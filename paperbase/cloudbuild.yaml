@@ -1,0 +1,53 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    dir: paperbase
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:$SHORT_SHA
+      - .
+
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:$SHORT_SHA
+
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        image="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:$SHORT_SHA"
+        cmd=(
+          gcloud run deploy "${_SERVICE_NAME}"
+          --image="${image}"
+          --region="${_REGION}"
+          --platform=managed
+          --quiet
+        )
+
+        if [[ -n "${_ENV_VARS_FILE}" ]]; then
+          cmd+=(--env-vars-file="${_ENV_VARS_FILE}")
+        fi
+
+        if [[ -n "${_RUNTIME_SERVICE_ACCOUNT}" ]]; then
+          cmd+=(--service-account="${_RUNTIME_SERVICE_ACCOUNT}")
+        fi
+
+        "${cmd[@]}"
+
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:$SHORT_SHA
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+substitutions:
+  _SERVICE_NAME: paperbase-api
+  _REGION: us-central1
+  _AR_REPO: paperbase
+  _IMAGE_NAME: paperbase-api
+  _ENV_VARS_FILE: ""
+  _RUNTIME_SERVICE_ACCOUNT: ""
+
+timeout: 1800s

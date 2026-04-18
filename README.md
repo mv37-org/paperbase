@@ -182,6 +182,13 @@ Cloud Run already injects `PORT`, and the API entrypoint uses that automatically
 
 For GCS access on Cloud Run, prefer attaching a service account with bucket permissions instead of stuffing a JSON key into an env var.
 
+For trigger-based continuous deployment with a custom Cloud Build service account, use:
+
+- build config: `paperbase/cloudbuild.yaml`
+- included files glob: `paperbase/**`
+
+That build config sets `options.logging: CLOUD_LOGGING_ONLY`, which avoids the Cloud Build error you hit when a trigger uses a user-specified build service account.
+
 ## Repo layout
 
 ```text
