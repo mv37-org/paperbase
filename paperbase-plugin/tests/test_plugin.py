@@ -72,6 +72,34 @@ def test_manifests_reference_shared_mcp_config():
     assert "paperbase" in mcp_config["mcpServers"]
 
 
+def test_main_uses_transport_from_environment(monkeypatch):
+    calls = {}
+    original_host = mcp_server.mcp.settings.host
+    original_port = mcp_server.mcp.settings.port
+
+    def stub_run(*, transport: str = "stdio", mount_path: str | None = None):
+        calls["transport"] = transport
+        calls["mount_path"] = mount_path
+
+    monkeypatch.setenv("PAPERBASE_PLUGIN_TRANSPORT", "streamable-http")
+    monkeypatch.setenv("PAPERBASE_PLUGIN_MOUNT_PATH", "/paperbase")
+    monkeypatch.setenv("FASTMCP_HOST", "127.0.0.2")
+    monkeypatch.setenv("FASTMCP_PORT", "8090")
+    monkeypatch.setattr(mcp_server.mcp, "run", stub_run)
+
+    mcp_server.main()
+
+    assert calls == {
+        "transport": "streamable-http",
+        "mount_path": "/paperbase",
+    }
+    assert mcp_server.mcp.settings.host == "127.0.0.2"
+    assert mcp_server.mcp.settings.port == 8090
+
+    mcp_server.mcp.settings.host = original_host
+    mcp_server.mcp.settings.port = original_port
+
+
 @pytest.mark.anyio
 async def test_mcp_server_exposes_tools(client_session: ClientSession):
     tools = await client_session.list_tools()

@@ -107,13 +107,35 @@ make run-worker
 
 The worker is the part that picks up indexing jobs and latest-sync jobs.
 
+Or start the whole local stack in one shot:
+
+```bash
+make start-all
+```
+
+That starts:
+
+- the API on `http://127.0.0.1:8080`
+- the worker
+- a background MCP HTTP bridge on `http://127.0.0.1:8090/mcp`
+
+Logs and PID files go into `.run/`.
+
+To stop everything and clean up any leftover paperbase processes:
+
+```bash
+make kill-all
+```
+
 ## How to run the plugin MCP server locally
 
 ```bash
 make run-plugin-mcp
 ```
 
-That runs the shared MCP server from `paperbase-plugin/`.
+That runs the shared MCP server from `paperbase-plugin/` over normal stdio, which is what Codex and Claude Code expect.
+
+`make start-all` uses an HTTP transport for the plugin instead, because background daemons cannot safely use stdio MCP.
 
 ## Environment variables you will care about later
 

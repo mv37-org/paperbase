@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+import os
 
 from mcp.server.fastmcp import FastMCP
 
@@ -96,4 +97,12 @@ def get_table(paper_id: str, table_id: str) -> dict:
 
 
 def main() -> None:
-    mcp.run()
+    transport = os.getenv("PAPERBASE_PLUGIN_TRANSPORT", "stdio")
+    mount_path = os.getenv("PAPERBASE_PLUGIN_MOUNT_PATH")
+    host = os.getenv("FASTMCP_HOST")
+    port = os.getenv("FASTMCP_PORT")
+    if host:
+        mcp.settings.host = host
+    if port:
+        mcp.settings.port = int(port)
+    mcp.run(transport=transport, mount_path=mount_path)

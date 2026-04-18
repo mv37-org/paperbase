@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from fastapi import Depends, FastAPI, Query
 
 from .auth import require_bearer_token
@@ -110,4 +112,6 @@ def get_job(job_id: str, service: PaperbaseService = Depends(get_service)) -> Jo
 def main() -> None:
     import uvicorn
 
-    uvicorn.run("paperbase.api:app", host="0.0.0.0", port=8080, reload=False)
+    host = os.getenv("PAPERBASE_API_HOST", "0.0.0.0")
+    port = int(os.getenv("PAPERBASE_API_PORT", "8080"))
+    uvicorn.run("paperbase.api:app", host=host, port=port, reload=False)
