@@ -5,7 +5,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from paperbase.api import app
+from paperbase.api import _resolve_bind_address, app
 from paperbase.config import Settings
 from paperbase.extractors import ExtractionOutput, FigureArtifact, RawArtifact, SectionArtifact, TableArtifact
 from paperbase.models import PaperMetadata, SearchRequest
@@ -149,3 +149,18 @@ def test_api_flow_for_jobs_and_results(monkeypatch, service: PaperbaseService):
     assert table["table_id"] == "table-1"
 
     app.dependency_overrides.clear()
+
+
+def test_api_bind_address_prefers_explicit_port_then_railway_port(monkeypatch):
+    monkeypatch.delenv("PAPERBASE_API_HOST", raising=False)
+    monkeypatch.delenv("PAPERBASE_API_PORT", raising=False)
+    monkeypatch.delenv("PORT", raising=False)
+
+    assert _resolve_bind_address() == ("0.0.0.0", 8080)
+
+    monkeypatch.setenv("PORT", "9000")
+    assert _resolve_bind_address() == ("0.0.0.0", 9000)
+
+    monkeypatch.setenv("PAPERBASE_API_HOST", "127.0.0.1")
+    monkeypatch.setenv("PAPERBASE_API_PORT", "9100")
+    assert _resolve_bind_address() == ("127.0.0.1", 9100)

@@ -31,6 +31,12 @@ app = FastAPI(
 )
 
 
+def _resolve_bind_address() -> tuple[str, int]:
+    host = os.getenv("PAPERBASE_API_HOST", "0.0.0.0")
+    port = int(os.getenv("PAPERBASE_API_PORT") or os.getenv("PORT") or "8080")
+    return host, port
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -112,6 +118,5 @@ def get_job(job_id: str, service: PaperbaseService = Depends(get_service)) -> Jo
 def main() -> None:
     import uvicorn
 
-    host = os.getenv("PAPERBASE_API_HOST", "0.0.0.0")
-    port = int(os.getenv("PAPERBASE_API_PORT", "8080"))
+    host, port = _resolve_bind_address()
     uvicorn.run("paperbase.api:app", host=host, port=port, reload=False)
