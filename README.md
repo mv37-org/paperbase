@@ -89,7 +89,7 @@ Current tests are mostly **local safety checks**. They verify things like:
 - plugin manifest wiring
 - MCP tool exposure
 
-They do **not** need a real Postgres database or Cloudflare R2 bucket, because the tests use in-memory substitutes and stubs.
+They do **not** need a real Postgres database or Google Cloud Storage bucket, because the tests use in-memory substitutes and stubs.
 
 ## How to run the backend locally
 
@@ -143,10 +143,9 @@ For real hosted usage, `paperbase` expects settings like:
 
 - `PAPERBASE_API_KEY`
 - `PAPERBASE_DATABASE_URL`
-- `PAPERBASE_R2_ENDPOINT_URL`
-- `PAPERBASE_R2_ACCESS_KEY_ID`
-- `PAPERBASE_R2_SECRET_ACCESS_KEY`
-- `PAPERBASE_R2_BUCKET`
+- `PAPERBASE_GCS_PROJECT`
+- `PAPERBASE_GCS_BUCKET`
+- `PAPERBASE_GCS_SERVICE_ACCOUNT_JSON`
 
 The plugin needs:
 

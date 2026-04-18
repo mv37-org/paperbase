@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any
+from datetime import timedelta
 
-import boto3
+from google.cloud import storage
+from google.oauth2 import service_account
 
 from .config import Settings
 
@@ -73,63 +74,64 @@ class MemoryObjectStore(ObjectStore):
         return f"memory://{path}"
 
 
-class R2ObjectStore(ObjectStore):
+def _build_gcs_client(settings: Settings) -> storage.Client:
+    if settings.gcs_service_account_json:
+        info = json.loads(settings.gcs_service_account_json)
+        credentials = service_account.Credentials.from_service_account_info(info)
+        project = settings.gcs_project or info.get("project_id")
+        return storage.Client(project=project, credentials=credentials)
+    if settings.gcs_project:
+        return storage.Client(project=settings.gcs_project)
+    return storage.Client()
+
+
+class GoogleCloudStorageObjectStore(ObjectStore):
     def __init__(self, settings: Settings) -> None:
-        self._bucket = settings.r2_bucket
-        self._public_base_url = settings.r2_public_base_url.rstrip("/") if settings.r2_public_base_url else None
-        self._client = boto3.client(
-            "s3",
-            endpoint_url=settings.r2_endpoint_url,
-            aws_access_key_id=settings.r2_access_key_id,
-            aws_secret_access_key=settings.r2_secret_access_key,
-            region_name=settings.r2_region_name,
-        )
+        self._bucket_name = settings.gcs_bucket
+        self._public_base_url = settings.gcs_public_base_url.rstrip("/") if settings.gcs_public_base_url else None
+        self._client = _build_gcs_client(settings)
+        self._bucket = self._client.bucket(self._bucket_name)
+
+    def _blob(self, path: str):
+        return self._bucket.blob(path)
 
     def put_bytes(self, path: str, data: bytes, *, content_type: str | None = None) -> None:
-        kwargs: dict[str, Any] = {
-            "Bucket": self._bucket,
-            "Key": path,
-            "Body": data,
-        }
-        if content_type:
-            kwargs["ContentType"] = content_type
-        self._client.put_object(**kwargs)
+        blob = self._blob(path)
+        blob.upload_from_string(data, content_type=content_type)
 
     def get_bytes(self, path: str) -> bytes:
-        response = self._client.get_object(Bucket=self._bucket, Key=path)
-        return response["Body"].read()
+        return self._blob(path).download_as_bytes()
 
     def exists(self, path: str) -> bool:
-        try:
-            self._client.head_object(Bucket=self._bucket, Key=path)
-            return True
-        except self._client.exceptions.ClientError:
-            return False
+        return bool(self._blob(path).exists(self._client))
 
     def list_prefix(self, prefix: str) -> list[StoredObject]:
-        paginator = self._client.get_paginator("list_objects_v2")
         files: list[StoredObject] = []
-        for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
-            for item in page.get("Contents", []):
-                files.append(
-                    StoredObject(
-                        path=item["Key"],
-                        size=item["Size"],
-                    )
+        for blob in self._client.list_blobs(self._bucket_name, prefix=prefix):
+            files.append(
+                StoredObject(
+                    path=blob.name,
+                    size=blob.size or 0,
+                    content_type=blob.content_type,
                 )
+            )
         return files
 
     def presign_get(self, path: str, *, expires_in: int) -> str | None:
+        if not self.exists(path):
+            return None
         if self._public_base_url:
             return f"{self._public_base_url}/{path}"
-        return self._client.generate_presigned_url(
-            "get_object",
-            Params={"Bucket": self._bucket, "Key": path},
-            ExpiresIn=expires_in,
+        return self._blob(path).generate_signed_url(
+            version="v4",
+            expiration=timedelta(seconds=expires_in),
+            method="GET",
         )
 
 
 def build_object_store(settings: Settings) -> ObjectStore:
     if settings.storage_backend == "memory":
         return MemoryObjectStore()
-    return R2ObjectStore(settings)
+    if settings.storage_backend == "gcs":
+        return GoogleCloudStorageObjectStore(settings)
+    raise ValueError(f"Unsupported storage backend: {settings.storage_backend}")

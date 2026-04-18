@@ -36,13 +36,11 @@ class Settings(BaseSettings):
 
     api_key: str = Field(default="development-token")
     database_url: str = Field(default="postgresql+psycopg://postgres:postgres@localhost:5432/paperbase")
-    storage_backend: str = Field(default="r2")
-    r2_endpoint_url: str | None = None
-    r2_access_key_id: str | None = None
-    r2_secret_access_key: str | None = None
-    r2_region_name: str = "auto"
-    r2_bucket: str = "paperbase"
-    r2_public_base_url: str | None = None
+    storage_backend: str = Field(default="gcs")
+    gcs_project: str | None = None
+    gcs_bucket: str = "paperbase"
+    gcs_public_base_url: str | None = None
+    gcs_service_account_json: str | None = None
     presign_ttl_seconds: int = 3600
     sync_interval_seconds: int = 3600
     worker_poll_interval_seconds: int = 10

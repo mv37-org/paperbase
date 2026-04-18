@@ -10,9 +10,9 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "beautifulsoup4>=4.12",
-    "boto3>=1.35",
     "docling>=2.15",
     "fastapi>=0.115",
+    "google-cloud-storage>=2.18",
     "pgvector>=0.3",
     "pydantic>=2.8",
     "pydantic-settings>=2.6",
