@@ -1,0 +1,33 @@
+{
+  "name": "paperbase-plugin",
+  "version": "0.1.0",
+  "description": "Query and index scientific papers through a hosted paperbase service.",
+  "author": {
+    "name": "arslnb",
+    "email": "arslnb@example.com",
+    "url": "https://github.com/arslnb"
+  },
+  "homepage": "https://github.com/arslnb/research/paper-ai",
+  "repository": "https://github.com/arslnb/research/paper-ai",
+  "license": "MIT",
+  "keywords": ["papers", "research", "arxiv", "mcp"],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Paperbase",
+    "shortDescription": "Index and inspect scientific papers.",
+    "longDescription": "Paperbase gives Codex a hosted scientific-paper backend with indexing, search, artifact browsing, result handles, and related-paper discovery.",
+    "developerName": "arslnb",
+    "category": "Research",
+    "capabilities": ["Interactive", "Read"],
+    "websiteURL": "https://github.com/arslnb/research/paper-ai",
+    "privacyPolicyURL": "https://github.com/arslnb/research/paper-ai",
+    "termsOfServiceURL": "https://github.com/arslnb/research/paper-ai",
+    "defaultPrompt": [
+      "Search recent multimodal AI papers.",
+      "Index this arXiv paper and show its figures.",
+      "Compare methods across these results."
+    ],
+    "brandColor": "#2563EB"
+  }
+}

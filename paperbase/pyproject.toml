@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "paperbase"
+version = "0.1.0"
+description = "Hosted backend for indexing and serving scientific papers"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "beautifulsoup4>=4.12",
+    "boto3>=1.35",
+    "docling>=2.15",
+    "fastapi>=0.115",
+    "pgvector>=0.3",
+    "pydantic>=2.8",
+    "pydantic-settings>=2.6",
+    "psycopg[binary]>=3.2",
+    "requests>=2.32",
+    "sqlalchemy>=2.0",
+    "uvicorn>=0.30",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+]
+
+[project.scripts]
+paperbase-api = "paperbase.api:main"
+paperbase-worker = "paperbase.worker:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

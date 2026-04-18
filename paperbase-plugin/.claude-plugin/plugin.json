@@ -1,0 +1,10 @@
+{
+  "name": "paperbase-plugin",
+  "version": "0.1.0",
+  "description": "Query and index scientific papers through a hosted paperbase service.",
+  "homepage": "https://github.com/arslnb/research/paper-ai",
+  "repository": "https://github.com/arslnb/research/paper-ai",
+  "license": "MIT",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json"
+}

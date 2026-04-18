@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "paperbase": {
+      "command": "python3",
+      "args": ["./scripts/run_mcp.py"],
+      "env": {
+        "PAPERBASE_BASE_URL": "${PAPERBASE_BASE_URL}",
+        "PAPERBASE_API_KEY": "${PAPERBASE_API_KEY}"
+      }
+    }
+  }
+}
