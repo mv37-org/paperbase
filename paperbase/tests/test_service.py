@@ -151,7 +151,7 @@ def test_api_flow_for_jobs_and_results(monkeypatch, service: PaperbaseService):
     app.dependency_overrides.clear()
 
 
-def test_api_bind_address_prefers_explicit_port_then_railway_port(monkeypatch):
+def test_api_bind_address_prefers_explicit_port_then_platform_port(monkeypatch):
     monkeypatch.delenv("PAPERBASE_API_HOST", raising=False)
     monkeypatch.delenv("PAPERBASE_API_PORT", raising=False)
     monkeypatch.delenv("PORT", raising=False)

@@ -154,6 +154,34 @@ The plugin needs:
 
 For basic local test runs, you usually do **not** need to set these.
 
+## Deploying `paperbase` on Cloud Run
+
+`paperbase/` now includes Cloud Run deployment files:
+
+- `paperbase/Dockerfile`
+- `paperbase/.dockerignore`
+- `paperbase/cloudrun.service.yaml`
+
+Typical flow:
+
+```bash
+gcloud builds submit paperbase \
+  --tag us-central1-docker.pkg.dev/YOUR_PROJECT_ID/YOUR_REPOSITORY/paperbase-api:latest
+```
+
+Copy `paperbase/.env.example` to a real env file first, fill in the values, then deploy:
+
+```bash
+gcloud run deploy paperbase-api \
+  --image us-central1-docker.pkg.dev/YOUR_PROJECT_ID/YOUR_REPOSITORY/paperbase-api:latest \
+  --region YOUR_REGION \
+  --env-vars-file paperbase/.env.cloudrun
+```
+
+Cloud Run already injects `PORT`, and the API entrypoint uses that automatically.
+
+For GCS access on Cloud Run, prefer attaching a service account with bucket permissions instead of stuffing a JSON key into an env var.
+
 ## Repo layout
 
 ```text

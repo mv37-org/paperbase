@@ -1,0 +1,44 @@
+# Example Cloud Run service manifest for the paperbase API.
+# Deploy with:
+#   gcloud run services replace cloudrun.service.yaml --region=YOUR_REGION --project=YOUR_PROJECT_ID
+# Best practice on Cloud Run is to attach a service account with access to Cloud SQL and GCS,
+# then leave PAPERBASE_GCS_SERVICE_ACCOUNT_JSON unset.
+
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: paperbase-api
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "0"
+    spec:
+      containerConcurrency: 80
+      timeoutSeconds: 300
+      containers:
+        - image: us-central1-docker.pkg.dev/YOUR_PROJECT_ID/YOUR_REPOSITORY/paperbase-api:latest
+          ports:
+            - name: http1
+              containerPort: 8080
+          env:
+            - name: PAPERBASE_API_KEY
+              value: change-me
+            - name: PAPERBASE_DATABASE_URL
+              value: postgresql+psycopg://postgres:postgres@YOUR_DB_HOST:5432/paperbase
+            - name: PAPERBASE_STORAGE_BACKEND
+              value: gcs
+            - name: PAPERBASE_GCS_PROJECT
+              value: YOUR_PROJECT_ID
+            - name: PAPERBASE_GCS_BUCKET
+              value: YOUR_BUCKET
+            - name: PAPERBASE_PRESIGN_TTL_SECONDS
+              value: "3600"
+            - name: PAPERBASE_LATEST_SYNC_DAYS
+              value: "7"
+            - name: PAPERBASE_LATEST_SYNC_LIMIT_PER_CATEGORY
+              value: "100"
+          resources:
+            limits:
+              cpu: "1"
+              memory: 1Gi
