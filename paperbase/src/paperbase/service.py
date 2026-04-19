@@ -31,6 +31,7 @@ from .models import (
     TableResponse,
 )
 from .repository import PaperRepository, build_repository
+from .summaries import build_paper_summaries
 from .storage import ObjectStore, StoredObject, build_object_store
 from . import sources
 from .utils import canonical_paper_id, new_id, utcnow
@@ -213,8 +214,13 @@ class PaperbaseService:
         metadata.source_type = extraction.source_type
         metadata.index_status = "indexed"
         metadata.indexed_at = utcnow()
+        metadata.summary_short, metadata.summary_eli5 = build_paper_summaries(metadata, extraction)
         search_document = extraction.text_markdown
-        embedding = self.embeddings.encode(f"{metadata.title}\n\n{metadata.abstract}") if self.embeddings else None
+        embedding = (
+            self.embeddings.encode(f"{metadata.title}\n\n{metadata.abstract}\n\n{metadata.summary_short}")
+            if self.embeddings
+            else None
+        )
         stored = self.repository.upsert_paper(metadata, search_document=search_document, embedding=embedding)
 
         prefix = f"papers/{stored.paper_id}"

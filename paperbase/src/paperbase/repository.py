@@ -32,6 +32,8 @@ class PaperORM(Base):
     title: Mapped[str] = mapped_column(Text, default="")
     authors: Mapped[str] = mapped_column(Text, default="")
     abstract: Mapped[str] = mapped_column(Text, default="")
+    summary_short: Mapped[str] = mapped_column(Text, default="")
+    summary_eli5: Mapped[str] = mapped_column(Text, default="")
     categories: Mapped[str] = mapped_column(Text, default="")
     primary_category: Mapped[str] = mapped_column(String(64), default="")
     published: Mapped[str] = mapped_column(String(32), default="")
@@ -113,6 +115,8 @@ def _paper_from_orm(row: PaperORM) -> PaperResponse:
         title=row.title,
         authors=row.authors,
         abstract=row.abstract,
+        summary_short=row.summary_short,
+        summary_eli5=row.summary_eli5,
         categories=row.categories,
         primary_category=row.primary_category,
         published=row.published,
@@ -237,6 +241,8 @@ class SqlAlchemyPaperRepository(PaperRepository):
         with self._engine.begin() as connection:
             connection.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
             connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+            connection.execute(text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS summary_short TEXT DEFAULT ''"))
+            connection.execute(text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS summary_eli5 TEXT DEFAULT ''"))
         Base.metadata.create_all(self._engine)
 
     def probe(self) -> IntegrationProbeComponent:
@@ -264,6 +270,8 @@ class SqlAlchemyPaperRepository(PaperRepository):
             title=paper.title,
             authors=paper.authors,
             abstract=paper.abstract,
+            summary_short=paper.summary_short,
+            summary_eli5=paper.summary_eli5,
             categories=paper.categories,
             primary_category=paper.primary_category,
             published=paper.published,
@@ -287,6 +295,8 @@ class SqlAlchemyPaperRepository(PaperRepository):
             "title": paper.title,
             "authors": paper.authors,
             "abstract": paper.abstract,
+            "summary_short": paper.summary_short,
+            "summary_eli5": paper.summary_eli5,
             "categories": paper.categories,
             "primary_category": paper.primary_category,
             "published": paper.published,
@@ -342,6 +352,18 @@ class SqlAlchemyPaperRepository(PaperRepository):
         embedding_literal = None
         vector_sql = "0.0"
         params: dict[str, Any] = {"query": query, "limit": limit}
+        weighted_document_sql = """
+            setweight(to_tsvector('english', coalesce(title, '')), 'A') ||
+            setweight(to_tsvector('english', coalesce(summary_short, '')), 'A') ||
+            setweight(to_tsvector('english', coalesce(abstract, '')), 'B') ||
+            setweight(to_tsvector('english', coalesce(summary_eli5, '')), 'B') ||
+            setweight(to_tsvector('english', coalesce(search_document, '')), 'C')
+        """
+        similarity_document_sql = """
+            coalesce(title, '') || ' ' || coalesce(summary_short, '') || ' ' ||
+            coalesce(abstract, '') || ' ' || coalesce(summary_eli5, '') || ' ' ||
+            coalesce(search_document, '')
+        """
         if query_embedding:
             embedding_literal = "[" + ",".join(f"{value:.6f}" for value in query_embedding) + "]"
             vector_sql = "CASE WHEN embedding IS NULL THEN 0 ELSE 1 - (embedding <=> CAST(:query_embedding AS vector)) END"
@@ -354,6 +376,8 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 title,
                 authors,
                 abstract,
+                summary_short,
+                summary_eli5,
                 categories,
                 primary_category,
                 published,
@@ -371,16 +395,26 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 index_status,
                 indexed_at,
                 ts_rank_cd(
-                    to_tsvector('english', coalesce(title, '') || ' ' || coalesce(abstract, '') || ' ' || coalesce(search_document, '')),
+                    {weighted_document_sql},
                     plainto_tsquery('english', :query)
                 ) AS lexical_score,
+                GREATEST(
+                    similarity(coalesce(title, ''), :query),
+                    similarity(coalesce(summary_short, ''), :query),
+                    similarity(coalesce(summary_eli5, ''), :query)
+                ) AS summary_score,
                 {vector_sql} AS vector_score
             FROM papers
             WHERE
-                to_tsvector('english', coalesce(title, '') || ' ' || coalesce(abstract, '') || ' ' || coalesce(search_document, ''))
+                {weighted_document_sql}
                     @@ plainto_tsquery('english', :query)
-                OR similarity(coalesce(title, '') || ' ' || coalesce(abstract, '') || ' ' || coalesce(search_document, ''), :query) > 0.05
-            ORDER BY lexical_score DESC, vector_score DESC, citation_count DESC, published DESC
+                OR similarity({similarity_document_sql}, :query) > 0.05
+                OR GREATEST(
+                    similarity(coalesce(title, ''), :query),
+                    similarity(coalesce(summary_short, ''), :query),
+                    similarity(coalesce(summary_eli5, ''), :query)
+                ) > 0.05
+            ORDER BY lexical_score DESC, summary_score DESC, vector_score DESC, citation_count DESC, published DESC
             LIMIT :limit
             """
         )
@@ -388,7 +422,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
             rows = session.execute(sql, params).mappings().all()
         results: list[SearchPaperResult] = []
         for row in rows:
-            score = float(row["lexical_score"] or 0) + float(row["vector_score"] or 0)
+            score = float(row["lexical_score"] or 0) + float(row["summary_score"] or 0) + float(row["vector_score"] or 0)
             results.append(
                 SearchPaperResult(
                     paper_id=row["paper_id"],
@@ -396,6 +430,8 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     title=row["title"],
                     authors=row["authors"],
                     abstract=row["abstract"],
+                    summary_short=row["summary_short"],
+                    summary_eli5=row["summary_eli5"],
                     categories=row["categories"],
                     primary_category=row["primary_category"],
                     published=row["published"],
@@ -441,6 +477,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     expires_at=expires_at,
                 )
             )
+            session.flush()
             for rank, paper in enumerate(papers):
                 session.add(
                     ResultItemORM(
@@ -665,15 +702,20 @@ class MemoryPaperRepository(PaperRepository):
         query_lower = query.lower()
         results: list[SearchPaperResult] = []
         for paper_id, paper in self.papers.items():
-            haystack = " ".join(
-                [
-                    paper.title,
-                    paper.abstract,
-                    self.search_documents.get(paper_id, ""),
-                ]
-            ).lower()
-            if query_lower in haystack:
-                results.append(SearchPaperResult(**paper.model_dump(), score=1.0, source="local"))
+            score = 0.0
+            if query_lower in paper.title.lower():
+                score += 4.0
+            if query_lower in paper.summary_short.lower():
+                score += 3.5
+            if query_lower in paper.abstract.lower():
+                score += 2.5
+            if query_lower in paper.summary_eli5.lower():
+                score += 2.0
+            if query_lower in self.search_documents.get(paper_id, "").lower():
+                score += 1.0
+            if score > 0:
+                results.append(SearchPaperResult(**paper.model_dump(), score=score, source="local"))
+        results.sort(key=lambda item: ((item.score or 0), item.citation_count, item.published), reverse=True)
         return results[:limit]
 
     def save_result_set(

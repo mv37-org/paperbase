@@ -82,6 +82,8 @@ def test_index_writes_manifest_and_artifacts(monkeypatch, service: PaperbaseServ
     indexed = service.index_arxiv_paper(paper.arxiv_id, paper=paper)
 
     assert indexed.paper_id == "arxiv:2401.12345"
+    assert indexed.summary_short
+    assert indexed.summary_eli5.startswith("In simple terms,")
     manifest = service.get_manifest(indexed.paper_id).manifest
     assert manifest["source_type"] == "html"
     assert manifest["figure_count"] == 1
@@ -136,6 +138,32 @@ def test_search_and_grep_return_result_handles(monkeypatch, service: PaperbaseSe
     assert narrowed.result_set_id != results.result_set_id
     assert narrowed.parent_result_set_id == results.result_set_id
     assert narrowed.papers[0].paper_id == "arxiv:2401.10001"
+
+
+def test_search_can_shortlist_from_generated_summaries(monkeypatch, service: PaperbaseService):
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr("paperbase.service.index_paper_artifacts", lambda paper: _rich_extraction(text="General workflow discussion"))
+
+    summaries = {
+        "2401.20001": (
+            "This paper studies AI agents that use tools, plan, and act in environments.",
+            "In simple terms, this paper explains how an AI agent can plan and use tools.",
+        ),
+        "2401.20002": (
+            "This paper studies image generation systems.",
+            "In simple terms, this paper explains diffusion for image generation.",
+        ),
+    }
+    monkeypatch.setattr("paperbase.service.build_paper_summaries", lambda paper, extraction: summaries[paper.arxiv_id])
+
+    service.index_arxiv_paper("2401.20001", paper=_sample_paper("2401.20001", title="Tool Use Study", abstract="Planning systems"))
+    service.index_arxiv_paper("2401.20002", paper=_sample_paper("2401.20002", title="Image Study", abstract="Vision systems"))
+
+    results = service.search(SearchRequest(query="agent", include_live_sources=False))
+
+    assert results.papers
+    assert results.papers[0].paper_id == "arxiv:2401.20001"
+    assert "AI agents" in results.papers[0].summary_short
 
 
 def test_api_flow_for_jobs_and_results(monkeypatch, service: PaperbaseService):
