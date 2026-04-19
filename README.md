@@ -124,6 +124,12 @@ Or start the whole local stack in one shot:
 make start-all
 ```
 
+If you want to force local Postgres plus local filesystem storage regardless of any hosted env values, use:
+
+```bash
+make start-local
+```
+
 That starts:
 
 - the API on `http://127.0.0.1:8080`
@@ -131,6 +137,7 @@ That starts:
 - a background MCP HTTP bridge on `http://127.0.0.1:8090/mcp`
 
 Logs and PID files go into `.run/`.
+Local artifact storage goes into `.paperbase-data/` in the repo root by default.
 
 To stop everything and clean up any leftover paperbase processes:
 

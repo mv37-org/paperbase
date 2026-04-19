@@ -10,6 +10,10 @@ PLUGIN_MCP_HOST ?= 127.0.0.1
 PLUGIN_MCP_PORT ?= 8090
 PAPERBASE_BASE_URL ?= http://$(API_HOST):$(API_PORT)
 PLUGIN_MCP_URL := http://$(PLUGIN_MCP_HOST):$(PLUGIN_MCP_PORT)/mcp
+LOCAL_DATABASE_URL ?= postgresql+psycopg:///paperbase
+LOCAL_STORAGE_ROOT ?= $(CURDIR)/.paperbase-data
+LOCAL_API_KEY ?= development-token
+LOCAL_STACK_ENV = env PAPERBASE_DATABASE_URL="$(LOCAL_DATABASE_URL)" PAPERBASE_STORAGE_BACKEND="local" PAPERBASE_LOCAL_STORAGE_ROOT="$(LOCAL_STORAGE_ROOT)" PAPERBASE_API_KEY="$(LOCAL_API_KEY)" PAPERBASE_BASE_URL="$(PAPERBASE_BASE_URL)"
 RUN_DIR := .run
 API_PID := $(RUN_DIR)/paperbase-api.pid
 WORKER_PID := $(RUN_DIR)/paperbase-worker.pid
@@ -18,7 +22,7 @@ API_LOG := $(RUN_DIR)/paperbase-api.log
 WORKER_LOG := $(RUN_DIR)/paperbase-worker.log
 PLUGIN_LOG := $(RUN_DIR)/paperbase-plugin-mcp.log
 
-.PHONY: help venv install install-paperbase install-plugin test test-paperbase test-plugin run-api run-worker run-plugin-mcp start-all kill-all clean
+.PHONY: help venv install install-paperbase install-plugin test test-paperbase test-plugin run-api run-worker run-plugin-mcp start-all start-local kill-all clean
 
 help:
 	@echo "Available targets:"
@@ -33,6 +37,7 @@ help:
 	@echo "  make run-worker      Run the paperbase background worker"
 	@echo "  make run-plugin-mcp  Run the plugin MCP server locally"
 	@echo "  make start-all       Start API, worker, and plugin MCP HTTP bridge in the background"
+	@echo "  make start-local     Start the local stack with local Postgres and filesystem storage"
 	@echo "  make kill-all        Stop all paperbase API, worker, and plugin MCP processes"
 	@echo "  make clean           Remove local caches and test artifacts"
 
@@ -102,6 +107,43 @@ start-all: install
 	@echo "Started paperbase API    pid=$$(cat $(API_PID)) log=$(API_LOG)"
 	@echo "Started paperbase worker pid=$$(cat $(WORKER_PID)) log=$(WORKER_LOG)"
 	@echo "Started plugin MCP       pid=$$(cat $(PLUGIN_PID)) url=$(PLUGIN_MCP_URL) log=$(PLUGIN_LOG)"
+
+start-local: install
+	@mkdir -p $(RUN_DIR) "$(LOCAL_STORAGE_ROOT)"
+	@$(MAKE) kill-all >/dev/null
+	@nohup $(LOCAL_STACK_ENV) PAPERBASE_API_HOST=$(API_HOST) PAPERBASE_API_PORT=$(API_PORT) $(VENV_BIN)/paperbase-api > $(API_LOG) 2>&1 & echo $$! > $(API_PID)
+	@nohup $(LOCAL_STACK_ENV) $(VENV_BIN)/paperbase-worker > $(WORKER_LOG) 2>&1 & echo $$! > $(WORKER_PID)
+	@nohup $(LOCAL_STACK_ENV) PAPERBASE_PLUGIN_TRANSPORT=streamable-http FASTMCP_HOST=$(PLUGIN_MCP_HOST) FASTMCP_PORT=$(PLUGIN_MCP_PORT) $(VENV_BIN)/paperbase-plugin-mcp > $(PLUGIN_LOG) 2>&1 & echo $$! > $(PLUGIN_PID)
+	@sleep 2
+	@if ! kill -0 "$$(cat $(API_PID))" 2>/dev/null; then \
+		echo "paperbase API failed to stay up"; \
+		sed -n '1,120p' $(API_LOG); \
+		$(MAKE) kill-all >/dev/null; \
+		exit 1; \
+	fi
+	@if ! kill -0 "$$(cat $(WORKER_PID))" 2>/dev/null; then \
+		echo "paperbase worker failed to stay up"; \
+		sed -n '1,120p' $(WORKER_LOG); \
+		$(MAKE) kill-all >/dev/null; \
+		exit 1; \
+	fi
+	@if ! kill -0 "$$(cat $(PLUGIN_PID))" 2>/dev/null; then \
+		echo "paperbase plugin MCP bridge failed to stay up"; \
+		sed -n '1,120p' $(PLUGIN_LOG); \
+		$(MAKE) kill-all >/dev/null; \
+		exit 1; \
+	fi
+	@if ! curl -fsS $(PAPERBASE_BASE_URL)/health >/dev/null; then \
+		echo "paperbase API failed health check"; \
+		sed -n '1,120p' $(API_LOG); \
+		$(MAKE) kill-all >/dev/null; \
+		exit 1; \
+	fi
+	@echo "Started local API       pid=$$(cat $(API_PID)) url=$(PAPERBASE_BASE_URL) log=$(API_LOG)"
+	@echo "Started local worker    pid=$$(cat $(WORKER_PID)) log=$(WORKER_LOG)"
+	@echo "Started local plugin    pid=$$(cat $(PLUGIN_PID)) url=$(PLUGIN_MCP_URL) log=$(PLUGIN_LOG)"
+	@echo "Local Postgres URL      $(LOCAL_DATABASE_URL)"
+	@echo "Local storage root      $(LOCAL_STORAGE_ROOT)"
 
 kill-all:
 	@mkdir -p $(RUN_DIR)
