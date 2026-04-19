@@ -50,6 +50,7 @@ fi
 public_ip="$(
   gcloud sql instances describe "$instance_name" \
     --project="$project_id" \
+    --flatten='ipAddresses[]' \
     --format='csv[no-heading](ipAddresses.type,ipAddresses.ipAddress)' \
   | awk -F, '$1 == "PRIMARY" { print $2; exit }'
 )"
