@@ -6,11 +6,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+COPY requirements.docker.txt ./
+RUN python -m pip install -r requirements.docker.txt
+
 COPY pyproject.toml README.md ./
 COPY src ./src
 
-RUN python -m pip install --upgrade pip && \
-    python -m pip install .
+RUN python -m pip install --no-deps .
 
 ENV PORT=8080
 

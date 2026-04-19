@@ -1,0 +1,11 @@
+beautifulsoup4>=4.12
+docling>=2.15
+fastapi>=0.115
+google-cloud-storage>=2.18
+pgvector>=0.3
+pydantic>=2.8
+pydantic-settings>=2.6
+psycopg[binary]>=3.2
+requests>=2.32
+sqlalchemy>=2.0
+uvicorn>=0.30
