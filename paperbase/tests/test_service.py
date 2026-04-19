@@ -164,3 +164,36 @@ def test_api_bind_address_prefers_explicit_port_then_platform_port(monkeypatch):
     monkeypatch.setenv("PAPERBASE_API_HOST", "127.0.0.1")
     monkeypatch.setenv("PAPERBASE_API_PORT", "9100")
     assert _resolve_bind_address() == ("127.0.0.1", 9100)
+
+
+def test_probe_integrations_returns_database_and_storage_status(service: PaperbaseService):
+    probe = service.probe_integrations()
+
+    assert probe.ok is True
+    assert probe.database.ok is True
+    assert probe.storage.ok is True
+    assert probe.storage.metadata["path"].startswith("system/probes/probe_")
+    assert probe.storage.metadata["signed_url_generated"] is True
+
+
+def test_probe_integrations_route_returns_503_on_storage_failure():
+    class FailingObjectStore(MemoryObjectStore):
+        def put_text(self, path: str, text: str, *, content_type: str = "text/plain; charset=utf-8") -> None:
+            raise RuntimeError("write denied")
+
+    service = PaperbaseService(
+        settings=Settings(storage_backend="gcs", database_url="memory://", api_key="test-token"),
+        repository=MemoryPaperRepository(),
+        object_store=FailingObjectStore(),
+    )
+    app.dependency_overrides[get_service] = lambda: service
+    client = TestClient(app)
+
+    response = client.post("/v1/debug/integrations", headers={"Authorization": "Bearer development-token"})
+
+    assert response.status_code == 503
+    assert response.json()["database"]["ok"] is True
+    assert response.json()["storage"]["ok"] is False
+    assert "write denied" in response.json()["storage"]["detail"]
+
+    app.dependency_overrides.clear()

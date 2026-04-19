@@ -17,6 +17,8 @@ from .models import (
     FileObject,
     FigureResponse,
     GrepResponse,
+    IntegrationProbeComponent,
+    IntegrationProbeResponse,
     JobResponse,
     ManifestResponse,
     PaperMetadata,
@@ -362,6 +364,80 @@ class PaperbaseService:
 
     def cleanup_expired_results(self) -> None:
         self.repository.cleanup_expired_results()
+
+    def probe_integrations(self) -> IntegrationProbeResponse:
+        checked_at = utcnow()
+        database_backend = "memory" if self.settings.database_url.startswith("memory://") else "sqlalchemy"
+        database_target = "memory://" if database_backend == "memory" else self.settings.database_url.split(":", 1)[0].split("+", 1)[0]
+        try:
+            database = self.repository.probe()
+        except Exception as exc:
+            database = IntegrationProbeComponent(
+                ok=False,
+                backend=database_backend,
+                detail=f"Database probe failed: {exc}",
+                target=database_target,
+                metadata={"error_type": exc.__class__.__name__},
+            )
+        storage = self._probe_object_store(checked_at)
+        return IntegrationProbeResponse(
+            ok=database.ok and storage.ok,
+            checked_at=checked_at,
+            database=database,
+            storage=storage,
+        )
+
+    def _probe_object_store(self, checked_at) -> IntegrationProbeComponent:
+        probe_id = new_id("probe")
+        probe_path = f"system/probes/{probe_id}.json"
+        payload = json.dumps(
+            {"probe_id": probe_id, "checked_at": checked_at.isoformat()},
+            sort_keys=True,
+        )
+        target = self.settings.gcs_bucket if self.settings.storage_backend == "gcs" else self.settings.storage_backend
+        metadata: dict[str, object] = {"path": probe_path}
+
+        try:
+            self.object_store.put_text(probe_path, payload, content_type="application/json")
+            if not self.object_store.exists(probe_path):
+                raise RuntimeError("probe object was not visible after write")
+            roundtrip = self.object_store.get_text(probe_path)
+            if roundtrip != payload:
+                raise RuntimeError("probe object contents changed during roundtrip")
+            metadata["bytes"] = len(payload.encode("utf-8"))
+        except Exception as exc:
+            metadata["error_type"] = exc.__class__.__name__
+            return IntegrationProbeComponent(
+                ok=False,
+                backend=self.settings.storage_backend,
+                detail=f"Object store write/read probe failed: {exc}",
+                target=target,
+                metadata=metadata,
+            )
+
+        try:
+            signed_url = self.object_store.presign_get(
+                probe_path,
+                expires_in=min(self.settings.presign_ttl_seconds, 300),
+            )
+        except Exception as exc:
+            metadata["error_type"] = exc.__class__.__name__
+            return IntegrationProbeComponent(
+                ok=False,
+                backend=self.settings.storage_backend,
+                detail=f"Object store write/read succeeded but signed URL generation failed: {exc}",
+                target=target,
+                metadata=metadata,
+            )
+
+        metadata["signed_url_generated"] = signed_url is not None
+        return IntegrationProbeComponent(
+            ok=True,
+            backend=self.settings.storage_backend,
+            detail="Object store write/read probe succeeded",
+            target=target,
+            metadata=metadata,
+        )
 
 
 @lru_cache(maxsize=1)

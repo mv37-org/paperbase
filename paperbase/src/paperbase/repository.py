@@ -16,7 +16,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
 from .config import Settings
-from .models import GrepPaperMatch, JobResponse, PaperMetadata, PaperResponse, ResultSetResponse, SearchPaperResult
+from .models import GrepPaperMatch, IntegrationProbeComponent, JobResponse, PaperMetadata, PaperResponse, ResultSetResponse, SearchPaperResult
 from .utils import canonical_paper_id, literal_hint_from_pattern, new_id, utcnow
 
 
@@ -138,6 +138,10 @@ class PaperRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def probe(self) -> IntegrationProbeComponent:
+        raise NotImplementedError
+
+    @abstractmethod
     def upsert_paper(
         self,
         paper: PaperMetadata,
@@ -234,6 +238,18 @@ class SqlAlchemyPaperRepository(PaperRepository):
             connection.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
             connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         Base.metadata.create_all(self._engine)
+
+    def probe(self) -> IntegrationProbeComponent:
+        result = 0
+        with self._engine.connect() as connection:
+            result = int(connection.execute(text("SELECT 1")).scalar_one())
+        return IntegrationProbeComponent(
+            ok=result == 1,
+            backend="sqlalchemy",
+            detail="SELECT 1 succeeded" if result == 1 else f"Unexpected probe result: {result}",
+            target=self._engine.url.get_backend_name(),
+            metadata={"driver": self._engine.url.get_driver_name()},
+        )
 
     def upsert_paper(
         self,
@@ -614,6 +630,14 @@ class MemoryPaperRepository(PaperRepository):
 
     def init(self) -> None:
         return None
+
+    def probe(self) -> IntegrationProbeComponent:
+        return IntegrationProbeComponent(
+            ok=True,
+            backend="memory",
+            detail="In-memory repository is reachable",
+            target="memory://",
+        )
 
     def upsert_paper(
         self,

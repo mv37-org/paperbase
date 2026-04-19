@@ -133,3 +133,18 @@ class TableResponse(BaseModel):
 class ManifestResponse(BaseModel):
     paper_id: str
     manifest: dict[str, Any]
+
+
+class IntegrationProbeComponent(BaseModel):
+    ok: bool
+    backend: str
+    detail: str
+    target: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class IntegrationProbeResponse(BaseModel):
+    ok: bool
+    checked_at: datetime
+    database: IntegrationProbeComponent
+    storage: IntegrationProbeComponent

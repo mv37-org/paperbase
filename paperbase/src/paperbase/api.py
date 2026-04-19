@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-from fastapi import Depends, FastAPI, Query
+from fastapi import Depends, FastAPI, Query, Response
 
 from .auth import require_bearer_token
 from .models import (
@@ -12,6 +12,7 @@ from .models import (
     FileListResponse,
     GrepRequest,
     GrepResponse,
+    IntegrationProbeResponse,
     JobResponse,
     ManifestResponse,
     PaperResponse,
@@ -113,6 +114,14 @@ def related(paper_id: str, service: PaperbaseService = Depends(get_service)) -> 
 @app.get("/v1/jobs/{job_id}", response_model=JobResponse, dependencies=[Depends(require_bearer_token)])
 def get_job(job_id: str, service: PaperbaseService = Depends(get_service)) -> JobResponse:
     return service.get_job(job_id)
+
+
+@app.post("/v1/debug/integrations", response_model=IntegrationProbeResponse, dependencies=[Depends(require_bearer_token)])
+def probe_integrations(response: Response, service: PaperbaseService = Depends(get_service)) -> IntegrationProbeResponse:
+    result = service.probe_integrations()
+    if not result.ok:
+        response.status_code = 503
+    return result
 
 
 def main() -> None:
