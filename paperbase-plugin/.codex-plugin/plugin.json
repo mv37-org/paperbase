@@ -25,7 +25,7 @@
     "termsOfServiceURL": "https://github.com/arslnb/research/paper-ai",
     "defaultPrompt": [
       "Search recent multimodal AI papers.",
-      "Index this arXiv paper and show its figures.",
+      "Index this arXiv paper, wait for completion, and give me a concise extraction summary.",
       "Compare methods across these results."
     ],
     "brandColor": "#2563EB"

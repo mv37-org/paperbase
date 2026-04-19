@@ -21,6 +21,9 @@ class StubClient:
     def sync_latest_papers(self):
         return {"job_id": "job_sync"}
 
+    def get_job(self, job_id: str):
+        return {"job_id": job_id, "status": "completed"}
+
     def get_results(self, result_set_id: str):
         return {"result_set_id": result_set_id, "papers": []}
 
@@ -108,6 +111,7 @@ async def test_mcp_server_exposes_tools(client_session: ClientSession):
     assert {
         "index_paper",
         "sync_latest_papers",
+        "get_job",
         "search_papers",
         "get_results",
         "grep_results",

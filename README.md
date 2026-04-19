@@ -185,7 +185,7 @@ Then ask Codex to index a paper, for example:
 
 ```text
 Use the paperbase tools to index arXiv paper 1706.03762.
-Wait for the job to finish, then show me the manifest and list the extracted files.
+Wait for the job to finish, then give me a concise extraction summary with the title, indexing status, source type, and how many sections, figures, and tables were captured. Do not list raw file paths unless I ask.
 ```
 
 ## Environment variables you will care about later

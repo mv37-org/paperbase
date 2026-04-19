@@ -34,6 +34,12 @@ def sync_latest_papers() -> dict:
 
 
 @mcp.tool()
+def get_job(job_id: str) -> dict:
+    """Fetch the current state of an indexing or sync job."""
+    return get_client().get_job(job_id)
+
+
+@mcp.tool()
 def search_papers(query: str, limit: int = 20, category: str | None = None, year: str | None = None, include_live_sources: bool = True) -> dict:
     """Hybrid-search papers and receive a result-set handle for downstream workflows."""
     return get_client().search_papers(
