@@ -164,6 +164,14 @@ To stop everything and clean up any leftover paperbase processes:
 make kill-all
 ```
 
+To wipe the local index and start over from an empty local database plus empty local storage:
+
+```bash
+make flush
+```
+
+`make flush` uses the same `LOCAL_DATABASE_URL` and `LOCAL_STORAGE_ROOT` knobs as `make start-local`, so you can override either one if needed.
+
 ## How to run the plugin MCP server locally
 
 ```bash

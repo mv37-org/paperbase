@@ -27,7 +27,7 @@ API_LOG := $(RUN_DIR)/paperbase-api.log
 WORKER_LOG := $(RUN_DIR)/paperbase-worker.log
 PLUGIN_LOG := $(RUN_DIR)/paperbase-plugin-mcp.log
 
-.PHONY: help venv install install-paperbase install-plugin test test-paperbase test-plugin run-api run-worker run-plugin-mcp start-all start-local kill-all clean
+.PHONY: help venv install install-paperbase install-plugin test test-paperbase test-plugin run-api run-worker run-plugin-mcp start-all start-local flush kill-all clean
 
 help:
 	@echo "Available targets:"
@@ -44,6 +44,8 @@ help:
 	@echo "  make start-all       Start API, worker, and plugin MCP HTTP bridge in the background"
 	@echo "  make start-local     Start local Postgres/filesystem stack with JSON logs attached"
 	@echo "                       Options: LOCAL_STREAM_LOGS=0 LOCAL_AUTO_SYNC_LATEST=1 LOCAL_INITIAL_SYNC_LATEST=1"
+	@echo "  make flush           Reset the local Postgres schema and clear local artifact storage"
+	@echo "                       Options: LOCAL_DATABASE_URL=... LOCAL_STORAGE_ROOT=..."
 	@echo "  make kill-all        Stop all paperbase API, worker, and plugin MCP processes"
 	@echo "  make clean           Remove local caches and test artifacts"
 
@@ -157,6 +159,16 @@ start-local: install
 		echo "Streaming logs. Press Ctrl-C to detach; use 'make kill-all' to stop the stack."; \
 		tail -n +1 -F $(API_LOG) $(WORKER_LOG) $(PLUGIN_LOG); \
 	fi
+
+flush: install-paperbase
+	@$(MAKE) kill-all >/dev/null
+	@$(VENV_PYTHON) $(CURDIR)/scripts/flush_local.py \
+		--database-url "$(LOCAL_DATABASE_URL)" \
+		--storage-root "$(LOCAL_STORAGE_ROOT)" \
+		--repo-root "$(CURDIR)"
+	@echo "Flushed local paperbase state"
+	@echo "Local Postgres URL      $(LOCAL_DATABASE_URL)"
+	@echo "Local storage root      $(LOCAL_STORAGE_ROOT)"
 
 kill-all:
 	@mkdir -p $(RUN_DIR)
