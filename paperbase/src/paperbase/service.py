@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import asdict
 from functools import lru_cache
 from typing import Any
@@ -33,6 +34,9 @@ from .repository import PaperRepository, build_repository
 from .storage import ObjectStore, StoredObject, build_object_store
 from . import sources
 from .utils import canonical_paper_id, new_id, utcnow
+
+
+logger = logging.getLogger(__name__)
 
 
 class OptionalEmbeddingProvider:
@@ -70,10 +74,20 @@ class PaperbaseService:
         self.repository.init()
 
     def enqueue_index_job(self, arxiv_id: str, *, force: bool = False) -> JobResponse:
-        return self.repository.create_job("index_paper", {"arxiv_id": arxiv_id, "force": force})
+        job = self.repository.create_job("index_paper", {"arxiv_id": arxiv_id, "force": force})
+        logger.info(
+            "Created index job",
+            extra={
+                "event": "jobs.index.created",
+                "job_id": job.job_id,
+                "arxiv_id": arxiv_id,
+                "force": force,
+            },
+        )
+        return job
 
     def enqueue_latest_sync_job(self) -> JobResponse:
-        return self.repository.create_job(
+        job = self.repository.create_job(
             "sync_latest",
             {
                 "days": self.settings.latest_sync_days,
@@ -81,11 +95,30 @@ class PaperbaseService:
                 "limit_per_category": self.settings.latest_sync_limit_per_category,
             },
         )
+        logger.info(
+            "Created latest sync job",
+            extra={
+                "event": "jobs.sync_latest.created",
+                "job_id": job.job_id,
+                "sync_days": self.settings.latest_sync_days,
+                "category_count": len(self.settings.arxiv_categories),
+                "limit_per_category": self.settings.latest_sync_limit_per_category,
+            },
+        )
+        return job
 
     def process_next_job(self) -> JobResponse | None:
         job = self.repository.claim_pending_job()
         if job is None:
             return None
+        logger.info(
+            "Claimed job",
+            extra={
+                "event": "jobs.claimed",
+                "job_id": job.job_id,
+                "job_type": job.job_type,
+            },
+        )
         try:
             if job.job_type == "index_paper":
                 self.index_arxiv_paper(job.payload["arxiv_id"], force=bool(job.payload.get("force")))
@@ -98,11 +131,36 @@ class PaperbaseService:
             else:
                 raise ValueError(f"Unsupported job type: {job.job_type}")
             self.repository.mark_job_completed(job.job_id)
+            logger.info(
+                "Completed job",
+                extra={
+                    "event": "jobs.completed",
+                    "job_id": job.job_id,
+                    "job_type": job.job_type,
+                },
+            )
         except Exception as exc:  # pragma: no cover - surfaced via job state and API
             self.repository.mark_job_failed(job.job_id, str(exc))
+            logger.exception(
+                "Job failed",
+                extra={
+                    "event": "jobs.failed",
+                    "job_id": job.job_id,
+                    "job_type": job.job_type,
+                },
+            )
         return self.repository.get_job(job.job_id)
 
     def sync_latest_papers(self, *, days: int, categories: list[str], limit_per_category: int) -> list[PaperResponse]:
+        logger.info(
+            "Starting latest sync",
+            extra={
+                "event": "sync_latest.start",
+                "sync_days": days,
+                "category_count": len(categories),
+                "limit_per_category": limit_per_category,
+            },
+        )
         indexed: list[PaperResponse] = []
         seen: set[str] = set()
         for category in categories:
@@ -113,13 +171,37 @@ class PaperbaseService:
                     continue
                 seen.add(paper.arxiv_id)
                 indexed.append(self.index_arxiv_paper(paper.arxiv_id, paper=paper, force=False))
+        logger.info(
+            "Completed latest sync",
+            extra={
+                "event": "sync_latest.completed",
+                "indexed_count": len(indexed),
+                "unique_paper_count": len(seen),
+            },
+        )
         return indexed
 
     def index_arxiv_paper(self, arxiv_id: str, *, paper: PaperMetadata | None = None, force: bool = False) -> PaperResponse:
         existing = self.repository.get_paper_by_arxiv_id(arxiv_id)
         if existing and existing.index_status == "indexed" and not force:
+            logger.info(
+                "Skipped already indexed paper",
+                extra={
+                    "event": "index.skipped",
+                    "arxiv_id": arxiv_id,
+                    "paper_id": existing.paper_id,
+                },
+            )
             return existing
 
+        logger.info(
+            "Starting paper indexing",
+            extra={
+                "event": "index.start",
+                "arxiv_id": arxiv_id,
+                "force": force,
+            },
+        )
         metadata = paper or sources.get_paper_details(arxiv_id)
         if metadata is None:
             raise HTTPException(status_code=404, detail=f"Paper {arxiv_id} not found on arXiv")
@@ -205,6 +287,18 @@ class PaperbaseService:
         )
 
         self.repository.replace_text_chunks(stored.paper_id, text_chunks)
+        logger.info(
+            "Completed paper indexing",
+            extra={
+                "event": "index.completed",
+                "arxiv_id": arxiv_id,
+                "paper_id": stored.paper_id,
+                "section_count": len(extraction.sections),
+                "figure_count": len(extraction.figures),
+                "table_count": len(extraction.tables),
+                "raw_artifact_count": len(extraction.raw_artifacts),
+            },
+        )
         return stored
 
     def search(self, request: SearchRequest) -> SearchResponse:

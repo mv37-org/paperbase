@@ -130,6 +130,25 @@ If you want to force local Postgres plus local filesystem storage regardless of 
 make start-local
 ```
 
+`start-local` defaults to:
+
+- structured JSON logs at `DEBUG`
+- attached log streaming in your terminal
+- `LOCAL_AUTO_SYNC_LATEST=0`
+- `LOCAL_INITIAL_SYNC_LATEST=0`
+
+To turn the latest-paper sync back on:
+
+```bash
+make start-local LOCAL_AUTO_SYNC_LATEST=1 LOCAL_INITIAL_SYNC_LATEST=1
+```
+
+To start the stack without attaching the log stream:
+
+```bash
+make start-local LOCAL_STREAM_LOGS=0
+```
+
 That starts:
 
 - the API on `http://127.0.0.1:8080`
@@ -176,6 +195,10 @@ For real hosted usage, `paperbase` expects settings like:
 - `PAPERBASE_API_KEY`
 - `PAPERBASE_DATABASE_URL`
 - `PAPERBASE_LOCAL_STORAGE_ROOT`
+- `PAPERBASE_LOG_LEVEL`
+- `PAPERBASE_LOG_FORMAT`
+- `PAPERBASE_WORKER_AUTO_SYNC_LATEST`
+- `PAPERBASE_WORKER_INITIAL_SYNC_LATEST`
 - `PAPERBASE_GCS_PROJECT`
 - `PAPERBASE_GCS_BUCKET`
 - `PAPERBASE_GCS_SERVICE_ACCOUNT_JSON`

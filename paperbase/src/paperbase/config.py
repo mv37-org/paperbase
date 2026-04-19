@@ -38,6 +38,8 @@ class Settings(BaseSettings):
     database_url: str = Field(default="postgresql+psycopg://postgres:postgres@localhost:5432/paperbase")
     storage_backend: str = Field(default="gcs")
     local_storage_root: str = Field(default=".paperbase-data")
+    log_level: str = Field(default="INFO")
+    log_format: str = Field(default="text")
     gcs_project: str | None = None
     gcs_bucket: str = "paperbase"
     gcs_public_base_url: str | None = None
@@ -45,6 +47,8 @@ class Settings(BaseSettings):
     presign_ttl_seconds: int = 3600
     sync_interval_seconds: int = 3600
     worker_poll_interval_seconds: int = 10
+    worker_auto_sync_latest: bool = Field(default=True)
+    worker_initial_sync_latest: bool = Field(default=True)
     arxiv_categories: list[str] = Field(default_factory=lambda: list(DEFAULT_AI_CATEGORIES))
     latest_sync_days: int = 7
     latest_sync_limit_per_category: int = 100

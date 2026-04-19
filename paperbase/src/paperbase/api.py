@@ -7,6 +7,8 @@ import os
 from fastapi import Depends, FastAPI, Query, Response
 
 from .auth import require_bearer_token
+from .config import get_settings
+from .logging_utils import build_log_config
 from .models import (
     FileContentResponse,
     FileListResponse,
@@ -127,5 +129,13 @@ def probe_integrations(response: Response, service: PaperbaseService = Depends(g
 def main() -> None:
     import uvicorn
 
+    settings = get_settings()
     host, port = _resolve_bind_address()
-    uvicorn.run("paperbase.api:app", host=host, port=port, reload=False)
+    uvicorn.run(
+        "paperbase.api:app",
+        host=host,
+        port=port,
+        reload=False,
+        log_config=build_log_config(component="api", level=settings.log_level, log_format=settings.log_format),
+        log_level=settings.log_level.lower(),
+    )

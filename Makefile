@@ -13,7 +13,12 @@ PLUGIN_MCP_URL := http://$(PLUGIN_MCP_HOST):$(PLUGIN_MCP_PORT)/mcp
 LOCAL_DATABASE_URL ?= postgresql+psycopg:///paperbase
 LOCAL_STORAGE_ROOT ?= $(CURDIR)/.paperbase-data
 LOCAL_API_KEY ?= development-token
-LOCAL_STACK_ENV = env PAPERBASE_DATABASE_URL="$(LOCAL_DATABASE_URL)" PAPERBASE_STORAGE_BACKEND="local" PAPERBASE_LOCAL_STORAGE_ROOT="$(LOCAL_STORAGE_ROOT)" PAPERBASE_API_KEY="$(LOCAL_API_KEY)" PAPERBASE_BASE_URL="$(PAPERBASE_BASE_URL)"
+LOCAL_LOG_LEVEL ?= DEBUG
+LOCAL_LOG_FORMAT ?= json
+LOCAL_STREAM_LOGS ?= 1
+LOCAL_AUTO_SYNC_LATEST ?= 0
+LOCAL_INITIAL_SYNC_LATEST ?= 0
+LOCAL_STACK_ENV = env PAPERBASE_DATABASE_URL="$(LOCAL_DATABASE_URL)" PAPERBASE_STORAGE_BACKEND="local" PAPERBASE_LOCAL_STORAGE_ROOT="$(LOCAL_STORAGE_ROOT)" PAPERBASE_API_KEY="$(LOCAL_API_KEY)" PAPERBASE_BASE_URL="$(PAPERBASE_BASE_URL)" PAPERBASE_LOG_LEVEL="$(LOCAL_LOG_LEVEL)" PAPERBASE_LOG_FORMAT="$(LOCAL_LOG_FORMAT)" PAPERBASE_WORKER_AUTO_SYNC_LATEST="$(LOCAL_AUTO_SYNC_LATEST)" PAPERBASE_WORKER_INITIAL_SYNC_LATEST="$(LOCAL_INITIAL_SYNC_LATEST)"
 RUN_DIR := .run
 API_PID := $(RUN_DIR)/paperbase-api.pid
 WORKER_PID := $(RUN_DIR)/paperbase-worker.pid
@@ -37,7 +42,8 @@ help:
 	@echo "  make run-worker      Run the paperbase background worker"
 	@echo "  make run-plugin-mcp  Run the plugin MCP server locally"
 	@echo "  make start-all       Start API, worker, and plugin MCP HTTP bridge in the background"
-	@echo "  make start-local     Start the local stack with local Postgres and filesystem storage"
+	@echo "  make start-local     Start local Postgres/filesystem stack with JSON logs attached"
+	@echo "                       Options: LOCAL_STREAM_LOGS=0 LOCAL_AUTO_SYNC_LATEST=1 LOCAL_INITIAL_SYNC_LATEST=1"
 	@echo "  make kill-all        Stop all paperbase API, worker, and plugin MCP processes"
 	@echo "  make clean           Remove local caches and test artifacts"
 
@@ -144,6 +150,13 @@ start-local: install
 	@echo "Started local plugin    pid=$$(cat $(PLUGIN_PID)) url=$(PLUGIN_MCP_URL) log=$(PLUGIN_LOG)"
 	@echo "Local Postgres URL      $(LOCAL_DATABASE_URL)"
 	@echo "Local storage root      $(LOCAL_STORAGE_ROOT)"
+	@echo "Auto sync latest        $(LOCAL_AUTO_SYNC_LATEST)"
+	@echo "Initial sync latest     $(LOCAL_INITIAL_SYNC_LATEST)"
+	@echo "Log format/level        $(LOCAL_LOG_FORMAT)/$(LOCAL_LOG_LEVEL)"
+	@if [ "$(LOCAL_STREAM_LOGS)" = "1" ]; then \
+		echo "Streaming logs. Press Ctrl-C to detach; use 'make kill-all' to stop the stack."; \
+		tail -n +1 -F $(API_LOG) $(WORKER_LOG) $(PLUGIN_LOG); \
+	fi
 
 kill-all:
 	@mkdir -p $(RUN_DIR)

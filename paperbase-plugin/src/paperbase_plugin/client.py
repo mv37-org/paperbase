@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import requests
 
 from .config import PluginSettings, get_settings
+
+
+logger = logging.getLogger(__name__)
 
 
 class PaperbaseClient:
@@ -24,8 +28,27 @@ class PaperbaseClient:
         return f"{self._settings.base_url.rstrip('/')}{path}"
 
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
-        response = self._session.request(method, self._url(path), timeout=60, **kwargs)
+        url = self._url(path)
+        logger.info(
+            "Forwarding plugin request",
+            extra={
+                "event": "plugin.request.start",
+                "method": method,
+                "path": path,
+                "url": url,
+            },
+        )
+        response = self._session.request(method, url, timeout=60, **kwargs)
         response.raise_for_status()
+        logger.info(
+            "Completed plugin request",
+            extra={
+                "event": "plugin.request.completed",
+                "method": method,
+                "path": path,
+                "status_code": response.status_code,
+            },
+        )
         return response.json()
 
     def index_paper(self, arxiv_id: str, *, force: bool = False) -> dict[str, Any]:
