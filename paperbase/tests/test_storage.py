@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from pathlib import Path
+
+import pytest
 
 from paperbase.config import Settings
-from paperbase.storage import GoogleCloudStorageObjectStore, _build_gcs_client
+from paperbase.storage import GoogleCloudStorageObjectStore, LocalFileObjectStore, _build_gcs_client
 
 
 class _FakeBlob:
@@ -121,3 +124,30 @@ def test_gcs_object_store_generates_signed_url_when_not_public(monkeypatch):
     url = store.presign_get("papers/arxiv:2/tables/table-1.csv", expires_in=120)
 
     assert url == "https://signed.example/papers/arxiv:2/tables/table-1.csv?seconds=120&method=GET&version=v4"
+
+
+def test_local_file_object_store_round_trip_and_listing(tmp_path: Path):
+    store = LocalFileObjectStore(Settings(storage_backend="local", local_storage_root=str(tmp_path)))
+
+    store.put_bytes("papers/arxiv:1/text/full.md", b"hello", content_type="text/markdown")
+    store.put_bytes("papers/arxiv:10/text/full.md", b"other", content_type="text/markdown")
+
+    assert store.get_bytes("papers/arxiv:1/text/full.md") == b"hello"
+    assert store.exists("papers/arxiv:1/text/full.md") is True
+
+    files = store.list_prefix("papers/arxiv:1/")
+    assert len(files) == 1
+    assert files[0].path == "papers/arxiv:1/text/full.md"
+    assert files[0].content_type == "text/markdown"
+    assert store.presign_get("papers/arxiv:1/text/full.md", expires_in=60) == str(tmp_path / "papers/arxiv:1/text/full.md")
+
+
+def test_local_file_object_store_rejects_path_escape(tmp_path: Path):
+    store = LocalFileObjectStore(Settings(storage_backend="local", local_storage_root=str(tmp_path)))
+
+    with pytest.raises(ValueError, match="Unsafe object path"):
+        store.put_bytes("../escape.txt", b"nope")
+
+    assert store.exists("../escape.txt") is False
+    assert store.list_prefix("../") == []
+    assert store.presign_get("../escape.txt", expires_in=60) is None

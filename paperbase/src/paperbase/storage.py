@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import timedelta
+from pathlib import Path, PurePosixPath
 
 from google.cloud import storage
 from google.oauth2 import service_account
@@ -74,6 +76,77 @@ class MemoryObjectStore(ObjectStore):
         return f"memory://{path}"
 
 
+class LocalFileObjectStore(ObjectStore):
+    def __init__(self, settings: Settings) -> None:
+        self._root = Path(settings.local_storage_root).expanduser().resolve()
+        self._root.mkdir(parents=True, exist_ok=True)
+
+    def _normalized_path(self, path: str) -> str:
+        candidate = PurePosixPath(path)
+        if candidate.is_absolute():
+            raise ValueError(f"Absolute object paths are not allowed: {path}")
+        parts = [part for part in candidate.parts if part not in ("",)]
+        if not parts:
+            raise ValueError("Object path must not be empty")
+        if any(part in (".", "..") for part in parts):
+            raise ValueError(f"Unsafe object path: {path}")
+        return PurePosixPath(*parts).as_posix()
+
+    def _resolve(self, path: str) -> tuple[str, Path]:
+        normalized = self._normalized_path(path)
+        return normalized, self._root.joinpath(*PurePosixPath(normalized).parts)
+
+    def _content_type_for(self, normalized: str) -> str | None:
+        content_type, _ = mimetypes.guess_type(normalized)
+        return content_type
+
+    def put_bytes(self, path: str, data: bytes, *, content_type: str | None = None) -> None:
+        _, target = self._resolve(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+
+    def get_bytes(self, path: str) -> bytes:
+        _, target = self._resolve(path)
+        return target.read_bytes()
+
+    def exists(self, path: str) -> bool:
+        try:
+            _, target = self._resolve(path)
+        except ValueError:
+            return False
+        return target.is_file()
+
+    def list_prefix(self, prefix: str) -> list[StoredObject]:
+        try:
+            normalized_prefix = self._normalized_path(prefix)
+        except ValueError:
+            return []
+        prefix_prefix = normalized_prefix + "/"
+        if not self._root.exists():
+            return []
+        files: list[StoredObject] = []
+        for target in sorted(path for path in self._root.rglob("*") if path.is_file()):
+            object_path = target.relative_to(self._root).as_posix()
+            if object_path == normalized_prefix or object_path.startswith(prefix_prefix):
+                files.append(
+                    StoredObject(
+                        path=object_path,
+                        size=target.stat().st_size,
+                        content_type=self._content_type_for(object_path),
+                    )
+                )
+        return files
+
+    def presign_get(self, path: str, *, expires_in: int) -> str | None:
+        try:
+            _, target = self._resolve(path)
+        except ValueError:
+            return None
+        if not target.is_file():
+            return None
+        return str(target)
+
+
 def _build_gcs_client(settings: Settings) -> storage.Client:
     if settings.gcs_service_account_json:
         info = json.loads(settings.gcs_service_account_json)
@@ -132,6 +205,8 @@ class GoogleCloudStorageObjectStore(ObjectStore):
 def build_object_store(settings: Settings) -> ObjectStore:
     if settings.storage_backend == "memory":
         return MemoryObjectStore()
+    if settings.storage_backend == "local":
+        return LocalFileObjectStore(settings)
     if settings.storage_backend == "gcs":
         return GoogleCloudStorageObjectStore(settings)
     raise ValueError(f"Unsupported storage backend: {settings.storage_backend}")

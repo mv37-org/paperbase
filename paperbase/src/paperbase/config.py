@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     api_key: str = Field(default="development-token")
     database_url: str = Field(default="postgresql+psycopg://postgres:postgres@localhost:5432/paperbase")
     storage_backend: str = Field(default="gcs")
+    local_storage_root: str = Field(default=".paperbase-data")
     gcs_project: str | None = None
     gcs_bucket: str = "paperbase"
     gcs_public_base_url: str | None = None

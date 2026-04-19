@@ -6,6 +6,7 @@ __pycache__/
 .ruff_cache/
 .venv/
 .run/
+.paperbase-data/
 dist/
 build/
 .eggs/

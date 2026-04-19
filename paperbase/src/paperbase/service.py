@@ -394,7 +394,12 @@ class PaperbaseService:
             {"probe_id": probe_id, "checked_at": checked_at.isoformat()},
             sort_keys=True,
         )
-        target = self.settings.gcs_bucket if self.settings.storage_backend == "gcs" else self.settings.storage_backend
+        if self.settings.storage_backend == "gcs":
+            target = self.settings.gcs_bucket
+        elif self.settings.storage_backend == "local":
+            target = self.settings.local_storage_root
+        else:
+            target = self.settings.storage_backend
         metadata: dict[str, object] = {"path": probe_path}
 
         try:

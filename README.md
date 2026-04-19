@@ -93,6 +93,17 @@ They do **not** need a real Postgres database or Google Cloud Storage bucket, be
 
 ## How to run the backend locally
 
+For local development, use a repo-root `.env` like this:
+
+```bash
+PAPERBASE_DATABASE_URL="postgresql+psycopg:///paperbase"
+PAPERBASE_STORAGE_BACKEND="local"
+PAPERBASE_LOCAL_STORAGE_ROOT=".paperbase-data"
+PAPERBASE_API_KEY="development-token"
+```
+
+That stores extracted paper artifacts under `.paperbase-data/` instead of GCS.
+
 Start the API server:
 
 ```bash
@@ -143,6 +154,7 @@ For real hosted usage, `paperbase` expects settings like:
 
 - `PAPERBASE_API_KEY`
 - `PAPERBASE_DATABASE_URL`
+- `PAPERBASE_LOCAL_STORAGE_ROOT`
 - `PAPERBASE_GCS_PROJECT`
 - `PAPERBASE_GCS_BUCKET`
 - `PAPERBASE_GCS_SERVICE_ACCOUNT_JSON`
@@ -153,6 +165,12 @@ The plugin needs:
 - `PAPERBASE_API_KEY`
 
 For basic local test runs, you usually do **not** need to set these.
+
+Valid storage backends are:
+
+- `gcs` for hosted object storage
+- `local` for a folder on disk
+- `memory` for tests and temporary in-process runs
 
 ## Deploying `paperbase` on Cloud Run
 
