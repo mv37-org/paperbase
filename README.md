@@ -155,6 +155,20 @@ That runs the shared MCP server from `paperbase-plugin/` over normal stdio, whic
 
 `make start-all` uses an HTTP transport for the plugin instead, because background daemons cannot safely use stdio MCP.
 
+## How to use it from Codex locally
+
+If you already ran `make start-local`, Codex can connect to paperbase in either of these ways:
+
+- Add a `streamable-http` MCP server pointing at `http://127.0.0.1:8090/mcp`.
+- Or install the local plugin from `paperbase-plugin/.codex-plugin/plugin.json` and provide `PAPERBASE_BASE_URL=http://127.0.0.1:8080` plus `PAPERBASE_API_KEY=development-token`.
+
+Then ask Codex to index a paper, for example:
+
+```text
+Use the paperbase tools to index arXiv paper 1706.03762.
+Wait for the job to finish, then show me the manifest and list the extracted files.
+```
+
 ## Environment variables you will care about later
 
 For real hosted usage, `paperbase` expects settings like:

@@ -19,7 +19,7 @@
     "longDescription": "Paperbase gives Codex a hosted scientific-paper backend with indexing, search, artifact browsing, result handles, and related-paper discovery.",
     "developerName": "arslnb",
     "category": "Research",
-    "capabilities": ["Interactive", "Read"],
+    "capabilities": ["Interactive", "Read", "Write"],
     "websiteURL": "https://github.com/arslnb/research/paper-ai",
     "privacyPolicyURL": "https://github.com/arslnb/research/paper-ai",
     "termsOfServiceURL": "https://github.com/arslnb/research/paper-ai",
