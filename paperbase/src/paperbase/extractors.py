@@ -20,6 +20,9 @@ from .utils import csv_bytes, make_slug, slugify
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": "paperbase/0.1.0 (paper extractor)"})
 
+_HTML_SECTION_CLASSES = {"ltx_section", "ltx_subsection", "ltx_subsubsection"}
+_HTML_CONTENT_TAGS = ("p", "li", "figcaption", "caption")
+
 
 @dataclass(slots=True)
 class RawArtifact:
@@ -115,14 +118,107 @@ def _clean_html_to_markdown(html: str) -> str:
     return "\n\n".join(merged)
 
 
+def _normalize_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _normalize_section_title(value: str) -> str:
+    title = _normalize_text(value)
+    title = re.sub(r"^#{1,6}\s*", "", title)
+    title = re.sub(r"^(?:\d+(?:\.\d+){0,3}\.?\s+)", "", title)
+    return title.strip(" :") or "Section"
+
+
+def _render_html_fragment(tag: object) -> str:
+    blocks: list[str] = []
+    if not hasattr(tag, "find_all"):
+        return ""
+    for block in tag.find_all(_HTML_CONTENT_TAGS):
+        text = _normalize_text(block.get_text(" ", strip=True))
+        if text:
+            blocks.append(text)
+    if blocks:
+        return "\n\n".join(blocks)
+    return _normalize_text(tag.get_text(" ", strip=True))
+
+
+def _clone_html_tag(tag: object) -> object | None:
+    soup = BeautifulSoup(str(tag), "html.parser")
+    return soup.find() if hasattr(soup, "find") else None
+
+
+def _is_html_section_tag(tag: object) -> bool:
+    attrs = getattr(tag, "attrs", None)
+    if not isinstance(attrs, dict):
+        return False
+    classes = set(attrs.get("class", []) or [])
+    return bool(_HTML_SECTION_CLASSES & classes)
+
+
+def _section_from_html_tag(tag: object, *, title: str, seen: set[str]) -> SectionArtifact | None:
+    clone = _clone_html_tag(tag)
+    if clone is None:
+        return None
+    for nested in list(clone.find_all("section")):
+        if nested is clone:
+            continue
+        if _is_html_section_tag(nested):
+            nested.decompose()
+    heading = clone.find(re.compile(r"^h[1-6]$"))
+    if heading is not None:
+        heading.decompose()
+    markdown = _render_html_fragment(clone)
+    if not markdown:
+        return None
+    return SectionArtifact(title=title, slug=make_slug(title, seen), markdown=markdown)
+
+
+def _extract_sections_from_html(html: str) -> list[SectionArtifact]:
+    soup = BeautifulSoup(html, "html.parser")
+    article = soup.find("article", class_=re.compile(r"\bltx_document\b")) or soup
+    sections: list[SectionArtifact] = []
+    seen: set[str] = set()
+
+    abstract = article.find("div", class_=re.compile(r"\bltx_abstract\b"))
+    if abstract is not None:
+        abstract_section = _section_from_html_tag(abstract, title="Abstract", seen=seen)
+        if abstract_section is not None:
+            sections.append(abstract_section)
+
+    for section_tag in article.find_all("section"):
+        if not _is_html_section_tag(section_tag):
+            continue
+        heading = section_tag.find(re.compile(r"^h[1-6]$"), recursive=False)
+        if heading is None:
+            continue
+        title = _normalize_section_title(heading.get_text(" ", strip=True))
+        section = _section_from_html_tag(section_tag, title=title, seen=seen)
+        if section is not None:
+            sections.append(section)
+    return sections
+
+
+def _assemble_markdown_from_sections(paper: PaperMetadata, sections: list[SectionArtifact]) -> str:
+    parts = [f"# {paper.title}"] if paper.title else []
+    for section in sections:
+        body = section.markdown.strip()
+        if body:
+            parts.append(f"## {section.title}\n\n{body}")
+        else:
+            parts.append(f"## {section.title}")
+    return "\n\n".join(parts).strip()
+
+
 def _extract_sections(markdown: str) -> list[SectionArtifact]:
     section_pattern = re.compile(
-        r"^(?:\d+\.?\s+)?(Abstract|Introduction|Related Work|Background|"
+        r"^(?:#{1,6}\s*)?(?:\d+(?:\.\d+){0,3}\.?\s+)?(Abstract|Introduction|Related Work|Background|"
         r"Methodology|Method|Methods|Approach|Model|Architecture|"
         r"Experiments?|Results?|Evaluation|Analysis|Discussion|"
         r"Conclusion|Conclusions|Limitations|Future Work|"
         r"Acknowledgments?|Acknowledgements?|References|Appendix|"
         r"Supplementary|Training|Datasets?|Implementation|Setup|"
+        r"Preliminaries|Experimental Setup|Experiments and Results|"
+        r"Conclusion and Future Work|Materials and Methods|"
         r"Ablation|Broader Impact|Ethics)\s*$",
         re.IGNORECASE | re.MULTILINE,
     )
@@ -134,7 +230,7 @@ def _extract_sections(markdown: str) -> list[SectionArtifact]:
     for index, match in enumerate(matches):
         start = match.end()
         end = matches[index + 1].start() if index + 1 < len(matches) else len(markdown)
-        title = re.sub(r"^\d+\.?\s*", "", match.group(1)).strip().title()
+        title = _normalize_section_title(match.group(0)).title()
         sections.append(
             SectionArtifact(
                 title=title,
@@ -317,7 +413,8 @@ def index_paper_artifacts(paper: PaperMetadata) -> ExtractionOutput:
     html = fetch_html(paper.arxiv_id)
     if html:
         source_bytes = fetch_source(paper.arxiv_id)
-        markdown = _clean_html_to_markdown(html)
+        sections = _extract_sections_from_html(html)
+        markdown = _assemble_markdown_from_sections(paper, sections) if sections else _clean_html_to_markdown(html)
         raw_artifacts: list[RawArtifact] = []
         if source_bytes:
             raw_artifacts.append(
@@ -330,7 +427,7 @@ def index_paper_artifacts(paper: PaperMetadata) -> ExtractionOutput:
         return ExtractionOutput(
             source_type="html",
             text_markdown=markdown,
-            sections=_extract_sections(markdown),
+            sections=sections or _extract_sections(markdown),
             figures=_extract_figures_from_html(html),
             tables=_extract_tables_from_html(html),
             raw_artifacts=raw_artifacts,

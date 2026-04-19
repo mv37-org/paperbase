@@ -65,6 +65,15 @@ def _rich_extraction(*, text: str) -> ExtractionOutput:
     )
 
 
+def _full_text_extraction(*, text: str) -> ExtractionOutput:
+    return ExtractionOutput(
+        source_type="html",
+        text_markdown=text,
+        sections=[SectionArtifact(title="Full Text", slug="full-text", markdown=text)],
+        raw_artifacts=[RawArtifact(path="raw/source.tar.gz", data=b"TAR", content_type="application/gzip")],
+    )
+
+
 def test_index_writes_manifest_and_artifacts(monkeypatch, service: PaperbaseService):
     paper = _sample_paper("2401.12345", title="Transformer Paper", abstract="Attention and transformers.")
     monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
@@ -90,6 +99,22 @@ def test_index_writes_manifest_and_artifacts(monkeypatch, service: PaperbaseServ
     assert "tables/table-1.json" in files
     assert "tables/table-1.csv" in files
     assert "raw/source.tar.gz" in files
+
+
+def test_reindex_replaces_stale_artifacts(monkeypatch, service: PaperbaseService):
+    paper = _sample_paper("2401.33333", title="Transformer Paper", abstract="Attention and transformers.")
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+
+    monkeypatch.setattr("paperbase.service.index_paper_artifacts", lambda paper: _full_text_extraction(text="Old extraction"))
+    service.index_arxiv_paper(paper.arxiv_id, paper=paper, force=True)
+
+    monkeypatch.setattr("paperbase.service.index_paper_artifacts", lambda paper: _rich_extraction(text="New extraction"))
+    service.index_arxiv_paper(paper.arxiv_id, paper=paper, force=True)
+
+    files = {item.path for item in service.list_files("arxiv:2401.33333").files}
+
+    assert "sections/introduction.md" in files
+    assert "sections/full-text.md" not in files
 
 
 def test_search_and_grep_return_result_handles(monkeypatch, service: PaperbaseService):

@@ -8,6 +8,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path, PurePosixPath
+import shutil
 
 from google.cloud import storage
 from google.oauth2 import service_account
@@ -46,6 +47,10 @@ class ObjectStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def delete_prefix(self, prefix: str) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
     def presign_get(self, path: str, *, expires_in: int) -> str | None:
         raise NotImplementedError
 
@@ -69,6 +74,11 @@ class MemoryObjectStore(ObjectStore):
             if path.startswith(prefix):
                 files.append(StoredObject(path=path, size=len(data), content_type=content_type))
         return files
+
+    def delete_prefix(self, prefix: str) -> None:
+        for path in list(self._objects):
+            if path == prefix or path.startswith(f"{prefix}/"):
+                del self._objects[path]
 
     def presign_get(self, path: str, *, expires_in: int) -> str | None:
         if not self.exists(path):
@@ -137,6 +147,24 @@ class LocalFileObjectStore(ObjectStore):
                 )
         return files
 
+    def delete_prefix(self, prefix: str) -> None:
+        try:
+            normalized_prefix, target = self._resolve(prefix)
+        except ValueError:
+            return
+        if target.is_file():
+            target.unlink()
+            return
+        if target.is_dir():
+            shutil.rmtree(target)
+            return
+        prefix_prefix = normalized_prefix + "/"
+        for stored in self.list_prefix(normalized_prefix):
+            if stored.path == normalized_prefix or stored.path.startswith(prefix_prefix):
+                _, stored_target = self._resolve(stored.path)
+                if stored_target.is_file():
+                    stored_target.unlink()
+
     def presign_get(self, path: str, *, expires_in: int) -> str | None:
         try:
             _, target = self._resolve(path)
@@ -189,6 +217,11 @@ class GoogleCloudStorageObjectStore(ObjectStore):
                 )
             )
         return files
+
+    def delete_prefix(self, prefix: str) -> None:
+        blobs = list(self._client.list_blobs(self._bucket_name, prefix=prefix))
+        if blobs:
+            self._bucket.delete_blobs(blobs)
 
     def presign_get(self, path: str, *, expires_in: int) -> str | None:
         if not self.exists(path):

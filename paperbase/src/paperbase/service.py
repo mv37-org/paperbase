@@ -218,6 +218,7 @@ class PaperbaseService:
         stored = self.repository.upsert_paper(metadata, search_document=search_document, embedding=embedding)
 
         prefix = f"papers/{stored.paper_id}"
+        self.object_store.delete_prefix(prefix)
         self.object_store.put_text(f"{prefix}/meta.json", json.dumps(metadata.model_dump(mode='json'), indent=2), content_type="application/json")
         self.object_store.put_text(f"{prefix}/text/full.md", extraction.text_markdown, content_type="text/markdown")
 
