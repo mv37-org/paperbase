@@ -28,6 +28,8 @@ from .models import (
     SearchPaperResult,
     SearchRequest,
     SearchResponse,
+    SearchSectionRequest,
+    SearchSectionResponse,
     TableResponse,
 )
 from .repository import PaperRepository, build_repository
@@ -351,6 +353,17 @@ class PaperbaseService:
         if result_set is None:
             raise HTTPException(status_code=404, detail=f"Result set {result_set_id} not found")
         return result_set
+
+    def search_sections(self, request: SearchSectionRequest) -> SearchSectionResponse:
+        if request.result_set_id:
+            self.get_results(request.result_set_id)
+        sections = self.repository.search_sections(
+            request.query,
+            limit=request.limit,
+            result_set_id=request.result_set_id,
+            paper_ids=request.paper_ids,
+        )
+        return SearchSectionResponse(query=request.query, sections=sections)
 
     def grep_results(self, result_set_id: str, pattern: str, *, limit: int) -> GrepResponse:
         parent = self.get_results(result_set_id)

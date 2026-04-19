@@ -16,7 +16,16 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
 from .config import Settings
-from .models import GrepPaperMatch, IntegrationProbeComponent, JobResponse, PaperMetadata, PaperResponse, ResultSetResponse, SearchPaperResult
+from .models import (
+    GrepPaperMatch,
+    IntegrationProbeComponent,
+    JobResponse,
+    PaperMetadata,
+    PaperResponse,
+    ResultSetResponse,
+    SearchPaperResult,
+    SearchSectionResult,
+)
 from .utils import canonical_paper_id, literal_hint_from_pattern, new_id, utcnow
 
 
@@ -169,6 +178,17 @@ class PaperRepository(ABC):
 
     @abstractmethod
     def search_local(self, query: str, *, limit: int, query_embedding: list[float] | None = None) -> list[SearchPaperResult]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def search_sections(
+        self,
+        query: str,
+        *,
+        limit: int,
+        result_set_id: str | None = None,
+        paper_ids: list[str] | None = None,
+    ) -> list[SearchSectionResult]:
         raise NotImplementedError
 
     @abstractmethod
@@ -454,6 +474,75 @@ class SqlAlchemyPaperRepository(PaperRepository):
             )
         return results
 
+    def search_sections(
+        self,
+        query: str,
+        *,
+        limit: int,
+        result_set_id: str | None = None,
+        paper_ids: list[str] | None = None,
+    ) -> list[SearchSectionResult]:
+        params: dict[str, Any] = {"query": query, "limit": limit}
+        joins = ["JOIN papers p ON p.paper_id = tc.paper_id"]
+        filters = [
+            "(to_tsvector('english', coalesce(tc.content, '')) @@ plainto_tsquery('english', :query) "
+            "OR similarity(coalesce(tc.content, ''), :query) > 0.05)"
+        ]
+        if result_set_id:
+            joins.append("JOIN result_items ri ON ri.paper_id = tc.paper_id")
+            filters.append("ri.result_set_id = :result_set_id")
+            params["result_set_id"] = result_set_id
+        if paper_ids:
+            filters.append("tc.paper_id = ANY(CAST(:paper_ids AS text[]))")
+            params["paper_ids"] = paper_ids
+        sql = text(
+            f"""
+            SELECT
+                tc.paper_id,
+                p.arxiv_id,
+                p.title,
+                tc.path,
+                tc.chunk_kind,
+                tc.content,
+                ts_rank_cd(
+                    to_tsvector('english', coalesce(tc.content, '')),
+                    plainto_tsquery('english', :query)
+                ) AS lexical_score,
+                similarity(coalesce(tc.content, ''), :query) AS similarity_score,
+                CASE tc.chunk_kind
+                    WHEN 'section' THEN 0.30
+                    WHEN 'table' THEN 0.20
+                    WHEN 'figure_caption' THEN 0.15
+                    WHEN 'full_text' THEN 0.05
+                    ELSE 0.0
+                END AS kind_score
+            FROM text_chunks tc
+            {' '.join(joins)}
+            WHERE {' AND '.join(filters)}
+            ORDER BY lexical_score DESC, kind_score DESC, similarity_score DESC, p.citation_count DESC, p.published DESC
+            LIMIT :limit
+            """
+        )
+        with self._session() as session:
+            rows = session.execute(sql, params).mappings().all()
+        results: list[SearchSectionResult] = []
+        for row in rows:
+            score = float(row["lexical_score"] or 0) + float(row["similarity_score"] or 0) + float(row["kind_score"] or 0)
+            content = row["content"] or ""
+            preview = content[:320].strip()
+            results.append(
+                SearchSectionResult(
+                    paper_id=row["paper_id"],
+                    arxiv_id=row["arxiv_id"],
+                    title=row["title"],
+                    path=row["path"],
+                    chunk_kind=row["chunk_kind"],
+                    preview=preview,
+                    score=score,
+                )
+            )
+        return results
+
     def save_result_set(
         self,
         *,
@@ -716,6 +805,50 @@ class MemoryPaperRepository(PaperRepository):
             if score > 0:
                 results.append(SearchPaperResult(**paper.model_dump(), score=score, source="local"))
         results.sort(key=lambda item: ((item.score or 0), item.citation_count, item.published), reverse=True)
+        return results[:limit]
+
+    def search_sections(
+        self,
+        query: str,
+        *,
+        limit: int,
+        result_set_id: str | None = None,
+        paper_ids: list[str] | None = None,
+    ) -> list[SearchSectionResult]:
+        query_lower = query.lower()
+        allowed_paper_ids = set(paper_ids or [])
+        if result_set_id:
+            allowed_paper_ids.update(paper.paper_id for paper in self.result_sets[result_set_id].papers)
+        results: list[SearchSectionResult] = []
+        for paper_id, chunks in self.text_chunks.items():
+            if allowed_paper_ids and paper_id not in allowed_paper_ids:
+                continue
+            paper = self.papers.get(paper_id)
+            if paper is None:
+                continue
+            for chunk in chunks:
+                content = chunk["content"]
+                if query_lower not in content.lower():
+                    continue
+                kind_score = {
+                    "section": 0.30,
+                    "table": 0.20,
+                    "figure_caption": 0.15,
+                    "full_text": 0.05,
+                }.get(chunk["chunk_kind"], 0.0)
+                score = len(query_lower) / max(len(content), 1) + kind_score
+                results.append(
+                    SearchSectionResult(
+                        paper_id=paper.paper_id,
+                        arxiv_id=paper.arxiv_id,
+                        title=paper.title,
+                        path=chunk["path"],
+                        chunk_kind=chunk["chunk_kind"],
+                        preview=content[:320],
+                        score=score,
+                    )
+                )
+        results.sort(key=lambda item: (item.score or 0, self.papers[item.paper_id].citation_count), reverse=True)
         return results[:limit]
 
     def save_result_set(

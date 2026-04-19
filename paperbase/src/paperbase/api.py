@@ -22,6 +22,8 @@ from .models import (
     SearchPaperResult,
     SearchRequest,
     SearchResponse,
+    SearchSectionRequest,
+    SearchSectionResponse,
     TableResponse,
     FigureResponse,
 )
@@ -92,6 +94,11 @@ def get_table(paper_id: str, table_id: str, service: PaperbaseService = Depends(
 @app.post("/v1/search", response_model=SearchResponse, dependencies=[Depends(require_bearer_token)])
 def search(request: SearchRequest, service: PaperbaseService = Depends(get_service)) -> SearchResponse:
     return service.search(request)
+
+
+@app.post("/v1/search/sections", response_model=SearchSectionResponse, dependencies=[Depends(require_bearer_token)])
+def search_sections(request: SearchSectionRequest, service: PaperbaseService = Depends(get_service)) -> SearchSectionResponse:
+    return service.search_sections(request)
 
 
 @app.get("/v1/results/{result_set_id}", response_model=ResultSetResponse, dependencies=[Depends(require_bearer_token)])

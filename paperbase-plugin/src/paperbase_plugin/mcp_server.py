@@ -10,6 +10,7 @@ from mcp.server.fastmcp import FastMCP
 
 from .client import PaperbaseClient
 from .logging_utils import configure_logging
+from .research_qa import run_research_qa
 
 
 mcp = FastMCP("paperbase", json_response=True)
@@ -58,6 +59,17 @@ def get_results(result_set_id: str) -> dict:
 
 
 @mcp.tool()
+def search_sections(query: str, limit: int = 20, result_set_id: str | None = None, paper_ids: list[str] | None = None) -> dict:
+    """Search section-level paper artifacts and return the strongest matching passages."""
+    return get_client().search_sections(
+        query=query,
+        limit=limit,
+        result_set_id=result_set_id,
+        paper_ids=paper_ids,
+    )
+
+
+@mcp.tool()
 def grep_results(result_set_id: str, pattern: str, limit: int = 50) -> dict:
     """Narrow a saved result set with a regex-like pattern and receive a new result-set handle."""
     return get_client().grep_results(result_set_id, pattern=pattern, limit=limit)
@@ -103,6 +115,27 @@ def get_figure(paper_id: str, figure_id: str) -> dict:
 def get_table(paper_id: str, table_id: str) -> dict:
     """Fetch structured table rows and a signed CSV URL."""
     return get_client().get_table(paper_id, table_id)
+
+
+@mcp.tool()
+def research_qa(
+    question: str,
+    query_limit: int = 6,
+    paper_limit: int = 8,
+    section_limit: int = 12,
+    evidence_limit: int = 5,
+    include_live_sources: bool = False,
+) -> dict:
+    """Answer a broad research question by rewriting the query, shortlisting papers, and reading relevant sections."""
+    return run_research_qa(
+        get_client(),
+        question=question,
+        query_limit=query_limit,
+        paper_limit=paper_limit,
+        section_limit=section_limit,
+        evidence_limit=evidence_limit,
+        include_live_sources=include_live_sources,
+    )
 
 
 def main() -> None:

@@ -26,7 +26,8 @@
     "defaultPrompt": [
       "Search recent multimodal AI papers.",
       "Index this arXiv paper, wait for completion, and give me a concise extraction summary.",
-      "Compare methods across these results."
+      "Compare methods across these results.",
+      "Answer this AI research question from indexed papers and section-level evidence."
     ],
     "brandColor": "#2563EB"
   }

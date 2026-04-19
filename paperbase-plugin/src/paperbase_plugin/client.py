@@ -78,6 +78,22 @@ class PaperbaseClient:
     def get_results(self, result_set_id: str) -> dict[str, Any]:
         return self._request("GET", f"/v1/results/{result_set_id}")
 
+    def search_sections(
+        self,
+        *,
+        query: str,
+        limit: int = 20,
+        result_set_id: str | None = None,
+        paper_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "query": query,
+            "limit": limit,
+            "result_set_id": result_set_id,
+            "paper_ids": paper_ids,
+        }
+        return self._request("POST", "/v1/search/sections", json=payload)
+
     def grep_results(self, result_set_id: str, *, pattern: str, limit: int = 50) -> dict[str, Any]:
         return self._request("POST", f"/v1/results/{result_set_id}/grep", json={"pattern": pattern, "limit": limit})
 

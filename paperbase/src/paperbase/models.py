@@ -58,6 +58,28 @@ class SearchResponse(BaseModel):
     expires_at: datetime
 
 
+class SearchSectionRequest(BaseModel):
+    query: str
+    limit: int = Field(default=20, ge=1, le=100)
+    result_set_id: str | None = None
+    paper_ids: list[str] | None = None
+
+
+class SearchSectionResult(BaseModel):
+    paper_id: str
+    arxiv_id: str
+    title: str
+    path: str
+    chunk_kind: str
+    preview: str
+    score: float | None = None
+
+
+class SearchSectionResponse(BaseModel):
+    query: str
+    sections: list[SearchSectionResult]
+
+
 class ResultSetResponse(BaseModel):
     result_set_id: str
     query: str | None = None

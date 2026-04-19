@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from paperbase.api import _resolve_bind_address, app
 from paperbase.config import Settings
 from paperbase.extractors import ExtractionOutput, FigureArtifact, RawArtifact, SectionArtifact, TableArtifact
-from paperbase.models import PaperMetadata, SearchRequest
+from paperbase.models import PaperMetadata, SearchRequest, SearchSectionRequest
 from paperbase.repository import MemoryPaperRepository
 from paperbase.service import PaperbaseService, get_service
 from paperbase.storage import MemoryObjectStore
@@ -139,6 +139,13 @@ def test_search_and_grep_return_result_handles(monkeypatch, service: PaperbaseSe
     assert narrowed.parent_result_set_id == results.result_set_id
     assert narrowed.papers[0].paper_id == "arxiv:2401.10001"
 
+    section_hits = service.search_sections(
+        SearchSectionRequest(query="attention", result_set_id=results.result_set_id, limit=10)
+    )
+    assert section_hits.sections
+    assert section_hits.sections[0].paper_id == "arxiv:2401.10001"
+    assert section_hits.sections[0].path == "sections/introduction.md"
+
 
 def test_search_can_shortlist_from_generated_summaries(monkeypatch, service: PaperbaseService):
     monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
@@ -189,6 +196,11 @@ def test_api_flow_for_jobs_and_results(monkeypatch, service: PaperbaseService):
         headers=headers,
         json={"query": "queued", "limit": 10, "include_live_sources": False},
     ).json()
+    section_search = client.post(
+        "/v1/search/sections",
+        headers=headers,
+        json={"query": "attention", "limit": 10, "paper_ids": ["arxiv:2401.55555"]},
+    ).json()
     grep = client.post(
         f"/v1/results/{search['result_set_id']}/grep",
         headers=headers,
@@ -198,6 +210,7 @@ def test_api_flow_for_jobs_and_results(monkeypatch, service: PaperbaseService):
     table = client.get("/v1/papers/arxiv:2401.55555/tables/table-1", headers=headers).json()
 
     assert grep["parent_result_set_id"] == search["result_set_id"]
+    assert section_search["sections"][0]["paper_id"] == "arxiv:2401.55555"
     assert figure["figure_id"] == "figure-1"
     assert table["table_id"] == "table-1"
 
