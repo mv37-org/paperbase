@@ -1,14 +1,16 @@
 # paper-ai
 
-This repo has **two boxes**:
+This repo has **three boxes**:
 
 - `paperbase/` = the server box
 - `paperbase-plugin/` = the plugin box for Codex and Claude Code
+- `chat/` = the lightweight web chat box for talking to indexed papers
 
 If you are 5 years old:
 
 - `paperbase` is the librarian.
 - `paperbase-plugin` is the walkie-talkie you use to ask the librarian questions.
+- `chat` is the reading room where a person asks the librarian questions about one paper at a time.
 
 The librarian knows how to:
 
@@ -22,6 +24,12 @@ The plugin knows how to:
 - talk to the server over HTTP
 - expose MCP tools like `search_papers`, `index_paper`, and `get_figure`
 - let Codex and Claude Code use the same backend
+
+The chat app knows how to:
+
+- search indexed papers already stored in paperbase
+- pick one paper and ask follow-up questions about it
+- answer with grounded excerpts from the indexed sections
 
 ## What “index a paper” means
 
@@ -47,7 +55,7 @@ Examples of saved artifacts:
 
 Use `make`.
 
-First, create the local Python environment and install both products:
+First, create the local Python environment and install all three products:
 
 ```bash
 make install
@@ -58,6 +66,7 @@ That will:
 - create `.venv/`
 - install `paperbase`
 - install `paperbase-plugin`
+- install `chat`
 - install test dependencies
 
 ## How to run tests
@@ -78,6 +87,12 @@ Run only plugin tests:
 
 ```bash
 make test-plugin
+```
+
+Run only chat app tests:
+
+```bash
+make test-chat
 ```
 
 Current tests are mostly **local safety checks**. They verify things like:
@@ -181,6 +196,17 @@ make run-plugin-mcp
 That runs the shared MCP server from `paperbase-plugin/` over normal stdio, which is what Codex and Claude Code expect.
 
 `make start-all` uses an HTTP transport for the plugin instead, because background daemons cannot safely use stdio MCP.
+
+## How to run the lightweight chat app locally
+
+Start the backend first, then in another terminal:
+
+```bash
+make run-chat
+```
+
+That starts the chat UI on `http://127.0.0.1:8091` by default.
+It talks to `paperbase` over HTTP using the same `PAPERBASE_BASE_URL` and `PAPERBASE_API_KEY` values already used by the plugin.
 
 ## How to use it from Codex locally
 
