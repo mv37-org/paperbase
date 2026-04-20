@@ -16,7 +16,12 @@ from paperbase.storage import MemoryObjectStore
 
 @pytest.fixture
 def service() -> PaperbaseService:
-    settings = Settings(storage_backend="memory", database_url="memory://", api_key="test-token")
+    settings = Settings(
+        storage_backend="memory",
+        database_url="memory://",
+        api_key="test-token",
+        summary_provider="heuristic",
+    )
     return PaperbaseService(
         settings=settings,
         repository=MemoryPaperRepository(),
@@ -161,7 +166,10 @@ def test_search_can_shortlist_from_generated_summaries(monkeypatch, service: Pap
             "In simple terms, this paper explains diffusion for image generation.",
         ),
     }
-    monkeypatch.setattr("paperbase.service.build_paper_summaries", lambda paper, extraction: summaries[paper.arxiv_id])
+    monkeypatch.setattr(
+        "paperbase.service.build_paper_summaries",
+        lambda paper, extraction, settings=None: summaries[paper.arxiv_id],
+    )
 
     service.index_arxiv_paper("2401.20001", paper=_sample_paper("2401.20001", title="Tool Use Study", abstract="Planning systems"))
     service.index_arxiv_paper("2401.20002", paper=_sample_paper("2401.20002", title="Image Study", abstract="Vision systems"))

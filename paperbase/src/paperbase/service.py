@@ -42,22 +42,109 @@ from .utils import canonical_paper_id, new_id, utcnow
 logger = logging.getLogger(__name__)
 
 
+_MODEL_CACHE: dict[str, Any] = {}
+_RERANKER_CACHE: dict[str, Any] = {}
+
+
 class OptionalEmbeddingProvider:
     def __init__(self, settings: Settings) -> None:
         self._model_name = settings.embedding_model
-        self._model = None
+        self._expected_dim = settings.embedding_dim
 
-    def encode(self, text: str) -> list[float] | None:
+    def _model(self):
         if not self._model_name:
             return None
-        if self._model is None:
-            try:
-                from sentence_transformers import SentenceTransformer
-            except Exception:
-                return None
-            self._model = SentenceTransformer(self._model_name)
-        vector = self._model.encode([text], normalize_embeddings=True)[0]
-        return [float(value) for value in vector.tolist()]
+        cached = _MODEL_CACHE.get(self._model_name)
+        if cached is not None:
+            return cached
+        try:
+            from sentence_transformers import SentenceTransformer
+        except Exception as exc:
+            logger.warning(
+                "sentence-transformers unavailable, embeddings disabled",
+                extra={"event": "embed.unavailable", "error": str(exc)},
+            )
+            return None
+        try:
+            model = SentenceTransformer(self._model_name)
+        except Exception as exc:
+            logger.warning(
+                "Failed to load embedding model, embeddings disabled",
+                extra={"event": "embed.load_failed", "model": self._model_name, "error": str(exc)},
+            )
+            return None
+        _MODEL_CACHE[self._model_name] = model
+        return model
+
+    def encode(self, text: str) -> list[float] | None:
+        batch = self.encode_batch([text])
+        if batch is None or not batch:
+            return None
+        return batch[0]
+
+    def encode_batch(self, texts: list[str]) -> list[list[float]] | None:
+        if not texts:
+            return []
+        model = self._model()
+        if model is None:
+            return None
+        try:
+            vectors = model.encode(texts, normalize_embeddings=True, convert_to_numpy=True, show_progress_bar=False)
+        except Exception as exc:
+            logger.warning("Embedding encode failed", extra={"event": "embed.encode_failed", "error": str(exc)})
+            return None
+        return [[float(v) for v in vector.tolist()] for vector in vectors]
+
+
+class OptionalReranker:
+    def __init__(self, settings: Settings) -> None:
+        self._model_name = settings.rerank_model
+        self._top_k = settings.rerank_top_k
+
+    def enabled(self) -> bool:
+        return bool(self._model_name)
+
+    @property
+    def top_k(self) -> int:
+        return self._top_k
+
+    def _model(self):
+        if not self._model_name:
+            return None
+        cached = _RERANKER_CACHE.get(self._model_name)
+        if cached is not None:
+            return cached
+        try:
+            from sentence_transformers import CrossEncoder
+        except Exception as exc:
+            logger.warning(
+                "CrossEncoder unavailable, reranker disabled",
+                extra={"event": "rerank.unavailable", "error": str(exc)},
+            )
+            return None
+        try:
+            model = CrossEncoder(self._model_name)
+        except Exception as exc:
+            logger.warning(
+                "Failed to load reranker, reranker disabled",
+                extra={"event": "rerank.load_failed", "model": self._model_name, "error": str(exc)},
+            )
+            return None
+        _RERANKER_CACHE[self._model_name] = model
+        return model
+
+    def score(self, query: str, docs: list[str]) -> list[float] | None:
+        if not docs:
+            return []
+        model = self._model()
+        if model is None:
+            return None
+        try:
+            scores = model.predict([(query, doc) for doc in docs], show_progress_bar=False)
+        except Exception as exc:
+            logger.warning("Reranker predict failed", extra={"event": "rerank.predict_failed", "error": str(exc)})
+            return None
+        return [float(s) for s in scores]
 
 
 class PaperbaseService:
@@ -72,6 +159,7 @@ class PaperbaseService:
         self.repository = repository
         self.object_store = object_store
         self.embeddings = OptionalEmbeddingProvider(settings)
+        self.reranker = OptionalReranker(settings)
 
     def init(self) -> None:
         self.repository.init()
@@ -88,6 +176,90 @@ class PaperbaseService:
             },
         )
         return job
+
+    def enqueue_summarize_top_cited_job(self, *, limit: int = 500_000) -> JobResponse:
+        job = self.repository.create_job("summarize_top_cited", {"limit": limit})
+        logger.info(
+            "Created summarize_top_cited job",
+            extra={
+                "event": "jobs.summarize_top_cited.created",
+                "job_id": job.job_id,
+                "limit": limit,
+            },
+        )
+        return job
+
+    def summarize_top_cited(self, *, limit: int) -> dict[str, int]:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        from .summaries import generate_summary_on_demand
+
+        if self.settings.summary_provider != "vertex":
+            logger.warning(
+                "summarize_top_cited invoked but summary_provider is not 'vertex'; nothing to do",
+                extra={"event": "summarize_top_cited.noop", "provider": self.settings.summary_provider},
+            )
+            return {"processed": 0, "updated": 0, "failed": 0}
+
+        papers = self.repository.list_papers_needing_summary(limit=limit)
+        logger.info(
+            "Starting summarize_top_cited",
+            extra={
+                "event": "summarize_top_cited.start",
+                "candidate_count": len(papers),
+                "concurrency": self.settings.featured_tier_concurrency,
+            },
+        )
+
+        updated = 0
+        failed = 0
+        concurrency = max(1, self.settings.featured_tier_concurrency)
+
+        def _summarize_one(paper: PaperResponse) -> tuple[str, tuple[str, str] | None]:
+            try:
+                return paper.paper_id, generate_summary_on_demand(paper, self.settings)
+            except Exception as exc:
+                logger.warning(
+                    "featured-tier paper summary failed",
+                    extra={
+                        "event": "summarize_top_cited.paper_failed",
+                        "paper_id": paper.paper_id,
+                        "error": str(exc),
+                    },
+                )
+                return paper.paper_id, None
+
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            futures = [pool.submit(_summarize_one, paper) for paper in papers]
+            for index, future in enumerate(as_completed(futures), start=1):
+                paper_id, result = future.result()
+                if result is None:
+                    failed += 1
+                    continue
+                short, eli5 = result
+                if self.repository.update_summaries(paper_id, summary_short=short, summary_eli5=eli5) is not None:
+                    updated += 1
+                if index % 500 == 0:
+                    logger.info(
+                        "summarize_top_cited progress",
+                        extra={
+                            "event": "summarize_top_cited.progress",
+                            "processed": index,
+                            "updated": updated,
+                            "failed": failed,
+                        },
+                    )
+
+        logger.info(
+            "Completed summarize_top_cited",
+            extra={
+                "event": "summarize_top_cited.completed",
+                "processed": len(papers),
+                "updated": updated,
+                "failed": failed,
+            },
+        )
+        return {"processed": len(papers), "updated": updated, "failed": failed}
 
     def enqueue_latest_sync_job(self) -> JobResponse:
         job = self.repository.create_job(
@@ -131,6 +303,8 @@ class PaperbaseService:
                     categories=list(job.payload.get("categories", self.settings.arxiv_categories)),
                     limit_per_category=int(job.payload.get("limit_per_category", self.settings.latest_sync_limit_per_category)),
                 )
+            elif job.job_type == "summarize_top_cited":
+                self.summarize_top_cited(limit=int(job.payload.get("limit", 500_000)))
             else:
                 raise ValueError(f"Unsupported job type: {job.job_type}")
             self.repository.mark_job_completed(job.job_id)
@@ -216,21 +390,30 @@ class PaperbaseService:
         metadata.source_type = extraction.source_type
         metadata.index_status = "indexed"
         metadata.indexed_at = utcnow()
-        metadata.summary_short, metadata.summary_eli5 = build_paper_summaries(metadata, extraction)
-        search_document = extraction.text_markdown
-        embedding = (
-            self.embeddings.encode(f"{metadata.title}\n\n{metadata.abstract}\n\n{metadata.summary_short}")
-            if self.embeddings
-            else None
+        metadata.summary_short, metadata.summary_eli5 = build_paper_summaries(metadata, extraction, self.settings)
+
+        search_document_parts = [metadata.title, metadata.tldr, metadata.summary_short, extraction.text_markdown]
+        search_document = "\n\n".join(part for part in search_document_parts if part)
+
+        paper_embedding_input = "\n".join(
+            part
+            for part in (
+                metadata.title,
+                metadata.tldr or metadata.abstract,
+                metadata.summary_short,
+            )
+            if part
         )
-        stored = self.repository.upsert_paper(metadata, search_document=search_document, embedding=embedding)
+        paper_embedding = self.embeddings.encode(paper_embedding_input) if paper_embedding_input else None
+
+        stored = self.repository.upsert_paper(metadata, search_document=search_document, embedding=paper_embedding)
 
         prefix = f"papers/{stored.paper_id}"
         self.object_store.delete_prefix(prefix)
         self.object_store.put_text(f"{prefix}/meta.json", json.dumps(metadata.model_dump(mode='json'), indent=2), content_type="application/json")
         self.object_store.put_text(f"{prefix}/text/full.md", extraction.text_markdown, content_type="text/markdown")
 
-        text_chunks: list[dict[str, str]] = [
+        text_chunks: list[dict[str, Any]] = [
             {"path": "text/full.md", "chunk_kind": "full_text", "content": extraction.text_markdown}
         ]
 
@@ -285,6 +468,12 @@ class PaperbaseService:
                         }
                     )
 
+        chunk_texts = [(chunk["content"] or "")[:2000] for chunk in text_chunks]
+        chunk_embeddings = self.embeddings.encode_batch(chunk_texts)
+        if chunk_embeddings is not None and len(chunk_embeddings) == len(text_chunks):
+            for chunk, vector in zip(text_chunks, chunk_embeddings):
+                chunk["embedding"] = vector
+
         for artifact in extraction.raw_artifacts:
             self.object_store.put_bytes(f"{prefix}/{artifact.path}", artifact.data, content_type=artifact.content_type)
 
@@ -311,31 +500,87 @@ class PaperbaseService:
         return stored
 
     def search(self, request: SearchRequest) -> SearchResponse:
+        k = self.settings.rrf_k
+        pool_size = max(request.limit * 4, 50)
+        query_embedding = self.embeddings.encode(request.query)
+
         local_results = self.repository.search_local(
             request.query,
-            limit=request.limit * 2,
-            query_embedding=self.embeddings.encode(request.query) if self.embeddings else None,
+            limit=pool_size,
+            query_embedding=query_embedding,
+            rrf_k=k,
         )
-        merged: dict[str, SearchPaperResult] = {result.paper_id: result for result in local_results}
 
+        arxiv_results: list[PaperMetadata] = []
+        s2_results: list[PaperMetadata] = []
         if request.include_live_sources:
-            arxiv_results = sources.search_arxiv(request.query, max_results=request.limit, category=request.category)
-            semantic_results = sources.search_semantic_scholar(request.query, limit=request.limit, year=request.year)
-            live_papers = arxiv_results + semantic_results
-            sources.enrich_with_semantic_scholar(live_papers)
-            for index, paper in enumerate(live_papers):
-                stored = self.repository.upsert_paper(paper, search_document=paper.abstract)
-                score = 1.0 / (index + 1)
-                result = SearchPaperResult(**stored.model_dump(), score=score, source="live")
-                current = merged.get(stored.paper_id)
-                if current is None or (current.score or 0) < score:
-                    merged[stored.paper_id] = result
+            try:
+                arxiv_results = sources.search_arxiv(request.query, max_results=request.limit, category=request.category)
+            except Exception as exc:
+                logger.warning("arxiv live search failed", extra={"event": "search.arxiv_failed", "error": str(exc)})
+            try:
+                s2_results = sources.search_semantic_scholar(request.query, limit=request.limit, year=request.year)
+            except Exception as exc:
+                logger.warning("s2 live search failed", extra={"event": "search.s2_failed", "error": str(exc)})
+            live_papers = arxiv_results + s2_results
+            if live_papers:
+                sources.enrich_with_semantic_scholar(live_papers)
 
-        ordered = sorted(
-            merged.values(),
-            key=lambda paper: ((paper.score or 0), paper.citation_count, paper.published),
-            reverse=True,
-        )[: request.limit]
+        candidates: dict[str, SearchPaperResult] = {}
+        rrf: dict[str, float] = {}
+
+        for rank, result in enumerate(local_results):
+            pid = result.paper_id
+            candidates[pid] = result
+            rrf[pid] = rrf.get(pid, 0.0) + 1.0 / (k + rank)
+
+        for rank, paper in enumerate(arxiv_results):
+            stored = self.repository.upsert_paper(paper, search_document=paper.abstract)
+            pid = stored.paper_id
+            candidates.setdefault(pid, SearchPaperResult(**stored.model_dump(), source="live-arxiv"))
+            rrf[pid] = rrf.get(pid, 0.0) + 0.8 / (k + rank)
+
+        for rank, paper in enumerate(s2_results):
+            stored = self.repository.upsert_paper(
+                paper,
+                search_document=paper.tldr or paper.abstract,
+            )
+            pid = stored.paper_id
+            candidates.setdefault(pid, SearchPaperResult(**stored.model_dump(), source="live-s2", tldr=paper.tldr or None))
+            rrf[pid] = rrf.get(pid, 0.0) + 0.8 / (k + rank)
+
+        from math import log10
+
+        for pid, paper in candidates.items():
+            citation_boost = 0.05 * log10(1 + (paper.citation_count or 0))
+            rrf[pid] = rrf.get(pid, 0.0) + citation_boost
+
+        fused = sorted(rrf.items(), key=lambda item: item[1], reverse=True)
+        fused_papers = [candidates[pid] for pid, _ in fused if pid in candidates]
+
+        if self.reranker.enabled():
+            rerank_head = fused_papers[: self.reranker.top_k]
+            rerank_tail = fused_papers[self.reranker.top_k :]
+            doc_texts = [
+                " ".join(part for part in (p.title, p.tldr or p.summary_short or p.abstract) if part)[:2000]
+                for p in rerank_head
+            ]
+            rerank_scores = self.reranker.score(request.query, doc_texts)
+            if rerank_scores is not None and len(rerank_scores) == len(rerank_head):
+                head_ranked = sorted(
+                    zip(rerank_head, rerank_scores), key=lambda pair: pair[1], reverse=True
+                )
+                for paper, score in head_ranked:
+                    paper.score = float(score)
+                fused_papers = [paper for paper, _ in head_ranked] + rerank_tail
+            else:
+                for paper in rerank_head:
+                    paper.score = rrf[paper.paper_id]
+        else:
+            for paper in fused_papers:
+                paper.score = rrf[paper.paper_id]
+
+        ordered = fused_papers[: request.limit]
         result_set = self.repository.save_result_set(
             query=request.query,
             papers=ordered,
@@ -357,11 +602,14 @@ class PaperbaseService:
     def search_sections(self, request: SearchSectionRequest) -> SearchSectionResponse:
         if request.result_set_id:
             self.get_results(request.result_set_id)
+        query_embedding = self.embeddings.encode(request.query)
         sections = self.repository.search_sections(
             request.query,
             limit=request.limit,
             result_set_id=request.result_set_id,
             paper_ids=request.paper_ids,
+            query_embedding=query_embedding,
+            rrf_k=self.settings.rrf_k,
         )
         return SearchSectionResponse(query=request.query, sections=sections)
 
@@ -392,7 +640,32 @@ class PaperbaseService:
         paper = self.repository.get_paper(paper_id)
         if paper is None:
             raise HTTPException(status_code=404, detail=f"Paper {paper_id} not found")
+        if self._should_lazy_summarize(paper):
+            upgraded = self._lazy_summarize(paper)
+            if upgraded is not None:
+                return upgraded
         return paper
+
+    def _should_lazy_summarize(self, paper: PaperResponse) -> bool:
+        if not self.settings.lazy_summary_on_read:
+            return False
+        if self.settings.summary_provider != "vertex":
+            return False
+        return not paper.summary_eli5
+
+    def _lazy_summarize(self, paper: PaperResponse) -> PaperResponse | None:
+        from .summaries import generate_summary_on_demand
+
+        result = generate_summary_on_demand(paper, self.settings)
+        if result is None:
+            return None
+        short, eli5 = result
+        updated = self.repository.update_summaries(paper.paper_id, summary_short=short, summary_eli5=eli5)
+        logger.info(
+            "Lazy summary generated",
+            extra={"event": "summary.lazy", "paper_id": paper.paper_id},
+        )
+        return updated or paper
 
     def get_manifest(self, paper_id: str) -> ManifestResponse:
         path = f"papers/{paper_id}/manifest.json"

@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import re
 
+from .config import Settings
 from .extractors import ExtractionOutput
 from .models import PaperMetadata
 
+
+logger = logging.getLogger(__name__)
 
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
 _WHITESPACE = re.compile(r"\s+")
@@ -71,6 +75,8 @@ def _simplify_text(text: str) -> str:
 
 
 def _build_technical_summary(paper: PaperMetadata, extraction: ExtractionOutput) -> str:
+    if paper.tldr:
+        return paper.tldr.strip()
     primary_sentences = _first_sentences(paper.abstract, 2)
     if not primary_sentences:
         primary_sentences = _first_sentences(_clean_markdown_text(extraction.text_markdown), 2)
@@ -109,7 +115,102 @@ def _build_eli5_summary(paper: PaperMetadata, extraction: ExtractionOutput, tech
     return body
 
 
-def build_paper_summaries(paper: PaperMetadata, extraction: ExtractionOutput) -> tuple[str, str]:
+def _heuristic_summaries(paper: PaperMetadata, extraction: ExtractionOutput) -> tuple[str, str]:
     technical_summary = _build_technical_summary(paper, extraction)
     eli5_summary = _build_eli5_summary(paper, extraction, technical_summary)
     return technical_summary, eli5_summary
+
+
+def build_summary_prompt(paper: PaperMetadata, *, context_override: str | None = None, section_titles: str = "") -> str:
+    context = context_override or paper.tldr or paper.abstract or ""
+    context = context[:4000]
+    return (
+        "You summarize AI/ML research papers. Given the paper metadata below, "
+        "produce two summaries.\n\n"
+        "Output EXACTLY two lines, each prefixed with a label:\n"
+        "  TECH: <one-to-two-sentence technical summary, faithful to the abstract>\n"
+        "  ELI5: <one-to-two-sentence plain-language summary an undergraduate could read>\n"
+        "No extra commentary.\n\n"
+        f"Title: {paper.title}\n"
+        f"Sections: {section_titles}\n"
+        f"Abstract/TLDR:\n{context}\n"
+    )
+
+
+def parse_summary_response(text: str) -> tuple[str, str] | None:
+    tech_line = ""
+    eli5_line = ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.upper().startswith("TECH:"):
+            tech_line = stripped.split(":", 1)[1].strip()
+        elif stripped.upper().startswith("ELI5:"):
+            eli5_line = stripped.split(":", 1)[1].strip()
+    if not tech_line or not eli5_line:
+        return None
+    return tech_line, eli5_line
+
+
+def _vertex_summaries(
+    paper: PaperMetadata,
+    extraction: ExtractionOutput | None,
+    settings: Settings,
+) -> tuple[str, str] | None:
+    try:
+        from google import genai
+        from google.genai import types as genai_types
+    except ImportError:
+        return None
+    if not settings.vertex_project:
+        return None
+
+    section_titles = ", ".join(_top_section_titles(extraction, limit=5)) if extraction else ""
+    context_override = None
+    if extraction is not None and not paper.tldr and not paper.abstract:
+        context_override = _clean_markdown_text(extraction.text_markdown)
+    prompt = build_summary_prompt(paper, context_override=context_override, section_titles=section_titles)
+
+    try:
+        client = genai.Client(
+            vertexai=True,
+            project=settings.vertex_project,
+            location=settings.vertex_location,
+        )
+        response = client.models.generate_content(
+            model=settings.summary_model,
+            contents=prompt,
+            config=genai_types.GenerateContentConfig(
+                max_output_tokens=400,
+                temperature=0.2,
+            ),
+        )
+        text = (response.text or "").strip()
+    except Exception as exc:
+        logger.warning(
+            "Vertex summary failed, falling back to heuristic",
+            extra={"event": "summary.vertex_failed", "error": str(exc)},
+        )
+        return None
+
+    return parse_summary_response(text)
+
+
+def build_paper_summaries(
+    paper: PaperMetadata,
+    extraction: ExtractionOutput,
+    settings: Settings | None = None,
+) -> tuple[str, str]:
+    if settings is not None and settings.summary_provider == "vertex":
+        llm = _vertex_summaries(paper, extraction, settings)
+        if llm is not None:
+            return llm
+    if settings is not None and settings.summary_provider == "none":
+        # Skip any heuristic elaboration too — use tldr or empty.
+        tech = paper.tldr or paper.abstract.split(". ", 1)[0] if paper.abstract else ""
+        return tech, ""
+    return _heuristic_summaries(paper, extraction)
+
+
+def generate_summary_on_demand(paper: PaperMetadata, settings: Settings) -> tuple[str, str] | None:
+    """Single-paper online Gemini call for lazy summarization in get_paper."""
+    return _vertex_summaries(paper, None, settings)

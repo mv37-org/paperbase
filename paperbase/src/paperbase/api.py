@@ -61,6 +61,14 @@ def sync_latest(service: PaperbaseService = Depends(get_service)) -> JobResponse
     return service.enqueue_latest_sync_job()
 
 
+@app.post("/v1/index/summarize-top-cited", response_model=JobResponse, dependencies=[Depends(require_bearer_token)])
+def summarize_top_cited(
+    limit: int = Query(default=500_000, ge=1, le=5_000_000),
+    service: PaperbaseService = Depends(get_service),
+) -> JobResponse:
+    return service.enqueue_summarize_top_cited_job(limit=limit)
+
+
 @app.get("/v1/papers/{paper_id}", response_model=PaperResponse, dependencies=[Depends(require_bearer_token)])
 def get_paper(paper_id: str, service: PaperbaseService = Depends(get_service)) -> PaperResponse:
     return service.get_paper(paper_id)

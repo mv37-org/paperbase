@@ -13,6 +13,7 @@ class PaperMetadata(BaseModel):
     title: str = ""
     authors: str = ""
     abstract: str = ""
+    tldr: str = ""
     summary_short: str = ""
     summary_eli5: str = ""
     categories: str = ""

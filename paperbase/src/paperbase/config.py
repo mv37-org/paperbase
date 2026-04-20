@@ -53,7 +53,19 @@ class Settings(BaseSettings):
     latest_sync_days: int = 7
     latest_sync_limit_per_category: int = 100
     result_ttl_days: int = 7
-    embedding_model: str | None = None
+    embedding_model: str | None = Field(default="allenai/specter2_base")
+    embedding_dim: int = 768
+    rerank_model: str | None = None
+    rerank_top_k: int = 50
+    # Summaries at ingest: "none" (tldr-or-first-sentence, empty ELI5 — intended for mass indexing),
+    # "heuristic" (local text wrangling), or "vertex" (Gemini on Vertex AI, expensive at scale).
+    summary_provider: str = Field(default="none")
+    summary_model: str = "gemini-2.5-flash-lite"
+    vertex_project: str | None = None
+    vertex_location: str = "us-central1"
+    lazy_summary_on_read: bool = Field(default=True)
+    featured_tier_concurrency: int = 16
+    rrf_k: int = 60
 
 
 @lru_cache(maxsize=1)

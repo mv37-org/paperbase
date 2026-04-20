@@ -59,7 +59,8 @@ class PaperORM(Base):
     source_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     index_status: Mapped[str] = mapped_column(String(32), default="discovered")
     search_document: Mapped[str] = mapped_column(Text, default="")
-    embedding: Mapped[list[float] | None] = mapped_column(Vector(384), nullable=True)
+    tldr: Mapped[str] = mapped_column(Text, default="")
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(768), nullable=True)
     indexed_at: Mapped[Any | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
@@ -75,6 +76,7 @@ class TextChunkORM(Base):
     path: Mapped[str] = mapped_column(Text)
     chunk_kind: Mapped[str] = mapped_column(String(32), default="section")
     content: Mapped[str] = mapped_column(Text)
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(768), nullable=True)
     created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     paper: Mapped[PaperORM] = relationship(back_populates="chunks")
@@ -124,6 +126,7 @@ def _paper_from_orm(row: PaperORM) -> PaperResponse:
         title=row.title,
         authors=row.authors,
         abstract=row.abstract,
+        tldr=row.tldr,
         summary_short=row.summary_short,
         summary_eli5=row.summary_eli5,
         categories=row.categories,
@@ -173,11 +176,26 @@ class PaperRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def replace_text_chunks(self, paper_id: str, chunks: list[dict[str, str]]) -> None:
+    def replace_text_chunks(self, paper_id: str, chunks: list[dict[str, Any]]) -> None:
         raise NotImplementedError
 
     @abstractmethod
-    def search_local(self, query: str, *, limit: int, query_embedding: list[float] | None = None) -> list[SearchPaperResult]:
+    def update_summaries(self, paper_id: str, *, summary_short: str, summary_eli5: str) -> PaperResponse | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_papers_needing_summary(self, *, limit: int) -> list[PaperResponse]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def search_local(
+        self,
+        query: str,
+        *,
+        limit: int,
+        query_embedding: list[float] | None = None,
+        rrf_k: int = 60,
+    ) -> list[SearchPaperResult]:
         raise NotImplementedError
 
     @abstractmethod
@@ -188,6 +206,8 @@ class PaperRepository(ABC):
         limit: int,
         result_set_id: str | None = None,
         paper_ids: list[str] | None = None,
+        query_embedding: list[float] | None = None,
+        rrf_k: int = 60,
     ) -> list[SearchSectionResult]:
         raise NotImplementedError
 
@@ -263,7 +283,35 @@ class SqlAlchemyPaperRepository(PaperRepository):
             connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
             connection.execute(text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS summary_short TEXT DEFAULT ''"))
             connection.execute(text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS summary_eli5 TEXT DEFAULT ''"))
+            connection.execute(text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS tldr TEXT DEFAULT ''"))
         Base.metadata.create_all(self._engine)
+        with self._engine.begin() as connection:
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS papers_embedding_hnsw "
+                    "ON papers USING hnsw (embedding vector_cosine_ops) "
+                    "WITH (m = 16, ef_construction = 64)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS text_chunks_embedding_hnsw "
+                    "ON text_chunks USING hnsw (embedding vector_cosine_ops) "
+                    "WITH (m = 16, ef_construction = 64)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS papers_search_document_trgm "
+                    "ON papers USING gin (search_document gin_trgm_ops)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS text_chunks_content_trgm "
+                    "ON text_chunks USING gin (content gin_trgm_ops)"
+                )
+            )
 
     def probe(self) -> IntegrationProbeComponent:
         result = 0
@@ -290,6 +338,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
             title=paper.title,
             authors=paper.authors,
             abstract=paper.abstract,
+            tldr=paper.tldr,
             summary_short=paper.summary_short,
             summary_eli5=paper.summary_eli5,
             categories=paper.categories,
@@ -315,6 +364,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
             "title": paper.title,
             "authors": paper.authors,
             "abstract": paper.abstract,
+            "tldr": paper.tldr,
             "summary_short": paper.summary_short,
             "summary_eli5": paper.summary_eli5,
             "categories": paper.categories,
@@ -354,7 +404,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
             row = session.scalar(select(PaperORM).where(PaperORM.arxiv_id == arxiv_id))
             return _paper_from_orm(row) if row else None
 
-    def replace_text_chunks(self, paper_id: str, chunks: list[dict[str, str]]) -> None:
+    def replace_text_chunks(self, paper_id: str, chunks: list[dict[str, Any]]) -> None:
         with self._session() as session:
             session.execute(delete(TextChunkORM).where(TextChunkORM.paper_id == paper_id))
             for chunk in chunks:
@@ -365,114 +415,181 @@ class SqlAlchemyPaperRepository(PaperRepository):
                         path=chunk["path"],
                         chunk_kind=chunk["chunk_kind"],
                         content=chunk["content"],
+                        embedding=chunk.get("embedding"),
                     )
                 )
 
-    def search_local(self, query: str, *, limit: int, query_embedding: list[float] | None = None) -> list[SearchPaperResult]:
-        embedding_literal = None
-        vector_sql = "0.0"
-        params: dict[str, Any] = {"query": query, "limit": limit}
+    def update_summaries(self, paper_id: str, *, summary_short: str, summary_eli5: str) -> PaperResponse | None:
+        with self._session() as session:
+            row = session.get(PaperORM, paper_id)
+            if row is None:
+                return None
+            row.summary_short = summary_short
+            row.summary_eli5 = summary_eli5
+            row.updated_at = utcnow()
+            session.flush()
+            return _paper_from_orm(row)
+
+    def list_papers_needing_summary(self, *, limit: int) -> list[PaperResponse]:
+        with self._session() as session:
+            rows = session.scalars(
+                select(PaperORM)
+                .where((PaperORM.summary_eli5 == "") | (PaperORM.summary_eli5.is_(None)))
+                .where(PaperORM.index_status == "indexed")
+                .order_by(
+                    PaperORM.influential_citation_count.desc(),
+                    PaperORM.citation_count.desc(),
+                    PaperORM.published.desc(),
+                )
+                .limit(limit)
+            ).all()
+        return [_paper_from_orm(row) for row in rows]
+
+    _SELECT_PAPER_COLUMNS = """
+        paper_id,
+        arxiv_id,
+        title,
+        authors,
+        abstract,
+        tldr,
+        summary_short,
+        summary_eli5,
+        categories,
+        primary_category,
+        published,
+        updated,
+        doi,
+        comment,
+        journal_ref,
+        pdf_url,
+        html_url,
+        citation_count,
+        influential_citation_count,
+        semantic_scholar_id,
+        code_url,
+        source_type,
+        index_status,
+        indexed_at
+    """
+
+    @staticmethod
+    def _row_to_paper_result(row: Any, *, score: float, source: str) -> SearchPaperResult:
+        return SearchPaperResult(
+            paper_id=row["paper_id"],
+            arxiv_id=row["arxiv_id"],
+            title=row["title"],
+            authors=row["authors"],
+            abstract=row["abstract"],
+            tldr=row["tldr"] or "",
+            summary_short=row["summary_short"],
+            summary_eli5=row["summary_eli5"],
+            categories=row["categories"],
+            primary_category=row["primary_category"],
+            published=row["published"],
+            updated=row["updated"],
+            doi=row["doi"],
+            comment=row["comment"],
+            journal_ref=row["journal_ref"],
+            pdf_url=row["pdf_url"],
+            html_url=row["html_url"],
+            citation_count=row["citation_count"],
+            influential_citation_count=row["influential_citation_count"],
+            semantic_scholar_id=row["semantic_scholar_id"],
+            code_url=row["code_url"],
+            source_type=row["source_type"],
+            index_status=row["index_status"],
+            indexed_at=row["indexed_at"],
+            score=score,
+            source=source,
+        )
+
+    def search_local(
+        self,
+        query: str,
+        *,
+        limit: int,
+        query_embedding: list[float] | None = None,
+        rrf_k: int = 60,
+    ) -> list[SearchPaperResult]:
+        """Hybrid retrieval: lexical (websearch_to_tsquery + weighted tsvector) RRF-fused
+        with vector cosine similarity, plus a log-citation boost.
+
+        Returns candidates already fused — the caller can RRF again against live sources.
+        """
+        candidate_pool = max(limit * 4, 50)
         weighted_document_sql = """
             setweight(to_tsvector('english', coalesce(title, '')), 'A') ||
+            setweight(to_tsvector('english', coalesce(tldr, '')), 'A') ||
             setweight(to_tsvector('english', coalesce(summary_short, '')), 'A') ||
             setweight(to_tsvector('english', coalesce(abstract, '')), 'B') ||
             setweight(to_tsvector('english', coalesce(summary_eli5, '')), 'B') ||
             setweight(to_tsvector('english', coalesce(search_document, '')), 'C')
         """
-        similarity_document_sql = """
-            coalesce(title, '') || ' ' || coalesce(summary_short, '') || ' ' ||
-            coalesce(abstract, '') || ' ' || coalesce(summary_eli5, '') || ' ' ||
-            coalesce(search_document, '')
-        """
-        if query_embedding:
-            embedding_literal = "[" + ",".join(f"{value:.6f}" for value in query_embedding) + "]"
-            vector_sql = "CASE WHEN embedding IS NULL THEN 0 ELSE 1 - (embedding <=> CAST(:query_embedding AS vector)) END"
-            params["query_embedding"] = embedding_literal
-        sql = text(
+        lexical_sql = text(
             f"""
             SELECT
-                paper_id,
-                arxiv_id,
-                title,
-                authors,
-                abstract,
-                summary_short,
-                summary_eli5,
-                categories,
-                primary_category,
-                published,
-                updated,
-                doi,
-                comment,
-                journal_ref,
-                pdf_url,
-                html_url,
-                citation_count,
-                influential_citation_count,
-                semantic_scholar_id,
-                code_url,
-                source_type,
-                index_status,
-                indexed_at,
-                ts_rank_cd(
-                    {weighted_document_sql},
-                    plainto_tsquery('english', :query)
-                ) AS lexical_score,
-                GREATEST(
-                    similarity(coalesce(title, ''), :query),
-                    similarity(coalesce(summary_short, ''), :query),
-                    similarity(coalesce(summary_eli5, ''), :query)
-                ) AS summary_score,
-                {vector_sql} AS vector_score
+                {self._SELECT_PAPER_COLUMNS},
+                ts_rank_cd({weighted_document_sql}, websearch_to_tsquery('english', :query)) AS lexical_score
             FROM papers
             WHERE
-                {weighted_document_sql}
-                    @@ plainto_tsquery('english', :query)
-                OR similarity({similarity_document_sql}, :query) > 0.05
-                OR GREATEST(
-                    similarity(coalesce(title, ''), :query),
-                    similarity(coalesce(summary_short, ''), :query),
-                    similarity(coalesce(summary_eli5, ''), :query)
-                ) > 0.05
-            ORDER BY lexical_score DESC, summary_score DESC, vector_score DESC, citation_count DESC, published DESC
-            LIMIT :limit
+                {weighted_document_sql} @@ websearch_to_tsquery('english', :query)
+                OR similarity(coalesce(title, '') || ' ' || coalesce(tldr, ''), :query) > 0.15
+            ORDER BY lexical_score DESC, citation_count DESC, published DESC
+            LIMIT :candidate_pool
             """
         )
-        with self._session() as session:
-            rows = session.execute(sql, params).mappings().all()
-        results: list[SearchPaperResult] = []
-        for row in rows:
-            score = float(row["lexical_score"] or 0) + float(row["summary_score"] or 0) + float(row["vector_score"] or 0)
-            results.append(
-                SearchPaperResult(
-                    paper_id=row["paper_id"],
-                    arxiv_id=row["arxiv_id"],
-                    title=row["title"],
-                    authors=row["authors"],
-                    abstract=row["abstract"],
-                    summary_short=row["summary_short"],
-                    summary_eli5=row["summary_eli5"],
-                    categories=row["categories"],
-                    primary_category=row["primary_category"],
-                    published=row["published"],
-                    updated=row["updated"],
-                    doi=row["doi"],
-                    comment=row["comment"],
-                    journal_ref=row["journal_ref"],
-                    pdf_url=row["pdf_url"],
-                    html_url=row["html_url"],
-                    citation_count=row["citation_count"],
-                    influential_citation_count=row["influential_citation_count"],
-                    semantic_scholar_id=row["semantic_scholar_id"],
-                    code_url=row["code_url"],
-                    source_type=row["source_type"],
-                    index_status=row["index_status"],
-                    indexed_at=row["indexed_at"],
-                    score=score,
-                    source="local",
-                )
+        lexical_params = {"query": query, "candidate_pool": candidate_pool}
+
+        vector_rows: list[Any] = []
+        if query_embedding:
+            embedding_literal = "[" + ",".join(f"{value:.6f}" for value in query_embedding) + "]"
+            vector_sql = text(
+                f"""
+                SELECT
+                    {self._SELECT_PAPER_COLUMNS},
+                    1 - (embedding <=> CAST(:query_embedding AS vector)) AS vector_score
+                FROM papers
+                WHERE embedding IS NOT NULL
+                ORDER BY embedding <=> CAST(:query_embedding AS vector)
+                LIMIT :candidate_pool
+                """
             )
-        return results
+            with self._session() as session:
+                vector_rows = session.execute(
+                    vector_sql,
+                    {"query_embedding": embedding_literal, "candidate_pool": candidate_pool},
+                ).mappings().all()
+
+        with self._session() as session:
+            lexical_rows = session.execute(lexical_sql, lexical_params).mappings().all()
+
+        row_by_id: dict[str, Any] = {}
+        rrf: dict[str, float] = {}
+        for rank, row in enumerate(lexical_rows):
+            pid = row["paper_id"]
+            row_by_id[pid] = row
+            rrf[pid] = rrf.get(pid, 0.0) + 1.0 / (rrf_k + rank)
+        for rank, row in enumerate(vector_rows):
+            pid = row["paper_id"]
+            row_by_id.setdefault(pid, row)
+            # slight weighting towards semantic hits
+            rrf[pid] = rrf.get(pid, 0.0) + 1.2 / (rrf_k + rank)
+
+        from math import log10
+
+        fused: list[tuple[float, Any]] = []
+        for pid, score in rrf.items():
+            row = row_by_id[pid]
+            citation_boost = 0.05 * log10(1 + float(row.get("citation_count") or 0))
+            recency_boost = 0.0
+            published = (row.get("published") or "")[:4]
+            if published.isdigit():
+                age_years = max(0, utcnow().year - int(published))
+                recency_boost = 0.02 * max(0.0, 1.0 - age_years / 10.0)
+            fused.append((score + citation_boost + recency_boost, row))
+
+        fused.sort(key=lambda item: item[0], reverse=True)
+        return [self._row_to_paper_result(row, score=score, source="local") for score, row in fused[:limit]]
 
     def search_sections(
         self,
@@ -481,12 +598,15 @@ class SqlAlchemyPaperRepository(PaperRepository):
         limit: int,
         result_set_id: str | None = None,
         paper_ids: list[str] | None = None,
+        query_embedding: list[float] | None = None,
+        rrf_k: int = 60,
     ) -> list[SearchSectionResult]:
-        params: dict[str, Any] = {"query": query, "limit": limit}
+        candidate_pool = max(limit * 4, 50)
+        params: dict[str, Any] = {"query": query, "candidate_pool": candidate_pool}
         joins = ["JOIN papers p ON p.paper_id = tc.paper_id"]
         filters = [
-            "(to_tsvector('english', coalesce(tc.content, '')) @@ plainto_tsquery('english', :query) "
-            "OR similarity(coalesce(tc.content, ''), :query) > 0.05)"
+            "(to_tsvector('english', coalesce(tc.content, '')) @@ websearch_to_tsquery('english', :query) "
+            "OR similarity(coalesce(tc.content, ''), :query) > 0.1)"
         ]
         if result_set_id:
             joins.append("JOIN result_items ri ON ri.paper_id = tc.paper_id")
@@ -495,20 +615,23 @@ class SqlAlchemyPaperRepository(PaperRepository):
         if paper_ids:
             filters.append("tc.paper_id = ANY(CAST(:paper_ids AS text[]))")
             params["paper_ids"] = paper_ids
-        sql = text(
+
+        lexical_sql = text(
             f"""
             SELECT
+                tc.chunk_id,
                 tc.paper_id,
                 p.arxiv_id,
                 p.title,
                 tc.path,
                 tc.chunk_kind,
                 tc.content,
+                p.citation_count,
+                p.published,
                 ts_rank_cd(
                     to_tsvector('english', coalesce(tc.content, '')),
-                    plainto_tsquery('english', :query)
+                    websearch_to_tsquery('english', :query)
                 ) AS lexical_score,
-                similarity(coalesce(tc.content, ''), :query) AS similarity_score,
                 CASE tc.chunk_kind
                     WHEN 'section' THEN 0.30
                     WHEN 'table' THEN 0.20
@@ -519,17 +642,79 @@ class SqlAlchemyPaperRepository(PaperRepository):
             FROM text_chunks tc
             {' '.join(joins)}
             WHERE {' AND '.join(filters)}
-            ORDER BY lexical_score DESC, kind_score DESC, similarity_score DESC, p.citation_count DESC, p.published DESC
-            LIMIT :limit
+            ORDER BY lexical_score DESC, kind_score DESC, p.citation_count DESC, p.published DESC
+            LIMIT :candidate_pool
             """
         )
+
         with self._session() as session:
-            rows = session.execute(sql, params).mappings().all()
+            lexical_rows = session.execute(lexical_sql, params).mappings().all()
+
+        vector_rows: list[Any] = []
+        if query_embedding:
+            embedding_literal = "[" + ",".join(f"{value:.6f}" for value in query_embedding) + "]"
+            vector_joins = ["JOIN papers p ON p.paper_id = tc.paper_id"]
+            vector_filters = ["tc.embedding IS NOT NULL"]
+            vector_params: dict[str, Any] = {
+                "query_embedding": embedding_literal,
+                "candidate_pool": candidate_pool,
+            }
+            if result_set_id:
+                vector_joins.append("JOIN result_items ri ON ri.paper_id = tc.paper_id")
+                vector_filters.append("ri.result_set_id = :result_set_id")
+                vector_params["result_set_id"] = result_set_id
+            if paper_ids:
+                vector_filters.append("tc.paper_id = ANY(CAST(:paper_ids AS text[]))")
+                vector_params["paper_ids"] = paper_ids
+            vector_sql = text(
+                f"""
+                SELECT
+                    tc.chunk_id,
+                    tc.paper_id,
+                    p.arxiv_id,
+                    p.title,
+                    tc.path,
+                    tc.chunk_kind,
+                    tc.content,
+                    p.citation_count,
+                    p.published,
+                    CASE tc.chunk_kind
+                        WHEN 'section' THEN 0.30
+                        WHEN 'table' THEN 0.20
+                        WHEN 'figure_caption' THEN 0.15
+                        WHEN 'full_text' THEN 0.05
+                        ELSE 0.0
+                    END AS kind_score,
+                    1 - (tc.embedding <=> CAST(:query_embedding AS vector)) AS vector_score
+                FROM text_chunks tc
+                {' '.join(vector_joins)}
+                WHERE {' AND '.join(vector_filters)}
+                ORDER BY tc.embedding <=> CAST(:query_embedding AS vector)
+                LIMIT :candidate_pool
+                """
+            )
+            with self._session() as session:
+                vector_rows = session.execute(vector_sql, vector_params).mappings().all()
+
+        row_by_id: dict[str, Any] = {}
+        rrf: dict[str, float] = {}
+        for rank, row in enumerate(lexical_rows):
+            cid = row["chunk_id"]
+            row_by_id[cid] = row
+            rrf[cid] = rrf.get(cid, 0.0) + 1.0 / (rrf_k + rank) + float(row["kind_score"] or 0) * 0.05
+        for rank, row in enumerate(vector_rows):
+            cid = row["chunk_id"]
+            row_by_id.setdefault(cid, row)
+            rrf[cid] = rrf.get(cid, 0.0) + 1.2 / (rrf_k + rank)
+
+        fused = sorted(
+            ((score, row_by_id[cid]) for cid, score in rrf.items()),
+            key=lambda pair: pair[0],
+            reverse=True,
+        )
         results: list[SearchSectionResult] = []
-        for row in rows:
-            score = float(row["lexical_score"] or 0) + float(row["similarity_score"] or 0) + float(row["kind_score"] or 0)
+        for score, row in fused[:limit]:
             content = row["content"] or ""
-            preview = content[:320].strip()
             results.append(
                 SearchSectionResult(
                     paper_id=row["paper_id"],
@@ -537,7 +722,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     title=row["title"],
                     path=row["path"],
                     chunk_kind=row["chunk_kind"],
-                    preview=preview,
+                    preview=content[:320].strip(),
                     score=score,
                 )
             )
@@ -750,7 +935,7 @@ class MemoryPaperRepository(PaperRepository):
     def __init__(self) -> None:
         self.papers: dict[str, PaperResponse] = {}
         self.search_documents: dict[str, str] = {}
-        self.text_chunks: dict[str, list[dict[str, str]]] = defaultdict(list)
+        self.text_chunks: dict[str, list[dict[str, Any]]] = defaultdict(list)
         self.result_sets: dict[str, ResultSetResponse] = {}
         self.jobs: dict[str, JobResponse] = {}
 
@@ -784,16 +969,45 @@ class MemoryPaperRepository(PaperRepository):
     def get_paper_by_arxiv_id(self, arxiv_id: str) -> PaperResponse | None:
         return self.papers.get(canonical_paper_id(arxiv_id))
 
-    def replace_text_chunks(self, paper_id: str, chunks: list[dict[str, str]]) -> None:
+    def replace_text_chunks(self, paper_id: str, chunks: list[dict[str, Any]]) -> None:
         self.text_chunks[paper_id] = chunks
 
-    def search_local(self, query: str, *, limit: int, query_embedding: list[float] | None = None) -> list[SearchPaperResult]:
+    def update_summaries(self, paper_id: str, *, summary_short: str, summary_eli5: str) -> PaperResponse | None:
+        existing = self.papers.get(paper_id)
+        if existing is None:
+            return None
+        updated = existing.model_copy(update={"summary_short": summary_short, "summary_eli5": summary_eli5})
+        self.papers[paper_id] = updated
+        return updated
+
+    def list_papers_needing_summary(self, *, limit: int) -> list[PaperResponse]:
+        candidates = [
+            paper
+            for paper in self.papers.values()
+            if not paper.summary_eli5 and paper.index_status == "indexed"
+        ]
+        candidates.sort(
+            key=lambda p: (p.influential_citation_count, p.citation_count, p.published),
+            reverse=True,
+        )
+        return candidates[:limit]
+
+    def search_local(
+        self,
+        query: str,
+        *,
+        limit: int,
+        query_embedding: list[float] | None = None,
+        rrf_k: int = 60,
+    ) -> list[SearchPaperResult]:
         query_lower = query.lower()
         results: list[SearchPaperResult] = []
         for paper_id, paper in self.papers.items():
             score = 0.0
             if query_lower in paper.title.lower():
                 score += 4.0
+            if query_lower in paper.tldr.lower():
+                score += 3.5
             if query_lower in paper.summary_short.lower():
                 score += 3.5
             if query_lower in paper.abstract.lower():
@@ -814,6 +1028,8 @@ class MemoryPaperRepository(PaperRepository):
         limit: int,
         result_set_id: str | None = None,
         paper_ids: list[str] | None = None,
+        query_embedding: list[float] | None = None,
+        rrf_k: int = 60,
     ) -> list[SearchSectionResult]:
         query_lower = query.lower()
         allowed_paper_ids = set(paper_ids or [])
