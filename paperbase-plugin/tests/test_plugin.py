@@ -90,6 +90,14 @@ class StubClient:
     def get_table(self, paper_id: str, table_id: str):
         return {"paper_id": paper_id, "table_id": table_id}
 
+    def expand_query(self, query: str, *, variants: int = 4) -> list[str]:
+        # Server-side expansion unavailable in tests; fall back to the
+        # client-contract behavior of returning just the original query.
+        return [query]
+
+    def get_paper_references(self, paper_id: str, *, refresh: bool = False) -> list[dict]:
+        return []
+
 
 @pytest.fixture
 def anyio_backend():

@@ -120,3 +120,28 @@ class PaperbaseClient:
 
     def get_job(self, job_id: str) -> dict[str, Any]:
         return self._request("GET", f"/v1/jobs/{job_id}")
+
+    def expand_query(self, query: str, *, variants: int = 4) -> list[str]:
+        try:
+            payload = self._request(
+                "POST",
+                "/v1/query/expand",
+                params={"query": query, "variants": variants},
+            )
+        except requests.RequestException as exc:
+            logger.warning(
+                "Server-side query expansion unavailable; falling back",
+                extra={"event": "plugin.query_expand.failed", "error": str(exc)},
+            )
+            return [query]
+        queries = payload.get("queries") if isinstance(payload, dict) else None
+        if not queries:
+            return [query]
+        return list(queries)
+
+    def get_paper_references(self, paper_id: str, *, refresh: bool = False) -> list[dict[str, Any]]:
+        return self._request(
+            "GET",
+            f"/v1/papers/{paper_id}/references",
+            params={"refresh": str(refresh).lower()},
+        )

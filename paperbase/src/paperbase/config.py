@@ -66,6 +66,24 @@ class Settings(BaseSettings):
     lazy_summary_on_read: bool = Field(default=True)
     featured_tier_concurrency: int = 16
     rrf_k: int = 60
+    # Citation boost: log10(1+cites) * scale, capped at max. Defaults keep
+    # boost <= one RRF rank unit (1/60 ≈ 0.017) so it never dominates relevance.
+    citation_boost_scale: float = 0.003
+    citation_boost_max: float = 0.015
+    # Section chunking windows. Applied to sections whose raw markdown exceeds
+    # chunk_max_chars; produces overlapping sub-chunks that are all embedded.
+    chunk_max_chars: int = 1500
+    chunk_overlap_chars: int = 300
+    # RRF weights for search() sources (local is the reference = 1.0).
+    live_source_weight: float = 0.8
+    live_source_weight_recent: float = 1.2
+    # Query expansion (server-side, for research_qa): how many variants Gemini
+    # is asked to produce. Keeps the Vertex call small.
+    query_expansion_variants: int = 4
+    # Citation graph: fetch and persist S2 references at index time. Adds one
+    # extra S2 call per indexed paper, so turn off for mass harvests and leave
+    # on for featured-tier / on-demand indexing.
+    fetch_references_at_index: bool = Field(default=False)
 
 
 @lru_cache(maxsize=1)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import asdict
 from functools import lru_cache
 from typing import Any
@@ -45,14 +46,114 @@ logger = logging.getLogger(__name__)
 _MODEL_CACHE: dict[str, Any] = {}
 _RERANKER_CACHE: dict[str, Any] = {}
 
+_RECENCY_SIGNAL_RE = re.compile(
+    r"\b(recent(?:ly)?|latest|newest|new|this\s+year|202[4-9]|203[0-9])\b",
+    re.IGNORECASE,
+)
+
+
+def _query_signals_recency(query: str) -> bool:
+    return bool(_RECENCY_SIGNAL_RE.search(query or ""))
+
+
+_APPENDIX_TITLE_RE = re.compile(r"\b(appendix|supplement|acknowledg|references?|bibliography)\b", re.IGNORECASE)
+
+
+def _section_depth_for(section: Any) -> int:
+    """Infer section depth heuristically.
+
+    Appendices / references / acknowledgements → 3 so they rank below main
+    body. Sections introduced via an explicit depth attribute would override
+    this when the extractor starts supplying one.
+    """
+    title = getattr(section, "title", "") or ""
+    if _APPENDIX_TITLE_RE.search(title):
+        return 3
+    return 1
+
+
+def _stride_chunks(text: str, *, max_chars: int, overlap: int) -> list[str]:
+    """Split text into overlapping windows.
+
+    Returns the text unchanged when it already fits, so short sections don't
+    turn into two-copy chunks. Boundary tries to snap to paragraph breaks to
+    avoid cutting mid-sentence when possible.
+    """
+    if not text:
+        return [""]
+    if max_chars <= 0 or len(text) <= max_chars:
+        return [text]
+    if overlap < 0:
+        overlap = 0
+    if overlap >= max_chars:
+        overlap = max_chars // 4
+    step = max(1, max_chars - overlap)
+    chunks: list[str] = []
+    start = 0
+    n = len(text)
+    while start < n:
+        end = min(start + max_chars, n)
+        if end < n:
+            # Prefer a paragraph break within the last 20% of the window.
+            window_start = max(start + int(max_chars * 0.8), start)
+            break_at = text.rfind("\n\n", window_start, end)
+            if break_at == -1:
+                break_at = text.rfind(". ", window_start, end)
+                if break_at != -1:
+                    break_at += 1  # include the period
+            if break_at != -1 and break_at > start + overlap:
+                end = break_at
+        chunks.append(text[start:end].strip())
+        if end >= n:
+            break
+        start = max(end - overlap, start + step)
+    return [chunk for chunk in chunks if chunk]
+
+
+def _table_to_indexable_text(table: Any) -> str:
+    """Render a TableArtifact as Markdown-table text so its cell values are
+    visible to lexical + vector retrieval. Caps rows so one giant table can't
+    dominate the chunk pool.
+    """
+    caption = (getattr(table, "caption", None) or "").strip()
+    rows = list(getattr(table, "rows", []) or [])
+    parts: list[str] = []
+    if caption:
+        parts.append(f"Caption: {caption}")
+    if rows:
+        # Keep the header + first 40 rows; 40 × ~80 chars ≈ 3 KB.
+        header, *body = rows
+        parts.append("| " + " | ".join(str(c) for c in header) + " |")
+        parts.append("|" + "|".join(["---"] * len(header)) + "|")
+        for row in body[:40]:
+            cells = [str(c) for c in row]
+            if len(cells) < len(header):
+                cells += [""] * (len(header) - len(cells))
+            parts.append("| " + " | ".join(cells[: len(header)]) + " |")
+        if len(body) > 40:
+            parts.append(f"(+{len(body) - 40} more rows)")
+    return "\n".join(parts).strip()
+
 
 class OptionalEmbeddingProvider:
+    # Module-level flags so we log each distinct disabled-state exactly once,
+    # rather than once per query.
+    _logged_unconfigured: bool = False
+    _logged_import_failure: bool = False
+    _logged_load_failure: bool = False
+
     def __init__(self, settings: Settings) -> None:
         self._model_name = settings.embedding_model
         self._expected_dim = settings.embedding_dim
 
     def _model(self):
         if not self._model_name:
+            if not OptionalEmbeddingProvider._logged_unconfigured:
+                logger.info(
+                    "Embeddings disabled: no PAPERBASE_EMBEDDING_MODEL set",
+                    extra={"event": "embed.unconfigured"},
+                )
+                OptionalEmbeddingProvider._logged_unconfigured = True
             return None
         cached = _MODEL_CACHE.get(self._model_name)
         if cached is not None:
@@ -60,18 +161,26 @@ class OptionalEmbeddingProvider:
         try:
             from sentence_transformers import SentenceTransformer
         except Exception as exc:
-            logger.warning(
-                "sentence-transformers unavailable, embeddings disabled",
-                extra={"event": "embed.unavailable", "error": str(exc)},
-            )
+            if not OptionalEmbeddingProvider._logged_import_failure:
+                logger.warning(
+                    "Embeddings disabled: sentence-transformers import failed",
+                    extra={"event": "embed.import_failed", "error": str(exc)},
+                )
+                OptionalEmbeddingProvider._logged_import_failure = True
             return None
         try:
             model = SentenceTransformer(self._model_name)
         except Exception as exc:
-            logger.warning(
-                "Failed to load embedding model, embeddings disabled",
-                extra={"event": "embed.load_failed", "model": self._model_name, "error": str(exc)},
-            )
+            if not OptionalEmbeddingProvider._logged_load_failure:
+                logger.warning(
+                    "Embeddings disabled: model failed to load",
+                    extra={
+                        "event": "embed.load_failed",
+                        "model": self._model_name,
+                        "error": str(exc),
+                    },
+                )
+                OptionalEmbeddingProvider._logged_load_failure = True
             return None
         _MODEL_CACHE[self._model_name] = model
         return model
@@ -91,6 +200,8 @@ class OptionalEmbeddingProvider:
         try:
             vectors = model.encode(texts, normalize_embeddings=True, convert_to_numpy=True, show_progress_bar=False)
         except Exception as exc:
+            # This one we log every time — query-level failures are actionable,
+            # and we don't want to hide a flapping model behind a once-flag.
             logger.warning("Embedding encode failed", extra={"event": "embed.encode_failed", "error": str(exc)})
             return None
         return [[float(v) for v in vector.tolist()] for vector in vectors]
@@ -176,6 +287,90 @@ class PaperbaseService:
             },
         )
         return job
+
+    def enqueue_reindex_embeddings_job(self, *, limit: int = 100_000, include_chunks: bool = True) -> JobResponse:
+        job = self.repository.create_job(
+            "reindex_missing_embeddings",
+            {"limit": limit, "include_chunks": include_chunks},
+        )
+        logger.info(
+            "Created reindex_missing_embeddings job",
+            extra={
+                "event": "jobs.reindex.created",
+                "job_id": job.job_id,
+                "limit": limit,
+                "include_chunks": include_chunks,
+            },
+        )
+        return job
+
+    def reindex_missing_embeddings(self, *, limit: int, include_chunks: bool = True) -> dict[str, int]:
+        if self.embeddings is None:
+            logger.warning(
+                "reindex_missing_embeddings invoked without an embedding provider",
+                extra={"event": "reindex.noop"},
+            )
+            return {"papers_updated": 0, "chunks_updated": 0}
+
+        papers_updated = 0
+        chunks_updated = 0
+        offset = 0
+        page = max(64, min(limit, 512))
+        remaining = limit
+
+        while remaining > 0:
+            batch = self.repository.list_papers_missing_embedding(
+                limit=min(page, remaining), offset=offset
+            )
+            if not batch:
+                break
+
+            # Paper-level embeddings in one batched encode.
+            inputs: list[str] = []
+            for paper in batch:
+                parts = (paper.title, paper.tldr or paper.abstract, paper.summary_short)
+                inputs.append("\n".join(p for p in parts if p))
+            vectors = self.embeddings.encode_batch(inputs)
+            if vectors is not None and len(vectors) == len(batch):
+                for paper, vector in zip(batch, vectors):
+                    self.repository.update_paper_embedding(paper.paper_id, vector)
+                    papers_updated += 1
+
+            if include_chunks:
+                for paper in batch:
+                    missing = self.repository.list_chunks_missing_embedding(paper.paper_id)
+                    if not missing:
+                        continue
+                    cap = self.settings.chunk_max_chars + self.settings.chunk_overlap_chars
+                    chunk_inputs = [(chunk.get("content") or "")[:cap] for chunk in missing]
+                    chunk_vectors = self.embeddings.encode_batch(chunk_inputs)
+                    if chunk_vectors is None or len(chunk_vectors) != len(missing):
+                        continue
+                    for chunk, vector in zip(missing, chunk_vectors):
+                        self.repository.update_chunk_embedding(chunk["chunk_id"], vector)
+                        chunks_updated += 1
+
+            offset += len(batch)
+            remaining -= len(batch)
+            logger.info(
+                "reindex_missing_embeddings progress",
+                extra={
+                    "event": "reindex.progress",
+                    "papers_updated": papers_updated,
+                    "chunks_updated": chunks_updated,
+                    "scanned": offset,
+                },
+            )
+
+        logger.info(
+            "Completed reindex_missing_embeddings",
+            extra={
+                "event": "reindex.completed",
+                "papers_updated": papers_updated,
+                "chunks_updated": chunks_updated,
+            },
+        )
+        return {"papers_updated": papers_updated, "chunks_updated": chunks_updated}
 
     def enqueue_summarize_top_cited_job(self, *, limit: int = 500_000) -> JobResponse:
         job = self.repository.create_job("summarize_top_cited", {"limit": limit})
@@ -337,6 +532,11 @@ class PaperbaseService:
                 )
             elif job.job_type == "summarize_top_cited":
                 self.summarize_top_cited(limit=int(job.payload.get("limit", 500_000)))
+            elif job.job_type == "reindex_missing_embeddings":
+                self.reindex_missing_embeddings(
+                    limit=int(job.payload.get("limit", 100_000)),
+                    include_chunks=bool(job.payload.get("include_chunks", True)),
+                )
             else:
                 raise ValueError(f"Unsupported job type: {job.job_type}")
             self.repository.mark_job_completed(job.job_id)
@@ -446,19 +646,37 @@ class PaperbaseService:
         self.object_store.put_text(f"{prefix}/text/full.md", extraction.text_markdown, content_type="text/markdown")
 
         text_chunks: list[dict[str, Any]] = [
-            {"path": "text/full.md", "chunk_kind": "full_text", "content": extraction.text_markdown}
+            {
+                "path": "text/full.md",
+                "chunk_kind": "full_text",
+                "content": extraction.text_markdown,
+                "chunk_index": 0,
+                "section_depth": 0,
+                "section_order": 0,
+            }
         ]
 
-        for section in extraction.sections:
+        for section_order, section in enumerate(extraction.sections):
             section_path = f"{prefix}/sections/{section.slug}.md"
             self.object_store.put_text(section_path, section.markdown, content_type="text/markdown")
-            text_chunks.append(
-                {
-                    "path": f"sections/{section.slug}.md",
-                    "chunk_kind": "section",
-                    "content": section.markdown,
-                }
-            )
+            section_depth = _section_depth_for(section)
+            for chunk_index, sub_content in enumerate(
+                _stride_chunks(
+                    section.markdown,
+                    max_chars=self.settings.chunk_max_chars,
+                    overlap=self.settings.chunk_overlap_chars,
+                )
+            ):
+                text_chunks.append(
+                    {
+                        "path": f"sections/{section.slug}.md",
+                        "chunk_kind": "section",
+                        "content": sub_content,
+                        "chunk_index": chunk_index,
+                        "section_depth": section_depth,
+                        "section_order": section_order,
+                    }
+                )
 
         if extraction.figures:
             self.object_store.put_text(
@@ -466,7 +684,7 @@ class PaperbaseService:
                 json.dumps(figure_index_payload(extraction.figures), indent=2),
                 content_type="application/json",
             )
-            for figure in extraction.figures:
+            for figure_order, figure in enumerate(extraction.figures):
                 caption_path = f"{prefix}/figures/{figure.figure_id}/caption.md"
                 self.object_store.put_text(caption_path, figure.caption, content_type="text/markdown")
                 text_chunks.append(
@@ -474,6 +692,9 @@ class PaperbaseService:
                         "path": f"figures/{figure.figure_id}/caption.md",
                         "chunk_kind": "figure_caption",
                         "content": figure.caption,
+                        "chunk_index": 0,
+                        "section_depth": 1,
+                        "section_order": figure_order,
                     }
                 )
                 if figure.image_bytes is not None:
@@ -486,21 +707,31 @@ class PaperbaseService:
                 json.dumps(table_index_payload(extraction.tables), indent=2),
                 content_type="application/json",
             )
-            for table in extraction.tables:
+            for table_order, table in enumerate(extraction.tables):
                 json_path = f"{prefix}/tables/{table.table_id}.json"
                 csv_path = f"{prefix}/tables/{table.table_id}.csv"
                 self.object_store.put_bytes(json_path, table_json_bytes(table), content_type="application/json")
                 self.object_store.put_bytes(csv_path, table_csv_bytes(table), content_type="text/csv")
-                if table.caption:
+                table_text = _table_to_indexable_text(table)
+                if table_text:
                     text_chunks.append(
                         {
                             "path": f"tables/{table.table_id}.json",
                             "chunk_kind": "table",
-                            "content": table.caption,
+                            "content": table_text,
+                            "chunk_index": 0,
+                            "section_depth": 1,
+                            "section_order": table_order,
                         }
                     )
 
-        chunk_texts = [(chunk["content"] or "")[:2000] for chunk in text_chunks]
+        # Truncate per-kind before embedding — full_text stays large so that
+        # vector search can still recover it as a coarse fallback, but
+        # sections/tables stay focused.
+        chunk_texts: list[str] = []
+        for chunk in text_chunks:
+            cap = 4000 if chunk["chunk_kind"] == "full_text" else self.settings.chunk_max_chars + self.settings.chunk_overlap_chars
+            chunk_texts.append((chunk["content"] or "")[:cap])
         chunk_embeddings = self.embeddings.encode_batch(chunk_texts)
         if chunk_embeddings is not None and len(chunk_embeddings) == len(text_chunks):
             for chunk, vector in zip(text_chunks, chunk_embeddings):
@@ -517,6 +748,18 @@ class PaperbaseService:
         )
 
         self.repository.replace_text_chunks(stored.paper_id, text_chunks)
+
+        if self.settings.fetch_references_at_index:
+            try:
+                refs = sources.fetch_references(metadata.arxiv_id, metadata.semantic_scholar_id)
+                if refs:
+                    self.repository.replace_paper_refs(stored.paper_id, refs)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to fetch references",
+                    extra={"event": "index.refs_failed", "arxiv_id": arxiv_id, "error": str(exc)},
+                )
+
         logger.info(
             "Completed paper indexing",
             extra={
@@ -541,6 +784,8 @@ class PaperbaseService:
             limit=pool_size,
             query_embedding=query_embedding,
             rrf_k=k,
+            citation_boost_scale=self.settings.citation_boost_scale,
+            citation_boost_max=self.settings.citation_boost_max,
         )
 
         arxiv_results: list[PaperMetadata] = []
@@ -566,22 +811,31 @@ class PaperbaseService:
             candidates[pid] = result
             rrf[pid] = rrf.get(pid, 0.0) + 1.0 / (k + rank)
 
+        live_weight = (
+            self.settings.live_source_weight_recent
+            if _query_signals_recency(request.query)
+            else self.settings.live_source_weight
+        )
+
         for rank, paper in enumerate(arxiv_results):
             stored = self.repository.upsert_paper_shallow(paper)
             pid = stored.paper_id
             candidates.setdefault(pid, SearchPaperResult(**stored.model_dump(), source="live-arxiv"))
-            rrf[pid] = rrf.get(pid, 0.0) + 0.8 / (k + rank)
+            rrf[pid] = rrf.get(pid, 0.0) + live_weight / (k + rank)
 
         for rank, paper in enumerate(s2_results):
             stored = self.repository.upsert_paper_shallow(paper)
             pid = stored.paper_id
             candidates.setdefault(pid, SearchPaperResult(**stored.model_dump(), source="live-s2", tldr=paper.tldr or None))
-            rrf[pid] = rrf.get(pid, 0.0) + 0.8 / (k + rank)
+            rrf[pid] = rrf.get(pid, 0.0) + live_weight / (k + rank)
 
         from math import log10
 
         for pid, paper in candidates.items():
-            citation_boost = 0.05 * log10(1 + (paper.citation_count or 0))
+            citation_boost = min(
+                self.settings.citation_boost_scale * log10(1 + (paper.citation_count or 0)),
+                self.settings.citation_boost_max,
+            )
             rrf[pid] = rrf.get(pid, 0.0) + citation_boost
 
         fused = sorted(rrf.items(), key=lambda item: item[1], reverse=True)
@@ -590,8 +844,20 @@ class PaperbaseService:
         if self.reranker.enabled():
             rerank_head = fused_papers[: self.reranker.top_k]
             rerank_tail = fused_papers[self.reranker.top_k :]
+            best_chunks = self.repository.best_chunk_for_papers(
+                request.query,
+                [p.paper_id for p in rerank_head],
+                query_embedding=query_embedding,
+            )
             doc_texts = [
-                " ".join(part for part in (p.title, p.tldr or p.summary_short or p.abstract) if part)[:2000]
+                " ".join(
+                    part
+                    for part in (
+                        p.title,
+                        best_chunks.get(p.paper_id) or p.tldr or p.summary_short or p.abstract,
+                    )
+                    if part
+                )[:2000]
                 for p in rerank_head
             ]
             rerank_scores = self.reranker.score(request.query, doc_texts)
@@ -763,6 +1029,17 @@ class PaperbaseService:
             csv_url=self.object_store.presign_get(csv_path, expires_in=self.settings.presign_ttl_seconds),
         )
 
+    def get_paper_references(self, paper_id: str, *, refresh: bool = False) -> list[dict[str, Any]]:
+        paper = self.get_paper(paper_id)
+        refs = self.repository.get_paper_refs(paper_id)
+        if refs and not refresh:
+            return refs
+        fetched = sources.fetch_references(paper.arxiv_id, paper.semantic_scholar_id)
+        if fetched:
+            self.repository.replace_paper_refs(paper_id, fetched)
+            return self.repository.get_paper_refs(paper_id)
+        return refs
+
     def get_related_papers(self, paper_id: str) -> list[SearchPaperResult]:
         paper = self.get_paper(paper_id)
         related = sources.get_related_papers(paper.arxiv_id, paper.semantic_scholar_id)
@@ -780,6 +1057,15 @@ class PaperbaseService:
 
     def cleanup_expired_results(self) -> None:
         self.repository.cleanup_expired_results()
+
+    def expand_query(self, query: str, *, variants: int | None = None) -> list[str]:
+        from .summaries import expand_query_with_gemini
+
+        want = variants if variants is not None else self.settings.query_expansion_variants
+        expanded = expand_query_with_gemini(query, self.settings, variants=want)
+        if not expanded:
+            return [query]
+        return expanded
 
     def probe_integrations(self) -> IntegrationProbeResponse:
         checked_at = utcnow()

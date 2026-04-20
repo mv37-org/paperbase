@@ -309,6 +309,112 @@ def _extract_tables_from_html(html: str) -> list[TableArtifact]:
     return tables
 
 
+_LATEX_TABLE_ENV_RE = re.compile(
+    r"\\begin\{(table\*?)\}(.*?)\\end\{\1\}",
+    re.DOTALL,
+)
+_LATEX_TABULAR_RE = re.compile(
+    r"\\begin\{tabular\*?\}\s*(?:\{[^}]*\}\s*)*(.*?)\\end\{tabular\*?\}",
+    re.DOTALL,
+)
+_LATEX_FIGURE_ENV_RE = re.compile(
+    r"\\begin\{(figure\*?)\}(.*?)\\end\{\1\}",
+    re.DOTALL,
+)
+_LATEX_CAPTION_RE = re.compile(r"\\caption\{((?:[^{}]|\{[^{}]*\})*)\}", re.DOTALL)
+_LATEX_INCLUDEGRAPHICS_RE = re.compile(
+    r"\\includegraphics(?:\[[^\]]*\])?\{([^}]+)\}"
+)
+
+
+def _strip_latex_inline(value: str) -> str:
+    value = re.sub(r"\\(?:cite|citep|citet|ref|eqref|label)\{[^}]*\}", "", value)
+    value = re.sub(r"\\(?:text(?:bf|it|tt|rm|sf)|emph|textsc)\{([^}]*)\}", r"\1", value)
+    value = re.sub(r"\\[a-zA-Z]+\*?\{([^}]*)\}", r"\1", value)
+    value = re.sub(r"\\[a-zA-Z]+\*?", "", value)
+    value = value.replace("~", " ").replace("\\", " ")
+    value = re.sub(r"[{}]", "", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _parse_latex_tabular(tabular_body: str) -> list[list[str]]:
+    body = re.sub(r"\\(?:hline|toprule|midrule|bottomrule|cmidrule(?:\[[^\]]*\])?(?:\{[^}]*\})?)", "", tabular_body)
+    raw_rows = re.split(r"\\\\", body)
+    rows: list[list[str]] = []
+    for raw_row in raw_rows:
+        if not raw_row.strip():
+            continue
+        cells = [_strip_latex_inline(cell) for cell in raw_row.split("&")]
+        if any(cell for cell in cells):
+            rows.append(cells)
+    return rows
+
+
+def _extract_latex_tables(latex: str) -> list[TableArtifact]:
+    tables: list[TableArtifact] = []
+    for index, match in enumerate(_LATEX_TABLE_ENV_RE.finditer(latex), start=1):
+        body = match.group(2)
+        tabular_match = _LATEX_TABULAR_RE.search(body)
+        if tabular_match is None:
+            continue
+        rows = _parse_latex_tabular(tabular_match.group(1))
+        if not rows:
+            continue
+        caption_match = _LATEX_CAPTION_RE.search(body)
+        caption = _strip_latex_inline(caption_match.group(1)) if caption_match else None
+        tables.append(
+            TableArtifact(
+                table_id=f"table-{index}",
+                caption=caption[:1000] if caption else None,
+                rows=rows,
+            )
+        )
+    # Tables may also live outside a \begin{table} wrapper (raw tabular).
+    # Only take those that weren't already captured above.
+    seen_bodies = set()
+    for match in _LATEX_TABLE_ENV_RE.finditer(latex):
+        tabular_match = _LATEX_TABULAR_RE.search(match.group(2))
+        if tabular_match:
+            seen_bodies.add(tabular_match.group(1))
+    offset = len(tables)
+    for index, match in enumerate(_LATEX_TABULAR_RE.finditer(latex), start=1):
+        body = match.group(1)
+        if body in seen_bodies:
+            continue
+        rows = _parse_latex_tabular(body)
+        if not rows:
+            continue
+        tables.append(
+            TableArtifact(
+                table_id=f"table-{offset + index}",
+                caption=None,
+                rows=rows,
+            )
+        )
+    return tables
+
+
+def _extract_latex_figures(latex: str) -> list[FigureArtifact]:
+    figures: list[FigureArtifact] = []
+    for index, match in enumerate(_LATEX_FIGURE_ENV_RE.finditer(latex), start=1):
+        body = match.group(2)
+        caption_match = _LATEX_CAPTION_RE.search(body)
+        caption = _strip_latex_inline(caption_match.group(1)) if caption_match else ""
+        graphics_match = _LATEX_INCLUDEGRAPHICS_RE.search(body)
+        source_path = graphics_match.group(1) if graphics_match else None
+        figures.append(
+            FigureArtifact(
+                figure_id=f"figure-{index}",
+                caption=caption[:1000],
+                file_extension="bin",
+                content_type=None,
+                image_bytes=None,
+                source_url=source_path,
+            )
+        )
+    return figures
+
+
 def _extract_latex_text(source_bytes: bytes) -> str | None:
     try:
         if source_bytes[:2] == b"\x1f\x8b" or source_bytes[:4] == b"PK\x03\x04":
@@ -442,6 +548,8 @@ def index_paper_artifacts(paper: PaperMetadata) -> ExtractionOutput:
                 source_type="latex",
                 text_markdown=markdown,
                 sections=_extract_sections(markdown),
+                figures=_extract_latex_figures(latex),
+                tables=_extract_latex_tables(latex),
                 raw_artifacts=[
                     RawArtifact(path="raw/source.tar.gz", data=source_bytes, content_type="application/gzip"),
                     RawArtifact(path="raw/raw.tex", data=latex.encode("utf-8"), content_type="text/x-tex"),

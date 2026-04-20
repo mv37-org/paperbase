@@ -26,7 +26,7 @@ from .models import (
     SearchPaperResult,
     SearchSectionResult,
 )
-from .utils import canonical_paper_id, literal_hint_from_pattern, new_id, utcnow
+from .utils import canonical_arxiv_id, canonical_paper_id, literal_hint_from_pattern, new_id, utcnow
 
 
 class Base(DeclarativeBase):
@@ -77,9 +77,26 @@ class TextChunkORM(Base):
     chunk_kind: Mapped[str] = mapped_column(String(32), default="section")
     content: Mapped[str] = mapped_column(Text)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(768), nullable=True)
+    chunk_index: Mapped[int] = mapped_column(Integer, default=0)
+    section_depth: Mapped[int] = mapped_column(Integer, default=1)
+    section_order: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     paper: Mapped[PaperORM] = relationship(back_populates="chunks")
+
+
+class PaperRefORM(Base):
+    __tablename__ = "paper_refs"
+
+    src_paper_id: Mapped[str] = mapped_column(
+        ForeignKey("papers.paper_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    dst_arxiv_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    dst_paper_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    ref_type: Mapped[str] = mapped_column(String(32), default="citation")
+    rank: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class ResultSetORM(Base):
@@ -207,6 +224,42 @@ class PaperRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def list_papers_missing_embedding(self, *, limit: int, offset: int = 0) -> list[PaperResponse]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def update_paper_embedding(self, paper_id: str, embedding: list[float]) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_chunks_missing_embedding(self, paper_id: str) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def update_chunk_embedding(self, chunk_id: str, embedding: list[float]) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def best_chunk_for_papers(
+        self,
+        query: str,
+        paper_ids: list[str],
+        *,
+        query_embedding: list[float] | None = None,
+    ) -> dict[str, str]:
+        """Return {paper_id: best_chunk_content} for each paper id."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def replace_paper_refs(self, paper_id: str, refs: list[dict[str, Any]]) -> None:
+        """Replace the outgoing citation set for a paper."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_paper_refs(self, paper_id: str) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
     def search_local(
         self,
         query: str,
@@ -214,6 +267,8 @@ class PaperRepository(ABC):
         limit: int,
         query_embedding: list[float] | None = None,
         rrf_k: int = 60,
+        citation_boost_scale: float = 0.003,
+        citation_boost_max: float = 0.015,
     ) -> list[SearchPaperResult]:
         raise NotImplementedError
 
@@ -303,6 +358,9 @@ class SqlAlchemyPaperRepository(PaperRepository):
             connection.execute(text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS summary_short TEXT DEFAULT ''"))
             connection.execute(text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS summary_eli5 TEXT DEFAULT ''"))
             connection.execute(text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS tldr TEXT DEFAULT ''"))
+            connection.execute(text("ALTER TABLE IF EXISTS text_chunks ADD COLUMN IF NOT EXISTS chunk_index INTEGER DEFAULT 0"))
+            connection.execute(text("ALTER TABLE IF EXISTS text_chunks ADD COLUMN IF NOT EXISTS section_depth INTEGER DEFAULT 1"))
+            connection.execute(text("ALTER TABLE IF EXISTS text_chunks ADD COLUMN IF NOT EXISTS section_order INTEGER DEFAULT 0"))
         Base.metadata.create_all(self._engine)
         with self._engine.begin() as connection:
             connection.execute(
@@ -331,6 +389,18 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     "ON text_chunks USING gin (content gin_trgm_ops)"
                 )
             )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS paper_refs_dst_arxiv_id "
+                    "ON paper_refs (dst_arxiv_id)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS paper_refs_dst_paper_id "
+                    "ON paper_refs (dst_paper_id) WHERE dst_paper_id IS NOT NULL"
+                )
+            )
 
     def probe(self) -> IntegrationProbeComponent:
         result = 0
@@ -351,9 +421,10 @@ class SqlAlchemyPaperRepository(PaperRepository):
         search_document: str = "",
         embedding: list[float] | None = None,
     ) -> PaperResponse:
+        canon_arxiv = canonical_arxiv_id(paper.arxiv_id)
         statement = insert(PaperORM).values(
             paper_id=canonical_paper_id(paper.arxiv_id),
-            arxiv_id=paper.arxiv_id,
+            arxiv_id=canon_arxiv,
             title=paper.title,
             authors=paper.authors,
             abstract=paper.abstract,
@@ -415,9 +486,10 @@ class SqlAlchemyPaperRepository(PaperRepository):
 
     def upsert_paper_shallow(self, paper: PaperMetadata) -> PaperResponse:
         paper_id = canonical_paper_id(paper.arxiv_id)
+        canon_arxiv = canonical_arxiv_id(paper.arxiv_id)
         statement = insert(PaperORM).values(
             paper_id=paper_id,
-            arxiv_id=paper.arxiv_id,
+            arxiv_id=canon_arxiv,
             title=paper.title,
             authors=paper.authors,
             abstract=paper.abstract,
@@ -481,6 +553,9 @@ class SqlAlchemyPaperRepository(PaperRepository):
                         chunk_kind=chunk["chunk_kind"],
                         content=chunk["content"],
                         embedding=chunk.get("embedding"),
+                        chunk_index=int(chunk.get("chunk_index", 0)),
+                        section_depth=int(chunk.get("section_depth", 1)),
+                        section_order=int(chunk.get("section_order", 0)),
                     )
                 )
 
@@ -529,6 +604,141 @@ class SqlAlchemyPaperRepository(PaperRepository):
         with self._session() as session:
             rows = session.scalars(query).all()
         return [_paper_from_orm(row) for row in rows]
+
+    def list_papers_missing_embedding(self, *, limit: int, offset: int = 0) -> list[PaperResponse]:
+        with self._session() as session:
+            rows = session.scalars(
+                select(PaperORM)
+                .where(PaperORM.embedding.is_(None))
+                .where(PaperORM.index_status == "indexed")
+                .order_by(
+                    PaperORM.influential_citation_count.desc(),
+                    PaperORM.citation_count.desc(),
+                    PaperORM.published.desc(),
+                    PaperORM.paper_id.asc(),
+                )
+                .offset(offset)
+                .limit(limit)
+            ).all()
+        return [_paper_from_orm(row) for row in rows]
+
+    def update_paper_embedding(self, paper_id: str, embedding: list[float]) -> None:
+        with self._session() as session:
+            row = session.get(PaperORM, paper_id)
+            if row is not None:
+                row.embedding = embedding
+                row.updated_at = utcnow()
+
+    def list_chunks_missing_embedding(self, paper_id: str) -> list[dict[str, Any]]:
+        with self._session() as session:
+            rows = session.execute(
+                select(TextChunkORM).where(
+                    TextChunkORM.paper_id == paper_id,
+                    TextChunkORM.embedding.is_(None),
+                )
+            ).scalars().all()
+        return [
+            {
+                "chunk_id": row.chunk_id,
+                "chunk_kind": row.chunk_kind,
+                "content": row.content,
+            }
+            for row in rows
+        ]
+
+    def update_chunk_embedding(self, chunk_id: str, embedding: list[float]) -> None:
+        with self._session() as session:
+            row = session.get(TextChunkORM, chunk_id)
+            if row is not None:
+                row.embedding = embedding
+
+    def replace_paper_refs(self, paper_id: str, refs: list[dict[str, Any]]) -> None:
+        with self._session() as session:
+            session.execute(delete(PaperRefORM).where(PaperRefORM.src_paper_id == paper_id))
+            seen: set[str] = set()
+            for ref in refs:
+                dst_arxiv = canonical_arxiv_id(ref.get("arxiv_id") or "")
+                if not dst_arxiv or dst_arxiv in seen:
+                    continue
+                seen.add(dst_arxiv)
+                session.add(
+                    PaperRefORM(
+                        src_paper_id=paper_id,
+                        dst_arxiv_id=dst_arxiv,
+                        dst_paper_id=f"arxiv:{dst_arxiv}",
+                        ref_type=ref.get("ref_type", "citation"),
+                        rank=int(ref.get("rank", 0)),
+                    )
+                )
+
+    def get_paper_refs(self, paper_id: str) -> list[dict[str, Any]]:
+        with self._session() as session:
+            rows = session.scalars(
+                select(PaperRefORM)
+                .where(PaperRefORM.src_paper_id == paper_id)
+                .order_by(PaperRefORM.rank.asc())
+            ).all()
+        return [
+            {
+                "src_paper_id": row.src_paper_id,
+                "dst_arxiv_id": row.dst_arxiv_id,
+                "dst_paper_id": row.dst_paper_id,
+                "ref_type": row.ref_type,
+                "rank": row.rank,
+            }
+            for row in rows
+        ]
+
+    def best_chunk_for_papers(
+        self,
+        query: str,
+        paper_ids: list[str],
+        *,
+        query_embedding: list[float] | None = None,
+    ) -> dict[str, str]:
+        if not paper_ids:
+            return {}
+        params: dict[str, Any] = {"query": query, "paper_ids": paper_ids}
+        order_clause = "lexical_score DESC, kind_score DESC"
+        select_vector_score = "NULL AS vector_score"
+        if query_embedding:
+            embedding_literal = "[" + ",".join(f"{v:.6f}" for v in query_embedding) + "]"
+            params["query_embedding"] = embedding_literal
+            select_vector_score = "1 - (embedding <=> CAST(:query_embedding AS vector)) AS vector_score"
+            order_clause = "(0.5 * coalesce(vector_score,0) + 0.5 * lexical_score) DESC, kind_score DESC"
+        sql = text(
+            f"""
+            SELECT DISTINCT ON (paper_id)
+                paper_id,
+                content
+            FROM (
+                SELECT
+                    tc.paper_id,
+                    tc.content,
+                    tc.chunk_kind,
+                    tc.section_depth,
+                    ts_rank_cd(
+                        to_tsvector('english', coalesce(tc.content, '')),
+                        websearch_to_tsquery('english', :query)
+                    ) AS lexical_score,
+                    CASE tc.chunk_kind
+                        WHEN 'section' THEN 0.30
+                        WHEN 'table' THEN 0.20
+                        WHEN 'figure_caption' THEN 0.15
+                        WHEN 'full_text' THEN 0.05
+                        ELSE 0.0
+                    END AS kind_score,
+                    {select_vector_score}
+                FROM text_chunks tc
+                WHERE tc.paper_id = ANY(CAST(:paper_ids AS text[]))
+                  AND tc.chunk_kind <> 'full_text'
+            ) scored
+            ORDER BY paper_id, {order_clause}
+            """
+        )
+        with self._session() as session:
+            rows = session.execute(sql, params).mappings().all()
+        return {row["paper_id"]: (row["content"] or "")[:2000] for row in rows}
 
     _SELECT_PAPER_COLUMNS = """
         paper_id,
@@ -595,6 +805,8 @@ class SqlAlchemyPaperRepository(PaperRepository):
         limit: int,
         query_embedding: list[float] | None = None,
         rrf_k: int = 60,
+        citation_boost_scale: float = 0.003,
+        citation_boost_max: float = 0.015,
     ) -> list[SearchPaperResult]:
         """Hybrid retrieval: lexical (websearch_to_tsquery + weighted tsvector) RRF-fused
         with vector cosine similarity, plus a log-citation boost.
@@ -608,6 +820,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
             setweight(to_tsvector('english', coalesce(summary_short, '')), 'A') ||
             setweight(to_tsvector('english', coalesce(abstract, '')), 'B') ||
             setweight(to_tsvector('english', coalesce(summary_eli5, '')), 'B') ||
+            setweight(to_tsvector('simple', coalesce(authors, '')), 'C') ||
             setweight(to_tsvector('english', coalesce(search_document, '')), 'C')
         """
         lexical_sql = text(
@@ -665,7 +878,10 @@ class SqlAlchemyPaperRepository(PaperRepository):
         fused: list[tuple[float, Any]] = []
         for pid, score in rrf.items():
             row = row_by_id[pid]
-            citation_boost = 0.05 * log10(1 + float(row.get("citation_count") or 0))
+            citation_boost = min(
+                citation_boost_scale * log10(1 + float(row.get("citation_count") or 0)),
+                citation_boost_max,
+            )
             recency_boost = 0.0
             published = (row.get("published") or "")[:4]
             if published.isdigit():
@@ -711,6 +927,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 tc.path,
                 tc.chunk_kind,
                 tc.content,
+                tc.section_depth,
                 p.citation_count,
                 p.published,
                 ts_rank_cd(
@@ -723,11 +940,16 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     WHEN 'figure_caption' THEN 0.15
                     WHEN 'full_text' THEN 0.05
                     ELSE 0.0
-                END AS kind_score
+                END AS kind_score,
+                CASE
+                    WHEN tc.section_depth >= 3 THEN 0.5
+                    WHEN tc.section_depth = 2 THEN 0.85
+                    ELSE 1.0
+                END AS depth_weight
             FROM text_chunks tc
             {' '.join(joins)}
             WHERE {' AND '.join(filters)}
-            ORDER BY lexical_score DESC, kind_score DESC, p.citation_count DESC, p.published DESC
+            ORDER BY lexical_score DESC, depth_weight DESC, kind_score DESC, p.citation_count DESC, p.published DESC
             LIMIT :candidate_pool
             """
         )
@@ -761,6 +983,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     tc.path,
                     tc.chunk_kind,
                     tc.content,
+                    tc.section_depth,
                     p.citation_count,
                     p.published,
                     CASE tc.chunk_kind
@@ -770,6 +993,11 @@ class SqlAlchemyPaperRepository(PaperRepository):
                         WHEN 'full_text' THEN 0.05
                         ELSE 0.0
                     END AS kind_score,
+                    CASE
+                        WHEN tc.section_depth >= 3 THEN 0.5
+                        WHEN tc.section_depth = 2 THEN 0.85
+                        ELSE 1.0
+                    END AS depth_weight,
                     1 - (tc.embedding <=> CAST(:query_embedding AS vector)) AS vector_score
                 FROM text_chunks tc
                 {' '.join(vector_joins)}
@@ -786,11 +1014,13 @@ class SqlAlchemyPaperRepository(PaperRepository):
         for rank, row in enumerate(lexical_rows):
             cid = row["chunk_id"]
             row_by_id[cid] = row
-            rrf[cid] = rrf.get(cid, 0.0) + 1.0 / (rrf_k + rank) + float(row["kind_score"] or 0) * 0.05
+            depth_w = float(row.get("depth_weight") or 1.0)
+            rrf[cid] = rrf.get(cid, 0.0) + depth_w * (1.0 / (rrf_k + rank)) + float(row["kind_score"] or 0) * 0.05
         for rank, row in enumerate(vector_rows):
             cid = row["chunk_id"]
             row_by_id.setdefault(cid, row)
-            rrf[cid] = rrf.get(cid, 0.0) + 1.2 / (rrf_k + rank)
+            depth_w = float(row.get("depth_weight") or 1.0)
+            rrf[cid] = rrf.get(cid, 0.0) + depth_w * (1.2 / (rrf_k + rank))
 
         fused = sorted(
             ((score, row_by_id[cid]) for cid, score in rrf.items()),
@@ -1023,6 +1253,7 @@ class MemoryPaperRepository(PaperRepository):
         self.text_chunks: dict[str, list[dict[str, Any]]] = defaultdict(list)
         self.result_sets: dict[str, ResultSetResponse] = {}
         self.jobs: dict[str, JobResponse] = {}
+        self.paper_refs: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
     def init(self) -> None:
         return None
@@ -1043,7 +1274,8 @@ class MemoryPaperRepository(PaperRepository):
         embedding: list[float] | None = None,
     ) -> PaperResponse:
         paper_id = canonical_paper_id(paper.arxiv_id)
-        response = PaperResponse(paper_id=paper_id, **paper.model_dump())
+        canonical = paper.model_copy(update={"arxiv_id": canonical_arxiv_id(paper.arxiv_id)})
+        response = PaperResponse(paper_id=paper_id, **canonical.model_dump())
         self.papers[paper_id] = response
         self.search_documents[paper_id] = search_document
         return response
@@ -1052,7 +1284,12 @@ class MemoryPaperRepository(PaperRepository):
         paper_id = canonical_paper_id(paper.arxiv_id)
         existing = self.papers.get(paper_id)
         if existing is None:
-            discovered = paper.model_copy(update={"index_status": "discovered"})
+            discovered = paper.model_copy(
+                update={
+                    "index_status": "discovered",
+                    "arxiv_id": canonical_arxiv_id(paper.arxiv_id),
+                }
+            )
             response = PaperResponse(paper_id=paper_id, **discovered.model_dump())
             self.papers[paper_id] = response
             return response
@@ -1112,6 +1349,79 @@ class MemoryPaperRepository(PaperRepository):
             candidates = [paper for paper in candidates if _paper_needs_summary_after(paper, after)]
         return candidates[:limit]
 
+    def list_papers_missing_embedding(self, *, limit: int, offset: int = 0) -> list[PaperResponse]:
+        candidates = [
+            paper for paper in self.papers.values() if paper.index_status == "indexed"
+        ]
+        candidates.sort(
+            key=lambda p: (p.influential_citation_count, p.citation_count, p.published, p.paper_id),
+            reverse=True,
+        )
+        return candidates[offset : offset + limit]
+
+    def update_paper_embedding(self, paper_id: str, embedding: list[float]) -> None:
+        existing = self.papers.get(paper_id)
+        if existing is not None:
+            # PaperResponse doesn't carry embeddings; the memory repo only
+            # tracks presence implicitly. Nothing to persist.
+            return None
+
+    def list_chunks_missing_embedding(self, paper_id: str) -> list[dict[str, Any]]:
+        return [chunk for chunk in self.text_chunks.get(paper_id, []) if not chunk.get("embedding")]
+
+    def update_chunk_embedding(self, chunk_id: str, embedding: list[float]) -> None:
+        for chunks in self.text_chunks.values():
+            for chunk in chunks:
+                if chunk.get("chunk_id") == chunk_id:
+                    chunk["embedding"] = embedding
+                    return
+
+    def replace_paper_refs(self, paper_id: str, refs: list[dict[str, Any]]) -> None:
+        normalized: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for ref in refs:
+            dst_arxiv = canonical_arxiv_id(ref.get("arxiv_id") or "")
+            if not dst_arxiv or dst_arxiv in seen:
+                continue
+            seen.add(dst_arxiv)
+            normalized.append(
+                {
+                    "src_paper_id": paper_id,
+                    "dst_arxiv_id": dst_arxiv,
+                    "dst_paper_id": f"arxiv:{dst_arxiv}",
+                    "ref_type": ref.get("ref_type", "citation"),
+                    "rank": int(ref.get("rank", 0)),
+                }
+            )
+        self.paper_refs[paper_id] = normalized
+
+    def get_paper_refs(self, paper_id: str) -> list[dict[str, Any]]:
+        return list(self.paper_refs.get(paper_id, []))
+
+    def best_chunk_for_papers(
+        self,
+        query: str,
+        paper_ids: list[str],
+        *,
+        query_embedding: list[float] | None = None,
+    ) -> dict[str, str]:
+        query_lower = (query or "").lower()
+        out: dict[str, str] = {}
+        for paper_id in paper_ids:
+            best = ""
+            best_score = -1
+            for chunk in self.text_chunks.get(paper_id, []):
+                if chunk.get("chunk_kind") == "full_text":
+                    continue
+                content = chunk.get("content", "")
+                score = content.lower().count(query_lower)
+                if score > best_score:
+                    best = content
+                    best_score = score
+            if best:
+                out[paper_id] = best[:2000]
+        return out
+
     def search_local(
         self,
         query: str,
@@ -1119,6 +1429,8 @@ class MemoryPaperRepository(PaperRepository):
         limit: int,
         query_embedding: list[float] | None = None,
         rrf_k: int = 60,
+        citation_boost_scale: float = 0.003,
+        citation_boost_max: float = 0.015,
     ) -> list[SearchPaperResult]:
         query_lower = query.lower()
         results: list[SearchPaperResult] = []
