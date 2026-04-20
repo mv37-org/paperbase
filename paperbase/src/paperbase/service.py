@@ -190,7 +190,7 @@ class PaperbaseService:
         return job
 
     def summarize_top_cited(self, *, limit: int) -> dict[str, int]:
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from concurrent.futures import ThreadPoolExecutor, FIRST_COMPLETED, wait
 
         from .summaries import generate_summary_on_demand
 
@@ -201,19 +201,21 @@ class PaperbaseService:
             )
             return {"processed": 0, "updated": 0, "failed": 0}
 
-        papers = self.repository.list_papers_needing_summary(limit=limit)
+        concurrency = max(1, self.settings.featured_tier_concurrency)
+        # Sliding window of in-flight futures so we never buffer all of `limit`
+        # papers and their futures in memory at once. Page size matches the
+        # window so each DB read matches what the pool is about to process.
+        window = max(concurrency * 4, 64)
+
         logger.info(
             "Starting summarize_top_cited",
             extra={
                 "event": "summarize_top_cited.start",
-                "candidate_count": len(papers),
-                "concurrency": self.settings.featured_tier_concurrency,
+                "limit": limit,
+                "concurrency": concurrency,
+                "in_flight_window": window,
             },
         )
-
-        updated = 0
-        failed = 0
-        concurrency = max(1, self.settings.featured_tier_concurrency)
 
         def _summarize_one(paper: PaperResponse) -> tuple[str, tuple[str, str] | None]:
             try:
@@ -229,37 +231,71 @@ class PaperbaseService:
                 )
                 return paper.paper_id, None
 
-        with ThreadPoolExecutor(max_workers=concurrency) as pool:
-            futures = [pool.submit(_summarize_one, paper) for paper in papers]
-            for index, future in enumerate(as_completed(futures), start=1):
+        processed = 0
+        updated = 0
+        failed = 0
+        in_flight: set = set()
+        remaining = limit
+        offset = 0
+
+        def _drain(wait_all: bool) -> None:
+            nonlocal processed, updated, failed
+            if not in_flight:
+                return
+            mode = None if wait_all else FIRST_COMPLETED
+            done, still_in_flight = wait(in_flight, return_when=mode) if mode else (set(in_flight), set())
+            for future in done:
                 paper_id, result = future.result()
+                processed += 1
                 if result is None:
                     failed += 1
-                    continue
-                short, eli5 = result
-                if self.repository.update_summaries(paper_id, summary_short=short, summary_eli5=eli5) is not None:
-                    updated += 1
-                if index % 500 == 0:
+                else:
+                    short, eli5 = result
+                    if self.repository.update_summaries(paper_id, summary_short=short, summary_eli5=eli5) is not None:
+                        updated += 1
+                if processed % 500 == 0:
                     logger.info(
                         "summarize_top_cited progress",
                         extra={
                             "event": "summarize_top_cited.progress",
-                            "processed": index,
+                            "processed": processed,
                             "updated": updated,
                             "failed": failed,
                         },
                     )
+            in_flight.difference_update(done)
+
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            while remaining > 0:
+                page_size = min(window, remaining)
+                batch = self.repository.list_papers_needing_summary(limit=page_size, offset=offset)
+                if not batch:
+                    break
+                for paper in batch:
+                    if len(in_flight) >= window:
+                        _drain(wait_all=False)
+                    in_flight.add(pool.submit(_summarize_one, paper))
+                # Advance stable pagination: results we already submitted won't
+                # re-appear once their summaries are persisted (WHERE clause
+                # filters on empty summary_eli5), so we page from offset=0.
+                # But if update_summaries fails for some, they'd still match —
+                # we use `offset=0` and rely on the updater to remove them from
+                # the result set. Advance by batch size to be safe in case the
+                # in-flight updates haven't committed yet.
+                offset += len(batch)
+                remaining -= len(batch)
+            _drain(wait_all=True)
 
         logger.info(
             "Completed summarize_top_cited",
             extra={
                 "event": "summarize_top_cited.completed",
-                "processed": len(papers),
+                "processed": processed,
                 "updated": updated,
                 "failed": failed,
             },
         )
-        return {"processed": len(papers), "updated": updated, "failed": failed}
+        return {"processed": processed, "updated": updated, "failed": failed}
 
     def enqueue_latest_sync_job(self) -> JobResponse:
         job = self.repository.create_job(
@@ -535,16 +571,13 @@ class PaperbaseService:
             rrf[pid] = rrf.get(pid, 0.0) + 1.0 / (k + rank)
 
         for rank, paper in enumerate(arxiv_results):
-            stored = self.repository.upsert_paper(paper, search_document=paper.abstract)
+            stored = self.repository.upsert_paper_shallow(paper)
             pid = stored.paper_id
             candidates.setdefault(pid, SearchPaperResult(**stored.model_dump(), source="live-arxiv"))
             rrf[pid] = rrf.get(pid, 0.0) + 0.8 / (k + rank)
 
         for rank, paper in enumerate(s2_results):
-            stored = self.repository.upsert_paper(
-                paper,
-                search_document=paper.tldr or paper.abstract,
-            )
+            stored = self.repository.upsert_paper_shallow(paper)
             pid = stored.paper_id
             candidates.setdefault(pid, SearchPaperResult(**stored.model_dump(), source="live-s2", tldr=paper.tldr or None))
             rrf[pid] = rrf.get(pid, 0.0) + 0.8 / (k + rank)
@@ -739,7 +772,7 @@ class PaperbaseService:
         related = sources.get_related_papers(paper.arxiv_id, paper.semantic_scholar_id)
         papers: list[SearchPaperResult] = []
         for item in related:
-            stored = self.repository.upsert_paper(item, search_document=item.abstract)
+            stored = self.repository.upsert_paper_shallow(item)
             papers.append(SearchPaperResult(**stored.model_dump(), source="related"))
         return papers
 

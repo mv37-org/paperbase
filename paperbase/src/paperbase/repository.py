@@ -168,6 +168,15 @@ class PaperRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def upsert_paper_shallow(self, paper: PaperMetadata) -> PaperResponse:
+        """Write-through for live-source hits: creates new rows if missing and
+        enriches citation/tldr/s2 id fields for existing rows without ever
+        touching indexed artifacts (index_status, indexed_at, search_document,
+        embedding).
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     def get_paper(self, paper_id: str) -> PaperResponse | None:
         raise NotImplementedError
 
@@ -184,7 +193,7 @@ class PaperRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def list_papers_needing_summary(self, *, limit: int) -> list[PaperResponse]:
+    def list_papers_needing_summary(self, *, limit: int, offset: int = 0) -> list[PaperResponse]:
         raise NotImplementedError
 
     @abstractmethod
@@ -394,6 +403,52 @@ class SqlAlchemyPaperRepository(PaperRepository):
             assert row is not None
             return _paper_from_orm(row)
 
+    def upsert_paper_shallow(self, paper: PaperMetadata) -> PaperResponse:
+        paper_id = canonical_paper_id(paper.arxiv_id)
+        statement = insert(PaperORM).values(
+            paper_id=paper_id,
+            arxiv_id=paper.arxiv_id,
+            title=paper.title,
+            authors=paper.authors,
+            abstract=paper.abstract,
+            tldr=paper.tldr,
+            categories=paper.categories,
+            primary_category=paper.primary_category,
+            published=paper.published,
+            updated=paper.updated,
+            doi=paper.doi,
+            comment=paper.comment,
+            journal_ref=paper.journal_ref,
+            pdf_url=paper.pdf_url,
+            html_url=paper.html_url,
+            citation_count=paper.citation_count,
+            influential_citation_count=paper.influential_citation_count,
+            semantic_scholar_id=paper.semantic_scholar_id,
+            code_url=paper.code_url,
+            # Fresh row discovered via a live search — not yet indexed.
+            index_status="discovered",
+        )
+        # On conflict, refresh only metadata that live sources are authoritative for.
+        # Never touch index_status, indexed_at, search_document, embedding, or
+        # any summary the local indexer has already filled in.
+        shallow_update: dict[str, Any] = {
+            "citation_count": func.greatest(PaperORM.citation_count, statement.excluded.citation_count),
+            "influential_citation_count": func.greatest(
+                PaperORM.influential_citation_count, statement.excluded.influential_citation_count
+            ),
+            "semantic_scholar_id": func.coalesce(PaperORM.semantic_scholar_id, statement.excluded.semantic_scholar_id),
+            "tldr": func.coalesce(func.nullif(PaperORM.tldr, ""), statement.excluded.tldr, ""),
+            "doi": func.coalesce(PaperORM.doi, statement.excluded.doi),
+            "code_url": func.coalesce(PaperORM.code_url, statement.excluded.code_url),
+            "updated_at": utcnow(),
+        }
+        statement = statement.on_conflict_do_update(index_elements=[PaperORM.paper_id], set_=shallow_update)
+        with self._session() as session:
+            session.execute(statement)
+            row = session.get(PaperORM, paper_id)
+            assert row is not None
+            return _paper_from_orm(row)
+
     def get_paper(self, paper_id: str) -> PaperResponse | None:
         with self._session() as session:
             row = session.get(PaperORM, paper_id)
@@ -430,7 +485,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
             session.flush()
             return _paper_from_orm(row)
 
-    def list_papers_needing_summary(self, *, limit: int) -> list[PaperResponse]:
+    def list_papers_needing_summary(self, *, limit: int, offset: int = 0) -> list[PaperResponse]:
         with self._session() as session:
             rows = session.scalars(
                 select(PaperORM)
@@ -440,7 +495,9 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     PaperORM.influential_citation_count.desc(),
                     PaperORM.citation_count.desc(),
                     PaperORM.published.desc(),
+                    PaperORM.paper_id.asc(),
                 )
+                .offset(offset)
                 .limit(limit)
             ).all()
         return [_paper_from_orm(row) for row in rows]
@@ -963,6 +1020,35 @@ class MemoryPaperRepository(PaperRepository):
         self.search_documents[paper_id] = search_document
         return response
 
+    def upsert_paper_shallow(self, paper: PaperMetadata) -> PaperResponse:
+        paper_id = canonical_paper_id(paper.arxiv_id)
+        existing = self.papers.get(paper_id)
+        if existing is None:
+            discovered = paper.model_copy(update={"index_status": "discovered"})
+            response = PaperResponse(paper_id=paper_id, **discovered.model_dump())
+            self.papers[paper_id] = response
+            return response
+        # Never overwrite indexed artifacts; only refresh metadata that live
+        # sources are authoritative for.
+        updates: dict[str, Any] = {}
+        if (paper.citation_count or 0) > (existing.citation_count or 0):
+            updates["citation_count"] = paper.citation_count
+        if (paper.influential_citation_count or 0) > (existing.influential_citation_count or 0):
+            updates["influential_citation_count"] = paper.influential_citation_count
+        if not existing.semantic_scholar_id and paper.semantic_scholar_id:
+            updates["semantic_scholar_id"] = paper.semantic_scholar_id
+        if not existing.tldr and paper.tldr:
+            updates["tldr"] = paper.tldr
+        if not existing.doi and paper.doi:
+            updates["doi"] = paper.doi
+        if not existing.code_url and paper.code_url:
+            updates["code_url"] = paper.code_url
+        if updates:
+            refreshed = existing.model_copy(update=updates)
+            self.papers[paper_id] = refreshed
+            return refreshed
+        return existing
+
     def get_paper(self, paper_id: str) -> PaperResponse | None:
         return self.papers.get(paper_id)
 
@@ -980,17 +1066,17 @@ class MemoryPaperRepository(PaperRepository):
         self.papers[paper_id] = updated
         return updated
 
-    def list_papers_needing_summary(self, *, limit: int) -> list[PaperResponse]:
+    def list_papers_needing_summary(self, *, limit: int, offset: int = 0) -> list[PaperResponse]:
         candidates = [
             paper
             for paper in self.papers.values()
             if not paper.summary_eli5 and paper.index_status == "indexed"
         ]
         candidates.sort(
-            key=lambda p: (p.influential_citation_count, p.citation_count, p.published),
+            key=lambda p: (p.influential_citation_count, p.citation_count, p.published, p.paper_id),
             reverse=True,
         )
-        return candidates[:limit]
+        return candidates[offset : offset + limit]
 
     def search_local(
         self,

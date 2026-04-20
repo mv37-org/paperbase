@@ -205,8 +205,9 @@ def build_paper_summaries(
         if llm is not None:
             return llm
     if settings is not None and settings.summary_provider == "none":
-        # Skip any heuristic elaboration too — use tldr or empty.
-        tech = paper.tldr or paper.abstract.split(". ", 1)[0] if paper.abstract else ""
+        # Skip any heuristic elaboration too — use tldr or first abstract sentence.
+        first_sentence = paper.abstract.split(". ", 1)[0] if paper.abstract else ""
+        tech = paper.tldr or first_sentence
         return tech, ""
     return _heuristic_summaries(paper, extraction)
 
