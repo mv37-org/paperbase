@@ -181,6 +181,40 @@ def test_search_can_shortlist_from_generated_summaries(monkeypatch, service: Pap
     assert "AI agents" in results.papers[0].summary_short
 
 
+def test_summarize_top_cited_uses_stable_paging(monkeypatch):
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            summary_provider="vertex",
+            featured_tier_concurrency=1,
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+    )
+    monkeypatch.setattr(
+        "paperbase.summaries.generate_summary_on_demand",
+        lambda paper, settings: (f"Short {paper.arxiv_id}", f"ELI5 {paper.arxiv_id}"),
+    )
+
+    for index in range(70):
+        paper = _sample_paper(
+            f"2401.{10000 + index}",
+            title=f"Paper {index}",
+            abstract=f"Abstract {index}.",
+        )
+        paper.index_status = "indexed"
+        paper.citation_count = 70 - index
+        paper.influential_citation_count = 70 - index
+        service.repository.upsert_paper(paper)
+
+    result = service.summarize_top_cited(limit=70)
+
+    assert result == {"processed": 70, "updated": 70, "failed": 0}
+    assert all(paper.summary_eli5.startswith("ELI5 ") for paper in service.repository.papers.values())
+
+
 def test_api_flow_for_jobs_and_results(monkeypatch, service: PaperbaseService):
     app.dependency_overrides[get_service] = lambda: service
     client = TestClient(app)

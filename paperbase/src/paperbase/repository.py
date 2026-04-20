@@ -148,6 +148,16 @@ def _paper_from_orm(row: PaperORM) -> PaperResponse:
     )
 
 
+def _paper_needs_summary_after(paper: PaperResponse, after: PaperResponse) -> bool:
+    if paper.influential_citation_count != after.influential_citation_count:
+        return paper.influential_citation_count < after.influential_citation_count
+    if paper.citation_count != after.citation_count:
+        return paper.citation_count < after.citation_count
+    if paper.published != after.published:
+        return paper.published < after.published
+    return paper.paper_id > after.paper_id
+
+
 class PaperRepository(ABC):
     @abstractmethod
     def init(self) -> None:
@@ -193,7 +203,7 @@ class PaperRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def list_papers_needing_summary(self, *, limit: int, offset: int = 0) -> list[PaperResponse]:
+    def list_papers_needing_summary(self, *, limit: int, after: PaperResponse | None = None) -> list[PaperResponse]:
         raise NotImplementedError
 
     @abstractmethod
@@ -485,21 +495,39 @@ class SqlAlchemyPaperRepository(PaperRepository):
             session.flush()
             return _paper_from_orm(row)
 
-    def list_papers_needing_summary(self, *, limit: int, offset: int = 0) -> list[PaperResponse]:
-        with self._session() as session:
-            rows = session.scalars(
-                select(PaperORM)
-                .where((PaperORM.summary_eli5 == "") | (PaperORM.summary_eli5.is_(None)))
-                .where(PaperORM.index_status == "indexed")
-                .order_by(
-                    PaperORM.influential_citation_count.desc(),
-                    PaperORM.citation_count.desc(),
-                    PaperORM.published.desc(),
-                    PaperORM.paper_id.asc(),
+    def list_papers_needing_summary(self, *, limit: int, after: PaperResponse | None = None) -> list[PaperResponse]:
+        query = (
+            select(PaperORM)
+            .where((PaperORM.summary_eli5 == "") | (PaperORM.summary_eli5.is_(None)))
+            .where(PaperORM.index_status == "indexed")
+        )
+        if after is not None:
+            query = query.where(
+                (PaperORM.influential_citation_count < after.influential_citation_count)
+                | (
+                    (PaperORM.influential_citation_count == after.influential_citation_count)
+                    & (PaperORM.citation_count < after.citation_count)
                 )
-                .offset(offset)
-                .limit(limit)
-            ).all()
+                | (
+                    (PaperORM.influential_citation_count == after.influential_citation_count)
+                    & (PaperORM.citation_count == after.citation_count)
+                    & (PaperORM.published < after.published)
+                )
+                | (
+                    (PaperORM.influential_citation_count == after.influential_citation_count)
+                    & (PaperORM.citation_count == after.citation_count)
+                    & (PaperORM.published == after.published)
+                    & (PaperORM.paper_id > after.paper_id)
+                )
+            )
+        query = query.order_by(
+            PaperORM.influential_citation_count.desc(),
+            PaperORM.citation_count.desc(),
+            PaperORM.published.desc(),
+            PaperORM.paper_id.asc(),
+        ).limit(limit)
+        with self._session() as session:
+            rows = session.scalars(query).all()
         return [_paper_from_orm(row) for row in rows]
 
     _SELECT_PAPER_COLUMNS = """
@@ -1066,17 +1094,23 @@ class MemoryPaperRepository(PaperRepository):
         self.papers[paper_id] = updated
         return updated
 
-    def list_papers_needing_summary(self, *, limit: int, offset: int = 0) -> list[PaperResponse]:
+    def list_papers_needing_summary(self, *, limit: int, after: PaperResponse | None = None) -> list[PaperResponse]:
         candidates = [
             paper
             for paper in self.papers.values()
             if not paper.summary_eli5 and paper.index_status == "indexed"
         ]
         candidates.sort(
-            key=lambda p: (p.influential_citation_count, p.citation_count, p.published, p.paper_id),
-            reverse=True,
+            key=lambda p: (
+                -p.influential_citation_count,
+                -p.citation_count,
+                -int((p.published or "").replace("-", "") or 0),
+                p.paper_id,
+            ),
         )
-        return candidates[offset : offset + limit]
+        if after is not None:
+            candidates = [paper for paper in candidates if _paper_needs_summary_after(paper, after)]
+        return candidates[:limit]
 
     def search_local(
         self,

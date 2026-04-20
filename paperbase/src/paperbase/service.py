@@ -236,7 +236,7 @@ class PaperbaseService:
         failed = 0
         in_flight: set = set()
         remaining = limit
-        offset = 0
+        after: PaperResponse | None = None
 
         def _drain(wait_all: bool) -> None:
             nonlocal processed, updated, failed
@@ -268,21 +268,17 @@ class PaperbaseService:
         with ThreadPoolExecutor(max_workers=concurrency) as pool:
             while remaining > 0:
                 page_size = min(window, remaining)
-                batch = self.repository.list_papers_needing_summary(limit=page_size, offset=offset)
+                batch = self.repository.list_papers_needing_summary(limit=page_size, after=after)
                 if not batch:
                     break
                 for paper in batch:
                     if len(in_flight) >= window:
                         _drain(wait_all=False)
                     in_flight.add(pool.submit(_summarize_one, paper))
-                # Advance stable pagination: results we already submitted won't
-                # re-appear once their summaries are persisted (WHERE clause
-                # filters on empty summary_eli5), so we page from offset=0.
-                # But if update_summaries fails for some, they'd still match —
-                # we use `offset=0` and rely on the updater to remove them from
-                # the result set. Advance by batch size to be safe in case the
-                # in-flight updates haven't committed yet.
-                offset += len(batch)
+                # Use a keyset cursor instead of OFFSET pagination so rows do
+                # not get skipped as earlier papers fall out of the result set
+                # once their summaries are written.
+                after = batch[-1]
                 remaining -= len(batch)
             _drain(wait_all=True)
 
