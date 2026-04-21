@@ -13,8 +13,16 @@ def utcnow() -> datetime:
     return datetime.now(tz=UTC)
 
 
+_ARXIV_VERSION_SUFFIX = re.compile(r"v\d+$", re.IGNORECASE)
+
+
+def canonical_arxiv_id(arxiv_id: str) -> str:
+    """Return the arxiv id with any trailing vN suffix removed."""
+    return _ARXIV_VERSION_SUFFIX.sub("", arxiv_id.strip())
+
+
 def canonical_paper_id(arxiv_id: str) -> str:
-    return f"arxiv:{arxiv_id.strip()}"
+    return f"arxiv:{canonical_arxiv_id(arxiv_id)}"
 
 
 def slugify(value: str) -> str:

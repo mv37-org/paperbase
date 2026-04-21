@@ -11,6 +11,7 @@ import requests
 
 from .config import DEFAULT_AI_CATEGORIES
 from .models import PaperMetadata
+from .utils import canonical_arxiv_id
 
 
 ARXIV_API = "http://export.arxiv.org/api/query"
@@ -24,7 +25,9 @@ SESSION.headers.update({"User-Agent": "paperbase/0.1.0 (scientific paper indexer
 def _extract_arxiv_id(entry: ET.Element) -> str:
     raw = entry.findtext("atom:id", "", ARXIV_NS)
     match = re.search(r"(\d{4}\.\d{4,5})(v\d+)?$", raw)
-    return match.group(1) if match else raw.split("/abs/")[-1]
+    if match:
+        return match.group(1)
+    return canonical_arxiv_id(raw.split("/abs/")[-1])
 
 
 def _parse_arxiv_entry(entry: ET.Element) -> PaperMetadata:
@@ -139,6 +142,10 @@ def enrich_with_semantic_scholar(papers: list[PaperMetadata], *, batch_size: int
                 paper.citation_count = item.get("citationCount", 0) or 0
                 paper.influential_citation_count = item.get("influentialCitationCount", 0) or 0
                 paper.semantic_scholar_id = item.get("paperId")
+                tldr_payload = item.get("tldr") or {}
+                tldr_text = tldr_payload.get("text") if isinstance(tldr_payload, dict) else None
+                if tldr_text:
+                    paper.tldr = tldr_text
         except requests.RequestException:
             continue
         if offset + batch_size < len(papers):
@@ -171,12 +178,14 @@ def search_semantic_scholar(
             continue
         authors = ", ".join(author.get("name", "") for author in (item.get("authors") or []))
         tldr = item.get("tldr") or {}
+        tldr_text = tldr.get("text") if isinstance(tldr, dict) else ""
         papers.append(
             PaperMetadata(
-                arxiv_id=arxiv_id,
+                arxiv_id=canonical_arxiv_id(arxiv_id),
                 title=item.get("title", ""),
                 authors=authors,
-                abstract=tldr.get("text") or item.get("abstract") or "",
+                abstract=item.get("abstract") or tldr_text or "",
+                tldr=tldr_text or "",
                 published=(item.get("publicationDate") or "")[:10],
                 updated="",
                 doi=external_ids.get("DOI"),
@@ -214,7 +223,7 @@ def get_related_papers(arxiv_id: str, semantic_scholar_id: str | None, *, limit:
             continue
         results.append(
             PaperMetadata(
-                arxiv_id=related_arxiv_id,
+                arxiv_id=canonical_arxiv_id(related_arxiv_id),
                 title=item.get("title", ""),
                 authors=", ".join(author.get("name", "") for author in (item.get("authors") or [])),
                 abstract=item.get("abstract") or "",

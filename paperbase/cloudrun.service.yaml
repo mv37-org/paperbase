@@ -38,7 +38,28 @@ spec:
               value: "7"
             - name: PAPERBASE_LATEST_SYNC_LIMIT_PER_CATEGORY
               value: "100"
+            - name: PAPERBASE_EMBEDDING_MODEL
+              value: allenai/specter2_base
+            - name: PAPERBASE_EMBEDDING_DIM
+              value: "768"
+            - name: PAPERBASE_RERANK_MODEL
+              value: ""  # set to BAAI/bge-reranker-v2-m3 to enable cross-encoder rerank
+            # Summaries: "none" skips LLM entirely at ingest (use this for 50M-scale harvests).
+            # Set to "vertex" after migration + when PAPERBASE_VERTEX_PROJECT is configured to
+            # enable lazy on-read summarization and the summarize_top_cited job.
+            - name: PAPERBASE_SUMMARY_PROVIDER
+              value: none
+            - name: PAPERBASE_SUMMARY_MODEL
+              value: gemini-2.5-flash-lite
+            - name: PAPERBASE_VERTEX_PROJECT
+              value: YOUR_PROJECT_ID
+            - name: PAPERBASE_VERTEX_LOCATION
+              value: us-central1
+            - name: PAPERBASE_LAZY_SUMMARY_ON_READ
+              value: "true"
+            - name: PAPERBASE_FEATURED_TIER_CONCURRENCY
+              value: "16"
           resources:
             limits:
-              cpu: "1"
-              memory: 1Gi
+              cpu: "2"
+              memory: 4Gi
