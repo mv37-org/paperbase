@@ -74,6 +74,10 @@ steps:
         fi
 
         if [[ -n "${_API_ENV_VARS_FILE}" ]]; then
+          if [[ ! -f "${_API_ENV_VARS_FILE}" ]]; then
+            echo "Missing API env vars file: ${_API_ENV_VARS_FILE}" >&2
+            exit 1
+          fi
           cmd+=(--env-vars-file="${_API_ENV_VARS_FILE}")
         fi
 
@@ -133,6 +137,10 @@ steps:
         )
 
         if [[ -n "${_WORKER_ENV_VARS_FILE}" ]]; then
+          if [[ ! -f "${_WORKER_ENV_VARS_FILE}" ]]; then
+            echo "Missing worker env vars file: ${_WORKER_ENV_VARS_FILE}" >&2
+            exit 1
+          fi
           cmd+=(--env-vars-file="${_WORKER_ENV_VARS_FILE}")
         fi
 
@@ -177,8 +185,8 @@ substitutions:
   _DEPLOY_WORKER: "true"
   _API_SERVICE_NAME: paperbase-api
   _WORKER_SERVICE_NAME: paperbase-worker
-  _API_ENV_VARS_FILE: paperbase/cloudrun.api.env.yaml
-  _WORKER_ENV_VARS_FILE: paperbase/cloudrun.worker.env.yaml
+  _API_ENV_VARS_FILE: ""
+  _WORKER_ENV_VARS_FILE: ""
   _API_SERVICE_ACCOUNT: ""
   _WORKER_SERVICE_ACCOUNT: ""
   _API_ALLOW_UNAUTHENTICATED: "true"

@@ -300,6 +300,9 @@ gcloud builds submit . \
   --substitutions _DEPLOY_WORKER=false,_API_ENV_VARS_FILE=paperbase/cloudrun.api.env.yaml
 ```
 
+By default, `paperbase/cloudbuild.yaml` does not require any env-vars files at all.
+`_API_ENV_VARS_FILE` and `_WORKER_ENV_VARS_FILE` are opt-in substitutions. If you set either one, the build expects that file to exist in the submitted source tree.
+
 Useful substitutions in `paperbase/cloudbuild.yaml`:
 
 - `_API_SERVICE_ACCOUNT` / `_WORKER_SERVICE_ACCOUNT`
