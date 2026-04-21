@@ -14,16 +14,26 @@ PAPERBASE_WORKER := $(VENV_BIN)/paperbase-worker
 RUN_DIR := .run
 CHAT_DIR := chat
 STATIC_DIR := paperbase/src/paperbase/static
+BENCHMARK_OUT_DIR := benchmarks/out
+BACKEND_JUNIT := $(BENCHMARK_OUT_DIR)/backend.junit.xml
+PLUGIN_JUNIT := $(BENCHMARK_OUT_DIR)/plugin.junit.xml
+CHAT_TEST_JSON := $(BENCHMARK_OUT_DIR)/chat.vitest.json
 VP_INSTALL_CMD := curl -fsSL https://vite.plus | bash
+BASELINE_FLAG :=
 
-.PHONY: help setup doctor dev test clean _require_vp _require_setup _stop_stack
+ifneq ($(UPDATE_BASELINE),)
+BASELINE_FLAG := --update-baseline
+endif
+
+.PHONY: help setup doctor dev test profile clean _require_vp _require_setup _stop_stack
 
 help:
 	@printf "paper-ai local workflow\n\n"
 	@printf "  make setup   Install Python packages, chat dependencies, the repo .env, and Git hooks.\n"
 	@printf "  make doctor  Verify vp, Python, Postgres, pgvector, ports, and the repo .env.\n"
 	@printf "  make dev     Initialize local storage/database and run API, worker, MCP bridge, and chat.\n"
-	@printf "  make test    Run Ruff, chat checks, frontend build, backend tests, and plugin tests.\n"
+	@printf "  make test    Run doctor, init-local, lint, chat checks/tests/build, pytest, and timing comparisons.\n"
+	@printf "  make profile Run doctor, init-local, deterministic hotpath profiling, and baseline comparisons.\n"
 	@printf "  make clean   Stop local services and remove generated logs, caches, and frontend output.\n"
 
 setup:
@@ -45,7 +55,7 @@ setup:
 doctor:
 	@$(MAKE) --no-print-directory _require_vp
 	@$(MAKE) --no-print-directory _require_setup
-	@"$(PAPERBASE_DEV)" doctor
+	@"$(PAPERBASE_DEV)" doctor --mode dev
 
 dev:
 	@$(MAKE) --no-print-directory _require_vp
@@ -81,15 +91,27 @@ dev:
 test:
 	@$(MAKE) --no-print-directory _require_vp
 	@$(MAKE) --no-print-directory _require_setup
+	@mkdir -p "$(BENCHMARK_OUT_DIR)"
+	@"$(PAPERBASE_DEV)" doctor --mode test
+	@"$(PAPERBASE_DEV)" init-local
 	@"$(RUFF)" check paperbase/src paperbase/tests paperbase-plugin/src paperbase-plugin/tests paperbase-plugin/scripts
 	@(cd "$(CHAT_DIR)" && set -a && source ../.env && set +a && vp check)
+	@(cd "$(CHAT_DIR)" && set -a && source ../.env && set +a && ./node_modules/.bin/vitest run --reporter=json --outputFile="../$(CHAT_TEST_JSON)")
 	@(cd "$(CHAT_DIR)" && set -a && source ../.env && set +a && vp build)
-	@"$(PYTEST)" paperbase/tests
-	@"$(PYTEST)" paperbase-plugin/tests
+	@"$(PYTEST)" --junitxml="$(BACKEND_JUNIT)" paperbase/tests
+	@"$(PYTEST)" --junitxml="$(PLUGIN_JUNIT)" paperbase-plugin/tests
+	@"$(PAPERBASE_DEV)" record-test-times --backend-junit "$(BACKEND_JUNIT)" --plugin-junit "$(PLUGIN_JUNIT)" --chat-json "$(CHAT_TEST_JSON)" $(BASELINE_FLAG)
+
+profile:
+	@$(MAKE) --no-print-directory _require_vp
+	@$(MAKE) --no-print-directory _require_setup
+	@"$(PAPERBASE_DEV)" doctor --mode profile
+	@"$(PAPERBASE_DEV)" init-local
+	@"$(PAPERBASE_DEV)" profile $(BASELINE_FLAG)
 
 clean:
 	@$(MAKE) --no-print-directory _stop_stack
-	@rm -rf "$(RUN_DIR)" .pytest_cache .ruff_cache "$(STATIC_DIR)" chat/.vite chat/dist paperbase/.venv paperbase-plugin/.venv
+	@rm -rf "$(RUN_DIR)" "$(BENCHMARK_OUT_DIR)" .pytest_cache .ruff_cache "$(STATIC_DIR)" chat/.vite chat/dist paperbase/.venv paperbase-plugin/.venv
 	@find . -name "__pycache__" -type d -prune -exec rm -rf {} +
 	@find . -name ".DS_Store" -type f -delete
 	@printf "Removed generated logs, caches, and frontend output.\n"

@@ -321,6 +321,7 @@ export default function App() {
   const sessionRef = useRef<BrowserSessionResponse | null>(null);
   const threadMapRef = useRef<Record<string, ChatThreadResponse>>({});
   const openTabsRef = useRef<string[]>([]);
+  const tabsStorageHydratedRef = useRef(false);
   const appUploadRef = useRef<HTMLInputElement | null>(null);
   const accountMenuRef = useRef<HTMLDivElement | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
@@ -335,6 +336,12 @@ export default function App() {
 
   useEffect(() => {
     openTabsRef.current = openTabs;
+    if (!tabsStorageHydratedRef.current) {
+      tabsStorageHydratedRef.current = true;
+      if (openTabs.length === 0) {
+        return;
+      }
+    }
     localStorage.setItem(OPEN_TABS_KEY, JSON.stringify(openTabs));
   }, [openTabs]);
 

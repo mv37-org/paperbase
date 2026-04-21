@@ -1,0 +1,2256 @@
+{
+  "fixture": {
+    "chunk_embedding_dimension": 768,
+    "database_backend": "sqlalchemy",
+    "paper_embedding_dimension": 384,
+    "query_token": "zzbench",
+    "seeded_papers": 6,
+    "storage_backend": "local"
+  },
+  "metadata": {
+    "generated_at": "2026-04-21T23:19:00Z",
+    "git_sha": "1dd41d5",
+    "kind": "hotpaths",
+    "label": "local-dev",
+    "node_version": "v24.15.0",
+    "python_version": "Python 3.13.7"
+  },
+  "scenarios": {
+    "chat_grounded_stream": {
+      "top_cumulative": [
+        {
+          "cumulative_time": 8.5833e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/dev_benchmarks.py",
+          "function": "<lambda>",
+          "line": 1177,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 6.083e-06
+        },
+        {
+          "cumulative_time": 7.3958e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/service.py",
+          "function": "stream_chat_message",
+          "line": 1608,
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "total_time": 3.6670000000000002e-06
+        },
+        {
+          "cumulative_time": 4.9000000000000005e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/service.py",
+          "function": "_prepare_chat_generation",
+          "line": 921,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 6.791000000000001e-06
+        },
+        {
+          "cumulative_time": 3.7083000000000004e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/repository.py",
+          "function": "add_chat_message",
+          "line": 2675,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 6e-06
+        },
+        {
+          "cumulative_time": 1.5666000000000002e-05,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/pydantic/main.py",
+          "function": "model_copy",
+          "line": 393,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 3.625e-06
+        },
+        {
+          "cumulative_time": 1.4666000000000002e-05,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/pydantic/main.py",
+          "function": "model_dump",
+          "line": 427,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 1.1660000000000001e-06
+        },
+        {
+          "cumulative_time": 1.3500000000000001e-05,
+          "filename": "~",
+          "function": "<method 'to_python' of 'pydantic_core._pydantic_core.SchemaSerializer' objects>",
+          "line": 0,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 1.3500000000000001e-05
+        },
+        {
+          "cumulative_time": 1.1375e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/utils.py",
+          "function": "new_id",
+          "line": 62,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 7.92e-07
+        },
+        {
+          "cumulative_time": 1.0751000000000001e-05,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/pydantic/main.py",
+          "function": "__init__",
+          "line": 253,
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "total_time": 3.377e-06
+        },
+        {
+          "cumulative_time": 1.0333000000000001e-05,
+          "filename": "/Users/arslnb/codebase/miniconda3/lib/python3.13/uuid.py",
+          "function": "uuid4",
+          "line": 710,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 3.7490000000000004e-06
+        },
+        {
+          "cumulative_time": 9.75e-06,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/pydantic/main.py",
+          "function": "__copy__",
+          "line": 971,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 5.376000000000001e-06
+        },
+        {
+          "cumulative_time": 9.542000000000001e-06,
+          "filename": "~",
+          "function": "<method 'disable' of '_lsprof.Profiler' objects>",
+          "line": 0,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 9.542000000000001e-06
+        },
+        {
+          "cumulative_time": 7.374e-06,
+          "filename": "~",
+          "function": "<method 'validate_python' of 'pydantic_core._pydantic_core.SchemaValidator' objects>",
+          "line": 0,
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "total_time": 7.374e-06
+        },
+        {
+          "cumulative_time": 6.625e-06,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/service.py",
+          "function": "_api_key_required_response",
+          "line": 1557,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 2.001e-06
+        },
+        {
+          "cumulative_time": 5.125e-06,
+          "filename": "/Users/arslnb/codebase/miniconda3/lib/python3.13/uuid.py",
+          "function": "__init__",
+          "line": 142,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 4.333e-06
+        }
+      ],
+      "top_self_time": [
+        {
+          "cumulative_time": 1.3500000000000001e-05,
+          "filename": "~",
+          "function": "<method 'to_python' of 'pydantic_core._pydantic_core.SchemaSerializer' objects>",
+          "line": 0,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 1.3500000000000001e-05
+        },
+        {
+          "cumulative_time": 9.542000000000001e-06,
+          "filename": "~",
+          "function": "<method 'disable' of '_lsprof.Profiler' objects>",
+          "line": 0,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 9.542000000000001e-06
+        },
+        {
+          "cumulative_time": 7.374e-06,
+          "filename": "~",
+          "function": "<method 'validate_python' of 'pydantic_core._pydantic_core.SchemaValidator' objects>",
+          "line": 0,
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "total_time": 7.374e-06
+        },
+        {
+          "cumulative_time": 4.9000000000000005e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/service.py",
+          "function": "_prepare_chat_generation",
+          "line": 921,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 6.791000000000001e-06
+        },
+        {
+          "cumulative_time": 8.5833e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/dev_benchmarks.py",
+          "function": "<lambda>",
+          "line": 1177,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 6.083e-06
+        },
+        {
+          "cumulative_time": 3.7083000000000004e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/repository.py",
+          "function": "add_chat_message",
+          "line": 2675,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 6e-06
+        },
+        {
+          "cumulative_time": 9.75e-06,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/pydantic/main.py",
+          "function": "__copy__",
+          "line": 971,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 5.376000000000001e-06
+        },
+        {
+          "cumulative_time": 5.125e-06,
+          "filename": "/Users/arslnb/codebase/miniconda3/lib/python3.13/uuid.py",
+          "function": "__init__",
+          "line": 142,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 4.333e-06
+        },
+        {
+          "cumulative_time": 1.0333000000000001e-05,
+          "filename": "/Users/arslnb/codebase/miniconda3/lib/python3.13/uuid.py",
+          "function": "uuid4",
+          "line": 710,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 3.7490000000000004e-06
+        },
+        {
+          "cumulative_time": 7.3958e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/service.py",
+          "function": "stream_chat_message",
+          "line": 1608,
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "total_time": 3.6670000000000002e-06
+        },
+        {
+          "cumulative_time": 1.5666000000000002e-05,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/pydantic/main.py",
+          "function": "model_copy",
+          "line": 393,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 3.625e-06
+        },
+        {
+          "cumulative_time": 1.0751000000000001e-05,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/pydantic/main.py",
+          "function": "__init__",
+          "line": 253,
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "total_time": 3.377e-06
+        },
+        {
+          "cumulative_time": 3.916e-06,
+          "filename": "/Users/arslnb/codebase/miniconda3/lib/python3.13/copy.py",
+          "function": "copy",
+          "line": 62,
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "total_time": 2.542e-06
+        },
+        {
+          "cumulative_time": 2.583e-06,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/repository.py",
+          "function": "get_chat_thread",
+          "line": 2670,
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "total_time": 2.125e-06
+        },
+        {
+          "cumulative_time": 6.625e-06,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/service.py",
+          "function": "_api_key_required_response",
+          "line": 1557,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 2.001e-06
+        }
+      ],
+      "wall_time_seconds": 0.00011237501166760921
+    },
+    "index_single_paper": {
+      "top_cumulative": [
+        {
+          "cumulative_time": 0.0006712920000000001,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/dev_benchmarks.py",
+          "function": "<lambda>",
+          "line": 1133,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 7.792000000000001e-06
+        },
+        {
+          "cumulative_time": 0.0006635,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/service.py",
+          "function": "index_arxiv_paper",
+          "line": 2014,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 4.6867000000000004e-05
+        },
+        {
+          "cumulative_time": 0.00032529200000000003,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/dev_benchmarks.py",
+          "function": "_vector",
+          "line": 344,
+          "primitive_calls": 6,
+          "total_calls": 6,
+          "total_time": 0.000319583
+        },
+        {
+          "cumulative_time": 0.00027441600000000004,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/dev_benchmarks.py",
+          "function": "encode_batch",
+          "line": 352,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 1.291e-06
+        },
+        {
+          "cumulative_time": 5.3375e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/dev_benchmarks.py",
+          "function": "encode_paper",
+          "line": 355,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 1.2080000000000001e-06
+        },
+        {
+          "cumulative_time": 4.6542e-05,
+          "filename": "/Users/arslnb/codebase/miniconda3/lib/python3.13/json/__init__.py",
+          "function": "dumps",
+          "line": 183,
+          "primitive_calls": 5,
+          "total_calls": 5,
+          "total_time": 6.834e-06
+        },
+        {
+          "cumulative_time": 4.2751000000000005e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/repository.py",
+          "function": "upsert_paper",
+          "line": 2085,
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "total_time": 1.1211e-05
+        },
+        {
+          "cumulative_time": 4.2000000000000004e-05,
+          "filename": "/Users/arslnb/codebase/miniconda3/lib/python3.13/textwrap.py",
+          "function": "shorten",
+          "line": 398,
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "total_time": 5.6660000000000005e-06
+        },
+        {
+          "cumulative_time": 3.7334000000000005e-05,
+          "filename": "/Users/arslnb/codebase/miniconda3/lib/python3.13/json/encoder.py",
+          "function": "encode",
+          "line": 183,
+          "primitive_calls": 5,
+          "total_calls": 5,
+          "total_time": 6.083e-06
+        },
+        {
+          "cumulative_time": 3.5625000000000005e-05,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/pydantic/main.py",
+          "function": "__setattr__",
+          "line": 1044,
+          "primitive_calls": 6,
+          "total_calls": 6,
+          "total_time": 6.498e-06
+        },
+        {
+          "cumulative_time": 3.3751e-05,
+          "filename": "/Users/arslnb/codebase/miniconda3/lib/python3.13/textwrap.py",
+          "function": "fill",
+          "line": 361,
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "total_time": 1.292e-06
+        },
+        {
+          "cumulative_time": 3.2334e-05,
+          "filename": "/Users/arslnb/codebase/miniconda3/lib/python3.13/textwrap.py",
+          "function": "wrap",
+          "line": 347,
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "total_time": 3.958e-06
+        },
+        {
+          "cumulative_time": 3.1667e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/repository.py",
+          "function": "replace_text_chunks",
+          "line": 2141,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 3.124e-06
+        },
+        {
+          "cumulative_time": 3.0292e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/extractors.py",
+          "function": "figure_index_payload",
+          "line": 648,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 1.8340000000000001e-06
+        },
+        {
+          "cumulative_time": 2.9417000000000003e-05,
+          "filename": "/Users/arslnb/codebase/miniconda3/lib/python3.13/json/encoder.py",
+          "function": "iterencode",
+          "line": 205,
+          "primitive_calls": 5,
+          "total_calls": 5,
+          "total_time": 2.8959000000000002e-05
+        }
+      ],
+      "top_self_time": [
+        {
+          "cumulative_time": 0.00032529200000000003,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/dev_benchmarks.py",
+          "function": "_vector",
+          "line": 344,
+          "primitive_calls": 6,
+          "total_calls": 6,
+          "total_time": 0.000319583
+        },
+        {
+          "cumulative_time": 0.0006635,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/service.py",
+          "function": "index_arxiv_paper",
+          "line": 2014,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 4.6867000000000004e-05
+        },
+        {
+          "cumulative_time": 2.9417000000000003e-05,
+          "filename": "/Users/arslnb/codebase/miniconda3/lib/python3.13/json/encoder.py",
+          "function": "iterencode",
+          "line": 205,
+          "primitive_calls": 5,
+          "total_calls": 5,
+          "total_time": 2.8959000000000002e-05
+        },
+        {
+          "cumulative_time": 1.7167e-05,
+          "filename": "~",
+          "function": "<method 'to_python' of 'pydantic_core._pydantic_core.SchemaSerializer' objects>",
+          "line": 0,
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "total_time": 1.7167e-05
+        },
+        {
+          "cumulative_time": 4.2751000000000005e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/repository.py",
+          "function": "upsert_paper",
+          "line": 2085,
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "total_time": 1.1211e-05
+        },
+        {
+          "cumulative_time": 2.5958e-05,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/pydantic/main.py",
+          "function": "_setattr_handler",
+          "line": 1052,
+          "primitive_calls": 5,
+          "total_calls": 5,
+          "total_time": 1.0417e-05
+        },
+        {
+          "cumulative_time": 1.4542e-05,
+          "filename": "/Users/arslnb/codebase/miniconda3/lib/python3.13/textwrap.py",
+          "function": "_wrap_chunks",
+          "line": 238,
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "total_time": 1.0295e-05
+        },
+        {
+          "cumulative_time": 9.250000000000001e-06,
+          "filename": "~",
+          "function": "<method 'disable' of '_lsprof.Profiler' objects>",
+          "line": 0,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 9.250000000000001e-06
+        },
+        {
+          "cumulative_time": 1.4667e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/utils.py",
+          "function": "csv_bytes",
+          "line": 55,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 7.916e-06
+        },
+        {
+          "cumulative_time": 0.0006712920000000001,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/dev_benchmarks.py",
+          "function": "<lambda>",
+          "line": 1133,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 7.792000000000001e-06
+        },
+        {
+          "cumulative_time": 7.4990000000000005e-06,
+          "filename": "~",
+          "function": "<built-in method posix.urandom>",
+          "line": 0,
+          "primitive_calls": 5,
+          "total_calls": 5,
+          "total_time": 7.4990000000000005e-06
+        },
+        {
+          "cumulative_time": 9.459e-06,
+          "filename": "/Users/arslnb/codebase/miniconda3/lib/python3.13/uuid.py",
+          "function": "__init__",
+          "line": 142,
+          "primitive_calls": 5,
+          "total_calls": 5,
+          "total_time": 7.1270000000000005e-06
+        },
+        {
+          "cumulative_time": 7.625000000000001e-06,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/extractors.py",
+          "function": "json_payload",
+          "line": 57,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 7.000000000000001e-06
+        },
+        {
+          "cumulative_time": 4.6542e-05,
+          "filename": "/Users/arslnb/codebase/miniconda3/lib/python3.13/json/__init__.py",
+          "function": "dumps",
+          "line": 183,
+          "primitive_calls": 5,
+          "total_calls": 5,
+          "total_time": 6.834e-06
+        },
+        {
+          "cumulative_time": 3.5625000000000005e-05,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/pydantic/main.py",
+          "function": "__setattr__",
+          "line": 1044,
+          "primitive_calls": 6,
+          "total_calls": 6,
+          "total_time": 6.498e-06
+        }
+      ],
+      "wall_time_seconds": 0.000699708005413413
+    },
+    "reindex_missing_embeddings": {
+      "top_cumulative": [
+        {
+          "cumulative_time": 0.000184792,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/dev_benchmarks.py",
+          "function": "<lambda>",
+          "line": 1156,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 3.334e-06
+        },
+        {
+          "cumulative_time": 0.000181458,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/service.py",
+          "function": "reindex_missing_embeddings",
+          "line": 1716,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 1.3831e-05
+        },
+        {
+          "cumulative_time": 0.000141416,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/dev_benchmarks.py",
+          "function": "_vector",
+          "line": 344,
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "total_time": 0.00013912400000000002
+        },
+        {
+          "cumulative_time": 9.041700000000001e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/dev_benchmarks.py",
+          "function": "encode_batch",
+          "line": 352,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 5.01e-07
+        },
+        {
+          "cumulative_time": 5.8875e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/dev_benchmarks.py",
+          "function": "encode_paper_batch",
+          "line": 358,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 7.3750000000000005e-06
+        },
+        {
+          "cumulative_time": 1.2792e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/repository.py",
+          "function": "list_papers_needing_embedding_backfill",
+          "line": 2180,
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "total_time": 3.7920000000000003e-06
+        },
+        {
+          "cumulative_time": 6.750000000000001e-06,
+          "filename": "~",
+          "function": "<method 'disable' of '_lsprof.Profiler' objects>",
+          "line": 0,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 6.750000000000001e-06
+        },
+        {
+          "cumulative_time": 4.5840000000000005e-06,
+          "filename": "~",
+          "function": "<method 'sort' of 'list' objects>",
+          "line": 0,
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "total_time": 8.340000000000001e-07
+        },
+        {
+          "cumulative_time": 4.25e-06,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/repository.py",
+          "function": "needs_backfill",
+          "line": 2187,
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "total_time": 2.583e-06
+        },
+        {
+          "cumulative_time": 3.75e-06,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/repository.py",
+          "function": "<lambda>",
+          "line": 2201,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 2.2080000000000003e-06
+        },
+        {
+          "cumulative_time": 2.042e-06,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/repository.py",
+          "function": "update_chunk_embedding",
+          "line": 2221,
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "total_time": 1.6260000000000002e-06
+        },
+        {
+          "cumulative_time": 1.542e-06,
+          "filename": "~",
+          "function": "<method 'replace' of 'str' objects>",
+          "line": 0,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 1.542e-06
+        },
+        {
+          "cumulative_time": 1.3750000000000002e-06,
+          "filename": "~",
+          "function": "<built-in method builtins.any>",
+          "line": 0,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 7.08e-07
+        },
+        {
+          "cumulative_time": 1.2510000000000002e-06,
+          "filename": "~",
+          "function": "<method 'get' of 'dict' objects>",
+          "line": 0,
+          "primitive_calls": 13,
+          "total_calls": 13,
+          "total_time": 1.2510000000000002e-06
+        },
+        {
+          "cumulative_time": 1.125e-06,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/repository.py",
+          "function": "list_chunks_missing_embedding",
+          "line": 2218,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 7.09e-07
+        }
+      ],
+      "top_self_time": [
+        {
+          "cumulative_time": 0.000141416,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/dev_benchmarks.py",
+          "function": "_vector",
+          "line": 344,
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "total_time": 0.00013912400000000002
+        },
+        {
+          "cumulative_time": 0.000181458,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/service.py",
+          "function": "reindex_missing_embeddings",
+          "line": 1716,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 1.3831e-05
+        },
+        {
+          "cumulative_time": 5.8875e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/dev_benchmarks.py",
+          "function": "encode_paper_batch",
+          "line": 358,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 7.3750000000000005e-06
+        },
+        {
+          "cumulative_time": 6.750000000000001e-06,
+          "filename": "~",
+          "function": "<method 'disable' of '_lsprof.Profiler' objects>",
+          "line": 0,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 6.750000000000001e-06
+        },
+        {
+          "cumulative_time": 1.2792e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/repository.py",
+          "function": "list_papers_needing_embedding_backfill",
+          "line": 2180,
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "total_time": 3.7920000000000003e-06
+        },
+        {
+          "cumulative_time": 0.000184792,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/dev_benchmarks.py",
+          "function": "<lambda>",
+          "line": 1156,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 3.334e-06
+        },
+        {
+          "cumulative_time": 4.25e-06,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/repository.py",
+          "function": "needs_backfill",
+          "line": 2187,
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "total_time": 2.583e-06
+        },
+        {
+          "cumulative_time": 3.75e-06,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/repository.py",
+          "function": "<lambda>",
+          "line": 2201,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 2.2080000000000003e-06
+        },
+        {
+          "cumulative_time": 2.042e-06,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/repository.py",
+          "function": "update_chunk_embedding",
+          "line": 2221,
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "total_time": 1.6260000000000002e-06
+        },
+        {
+          "cumulative_time": 1.542e-06,
+          "filename": "~",
+          "function": "<method 'replace' of 'str' objects>",
+          "line": 0,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 1.542e-06
+        },
+        {
+          "cumulative_time": 1.2510000000000002e-06,
+          "filename": "~",
+          "function": "<method 'get' of 'dict' objects>",
+          "line": 0,
+          "primitive_calls": 13,
+          "total_calls": 13,
+          "total_time": 1.2510000000000002e-06
+        },
+        {
+          "cumulative_time": 4.5840000000000005e-06,
+          "filename": "~",
+          "function": "<method 'sort' of 'list' objects>",
+          "line": 0,
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "total_time": 8.340000000000001e-07
+        },
+        {
+          "cumulative_time": 8.340000000000001e-07,
+          "filename": "~",
+          "function": "<method 'digest' of '_hashlib.HASH' objects>",
+          "line": 0,
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "total_time": 8.340000000000001e-07
+        },
+        {
+          "cumulative_time": 7.92e-07,
+          "filename": "~",
+          "function": "<built-in method builtins.min>",
+          "line": 0,
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "total_time": 7.92e-07
+        },
+        {
+          "cumulative_time": 7.92e-07,
+          "filename": "~",
+          "function": "<built-in method _hashlib.openssl_sha256>",
+          "line": 0,
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "total_time": 7.92e-07
+        }
+      ],
+      "wall_time_seconds": 0.00020275003043934703
+    },
+    "search_local_only": {
+      "top_cumulative": [
+        {
+          "cumulative_time": 0.000214417,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/dev_benchmarks.py",
+          "function": "<lambda>",
+          "line": 1138,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 1.0041000000000001e-05
+        },
+        {
+          "cumulative_time": 0.000200792,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/service.py",
+          "function": "search",
+          "line": 2200,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 2.8209e-05
+        },
+        {
+          "cumulative_time": 4.9500000000000004e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/dev_benchmarks.py",
+          "function": "encode",
+          "line": 349,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 3.3300000000000003e-07
+        },
+        {
+          "cumulative_time": 4.9250000000000004e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/repository.py",
+          "function": "search_local",
+          "line": 2344,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 2.025e-05
+        },
+        {
+          "cumulative_time": 4.9167000000000005e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/dev_benchmarks.py",
+          "function": "_vector",
+          "line": 344,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 4.8208e-05
+        },
+        {
+          "cumulative_time": 1.8001000000000003e-05,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/pydantic/main.py",
+          "function": "__init__",
+          "line": 253,
+          "primitive_calls": 9,
+          "total_calls": 9,
+          "total_time": 2.752e-06
+        },
+        {
+          "cumulative_time": 1.7333e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/repository.py",
+          "function": "save_result_set",
+          "line": 2421,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 3.5000000000000004e-06
+        },
+        {
+          "cumulative_time": 1.6292000000000003e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/dev_benchmarks.py",
+          "function": "score",
+          "line": 372,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 7.335e-06
+        },
+        {
+          "cumulative_time": 1.5249000000000001e-05,
+          "filename": "~",
+          "function": "<method 'validate_python' of 'pydantic_core._pydantic_core.SchemaValidator' objects>",
+          "line": 0,
+          "primitive_calls": 9,
+          "total_calls": 9,
+          "total_time": 1.5249000000000001e-05
+        },
+        {
+          "cumulative_time": 1.4708e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/repository.py",
+          "function": "best_chunk_for_papers",
+          "line": 2250,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 8.748e-06
+        },
+        {
+          "cumulative_time": 1.1999000000000001e-05,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/pydantic/main.py",
+          "function": "__setattr__",
+          "line": 1044,
+          "primitive_calls": 6,
+          "total_calls": 6,
+          "total_time": 2.7090000000000002e-06
+        },
+        {
+          "cumulative_time": 1.1582e-05,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/pydantic/main.py",
+          "function": "model_dump",
+          "line": 427,
+          "primitive_calls": 6,
+          "total_calls": 6,
+          "total_time": 1.5410000000000002e-06
+        },
+        {
+          "cumulative_time": 1.0041000000000001e-05,
+          "filename": "~",
+          "function": "<method 'to_python' of 'pydantic_core._pydantic_core.SchemaSerializer' objects>",
+          "line": 0,
+          "primitive_calls": 6,
+          "total_calls": 6,
+          "total_time": 1.0041000000000001e-05
+        },
+        {
+          "cumulative_time": 8.917000000000001e-06,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/utils.py",
+          "function": "new_id",
+          "line": 62,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 7.510000000000001e-07
+        },
+        {
+          "cumulative_time": 7.916e-06,
+          "filename": "/Users/arslnb/codebase/miniconda3/lib/python3.13/uuid.py",
+          "function": "uuid4",
+          "line": 710,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 1.1660000000000001e-06
+        }
+      ],
+      "top_self_time": [
+        {
+          "cumulative_time": 4.9167000000000005e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/dev_benchmarks.py",
+          "function": "_vector",
+          "line": 344,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 4.8208e-05
+        },
+        {
+          "cumulative_time": 0.000200792,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/service.py",
+          "function": "search",
+          "line": 2200,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 2.8209e-05
+        },
+        {
+          "cumulative_time": 4.9250000000000004e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/repository.py",
+          "function": "search_local",
+          "line": 2344,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 2.025e-05
+        },
+        {
+          "cumulative_time": 1.5249000000000001e-05,
+          "filename": "~",
+          "function": "<method 'validate_python' of 'pydantic_core._pydantic_core.SchemaValidator' objects>",
+          "line": 0,
+          "primitive_calls": 9,
+          "total_calls": 9,
+          "total_time": 1.5249000000000001e-05
+        },
+        {
+          "cumulative_time": 0.000214417,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/dev_benchmarks.py",
+          "function": "<lambda>",
+          "line": 1138,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 1.0041000000000001e-05
+        },
+        {
+          "cumulative_time": 1.0041000000000001e-05,
+          "filename": "~",
+          "function": "<method 'to_python' of 'pydantic_core._pydantic_core.SchemaSerializer' objects>",
+          "line": 0,
+          "primitive_calls": 6,
+          "total_calls": 6,
+          "total_time": 1.0041000000000001e-05
+        },
+        {
+          "cumulative_time": 1.4708e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/repository.py",
+          "function": "best_chunk_for_papers",
+          "line": 2250,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 8.748e-06
+        },
+        {
+          "cumulative_time": 1.6292000000000003e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/dev_benchmarks.py",
+          "function": "score",
+          "line": 372,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 7.335e-06
+        },
+        {
+          "cumulative_time": 6.792e-06,
+          "filename": "~",
+          "function": "<method 'disable' of '_lsprof.Profiler' objects>",
+          "line": 0,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 6.792e-06
+        },
+        {
+          "cumulative_time": 5.541e-06,
+          "filename": "~",
+          "function": "<method 'lower' of 'str' objects>",
+          "line": 0,
+          "primitive_calls": 62,
+          "total_calls": 62,
+          "total_time": 5.541e-06
+        },
+        {
+          "cumulative_time": 5.086e-06,
+          "filename": "~",
+          "function": "<method 'get' of 'dict' objects>",
+          "line": 0,
+          "primitive_calls": 73,
+          "total_calls": 73,
+          "total_time": 5.086e-06
+        },
+        {
+          "cumulative_time": 4.3750000000000005e-06,
+          "filename": "~",
+          "function": "<built-in method posix.urandom>",
+          "line": 0,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 4.3750000000000005e-06
+        },
+        {
+          "cumulative_time": 1.7333e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/repository.py",
+          "function": "save_result_set",
+          "line": 2421,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 3.5000000000000004e-06
+        },
+        {
+          "cumulative_time": 2.917e-06,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/dev_benchmarks.py",
+          "function": "<genexpr>",
+          "line": 377,
+          "primitive_calls": 30,
+          "total_calls": 30,
+          "total_time": 2.917e-06
+        },
+        {
+          "cumulative_time": 5.709000000000001e-06,
+          "filename": "~",
+          "function": "<built-in method builtins.sum>",
+          "line": 0,
+          "primitive_calls": 6,
+          "total_calls": 6,
+          "total_time": 2.792e-06
+        }
+      ],
+      "wall_time_seconds": 0.00023212499218061566
+    },
+    "search_sections": {
+      "top_cumulative": [
+        {
+          "cumulative_time": 0.0071321660000000005,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/dev_benchmarks.py",
+          "function": "<lambda>",
+          "line": 1144,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 5.791e-06
+        },
+        {
+          "cumulative_time": 0.007124167000000001,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/service.py",
+          "function": "search_sections",
+          "line": 2320,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 1.2208e-05
+        },
+        {
+          "cumulative_time": 0.007058834000000001,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/repository.py",
+          "function": "search_sections",
+          "line": 1333,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 5.3627e-05
+        },
+        {
+          "cumulative_time": 0.0062761250000000005,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/sqlalchemy/orm/session.py",
+          "function": "execute",
+          "line": 2291,
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "total_time": 3.2920000000000004e-06
+        },
+        {
+          "cumulative_time": 0.006272833,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/sqlalchemy/orm/session.py",
+          "function": "_execute_internal",
+          "line": 2136,
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "total_time": 1.7207e-05
+        },
+        {
+          "cumulative_time": 0.006074417,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py",
+          "function": "execute",
+          "line": 1375,
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "total_time": 2.5010000000000003e-06
+        },
+        {
+          "cumulative_time": 0.006071916,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/sqlalchemy/sql/elements.py",
+          "function": "_execute_on_connection",
+          "line": 518,
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "total_time": 1.666e-06
+        },
+        {
+          "cumulative_time": 0.00607025,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py",
+          "function": "_execute_clauseelement",
+          "line": 1591,
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "total_time": 9.667e-06
+        },
+        {
+          "cumulative_time": 0.005866292,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py",
+          "function": "_execute_context",
+          "line": 1791,
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "total_time": 1.0251e-05
+        },
+        {
+          "cumulative_time": 0.005828418,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/psycopg/connection.py",
+          "function": "wait",
+          "line": 476,
+          "primitive_calls": 6,
+          "total_calls": 6,
+          "total_time": 0.005272878
+        },
+        {
+          "cumulative_time": 0.005806625,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py",
+          "function": "_exec_single_context",
+          "line": 1850,
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "total_time": 6.46e-06
+        },
+        {
+          "cumulative_time": 0.005629417,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py",
+          "function": "do_execute",
+          "line": 951,
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "total_time": 2.2920000000000002e-06
+        },
+        {
+          "cumulative_time": 0.005627125,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/psycopg/cursor.py",
+          "function": "execute",
+          "line": 100,
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "total_time": 3.041e-06
+        },
+        {
+          "cumulative_time": 0.000527291,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/psycopg/_cursor_base.py",
+          "function": "_execute_gen",
+          "line": 195,
+          "primitive_calls": 7,
+          "total_calls": 7,
+          "total_time": 9.293e-06
+        },
+        {
+          "cumulative_time": 0.0003935,
+          "filename": "~",
+          "function": "<built-in method builtins.next>",
+          "line": 0,
+          "primitive_calls": 5,
+          "total_calls": 15,
+          "total_time": 4.834000000000001e-06
+        }
+      ],
+      "top_self_time": [
+        {
+          "cumulative_time": 0.005828418,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/psycopg/connection.py",
+          "function": "wait",
+          "line": 476,
+          "primitive_calls": 6,
+          "total_calls": 6,
+          "total_time": 0.005272878
+        },
+        {
+          "cumulative_time": 0.00012105500000000001,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/repository.py",
+          "function": "<genexpr>",
+          "line": 1400,
+          "primitive_calls": 769,
+          "total_calls": 769,
+          "total_time": 0.00012105500000000001
+        },
+        {
+          "cumulative_time": 0.000179667,
+          "filename": "~",
+          "function": "<method 'sub' of 're.Pattern' objects>",
+          "line": 0,
+          "primitive_calls": 6,
+          "total_calls": 6,
+          "total_time": 7.850000000000001e-05
+        },
+        {
+          "cumulative_time": 0.000177042,
+          "filename": "~",
+          "function": "<method 'join' of 'str' objects>",
+          "line": 0,
+          "primitive_calls": 5,
+          "total_calls": 5,
+          "total_time": 5.5987000000000005e-05
+        },
+        {
+          "cumulative_time": 0.007058834000000001,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/repository.py",
+          "function": "search_sections",
+          "line": 1333,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 5.3627e-05
+        },
+        {
+          "cumulative_time": 0.000126791,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/psycopg/_cursor_base.py",
+          "function": "_maybe_prepare_gen",
+          "line": 275,
+          "primitive_calls": 5,
+          "total_calls": 5,
+          "total_time": 5.3416000000000005e-05
+        },
+        {
+          "cumulative_time": 4.9500000000000004e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/dev_benchmarks.py",
+          "function": "_vector",
+          "line": 344,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 4.8501e-05
+        },
+        {
+          "cumulative_time": 7.8584e-05,
+          "filename": "/Users/arslnb/codebase/miniconda3/lib/python3.13/re/_parser.py",
+          "function": "_parse",
+          "line": 511,
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "total_time": 3.6871e-05
+        },
+        {
+          "cumulative_time": 4.1709e-05,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/psycopg/_connection_base.py",
+          "function": "_exec_command",
+          "line": 445,
+          "primitive_calls": 8,
+          "total_calls": 8,
+          "total_time": 3.5126e-05
+        },
+        {
+          "cumulative_time": 4.2541000000000005e-05,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/psycopg/_queries.py",
+          "function": "_split_query",
+          "line": 376,
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "total_time": 2.8535e-05
+        },
+        {
+          "cumulative_time": 4.4124e-05,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/sqlalchemy/event/attr.py",
+          "function": "update_subclass",
+          "line": 210,
+          "primitive_calls": 25,
+          "total_calls": 25,
+          "total_time": 2.5746e-05
+        },
+        {
+          "cumulative_time": 0.000284626,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/psycopg/_queries.py",
+          "function": "dump",
+          "line": 94,
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "total_time": 2.4292e-05
+        },
+        {
+          "cumulative_time": 3.5792000000000006e-05,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/psycopg/_cursor_base.py",
+          "function": "_select_current_result",
+          "line": 504,
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "total_time": 2.3043000000000003e-05
+        },
+        {
+          "cumulative_time": 2.2624000000000002e-05,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/psycopg/cursor.py",
+          "function": "fetchall",
+          "line": 274,
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "total_time": 2.1167000000000002e-05
+        },
+        {
+          "cumulative_time": 5.525e-05,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/sqlalchemy/sql/compiler.py",
+          "function": "visit_bindparam",
+          "line": 3683,
+          "primitive_calls": 9,
+          "total_calls": 9,
+          "total_time": 2.0373e-05
+        }
+      ],
+      "wall_time_seconds": 0.007152042002417147
+    },
+    "worker_idle_iteration": {
+      "top_cumulative": [
+        {
+          "cumulative_time": 3.3292e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/dev_benchmarks.py",
+          "function": "<lambda>",
+          "line": 1198,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 3.75e-06
+        },
+        {
+          "cumulative_time": 1.5417e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/worker.py",
+          "function": "run_one_iteration",
+          "line": 66,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 4.875e-06
+        },
+        {
+          "cumulative_time": 1.4125000000000001e-05,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/pydantic/main.py",
+          "function": "model_copy",
+          "line": 393,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 3.1670000000000003e-06
+        },
+        {
+          "cumulative_time": 1.0083e-05,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/pydantic/main.py",
+          "function": "__copy__",
+          "line": 971,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 5.2090000000000004e-06
+        },
+        {
+          "cumulative_time": 7.542000000000001e-06,
+          "filename": "~",
+          "function": "<method 'disable' of '_lsprof.Profiler' objects>",
+          "line": 0,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 7.542000000000001e-06
+        },
+        {
+          "cumulative_time": 4.417e-06,
+          "filename": "/Users/arslnb/codebase/miniconda3/lib/python3.13/copy.py",
+          "function": "copy",
+          "line": 62,
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "total_time": 2.5010000000000003e-06
+        },
+        {
+          "cumulative_time": 4.292000000000001e-06,
+          "filename": "/Users/arslnb/codebase/miniconda3/lib/python3.13/logging/__init__.py",
+          "function": "debug",
+          "line": 1497,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 1.083e-06
+        },
+        {
+          "cumulative_time": 4.208e-06,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/service.py",
+          "function": "cleanup_expired_results",
+          "line": 2481,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 7.91e-07
+        },
+        {
+          "cumulative_time": 3.417e-06,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/repository.py",
+          "function": "cleanup_expired_results",
+          "line": 2760,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 8.340000000000001e-07
+        },
+        {
+          "cumulative_time": 3.209e-06,
+          "filename": "/Users/arslnb/codebase/miniconda3/lib/python3.13/logging/__init__.py",
+          "function": "isEnabledFor",
+          "line": 1764,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 2.4170000000000003e-06
+        },
+        {
+          "cumulative_time": 2.5e-06,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/utils.py",
+          "function": "utcnow",
+          "line": 12,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 7.92e-07
+        },
+        {
+          "cumulative_time": 1.9590000000000002e-06,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/service.py",
+          "function": "process_next_job",
+          "line": 1933,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 1.168e-06
+        },
+        {
+          "cumulative_time": 1.7080000000000002e-06,
+          "filename": "~",
+          "function": "<built-in method now>",
+          "line": 0,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 1.7080000000000002e-06
+        },
+        {
+          "cumulative_time": 1.25e-06,
+          "filename": "~",
+          "function": "<method 'copy' of 'dict' objects>",
+          "line": 0,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 1.25e-06
+        },
+        {
+          "cumulative_time": 7.91e-07,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/repository.py",
+          "function": "claim_pending_job",
+          "line": 2737,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 7.08e-07
+        }
+      ],
+      "top_self_time": [
+        {
+          "cumulative_time": 7.542000000000001e-06,
+          "filename": "~",
+          "function": "<method 'disable' of '_lsprof.Profiler' objects>",
+          "line": 0,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 7.542000000000001e-06
+        },
+        {
+          "cumulative_time": 1.0083e-05,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/pydantic/main.py",
+          "function": "__copy__",
+          "line": 971,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 5.2090000000000004e-06
+        },
+        {
+          "cumulative_time": 1.5417e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/worker.py",
+          "function": "run_one_iteration",
+          "line": 66,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 4.875e-06
+        },
+        {
+          "cumulative_time": 3.3292e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/dev_benchmarks.py",
+          "function": "<lambda>",
+          "line": 1198,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 3.75e-06
+        },
+        {
+          "cumulative_time": 1.4125000000000001e-05,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/pydantic/main.py",
+          "function": "model_copy",
+          "line": 393,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 3.1670000000000003e-06
+        },
+        {
+          "cumulative_time": 4.417e-06,
+          "filename": "/Users/arslnb/codebase/miniconda3/lib/python3.13/copy.py",
+          "function": "copy",
+          "line": 62,
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "total_time": 2.5010000000000003e-06
+        },
+        {
+          "cumulative_time": 3.209e-06,
+          "filename": "/Users/arslnb/codebase/miniconda3/lib/python3.13/logging/__init__.py",
+          "function": "isEnabledFor",
+          "line": 1764,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 2.4170000000000003e-06
+        },
+        {
+          "cumulative_time": 1.7080000000000002e-06,
+          "filename": "~",
+          "function": "<built-in method now>",
+          "line": 0,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 1.7080000000000002e-06
+        },
+        {
+          "cumulative_time": 1.25e-06,
+          "filename": "~",
+          "function": "<method 'copy' of 'dict' objects>",
+          "line": 0,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 1.25e-06
+        },
+        {
+          "cumulative_time": 1.9590000000000002e-06,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/service.py",
+          "function": "process_next_job",
+          "line": 1933,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 1.168e-06
+        },
+        {
+          "cumulative_time": 4.292000000000001e-06,
+          "filename": "/Users/arslnb/codebase/miniconda3/lib/python3.13/logging/__init__.py",
+          "function": "debug",
+          "line": 1497,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 1.083e-06
+        },
+        {
+          "cumulative_time": 3.417e-06,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/repository.py",
+          "function": "cleanup_expired_results",
+          "line": 2760,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 8.340000000000001e-07
+        },
+        {
+          "cumulative_time": 2.5e-06,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/utils.py",
+          "function": "utcnow",
+          "line": 12,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 7.92e-07
+        },
+        {
+          "cumulative_time": 4.208e-06,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/service.py",
+          "function": "cleanup_expired_results",
+          "line": 2481,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 7.91e-07
+        },
+        {
+          "cumulative_time": 7.91e-07,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/repository.py",
+          "function": "claim_pending_job",
+          "line": 2737,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 7.08e-07
+        }
+      ],
+      "wall_time_seconds": 5.4540985729545355e-05
+    },
+    "worker_process_job": {
+      "top_cumulative": [
+        {
+          "cumulative_time": 0.00036725,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/service.py",
+          "function": "process_next_job",
+          "line": 1933,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 1.0377e-05
+        },
+        {
+          "cumulative_time": 0.000333458,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/service.py",
+          "function": "index_arxiv_paper",
+          "line": 2014,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 2.5917000000000003e-05
+        },
+        {
+          "cumulative_time": 0.000194667,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/dev_benchmarks.py",
+          "function": "_vector",
+          "line": 344,
+          "primitive_calls": 4,
+          "total_calls": 4,
+          "total_time": 0.00019112500000000002
+        },
+        {
+          "cumulative_time": 0.000146708,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/dev_benchmarks.py",
+          "function": "encode_batch",
+          "line": 352,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 9.570000000000001e-07
+        },
+        {
+          "cumulative_time": 5e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/dev_benchmarks.py",
+          "function": "encode_paper",
+          "line": 355,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 1.0840000000000001e-06
+        },
+        {
+          "cumulative_time": 4.0833e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/repository.py",
+          "function": "upsert_paper",
+          "line": 2085,
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "total_time": 7.1660000000000005e-06
+        },
+        {
+          "cumulative_time": 3.0084000000000002e-05,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/pydantic/main.py",
+          "function": "model_copy",
+          "line": 393,
+          "primitive_calls": 4,
+          "total_calls": 4,
+          "total_time": 5.377e-06
+        },
+        {
+          "cumulative_time": 2.2292000000000003e-05,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/pydantic/main.py",
+          "function": "__copy__",
+          "line": 971,
+          "primitive_calls": 4,
+          "total_calls": 4,
+          "total_time": 7.917e-06
+        },
+        {
+          "cumulative_time": 2.05e-05,
+          "filename": "/Users/arslnb/codebase/miniconda3/lib/python3.13/json/__init__.py",
+          "function": "dumps",
+          "line": 183,
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "total_time": 3.5430000000000002e-06
+        },
+        {
+          "cumulative_time": 1.925e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/repository.py",
+          "function": "replace_text_chunks",
+          "line": 2141,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 2.001e-06
+        },
+        {
+          "cumulative_time": 1.675e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/utils.py",
+          "function": "new_id",
+          "line": 62,
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "total_time": 1.5810000000000002e-06
+        },
+        {
+          "cumulative_time": 1.6416e-05,
+          "filename": "/Users/arslnb/codebase/miniconda3/lib/python3.13/json/encoder.py",
+          "function": "encode",
+          "line": 183,
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "total_time": 3.0420000000000003e-06
+        },
+        {
+          "cumulative_time": 1.4459000000000002e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/repository.py",
+          "function": "claim_pending_job",
+          "line": 2737,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 2.9590000000000004e-06
+        },
+        {
+          "cumulative_time": 1.4334e-05,
+          "filename": "/Users/arslnb/codebase/miniconda3/lib/python3.13/uuid.py",
+          "function": "uuid4",
+          "line": 710,
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "total_time": 4.3750000000000005e-06
+        },
+        {
+          "cumulative_time": 1.3584e-05,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/pydantic/main.py",
+          "function": "model_dump",
+          "line": 427,
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "total_time": 1.8340000000000001e-06
+        }
+      ],
+      "top_self_time": [
+        {
+          "cumulative_time": 0.000194667,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/dev_benchmarks.py",
+          "function": "_vector",
+          "line": 344,
+          "primitive_calls": 4,
+          "total_calls": 4,
+          "total_time": 0.00019112500000000002
+        },
+        {
+          "cumulative_time": 0.000333458,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/service.py",
+          "function": "index_arxiv_paper",
+          "line": 2014,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 2.5917000000000003e-05
+        },
+        {
+          "cumulative_time": 1.25e-05,
+          "filename": "/Users/arslnb/codebase/miniconda3/lib/python3.13/json/encoder.py",
+          "function": "iterencode",
+          "line": 205,
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "total_time": 1.2250000000000001e-05
+        },
+        {
+          "cumulative_time": 1.1750000000000001e-05,
+          "filename": "~",
+          "function": "<method 'to_python' of 'pydantic_core._pydantic_core.SchemaSerializer' objects>",
+          "line": 0,
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "total_time": 1.1750000000000001e-05
+        },
+        {
+          "cumulative_time": 0.00036725,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/service.py",
+          "function": "process_next_job",
+          "line": 1933,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 1.0377e-05
+        },
+        {
+          "cumulative_time": 1.3375000000000002e-05,
+          "filename": "/Users/arslnb/codebase/miniconda3/lib/python3.13/copy.py",
+          "function": "copy",
+          "line": 62,
+          "primitive_calls": 12,
+          "total_calls": 12,
+          "total_time": 1.0292e-05
+        },
+        {
+          "cumulative_time": 2.2292000000000003e-05,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/pydantic/main.py",
+          "function": "__copy__",
+          "line": 971,
+          "primitive_calls": 4,
+          "total_calls": 4,
+          "total_time": 7.917e-06
+        },
+        {
+          "cumulative_time": 4.0833e-05,
+          "filename": "/Users/arslnb/research/paper-ai/paperbase/src/paperbase/repository.py",
+          "function": "upsert_paper",
+          "line": 2085,
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "total_time": 7.1660000000000005e-06
+        },
+        {
+          "cumulative_time": 6.708000000000001e-06,
+          "filename": "~",
+          "function": "<method 'disable' of '_lsprof.Profiler' objects>",
+          "line": 0,
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "total_time": 6.708000000000001e-06
+        },
+        {
+          "cumulative_time": 3.0084000000000002e-05,
+          "filename": "/Users/arslnb/research/paper-ai/.venv/lib/python3.13/site-packages/pydantic/main.py",
+          "function": "model_copy",
+          "line": 393,
+          "primitive_calls": 4,
+          "total_calls": 4,
+          "total_time": 5.377e-06
+        },
+        {
+          "cumulative_time": 4.625000000000001e-06,
+          "filename": "~",
+          "function": "<method 'validate_python' of 'pydantic_core._pydantic_core.SchemaValidator' objects>",
+          "line": 0,
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "total_time": 4.625000000000001e-06
+        },
+        {
+          "cumulative_time": 5.584e-06,
+          "filename": "/Users/arslnb/codebase/miniconda3/lib/python3.13/uuid.py",
+          "function": "__init__",
+          "line": 142,
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "total_time": 4.417e-06
+        },
+        {
+          "cumulative_time": 4.3750000000000005e-06,
+          "filename": "~",
+          "function": "<built-in method posix.urandom>",
+          "line": 0,
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "total_time": 4.3750000000000005e-06
+        },
+        {
+          "cumulative_time": 1.4334e-05,
+          "filename": "/Users/arslnb/codebase/miniconda3/lib/python3.13/uuid.py",
+          "function": "uuid4",
+          "line": 710,
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "total_time": 4.3750000000000005e-06
+        },
+        {
+          "cumulative_time": 2.05e-05,
+          "filename": "/Users/arslnb/codebase/miniconda3/lib/python3.13/json/__init__.py",
+          "function": "dumps",
+          "line": 183,
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "total_time": 3.5430000000000002e-06
+        }
+      ],
+      "wall_time_seconds": 0.00038400001358240843
+    }
+  },
+  "sql_explains": {
+    "best_chunk_for_papers": {
+      "execution_time_ms": 0.08,
+      "plan": {
+        "actual_rows": 3,
+        "actual_total_time": 0.071,
+        "index_name": null,
+        "node_type": "Unique",
+        "plans": [
+          {
+            "actual_rows": 9,
+            "actual_total_time": 0.07,
+            "index_name": null,
+            "node_type": "Incremental Sort",
+            "plans": [
+              {
+                "actual_rows": 9,
+                "actual_total_time": 0.06,
+                "index_name": "ix_text_chunks_paper_id",
+                "node_type": "Index Scan",
+                "plans": [],
+                "relation_name": "text_chunks"
+              }
+            ],
+            "relation_name": null
+          }
+        ],
+        "relation_name": null
+      },
+      "planning_time_ms": 0.053
+    },
+    "claim_pending_job": {
+      "execution_time_ms": 0.008,
+      "plan": {
+        "actual_rows": 0,
+        "actual_total_time": 0.006,
+        "index_name": null,
+        "node_type": "Limit",
+        "plans": [
+          {
+            "actual_rows": 0,
+            "actual_total_time": 0.006,
+            "index_name": null,
+            "node_type": "Sort",
+            "plans": [
+              {
+                "actual_rows": 0,
+                "actual_total_time": 0.004,
+                "index_name": null,
+                "node_type": "Seq Scan",
+                "plans": [],
+                "relation_name": "jobs"
+              }
+            ],
+            "relation_name": null
+          }
+        ],
+        "relation_name": null
+      },
+      "planning_time_ms": 0.112
+    },
+    "grep_result_set": {
+      "execution_time_ms": 0.039,
+      "plan": {
+        "actual_rows": 15,
+        "actual_total_time": 0.032,
+        "index_name": null,
+        "node_type": "Limit",
+        "plans": [
+          {
+            "actual_rows": 15,
+            "actual_total_time": 0.032,
+            "index_name": null,
+            "node_type": "Nested Loop",
+            "plans": [
+              {
+                "actual_rows": 5,
+                "actual_total_time": 0.015,
+                "index_name": null,
+                "node_type": "Nested Loop",
+                "plans": [
+                  {
+                    "actual_rows": 5,
+                    "actual_total_time": 0.005,
+                    "index_name": "ix_result_items_result_set_id",
+                    "node_type": "Index Scan",
+                    "plans": [],
+                    "relation_name": "result_items"
+                  },
+                  {
+                    "actual_rows": 19,
+                    "actual_total_time": 0.001,
+                    "index_name": null,
+                    "node_type": "Seq Scan",
+                    "plans": [],
+                    "relation_name": "papers"
+                  }
+                ],
+                "relation_name": null
+              },
+              {
+                "actual_rows": 3,
+                "actual_total_time": 0.003,
+                "index_name": "ix_text_chunks_paper_id",
+                "node_type": "Index Scan",
+                "plans": [],
+                "relation_name": "text_chunks"
+              }
+            ],
+            "relation_name": null
+          }
+        ],
+        "relation_name": null
+      },
+      "planning_time_ms": 0.413
+    },
+    "search_local": {
+      "lexical": {
+        "execution_time_ms": 46.261,
+        "plan": {
+          "actual_rows": 6,
+          "actual_total_time": 45.879,
+          "index_name": null,
+          "node_type": "Limit",
+          "plans": [
+            {
+              "actual_rows": 6,
+              "actual_total_time": 45.876,
+              "index_name": null,
+              "node_type": "Sort",
+              "plans": [
+                {
+                  "actual_rows": 6,
+                  "actual_total_time": 45.853,
+                  "index_name": null,
+                  "node_type": "Seq Scan",
+                  "plans": [],
+                  "relation_name": "papers"
+                }
+              ],
+              "relation_name": null
+            }
+          ],
+          "relation_name": null
+        },
+        "planning_time_ms": 1.613
+      },
+      "vector": {
+        "execution_time_ms": 0.019,
+        "plan": {
+          "actual_rows": 0,
+          "actual_total_time": 0.009,
+          "index_name": null,
+          "node_type": "Limit",
+          "plans": [
+            {
+              "actual_rows": 0,
+              "actual_total_time": 0.009,
+              "index_name": null,
+              "node_type": "Sort",
+              "plans": [
+                {
+                  "actual_rows": 0,
+                  "actual_total_time": 0.006,
+                  "index_name": null,
+                  "node_type": "Seq Scan",
+                  "plans": [],
+                  "relation_name": "papers"
+                }
+              ],
+              "relation_name": null
+            }
+          ],
+          "relation_name": null
+        },
+        "planning_time_ms": 0.061
+      }
+    },
+    "search_sections": {
+      "lexical": {
+        "execution_time_ms": 0.105,
+        "plan": {
+          "actual_rows": 9,
+          "actual_total_time": 0.096,
+          "index_name": null,
+          "node_type": "Limit",
+          "plans": [
+            {
+              "actual_rows": 9,
+              "actual_total_time": 0.095,
+              "index_name": null,
+              "node_type": "Sort",
+              "plans": [
+                {
+                  "actual_rows": 9,
+                  "actual_total_time": 0.087,
+                  "index_name": null,
+                  "node_type": "Hash Join",
+                  "plans": [
+                    {
+                      "actual_rows": 21,
+                      "actual_total_time": 0.006,
+                      "index_name": null,
+                      "node_type": "Seq Scan",
+                      "plans": [],
+                      "relation_name": "papers"
+                    },
+                    {
+                      "actual_rows": 9,
+                      "actual_total_time": 0.052,
+                      "index_name": null,
+                      "node_type": "Hash",
+                      "plans": [
+                        {
+                          "actual_rows": 9,
+                          "actual_total_time": 0.049,
+                          "index_name": "ix_text_chunks_paper_id",
+                          "node_type": "Index Scan",
+                          "plans": [],
+                          "relation_name": "text_chunks"
+                        }
+                      ],
+                      "relation_name": null
+                    }
+                  ],
+                  "relation_name": null
+                }
+              ],
+              "relation_name": null
+            }
+          ],
+          "relation_name": null
+        },
+        "planning_time_ms": 0.35
+      },
+      "vector": {
+        "execution_time_ms": 0.054,
+        "plan": {
+          "actual_rows": 9,
+          "actual_total_time": 0.05,
+          "index_name": null,
+          "node_type": "Limit",
+          "plans": [
+            {
+              "actual_rows": 9,
+              "actual_total_time": 0.049,
+              "index_name": null,
+              "node_type": "Sort",
+              "plans": [
+                {
+                  "actual_rows": 9,
+                  "actual_total_time": 0.048,
+                  "index_name": "ix_text_chunks_paper_id",
+                  "node_type": "Index Scan",
+                  "plans": [],
+                  "relation_name": "text_chunks"
+                }
+              ],
+              "relation_name": null
+            }
+          ],
+          "relation_name": null
+        },
+        "planning_time_ms": 0.029
+      }
+    },
+    "suggest_papers": {
+      "execution_time_ms": 0.079,
+      "plan": {
+        "actual_rows": 6,
+        "actual_total_time": 0.071,
+        "index_name": null,
+        "node_type": "Limit",
+        "plans": [
+          {
+            "actual_rows": 6,
+            "actual_total_time": 0.071,
+            "index_name": null,
+            "node_type": "Sort",
+            "plans": [
+              {
+                "actual_rows": 6,
+                "actual_total_time": 0.065,
+                "index_name": null,
+                "node_type": "Seq Scan",
+                "plans": [],
+                "relation_name": "papers"
+              }
+            ],
+            "relation_name": null
+          }
+        ],
+        "relation_name": null
+      },
+      "planning_time_ms": 0.123
+    }
+  }
+}

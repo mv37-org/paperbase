@@ -7,6 +7,7 @@ import shutil
 import socket
 import sys
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Iterable
 
@@ -15,6 +16,7 @@ from psycopg import sql
 from sqlalchemy.engine import URL, make_url
 
 from .config import Settings, get_settings, repo_root, resolve_repo_path, settings_env_file
+from .dev_benchmarks import profile_hotpaths, record_test_times
 from .repository import build_repository
 
 
@@ -30,6 +32,12 @@ class CheckResult:
     name: str
     status: str
     detail: str
+
+
+class DoctorMode(StrEnum):
+    DEV = "dev"
+    TEST = "test"
+    PROFILE = "profile"
 
 
 def _repo_root() -> Path:
@@ -116,10 +124,36 @@ def _port_available(host: str, port: int) -> bool:
     return True
 
 
-def _check_results(settings: Settings) -> Iterable[CheckResult]:
-    env_file = _repo_env_file()
+def _storage_checks(settings: Settings, *, root: Path, mode: DoctorMode) -> Iterable[CheckResult]:
     storage_root = _local_storage_root(settings)
+    if settings.storage_backend != "local":
+        if mode is DoctorMode.PROFILE:
+            yield CheckResult(
+                "storage backend",
+                "fail",
+                f"`paperbase-dev doctor --mode {mode.value}` requires PAPERBASE_STORAGE_BACKEND=local, got {settings.storage_backend!r}",
+            )
+            return
+        yield CheckResult("storage backend", "ok", f"Configured backend: {settings.storage_backend}")
+        return
+
+    try:
+        _assert_safe_storage_root(storage_root, root)
+    except ValueError as exc:
+        yield CheckResult("storage root", "fail", str(exc))
+        return
+
+    exists_detail = "exists" if storage_root.exists() else "will be created by `paperbase-dev init-local`"
+    yield CheckResult("storage backend", "ok", "Local object storage")
+    yield CheckResult("storage root", "ok", f"{storage_root} ({exists_detail})")
+
+
+def _check_results(settings: Settings, *, mode: DoctorMode) -> Iterable[CheckResult]:
+    env_file = _repo_env_file()
     database_url = make_url(settings.database_url)
+    root = _repo_root()
+    supports_local_profile = mode in {DoctorMode.TEST, DoctorMode.PROFILE}
+    expected_db = "postgresql" if supports_local_profile else "configured"
 
     yield CheckResult(
         "vp",
@@ -136,15 +170,7 @@ def _check_results(settings: Settings) -> Iterable[CheckResult]:
         "ok" if env_file.exists() else "fail",
         str(env_file),
     )
-
-    if settings.storage_backend != "local":
-        yield CheckResult(
-            "storage backend",
-            "fail",
-            f"Expected PAPERBASE_STORAGE_BACKEND=local for local development, got {settings.storage_backend!r}",
-        )
-    else:
-        yield CheckResult("storage backend", "ok", f"Local storage root: {storage_root}")
+    yield from _storage_checks(settings, root=root, mode=mode)
 
     try:
         _assert_local_database_url(database_url)
@@ -152,7 +178,7 @@ def _check_results(settings: Settings) -> Iterable[CheckResult]:
         yield CheckResult("database url", "fail", str(exc))
         return
 
-    yield CheckResult("database url", "ok", str(database_url))
+    yield CheckResult("database url", "ok", f"{database_url} ({expected_db})")
 
     for name, port in (("api port", API_PORT), ("chat port", CHAT_PORT), ("plugin port", PLUGIN_MCP_PORT)):
         status = "ok" if _port_available(API_HOST, port) else "warn"
@@ -193,12 +219,13 @@ def _check_results(settings: Settings) -> Iterable[CheckResult]:
         )
 
 
-def doctor() -> int:
+def doctor(*, mode: DoctorMode) -> int:
     env_file = _repo_env_file()
     settings = get_settings() if env_file.exists() else Settings()
     failures = 0
     warnings = 0
-    for result in _check_results(settings):
+    print(f"Running doctor in {mode.value} mode.")
+    for result in _check_results(settings, mode=mode):
         print(f"[{result.status.upper():4}] {result.name}: {result.detail}")
         if result.status == "fail":
             failures += 1
@@ -303,9 +330,30 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Local developer helpers for paperbase.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser("doctor", help="Verify local prerequisites and the repo env file.")
+    doctor_parser = subparsers.add_parser("doctor", help="Verify local prerequisites and the repo env file.")
+    doctor_parser.add_argument(
+        "--mode",
+        choices=[mode.value for mode in DoctorMode],
+        default=DoctorMode.DEV.value,
+        help="Validation profile for the current workflow.",
+    )
     subparsers.add_parser("init-local", help="Create the local database, storage root, and schema.")
     subparsers.add_parser("flush-local", help="Reset the local database schema and storage root.")
+
+    timing_parser = subparsers.add_parser(
+        "record-test-times",
+        help="Capture suite timings, compare them to the committed baseline, and optionally update that baseline.",
+    )
+    timing_parser.add_argument("--backend-junit", required=True, type=Path)
+    timing_parser.add_argument("--plugin-junit", required=True, type=Path)
+    timing_parser.add_argument("--chat-json", required=True, type=Path)
+    timing_parser.add_argument("--update-baseline", action="store_true")
+
+    profile_parser = subparsers.add_parser(
+        "profile",
+        help="Run deterministic hotpath profiling and compare the results to the committed baseline.",
+    )
+    profile_parser.add_argument("--update-baseline", action="store_true")
     return parser
 
 
@@ -314,11 +362,20 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "doctor":
-        return doctor()
+        return doctor(mode=DoctorMode(args.mode))
     if args.command == "init-local":
         return init_local()
     if args.command == "flush-local":
         return flush_local()
+    if args.command == "record-test-times":
+        return record_test_times(
+            backend_junit=args.backend_junit.resolve(),
+            plugin_junit=args.plugin_junit.resolve(),
+            chat_json=args.chat_json.resolve(),
+            update_baseline=args.update_baseline,
+        )
+    if args.command == "profile":
+        return profile_hotpaths(settings=_settings(), update_baseline=args.update_baseline)
 
     parser.error(f"Unsupported command: {args.command}")
     return 2
