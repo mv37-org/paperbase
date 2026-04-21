@@ -12,6 +12,7 @@ def test_home_renders_static_shell():
 
     assert response.status_code == 200
     assert "paperbase" in response.text
+    assert "Research patterns for building better AI agents and systems." in response.text
     assert "Paperbase helps AI researchers and agent builders keep up with fast-moving work without losing track of the original sources." in response.text
     assert "Ask broad questions, compare ideas across papers, and pull out the design patterns that matter" in response.text
     assert 'href="https://mv37.org"' in response.text

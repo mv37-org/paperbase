@@ -71,11 +71,11 @@ button, input, textarea {
 
 .landing-subtitle {
   margin: 10px 0 28px;
-  font-size: 15px;
+  font-size: 13px;
   color: rgba(27, 22, 17, 0.76);
   font-style: normal;
-  max-width: 34rem;
-  line-height: 1.55;
+  max-width: 28rem;
+  line-height: 1.45;
 }
 
 .landing-copy,
@@ -595,6 +595,27 @@ textarea {
   gap: 10px;
 }
 
+.modal-view .stack {
+  gap: 8px;
+}
+
+.modal-view .stack input,
+.modal-view .stack button,
+.modal-view .oauth-button {
+  min-height: 32px;
+  height: 32px;
+  max-height: 32px;
+  padding: 0 10px;
+  font-size: 13px;
+}
+
+.modal-view .stack .primary-button {
+  margin-top: 4px;
+  background: var(--blue);
+  border-color: var(--blue-border);
+  color: #ffffff;
+}
+
 .oauth-button svg {
   width: 18px;
   height: 18px;
@@ -615,8 +636,14 @@ textarea {
   color: var(--muted);
   font-size: 12px;
   cursor: pointer;
-  text-decoration: none;
+  text-decoration: underline;
+  text-underline-offset: 2px;
   transition: color 120ms ease;
+}
+
+.modal-panel .danger-link {
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 .brandline-link:hover,
