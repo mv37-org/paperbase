@@ -672,9 +672,11 @@ textarea::placeholder,
 
 .account-menu {
   position: absolute;
-  right: 0;
+  left: 0;
+  right: auto;
   bottom: calc(100% + 10px);
-  width: min(260px, calc(100vw - 56px));
+  width: 100%;
+  max-width: 100%;
   padding: 8px;
   border-radius: var(--radius);
   border: 1px solid var(--line);
@@ -901,6 +903,7 @@ textarea::placeholder,
 .chat-empty-state {
   max-width: 320px;
   text-align: center;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
 .chat-empty-eyebrow {
@@ -1480,6 +1483,8 @@ textarea:hover,
   }
 
   .app-shell.sidebar-collapsed .account-menu {
+    width: min(240px, calc(100vw - 56px));
+    max-width: min(240px, calc(100vw - 56px));
     right: auto;
     left: calc(100% + 12px);
     bottom: 0;
