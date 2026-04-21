@@ -8,7 +8,9 @@
   --accent: #1e1d1a;
   --accent-soft: rgba(27, 22, 17, 0.04);
   --shadow: 0 12px 32px rgba(25, 25, 25, 0.06);
-  --radius: 18px;
+  --radius: 4px;
+  --blue: #2563eb;
+  --blue-border: #1d4ed8;
 }
 
 * {
@@ -62,6 +64,11 @@ button, input, textarea {
   margin-bottom: 36px;
 }
 
+.brandline-link {
+  color: var(--text);
+  text-decoration: none;
+}
+
 .landing-title {
   margin: 0;
   font-size: clamp(34px, 5vw, 48px);
@@ -71,10 +78,10 @@ button, input, textarea {
 
 .landing-subtitle {
   margin: 10px 0 28px;
-  font-size: 18px;
+  font-size: 17px;
   color: var(--muted);
   font-style: italic;
-  max-width: 30rem;
+  max-width: 34rem;
 }
 
 .landing-copy,
@@ -99,7 +106,7 @@ button, input, textarea {
   padding: 7px 8px;
   background: var(--paper);
   border: 1px solid var(--line);
-  border-radius: 14px;
+  border-radius: var(--radius);
   box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
 }
 
@@ -110,7 +117,7 @@ button, input, textarea {
 .oauth-button,
 .stack button {
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius);
   background: var(--paper-strong);
   color: var(--text);
   padding: 9px 14px;
@@ -133,10 +140,11 @@ button, input, textarea {
 .stack input,
 textarea {
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius);
   background: var(--paper);
   padding: 10px 12px;
   color: var(--text);
+  font-size: 14px;
 }
 
 .prompt-input {
@@ -144,6 +152,12 @@ textarea {
   background: transparent;
   padding: 0;
   min-width: 0;
+}
+
+#landing-start-button {
+  background: var(--blue);
+  border-color: var(--blue-border);
+  color: #ffffff;
 }
 
 .examples {
@@ -164,6 +178,13 @@ textarea {
   margin-top: 12px;
 }
 
+.section-subtitle {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
 .example-pill,
 .thread-card,
 .doc-card,
@@ -172,7 +193,7 @@ textarea {
   text-align: left;
   border: 1px solid var(--line);
   background: var(--paper);
-  border-radius: 14px;
+  border-radius: var(--radius);
 }
 
 .example-pill {
@@ -294,7 +315,7 @@ textarea {
   max-width: 760px;
   padding: 16px 18px;
   border: 1px solid var(--line);
-  border-radius: 18px;
+  border-radius: var(--radius);
   background: var(--paper);
   line-height: 1.65;
   white-space: pre-wrap;
@@ -320,7 +341,7 @@ textarea {
 
 .citation-card {
   padding: 10px 12px;
-  border-radius: 12px;
+  border-radius: var(--radius);
   background: var(--accent-soft);
   border: 1px solid var(--line);
   min-width: 220px;
@@ -394,7 +415,7 @@ textarea {
   position: relative;
   width: min(460px, calc(100vw - 32px));
   padding: 22px;
-  border-radius: 18px;
+  border-radius: var(--radius);
   background: var(--paper-strong);
   border: 1px solid var(--line);
   box-shadow: var(--shadow);
@@ -421,7 +442,7 @@ textarea {
 .modal-tab {
   border: 1px solid var(--line);
   background: transparent;
-  border-radius: 999px;
+  border-radius: var(--radius);
   padding: 8px 12px;
   cursor: pointer;
 }

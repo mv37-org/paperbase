@@ -12,8 +12,9 @@ def test_home_renders_static_shell():
 
     assert response.status_code == 200
     assert "paperbase" in response.text
-    assert "Use current AI research to build better agents, evals, and systems." in response.text
+    assert "A research workspace for turning the latest papers on agents, evals, retrieval, memory, and inference into concrete decisions for the AI systems you build." in response.text
     assert "Attach your own notes or drafts, compare them with the literature" in response.text
+    assert 'href="https://mv37.org"' in response.text
     assert "Continue with Google" in response.text
     assert "__PAPERBASE_BASE_URL__" not in response.text
 
