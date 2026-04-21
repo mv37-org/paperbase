@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from paperbase.api import _resolve_bind_address, app
-from paperbase.config import Settings
+from paperbase.config import Settings, get_settings
 from paperbase.extractors import ExtractionOutput, FigureArtifact, RawArtifact, SectionArtifact, TableArtifact
 from paperbase.models import PaperMetadata, SearchRequest, SearchSectionRequest
 from paperbase.repository import MemoryPaperRepository
@@ -26,10 +26,38 @@ class FakeEmailSender:
 class FakeChatModel:
     def __init__(self) -> None:
         self.prompts: list[str] = []
+        self.stream_chunks: list[str] = ["Grounded ", "answer with citations [S1]"]
+        self.fail_stream_after_chunks: int | None = None
 
     def complete(self, *, api_key: str, prompt: str, system_prompt: str) -> str:
         self.prompts.append(prompt)
         return f"Grounded answer with citations [S1]\n\nAPI key used: {api_key[:6]}"
+
+    def stream_complete(self, *, api_key: str, prompt: str, system_prompt: str):
+        self.prompts.append(prompt)
+        for index, chunk in enumerate(self.stream_chunks):
+            if self.fail_stream_after_chunks is not None and index >= self.fail_stream_after_chunks:
+                raise RuntimeError("stream blew up")
+            yield chunk
+
+
+def _parse_sse_events(body: str) -> list[tuple[str, dict]]:
+    events: list[tuple[str, dict]] = []
+    for block in body.strip().split("\n\n"):
+        event_name = ""
+        payload = ""
+        for line in block.splitlines():
+            if line.startswith("event:"):
+                event_name = line.split(":", 1)[1].strip()
+            elif line.startswith("data:"):
+                payload = line.split(":", 1)[1].strip()
+        if event_name and payload:
+            events.append((event_name, json.loads(payload)))
+    return events
+
+
+def _auth_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {get_settings().api_key}"}
 
 
 @pytest.fixture
@@ -256,7 +284,7 @@ def test_summarize_top_cited_uses_stable_paging(monkeypatch):
 def test_api_flow_for_jobs_and_results(monkeypatch, service: PaperbaseService):
     app.dependency_overrides[get_service] = lambda: service
     client = TestClient(app)
-    headers = {"Authorization": "Bearer development-token"}
+    headers = _auth_headers()
     paper = _sample_paper("2401.55555", title="Queued Paper", abstract="Queued indexing")
 
     monkeypatch.setattr("paperbase.service.sources.get_paper_details", lambda arxiv_id: paper)
@@ -367,7 +395,7 @@ def test_probe_integrations_route_returns_503_on_storage_failure():
     app.dependency_overrides[get_service] = lambda: service
     client = TestClient(app)
 
-    response = client.post("/v1/debug/integrations", headers={"Authorization": "Bearer development-token"})
+    response = client.post("/v1/debug/integrations", headers=_auth_headers())
 
     assert response.status_code == 503
     assert response.json()["database"]["ok"] is True
@@ -918,6 +946,175 @@ def test_browser_uploads_and_chat_require_api_key_after_free_quota(monkeypatch, 
     assert resumed.status_code == 200
     assert resumed.json()["state"] == "completed"
     assert any("S1" in prompt for prompt in chat_model.prompts)
+
+    app.dependency_overrides.clear()
+
+
+def test_browser_chat_stream_emits_citations_and_completion(monkeypatch, browser_service):
+    service, _, _ = browser_service
+    app.dependency_overrides[get_service] = lambda: service
+    client = TestClient(app)
+
+    signup = client.post(
+        "/v1/browser/auth/signup",
+        json={"email": "stream@example.com", "password": "topsecret123", "display_name": "Stream User"},
+    )
+    assert signup.status_code == 200
+    csrf_headers = {"X-Paperbase-CSRF": signup.json()["csrf_token"]}
+
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda paper: _rich_extraction(text="## Methods\n\nMethods section explains grounding and citations."),
+    )
+    service.index_arxiv_paper(
+        "2401.88888",
+        paper=_sample_paper("2401.88888", title="Stream Grounding Paper", abstract="A paper about streaming citations"),
+    )
+
+    thread = client.post("/v1/browser/chats", json={"title": "New chat"}, headers=csrf_headers).json()
+    thread_id = thread["thread_id"]
+
+    with client.stream(
+        "POST",
+        f"/v1/browser/chats/{thread_id}/messages/stream",
+        json={"content": "Explain the methods grounding with citations", "tag_filters": []},
+        headers=csrf_headers,
+    ) as response:
+        assert response.status_code == 200
+        events = _parse_sse_events("".join(response.iter_text()))
+
+    event_names = [event_name for event_name, _ in events]
+    assert event_names[0] == "assistant_start"
+    assert "delta" in event_names
+    assert event_names[-1] == "done"
+    assert events[0][1]["assistant_message"]["citations"]
+    assert events[-1][1]["assistant_message"]["status"] == "completed"
+
+    refreshed = client.get(f"/v1/browser/chats/{thread_id}").json()
+    assert refreshed["messages"][-1]["status"] == "completed"
+    assert refreshed["messages"][-1]["citations"]
+
+    app.dependency_overrides.clear()
+
+
+def test_browser_chat_stream_handles_api_key_required_without_placeholder(browser_service):
+    service, _, _ = browser_service
+    app.dependency_overrides[get_service] = lambda: service
+    client = TestClient(app)
+
+    signup = client.post(
+        "/v1/browser/auth/signup",
+        json={"email": "stream-gated@example.com", "password": "topsecret123", "display_name": "Gated User"},
+    )
+    assert signup.status_code == 200
+    payload = signup.json()
+    csrf_headers = {"X-Paperbase-CSRF": payload["csrf_token"]}
+    user_id = payload["user"]["user_id"]
+
+    for _ in range(3):
+        service.repository.increment_free_responses_used(user_id)  # type: ignore[attr-defined]
+
+    thread = client.post("/v1/browser/chats", json={"title": "New chat"}, headers=csrf_headers).json()
+    thread_id = thread["thread_id"]
+
+    with client.stream(
+        "POST",
+        f"/v1/browser/chats/{thread_id}/messages/stream",
+        json={"content": "One more answer please", "tag_filters": []},
+        headers=csrf_headers,
+    ) as response:
+        assert response.status_code == 200
+        events = _parse_sse_events("".join(response.iter_text()))
+
+    assert [event_name for event_name, _ in events] == ["api_key_required"]
+    assert events[0][1]["state"] == "api_key_required"
+    assert events[0][1]["assistant_message"] is None
+    assert [message["role"] for message in events[0][1]["thread"]["messages"]] == ["user"]
+
+    app.dependency_overrides.clear()
+
+
+def test_browser_chat_stream_marks_partial_failure(monkeypatch, browser_service):
+    service, _, chat_model = browser_service
+    app.dependency_overrides[get_service] = lambda: service
+    client = TestClient(app)
+
+    signup = client.post(
+        "/v1/browser/auth/signup",
+        json={"email": "stream-fail@example.com", "password": "topsecret123", "display_name": "Fail User"},
+    )
+    assert signup.status_code == 200
+    csrf_headers = {"X-Paperbase-CSRF": signup.json()["csrf_token"]}
+
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda paper: _rich_extraction(text="Methods section explains grounding and citations."),
+    )
+    service.index_arxiv_paper(
+        "2401.99999",
+        paper=_sample_paper("2401.99999", title="Failure Paper", abstract="A paper about stream failure"),
+    )
+    chat_model.fail_stream_after_chunks = 1
+
+    thread = client.post("/v1/browser/chats", json={"title": "New chat"}, headers=csrf_headers).json()
+    thread_id = thread["thread_id"]
+
+    with client.stream(
+        "POST",
+        f"/v1/browser/chats/{thread_id}/messages/stream",
+        json={"content": "Explain the methods grounding with citations", "tag_filters": []},
+        headers=csrf_headers,
+    ) as response:
+        assert response.status_code == 200
+        events = _parse_sse_events("".join(response.iter_text()))
+
+    assert [event_name for event_name, _ in events][:2] == ["assistant_start", "delta"]
+    assert events[-1][0] == "error"
+    refreshed = client.get(f"/v1/browser/chats/{thread_id}").json()
+    assert refreshed["messages"][-1]["status"] == "failed"
+    assert refreshed["messages"][-1]["content_markdown"] == "Grounded"
+
+    app.dependency_overrides.clear()
+
+
+def test_browser_paper_read_endpoints(monkeypatch, browser_service):
+    service, _, _ = browser_service
+    app.dependency_overrides[get_service] = lambda: service
+    client = TestClient(app)
+
+    signup = client.post(
+        "/v1/browser/auth/signup",
+        json={"email": "papers@example.com", "password": "topsecret123", "display_name": "Paper User"},
+    )
+    assert signup.status_code == 200
+
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda paper: _rich_extraction(text="## Introduction\n\nGrounded section content."),
+    )
+    indexed = service.index_arxiv_paper(
+        "2402.00001",
+        paper=_sample_paper("2402.00001", title="Drawer Paper", abstract="A paper for the drawer"),
+    )
+
+    paper = client.get(f"/v1/browser/papers/{indexed.paper_id}")
+    assert paper.status_code == 200
+    assert paper.json()["title"] == "Drawer Paper"
+
+    file_response = client.get(f"/v1/browser/papers/{indexed.paper_id}/files/sections/introduction.md")
+    assert file_response.status_code == 200
+    assert "Grounded section content." in file_response.json()["content"]
+
+    figure = client.get(f"/v1/browser/papers/{indexed.paper_id}/figures/figure-1")
+    assert figure.status_code == 200
+    assert figure.json()["caption"] == "A model architecture."
+
+    table = client.get(f"/v1/browser/papers/{indexed.paper_id}/tables/table-1")
+    assert table.status_code == 200
+    assert table.json()["rows"][1] == ["Paperbase", "1.0"]
 
     app.dependency_overrides.clear()
 

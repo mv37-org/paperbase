@@ -19,6 +19,7 @@ dependencies = [
     "google-genai>=0.3",
     "itsdangerous>=2.2",
     "pgvector>=0.3",
+    "python-multipart>=0.0.20",
     "pydantic>=2.8",
     "pydantic-settings>=2.6",
     "psycopg[binary]>=3.2",

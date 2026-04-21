@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Iterator
 from dataclasses import asdict
+from dataclasses import dataclass
 from datetime import timedelta
 from functools import lru_cache
 from pathlib import Path
@@ -542,6 +544,16 @@ def _query_variants(question: str) -> list[str]:
     return deduped[:5]
 
 
+@dataclass
+class PreparedChatGeneration:
+    thread: ChatThreadResponse
+    user_message: ChatMessageResponse
+    citations: list[ChatCitation]
+    resolved_user: BrowserUser
+    api_key_value: str | None
+    using_free_tier: bool
+
+
 class PaperbaseService:
     def __init__(
         self,
@@ -830,54 +842,91 @@ class PaperbaseService:
             return self.secret_cipher.decrypt(user_key_record["encrypted_api_key"]), False
         return None, False
 
-    def send_chat_message(self, user: BrowserUser, thread_id: str, request: SendChatMessageRequest) -> SendChatMessageResponse:
+    def _prepare_chat_generation(
+        self,
+        *,
+        user: BrowserUser,
+        thread_id: str,
+        request: SendChatMessageRequest,
+    ) -> PreparedChatGeneration:
         thread = self.get_chat_thread(user, thread_id)
+        content = request.content.strip()
         user_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
             thread_id=thread_id,
             role="user",
-            content_markdown=request.content.strip(),
+            content_markdown=content,
         )
         if thread.title == "New chat":
-            self.repository.rename_chat_thread(thread_id=thread_id, title=request.content.strip()[:60])  # type: ignore[attr-defined]
-        citations = self._build_citations(question=request.content, user=user, request=request)
+            self.repository.rename_chat_thread(thread_id=thread_id, title=content[:60])  # type: ignore[attr-defined]
+        citations = self._build_citations(question=content, user=user, request=request)
         resolved_user = self.repository.get_browser_user_by_id(user.user_id) or user  # type: ignore[attr-defined]
         api_key_value, using_free_tier = self._choose_anthropic_api_key(resolved_user)
-        if not api_key_value:
-            refreshed = self.get_chat_thread(user, thread_id)
-            return SendChatMessageResponse(
-                thread=refreshed,
-                assistant_message=None,
-                remaining_free_responses=self._remaining_free_responses(resolved_user),
-                has_anthropic_api_key=self.repository.get_anthropic_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
-                state="api_key_required",
-            )
+        return PreparedChatGeneration(
+            thread=thread,
+            user_message=user_message,
+            citations=citations,
+            resolved_user=resolved_user,
+            api_key_value=api_key_value,
+            using_free_tier=using_free_tier,
+        )
 
+    def _chat_system_prompt(self) -> str:
+        return (
+            "You are Paperbase Chat. Answer using only the provided sources when possible. "
+            "Use rich markdown when it helps: headings, bullets, tables, fenced code blocks, and normal markdown links. "
+            "Always cite source ids inline like [S1]. If the sources are insufficient, say so plainly."
+        )
+
+    def _chat_prompt(self, prepared: PreparedChatGeneration) -> str:
         conversation_lines = []
-        for message in thread.messages[-6:] + [user_message]:
+        for message in prepared.thread.messages[-6:] + [prepared.user_message]:
             conversation_lines.append(f"{message.role.upper()}: {message.content_markdown}")
         sources_block = "\n\n".join(
             f"{citation.source_id} | {citation.source_kind} | {citation.title} | {citation.path}\n{citation.excerpt}"
-            for citation in citations
+            for citation in prepared.citations
         )
-        system_prompt = (
-            "You are Paperbase Chat. Answer using only the provided sources when possible. "
-            "Always cite source ids inline like [S1]. If the sources are insufficient, say so plainly."
-        )
-        prompt = (
+        return (
             "Conversation:\n"
             + "\n".join(conversation_lines)
             + "\n\nSources:\n"
             + sources_block
-            + "\n\nAnswer the final user message. Keep the answer concise, grounded, and cited."
+            + "\n\nAnswer the final user message. Keep the answer concise, grounded, cited, and well-structured in markdown."
         )
-        answer = self.chat_model.complete(api_key=api_key_value, prompt=prompt, system_prompt=system_prompt)
+
+    def _api_key_required_response(
+        self,
+        *,
+        user: BrowserUser,
+        thread_id: str,
+        resolved_user: BrowserUser,
+    ) -> SendChatMessageResponse:
+        refreshed = self.get_chat_thread(user, thread_id)
+        return SendChatMessageResponse(
+            thread=refreshed,
+            assistant_message=None,
+            remaining_free_responses=self._remaining_free_responses(resolved_user),
+            has_anthropic_api_key=self.repository.get_anthropic_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
+            state="api_key_required",
+        )
+
+    def send_chat_message(self, user: BrowserUser, thread_id: str, request: SendChatMessageRequest) -> SendChatMessageResponse:
+        prepared = self._prepare_chat_generation(user=user, thread_id=thread_id, request=request)
+        if not prepared.api_key_value:
+            return self._api_key_required_response(user=user, thread_id=thread_id, resolved_user=prepared.resolved_user)
+
+        answer = self.chat_model.complete(
+            api_key=prepared.api_key_value,
+            prompt=self._chat_prompt(prepared),
+            system_prompt=self._chat_system_prompt(),
+        )
         assistant_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
             thread_id=thread_id,
             role="assistant",
             content_markdown=answer,
-            citations=[citation.model_dump() for citation in citations],
+            citations=[citation.model_dump() for citation in prepared.citations],
         )
-        if using_free_tier:
+        resolved_user = prepared.resolved_user
+        if prepared.using_free_tier:
             resolved_user = self.repository.increment_free_responses_used(user.user_id) or resolved_user  # type: ignore[attr-defined]
         refreshed = self.get_chat_thread(user, thread_id)
         return SendChatMessageResponse(
@@ -886,6 +935,79 @@ class PaperbaseService:
             remaining_free_responses=self._remaining_free_responses(resolved_user),
             has_anthropic_api_key=self.repository.get_anthropic_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
             state="completed",
+        )
+
+    def stream_chat_message(
+        self,
+        user: BrowserUser,
+        thread_id: str,
+        request: SendChatMessageRequest,
+    ) -> Iterator[tuple[str, dict[str, Any]]]:
+        prepared = self._prepare_chat_generation(user=user, thread_id=thread_id, request=request)
+        if not prepared.api_key_value:
+            yield ("api_key_required", self._api_key_required_response(user=user, thread_id=thread_id, resolved_user=prepared.resolved_user).model_dump(mode="json"))
+            return
+
+        assistant_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
+            thread_id=thread_id,
+            role="assistant",
+            content_markdown="",
+            citations=[citation.model_dump() for citation in prepared.citations],
+            status="streaming",
+        )
+        yield ("assistant_start", {"assistant_message": assistant_message.model_dump(mode="json")})
+
+        chunks: list[str] = []
+        try:
+            for delta in self.chat_model.stream_complete(
+                api_key=prepared.api_key_value,
+                prompt=self._chat_prompt(prepared),
+                system_prompt=self._chat_system_prompt(),
+            ):
+                if not delta:
+                    continue
+                chunks.append(delta)
+                yield ("delta", {"message_id": assistant_message.message_id, "delta": delta})
+        except Exception as exc:
+            failed_message = self.repository.update_chat_message(  # type: ignore[attr-defined]
+                assistant_message.message_id,
+                content_markdown="".join(chunks).strip(),
+                status="failed",
+            )
+            logger.exception(
+                "Streaming chat request failed",
+                extra={"event": "chat.model.stream.failed", "thread_id": thread_id, "message_id": assistant_message.message_id},
+            )
+            yield (
+                "error",
+                {
+                    "message_id": failed_message.message_id if failed_message else assistant_message.message_id,
+                    "detail": str(exc) or "Streaming request failed",
+                },
+            )
+            return
+
+        final_message = self.repository.update_chat_message(  # type: ignore[attr-defined]
+            assistant_message.message_id,
+            content_markdown="".join(chunks).strip(),
+            citations=[citation.model_dump() for citation in prepared.citations],
+            status="completed",
+        )
+        if final_message is None:
+            raise RuntimeError("Assistant message vanished during streaming")
+
+        resolved_user = prepared.resolved_user
+        if prepared.using_free_tier:
+            resolved_user = self.repository.increment_free_responses_used(user.user_id) or resolved_user  # type: ignore[attr-defined]
+
+        yield (
+            "done",
+            {
+                "assistant_message": final_message.model_dump(mode="json"),
+                "remaining_free_responses": self._remaining_free_responses(resolved_user),
+                "has_anthropic_api_key": self.repository.get_anthropic_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
+                "state": "completed",
+            },
         )
 
     def enqueue_index_job(self, arxiv_id: str, *, force: bool = False) -> JobResponse:

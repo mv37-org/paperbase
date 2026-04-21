@@ -4,6 +4,10 @@ import type { ChangeEvent, FormEvent, RefObject } from "react";
 import {
   api,
   createThread,
+  getBrowserPaper,
+  getBrowserPaperFigure,
+  getBrowserPaperFile,
+  getBrowserPaperTable,
   getThread,
   googleLoginUrl,
   loadSession,
@@ -12,14 +16,24 @@ import {
   logoutBrowserSession,
   postForm,
   sendThreadMessage,
+  sendThreadMessageStream,
+  StreamingChatError,
   uploadDocument,
 } from "./api";
 import { LandingMentionEditor } from "./LandingMentionEditor";
+import { MarkdownRenderer } from "./MarkdownRenderer";
 import type {
   AuthView,
   BrowserSessionResponse,
+  ChatCitation,
+  ChatMessageResponse,
+  ChatStreamDoneEvent,
   ChatThreadResponse,
   ChatThreadSummary,
+  FigureResponse,
+  FileContentResponse,
+  PaperResponse,
+  TableResponse,
 } from "./types";
 
 const OPEN_TABS_KEY = "paperbase-open-tabs";
@@ -27,6 +41,11 @@ const PENDING_PROMPT_KEY = "paperbase-pending-prompt";
 const SIDEBAR_COLLAPSED_KEY = "paperbase-sidebar-collapsed";
 const FREE_RESPONSE_LIMIT = 3;
 type ModalFlashKind = "error" | "note";
+type PaperDrawerState = { paperId: string; path: string } | null;
+type PaperDrawerContent =
+  | { kind: "markdown"; path: string; file: FileContentResponse }
+  | { kind: "figure"; path: string; figure: FigureResponse }
+  | { kind: "table"; path: string; table: TableResponse };
 
 const AUTH_VIEW_COPY: Record<AuthView, { title: string; caption: string }> = {
   login: { title: "Log in", caption: "Use your account to continue." },
@@ -56,6 +75,61 @@ const EXAMPLES = [
 
 function staticAssetPath(name: string) {
   return `${import.meta.env.BASE_URL}${name.replace(/^\/+/, "")}`;
+}
+
+function createLocalMessage(
+  role: string,
+  content_markdown: string,
+  options: Partial<Pick<ChatMessageResponse, "citations" | "status" | "message_id">> = {},
+): ChatMessageResponse {
+  return {
+    message_id: options.message_id ?? `local-${role}-${Math.random().toString(36).slice(2)}`,
+    role,
+    content_markdown,
+    citations: options.citations ?? [],
+    created_at: new Date().toISOString(),
+    status: options.status ?? "completed",
+  };
+}
+
+function drawerStateFromUrl(): PaperDrawerState {
+  const params = new URLSearchParams(window.location.search);
+  const paperId = params.get("paper");
+  const path = params.get("paperPath");
+  if (!paperId || !path) {
+    return null;
+  }
+  return { paperId, path };
+}
+
+function updateDrawerUrl(nextState: PaperDrawerState) {
+  const params = new URLSearchParams(window.location.search);
+  if (nextState) {
+    params.set("paper", nextState.paperId);
+    params.set("paperPath", nextState.path);
+  } else {
+    params.delete("paper");
+    params.delete("paperPath");
+  }
+  const query = params.toString();
+  const nextUrl = `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`;
+  window.history.pushState({}, "", nextUrl);
+}
+
+function inferDrawerContentKind(path: string) {
+  const figureMatch = path.match(/^figures\/([^/]+)\/caption\.md$/);
+  if (figureMatch) {
+    return { kind: "figure" as const, id: figureMatch[1] };
+  }
+  const tableMatch = path.match(/^tables\/([^/.]+)\.json$/);
+  if (tableMatch) {
+    return { kind: "table" as const, id: tableMatch[1] };
+  }
+  return { kind: "markdown" as const };
+}
+
+function sourceCardId(messageId: string, sourceId: string) {
+  return `source-card-${messageId}-${sourceId}`;
 }
 
 function consumePendingPrompt() {
@@ -169,6 +243,12 @@ export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const [streamingThreadId, setStreamingThreadId] = useState<string | null>(null);
+  const [paperDrawer, setPaperDrawer] = useState<PaperDrawerState>(() => drawerStateFromUrl());
+  const [paperDrawerPaper, setPaperDrawerPaper] = useState<PaperResponse | null>(null);
+  const [paperDrawerContent, setPaperDrawerContent] = useState<PaperDrawerContent | null>(null);
+  const [paperDrawerStatus, setPaperDrawerStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [paperDrawerError, setPaperDrawerError] = useState("");
 
   const sessionRef = useRef<BrowserSessionResponse | null>(null);
   const threadMapRef = useRef<Record<string, ChatThreadResponse>>({});
@@ -176,6 +256,7 @@ export default function App() {
   const appUploadRef = useRef<HTMLInputElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const accountMenuRef = useRef<HTMLDivElement | null>(null);
+  const messageListRef = useRef<HTMLDivElement | null>(null);
 
   useAutosizeTextarea(composerRef, composerInput);
 
@@ -244,6 +325,84 @@ export default function App() {
   const authenticated = Boolean(session?.authenticated);
   const sidebarThreads = useMemo(() => threads.filter(shouldShowThreadInSidebar), [threads]);
   const activeThread = activeThreadId ? threadMap[activeThreadId] ?? null : null;
+  const paperDrawerOpen = Boolean(paperDrawer);
+
+  useEffect(() => {
+    const handlePopState = () => {
+      setPaperDrawer(drawerStateFromUrl());
+    };
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  useEffect(() => {
+    if (!authenticated || !paperDrawer) {
+      setPaperDrawerPaper(null);
+      setPaperDrawerContent(null);
+      setPaperDrawerError("");
+      setPaperDrawerStatus("idle");
+      return;
+    }
+
+    let cancelled = false;
+    setPaperDrawerStatus("loading");
+    setPaperDrawerError("");
+
+    void (async () => {
+      try {
+        const paper = await getBrowserPaper(paperDrawer.paperId);
+        if (cancelled) {
+          return;
+        }
+        setPaperDrawerPaper(paper);
+
+        const target = inferDrawerContentKind(paperDrawer.path);
+        if (target.kind === "figure") {
+          const figure = await getBrowserPaperFigure(paperDrawer.paperId, target.id);
+          if (cancelled) {
+            return;
+          }
+          setPaperDrawerContent({ kind: "figure", path: paperDrawer.path, figure });
+          setPaperDrawerStatus("ready");
+          return;
+        }
+
+        if (target.kind === "table") {
+          const table = await getBrowserPaperTable(paperDrawer.paperId, target.id);
+          if (cancelled) {
+            return;
+          }
+          setPaperDrawerContent({ kind: "table", path: paperDrawer.path, table });
+          setPaperDrawerStatus("ready");
+          return;
+        }
+
+        const file = await getBrowserPaperFile(paperDrawer.paperId, paperDrawer.path);
+        if (cancelled) {
+          return;
+        }
+        setPaperDrawerContent({ kind: "markdown", path: paperDrawer.path, file });
+        setPaperDrawerStatus("ready");
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+        setPaperDrawerStatus("error");
+        setPaperDrawerError(error instanceof Error ? error.message : "Paper content could not be loaded.");
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authenticated, paperDrawer]);
+
+  useEffect(() => {
+    if (!messageListRef.current) {
+      return;
+    }
+    messageListRef.current.scrollTop = messageListRef.current.scrollHeight;
+  }, [activeThread]);
 
   const sessionSummary = useMemo(() => {
     if (!session?.user) {
@@ -286,6 +445,37 @@ export default function App() {
     setAuthModalOpen(false);
     clearFlash();
   }, [clearFlash]);
+
+  const closePaperDrawer = useCallback(() => {
+    setPaperDrawer(null);
+    updateDrawerUrl(null);
+  }, []);
+
+  const openPaperDrawer = useCallback((paperId: string, path: string) => {
+    const nextState = { paperId, path };
+    setPaperDrawer(nextState);
+    updateDrawerUrl(nextState);
+  }, []);
+
+  const updateThread = useCallback((threadId: string, updater: (thread: ChatThreadResponse | null) => ChatThreadResponse) => {
+    setThreadMap((current) => ({
+      ...current,
+      [threadId]: updater(current[threadId] ?? null),
+    }));
+  }, []);
+
+  const handleCitationClick = useCallback(
+    (message: ChatMessageResponse, citation: ChatCitation) => {
+      document.getElementById(sourceCardId(message.message_id, citation.source_id))?.scrollIntoView({
+        behavior: "smooth",
+        block: "nearest",
+      });
+      if (citation.paper_id) {
+        openPaperDrawer(citation.paper_id, citation.path);
+      }
+    },
+    [openPaperDrawer],
+  );
 
   const refreshThreads = useCallback(async () => {
     const payload = await loadThreads();
@@ -331,32 +521,192 @@ export default function App() {
 
   const sendMessage = useCallback(
     async (threadId: string, content: string) => {
-      setComposerStatus("Thinking...");
-      const payload = await sendThreadMessage(threadId, {
-        content,
-        include_uploads: includeUploads,
-        include_papers: includePapers,
-      });
-      setThreadMap((current) => ({ ...current, [threadId]: payload.thread }));
-      setSession((current) =>
-        current
-          ? {
-              ...current,
-              remaining_free_responses: payload.remaining_free_responses,
-              has_anthropic_api_key: payload.has_anthropic_api_key,
+      const optimisticUserMessage = createLocalMessage("user", content);
+      const now = new Date().toISOString();
+      let assistantStarted = false;
+      let donePayload: ChatStreamDoneEvent | null = null;
+      let gatingPayload: SendChatMessageResponse | null = null;
+      let streamError: string | null = null;
+      let streamingMessageId: string | null = null;
+
+      updateThread(threadId, (thread) => ({
+        thread_id: thread?.thread_id ?? threadId,
+        title: (thread?.title ?? "New chat") === "New chat" ? content.slice(0, 60) : thread?.title ?? "New chat",
+        created_at: thread?.created_at ?? now,
+        updated_at: now,
+        messages: [...(thread?.messages ?? []), optimisticUserMessage],
+      }));
+
+      setStreamingThreadId(threadId);
+      setComposerStatus("Streaming...");
+
+      try {
+        await sendThreadMessageStream(
+          threadId,
+          {
+            content,
+            include_uploads: includeUploads,
+            include_papers: includePapers,
+          },
+          (eventName, payload) => {
+            if (eventName === "assistant_start") {
+              assistantStarted = true;
+              streamingMessageId = payload.assistant_message.message_id;
+              updateThread(threadId, (thread) => ({
+                ...(thread ?? {
+                  thread_id: threadId,
+                  title: content.slice(0, 60),
+                  created_at: now,
+                  updated_at: now,
+                  messages: [],
+                }),
+                updated_at: now,
+                messages: [...(thread?.messages ?? []), payload.assistant_message],
+              }));
+              return;
             }
-          : current,
-      );
-      setComposerStatus("");
-      await refreshThreads();
-      if (payload.state === "api_key_required") {
+
+            if (eventName === "delta") {
+              updateThread(threadId, (thread) => ({
+                ...(thread ?? {
+                  thread_id: threadId,
+                  title: content.slice(0, 60),
+                  created_at: now,
+                  updated_at: now,
+                  messages: [],
+                }),
+                updated_at: new Date().toISOString(),
+                messages: (thread?.messages ?? []).map((message) =>
+                  message.message_id === payload.message_id
+                    ? { ...message, content_markdown: `${message.content_markdown}${payload.delta}` }
+                    : message,
+                ),
+              }));
+              return;
+            }
+
+            if (eventName === "done") {
+              donePayload = payload;
+              updateThread(threadId, (thread) => ({
+                ...(thread ?? {
+                  thread_id: threadId,
+                  title: content.slice(0, 60),
+                  created_at: now,
+                  updated_at: now,
+                  messages: [],
+                }),
+                updated_at: new Date().toISOString(),
+                messages: (thread?.messages ?? []).map((message) =>
+                  message.message_id === payload.assistant_message.message_id ? payload.assistant_message : message,
+                ),
+              }));
+              return;
+            }
+
+            if (eventName === "api_key_required") {
+              gatingPayload = payload;
+              return;
+            }
+
+            if (eventName === "error") {
+              streamError = payload.detail;
+            }
+          },
+        );
+      } catch (error) {
+        if (error instanceof StreamingChatError && error.canFallback && !assistantStarted) {
+          const payload = await sendThreadMessage(threadId, {
+            content,
+            include_uploads: includeUploads,
+            include_papers: includePapers,
+          });
+          setThreadMap((current) => ({ ...current, [threadId]: payload.thread }));
+          setSession((current) =>
+            current
+              ? {
+                  ...current,
+                  remaining_free_responses: payload.remaining_free_responses,
+                  has_anthropic_api_key: payload.has_anthropic_api_key,
+                }
+              : current,
+          );
+          setComposerStatus("");
+          await refreshThreads();
+          if (payload.state === "api_key_required") {
+            showErrorFlash("You have used your 3 free responses. Add an Anthropic API key to continue.");
+            setAuthView("api-key");
+            setAuthModalOpen(true);
+          }
+          return payload;
+        }
+
+        const detail = error instanceof Error ? error.message : "Streaming request failed.";
+        if (streamingMessageId) {
+          updateThread(threadId, (thread) => ({
+            ...(thread ?? {
+              thread_id: threadId,
+              title: content.slice(0, 60),
+              created_at: now,
+              updated_at: now,
+              messages: [],
+            }),
+            messages: (thread?.messages ?? []).map((message) =>
+              message.message_id === streamingMessageId ? { ...message, status: "failed" } : message,
+            ),
+          }));
+        }
+        setComposerStatus(detail);
+        throw error;
+      } finally {
+        setStreamingThreadId((current) => (current === threadId ? null : current));
+      }
+
+      if (gatingPayload) {
+        setThreadMap((current) => ({ ...current, [threadId]: gatingPayload.thread }));
+        setSession((current) =>
+          current
+            ? {
+                ...current,
+                remaining_free_responses: gatingPayload.remaining_free_responses,
+                has_anthropic_api_key: gatingPayload.has_anthropic_api_key,
+              }
+            : current,
+        );
+        setComposerStatus("");
+        await refreshThreads();
         showErrorFlash("You have used your 3 free responses. Add an Anthropic API key to continue.");
         setAuthView("api-key");
         setAuthModalOpen(true);
+        return gatingPayload;
       }
-      return payload;
+
+      if (streamError) {
+        setComposerStatus(streamError);
+        await fetchAndStoreThread(threadId);
+        await refreshThreads();
+        return null;
+      }
+
+      if (donePayload) {
+        setSession((current) =>
+          current
+            ? {
+                ...current,
+                remaining_free_responses: donePayload.remaining_free_responses,
+                has_anthropic_api_key: donePayload.has_anthropic_api_key,
+              }
+            : current,
+        );
+        setComposerStatus("");
+        await fetchAndStoreThread(threadId);
+        await refreshThreads();
+        return donePayload;
+      }
+
+      setComposerStatus("");
+      return null;
     },
-    [includePapers, includeUploads, refreshThreads, showErrorFlash],
+    [fetchAndStoreThread, includePapers, includeUploads, refreshThreads, showErrorFlash, updateThread],
   );
 
   const bootstrapAuthenticatedUi = useCallback(async () => {
@@ -486,6 +836,9 @@ export default function App() {
   const handleComposerSubmit = useCallback(
     async (event: FormEvent) => {
       event.preventDefault();
+      if (streamingThreadId) {
+        return;
+      }
       const content = composerInput.trim();
       if (!content) {
         return;
@@ -494,7 +847,7 @@ export default function App() {
       setComposerInput("");
       await sendMessage(threadId, content);
     },
-    [activeThreadId, composerInput, createNewThread, sendMessage],
+    [activeThreadId, composerInput, createNewThread, sendMessage, streamingThreadId],
   );
 
   const resetAuthenticatedState = useCallback(() => {
@@ -508,6 +861,13 @@ export default function App() {
     setComposerStatus("");
     setMobileSidebarOpen(false);
     setAccountMenuOpen(false);
+    setStreamingThreadId(null);
+    setPaperDrawer(null);
+    setPaperDrawerPaper(null);
+    setPaperDrawerContent(null);
+    setPaperDrawerStatus("idle");
+    setPaperDrawerError("");
+    updateDrawerUrl(null);
   }, []);
 
   const handleSidebarToggle = useCallback(() => {
@@ -610,7 +970,7 @@ export default function App() {
       {authenticated ? (
         <div
           id="app-shell"
-          className={`app-shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${mobileSidebarOpen ? " mobile-sidebar-open" : ""}`}
+          className={`app-shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${mobileSidebarOpen ? " mobile-sidebar-open" : ""}${paperDrawerOpen ? " paper-drawer-open" : ""}`}
         >
           <button
             type="button"
@@ -750,47 +1110,184 @@ export default function App() {
                 className="sidebar-toggle-icon"
               />
             </button>
-            <div className="chat-stage-spacer">
+
+            <div ref={messageListRef} className="chat-message-list">
               {!activeThread || activeThread.messages.length === 0 ? (
-                <div className="chat-empty-state">
-                  <div className="chat-empty-eyebrow">Empty chat</div>
-                  <strong>{activeThread ? "Start the conversation" : "Start a new chat"}</strong>
-                  <p>
-                    {activeThread
-                      ? "Ask about papers, compare ideas, or pull out patterns for the system you are building."
-                      : "Choose a previous session or start a new chat to begin."}
-                  </p>
+                <div className="chat-stage-spacer">
+                  <div className="chat-empty-state">
+                    <div className="chat-empty-eyebrow">Empty chat</div>
+                    <strong>{activeThread ? "Start the conversation" : "Start a new chat"}</strong>
+                    <p>
+                      {activeThread
+                        ? "Ask about papers, compare ideas, or pull out patterns for the system you are building."
+                        : "Choose a previous session or start a new chat to begin."}
+                    </p>
+                  </div>
                 </div>
-              ) : null}
+              ) : (
+                activeThread.messages.map((message) => (
+                  <article
+                    key={message.message_id}
+                    className={`message-row ${message.role === "assistant" ? "assistant" : "user"} status-${message.status}`}
+                  >
+                    <div className="message-meta-row">
+                      <span className="message-role-label">{message.role === "assistant" ? "Paperbase" : "You"}</span>
+                      {message.status !== "completed" ? (
+                        <span className="message-status-label">
+                          {message.status === "streaming" ? "Streaming" : "Failed"}
+                        </span>
+                      ) : null}
+                    </div>
+                    <div className={`message-bubble ${message.role === "assistant" ? "assistant" : "user"}`}>
+                      {message.role === "assistant" ? (
+                        <MarkdownRenderer
+                          markdown={message.content_markdown}
+                          className="message-markdown"
+                          interactiveCitations
+                          onCitationClick={(sourceId) => {
+                            const citation = message.citations.find((item) => item.source_id === sourceId);
+                            if (citation) {
+                              handleCitationClick(message, citation);
+                            }
+                          }}
+                        />
+                      ) : (
+                        <div className="message-plain-text">{message.content_markdown}</div>
+                      )}
+                    </div>
+                    {message.role === "assistant" && message.citations.length > 0 ? (
+                      <div className="message-citations">
+                        {message.citations.map((citation) => (
+                          <div
+                            key={citation.source_id}
+                            id={sourceCardId(message.message_id, citation.source_id)}
+                            className="citation-card"
+                          >
+                            <div className="citation-card-header">
+                              <div>
+                                <span className="citation-card-source-id">{citation.source_id}</span>
+                                <strong className="citation-card-title">{citation.title}</strong>
+                              </div>
+                              {citation.paper_id ? (
+                                <button
+                                  type="button"
+                                  className="citation-card-action"
+                                  onClick={() => openPaperDrawer(citation.paper_id!, citation.path)}
+                                >
+                                  Open paper
+                                </button>
+                              ) : null}
+                            </div>
+                            <div className="citation-card-path">
+                              {citation.source_kind === "paperbase_paper" ? "Paper" : "Upload"} · {citation.path}
+                            </div>
+                            <p className="citation-card-excerpt">{citation.excerpt}</p>
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+                  </article>
+                ))
+              )}
             </div>
-            <form id="composer-form" className="composer-form" onSubmit={handleComposerSubmit}>
-              <div className="composer-shell">
-                <button
-                  type="button"
-                  className="prompt-clip"
-                  id="composer-upload-trigger"
-                  aria-label="Attach document"
-                  onClick={() => appUploadRef.current?.click()}
-                >
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M16.5 6.5 9 14a3 3 0 1 0 4.24 4.24l7.01-7.02a5 5 0 0 0-7.07-7.07L5.46 11.9a7 7 0 1 0 9.9 9.9l6.01-6.01" />
-                  </svg>
-                </button>
-                <textarea
-                  ref={composerRef}
-                  id="composer-input"
-                  rows={1}
-                  placeholder="Ask about the latest agent and AI systems research..."
-                  value={composerInput}
-                  onChange={(event) => setComposerInput(event.target.value)}
-                />
-                <button id="composer-send" className="prompt-button" type="submit">
-                  Send
+
+            <div className="composer-area">
+              {composerStatus ? <div className="composer-status">{composerStatus}</div> : null}
+              <form id="composer-form" className="composer-form" onSubmit={handleComposerSubmit}>
+                <div className="composer-shell">
+                  <button
+                    type="button"
+                    className="prompt-clip"
+                    id="composer-upload-trigger"
+                    aria-label="Attach document"
+                    onClick={() => appUploadRef.current?.click()}
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M16.5 6.5 9 14a3 3 0 1 0 4.24 4.24l7.01-7.02a5 5 0 0 0-7.07-7.07L5.46 11.9a7 7 0 1 0 9.9 9.9l6.01-6.01" />
+                    </svg>
+                  </button>
+                  <textarea
+                    ref={composerRef}
+                    id="composer-input"
+                    rows={1}
+                    placeholder="Ask about the latest agent and AI systems research..."
+                    value={composerInput}
+                    onChange={(event) => setComposerInput(event.target.value)}
+                    disabled={Boolean(streamingThreadId)}
+                  />
+                  <button id="composer-send" className="prompt-button" type="submit" disabled={Boolean(streamingThreadId)}>
+                    {streamingThreadId ? "Thinking..." : "Send"}
+                  </button>
+                </div>
+                <input ref={appUploadRef} id="app-upload-file" className="hidden-file-input" type="file" onChange={onUploadChange} />
+              </form>
+            </div>
+          </section>
+
+          {paperDrawerOpen ? (
+            <aside className="paper-drawer" aria-label="Cited paper drawer">
+              <div className="paper-drawer-header">
+                <div>
+                  <div className="paper-drawer-eyebrow">Cited paper</div>
+                  <strong className="paper-drawer-title">{paperDrawerPaper?.title ?? "Loading paper"}</strong>
+                  {paperDrawer ? <div className="paper-drawer-path">{paperDrawer.path}</div> : null}
+                </div>
+                <button type="button" className="paper-drawer-close" aria-label="Close paper drawer" onClick={closePaperDrawer}>
+                  ×
                 </button>
               </div>
-              <input ref={appUploadRef} id="app-upload-file" className="hidden-file-input" type="file" onChange={onUploadChange} />
-            </form>
-          </section>
+
+              {paperDrawerPaper ? (
+                <div className="paper-drawer-meta">
+                  <div>{paperDrawerPaper.authors}</div>
+                  <div>
+                    {paperDrawerPaper.primary_category || paperDrawerPaper.categories}
+                    {paperDrawerPaper.published ? ` · ${paperDrawerPaper.published}` : ""}
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="paper-drawer-body">
+                {paperDrawerStatus === "loading" ? <div className="paper-drawer-placeholder">Loading cited paper…</div> : null}
+                {paperDrawerStatus === "error" ? <div className="paper-drawer-error">{paperDrawerError}</div> : null}
+                {paperDrawerStatus === "ready" && paperDrawerContent?.kind === "markdown" ? (
+                  <MarkdownRenderer markdown={paperDrawerContent.file.content} className="paper-drawer-markdown" />
+                ) : null}
+                {paperDrawerStatus === "ready" && paperDrawerContent?.kind === "figure" ? (
+                  <div className="paper-drawer-figure">
+                    {paperDrawerContent.figure.image_url ? (
+                      <img
+                        className="paper-drawer-figure-image"
+                        src={paperDrawerContent.figure.image_url}
+                        alt={paperDrawerContent.figure.caption}
+                      />
+                    ) : null}
+                    <MarkdownRenderer markdown={paperDrawerContent.figure.caption} className="paper-drawer-markdown" />
+                  </div>
+                ) : null}
+                {paperDrawerStatus === "ready" && paperDrawerContent?.kind === "table" ? (
+                  <div className="paper-drawer-table-wrap">
+                    {paperDrawerContent.table.caption ? (
+                      <MarkdownRenderer markdown={paperDrawerContent.table.caption} className="paper-drawer-markdown" />
+                    ) : null}
+                    <div className="paper-drawer-table-scroll">
+                      <table className="paper-drawer-table">
+                        <tbody>
+                          {paperDrawerContent.table.rows.map((row, rowIndex) => (
+                            <tr key={`${paperDrawerContent.table.table_id}-${rowIndex}`}>
+                              {row.map((cell, cellIndex) => (
+                                <td key={`${paperDrawerContent.table.table_id}-${rowIndex}-${cellIndex}`}>{cell}</td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            </aside>
+          ) : null}
         </div>
       ) : null}
 

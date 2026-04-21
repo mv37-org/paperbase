@@ -493,6 +493,10 @@ textarea::placeholder,
   background: var(--bg);
 }
 
+.app-shell.paper-drawer-open {
+  grid-template-columns: 280px minmax(0, 1fr) 380px;
+}
+
 .sidebar-scrim {
   display: none;
 }
@@ -857,8 +861,7 @@ textarea::placeholder,
   box-shadow: none;
 }
 
-.tag-filter-row,
-.message-citations {
+.tag-filter-row {
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
@@ -880,6 +883,7 @@ textarea::placeholder,
   display: flex;
   flex-direction: column;
   position: relative;
+  min-width: 0;
 }
 
 .composer-form {
@@ -898,6 +902,267 @@ textarea::placeholder,
   align-items: center;
   justify-content: center;
   min-height: 0;
+}
+
+.chat-message-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  align-content: start;
+  gap: 18px;
+  padding: 0 0 20px;
+}
+
+.message-row {
+  display: grid;
+  gap: 8px;
+  max-width: min(820px, 100%);
+}
+
+.message-row.user {
+  justify-self: end;
+}
+
+.message-meta-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.message-row.user .message-meta-row {
+  justify-self: end;
+}
+
+.message-role-label,
+.message-status-label {
+  display: inline-flex;
+  align-items: center;
+}
+
+.message-status-label {
+  color: #8a6a00;
+}
+
+.message-row.status-failed .message-status-label {
+  color: #8f2d1f;
+}
+
+.message-bubble {
+  max-width: min(820px, 100%);
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--paper);
+}
+
+.message-bubble.user {
+  background: #f8f6f1;
+}
+
+.message-plain-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.message-markdown,
+.paper-drawer-markdown {
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+
+.message-markdown > :first-child,
+.paper-drawer-markdown > :first-child {
+  margin-top: 0;
+}
+
+.message-markdown > :last-child,
+.paper-drawer-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.message-markdown h1,
+.message-markdown h2,
+.message-markdown h3,
+.message-markdown h4,
+.paper-drawer-markdown h1,
+.paper-drawer-markdown h2,
+.paper-drawer-markdown h3,
+.paper-drawer-markdown h4 {
+  margin: 1.1em 0 0.4em;
+  line-height: 1.15;
+  letter-spacing: -0.03em;
+}
+
+.message-markdown p,
+.message-markdown ul,
+.message-markdown ol,
+.message-markdown blockquote,
+.paper-drawer-markdown p,
+.paper-drawer-markdown ul,
+.paper-drawer-markdown ol,
+.paper-drawer-markdown blockquote {
+  margin: 0.7em 0;
+}
+
+.message-markdown ul,
+.message-markdown ol,
+.paper-drawer-markdown ul,
+.paper-drawer-markdown ol {
+  padding-left: 1.4em;
+}
+
+.message-markdown blockquote,
+.paper-drawer-markdown blockquote {
+  padding-left: 12px;
+  border-left: 2px solid rgba(27, 22, 17, 0.14);
+  color: var(--muted);
+}
+
+.message-markdown pre,
+.paper-drawer-markdown pre {
+  margin: 0.9em 0;
+  padding: 12px 14px;
+  overflow: auto;
+  border: 1px solid rgba(27, 22, 17, 0.1);
+  border-radius: var(--radius);
+  background: #f8f6f1;
+  font-family: "JetBrains Mono", "SFMono-Regular", monospace;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.message-markdown code,
+.paper-drawer-markdown code {
+  font-family: "JetBrains Mono", "SFMono-Regular", monospace;
+  font-size: 0.9em;
+}
+
+.message-markdown :not(pre) > code,
+.paper-drawer-markdown :not(pre) > code {
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: rgba(27, 22, 17, 0.06);
+}
+
+.message-markdown table,
+.paper-drawer-markdown table,
+.paper-drawer-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.9em 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 13px;
+}
+
+.message-markdown th,
+.message-markdown td,
+.paper-drawer-markdown th,
+.paper-drawer-markdown td,
+.paper-drawer-table td {
+  padding: 8px 10px;
+  border: 1px solid rgba(27, 22, 17, 0.1);
+  vertical-align: top;
+}
+
+.message-markdown a,
+.paper-drawer-markdown a {
+  color: #1d4ed8;
+}
+
+.citation-inline-button {
+  display: inline-flex;
+  align-items: center;
+  margin: 0 1px;
+  padding: 0 6px;
+  border: 1px solid rgba(37, 99, 235, 0.2);
+  border-radius: 999px;
+  background: rgba(37, 99, 235, 0.08);
+  color: #1d4ed8;
+  cursor: pointer;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.message-citations {
+  display: grid;
+  gap: 10px;
+}
+
+.citation-card {
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fcfbf8;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.citation-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.citation-card-source-id {
+  display: inline-flex;
+  margin-right: 8px;
+  color: #1d4ed8;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.citation-card-title {
+  display: inline;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.citation-card-action {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #1d4ed8;
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.citation-card-path {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.citation-card-excerpt {
+  margin: 8px 0 0;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.composer-area {
+  display: grid;
+  gap: 8px;
+}
+
+.composer-status {
+  width: min(720px, 100%);
+  margin: 0 auto;
+  color: var(--muted);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .chat-empty-state {
@@ -930,10 +1195,16 @@ textarea::placeholder,
 }
 
 .composer-form {
-  width: min(50%, 720px);
+  width: min(720px, 100%);
   max-width: 100%;
   margin: 0 auto;
   padding: 0;
+}
+
+.composer-form button:disabled,
+.citation-inline-button:disabled {
+  cursor: default;
+  opacity: 0.65;
 }
 
 textarea {
@@ -960,6 +1231,105 @@ textarea {
 
 .hidden-file-input {
   display: none;
+}
+
+.paper-drawer {
+  min-width: 0;
+  min-height: 100vh;
+  padding: 20px 18px;
+  border-left: 1px solid var(--line);
+  background: #fcfbf8;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 12px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.paper-drawer-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.paper-drawer-eyebrow {
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.paper-drawer-title {
+  display: block;
+  margin-top: 4px;
+  font-family: "Georgia", "Iowan Old Style", serif;
+  font-size: 20px;
+  line-height: 1.15;
+}
+
+.paper-drawer-path,
+.paper-drawer-meta {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.paper-drawer-close {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  cursor: pointer;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.paper-drawer-body {
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  align-content: start;
+  gap: 14px;
+}
+
+.paper-drawer-placeholder,
+.paper-drawer-error {
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--paper);
+  font-size: 13px;
+}
+
+.paper-drawer-error {
+  border-color: rgba(143, 45, 31, 0.2);
+  color: #8f2d1f;
+}
+
+.paper-drawer-figure {
+  display: grid;
+  gap: 12px;
+}
+
+.paper-drawer-figure-image {
+  width: 100%;
+  border: 1px solid rgba(27, 22, 17, 0.1);
+  border-radius: var(--radius);
+  background: #ffffff;
+}
+
+.paper-drawer-table-wrap {
+  display: grid;
+  gap: 12px;
+}
+
+.paper-drawer-table-scroll {
+  overflow: auto;
+  border: 1px solid rgba(27, 22, 17, 0.1);
+  border-radius: var(--radius);
+  background: #ffffff;
 }
 
 .prompt-clip svg {
@@ -1443,6 +1813,10 @@ textarea:hover,
     grid-template-columns: 60px minmax(0, 1fr);
   }
 
+  .app-shell.paper-drawer-open.sidebar-collapsed {
+    grid-template-columns: 60px minmax(0, 1fr) 380px;
+  }
+
   .app-shell.sidebar-collapsed .sidebar {
     padding-inline: 6px;
   }
@@ -1574,5 +1948,16 @@ textarea:hover,
 
   .composer-form {
     width: 100%;
+  }
+
+  .paper-drawer {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(380px, calc(100vw - 20px));
+    min-height: 100dvh;
+    z-index: 4;
+    box-shadow: -4px 0 12px rgba(16, 24, 40, 0.08);
   }
 }

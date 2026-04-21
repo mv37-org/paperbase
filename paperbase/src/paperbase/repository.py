@@ -18,6 +18,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, rela
 from .config import Settings
 from .models import (
     BrowserUser,
+    ChatCitation,
     ChatMessageResponse,
     ChatThreadResponse,
     ChatThreadSummary,
@@ -372,7 +373,7 @@ def _chat_message_from_orm(row: ChatMessageORM) -> ChatMessageResponse:
         message_id=row.message_id,
         role=row.role,
         content_markdown=row.content_markdown,
-        citations=row.citations or [],
+        citations=[ChatCitation.model_validate(citation) for citation in (row.citations or [])],
         created_at=row.created_at,
         status=row.status,
     )
@@ -1816,6 +1817,29 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 thread.updated_at = utcnow()
         return _chat_message_from_orm(row)
 
+    def update_chat_message(
+        self,
+        message_id: str,
+        *,
+        content_markdown: str | None = None,
+        citations: list[dict[str, Any]] | None = None,
+        status: str | None = None,
+    ) -> ChatMessageResponse | None:
+        with self._session() as session:
+            row = session.get(ChatMessageORM, message_id)
+            if row is None:
+                return None
+            if content_markdown is not None:
+                row.content_markdown = content_markdown
+            if citations is not None:
+                row.citations = citations
+            if status is not None:
+                row.status = status
+            thread = session.get(ChatThreadORM, row.thread_id)
+            if thread:
+                thread.updated_at = utcnow()
+        return _chat_message_from_orm(row)
+
     def save_result_set(
         self,
         *,
@@ -2656,7 +2680,7 @@ class MemoryPaperRepository(PaperRepository):
             message_id=new_id("msg"),
             role=role,
             content_markdown=content_markdown,
-            citations=citations or [],
+            citations=[ChatCitation.model_validate(citation) for citation in (citations or [])],
             created_at=utcnow(),
             status=status,
         )
@@ -2664,6 +2688,31 @@ class MemoryPaperRepository(PaperRepository):
         updated = thread.model_copy(update={"messages": [*thread.messages, message], "updated_at": utcnow()})
         self.chat_threads[thread_id] = updated
         return message
+
+    def update_chat_message(
+        self,
+        message_id: str,
+        *,
+        content_markdown: str | None = None,
+        citations: list[dict[str, Any]] | None = None,
+        status: str | None = None,
+    ) -> ChatMessageResponse | None:
+        for thread_id, thread in self.chat_threads.items():
+            for index, message in enumerate(thread.messages):
+                if message.message_id != message_id:
+                    continue
+                updated_message = message.model_copy(
+                    update={
+                        "content_markdown": message.content_markdown if content_markdown is None else content_markdown,
+                        "citations": message.citations if citations is None else [ChatCitation.model_validate(citation) for citation in citations],
+                        "status": message.status if status is None else status,
+                    }
+                )
+                messages = list(thread.messages)
+                messages[index] = updated_message
+                self.chat_threads[thread_id] = thread.model_copy(update={"messages": messages, "updated_at": utcnow()})
+                return updated_message
+        return None
 
     def create_job(self, job_type: str, payload: dict[str, Any]) -> JobResponse:
         job = JobResponse(

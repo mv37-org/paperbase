@@ -15,6 +15,54 @@ export interface BrowserSessionResponse {
   csrf_token: string | null;
 }
 
+export interface PaperResponse {
+  paper_id: string;
+  arxiv_id: string;
+  title: string;
+  authors: string;
+  abstract: string;
+  summary_short: string;
+  summary_eli5: string;
+  categories: string;
+  primary_category: string;
+  published: string;
+  updated: string;
+  doi?: string | null;
+  comment?: string | null;
+  journal_ref?: string | null;
+  pdf_url: string;
+  html_url: string;
+  citation_count: number;
+  influential_citation_count: number;
+  semantic_scholar_id?: string | null;
+  code_url?: string | null;
+  source_type?: string | null;
+  index_status: string;
+  indexed_at?: string | null;
+}
+
+export interface FileContentResponse {
+  paper_id: string;
+  path: string;
+  content: string;
+}
+
+export interface FigureResponse {
+  paper_id: string;
+  figure_id: string;
+  caption: string;
+  image_url?: string | null;
+  content_type?: string | null;
+}
+
+export interface TableResponse {
+  paper_id: string;
+  table_id: string;
+  caption?: string | null;
+  rows: string[][];
+  csv_url?: string | null;
+}
+
 export interface UploadedDocumentResponse {
   document_id: string;
   user_id: string;
@@ -79,6 +127,35 @@ export interface SendChatMessageResponse {
   has_anthropic_api_key: boolean;
   state: string;
 }
+
+export interface ChatStreamAssistantStartEvent {
+  assistant_message: ChatMessageResponse;
+}
+
+export interface ChatStreamDeltaEvent {
+  message_id: string;
+  delta: string;
+}
+
+export interface ChatStreamDoneEvent {
+  assistant_message: ChatMessageResponse;
+  remaining_free_responses: number;
+  has_anthropic_api_key: boolean;
+  state: "completed";
+}
+
+export interface ChatStreamErrorEvent {
+  message_id?: string;
+  detail: string;
+}
+
+export type ChatStreamEventMap = {
+  assistant_start: ChatStreamAssistantStartEvent;
+  delta: ChatStreamDeltaEvent;
+  done: ChatStreamDoneEvent;
+  api_key_required: SendChatMessageResponse;
+  error: ChatStreamErrorEvent;
+};
 
 export interface MentionTag {
   id: string;

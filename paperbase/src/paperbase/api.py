@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 from functools import lru_cache
+import json
 import os
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from authlib.integrations.starlette_client import OAuth
+from fastapi.encoders import jsonable_encoder
 from fastapi import Depends, FastAPI, File, Form, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -130,6 +132,10 @@ def _chat_redirect_base(request: Request, settings, *, return_to: str | None = N
         parts = urlsplit(referer)
         return f"{parts.scheme}://{parts.netloc}"
     return settings.chat_public_url.rstrip("/")
+
+
+def _sse_event(event_name: str, payload: object) -> str:
+    return f"event: {event_name}\ndata: {json.dumps(jsonable_encoder(payload), ensure_ascii=False)}\n\n"
 
 
 @lru_cache(maxsize=1)
@@ -283,6 +289,45 @@ def references(
     service: PaperbaseService = Depends(get_service),
 ) -> list[dict]:
     return service.get_paper_references(paper_id, refresh=refresh)
+
+
+@app.get("/v1/browser/papers/{paper_id}", response_model=PaperResponse)
+def browser_get_paper(
+    paper_id: str,
+    user=Depends(require_browser_user),
+    service: PaperbaseService = Depends(get_service),
+) -> PaperResponse:
+    return service.get_paper(paper_id)
+
+
+@app.get("/v1/browser/papers/{paper_id}/files/{path:path}", response_model=FileContentResponse)
+def browser_read_paper_file(
+    paper_id: str,
+    path: str,
+    user=Depends(require_browser_user),
+    service: PaperbaseService = Depends(get_service),
+) -> FileContentResponse:
+    return service.read_file(paper_id, path)
+
+
+@app.get("/v1/browser/papers/{paper_id}/figures/{figure_id}", response_model=FigureResponse)
+def browser_get_paper_figure(
+    paper_id: str,
+    figure_id: str,
+    user=Depends(require_browser_user),
+    service: PaperbaseService = Depends(get_service),
+) -> FigureResponse:
+    return service.get_figure(paper_id, figure_id)
+
+
+@app.get("/v1/browser/papers/{paper_id}/tables/{table_id}", response_model=TableResponse)
+def browser_get_paper_table(
+    paper_id: str,
+    table_id: str,
+    user=Depends(require_browser_user),
+    service: PaperbaseService = Depends(get_service),
+) -> TableResponse:
+    return service.get_table(paper_id, table_id)
 
 
 @app.get("/v1/jobs/{job_id}", response_model=JobResponse, dependencies=[Depends(require_bearer_token)])
@@ -498,6 +543,24 @@ def browser_send_chat_message(
     service: PaperbaseService = Depends(get_service),
 ) -> SendChatMessageResponse:
     return service.send_chat_message(user, thread_id, request)
+
+
+@app.post("/v1/browser/chats/{thread_id}/messages/stream")
+def browser_stream_chat_message(
+    thread_id: str,
+    request: SendChatMessageRequest,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> StreamingResponse:
+    def event_stream():
+        for event_name, payload in service.stream_chat_message(user, thread_id, request):
+            yield _sse_event(event_name, payload)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )
 
 
 def main() -> None:
