@@ -97,6 +97,10 @@ function GoogleButton() {
   );
 }
 
+function AppIcon({ src, className = "" }: { src: string; className?: string }) {
+  return <img src={src} alt="" aria-hidden="true" className={className ? `icon-image ${className}` : "icon-image"} />;
+}
+
 function useAutosizeTextarea(ref: RefObject<HTMLTextAreaElement | null>, value: string) {
   useEffect(() => {
     if (!ref.current) {
@@ -520,11 +524,7 @@ export default function App() {
             onClick={() => openAuthModal("login")}
           >
             <span className="landing-login-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24">
-                <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
-                <path d="M3 12h12" />
-                <path d="m10 7 5 5-5 5" />
-              </svg>
+              <AppIcon src="/login.svg" className="landing-login-icon-image" />
             </span>
             <span className="landing-login-label">Log in</span>
           </button>
@@ -587,9 +587,7 @@ export default function App() {
                   aria-expanded={!sidebarCollapsed}
                   onClick={handleSidebarToggle}
                 >
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M4 7h16M4 12h16M4 17h16" />
-                  </svg>
+                  <AppIcon src={sidebarCollapsed ? "/show-sidebar.svg" : "/hide-sidebar.svg"} className="sidebar-toggle-icon" />
                 </button>
               </div>
               <button id="new-chat-button" className="sidebar-primary-action" onClick={() => void handleNewChat()}>
@@ -636,12 +634,7 @@ export default function App() {
                     aria-expanded={accountMenuOpen}
                     onClick={() => setAccountMenuOpen((current) => !current)}
                   >
-                    <svg viewBox="0 0 24 24" aria-hidden="true">
-                      <path d="M10 4H4v6" />
-                      <path d="M20 14v6h-6" />
-                      <path d="M20 10V4h-6" />
-                      <path d="M4 14v6h6" />
-                    </svg>
+                    <AppIcon src="/settings.svg" className="sidebar-settings-icon" />
                     <span>Settings</span>
                   </button>
                   {accountMenuOpen ? (
@@ -669,6 +662,7 @@ export default function App() {
                         role="menuitem"
                         onClick={() => openAuthModal("api-key")}
                       >
+                        <AppIcon src="/claude.svg" className="account-menu-item-icon account-menu-item-icon-claude" />
                         {sessionSummary.hasAnthropicApiKey ? "Manage API key" : "Add API key"}
                       </button>
                       <button
@@ -678,6 +672,7 @@ export default function App() {
                         role="menuitem"
                         onClick={() => void handleLogout()}
                       >
+                        <AppIcon src="/logout.svg" className="account-menu-item-icon" />
                         Log out
                       </button>
                     </div>
@@ -694,9 +689,7 @@ export default function App() {
               aria-label={mobileSidebarOpen ? "Close sidebar" : "Open sidebar"}
               onClick={handleSidebarToggle}
             >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M4 7h16M4 12h16M4 17h16" />
-              </svg>
+              <AppIcon src={mobileSidebarOpen ? "/hide-sidebar.svg" : "/show-sidebar.svg"} className="sidebar-toggle-icon" />
             </button>
             <div className="chat-stage-spacer" />
             <form id="composer-form" className="composer-form" onSubmit={handleComposerSubmit}>

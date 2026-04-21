@@ -51,6 +51,14 @@ textarea {
   outline: none;
 }
 
+.icon-image {
+  display: block;
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+  flex: 0 0 auto;
+}
+
 .hidden {
   display: none !important;
 }
@@ -103,21 +111,11 @@ textarea {
   min-width: 24px;
 }
 
-.landing-login-icon svg {
+.landing-login-icon-image {
   width: 12px;
   height: 12px;
-  stroke: currentColor;
-  stroke-width: 1.9;
-  fill: none;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.landing-login-icon svg path:nth-of-type(2),
-.landing-login-icon svg path:nth-of-type(3) {
   transition: transform 140ms ease;
-  transform-box: fill-box;
-  transform-origin: center;
+  filter: invert(36%) sepia(79%) saturate(2182%) hue-rotate(216deg) brightness(94%) contrast(92%);
 }
 
 .landing-login-label {
@@ -555,15 +553,30 @@ textarea::placeholder,
 .sidebar-icon-button svg,
 .sidebar-primary-action svg,
 .sidebar-link svg,
-.thread-header-action svg {
+.thread-header-action svg,
+.sidebar-icon-button .icon-image,
+.sidebar-settings-button .icon-image,
+.account-menu-item .icon-image {
   width: 16px;
   height: 16px;
   display: block;
+}
+
+.sidebar-icon-button svg,
+.sidebar-primary-action svg,
+.sidebar-link svg,
+.thread-header-action svg {
   stroke: currentColor;
   stroke-width: 1.8;
   fill: none;
   stroke-linecap: round;
   stroke-linejoin: round;
+}
+
+.sidebar-icon-button .icon-image,
+.sidebar-settings-button .icon-image,
+.account-menu-item .icon-image {
+  opacity: 0.72;
 }
 
 .sidebar-primary-action,
@@ -612,16 +625,6 @@ textarea::placeholder,
   color: var(--muted);
   font-size: 13px;
   cursor: pointer;
-}
-
-.sidebar-settings-button svg {
-  width: 16px;
-  height: 16px;
-  stroke: currentColor;
-  stroke-width: 1.8;
-  fill: none;
-  stroke-linecap: round;
-  stroke-linejoin: round;
 }
 
 .account-menu {
@@ -692,10 +695,17 @@ textarea::placeholder,
   border: 0;
   border-radius: var(--radius);
   background: transparent;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
   text-align: left;
   color: var(--text);
   font-size: 13px;
   cursor: pointer;
+}
+
+.account-menu-item-icon-claude {
+  opacity: 1 !important;
 }
 
 .sidebar-button,
@@ -1177,10 +1187,8 @@ textarea {
   box-shadow: 0 3px 10px rgba(43, 98, 228, 0.08);
 }
 
-.landing-login-button:hover .landing-login-icon svg path:nth-of-type(2),
-.landing-login-button:hover .landing-login-icon svg path:nth-of-type(3),
-.landing-login-button:focus-visible .landing-login-icon svg path:nth-of-type(2),
-.landing-login-button:focus-visible .landing-login-icon svg path:nth-of-type(3) {
+.landing-login-button:hover .landing-login-icon-image,
+.landing-login-button:focus-visible .landing-login-icon-image {
   transform: translateX(1.5px);
 }
 
