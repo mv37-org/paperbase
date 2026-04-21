@@ -32,8 +32,8 @@ help:
 	@printf "  make setup   Install Python packages, chat dependencies, the repo .env, and Git hooks.\n"
 	@printf "  make doctor  Verify vp, Python, Postgres, pgvector, ports, and the repo .env.\n"
 	@printf "  make dev     Initialize local storage/database and run API, worker, MCP bridge, and chat.\n"
-	@printf "  make test    Run doctor, init-local, lint, chat checks/tests/build, pytest, and timing comparisons.\n"
-	@printf "  make profile Run doctor, init-local, deterministic hotpath profiling, and baseline comparisons.\n"
+	@printf "  make test    Run doctor, init-local, run-prereq verification, lint, chat checks/tests/build, pytest, and timing comparisons.\n"
+	@printf "  make profile Run doctor, init-local, run-prereq verification, deterministic hotpath profiling, and baseline comparisons.\n"
 	@printf "  make clean   Stop local services and remove generated logs, caches, and frontend output.\n"
 
 setup:
@@ -94,6 +94,7 @@ test:
 	@mkdir -p "$(BENCHMARK_OUT_DIR)"
 	@"$(PAPERBASE_DEV)" doctor --mode test
 	@"$(PAPERBASE_DEV)" init-local
+	@"$(PAPERBASE_DEV)" verify-run --mode test
 	@"$(RUFF)" check paperbase/src paperbase/tests paperbase-plugin/src paperbase-plugin/tests paperbase-plugin/scripts
 	@(cd "$(CHAT_DIR)" && set -a && source ../.env && set +a && vp check)
 	@(cd "$(CHAT_DIR)" && set -a && source ../.env && set +a && ./node_modules/.bin/vitest run --reporter=json --outputFile="../$(CHAT_TEST_JSON)")
@@ -107,6 +108,7 @@ profile:
 	@$(MAKE) --no-print-directory _require_setup
 	@"$(PAPERBASE_DEV)" doctor --mode profile
 	@"$(PAPERBASE_DEV)" init-local
+	@"$(PAPERBASE_DEV)" verify-run --mode profile
 	@"$(PAPERBASE_DEV)" profile $(BASELINE_FLAG)
 
 clean:
