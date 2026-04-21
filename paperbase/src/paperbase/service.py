@@ -77,6 +77,25 @@ _RECENCY_SIGNAL_RE = re.compile(
     re.IGNORECASE,
 )
 
+_GROUNDING_INTENT_RE = re.compile(
+    r"\b("
+    r"paper|papers|research|study|studies|citation|citations|cite|source|sources|reference|references|"
+    r"figure|figures|table|tables|benchmark|benchmarks|result|results|method|methods|experiment|experiments|"
+    r"ablation|dataset|datasets|arxiv|appendix|section|sections|survey|summarize|summary|compare|comparison|"
+    r"uploaded|upload|document|documents|docs|notes?"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_FORCE_TOOL_QUERY_RE = re.compile(
+    r"\b("
+    r"cite|citations|source|sources|reference|references|according to|find|search|compare|comparison|"
+    r"summarize|summary|survey|method|methods|result|results|figure|figures|table|tables|benchmark|benchmarks|"
+    r"uploaded|document|documents|notes?"
+    r")\b",
+    re.IGNORECASE,
+)
+
 
 def _query_signals_recency(query: str) -> bool:
     return bool(_RECENCY_SIGNAL_RE.search(query or ""))
@@ -545,6 +564,33 @@ def _query_variants(question: str) -> list[str]:
     return deduped[:5]
 
 
+def _question_mentions_uploads(question: str) -> bool:
+    lowered = question.lower()
+    return any(token in lowered for token in ("upload", "uploaded", "document", "documents", "docs", "notes", "note"))
+
+
+def _should_offer_chat_tools(question: str, request: SendChatMessageRequest) -> bool:
+    if not (request.include_papers or request.include_uploads):
+        return False
+    if request.tag_filters:
+        return True
+    if request.include_uploads and _question_mentions_uploads(question):
+        return True
+    if request.include_papers and _GROUNDING_INTENT_RE.search(question):
+        return True
+    return False
+
+
+def _should_force_chat_tool_use(question: str, request: SendChatMessageRequest) -> bool:
+    if not _should_offer_chat_tools(question, request):
+        return False
+    if request.tag_filters:
+        return True
+    if _query_signals_recency(question):
+        return True
+    return bool(_FORCE_TOOL_QUERY_RE.search(question))
+
+
 def _tool_int(value: Any, *, default: int, minimum: int = 1, maximum: int) -> int:
     try:
         parsed = int(value)
@@ -886,6 +932,8 @@ class PaperbaseService:
         return (
             "You are Paperbase Chat. You have access to Paperbase research tools that can search papers, sections, files, figures, tables, references, related papers, and the user's uploaded documents. "
             "Use tools to gather evidence before answering any factual question about papers, research findings, figures, tables, metrics, or uploaded notes. "
+            "Broad discovery tools like paperbase_search, paperbase_get_results, paperbase_get_paper, paperbase_get_related_papers, and paperbase_get_references are for candidate discovery and metadata only. "
+            "They are not citable evidence by themselves. Before making specific factual claims, follow up with evidence tools like paperbase_search_sections, paperbase_read_file, paperbase_get_figure, paperbase_get_table, or paperbase_search_uploaded_sections. "
             "On turns where you still need tools, emit tool calls only and do not write any user-facing narrative text. "
             "Once the tool results are sufficient, stop calling tools. The final answer will be generated in a separate step."
         )
@@ -894,7 +942,8 @@ class PaperbaseService:
         return (
             "You are Paperbase Chat. Answer using the gathered Paperbase tool results when possible. "
             "Respond in GitHub-flavored markdown. Use headings, bullets, tables, fenced code blocks, and normal markdown links when they clarify the answer. "
-            "Always cite source ids inline like [S1]. If the gathered sources are insufficient, say so plainly."
+            "Only cite source ids inline like [S1] when those ids came from evidence-bearing tool results such as section hits, file reads, figure captions, tables, or uploaded-document excerpts. "
+            "Do not cite broad search results or metadata-only results. If the gathered sources are insufficient, say so plainly."
         )
 
     def _chat_messages(self, prepared: PreparedChatGeneration) -> list[dict[str, Any]]:
@@ -906,6 +955,8 @@ class PaperbaseService:
 
     def _chat_tool_definitions(self, request: SendChatMessageRequest) -> list[dict[str, Any]]:
         tools: list[dict[str, Any]] = []
+        if not _should_offer_chat_tools(request.content, request):
+            return tools
         if request.include_papers:
             tools.extend(
                 [
@@ -1062,24 +1113,6 @@ class PaperbaseService:
             )
         return tools
 
-    def _paper_summary_citation(
-        self,
-        citation_registry: ChatCitationRegistry,
-        *,
-        paper_id: str,
-        title: str,
-        content: str,
-        question: str,
-    ) -> ChatCitation:
-        return citation_registry.register(
-            key=("paperbase_paper", f"{paper_id}:summary"),
-            source_kind="paperbase_paper",
-            title=title,
-            path="summary",
-            excerpt=_best_excerpt(content or title, question),
-            paper_id=paper_id,
-        )
-
     def _paper_path_citation(
         self,
         citation_registry: ChatCitationRegistry,
@@ -1141,17 +1174,9 @@ class PaperbaseService:
             papers = []
             for paper in response.papers:
                 summary_text = paper.summary_short or paper.tldr or paper.abstract or paper.title
-                citation = self._paper_summary_citation(
-                    citation_registry,
-                    paper_id=paper.paper_id,
-                    title=paper.title,
-                    content=summary_text,
-                    question=query,
-                )
                 abstract_excerpt, truncated = _truncate_tool_text(paper.abstract or summary_text, limit=900)
                 papers.append(
                     {
-                        "source_id": citation.source_id,
                         "paper_id": paper.paper_id,
                         "title": paper.title,
                         "authors": paper.authors,
@@ -1214,17 +1239,8 @@ class PaperbaseService:
             response = self.get_results(result_set_id)
             papers = []
             for paper in response.papers:
-                summary_text = paper.summary_short or paper.tldr or paper.abstract or paper.title
-                citation = self._paper_summary_citation(
-                    citation_registry,
-                    paper_id=paper.paper_id,
-                    title=paper.title,
-                    content=summary_text,
-                    question=response.query or paper.title,
-                )
                 papers.append(
                     {
-                        "source_id": citation.source_id,
                         "paper_id": paper.paper_id,
                         "title": paper.title,
                         "summary_short": paper.summary_short,
@@ -1250,18 +1266,8 @@ class PaperbaseService:
             )
             papers = []
             for match in response.papers:
-                preview = "\n".join(match.previews[:3])
-                citation = citation_registry.register(
-                    key=("paperbase_paper", f"{match.paper_id}:grep:{pattern}"),
-                    source_kind="paperbase_paper",
-                    title=match.title,
-                    path=f"grep:{pattern}",
-                    excerpt=_best_excerpt(preview, pattern),
-                    paper_id=match.paper_id,
-                )
                 papers.append(
                     {
-                        "source_id": citation.source_id,
                         "paper_id": match.paper_id,
                         "title": match.title,
                         "match_count": match.match_count,
@@ -1279,16 +1285,7 @@ class PaperbaseService:
         if tool_name == "paperbase_get_paper":
             paper_id = str(tool_input.get("paper_id") or "").strip()
             paper = self.get_paper(paper_id)
-            summary_text = paper.summary_short or paper.tldr or paper.abstract or paper.title
-            citation = self._paper_summary_citation(
-                citation_registry,
-                paper_id=paper.paper_id,
-                title=paper.title,
-                content=summary_text,
-                question=paper.title,
-            )
             return {
-                "source_id": citation.source_id,
                 "paper": paper.model_dump(mode="json"),
             }
 
@@ -1376,17 +1373,8 @@ class PaperbaseService:
             papers = self.get_related_papers(paper_id)
             related = []
             for paper in papers:
-                summary_text = paper.summary_short or paper.tldr or paper.abstract or paper.title
-                citation = self._paper_summary_citation(
-                    citation_registry,
-                    paper_id=paper.paper_id,
-                    title=paper.title,
-                    content=summary_text,
-                    question=paper.title,
-                )
                 related.append(
                     {
-                        "source_id": citation.source_id,
                         "paper_id": paper.paper_id,
                         "title": paper.title,
                         "summary_short": paper.summary_short,
@@ -1507,8 +1495,9 @@ class PaperbaseService:
         if not tools:
             return messages, citation_registry
 
+        force_first_tool = _should_force_chat_tool_use(prepared.user_message.content_markdown, request)
         for round_index in range(_CHAT_TOOL_MAX_ROUNDS):
-            tool_choice = {"type": "any"} if round_index == 0 else {"type": "auto"}
+            tool_choice = {"type": "any"} if round_index == 0 and force_first_tool else {"type": "auto"}
             response = self.chat_model.create_message(
                 api_key=prepared.api_key_value or "",
                 messages=messages,

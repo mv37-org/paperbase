@@ -9,7 +9,14 @@ from fastapi.testclient import TestClient
 from paperbase.api import _resolve_bind_address, app
 from paperbase.config import Settings, get_settings
 from paperbase.extractors import ExtractionOutput, FigureArtifact, RawArtifact, SectionArtifact, TableArtifact
-from paperbase.models import PaperMetadata, SearchRequest, SearchSectionRequest
+from paperbase.models import (
+    CreateChatThreadRequest,
+    PaperMetadata,
+    SearchRequest,
+    SearchSectionRequest,
+    SendChatMessageRequest,
+    SignupRequest,
+)
 from paperbase.repository import MemoryPaperRepository
 from paperbase.service import PaperbaseService, get_service
 from paperbase.storage import MemoryObjectStore
@@ -72,10 +79,10 @@ class FakeChatModel:
                 else:
                     query = " ".join(query_words[:2]) or raw_query
                 tool_name = (
-                    "paperbase_search"
-                    if "paperbase_search" in tool_names
-                    else "paperbase_search_sections"
+                    "paperbase_search_sections"
                     if "paperbase_search_sections" in tool_names
+                    else "paperbase_search"
+                    if "paperbase_search" in tool_names
                     else str(tool_names[0])
                 )
                 return {
@@ -1024,6 +1031,107 @@ def test_browser_uploads_and_chat_require_api_key_after_free_quota(monkeypatch, 
     assert chat_model.create_calls[0]["tools"]
 
     app.dependency_overrides.clear()
+
+
+def test_non_grounded_chat_skips_tools_and_citations(browser_service):
+    service, _, chat_model = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="casual@example.com", password="topsecret123", display_name="Casual User")
+    )
+    assert session.user is not None
+
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
+    response = service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="Help me brainstorm a short product name"),
+    )
+
+    assert response.assistant_message is not None
+    assert response.assistant_message.citations == []
+    assert len(chat_model.create_calls) == 1
+    assert chat_model.create_calls[0]["tools"] is None
+
+
+def test_search_only_tool_results_do_not_create_citations(monkeypatch):
+    class SearchOnlyChatModel(FakeChatModel):
+        def create_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+            self.create_calls.append(
+                {
+                    "api_key": api_key,
+                    "messages": messages,
+                    "system_prompt": system_prompt,
+                    "tools": tools,
+                    "tool_choice": tool_choice,
+                }
+            )
+            if tools:
+                has_tool_results = any(
+                    message.get("role") == "user"
+                    and isinstance(message.get("content"), list)
+                    and any(block.get("type") == "tool_result" for block in message.get("content"))
+                    for message in messages
+                    if isinstance(message, dict)
+                )
+                if tool_choice == {"type": "any"} or not has_tool_results:
+                    return {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "toolu_search_only",
+                                "name": "paperbase_search",
+                                "input": {"query": "grounding", "limit": 3},
+                            }
+                        ],
+                        "stop_reason": "tool_use",
+                    }
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Grounded answer without evidence citations.",
+                    }
+                ],
+                "stop_reason": "end_turn",
+            }
+
+    chat_model = SearchOnlyChatModel()
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=chat_model,
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="search-only@example.com", password="topsecret123", display_name="Search Only")
+    )
+    assert session.user is not None
+
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda paper: _rich_extraction(text="Methods section explains grounding and citations."),
+    )
+    service.index_arxiv_paper(
+        "2403.00001",
+        paper=_sample_paper("2403.00001", title="Grounding Paper", abstract="A paper about grounded citations"),
+    )
+
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
+    response = service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="Explain the methods grounding with citations"),
+    )
+
+    assert response.assistant_message is not None
+    assert response.assistant_message.citations == []
 
 
 def test_browser_chat_stream_emits_citations_and_completion(monkeypatch, browser_service):
