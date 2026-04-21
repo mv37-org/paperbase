@@ -84,22 +84,23 @@ button, input, textarea {
 
 .landing-copy {
   display: grid;
-  gap: 14px;
-  line-height: 1.7;
-  font-size: 17px;
+  gap: 10px;
+  line-height: 1.65;
+  font-size: 16px;
 }
 
-.prompt-shell {
+.prompt-shell,
+.composer-shell {
   margin-top: 40px;
   display: grid;
-  grid-template-columns: 44px minmax(0, 1fr) auto;
-  gap: 10px;
+  grid-template-columns: 36px minmax(0, 1fr) auto;
+  gap: 8px;
   align-items: center;
-  padding: 14px 16px;
+  padding: 7px 8px;
   background: var(--paper);
   border: 1px solid var(--line);
-  border-radius: 18px;
-  box-shadow: var(--shadow);
+  border-radius: 14px;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
 }
 
 .prompt-clip,
@@ -109,15 +110,22 @@ button, input, textarea {
 .oauth-button,
 .stack button {
   border: 1px solid var(--line);
-  border-radius: 14px;
+  border-radius: 10px;
   background: var(--paper-strong);
   color: var(--text);
-  padding: 12px 16px;
+  padding: 9px 14px;
   cursor: pointer;
 }
 
 .prompt-clip {
-  padding: 10px 0;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 0;
 }
 
 .prompt-input,
@@ -125,28 +133,23 @@ button, input, textarea {
 .stack input,
 textarea {
   border: 1px solid var(--line);
-  border-radius: 14px;
+  border-radius: 10px;
   background: var(--paper);
-  padding: 13px 14px;
+  padding: 10px 12px;
   color: var(--text);
 }
 
 .prompt-input {
   border: 0;
   background: transparent;
-  padding: 6px 0;
+  padding: 0;
+  min-width: 0;
 }
 
-.upload-card,
 .examples {
   margin-top: 34px;
   padding-top: 18px;
   border-top: 1px solid var(--line);
-}
-
-.upload-card h2 {
-  margin: 10px 0 8px;
-  font-size: 24px;
 }
 
 .upload-form,
@@ -173,7 +176,7 @@ textarea {
 }
 
 .example-pill {
-  padding: 14px 16px;
+  padding: 12px 14px;
   cursor: pointer;
 }
 
@@ -328,7 +331,7 @@ textarea {
   padding: 18px;
   display: grid;
   gap: 10px;
-  background: rgba(250, 247, 242, 0.92);
+  background: var(--paper);
 }
 
 .composer-meta {
@@ -340,15 +343,37 @@ textarea {
 }
 
 textarea {
-  min-height: 130px;
-  resize: vertical;
+  min-height: 20px;
+  resize: none;
+  line-height: 1.45;
+  padding: 0;
+  border: 0;
+  background: transparent;
 }
 
 .composer-actions {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-end;
   align-items: center;
   gap: 16px;
+}
+
+.composer-shell {
+  margin-top: 0;
+}
+
+.hidden-file-input {
+  display: none;
+}
+
+.prompt-clip svg {
+  width: 18px;
+  height: 18px;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .modal {

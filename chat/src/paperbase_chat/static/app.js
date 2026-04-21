@@ -10,8 +10,6 @@
     openTabs: [],
     activeThreadId: null,
     documents: [],
-    availableTags: [],
-    activeTags: [],
     authView: "login",
   };
 
@@ -21,17 +19,12 @@
     landingPromptForm: document.getElementById("landing-prompt-form"),
     landingPromptInput: document.getElementById("landing-prompt-input"),
     landingUploadTrigger: document.getElementById("landing-upload-trigger"),
-    publicUploadForm: document.getElementById("public-upload-form"),
-    publicUploadFile: document.getElementById("public-upload-file"),
-    publicUploadTags: document.getElementById("public-upload-tags"),
     exampleList: document.getElementById("example-list"),
     authModal: document.getElementById("auth-modal"),
     modalFlash: document.getElementById("modal-flash"),
     sessionSummary: document.getElementById("session-summary"),
     quotaRow: document.getElementById("quota-row"),
     threadList: document.getElementById("thread-list"),
-    documentList: document.getElementById("document-list"),
-    docTagFilters: document.getElementById("doc-tag-filters"),
     newChatButton: document.getElementById("new-chat-button"),
     tabStrip: document.getElementById("tab-strip"),
     threadHeader: document.getElementById("thread-header"),
@@ -39,11 +32,10 @@
     composerForm: document.getElementById("composer-form"),
     composerInput: document.getElementById("composer-input"),
     composerStatus: document.getElementById("composer-status"),
+    composerUploadTrigger: document.getElementById("composer-upload-trigger"),
     toggleUploads: document.getElementById("toggle-uploads"),
     togglePapers: document.getElementById("toggle-papers"),
-    appUploadForm: document.getElementById("app-upload-form"),
     appUploadFile: document.getElementById("app-upload-file"),
-    appUploadTags: document.getElementById("app-upload-tags"),
     logoutButton: document.getElementById("logout-button"),
     manageKeyButton: document.getElementById("manage-key-button"),
     googleLoginButton: document.getElementById("google-login-button"),
@@ -152,51 +144,6 @@
     el.quotaRow.textContent = `${free} free responses left · ${keyText}`;
   }
 
-  function renderDocuments() {
-    el.docTagFilters.innerHTML = "";
-    const allButton = document.createElement("button");
-    allButton.type = "button";
-    allButton.className = "tag-chip" + (state.activeTags.length === 0 ? " active" : "");
-    allButton.textContent = "all";
-    allButton.addEventListener("click", () => {
-      state.activeTags = [];
-      renderDocuments();
-    });
-    el.docTagFilters.appendChild(allButton);
-
-    for (const tag of state.availableTags) {
-      const chip = document.createElement("button");
-      chip.type = "button";
-      chip.className = "tag-chip" + (state.activeTags.includes(tag) ? " active" : "");
-      chip.textContent = tag;
-      chip.addEventListener("click", () => {
-        state.activeTags = state.activeTags.includes(tag)
-          ? state.activeTags.filter((value) => value !== tag)
-          : [...state.activeTags, tag];
-        renderDocuments();
-      });
-      el.docTagFilters.appendChild(chip);
-    }
-
-    const filtered = state.documents.filter((doc) => {
-      if (state.activeTags.length === 0) {
-        return true;
-      }
-      return state.activeTags.every((tag) => doc.tags.includes(tag));
-    });
-    el.documentList.innerHTML = "";
-    for (const doc of filtered) {
-      const card = document.createElement("div");
-      card.className = "doc-card";
-      card.innerHTML = `
-        <strong>${escapeHtml(doc.title)}</strong>
-        <div class="muted">${escapeHtml(doc.source_filename)}</div>
-        <div class="muted">${escapeHtml(doc.tags.join(", ") || "untagged")}</div>
-      `;
-      el.documentList.appendChild(card);
-    }
-  }
-
   function renderThreads() {
     el.threadList.innerHTML = "";
     for (const thread of state.threads) {
@@ -286,8 +233,6 @@
     }
     const payload = await api("/v1/browser/uploads", { method: "GET" });
     state.documents = payload.documents || [];
-    state.availableTags = payload.available_tags || [];
-    renderDocuments();
   }
 
   async function loadThreads() {
@@ -347,7 +292,7 @@
       method: "POST",
       body: JSON.stringify({
         content,
-        tag_filters: state.activeTags,
+        tag_filters: [],
         include_uploads: el.toggleUploads.checked,
         include_papers: el.togglePapers.checked,
       }),
@@ -392,14 +337,13 @@
     return api(path, { method: "POST", body: JSON.stringify(payload) });
   }
 
-  async function uploadFromForm(fileInput, tagInput) {
+  async function uploadSelectedFile(fileInput) {
     const file = fileInput.files[0];
     if (!file) {
       return;
     }
     const formData = new FormData();
     formData.append("file", file);
-    formData.append("tags", tagInput.value || "");
     const response = await fetch(`${API_BASE}/v1/browser/uploads`, {
       method: "POST",
       body: formData,
@@ -408,7 +352,6 @@
     if (!response.ok) {
       throw new Error((await response.json()).detail || "Upload failed");
     }
-    tagInput.value = "";
     fileInput.value = "";
     await loadDocuments();
   }
@@ -459,24 +402,18 @@
       el.appUploadFile.click();
     });
 
-    el.publicUploadForm.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      if (!state.session || !state.session.authenticated) {
-        showAuthModal("login");
+    el.composerUploadTrigger.addEventListener("click", () => {
+      el.appUploadFile.click();
+    });
+
+    el.appUploadFile.addEventListener("change", async () => {
+      const file = el.appUploadFile.files[0];
+      if (!file) {
         return;
       }
       try {
-        await uploadFromForm(el.publicUploadFile, el.publicUploadTags);
-      } catch (error) {
-        setFlash(error.message);
-        showAuthModal("login");
-      }
-    });
-
-    el.appUploadForm.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      try {
-        await uploadFromForm(el.appUploadFile, el.appUploadTags);
+        await uploadSelectedFile(el.appUploadFile);
+        el.composerStatus.textContent = `Attached ${file.name}`;
       } catch (error) {
         el.composerStatus.textContent = error.message;
       }
@@ -504,7 +441,6 @@
       await api("/v1/browser/auth/logout", { method: "POST" });
       state.session = null;
       state.documents = [];
-      state.availableTags = [];
       state.threads = [];
       state.threadMap = new Map();
       state.openTabs = [];

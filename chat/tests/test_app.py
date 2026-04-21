@@ -12,8 +12,8 @@ def test_home_renders_static_shell():
 
     assert response.status_code == 200
     assert "paperbase" in response.text
-    assert "Chat with your papers" in response.text
-    assert "Grounded answers across your library and the literature." in response.text
+    assert "Use current AI research to build better agents, evals, and systems." in response.text
+    assert "Attach your own notes or drafts, compare them with the literature" in response.text
     assert "Continue with Google" in response.text
     assert "__PAPERBASE_BASE_URL__" not in response.text
 
