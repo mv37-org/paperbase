@@ -1315,26 +1315,24 @@ export default function App() {
               )}
             </div>
 
-            <div className="composer-area">
-              {composerStatus ? <div className="composer-status">{composerStatus}</div> : null}
-              <LandingMentionEditor
-                attachButtonId="composer-upload-trigger"
-                disabled={Boolean(streamingThreadId)}
-                formId="composer-form"
-                inputId="composer-input"
-                onAttach={() => appUploadRef.current?.click()}
-                onChange={setComposerInput}
-                onSubmit={() => void handleComposerSubmit()}
-                placeholder="Ask about the latest agent and AI systems research. Type @ to tag a paper."
-                submitButtonId="composer-send"
-                submitLabel={streamingThreadId ? "Thinking..." : "Send"}
-                submitOnShiftEnter
-                suggestionsPlacement="above"
-                value={composerInput}
-                variant="chat"
-              />
-              <input ref={appUploadRef} id="app-upload-file" className="hidden-file-input" type="file" onChange={onUploadChange} />
-            </div>
+            {composerStatus ? <div className="composer-status">{composerStatus}</div> : null}
+            <LandingMentionEditor
+              attachButtonId="composer-upload-trigger"
+              disabled={Boolean(streamingThreadId)}
+              formId="composer-form"
+              inputId="composer-input"
+              onAttach={() => appUploadRef.current?.click()}
+              onChange={setComposerInput}
+              onSubmit={() => void handleComposerSubmit()}
+              placeholder="Ask about the latest agent and AI systems research. Type @ to tag a paper."
+              submitButtonId="composer-send"
+              submitLabel={streamingThreadId ? "Thinking..." : "Send"}
+              submitOnShiftEnter
+              suggestionsPlacement="above"
+              value={composerInput}
+              variant="chat"
+            />
+            <input ref={appUploadRef} id="app-upload-file" className="hidden-file-input" type="file" onChange={onUploadChange} />
           </section>
 
           {paperDrawerOpen ? (
