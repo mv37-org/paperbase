@@ -131,22 +131,36 @@ function insertMention(editor: Editor & ReactEditor, target: BaseRange, paper: (
 
 type Props = {
   attachButtonId?: string;
+  disabled?: boolean;
+  formId?: string;
+  inputId?: string;
   onAttach: () => void;
   value: string;
   onChange: (value: string) => void;
   onSubmit: () => void;
+  placeholder?: string;
+  submitOnShiftEnter?: boolean;
   submitButtonId?: string;
   submitLabel?: string;
+  suggestionsPlacement?: "above" | "below";
+  variant?: "landing" | "chat";
 };
 
 export function LandingMentionEditor({
   attachButtonId,
+  disabled = false,
+  formId,
+  inputId,
   onAttach,
   value: plainText,
   onChange,
   onSubmit,
+  placeholder = "Ask about agents, evals, or inference. Type @ to tag a paper.",
+  submitOnShiftEnter = false,
   submitButtonId,
   submitLabel = "Start",
+  suggestionsPlacement = "below",
+  variant = "landing",
 }: Props) {
   const [editor] = useState(() => withMentions(withReact(createEditor())));
   const [value, setValue] = useState<Descendant[]>(plainTextToValue(plainText));
@@ -159,6 +173,8 @@ export function LandingMentionEditor({
 
   const tags = useMemo(() => extractMentionTags(value), [value]);
   const showSuggestions = Boolean(target && suggestions.length > 0);
+  const composerClassName = variant === "chat" ? "chat-composer" : "landing-composer";
+  const shellClassName = variant === "chat" ? "prompt-shell composer-form chat-prompt-shell" : "prompt-shell landing-prompt-shell";
 
   useEffect(() => {
     const nextPlainText = serialize(value).trimEnd();
@@ -277,6 +293,10 @@ export function LandingMentionEditor({
   const onKeyDown = useCallback(
     (event: KeyboardEvent<HTMLDivElement>) => {
       if (!target || suggestions.length === 0) {
+        if (submitOnShiftEnter && event.key === "Enter" && event.shiftKey && !disabled) {
+          event.preventDefault();
+          onSubmit();
+        }
         return;
       }
       if (event.key === "ArrowDown") {
@@ -299,7 +319,7 @@ export function LandingMentionEditor({
         setTarget(null);
       }
     },
-    [chooseSuggestion, index, suggestions, target],
+    [chooseSuggestion, disabled, index, onSubmit, submitOnShiftEnter, suggestions, target],
   );
 
   const handleSubmit = useCallback(
@@ -321,12 +341,14 @@ export function LandingMentionEditor({
     const left = Math.min(Math.max(rect.left, gutter), window.innerWidth - gutter - width);
     setPopoverStyle({
       position: "fixed",
-      top: rect.bottom + 4,
       left,
       width,
       zIndex: 30,
+      ...(suggestionsPlacement === "above"
+        ? { bottom: window.innerHeight - rect.top + 4 }
+        : { top: rect.bottom + 4 }),
     });
-  }, []);
+  }, [suggestionsPlacement]);
 
   useLayoutEffect(() => {
     if (!showSuggestions) {
@@ -354,7 +376,7 @@ export function LandingMentionEditor({
   }, [showSuggestions, updatePopoverPosition]);
 
   return (
-    <div className="landing-composer">
+    <div className={composerClassName}>
       {tags.length > 0 ? (
         <div className="mention-tags">
           {tags.map((tag) => (
@@ -364,36 +386,61 @@ export function LandingMentionEditor({
           ))}
         </div>
       ) : null}
-      <form ref={shellRef} className="prompt-shell landing-prompt-shell" onSubmit={handleSubmit}>
-        <button
-          type="button"
-          id={attachButtonId}
-          className="prompt-clip"
-          aria-label="Attach document"
-          onClick={onAttach}
-        >
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M16.5 6.5 9 14a3 3 0 1 0 4.24 4.24l7.01-7.02a5 5 0 0 0-7.07-7.07L5.46 11.9a7 7 0 1 0 9.9 9.9l6.01-6.01" />
-          </svg>
-        </button>
+      <form ref={shellRef} id={formId} className={shellClassName} onSubmit={handleSubmit}>
+        {variant === "landing" ? (
+          <button
+            type="button"
+            id={attachButtonId}
+            className="prompt-clip"
+            aria-label="Attach document"
+            onClick={onAttach}
+            disabled={disabled}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M16.5 6.5 9 14a3 3 0 1 0 4.24 4.24l7.01-7.02a5 5 0 0 0-7.07-7.07L5.46 11.9a7 7 0 1 0 9.9 9.9l6.01-6.01" />
+            </svg>
+          </button>
+        ) : null}
         <div className="landing-editor-root">
           <div className="mention-editor">
             <Slate editor={editor} initialValue={value} onChange={handleChange}>
               <Editable
+                id={inputId}
                 className="mention-editor-input"
                 renderElement={renderElement}
                 renderPlaceholder={renderPlaceholder}
                 onKeyDown={onKeyDown}
-                placeholder="Ask about agents, evals, or inference. Type @ to tag a paper."
+                placeholder={placeholder}
                 spellCheck={false}
                 autoFocus={false}
+                readOnly={disabled}
               />
             </Slate>
           </div>
         </div>
-        <button id={submitButtonId} className="prompt-button" type="submit">
-          {submitLabel}
-        </button>
+        {variant === "chat" ? (
+          <div className="chat-prompt-actions">
+            <button
+              type="button"
+              id={attachButtonId}
+              className="prompt-clip"
+              aria-label="Attach document"
+              onClick={onAttach}
+              disabled={disabled}
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M16.5 6.5 9 14a3 3 0 1 0 4.24 4.24l7.01-7.02a5 5 0 0 0-7.07-7.07L5.46 11.9a7 7 0 1 0 9.9 9.9l6.01-6.01" />
+              </svg>
+            </button>
+            <button id={submitButtonId} className="prompt-button" type="submit" disabled={disabled}>
+              {submitLabel}
+            </button>
+          </div>
+        ) : (
+          <button id={submitButtonId} className="prompt-button" type="submit" disabled={disabled}>
+            {submitLabel}
+          </button>
+        )}
       </form>
       {showSuggestions && popoverStyle && typeof document !== "undefined"
         ? createPortal(

@@ -230,6 +230,12 @@ textarea {
   gap: 8px;
 }
 
+.chat-composer {
+  width: 100%;
+  display: grid;
+  gap: 8px;
+}
+
 .landing-prompt-shell {
   margin-top: 0;
   display: flex;
@@ -257,6 +263,46 @@ textarea {
   flex: 0 0 auto;
   align-self: center;
   margin-left: auto;
+}
+
+.chat-prompt-shell {
+  margin-top: 0;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+  align-items: stretch;
+  padding: 10px;
+  border-radius: 6px;
+}
+
+.chat-prompt-shell .landing-editor-root {
+  min-width: 0;
+}
+
+.chat-prompt-shell .mention-editor {
+  min-height: 96px;
+}
+
+.chat-prompt-shell .mention-editor-input {
+  min-height: 96px;
+  max-height: 220px;
+}
+
+.chat-prompt-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.chat-prompt-shell .prompt-clip {
+  align-self: flex-end;
+}
+
+.chat-prompt-shell .prompt-button {
+  margin-left: auto;
+  padding: 7px 14px;
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .prompt-input,
@@ -1195,7 +1241,7 @@ textarea::placeholder,
 }
 
 .composer-form {
-  width: min(720px, 100%);
+  width: min(660px, 100%);
   max-width: 100%;
   margin: 0 auto;
   padding: 0;

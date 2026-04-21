@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ChangeEvent, FormEvent, RefObject } from "react";
+import type { ChangeEvent, FormEvent } from "react";
 
 import {
   api,
@@ -214,16 +214,6 @@ function AppIcon({ src, className = "" }: { src: string; className?: string }) {
   return <img src={src} alt="" aria-hidden="true" className={className ? `icon-image ${className}` : "icon-image"} />;
 }
 
-function useAutosizeTextarea(ref: RefObject<HTMLTextAreaElement | null>, value: string) {
-  useEffect(() => {
-    if (!ref.current) {
-      return;
-    }
-    ref.current.style.height = "0px";
-    ref.current.style.height = `${Math.min(ref.current.scrollHeight, 160)}px`;
-  }, [ref, value]);
-}
-
 export default function App() {
   const [session, setSession] = useState<BrowserSessionResponse | null>(null);
   const [threads, setThreads] = useState<ChatThreadSummary[]>([]);
@@ -254,11 +244,8 @@ export default function App() {
   const threadMapRef = useRef<Record<string, ChatThreadResponse>>({});
   const openTabsRef = useRef<string[]>([]);
   const appUploadRef = useRef<HTMLInputElement | null>(null);
-  const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const accountMenuRef = useRef<HTMLDivElement | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
-
-  useAutosizeTextarea(composerRef, composerInput);
 
   useEffect(() => {
     sessionRef.current = session;
@@ -834,8 +821,7 @@ export default function App() {
   );
 
   const handleComposerSubmit = useCallback(
-    async (event: FormEvent) => {
-      event.preventDefault();
+    async () => {
       if (streamingThreadId) {
         return;
       }
@@ -1193,34 +1179,23 @@ export default function App() {
 
             <div className="composer-area">
               {composerStatus ? <div className="composer-status">{composerStatus}</div> : null}
-              <form id="composer-form" className="composer-form" onSubmit={handleComposerSubmit}>
-                <div className="composer-shell">
-                  <button
-                    type="button"
-                    className="prompt-clip"
-                    id="composer-upload-trigger"
-                    aria-label="Attach document"
-                    onClick={() => appUploadRef.current?.click()}
-                  >
-                    <svg viewBox="0 0 24 24" aria-hidden="true">
-                      <path d="M16.5 6.5 9 14a3 3 0 1 0 4.24 4.24l7.01-7.02a5 5 0 0 0-7.07-7.07L5.46 11.9a7 7 0 1 0 9.9 9.9l6.01-6.01" />
-                    </svg>
-                  </button>
-                  <textarea
-                    ref={composerRef}
-                    id="composer-input"
-                    rows={1}
-                    placeholder="Ask about the latest agent and AI systems research..."
-                    value={composerInput}
-                    onChange={(event) => setComposerInput(event.target.value)}
-                    disabled={Boolean(streamingThreadId)}
-                  />
-                  <button id="composer-send" className="prompt-button" type="submit" disabled={Boolean(streamingThreadId)}>
-                    {streamingThreadId ? "Thinking..." : "Send"}
-                  </button>
-                </div>
-                <input ref={appUploadRef} id="app-upload-file" className="hidden-file-input" type="file" onChange={onUploadChange} />
-              </form>
+              <LandingMentionEditor
+                attachButtonId="composer-upload-trigger"
+                disabled={Boolean(streamingThreadId)}
+                formId="composer-form"
+                inputId="composer-input"
+                onAttach={() => appUploadRef.current?.click()}
+                onChange={setComposerInput}
+                onSubmit={() => void handleComposerSubmit()}
+                placeholder="Ask about the latest agent and AI systems research. Type @ to tag a paper."
+                submitButtonId="composer-send"
+                submitLabel={streamingThreadId ? "Thinking..." : "Send"}
+                submitOnShiftEnter
+                suggestionsPlacement="above"
+                value={composerInput}
+                variant="chat"
+              />
+              <input ref={appUploadRef} id="app-upload-file" className="hidden-file-input" type="file" onChange={onUploadChange} />
             </div>
           </section>
 
