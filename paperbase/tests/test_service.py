@@ -1,17 +1,144 @@
 from __future__ import annotations
 
 import json
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 from fastapi.testclient import TestClient
 
 from paperbase.api import _resolve_bind_address, app
-from paperbase.config import Settings
+from paperbase.config import Settings, get_settings
 from paperbase.extractors import ExtractionOutput, FigureArtifact, RawArtifact, SectionArtifact, TableArtifact
-from paperbase.models import PaperMetadata, SearchRequest, SearchSectionRequest
+from paperbase.models import (
+    CreateChatThreadRequest,
+    PaperMetadata,
+    SearchRequest,
+    SearchSectionRequest,
+    SendChatMessageRequest,
+    SignupRequest,
+)
 from paperbase.repository import MemoryPaperRepository
 from paperbase.service import PaperbaseService, get_service
 from paperbase.storage import MemoryObjectStore
+
+
+class FakeEmailSender:
+    def __init__(self) -> None:
+        self.reset_emails: list[tuple[str, str]] = []
+
+    def send_password_reset(self, *, email: str, reset_link: str) -> None:
+        self.reset_emails.append((email, reset_link))
+
+
+class FakeChatModel:
+    def __init__(self) -> None:
+        self.create_calls: list[dict[str, object]] = []
+        self.stream_calls: list[dict[str, object]] = []
+        self.stream_chunks: list[str] = ["Grounded ", "answer with citations [S1]"]
+        self.fail_stream_after_chunks: int | None = None
+
+    def create_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+        self.create_calls.append(
+            {
+                "api_key": api_key,
+                "messages": messages,
+                "system_prompt": system_prompt,
+                "tools": tools,
+                "tool_choice": tool_choice,
+            }
+        )
+        if tools:
+            tool_names = [tool.get("name") for tool in tools if isinstance(tool, dict)]
+            has_tool_results = any(
+                message.get("role") == "user"
+                and isinstance(message.get("content"), list)
+                and any(block.get("type") == "tool_result" for block in message.get("content"))
+                for message in messages
+                if isinstance(message, dict)
+            )
+            if tool_choice == {"type": "any"} or not has_tool_results:
+                raw_query = next(
+                    (
+                        str(message.get("content"))
+                        for message in reversed(messages)
+                        if isinstance(message, dict)
+                        and message.get("role") == "user"
+                        and isinstance(message.get("content"), str)
+                    ),
+                    "grounding",
+                )
+                query_words = [
+                    token.strip(".,!?():;").lower()
+                    for token in raw_query.split()
+                    if len(token.strip(".,!?():;")) > 3
+                ]
+                if any(word.startswith("ground") for word in query_words):
+                    query = "grounding"
+                elif "methods" in query_words:
+                    query = "methods"
+                else:
+                    query = " ".join(query_words[:2]) or raw_query
+                tool_name = (
+                    "paperbase_search_sections"
+                    if "paperbase_search_sections" in tool_names
+                    else "paperbase_search"
+                    if "paperbase_search" in tool_names
+                    else str(tool_names[0])
+                )
+                return {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_search_sections",
+                            "name": tool_name,
+                            "input": {"query": query, "limit": 3},
+                        }
+                    ],
+                    "stop_reason": "tool_use",
+                }
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": f"Grounded answer with citations [S1]\n\nAPI key used: {api_key[:6]}",
+                }
+            ],
+            "stop_reason": "end_turn",
+        }
+
+    def stream_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+        self.stream_calls.append(
+            {
+                "api_key": api_key,
+                "messages": messages,
+                "system_prompt": system_prompt,
+                "tools": tools,
+                "tool_choice": tool_choice,
+            }
+        )
+        for index, chunk in enumerate(self.stream_chunks):
+            if self.fail_stream_after_chunks is not None and index >= self.fail_stream_after_chunks:
+                raise RuntimeError("stream blew up")
+            yield chunk
+
+
+def _parse_sse_events(body: str) -> list[tuple[str, dict]]:
+    events: list[tuple[str, dict]] = []
+    for block in body.strip().split("\n\n"):
+        event_name = ""
+        payload = ""
+        for line in block.splitlines():
+            if line.startswith("event:"):
+                event_name = line.split(":", 1)[1].strip()
+            elif line.startswith("data:"):
+                payload = line.split(":", 1)[1].strip()
+        if event_name and payload:
+            events.append((event_name, json.loads(payload)))
+    return events
+
+
+def _auth_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {get_settings().api_key}"}
 
 
 @pytest.fixture
@@ -27,6 +154,26 @@ def service() -> PaperbaseService:
         repository=MemoryPaperRepository(),
         object_store=MemoryObjectStore(),
     )
+
+
+@pytest.fixture
+def browser_service() -> tuple[PaperbaseService, FakeEmailSender, FakeChatModel]:
+    email_sender = FakeEmailSender()
+    chat_model = FakeChatModel()
+    settings = Settings(
+        storage_backend="memory",
+        database_url="memory://",
+        api_key="test-token",
+        anthropic_api_key="product-key-123",
+    )
+    service = PaperbaseService(
+        settings=settings,
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=email_sender,
+        chat_model=chat_model,
+    )
+    return service, email_sender, chat_model
 
 
 def _sample_paper(arxiv_id: str, *, title: str, abstract: str) -> PaperMetadata:
@@ -218,7 +365,7 @@ def test_summarize_top_cited_uses_stable_paging(monkeypatch):
 def test_api_flow_for_jobs_and_results(monkeypatch, service: PaperbaseService):
     app.dependency_overrides[get_service] = lambda: service
     client = TestClient(app)
-    headers = {"Authorization": "Bearer development-token"}
+    headers = _auth_headers()
     paper = _sample_paper("2401.55555", title="Queued Paper", abstract="Queued indexing")
 
     monkeypatch.setattr("paperbase.service.sources.get_paper_details", lambda arxiv_id: paper)
@@ -259,6 +406,38 @@ def test_api_flow_for_jobs_and_results(monkeypatch, service: PaperbaseService):
     app.dependency_overrides.clear()
 
 
+def test_root_serves_built_chat_shell():
+    client = TestClient(app)
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert "Paperbase | MV37" in response.text
+    assert 'id="root"' in response.text
+    assert 'href="/static/favicon.png"' in response.text
+    assert "/static/app.js" in response.text
+    assert "/static/app.css" in response.text
+    assert "__PAPERBASE_BASE_URL__" not in response.text
+
+
+def test_static_chat_assets_are_served():
+    client = TestClient(app)
+
+    response = client.get("/static/app.js")
+
+    assert response.status_code == 200
+    assert "javascript" in response.headers["content-type"]
+
+    stylesheet = client.get("/static/app.css")
+
+    assert stylesheet.status_code == 200
+    assert "css" in stylesheet.headers["content-type"]
+
+    favicon = client.get("/static/favicon.png")
+
+    assert favicon.status_code == 200
+
+
 def test_api_bind_address_prefers_explicit_port_then_platform_port(monkeypatch):
     monkeypatch.delenv("PAPERBASE_API_HOST", raising=False)
     monkeypatch.delenv("PAPERBASE_API_PORT", raising=False)
@@ -297,7 +476,7 @@ def test_probe_integrations_route_returns_503_on_storage_failure():
     app.dependency_overrides[get_service] = lambda: service
     client = TestClient(app)
 
-    response = client.post("/v1/debug/integrations", headers={"Authorization": "Bearer development-token"})
+    response = client.post("/v1/debug/integrations", headers=_auth_headers())
 
     assert response.status_code == 503
     assert response.json()["database"]["ok"] is True
@@ -726,6 +905,7 @@ def test_init_creates_trigram_indexes_for_summary_and_tldr():
             return _FakeBegin()
 
     repo = SqlAlchemyPaperRepository.__new__(SqlAlchemyPaperRepository)
+    repo._embedding_dim = 768
     repo._engine = _FakeEngine()
     repo._session_factory = None  # type: ignore[assignment]
 
@@ -737,7 +917,467 @@ def test_init_creates_trigram_indexes_for_summary_and_tldr():
         Base.metadata.create_all = original_create_all
 
     combined = "\n".join(statements)
+    assert "ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS embedding VECTOR(768)" in combined
+    assert "ALTER TABLE IF EXISTS text_chunks ADD COLUMN IF NOT EXISTS embedding VECTOR(768)" in combined
     assert "papers_summary_short_trgm" in combined
     assert "summary_short gin_trgm_ops" in combined
     assert "papers_tldr_trgm" in combined
     assert "tldr gin_trgm_ops" in combined
+
+
+def test_browser_auth_and_password_reset_flow(browser_service):
+    service, email_sender, _ = browser_service
+    app.dependency_overrides[get_service] = lambda: service
+    client = TestClient(app)
+
+    signup = client.post(
+        "/v1/browser/auth/signup",
+        json={"email": "user@example.com", "password": "topsecret123", "display_name": "User"},
+    )
+    assert signup.status_code == 200
+    assert signup.json()["authenticated"] is True
+    assert signup.json()["remaining_free_responses"] == 3
+    csrf_token = signup.json()["csrf_token"]
+    assert csrf_token
+
+    session = client.get("/v1/browser/session")
+    assert session.json()["user"]["email"] == "user@example.com"
+    assert session.json()["csrf_token"] == csrf_token
+
+    forgot = client.post("/v1/browser/auth/forgot-password", json={"email": "user@example.com"})
+    assert forgot.status_code == 200
+    assert email_sender.reset_emails
+    reset_link = email_sender.reset_emails[0][1]
+    reset_token = parse_qs(urlparse(reset_link).query)["reset_token"][0]
+
+    reset = client.post("/v1/browser/auth/reset-password", json={"token": reset_token, "password": "newsecret456"})
+    assert reset.status_code == 200
+
+    logout = client.post("/v1/browser/auth/logout", headers={"X-Paperbase-CSRF": csrf_token})
+    assert logout.status_code == 200
+
+    login = client.post("/v1/browser/auth/login", json={"email": "user@example.com", "password": "newsecret456"})
+    assert login.status_code == 200
+    assert login.json()["authenticated"] is True
+    assert login.json()["csrf_token"]
+
+    app.dependency_overrides.clear()
+
+
+def test_browser_uploads_and_chat_require_api_key_after_free_quota(monkeypatch, browser_service):
+    service, _, chat_model = browser_service
+    app.dependency_overrides[get_service] = lambda: service
+    client = TestClient(app)
+
+    signup = client.post(
+        "/v1/browser/auth/signup",
+        json={"email": "chat@example.com", "password": "topsecret123", "display_name": "Chat User"},
+    )
+    assert signup.status_code == 200
+    csrf_headers = {"X-Paperbase-CSRF": signup.json()["csrf_token"]}
+
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda paper: _rich_extraction(text="Methods section explains grounding and citations."),
+    )
+    service.index_arxiv_paper(
+        "2401.77777",
+        paper=_sample_paper("2401.77777", title="Grounding Paper", abstract="A paper about grounded citations"),
+    )
+
+    upload = client.post(
+        "/v1/browser/uploads",
+        data={"tags": "methods,notes"},
+        files={"file": ("notes.md", b"# Notes\n\nThese uploaded notes discuss methods and grounding.", "text/markdown")},
+        headers=csrf_headers,
+    )
+    assert upload.status_code == 200
+    assert upload.json()["tags"] == ["methods", "notes"]
+
+    thread = client.post("/v1/browser/chats", json={"title": "New chat"}, headers=csrf_headers).json()
+    thread_id = thread["thread_id"]
+
+    for _ in range(3):
+        response = client.post(
+            f"/v1/browser/chats/{thread_id}/messages",
+            json={"content": "Explain the methods grounding with citations", "tag_filters": ["methods"]},
+            headers=csrf_headers,
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["state"] == "completed"
+        assert payload["assistant_message"]["citations"]
+
+    gated = client.post(
+        f"/v1/browser/chats/{thread_id}/messages",
+        json={"content": "One more answer please", "tag_filters": ["methods"]},
+        headers=csrf_headers,
+    )
+    assert gated.status_code == 200
+    assert gated.json()["state"] == "api_key_required"
+
+    save_key = client.put("/v1/browser/settings/anthropic-key", json={"api_key": "anthropic-user-key-999"}, headers=csrf_headers)
+    assert save_key.status_code == 200
+    assert save_key.json()["has_anthropic_api_key"] is True
+    csrf_headers = {"X-Paperbase-CSRF": save_key.json()["csrf_token"]}
+
+    resumed = client.post(
+        f"/v1/browser/chats/{thread_id}/messages",
+        json={"content": "Continue with my saved key", "tag_filters": ["methods"]},
+        headers=csrf_headers,
+    )
+    assert resumed.status_code == 200
+    assert resumed.json()["state"] == "completed"
+    assert chat_model.create_calls
+    assert chat_model.create_calls[0]["tool_choice"] == {"type": "any"}
+    assert chat_model.create_calls[0]["tools"]
+
+    app.dependency_overrides.clear()
+
+
+def test_non_grounded_chat_skips_tools_and_citations(browser_service):
+    service, _, chat_model = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="casual@example.com", password="topsecret123", display_name="Casual User")
+    )
+    assert session.user is not None
+
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
+    response = service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="Help me brainstorm a short product name"),
+    )
+
+    assert response.assistant_message is not None
+    assert response.assistant_message.citations == []
+    assert "[S" not in response.assistant_message.content_markdown
+    assert len(chat_model.create_calls) == 1
+    assert chat_model.create_calls[0]["tools"] is None
+    assert "do not invent source ids" in str(chat_model.create_calls[0]["system_prompt"])
+
+
+def test_search_only_tool_results_do_not_create_citations(monkeypatch):
+    class SearchOnlyChatModel(FakeChatModel):
+        def create_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+            self.create_calls.append(
+                {
+                    "api_key": api_key,
+                    "messages": messages,
+                    "system_prompt": system_prompt,
+                    "tools": tools,
+                    "tool_choice": tool_choice,
+                }
+            )
+            if tools:
+                has_tool_results = any(
+                    message.get("role") == "user"
+                    and isinstance(message.get("content"), list)
+                    and any(block.get("type") == "tool_result" for block in message.get("content"))
+                    for message in messages
+                    if isinstance(message, dict)
+                )
+                if tool_choice == {"type": "any"} or not has_tool_results:
+                    return {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "toolu_search_only",
+                                "name": "paperbase_search",
+                                "input": {"query": "grounding", "limit": 3},
+                            }
+                        ],
+                        "stop_reason": "tool_use",
+                    }
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Grounded answer without evidence citations [S1].",
+                    }
+                ],
+                "stop_reason": "end_turn",
+            }
+
+    chat_model = SearchOnlyChatModel()
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=chat_model,
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="search-only@example.com", password="topsecret123", display_name="Search Only")
+    )
+    assert session.user is not None
+
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda paper: _rich_extraction(text="Methods section explains grounding and citations."),
+    )
+    service.index_arxiv_paper(
+        "2403.00001",
+        paper=_sample_paper("2403.00001", title="Grounding Paper", abstract="A paper about grounded citations"),
+    )
+
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
+    response = service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="Explain the methods grounding with citations"),
+    )
+
+    assert response.assistant_message is not None
+    assert response.assistant_message.citations == []
+    assert "[S" not in response.assistant_message.content_markdown
+
+
+def test_link_requests_force_tool_use_and_prompt_for_paper_links(monkeypatch, browser_service):
+    service, _, chat_model = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="links@example.com", password="topsecret123", display_name="Links User")
+    )
+    assert session.user is not None
+
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda paper: _rich_extraction(text="## Methods\n\nGrounding methods and benchmark comparisons."),
+    )
+    service.index_arxiv_paper(
+        "2402.42424",
+        paper=_sample_paper("2402.42424", title="Grounding Links Paper", abstract="A paper with useful metadata"),
+    )
+
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
+    service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="Give me links to papers about grounding"),
+    )
+
+    assert chat_model.create_calls[0]["tool_choice"] == {"type": "any"}
+    assert "html_url or pdf_url" in str(chat_model.create_calls[0]["system_prompt"])
+    assert "markdown links to the paper pages or PDFs" in str(chat_model.create_calls[-1]["system_prompt"])
+
+
+def test_browser_chat_stream_emits_citations_and_completion(monkeypatch, browser_service):
+    service, _, _ = browser_service
+    app.dependency_overrides[get_service] = lambda: service
+    client = TestClient(app)
+
+    signup = client.post(
+        "/v1/browser/auth/signup",
+        json={"email": "stream@example.com", "password": "topsecret123", "display_name": "Stream User"},
+    )
+    assert signup.status_code == 200
+    csrf_headers = {"X-Paperbase-CSRF": signup.json()["csrf_token"]}
+
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda paper: _rich_extraction(text="## Methods\n\nMethods section explains grounding and citations."),
+    )
+    service.index_arxiv_paper(
+        "2401.88888",
+        paper=_sample_paper("2401.88888", title="Stream Grounding Paper", abstract="A paper about streaming citations"),
+    )
+
+    thread = client.post("/v1/browser/chats", json={"title": "New chat"}, headers=csrf_headers).json()
+    thread_id = thread["thread_id"]
+
+    with client.stream(
+        "POST",
+        f"/v1/browser/chats/{thread_id}/messages/stream",
+        json={"content": "Explain the methods grounding with citations", "tag_filters": []},
+        headers=csrf_headers,
+    ) as response:
+        assert response.status_code == 200
+        events = _parse_sse_events("".join(response.iter_text()))
+
+    event_names = [event_name for event_name, _ in events]
+    assert event_names[0] == "assistant_start"
+    assert "delta" in event_names
+    assert event_names[-1] == "done"
+    assert events[0][1]["assistant_message"]["citations"]
+    assert events[-1][1]["assistant_message"]["status"] == "completed"
+
+    refreshed = client.get(f"/v1/browser/chats/{thread_id}").json()
+    assert refreshed["messages"][-1]["status"] == "completed"
+    assert refreshed["messages"][-1]["citations"]
+
+    app.dependency_overrides.clear()
+
+
+def test_browser_chat_stream_handles_api_key_required_without_placeholder(browser_service):
+    service, _, _ = browser_service
+    app.dependency_overrides[get_service] = lambda: service
+    client = TestClient(app)
+
+    signup = client.post(
+        "/v1/browser/auth/signup",
+        json={"email": "stream-gated@example.com", "password": "topsecret123", "display_name": "Gated User"},
+    )
+    assert signup.status_code == 200
+    payload = signup.json()
+    csrf_headers = {"X-Paperbase-CSRF": payload["csrf_token"]}
+    user_id = payload["user"]["user_id"]
+
+    for _ in range(3):
+        service.repository.increment_free_responses_used(user_id)  # type: ignore[attr-defined]
+
+    thread = client.post("/v1/browser/chats", json={"title": "New chat"}, headers=csrf_headers).json()
+    thread_id = thread["thread_id"]
+
+    with client.stream(
+        "POST",
+        f"/v1/browser/chats/{thread_id}/messages/stream",
+        json={"content": "One more answer please", "tag_filters": []},
+        headers=csrf_headers,
+    ) as response:
+        assert response.status_code == 200
+        events = _parse_sse_events("".join(response.iter_text()))
+
+    assert [event_name for event_name, _ in events] == ["api_key_required"]
+    assert events[0][1]["state"] == "api_key_required"
+    assert events[0][1]["assistant_message"] is None
+    assert [message["role"] for message in events[0][1]["thread"]["messages"]] == ["user"]
+
+    app.dependency_overrides.clear()
+
+
+def test_browser_chat_stream_marks_partial_failure(monkeypatch, browser_service):
+    service, _, chat_model = browser_service
+    app.dependency_overrides[get_service] = lambda: service
+    client = TestClient(app)
+
+    signup = client.post(
+        "/v1/browser/auth/signup",
+        json={"email": "stream-fail@example.com", "password": "topsecret123", "display_name": "Fail User"},
+    )
+    assert signup.status_code == 200
+    csrf_headers = {"X-Paperbase-CSRF": signup.json()["csrf_token"]}
+
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda paper: _rich_extraction(text="Methods section explains grounding and citations."),
+    )
+    service.index_arxiv_paper(
+        "2401.99999",
+        paper=_sample_paper("2401.99999", title="Failure Paper", abstract="A paper about stream failure"),
+    )
+    chat_model.fail_stream_after_chunks = 1
+
+    thread = client.post("/v1/browser/chats", json={"title": "New chat"}, headers=csrf_headers).json()
+    thread_id = thread["thread_id"]
+
+    with client.stream(
+        "POST",
+        f"/v1/browser/chats/{thread_id}/messages/stream",
+        json={"content": "Explain the methods grounding with citations", "tag_filters": []},
+        headers=csrf_headers,
+    ) as response:
+        assert response.status_code == 200
+        events = _parse_sse_events("".join(response.iter_text()))
+
+    assert [event_name for event_name, _ in events][:2] == ["assistant_start", "delta"]
+    assert events[-1][0] == "error"
+    refreshed = client.get(f"/v1/browser/chats/{thread_id}").json()
+    assert refreshed["messages"][-1]["status"] == "failed"
+    assert refreshed["messages"][-1]["content_markdown"] == "Grounded"
+
+    app.dependency_overrides.clear()
+
+
+def test_browser_paper_read_endpoints(monkeypatch, browser_service):
+    service, _, _ = browser_service
+    app.dependency_overrides[get_service] = lambda: service
+    client = TestClient(app)
+
+    signup = client.post(
+        "/v1/browser/auth/signup",
+        json={"email": "papers@example.com", "password": "topsecret123", "display_name": "Paper User"},
+    )
+    assert signup.status_code == 200
+
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda paper: _rich_extraction(text="## Introduction\n\nGrounded section content."),
+    )
+    indexed = service.index_arxiv_paper(
+        "2402.00001",
+        paper=_sample_paper("2402.00001", title="Drawer Paper", abstract="A paper for the drawer"),
+    )
+
+    paper = client.get(f"/v1/browser/papers/{indexed.paper_id}")
+    assert paper.status_code == 200
+    assert paper.json()["title"] == "Drawer Paper"
+
+    file_response = client.get(f"/v1/browser/papers/{indexed.paper_id}/files/sections/introduction.md")
+    assert file_response.status_code == 200
+    assert "Grounded section content." in file_response.json()["content"]
+
+    figure = client.get(f"/v1/browser/papers/{indexed.paper_id}/figures/figure-1")
+    assert figure.status_code == 200
+    assert figure.json()["caption"] == "A model architecture."
+
+    table = client.get(f"/v1/browser/papers/{indexed.paper_id}/tables/table-1")
+    assert table.status_code == 200
+    assert table.json()["rows"][1] == ["Paperbase", "1.0"]
+
+    app.dependency_overrides.clear()
+
+
+def test_browser_write_endpoints_require_csrf(browser_service):
+    service, _, _ = browser_service
+    app.dependency_overrides[get_service] = lambda: service
+    client = TestClient(app)
+
+    signup = client.post(
+        "/v1/browser/auth/signup",
+        json={"email": "csrf@example.com", "password": "topsecret123", "display_name": "CSRF User"},
+    )
+    assert signup.status_code == 200
+    assert signup.json()["csrf_token"]
+
+    missing_csrf = client.post("/v1/browser/chats", json={"title": "No token"})
+    assert missing_csrf.status_code == 403
+    assert missing_csrf.json()["detail"] == "Invalid CSRF token"
+
+    wrong_origin = client.post(
+        "/v1/browser/chats",
+        json={"title": "Wrong origin"},
+        headers={"X-Paperbase-CSRF": signup.json()["csrf_token"], "Origin": "https://evil.example"},
+    )
+    assert wrong_origin.status_code == 403
+    assert wrong_origin.json()["detail"] == "Cross-site browser requests are not allowed"
+
+    app.dependency_overrides.clear()
+
+
+def test_browser_google_start_redirects_back_to_return_to_when_not_configured(monkeypatch, service: PaperbaseService):
+    app.dependency_overrides[get_service] = lambda: service
+    client = TestClient(app)
+
+    monkeypatch.setattr("paperbase.api.get_google_oauth_client", lambda: None)
+
+    response = client.get(
+        "/v1/browser/auth/google/start",
+        params={"return_to": "http://127.0.0.1:8080"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    assert response.headers["location"] == "http://127.0.0.1:8080/?auth_error=google_not_configured"
+
+    app.dependency_overrides.clear()

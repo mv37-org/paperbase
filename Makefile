@@ -1,9 +1,11 @@
 PYTHON := python3
+VP ?= vp
 VENV := .venv
 VENV_PYTHON := $(VENV)/bin/python
 VENV_BIN := $(VENV)/bin
 PIP := $(VENV_PYTHON) -m pip
 PYTEST := $(VENV_PYTHON) -m pytest
+CHAT_FRONTEND_DIR := $(CURDIR)/chat
 API_HOST ?= 127.0.0.1
 API_PORT ?= 8080
 PLUGIN_MCP_HOST ?= 127.0.0.1
@@ -27,20 +29,24 @@ API_LOG := $(RUN_DIR)/paperbase-api.log
 WORKER_LOG := $(RUN_DIR)/paperbase-worker.log
 PLUGIN_LOG := $(RUN_DIR)/paperbase-plugin-mcp.log
 
-.PHONY: help venv install install-paperbase install-plugin test test-paperbase test-plugin run-api run-worker run-plugin-mcp start-all start-local flush kill-all clean
+.PHONY: help venv install install-paperbase install-plugin install-chat build-chat-frontend test test-paperbase test-plugin test-chat run-api run-worker run-plugin-mcp run-chat start-all start-local flush kill-all clean
 
 help:
 	@echo "Available targets:"
 	@echo "  make venv            Create .venv and bootstrap pip"
-	@echo "  make install         Install both paperbase and paperbase-plugin with dev deps"
+	@echo "  make install         Install paperbase, paperbase-plugin, and chat frontend deps"
 	@echo "  make install-paperbase Install only the paperbase backend"
 	@echo "  make install-plugin  Install only the paperbase plugin"
+	@echo "  make install-chat    Install chat frontend dependencies"
+	@echo "  make build-chat-frontend Install frontend deps and build assets into paperbase/static"
 	@echo "  make test            Run all tests"
 	@echo "  make test-paperbase  Run backend tests only"
 	@echo "  make test-plugin     Run plugin tests only"
+	@echo "  make test-chat       Run chat frontend checks only"
 	@echo "  make run-api         Run the paperbase FastAPI server"
 	@echo "  make run-worker      Run the paperbase background worker"
 	@echo "  make run-plugin-mcp  Run the plugin MCP server locally"
+	@echo "  make run-chat        Run the chat VitePlus dev server"
 	@echo "  make start-all       Start API, worker, and plugin MCP HTTP bridge in the background"
 	@echo "  make start-local     Start local Postgres/filesystem stack with JSON logs attached"
 	@echo "                       Options: LOCAL_STREAM_LOGS=0 LOCAL_AUTO_SYNC_LATEST=1 LOCAL_INITIAL_SYNC_LATEST=1"
@@ -55,8 +61,7 @@ $(VENV_PYTHON):
 
 venv: $(VENV_PYTHON)
 
-install: venv
-	$(PIP) install -e './paperbase[dev]' -e './paperbase-plugin[dev]'
+install: install-paperbase install-plugin install-chat
 
 install-paperbase: venv
 	$(PIP) install -e './paperbase[dev]'
@@ -64,24 +69,36 @@ install-paperbase: venv
 install-plugin: venv
 	$(PIP) install -e './paperbase-plugin[dev]'
 
-test: test-paperbase test-plugin
+install-chat:
+	cd $(CHAT_FRONTEND_DIR) && $(VP) install
 
-test-paperbase: venv
+build-chat-frontend: install-chat
+	cd $(CHAT_FRONTEND_DIR) && $(VP) build
+
+test: test-paperbase test-plugin test-chat
+
+test-paperbase: venv build-chat-frontend
 	$(PYTEST) paperbase/tests -q
 
 test-plugin: venv
 	$(PYTEST) paperbase-plugin/tests -q
 
-run-api: install
+test-chat: build-chat-frontend
+	cd $(CHAT_FRONTEND_DIR) && $(VP) run typecheck
+
+run-api: install-paperbase build-chat-frontend
 	$(VENV_BIN)/paperbase-api
 
-run-worker: install
+run-worker: install-paperbase
 	$(VENV_BIN)/paperbase-worker
 
-run-plugin-mcp: install
+run-plugin-mcp: install-plugin
 	$(VENV_BIN)/paperbase-plugin-mcp
 
-start-all: install
+run-chat: install-chat
+	cd $(CHAT_FRONTEND_DIR) && $(VP) dev
+
+start-all: install build-chat-frontend
 	@mkdir -p $(RUN_DIR)
 	@$(MAKE) kill-all >/dev/null
 	@nohup env PAPERBASE_API_HOST=$(API_HOST) PAPERBASE_API_PORT=$(API_PORT) $(VENV_BIN)/paperbase-api > $(API_LOG) 2>&1 & echo $$! > $(API_PID)
@@ -113,10 +130,11 @@ start-all: install
 		exit 1; \
 	fi
 	@echo "Started paperbase API    pid=$$(cat $(API_PID)) log=$(API_LOG)"
+	@echo "Chat URL                 $(PAPERBASE_BASE_URL)"
 	@echo "Started paperbase worker pid=$$(cat $(WORKER_PID)) log=$(WORKER_LOG)"
 	@echo "Started plugin MCP       pid=$$(cat $(PLUGIN_PID)) url=$(PLUGIN_MCP_URL) log=$(PLUGIN_LOG)"
 
-start-local: install
+start-local: install build-chat-frontend
 	@mkdir -p $(RUN_DIR) "$(LOCAL_STORAGE_ROOT)"
 	@$(MAKE) kill-all >/dev/null
 	@nohup $(LOCAL_STACK_ENV) PAPERBASE_API_HOST=$(API_HOST) PAPERBASE_API_PORT=$(API_PORT) $(VENV_BIN)/paperbase-api > $(API_LOG) 2>&1 & echo $$! > $(API_PID)
@@ -148,6 +166,7 @@ start-local: install
 		exit 1; \
 	fi
 	@echo "Started local API       pid=$$(cat $(API_PID)) url=$(PAPERBASE_BASE_URL) log=$(API_LOG)"
+	@echo "Chat URL                $(PAPERBASE_BASE_URL)"
 	@echo "Started local worker    pid=$$(cat $(WORKER_PID)) log=$(WORKER_LOG)"
 	@echo "Started local plugin    pid=$$(cat $(PLUGIN_PID)) url=$(PLUGIN_MCP_URL) log=$(PLUGIN_LOG)"
 	@echo "Local Postgres URL      $(LOCAL_DATABASE_URL)"

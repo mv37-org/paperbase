@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import base64
 from functools import lru_cache
 
 from pydantic import Field
@@ -40,6 +42,24 @@ class Settings(BaseSettings):
     local_storage_root: str = Field(default=".paperbase-data")
     log_level: str = Field(default="INFO")
     log_format: str = Field(default="text")
+    browser_origin: str = Field(default="http://127.0.0.1:5173")
+    chat_public_url: str = Field(default="http://127.0.0.1:8080")
+    app_secret: str = Field(default="paperbase-development-secret")
+    encryption_key: str | None = None
+    browser_session_cookie_name: str = Field(default="paperbase_browser_session")
+    browser_session_ttl_seconds: int = Field(default=60 * 60 * 24 * 30)
+    browser_session_secure: bool = Field(default=False)
+    password_reset_ttl_seconds: int = Field(default=60 * 60)
+    resend_api_key: str | None = None
+    resend_from_email: str = Field(default="Paperbase <auth@paperbase.local>")
+    google_client_id: str | None = None
+    google_client_secret: str | None = None
+    google_oauth_redirect_url: str | None = None
+    anthropic_api_key: str | None = None
+    anthropic_base_url: str = Field(default="https://api.anthropic.com")
+    anthropic_model: str = Field(default="claude-opus-4-7")
+    free_chat_response_limit: int = Field(default=3)
+    upload_max_bytes: int = Field(default=25_000_000)
     gcs_project: str | None = None
     gcs_bucket: str = "paperbase"
     gcs_public_base_url: str | None = None
@@ -84,6 +104,13 @@ class Settings(BaseSettings):
     # extra S2 call per indexed paper, so turn off for mass harvests and leave
     # on for featured-tier / on-demand indexing.
     fetch_references_at_index: bool = Field(default=False)
+
+    @property
+    def effective_encryption_key(self) -> str:
+        if self.encryption_key:
+            return self.encryption_key
+        digest = hashlib.sha256(self.app_secret.encode("utf-8")).digest()
+        return base64.urlsafe_b64encode(digest).decode("ascii")
 
 
 @lru_cache(maxsize=1)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import re
+from pathlib import Path
 import tarfile
 import tempfile
 from dataclasses import dataclass, field
@@ -513,6 +514,44 @@ def extract_with_docling(pdf_bytes: bytes) -> ExtractionOutput | None:
         tables=tables,
         raw_artifacts=[RawArtifact(path="raw/paper.pdf", data=pdf_bytes, content_type="application/pdf")],
     )
+
+
+def extract_uploaded_document(filename: str, data: bytes, *, content_type: str | None = None) -> ExtractionOutput:
+    suffix = Path(filename).suffix.lower()
+    if suffix in {".md", ".markdown", ".txt"}:
+        text = data.decode("utf-8", errors="replace")
+        markdown = text if suffix in {".md", ".markdown"} else f"# {Path(filename).stem}\n\n{text}"
+        return ExtractionOutput(
+            source_type="upload-text",
+            text_markdown=markdown,
+            sections=_extract_sections(markdown),
+            raw_artifacts=[RawArtifact(path=f"raw/{Path(filename).name}", data=data, content_type=content_type or "text/plain")],
+        )
+
+    if suffix in {".pdf", ".docx", ".pptx"}:
+        try:
+            from docling.document_converter import DocumentConverter
+        except Exception as exc:  # pragma: no cover - depends on optional runtime imports
+            raise RuntimeError(f"Docling is unavailable for {filename}") from exc
+        with tempfile.NamedTemporaryFile(suffix=suffix) as temp_file:
+            temp_file.write(data)
+            temp_file.flush()
+            converter = DocumentConverter()
+            result = converter.convert(temp_file.name)
+            document = result.document
+            markdown = document.export_to_markdown()
+            payload = _docling_export_dict(document)
+        tables: list[TableArtifact] = []
+        _scan_docling_tables(payload, tables)
+        return ExtractionOutput(
+            source_type="upload-docling",
+            text_markdown=markdown,
+            sections=_extract_sections(markdown),
+            tables=tables,
+            raw_artifacts=[RawArtifact(path=f"raw/{Path(filename).name}", data=data, content_type=content_type or "application/octet-stream")],
+        )
+
+    raise RuntimeError(f"Unsupported upload type for {filename}")
 
 
 def index_paper_artifacts(paper: PaperMetadata) -> ExtractionOutput:

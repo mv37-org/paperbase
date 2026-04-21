@@ -1,14 +1,16 @@
 # paper-ai
 
-This repo has **two boxes**:
+This repo has **three boxes**:
 
 - `paperbase/` = the server box
 - `paperbase-plugin/` = the plugin box for Codex and Claude Code
+- `chat/` = the web chat product for the `paperbase` browser experience
 
 If you are 5 years old:
 
 - `paperbase` is the librarian.
 - `paperbase-plugin` is the walkie-talkie you use to ask the librarian questions.
+- `chat` is the reading room where a person asks the librarian questions about one paper at a time.
 
 The librarian knows how to:
 
@@ -22,6 +24,12 @@ The plugin knows how to:
 - talk to the server over HTTP
 - expose MCP tools like `search_papers`, `index_paper`, and `get_figure`
 - let Codex and Claude Code use the same backend
+
+The chat app knows how to:
+
+- serve the browser UI for the chat product
+- talk to the `paperbase` browser API over HTTP
+- ship a React frontend built with VitePlus from `chat/`
 
 ## What “index a paper” means
 
@@ -47,7 +55,7 @@ Examples of saved artifacts:
 
 Use `make`.
 
-First, create the local Python environment and install both products:
+First, create the local Python environment and install all three products:
 
 ```bash
 make install
@@ -58,6 +66,7 @@ That will:
 - create `.venv/`
 - install `paperbase`
 - install `paperbase-plugin`
+- install the `chat/` VitePlus dependencies
 - install test dependencies
 
 ## How to run tests
@@ -78,6 +87,12 @@ Run only plugin tests:
 
 ```bash
 make test-plugin
+```
+
+Run only chat app tests:
+
+```bash
+make test-chat
 ```
 
 Current tests are mostly **local safety checks**. They verify things like:
@@ -181,6 +196,25 @@ make run-plugin-mcp
 That runs the shared MCP server from `paperbase-plugin/` over normal stdio, which is what Codex and Claude Code expect.
 
 `make start-all` uses an HTTP transport for the plugin instead, because background daemons cannot safely use stdio MCP.
+
+## How to run the lightweight chat app locally
+
+To work on the frontend with a Vite dev server:
+
+```bash
+make run-chat
+```
+
+That starts the chat UI on `http://127.0.0.1:5173` by default and points browser requests at `paperbase`.
+
+If you want the main backend to serve the built chat app, build the frontend and run the API:
+
+```bash
+make build-chat-frontend
+make run-api
+```
+
+That serves the built app from `paperbase/src/paperbase/static/` at `http://127.0.0.1:8080`.
 
 ## How to use it from Codex locally
 
