@@ -169,6 +169,25 @@ function truncateTabTitle(title: string) {
   return `${words.slice(0, 4).join(" ")}…`;
 }
 
+function formatTodayTimeLabel(value: string) {
+  const timestamp = new Date(value);
+  if (Number.isNaN(timestamp.getTime())) {
+    return null;
+  }
+  const now = new Date();
+  const isToday =
+    timestamp.getFullYear() === now.getFullYear() &&
+    timestamp.getMonth() === now.getMonth() &&
+    timestamp.getDate() === now.getDate();
+  if (!isToday) {
+    return null;
+  }
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(timestamp);
+}
+
 function shouldShowThreadInSidebar(thread: ChatThreadSummary) {
   return thread.title.trim().length > 0 || thread.last_message_preview.trim().length > 0;
 }
@@ -335,6 +354,7 @@ export default function App() {
       }),
     [openTabs, threadMap, threads],
   );
+  const hasOpenTabs = openTabItems.length > 0;
 
   useEffect(() => {
     const handlePopState = () => {
@@ -541,6 +561,14 @@ export default function App() {
       });
       return nextTabs;
     });
+  }, []);
+
+  const copyMessage = useCallback(async (content: string) => {
+    try {
+      await navigator.clipboard.writeText(content);
+    } catch (error) {
+      console.error(error);
+    }
   }, []);
 
   const sendMessage = useCallback(
@@ -1118,62 +1146,77 @@ export default function App() {
           </aside>
 
           <section className="chat-stage">
-            <header className="chat-stage-header">
-              <div className="chat-stage-header-inner">
-                <button
-                  type="button"
-                  className="sidebar-icon-button chat-sidebar-toggle"
-                  aria-label={mobileSidebarOpen ? "Close sidebar" : "Open sidebar"}
-                  onClick={handleSidebarToggle}
-                >
-                  <AppIcon
-                    src={staticAssetPath(mobileSidebarOpen ? "hide-sidebar.svg" : "show-sidebar.svg")}
-                    className="sidebar-toggle-icon"
-                  />
-                </button>
-                <div className="chat-tab-strip" role="tablist" aria-label="Open tabs">
-                  {openTabItems.map((tab) => (
-                    <div
-                      key={tab.threadId}
-                      role="tab"
-                      tabIndex={0}
-                      aria-selected={activeThreadId === tab.threadId}
-                      className={`chat-tab${activeThreadId === tab.threadId ? " active" : ""}`}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter" || event.key === " ") {
-                          event.preventDefault();
-                          void handleThreadSelection(tab.threadId);
-                        }
-                      }}
-                    >
-                      <button
-                        type="button"
-                        className="chat-tab-trigger"
-                        title={tab.title}
-                        onClick={() => void handleThreadSelection(tab.threadId)}
-                      >
-                        <span className="chat-tab-title">{tab.tabTitle}</span>
-                      </button>
-                      <button
-                        type="button"
-                        aria-label={`Close ${tab.title}`}
-                        className="chat-tab-close"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          closeThreadTab(tab.threadId);
+            {hasOpenTabs ? (
+              <header className="chat-stage-header">
+                <div className="chat-stage-header-inner">
+                  <button
+                    type="button"
+                    className="sidebar-icon-button chat-sidebar-toggle"
+                    aria-label={mobileSidebarOpen ? "Close sidebar" : "Open sidebar"}
+                    onClick={handleSidebarToggle}
+                  >
+                    <AppIcon
+                      src={staticAssetPath(mobileSidebarOpen ? "hide-sidebar.svg" : "show-sidebar.svg")}
+                      className="sidebar-toggle-icon"
+                    />
+                  </button>
+                  <div className="chat-tab-strip" role="tablist" aria-label="Open tabs">
+                    {openTabItems.map((tab) => (
+                      <div
+                        key={tab.threadId}
+                        role="tab"
+                        tabIndex={0}
+                        aria-selected={activeThreadId === tab.threadId}
+                        className={`chat-tab${activeThreadId === tab.threadId ? " active" : ""}`}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" || event.key === " ") {
+                            event.preventDefault();
+                            void handleThreadSelection(tab.threadId);
+                          }
                         }}
                       >
-                        ×
-                      </button>
-                    </div>
-                  ))}
+                        <button
+                          type="button"
+                          className="chat-tab-trigger"
+                          title={tab.title}
+                          onClick={() => void handleThreadSelection(tab.threadId)}
+                        >
+                          <span className="chat-tab-title">{tab.tabTitle}</span>
+                        </button>
+                        <button
+                          type="button"
+                          aria-label={`Close ${tab.title}`}
+                          className="chat-tab-close"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            closeThreadTab(tab.threadId);
+                          }}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))}
+                  </div>
                 </div>
-              </div>
-            </header>
+              </header>
+            ) : null}
 
             <div ref={messageListRef} className="chat-message-list">
               {!activeThread || activeThread.messages.length === 0 ? (
                 <div className="chat-stage-spacer">
+                  {!hasOpenTabs ? (
+                    <button
+                      type="button"
+                      className="sidebar-icon-button chat-sidebar-toggle empty-state-sidebar-toggle"
+                      aria-label={mobileSidebarOpen ? "Close sidebar" : "Open sidebar"}
+                      onClick={handleSidebarToggle}
+                    >
+                      <AppIcon
+                        src={staticAssetPath(mobileSidebarOpen ? "hide-sidebar.svg" : "show-sidebar.svg")}
+                        className="sidebar-toggle-icon"
+                      />
+                    </button>
+                  ) : null}
                   <div className="chat-empty-state">
                     <div className="chat-empty-eyebrow">Empty chat</div>
                     <strong>{activeThread ? "Start the conversation" : "Open a chat tab"}</strong>
@@ -1186,69 +1229,88 @@ export default function App() {
                 </div>
               ) : (
                 <div className="chat-message-column">
-                  {activeThread.messages.map((message) => (
-                    <article
-                      key={message.message_id}
-                      className={`message-row ${message.role === "assistant" ? "assistant" : "user"} status-${message.status}`}
-                    >
-                      <div className="message-meta-row">
-                        <span className="message-role-label">{message.role === "assistant" ? "Paperbase" : "You"}</span>
+                  {activeThread.messages.map((message) => {
+                    const hoverTime = formatTodayTimeLabel(message.created_at);
+                    return (
+                      <article
+                        key={message.message_id}
+                        className={`message-row ${message.role === "assistant" ? "assistant" : "user"} status-${message.status}`}
+                      >
                         {message.status !== "completed" ? (
-                          <span className="message-status-label">
-                            {message.status === "streaming" ? "Streaming" : "Failed"}
-                          </span>
+                          <div className="message-meta-row">
+                            <span className="message-status-label">
+                              {message.status === "streaming" ? "Streaming" : "Failed"}
+                            </span>
+                          </div>
                         ) : null}
-                      </div>
-                      <div className={`message-bubble ${message.role === "assistant" ? "assistant" : "user"}`}>
-                        {message.role === "assistant" ? (
-                          <MarkdownRenderer
-                            markdown={message.content_markdown}
-                            className="message-markdown"
-                            interactiveCitations
-                            onCitationClick={(sourceId) => {
-                              const citation = message.citations.find((item) => item.source_id === sourceId);
-                              if (citation) {
-                                handleCitationClick(message, citation);
-                              }
-                            }}
-                          />
-                        ) : (
-                          <div className="message-plain-text">{message.content_markdown}</div>
-                        )}
-                      </div>
-                      {message.role === "assistant" && message.citations.length > 0 ? (
-                        <div className="message-citations">
-                          {message.citations.map((citation) => (
-                            <div
-                              key={citation.source_id}
-                              id={sourceCardId(message.message_id, citation.source_id)}
-                              className="citation-card"
-                            >
-                              <div className="citation-card-header">
-                                <div>
-                                  <span className="citation-card-source-id">{citation.source_id}</span>
-                                  <strong className="citation-card-title">{citation.title}</strong>
-                                </div>
-                                {citation.paper_id ? (
-                                  <button
-                                    type="button"
-                                    className="citation-card-action"
-                                    onClick={() => openPaperDrawer(citation.paper_id!, citation.path)}
-                                  >
-                                    Open paper
-                                  </button>
-                                ) : null}
-                              </div>
-                              <div className="citation-card-path">
-                                {citation.source_kind === "paperbase_paper" ? "Paper" : "Upload"} · {citation.path}
-                              </div>
-                              <p className="citation-card-excerpt">{citation.excerpt}</p>
-                            </div>
-                          ))}
+                        <div className={`message-bubble ${message.role === "assistant" ? "assistant" : "user"}`}>
+                          {message.role === "assistant" ? (
+                            <MarkdownRenderer
+                              markdown={message.content_markdown}
+                              className="message-markdown"
+                              interactiveCitations
+                              onCitationClick={(sourceId) => {
+                                const citation = message.citations.find((item) => item.source_id === sourceId);
+                                if (citation) {
+                                  handleCitationClick(message, citation);
+                                }
+                              }}
+                            />
+                          ) : (
+                            <div className="message-plain-text">{message.content_markdown}</div>
+                          )}
                         </div>
-                      ) : null}
-                    </article>
-                  ))}
+                        {message.role === "assistant" ? (
+                          <div className="assistant-hover-actions">
+                            {hoverTime ? <span className="assistant-hover-time">{hoverTime}</span> : null}
+                            <button
+                              type="button"
+                              className="assistant-copy-button"
+                              aria-label="Copy response"
+                              title="Copy response"
+                              onClick={() => void copyMessage(message.content_markdown)}
+                            >
+                              <svg viewBox="0 0 24 24" aria-hidden="true">
+                                <path d="M9 9h9v11H9z" />
+                                <path d="M6 15H5V4h9v1" />
+                              </svg>
+                            </button>
+                          </div>
+                        ) : null}
+                        {message.role === "assistant" && message.citations.length > 0 ? (
+                          <div className="message-citations">
+                            {message.citations.map((citation) => (
+                              <div
+                                key={citation.source_id}
+                                id={sourceCardId(message.message_id, citation.source_id)}
+                                className="citation-card"
+                              >
+                                <div className="citation-card-header">
+                                  <div>
+                                    <span className="citation-card-source-id">{citation.source_id}</span>
+                                    <strong className="citation-card-title">{citation.title}</strong>
+                                  </div>
+                                  {citation.paper_id ? (
+                                    <button
+                                      type="button"
+                                      className="citation-card-action"
+                                      onClick={() => openPaperDrawer(citation.paper_id!, citation.path)}
+                                    >
+                                      Open paper
+                                    </button>
+                                  ) : null}
+                                </div>
+                                <div className="citation-card-path">
+                                  {citation.source_kind === "paperbase_paper" ? "Paper" : "Upload"} · {citation.path}
+                                </div>
+                                <p className="citation-card-excerpt">{citation.excerpt}</p>
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
+                      </article>
+                    );
+                  })}
                 </div>
               )}
             </div>
