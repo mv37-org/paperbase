@@ -264,32 +264,61 @@ Valid storage backends are:
 
 - `paperbase/Dockerfile`
 - `paperbase/.dockerignore`
+- `paperbase/cloudbuild.yaml`
 - `paperbase/cloudrun.service.yaml`
+- `paperbase/cloudrun.worker.service.yaml`
+- `paperbase/cloudrun.api.env.example.yaml`
+- `paperbase/cloudrun.worker.env.example.yaml`
 
-Typical flow:
-
-```bash
-gcloud builds submit paperbase \
-  --tag us-central1-docker.pkg.dev/YOUR_PROJECT_ID/YOUR_REPOSITORY/paperbase-api:latest
-```
-
-Copy `paperbase/.env.example` to a real env file first, fill in the values, then deploy:
+Typical flow from the repo root:
 
 ```bash
-gcloud run deploy paperbase-api \
-  --image us-central1-docker.pkg.dev/YOUR_PROJECT_ID/YOUR_REPOSITORY/paperbase-api:latest \
-  --region YOUR_REGION \
-  --env-vars-file paperbase/.env.cloudrun
+cp paperbase/cloudrun.api.env.example.yaml paperbase/cloudrun.api.env.yaml
+cp paperbase/cloudrun.worker.env.example.yaml paperbase/cloudrun.worker.env.yaml
 ```
 
-Cloud Run already injects `PORT`, and the API entrypoint uses that automatically.
+Fill in those two YAML files with your real values, then build and deploy both the API and worker with Cloud Build:
 
-For GCS access on Cloud Run, prefer attaching a service account with bucket permissions instead of stuffing a JSON key into an env var.
+```bash
+gcloud builds submit . \
+  --config paperbase/cloudbuild.yaml \
+  --substitutions _REGION=YOUR_REGION,_AR_REPO=YOUR_REPOSITORY,_IMAGE_NAME=paperbase-api,_API_SERVICE_NAME=paperbase-api,_WORKER_SERVICE_NAME=paperbase-worker,_API_ENV_VARS_FILE=paperbase/cloudrun.api.env.yaml,_WORKER_ENV_VARS_FILE=paperbase/cloudrun.worker.env.yaml,_CLOUDSQL_INSTANCES=YOUR_PROJECT_ID:YOUR_REGION:YOUR_INSTANCE
+```
+
+That build config:
+
+- rebuilds the `chat/` frontend in CI so Cloud Run gets fresh browser assets
+- builds a single container image from `paperbase/`
+- deploys the API service
+- deploys the worker service with `paperbase-worker` as the command
+
+If you only want the API, disable the worker deploy:
+
+```bash
+gcloud builds submit . \
+  --config paperbase/cloudbuild.yaml \
+  --substitutions _DEPLOY_WORKER=false,_API_ENV_VARS_FILE=paperbase/cloudrun.api.env.yaml
+```
+
+Useful substitutions in `paperbase/cloudbuild.yaml`:
+
+- `_API_SERVICE_ACCOUNT` / `_WORKER_SERVICE_ACCOUNT`
+- `_CLOUDSQL_INSTANCES`
+- `_VPC_CONNECTOR`
+- `_VPC_EGRESS`
+- `_API_SECRETS` / `_WORKER_SECRETS`
+- `_API_ALLOW_UNAUTHENTICATED`
+- `_API_CPU`, `_API_MEMORY`, `_API_TIMEOUT`
+- `_WORKER_CPU`, `_WORKER_MEMORY`, `_WORKER_TIMEOUT`
+
+Cloud Run already injects `PORT`, and both entrypoints use that automatically.
+
+For GCS access on Cloud Run, prefer attaching a runtime service account with bucket permissions instead of stuffing a JSON key into an env var.
 
 For trigger-based continuous deployment with a custom Cloud Build service account, use:
 
 - build config: `paperbase/cloudbuild.yaml`
-- included files glob: `paperbase/**`
+- included files glob: `paperbase/**,chat/**`
 
 That build config sets `options.logging: CLOUD_LOGGING_ONLY`, which avoids the Cloud Build error you hit when a trigger uses a user-specified build service account.
 
