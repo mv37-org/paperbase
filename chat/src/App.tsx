@@ -24,6 +24,7 @@ import type {
 
 const OPEN_TABS_KEY = "paperbase-open-tabs";
 const PENDING_PROMPT_KEY = "paperbase-pending-prompt";
+const SIDEBAR_COLLAPSED_KEY = "paperbase-sidebar-collapsed";
 
 const AUTH_VIEW_COPY: Record<AuthView, { title: string; caption: string }> = {
   login: { title: "Log in", caption: "Use your account to continue." },
@@ -72,6 +73,26 @@ function restoreTabs() {
   }
 }
 
+function restoreSidebarCollapsed() {
+  return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "true";
+}
+
+function displayThreadTitle(title: string) {
+  return title.trim() || "New chat";
+}
+
+function getInitials(value: string, fallback = "PB") {
+  const tokens = value
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2);
+  if (tokens.length === 0) {
+    return fallback;
+  }
+  return tokens.map((token) => token[0]?.toUpperCase() ?? "").join("");
+}
+
 function GoogleButton() {
   return (
     <button className="oauth-button" data-google-login="true" type="button" onClick={() => (window.location.href = googleLoginUrl())}>
@@ -111,6 +132,8 @@ export default function App() {
   const [composerStatus, setComposerStatus] = useState("");
   const [includeUploads, setIncludeUploads] = useState(true);
   const [includePapers, setIncludePapers] = useState(true);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
   const sessionRef = useRef<BrowserSessionResponse | null>(null);
   const threadMapRef = useRef<Record<string, ChatThreadResponse>>({});
@@ -132,6 +155,32 @@ export default function App() {
     openTabsRef.current = openTabs;
     localStorage.setItem(OPEN_TABS_KEY, JSON.stringify(openTabs));
   }, [openTabs]);
+
+  useEffect(() => {
+    setSidebarCollapsed(restoreSidebarCollapsed());
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(sidebarCollapsed));
+  }, [sidebarCollapsed]);
+
+  useEffect(() => {
+    if (!mobileSidebarOpen) {
+      document.body.style.overflow = "";
+      return;
+    }
+    document.body.style.overflow = "hidden";
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setMobileSidebarOpen(false);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.body.style.overflow = "";
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [mobileSidebarOpen]);
 
   const authCopy = AUTH_VIEW_COPY[authView];
   const activeThread = activeThreadId ? threadMap[activeThreadId] ?? null : null;
@@ -369,7 +418,29 @@ export default function App() {
     setLandingPrompt("");
     setComposerInput("");
     setComposerStatus("");
+    setMobileSidebarOpen(false);
   }, []);
+
+  const handleSidebarToggle = useCallback(() => {
+    if (window.matchMedia("(max-width: 980px)").matches) {
+      setMobileSidebarOpen((current) => !current);
+      return;
+    }
+    setSidebarCollapsed((current) => !current);
+  }, []);
+
+  const handleThreadSelection = useCallback(
+    async (threadId: string) => {
+      await openThread(threadId);
+      setMobileSidebarOpen(false);
+    },
+    [openThread],
+  );
+
+  const handleNewChat = useCallback(async () => {
+    setMobileSidebarOpen(false);
+    return createNewThread();
+  }, [createNewThread]);
 
   const handleLogout = useCallback(async () => {
     await logoutBrowserSession();
@@ -429,59 +500,144 @@ export default function App() {
       ) : null}
 
       {authenticated ? (
-        <div id="app-shell" className="app-shell">
+        <div
+          id="app-shell"
+          className={`app-shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${mobileSidebarOpen ? " mobile-sidebar-open" : ""}`}
+        >
+          <button
+            type="button"
+            className="sidebar-scrim"
+            aria-label="Close sidebar"
+            onClick={() => setMobileSidebarOpen(false)}
+          />
           <aside className="sidebar">
             <div className="sidebar-top">
-              <div className="brandline">paperbase</div>
-              <button id="new-chat-button" className="sidebar-button" onClick={() => void createNewThread()}>
-                New chat
+              <div className="sidebar-brand-row">
+                <button
+                  type="button"
+                  className="sidebar-icon-button sidebar-toggle"
+                  aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+                  aria-expanded={!sidebarCollapsed}
+                  onClick={handleSidebarToggle}
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M4 7h16M4 12h16M4 17h16" />
+                  </svg>
+                </button>
+                <div className="brand-lockup">
+                  <div className="brand-mark">PB</div>
+                  <div className="brand-copy">
+                    <div className="brandline">Paperbase</div>
+                    <div className="brand-caption">Research-backed chat</div>
+                  </div>
+                </div>
+              </div>
+              <button id="new-chat-button" className="sidebar-primary-action" onClick={() => void handleNewChat()}>
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 5v14M5 12h14" />
+                </svg>
+                <span>New chat</span>
               </button>
             </div>
 
-            <section className="sidebar-section">
-              <div className="section-label">Account</div>
+            <section className="sidebar-section sidebar-card">
+              <div className="sidebar-section-header">
+                <div className="section-label">Account</div>
+              </div>
               {sessionSummary ? (
-                <>
-                  <div id="session-summary" className="session-summary">
+                <div id="session-summary" className="session-card">
+                  <div className="session-avatar">{getInitials(sessionSummary.displayName, "PB")}</div>
+                  <div className="session-copy">
                     <strong>{sessionSummary.displayName}</strong>
                     <div className="muted">{sessionSummary.email}</div>
+                    <div className="quota-row" id="quota-row">
+                      {sessionSummary.quota}
+                    </div>
                   </div>
-                  <div className="quota-row" id="quota-row">
-                    {sessionSummary.quota}
-                  </div>
-                </>
+                </div>
               ) : null}
-              <button id="manage-key-button" className="sidebar-link" onClick={() => openAuthModal("api-key")}>
-                Manage Anthropic key
-              </button>
-              <button
-                id="logout-button"
-                className="sidebar-link"
-                onClick={() => void handleLogout()}
-              >
-                Log out
-              </button>
+              <div className="sidebar-action-list">
+                <button id="manage-key-button" className="sidebar-link" onClick={() => openAuthModal("api-key")}>
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M15 7a4 4 0 1 0-5.94 3.5L5 14.56V19h4.44l2.06-2.06V14.5H14l1.5-1.5h2.06L19 11.56V9h-2.44A4 4 0 0 0 15 7Z" />
+                  </svg>
+                  <span>Manage Anthropic key</span>
+                </button>
+                <button id="logout-button" className="sidebar-link" onClick={() => void handleLogout()}>
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M10 7V5a2 2 0 0 1 2-2h6v18h-6a2 2 0 0 1-2-2v-2M15 12H3m0 0 4-4m-4 4 4 4" />
+                  </svg>
+                  <span>Log out</span>
+                </button>
+              </div>
             </section>
 
-            <section className="sidebar-section history-section">
-              <div className="section-label">Previous sessions</div>
-              <div id="thread-list" className="thread-list">
-                {threads.map((thread) => (
-                  <button
-                    key={thread.thread_id}
-                    type="button"
-                    className={`thread-card${activeThreadId === thread.thread_id ? " active" : ""}`}
-                    onClick={() => void openThread(thread.thread_id)}
-                  >
-                    <strong>{thread.title}</strong>
-                    <div className="muted">{thread.last_message_preview}</div>
-                  </button>
-                ))}
+            <section className="sidebar-section sidebar-card history-section">
+              <div className="sidebar-section-header">
+                <div className="section-label">Previous sessions</div>
+                <div className="section-count">{threads.length}</div>
               </div>
+              {threads.length > 0 ? (
+                <div id="thread-list" className="thread-list">
+                  {threads.map((thread) => {
+                    const title = displayThreadTitle(thread.title);
+                    return (
+                      <button
+                        key={thread.thread_id}
+                        type="button"
+                        className={`thread-card${activeThreadId === thread.thread_id ? " active" : ""}`}
+                        title={title}
+                        onClick={() => void handleThreadSelection(thread.thread_id)}
+                      >
+                        <div className="thread-card-icon">{getInitials(title, "N")}</div>
+                        <div className="thread-card-copy">
+                          <strong>{title}</strong>
+                          <div className="muted">{thread.last_message_preview || "No messages yet"}</div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="thread-empty">Start a conversation and it will show up here for quick access.</div>
+              )}
             </section>
           </aside>
 
           <section className="chat-stage">
+            <div id="thread-header" className="thread-header">
+              <div className="thread-header-main">
+                <button
+                  type="button"
+                  className="sidebar-icon-button chat-sidebar-toggle"
+                  aria-label={mobileSidebarOpen ? "Close sidebar" : "Open sidebar"}
+                  onClick={handleSidebarToggle}
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M4 7h16M4 12h16M4 17h16" />
+                  </svg>
+                </button>
+                {activeThread ? (
+                  <div className="thread-summary">
+                    <div className="thread-summary-label">Current chat</div>
+                    <strong>{displayThreadTitle(activeThread.title)}</strong>
+                    <div className="muted">{activeThread.messages.length} messages in this thread</div>
+                  </div>
+                ) : (
+                  <div className="thread-summary">
+                    <div className="thread-summary-label">Workspace</div>
+                    <strong>Start a new chat</strong>
+                    <div className="muted">Ask a question, compare papers, or upload supporting documents.</div>
+                  </div>
+                )}
+              </div>
+              <button type="button" className="thread-header-action" onClick={() => void handleNewChat()}>
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 5v14M5 12h14" />
+                </svg>
+                <span>New chat</span>
+              </button>
+            </div>
             <div id="tab-strip" className="tab-strip">
               {openTabs.map((threadId) => {
                 const thread = threadMap[threadId];
@@ -493,43 +649,46 @@ export default function App() {
                     key={threadId}
                     type="button"
                     className={`tab${activeThreadId === threadId ? " active" : ""}`}
-                    onClick={() => void openThread(threadId)}
+                    onClick={() => void handleThreadSelection(threadId)}
                   >
-                    {thread.title}
+                    <span className="tab-title">{displayThreadTitle(thread.title)}</span>
+                    <span className="tab-meta">{thread.messages.length}</span>
                   </button>
                 );
               })}
             </div>
-            <div id="thread-header" className="thread-header">
-              {activeThread ? (
-                <>
-                  <strong>{activeThread.title}</strong>
-                  <div className="muted">{activeThread.messages.length} messages</div>
-                </>
-              ) : (
-                <div className="muted">Open a chat to begin.</div>
-              )}
-            </div>
             <div id="message-list" className="message-list">
-              {activeThread?.messages.map((message) => (
-                <article key={message.message_id} className={`message ${message.role}`}>
-                  <div className="message-meta">{message.role}</div>
-                  <div>{message.content_markdown}</div>
-                  {message.citations.length > 0 ? (
-                    <div className="message-citations">
-                      {message.citations.map((citation) => (
-                        <div key={`${message.message_id}-${citation.source_id}`} className="citation-card">
-                          <strong>
-                            {citation.source_id} · {citation.title}
-                          </strong>
-                          <div className="muted">{citation.path}</div>
-                          <div className="muted">{citation.excerpt}</div>
-                        </div>
-                      ))}
-                    </div>
-                  ) : null}
-                </article>
-              ))}
+              {activeThread?.messages.length ? (
+                activeThread.messages.map((message) => (
+                  <article key={message.message_id} className={`message ${message.role}`}>
+                    <div className="message-meta">{message.role}</div>
+                    <div>{message.content_markdown}</div>
+                    {message.citations.length > 0 ? (
+                      <div className="message-citations">
+                        {message.citations.map((citation) => (
+                          <div key={`${message.message_id}-${citation.source_id}`} className="citation-card">
+                            <strong>
+                              {citation.source_id} · {citation.title}
+                            </strong>
+                            <div className="muted">{citation.path}</div>
+                            <div className="muted">{citation.excerpt}</div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+                  </article>
+                ))
+              ) : (
+                <div className="message-empty-state">
+                  <div className="message-empty-eyebrow">Ready when you are</div>
+                  <strong>{activeThread ? "Send the first prompt" : "Choose a chat or create one"}</strong>
+                  <p>
+                    {activeThread
+                      ? "Use the composer below to ask about indexed papers, uploaded docs, or current research directions."
+                      : "Your open threads and previous sessions stay organized here so you can move between research questions without losing context."}
+                  </p>
+                </div>
+              )}
             </div>
             <form id="composer-form" className="composer-form" onSubmit={handleComposerSubmit}>
               <div className="composer-meta">
