@@ -660,13 +660,26 @@ textarea::placeholder,
 .usage-meter {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 6px;
+  gap: 1px;
+  padding: 1px;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  background: var(--line);
+  overflow: hidden;
 }
 
 .usage-meter-segment {
   height: 8px;
-  border-radius: var(--radius);
-  background: rgba(27, 22, 17, 0.12);
+  border-radius: 0;
+  background: #f4f1ec;
+}
+
+.usage-meter-segment:first-child {
+  border-radius: 2px 0 0 2px;
+}
+
+.usage-meter-segment:last-child {
+  border-radius: 0 2px 2px 0;
 }
 
 .usage-meter-segment.active {
@@ -1019,7 +1032,7 @@ textarea {
 }
 
 .api-key-usage-meter {
-  gap: 5px;
+  border-radius: 2px;
 }
 
 .api-key-form {
