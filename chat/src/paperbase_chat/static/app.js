@@ -24,7 +24,7 @@
     landingPage: document.getElementById("landing-page"),
     appShell: document.getElementById("app-shell"),
     landingPromptForm: document.getElementById("landing-prompt-form"),
-    landingPromptInput: document.getElementById("landing-prompt-input"),
+    landingEditorRoot: document.getElementById("landing-editor-root"),
     landingUploadTrigger: document.getElementById("landing-upload-trigger"),
     exampleList: document.getElementById("example-list"),
     authModal: document.getElementById("auth-modal"),
@@ -103,6 +103,22 @@
   function hideAuthModal() {
     el.authModal.classList.add("hidden");
     setFlash("");
+  }
+
+  function getLandingEditorApi() {
+    return window.PaperbaseLandingEditor || null;
+  }
+
+  function getLandingPrompt() {
+    return getLandingEditorApi()?.getPlainText?.() || "";
+  }
+
+  function setLandingPrompt(value) {
+    getLandingEditorApi()?.setPlainText?.(value || "");
+  }
+
+  function clearLandingPrompt() {
+    getLandingEditorApi()?.clear?.();
   }
 
   function autoResizeTextarea(node) {
@@ -369,7 +385,7 @@
   }
 
   function bindEvents() {
-    [el.landingPromptInput, el.composerInput].forEach((node) => {
+    [el.composerInput].forEach((node) => {
       autoResizeTextarea(node);
       node.addEventListener("input", () => autoResizeTextarea(node));
     });
@@ -384,7 +400,7 @@
 
     el.landingPromptForm.addEventListener("submit", async (event) => {
       event.preventDefault();
-      const prompt = el.landingPromptInput.value.trim();
+      const prompt = getLandingPrompt().trim();
       if (!prompt) {
         return;
       }
@@ -394,8 +410,7 @@
         return;
       }
       const thread = await createThread();
-      el.landingPromptInput.value = "";
-      autoResizeTextarea(el.landingPromptInput);
+      clearLandingPrompt();
       await sendMessage(thread.thread_id, prompt);
     });
 
@@ -405,8 +420,7 @@
         return;
       }
       const prompt = button.dataset.prompt || "";
-      el.landingPromptInput.value = prompt;
-      autoResizeTextarea(el.landingPromptInput);
+      setLandingPrompt(prompt);
       rememberPendingPrompt(prompt);
       if (!state.session || !state.session.authenticated) {
         showAuthModal("login");
@@ -544,6 +558,12 @@
   }
 
   async function init() {
+    if (window.PaperbaseEditorsReady) {
+      await Promise.race([
+        window.PaperbaseEditorsReady,
+        new Promise((resolve) => window.setTimeout(resolve, 1200)),
+      ]);
+    }
     bindEvents();
     const params = new URLSearchParams(window.location.search);
     if (params.get("reset_token")) {

@@ -12,8 +12,8 @@ def test_home_renders_static_shell():
 
     assert response.status_code == 200
     assert "paperbase" in response.text
-    assert "A research workspace for turning the latest papers on agents, evals, retrieval, memory, and inference into concrete decisions for the AI systems you build." in response.text
-    assert "Attach your own notes or drafts, compare them with the literature" in response.text
+    assert "Paperbase helps AI researchers and agent builders keep up with fast-moving work without losing track of the original sources." in response.text
+    assert "Ask broad questions, compare ideas across papers, and pull out the design patterns that matter" in response.text
     assert 'href="https://mv37.org"' in response.text
     assert "Continue with Google" in response.text
     assert "Create a new account" in response.text
@@ -21,6 +21,7 @@ def test_home_renders_static_shell():
     assert "Forgot password" in response.text
     assert "Use your account to continue." in response.text
     assert 'id="auth-tabs"' not in response.text
+    assert "/static/editor.js" in response.text
     assert "__PAPERBASE_BASE_URL__" not in response.text
 
 

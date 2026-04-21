@@ -9,6 +9,9 @@
 <body>
   <script>
     window.PAPERBASE_BASE_URL = "__PAPERBASE_BASE_URL__";
+    window.PaperbaseEditorsReady = new Promise((resolve) => {
+      window.__resolvePaperbaseEditorsReady = resolve;
+    });
   </script>
 
   <main id="landing-page" class="landing-page">
@@ -17,8 +20,8 @@
       <h1 class="landing-title">paperbase</h1>
       <p class="landing-subtitle">A research workspace for turning the latest papers on agents, evals, retrieval, memory, and inference into concrete decisions for the AI systems you build.</p>
       <div class="landing-copy">
-        <p>TL;DR: ask about agent design, eval strategy, memory, retrieval, model routing, and system patterns across the latest AI papers.</p>
-        <p>Attach your own notes or drafts, compare them with the literature, and get grounded answers with citations you can actually use to build.</p>
+        <p>Paperbase helps AI researchers and agent builders keep up with fast-moving work without losing track of the original sources.</p>
+        <p>Ask broad questions, compare ideas across papers, and pull out the design patterns that matter when you are building agents and AI systems.</p>
       </div>
 
       <form id="landing-prompt-form" class="prompt-shell">
@@ -27,7 +30,7 @@
             <path d="M16.5 6.5 9 14a3 3 0 1 0 4.24 4.24l7.01-7.02a5 5 0 0 0-7.07-7.07L5.46 11.9a7 7 0 1 0 9.9 9.9l6.01-6.01" />
           </svg>
         </button>
-        <textarea id="landing-prompt-input" class="prompt-input prompt-textarea" rows="1" placeholder="Ask about agent loops, eval design, memory systems, or inference architecture"></textarea>
+        <div id="landing-editor-root" class="landing-editor-root"></div>
         <button id="landing-start-button" class="prompt-button" type="submit">Start</button>
       </form>
 
@@ -171,7 +174,7 @@
       </div>
     </div>
   </div>
-
+  <script type="module" src="/static/editor.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>
