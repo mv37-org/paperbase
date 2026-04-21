@@ -11,18 +11,24 @@ from datetime import timedelta
 from typing import Any
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text, create_engine, delete, func, select, text
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text, create_engine, delete, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
 from .config import Settings
 from .models import (
+    BrowserUser,
+    ChatMessageResponse,
+    ChatThreadResponse,
+    ChatThreadSummary,
     GrepPaperMatch,
     IntegrationProbeComponent,
     JobResponse,
     PaperMetadata,
     PaperResponse,
     ResultSetResponse,
+    UploadedDocumentResponse,
+    UploadedDocumentSectionResult,
     SearchPaperResult,
     SearchSectionResult,
 )
@@ -185,6 +191,110 @@ def _suggest_row_to_payload(q: str, row: Any) -> dict[str, Any]:
     }
 
 
+class BrowserUserORM(Base):
+    __tablename__ = "browser_users"
+
+    user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(Text, default="")
+    password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    free_responses_used: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class GoogleIdentityORM(Base):
+    __tablename__ = "google_identities"
+
+    google_identity_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("browser_users.user_id", ondelete="CASCADE"), index=True)
+    google_subject: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    email: Mapped[str] = mapped_column(String(320), default="")
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class BrowserSessionORM(Base):
+    __tablename__ = "browser_sessions"
+
+    browser_session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("browser_users.user_id", ondelete="CASCADE"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    expires_at: Mapped[Any] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_seen_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class PasswordResetTokenORM(Base):
+    __tablename__ = "password_reset_tokens"
+
+    password_reset_token_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("browser_users.user_id", ondelete="CASCADE"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    expires_at: Mapped[Any] = mapped_column(DateTime(timezone=True), index=True)
+    used_at: Mapped[Any | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AnthropicAPIKeyORM(Base):
+    __tablename__ = "anthropic_api_keys"
+
+    anthropic_api_key_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("browser_users.user_id", ondelete="CASCADE"), unique=True, index=True)
+    encrypted_api_key: Mapped[str] = mapped_column(Text)
+    api_key_hint: Mapped[str] = mapped_column(String(32), default="")
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class UploadedDocumentORM(Base):
+    __tablename__ = "uploaded_documents"
+
+    document_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("browser_users.user_id", ondelete="CASCADE"), index=True)
+    title: Mapped[str] = mapped_column(Text, default="")
+    source_filename: Mapped[str] = mapped_column(Text, default="")
+    content_type: Mapped[str] = mapped_column(String(255), default="application/octet-stream")
+    tags: Mapped[list[str]] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(32), default="ready")
+    storage_path: Mapped[str] = mapped_column(Text, default="")
+    extracted_text_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class UploadedDocumentChunkORM(Base):
+    __tablename__ = "uploaded_document_chunks"
+
+    chunk_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    document_id: Mapped[str] = mapped_column(ForeignKey("uploaded_documents.document_id", ondelete="CASCADE"), index=True)
+    path: Mapped[str] = mapped_column(Text)
+    chunk_kind: Mapped[str] = mapped_column(String(32), default="section")
+    content: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ChatThreadORM(Base):
+    __tablename__ = "chat_threads"
+
+    thread_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("browser_users.user_id", ondelete="CASCADE"), index=True)
+    title: Mapped[str] = mapped_column(Text, default="New chat")
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class ChatMessageORM(Base):
+    __tablename__ = "chat_messages"
+
+    message_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    thread_id: Mapped[str] = mapped_column(ForeignKey("chat_threads.thread_id", ondelete="CASCADE"), index=True)
+    role: Mapped[str] = mapped_column(String(32), index=True)
+    content_markdown: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(32), default="completed")
+    citations: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 def _paper_from_orm(row: PaperORM) -> PaperResponse:
     return PaperResponse(
         paper_id=row.paper_id,
@@ -222,6 +332,50 @@ def _paper_needs_summary_after(paper: PaperResponse, after: PaperResponse) -> bo
     if paper.published != after.published:
         return paper.published < after.published
     return paper.paper_id > after.paper_id
+
+
+def _browser_user_from_orm(row: BrowserUserORM) -> BrowserUser:
+    return BrowserUser(
+        user_id=row.user_id,
+        email=row.email,
+        display_name=row.display_name,
+        free_responses_used=row.free_responses_used,
+    )
+
+
+def _uploaded_document_from_orm(row: UploadedDocumentORM) -> UploadedDocumentResponse:
+    return UploadedDocumentResponse(
+        document_id=row.document_id,
+        user_id=row.user_id,
+        title=row.title,
+        source_filename=row.source_filename,
+        content_type=row.content_type,
+        tags=list(row.tags or []),
+        status=row.status,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _chat_thread_summary_from_orm(row: ChatThreadORM, *, last_message_preview: str = "") -> ChatThreadSummary:
+    return ChatThreadSummary(
+        thread_id=row.thread_id,
+        title=row.title,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        last_message_preview=last_message_preview,
+    )
+
+
+def _chat_message_from_orm(row: ChatMessageORM) -> ChatMessageResponse:
+    return ChatMessageResponse(
+        message_id=row.message_id,
+        role=row.role,
+        content_markdown=row.content_markdown,
+        citations=row.citations or [],
+        created_at=row.created_at,
+        status=row.status,
+    )
 
 
 class PaperRepository(ABC):
@@ -1322,6 +1476,346 @@ class SqlAlchemyPaperRepository(PaperRepository):
             )
         return results
 
+    def create_browser_user(self, *, email: str, display_name: str, password_hash: str | None) -> BrowserUser:
+        row = BrowserUserORM(
+            user_id=new_id("usr"),
+            email=email,
+            display_name=display_name,
+            password_hash=password_hash,
+        )
+        with self._session() as session:
+            session.add(row)
+        return _browser_user_from_orm(row)
+
+    def get_browser_user_by_email(self, email: str) -> BrowserUser | None:
+        with self._session() as session:
+            row = session.scalar(select(BrowserUserORM).where(BrowserUserORM.email == email))
+            return _browser_user_from_orm(row) if row else None
+
+    def get_browser_user_by_id(self, user_id: str) -> BrowserUser | None:
+        with self._session() as session:
+            row = session.get(BrowserUserORM, user_id)
+            return _browser_user_from_orm(row) if row else None
+
+    def get_browser_user_by_google_subject(self, google_subject: str) -> BrowserUser | None:
+        with self._session() as session:
+            row = session.execute(
+                select(BrowserUserORM)
+                .join(GoogleIdentityORM, GoogleIdentityORM.user_id == BrowserUserORM.user_id)
+                .where(GoogleIdentityORM.google_subject == google_subject)
+            ).scalar_one_or_none()
+            return _browser_user_from_orm(row) if row else None
+
+    def set_browser_user_password(self, user_id: str, password_hash: str) -> BrowserUser | None:
+        with self._session() as session:
+            row = session.get(BrowserUserORM, user_id)
+            if row is None:
+                return None
+            row.password_hash = password_hash
+            row.updated_at = utcnow()
+        return self.get_browser_user_by_id(user_id)
+
+    def get_browser_password_hash(self, user_id: str) -> str | None:
+        with self._session() as session:
+            row = session.get(BrowserUserORM, user_id)
+            return row.password_hash if row else None
+
+    def increment_free_responses_used(self, user_id: str) -> BrowserUser | None:
+        with self._session() as session:
+            row = session.get(BrowserUserORM, user_id)
+            if row is None:
+                return None
+            row.free_responses_used += 1
+            row.updated_at = utcnow()
+        return self.get_browser_user_by_id(user_id)
+
+    def create_browser_session(self, *, user_id: str, token_hash_value: str, expires_at: Any) -> None:
+        with self._session() as session:
+            session.add(
+                BrowserSessionORM(
+                    browser_session_id=new_id("sess"),
+                    user_id=user_id,
+                    token_hash=token_hash_value,
+                    expires_at=expires_at,
+                    last_seen_at=utcnow(),
+                )
+            )
+
+    def get_browser_user_by_session_token_hash(self, token_hash_value: str) -> BrowserUser | None:
+        with self._session() as session:
+            session.execute(delete(BrowserSessionORM).where(BrowserSessionORM.expires_at < utcnow()))
+            session_row = session.scalar(
+                select(BrowserSessionORM).where(BrowserSessionORM.token_hash == token_hash_value)
+            )
+            if session_row is None or session_row.expires_at < utcnow():
+                return None
+            session_row.last_seen_at = utcnow()
+            user = session.get(BrowserUserORM, session_row.user_id)
+            return _browser_user_from_orm(user) if user else None
+
+    def delete_browser_session(self, token_hash_value: str) -> None:
+        with self._session() as session:
+            session.execute(delete(BrowserSessionORM).where(BrowserSessionORM.token_hash == token_hash_value))
+
+    def create_password_reset_token(self, *, user_id: str, token_hash_value: str, expires_at: Any) -> None:
+        with self._session() as session:
+            session.add(
+                PasswordResetTokenORM(
+                    password_reset_token_id=new_id("prt"),
+                    user_id=user_id,
+                    token_hash=token_hash_value,
+                    expires_at=expires_at,
+                )
+            )
+
+    def consume_password_reset_token(self, token_hash_value: str) -> BrowserUser | None:
+        with self._session() as session:
+            row = session.scalar(
+                select(PasswordResetTokenORM).where(
+                    PasswordResetTokenORM.token_hash == token_hash_value,
+                    PasswordResetTokenORM.used_at.is_(None),
+                )
+            )
+            if row is None or row.expires_at < utcnow():
+                return None
+            row.used_at = utcnow()
+            user = session.get(BrowserUserORM, row.user_id)
+            return _browser_user_from_orm(user) if user else None
+
+    def link_google_identity(self, *, user_id: str, google_subject: str, email: str) -> None:
+        statement = insert(GoogleIdentityORM).values(
+            google_identity_id=new_id("gid"),
+            user_id=user_id,
+            google_subject=google_subject,
+            email=email,
+        )
+        statement = statement.on_conflict_do_update(
+            index_elements=[GoogleIdentityORM.google_subject],
+            set_={"user_id": user_id, "email": email},
+        )
+        with self._session() as session:
+            session.execute(statement)
+
+    def save_anthropic_api_key(self, *, user_id: str, encrypted_api_key: str, hint: str) -> None:
+        statement = insert(AnthropicAPIKeyORM).values(
+            anthropic_api_key_id=new_id("uak"),
+            user_id=user_id,
+            encrypted_api_key=encrypted_api_key,
+            api_key_hint=hint,
+        )
+        statement = statement.on_conflict_do_update(
+            index_elements=[AnthropicAPIKeyORM.user_id],
+            set_={"encrypted_api_key": encrypted_api_key, "api_key_hint": hint, "updated_at": utcnow()},
+        )
+        with self._session() as session:
+            session.execute(statement)
+
+    def get_anthropic_api_key_record(self, user_id: str) -> dict[str, str] | None:
+        with self._session() as session:
+            row = session.scalar(select(AnthropicAPIKeyORM).where(AnthropicAPIKeyORM.user_id == user_id))
+            if row is None:
+                return None
+            return {"encrypted_api_key": row.encrypted_api_key, "api_key_hint": row.api_key_hint}
+
+    def delete_anthropic_api_key(self, user_id: str) -> None:
+        with self._session() as session:
+            session.execute(delete(AnthropicAPIKeyORM).where(AnthropicAPIKeyORM.user_id == user_id))
+
+    def create_uploaded_document(
+        self,
+        *,
+        user_id: str,
+        title: str,
+        source_filename: str,
+        content_type: str,
+        tags: list[str],
+        storage_path: str,
+        extracted_text_path: str | None,
+        status: str,
+    ) -> UploadedDocumentResponse:
+        row = UploadedDocumentORM(
+            document_id=new_id("doc"),
+            user_id=user_id,
+            title=title,
+            source_filename=source_filename,
+            content_type=content_type,
+            tags=tags,
+            storage_path=storage_path,
+            extracted_text_path=extracted_text_path,
+            status=status,
+        )
+        with self._session() as session:
+            session.add(row)
+        return _uploaded_document_from_orm(row)
+
+    def update_uploaded_document(
+        self,
+        *,
+        document_id: str,
+        title: str,
+        tags: list[str],
+        extracted_text_path: str | None,
+        status: str,
+    ) -> UploadedDocumentResponse | None:
+        with self._session() as session:
+            row = session.get(UploadedDocumentORM, document_id)
+            if row is None:
+                return None
+            row.title = title
+            row.tags = tags
+            row.extracted_text_path = extracted_text_path
+            row.status = status
+            row.updated_at = utcnow()
+        return self.get_uploaded_document(document_id)
+
+    def get_uploaded_document(self, document_id: str) -> UploadedDocumentResponse | None:
+        with self._session() as session:
+            row = session.get(UploadedDocumentORM, document_id)
+            return _uploaded_document_from_orm(row) if row else None
+
+    def replace_uploaded_document_chunks(self, document_id: str, chunks: list[dict[str, str]]) -> None:
+        with self._session() as session:
+            session.execute(delete(UploadedDocumentChunkORM).where(UploadedDocumentChunkORM.document_id == document_id))
+            for chunk in chunks:
+                session.add(
+                    UploadedDocumentChunkORM(
+                        chunk_id=new_id("dchunk"),
+                        document_id=document_id,
+                        path=chunk["path"],
+                        chunk_kind=chunk["chunk_kind"],
+                        content=chunk["content"],
+                    )
+                )
+
+    def list_uploaded_documents(self, user_id: str) -> list[UploadedDocumentResponse]:
+        with self._session() as session:
+            rows = session.scalars(
+                select(UploadedDocumentORM)
+                .where(UploadedDocumentORM.user_id == user_id)
+                .order_by(UploadedDocumentORM.updated_at.desc())
+            ).all()
+        return [_uploaded_document_from_orm(row) for row in rows]
+
+    def search_uploaded_document_sections(
+        self,
+        *,
+        user_id: str,
+        query: str,
+        limit: int,
+        tag_filters: list[str] | None = None,
+    ) -> list[UploadedDocumentSectionResult]:
+        query_lower = query.lower()
+        with self._session() as session:
+            rows = session.execute(
+                select(UploadedDocumentChunkORM, UploadedDocumentORM)
+                .join(UploadedDocumentORM, UploadedDocumentORM.document_id == UploadedDocumentChunkORM.document_id)
+                .where(
+                    UploadedDocumentORM.user_id == user_id,
+                    or_(
+                        func.lower(UploadedDocumentChunkORM.content).contains(query_lower),
+                        func.lower(UploadedDocumentORM.title).contains(query_lower),
+                    ),
+                )
+                .order_by(UploadedDocumentORM.updated_at.desc())
+            ).all()
+        required_tags = set(tag_filters or [])
+        results: list[UploadedDocumentSectionResult] = []
+        for chunk, document in rows:
+            tags = list(document.tags or [])
+            if required_tags and not required_tags.issubset(set(tags)):
+                continue
+            content = chunk.content or ""
+            score = (len(query_lower) / max(len(content), 1)) + (0.2 if chunk.chunk_kind == "section" else 0.05)
+            results.append(
+                UploadedDocumentSectionResult(
+                    document_id=document.document_id,
+                    title=document.title,
+                    path=chunk.path,
+                    chunk_kind=chunk.chunk_kind,
+                    preview=content[:320],
+                    tags=tags,
+                    score=score,
+                )
+            )
+        results.sort(key=lambda item: item.score or 0, reverse=True)
+        return results[:limit]
+
+    def create_chat_thread(self, *, user_id: str, title: str) -> ChatThreadSummary:
+        row = ChatThreadORM(thread_id=new_id("thread"), user_id=user_id, title=title or "New chat")
+        with self._session() as session:
+            session.add(row)
+        return _chat_thread_summary_from_orm(row)
+
+    def rename_chat_thread(self, *, thread_id: str, title: str) -> None:
+        with self._session() as session:
+            row = session.get(ChatThreadORM, thread_id)
+            if row:
+                row.title = title
+                row.updated_at = utcnow()
+
+    def list_chat_threads(self, user_id: str) -> list[ChatThreadSummary]:
+        with self._session() as session:
+            threads = session.scalars(
+                select(ChatThreadORM)
+                .where(ChatThreadORM.user_id == user_id)
+                .order_by(ChatThreadORM.updated_at.desc())
+            ).all()
+            results: list[ChatThreadSummary] = []
+            for thread in threads:
+                last_message = session.scalar(
+                    select(ChatMessageORM)
+                    .where(ChatMessageORM.thread_id == thread.thread_id)
+                    .order_by(ChatMessageORM.created_at.desc())
+                    .limit(1)
+                )
+                preview = (last_message.content_markdown[:120] if last_message else "").strip()
+                results.append(_chat_thread_summary_from_orm(thread, last_message_preview=preview))
+        return results
+
+    def get_chat_thread(self, *, user_id: str, thread_id: str) -> ChatThreadResponse | None:
+        with self._session() as session:
+            thread = session.scalar(
+                select(ChatThreadORM).where(ChatThreadORM.thread_id == thread_id, ChatThreadORM.user_id == user_id)
+            )
+            if thread is None:
+                return None
+            messages = session.scalars(
+                select(ChatMessageORM)
+                .where(ChatMessageORM.thread_id == thread_id)
+                .order_by(ChatMessageORM.created_at.asc())
+            ).all()
+        return ChatThreadResponse(
+            thread_id=thread.thread_id,
+            title=thread.title,
+            created_at=thread.created_at,
+            updated_at=thread.updated_at,
+            messages=[_chat_message_from_orm(message) for message in messages],
+        )
+
+    def add_chat_message(
+        self,
+        *,
+        thread_id: str,
+        role: str,
+        content_markdown: str,
+        citations: list[dict[str, Any]] | None = None,
+        status: str = "completed",
+    ) -> ChatMessageResponse:
+        row = ChatMessageORM(
+            message_id=new_id("msg"),
+            thread_id=thread_id,
+            role=role,
+            content_markdown=content_markdown,
+            citations=citations or [],
+            status=status,
+        )
+        with self._session() as session:
+            session.add(row)
+            thread = session.get(ChatThreadORM, thread_id)
+            if thread:
+                thread.updated_at = utcnow()
+        return _chat_message_from_orm(row)
+
     def save_result_set(
         self,
         *,
@@ -1536,6 +2030,17 @@ class MemoryPaperRepository(PaperRepository):
         # Paper-level embeddings, tracked out-of-band because PaperResponse
         # doesn't carry them on the wire.
         self.paper_embeddings: dict[str, list[float] | None] = {}
+        self.browser_users: dict[str, BrowserUser] = {}
+        self.browser_user_passwords: dict[str, str | None] = {}
+        self.browser_users_by_email: dict[str, str] = {}
+        self.google_identities: dict[str, str] = {}
+        self.browser_sessions: dict[str, dict[str, Any]] = {}
+        self.password_reset_tokens: dict[str, dict[str, Any]] = {}
+        self.user_api_keys: dict[str, dict[str, str]] = {}
+        self.uploaded_documents: dict[str, UploadedDocumentResponse] = {}
+        self.uploaded_document_chunks: dict[str, list[dict[str, str]]] = defaultdict(list)
+        self.chat_threads: dict[str, ChatThreadResponse] = {}
+        self.chat_thread_users: dict[str, str] = {}
 
     def init(self) -> None:
         return None
@@ -1928,6 +2433,237 @@ class MemoryPaperRepository(PaperRepository):
                     )
                 )
         return matches[:limit]
+
+    def create_browser_user(self, *, email: str, display_name: str, password_hash: str | None) -> BrowserUser:
+        user = BrowserUser(user_id=new_id("usr"), email=email, display_name=display_name, free_responses_used=0)
+        self.browser_users[user.user_id] = user
+        self.browser_users_by_email[email] = user.user_id
+        self.browser_user_passwords[user.user_id] = password_hash
+        return user
+
+    def get_browser_user_by_email(self, email: str) -> BrowserUser | None:
+        user_id = self.browser_users_by_email.get(email)
+        return self.browser_users.get(user_id) if user_id else None
+
+    def get_browser_user_by_id(self, user_id: str) -> BrowserUser | None:
+        return self.browser_users.get(user_id)
+
+    def get_browser_user_by_google_subject(self, google_subject: str) -> BrowserUser | None:
+        user_id = self.google_identities.get(google_subject)
+        return self.browser_users.get(user_id) if user_id else None
+
+    def set_browser_user_password(self, user_id: str, password_hash: str) -> BrowserUser | None:
+        user = self.browser_users.get(user_id)
+        if user is None:
+            return None
+        self.browser_user_passwords[user_id] = password_hash
+        return user
+
+    def get_browser_password_hash(self, user_id: str) -> str | None:
+        return self.browser_user_passwords.get(user_id)
+
+    def increment_free_responses_used(self, user_id: str) -> BrowserUser | None:
+        user = self.browser_users.get(user_id)
+        if user is None:
+            return None
+        updated = user.model_copy(update={"free_responses_used": user.free_responses_used + 1})
+        self.browser_users[user_id] = updated
+        return updated
+
+    def create_browser_session(self, *, user_id: str, token_hash_value: str, expires_at: Any) -> None:
+        self.browser_sessions[token_hash_value] = {"user_id": user_id, "expires_at": expires_at, "last_seen_at": utcnow()}
+
+    def get_browser_user_by_session_token_hash(self, token_hash_value: str) -> BrowserUser | None:
+        record = self.browser_sessions.get(token_hash_value)
+        if record is None or record["expires_at"] < utcnow():
+            self.browser_sessions.pop(token_hash_value, None)
+            return None
+        record["last_seen_at"] = utcnow()
+        return self.browser_users.get(record["user_id"])
+
+    def delete_browser_session(self, token_hash_value: str) -> None:
+        self.browser_sessions.pop(token_hash_value, None)
+
+    def create_password_reset_token(self, *, user_id: str, token_hash_value: str, expires_at: Any) -> None:
+        self.password_reset_tokens[token_hash_value] = {"user_id": user_id, "expires_at": expires_at, "used_at": None}
+
+    def consume_password_reset_token(self, token_hash_value: str) -> BrowserUser | None:
+        record = self.password_reset_tokens.get(token_hash_value)
+        if record is None or record["used_at"] is not None or record["expires_at"] < utcnow():
+            return None
+        record["used_at"] = utcnow()
+        return self.browser_users.get(record["user_id"])
+
+    def link_google_identity(self, *, user_id: str, google_subject: str, email: str) -> None:
+        self.google_identities[google_subject] = user_id
+
+    def save_anthropic_api_key(self, *, user_id: str, encrypted_api_key: str, hint: str) -> None:
+        self.user_api_keys[user_id] = {"encrypted_api_key": encrypted_api_key, "api_key_hint": hint}
+
+    def get_anthropic_api_key_record(self, user_id: str) -> dict[str, str] | None:
+        return self.user_api_keys.get(user_id)
+
+    def delete_anthropic_api_key(self, user_id: str) -> None:
+        self.user_api_keys.pop(user_id, None)
+
+    def create_uploaded_document(
+        self,
+        *,
+        user_id: str,
+        title: str,
+        source_filename: str,
+        content_type: str,
+        tags: list[str],
+        storage_path: str,
+        extracted_text_path: str | None,
+        status: str,
+    ) -> UploadedDocumentResponse:
+        now = utcnow()
+        document = UploadedDocumentResponse(
+            document_id=new_id("doc"),
+            user_id=user_id,
+            title=title,
+            source_filename=source_filename,
+            content_type=content_type,
+            tags=tags,
+            status=status,
+            created_at=now,
+            updated_at=now,
+        )
+        self.uploaded_documents[document.document_id] = document
+        return document
+
+    def update_uploaded_document(
+        self,
+        *,
+        document_id: str,
+        title: str,
+        tags: list[str],
+        extracted_text_path: str | None,
+        status: str,
+    ) -> UploadedDocumentResponse | None:
+        document = self.uploaded_documents.get(document_id)
+        if document is None:
+            return None
+        updated = document.model_copy(update={"title": title, "tags": tags, "status": status, "updated_at": utcnow()})
+        self.uploaded_documents[document_id] = updated
+        return updated
+
+    def get_uploaded_document(self, document_id: str) -> UploadedDocumentResponse | None:
+        return self.uploaded_documents.get(document_id)
+
+    def replace_uploaded_document_chunks(self, document_id: str, chunks: list[dict[str, str]]) -> None:
+        self.uploaded_document_chunks[document_id] = chunks
+
+    def list_uploaded_documents(self, user_id: str) -> list[UploadedDocumentResponse]:
+        return sorted(
+            [document for document in self.uploaded_documents.values() if document.user_id == user_id],
+            key=lambda item: item.updated_at,
+            reverse=True,
+        )
+
+    def search_uploaded_document_sections(
+        self,
+        *,
+        user_id: str,
+        query: str,
+        limit: int,
+        tag_filters: list[str] | None = None,
+    ) -> list[UploadedDocumentSectionResult]:
+        query_lower = query.lower()
+        required_tags = set(tag_filters or [])
+        results: list[UploadedDocumentSectionResult] = []
+        for document in self.list_uploaded_documents(user_id):
+            tags = set(document.tags)
+            if required_tags and not required_tags.issubset(tags):
+                continue
+            for chunk in self.uploaded_document_chunks.get(document.document_id, []):
+                if query_lower not in chunk["content"].lower() and query_lower not in document.title.lower():
+                    continue
+                content = chunk["content"]
+                score = len(query_lower) / max(len(content), 1)
+                results.append(
+                    UploadedDocumentSectionResult(
+                        document_id=document.document_id,
+                        title=document.title,
+                        path=chunk["path"],
+                        chunk_kind=chunk["chunk_kind"],
+                        preview=content[:320],
+                        tags=document.tags,
+                        score=score,
+                    )
+                )
+        results.sort(key=lambda item: item.score or 0, reverse=True)
+        return results[:limit]
+
+    def create_chat_thread(self, *, user_id: str, title: str) -> ChatThreadSummary:
+        now = utcnow()
+        thread = ChatThreadResponse(
+            thread_id=new_id("thread"),
+            title=title or "New chat",
+            created_at=now,
+            updated_at=now,
+            messages=[],
+        )
+        self.chat_threads[thread.thread_id] = thread
+        self.chat_thread_users[thread.thread_id] = user_id
+        return ChatThreadSummary(
+            thread_id=thread.thread_id,
+            title=thread.title,
+            created_at=thread.created_at,
+            updated_at=thread.updated_at,
+            last_message_preview="",
+        )
+
+    def rename_chat_thread(self, *, thread_id: str, title: str) -> None:
+        thread = self.chat_threads.get(thread_id)
+        if thread:
+            self.chat_threads[thread_id] = thread.model_copy(update={"title": title, "updated_at": utcnow()})
+
+    def list_chat_threads(self, user_id: str) -> list[ChatThreadSummary]:
+        summaries: list[ChatThreadSummary] = []
+        for thread in self.chat_threads.values():
+            if self.chat_thread_users.get(thread.thread_id) != user_id:
+                continue
+            last_message = thread.messages[-1].content_markdown[:120] if thread.messages else ""
+            summaries.append(
+                ChatThreadSummary(
+                    thread_id=thread.thread_id,
+                    title=thread.title,
+                    created_at=thread.created_at,
+                    updated_at=thread.updated_at,
+                    last_message_preview=last_message,
+                )
+            )
+        summaries.sort(key=lambda item: item.updated_at, reverse=True)
+        return summaries
+
+    def get_chat_thread(self, *, user_id: str, thread_id: str) -> ChatThreadResponse | None:
+        if self.chat_thread_users.get(thread_id) != user_id:
+            return None
+        return self.chat_threads.get(thread_id)
+
+    def add_chat_message(
+        self,
+        *,
+        thread_id: str,
+        role: str,
+        content_markdown: str,
+        citations: list[dict[str, Any]] | None = None,
+        status: str = "completed",
+    ) -> ChatMessageResponse:
+        message = ChatMessageResponse(
+            message_id=new_id("msg"),
+            role=role,
+            content_markdown=content_markdown,
+            citations=citations or [],
+            created_at=utcnow(),
+            status=status,
+        )
+        thread = self.chat_threads[thread_id]
+        updated = thread.model_copy(update={"messages": [*thread.messages, message], "updated_at": utcnow()})
+        self.chat_threads[thread_id] = updated
+        return message
 
     def create_job(self, job_type: str, payload: dict[str, Any]) -> JobResponse:
         job = JobResponse(

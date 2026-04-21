@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>paperbase chat</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <script>
+    window.PAPERBASE_BASE_URL = "__PAPERBASE_BASE_URL__";
+  </script>
+
+  <main id="landing-page" class="landing-page">
+    <div class="landing-column">
+      <div class="brandline">paperbase</div>
+      <h1 class="landing-title">Title</h1>
+      <p class="landing-subtitle">Subtitle</p>
+      <div class="landing-copy">
+        <p>Paperbase Chat is a reading room for scientific work. It lets you bring your own documents, search across indexed literature, and stay grounded in source material while asking broad questions.</p>
+        <p>The interface is intentionally spare. Start with a question, attach your own files, or use one of the examples below to open a new conversation.</p>
+      </div>
+
+      <form id="landing-prompt-form" class="prompt-shell">
+        <button type="button" class="prompt-clip" id="landing-upload-trigger" aria-label="Upload documents">⌕</button>
+        <input id="landing-prompt-input" class="prompt-input" type="text" placeholder="Search or @ mention papers in bioRxiv, medRxiv, and PubMed Central" autocomplete="off" />
+        <button id="landing-start-button" class="prompt-button" type="submit">Start ↗</button>
+      </form>
+
+      <section class="upload-card">
+        <div class="section-label">Library</div>
+        <h2>Upload and tag documents</h2>
+        <p class="muted">PDF, DOCX, PPTX, Markdown, and text files become part of your private chat library after login.</p>
+        <form id="public-upload-form" class="upload-form">
+          <input id="public-upload-file" type="file" />
+          <input id="public-upload-tags" type="text" placeholder="tags: grant, methods, deck" />
+          <button type="submit">Upload</button>
+        </form>
+      </section>
+
+      <section class="examples">
+        <div class="section-label">Examples</div>
+        <div class="example-list" id="example-list">
+          <button type="button" class="example-pill" data-prompt="Compare the methods in my uploaded grant draft against the strongest indexed papers on the topic.">Compare my upload with the literature</button>
+          <button type="button" class="example-pill" data-prompt="What are the main assumptions and limitations in this paper, with citations?">Summarize assumptions and limitations</button>
+          <button type="button" class="example-pill" data-prompt="Find the sections that best explain the evaluation setup and benchmark results.">Locate evaluation details</button>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <div id="app-shell" class="app-shell hidden">
+    <aside class="sidebar">
+      <div class="sidebar-top">
+        <div class="brandline">paperbase chat</div>
+        <button id="new-chat-button" class="sidebar-button">New chat</button>
+      </div>
+
+      <section class="sidebar-section">
+        <div class="section-label">Account</div>
+        <div id="session-summary" class="session-summary"></div>
+        <div class="quota-row" id="quota-row"></div>
+        <button id="manage-key-button" class="sidebar-link">Manage Anthropic key</button>
+        <button id="logout-button" class="sidebar-link">Log out</button>
+      </section>
+
+      <section class="sidebar-section">
+        <div class="section-label">Library</div>
+        <form id="app-upload-form" class="upload-form compact-upload">
+          <input id="app-upload-file" type="file" />
+          <input id="app-upload-tags" type="text" placeholder="tags" />
+          <button type="submit">Add</button>
+        </form>
+        <div id="doc-tag-filters" class="tag-filter-row"></div>
+        <div id="document-list" class="document-list"></div>
+      </section>
+
+      <section class="sidebar-section history-section">
+        <div class="section-label">Previous sessions</div>
+        <div id="thread-list" class="thread-list"></div>
+      </section>
+    </aside>
+
+    <section class="chat-stage">
+      <div id="tab-strip" class="tab-strip"></div>
+      <div id="thread-header" class="thread-header"></div>
+      <div id="message-list" class="message-list"></div>
+      <form id="composer-form" class="composer-form">
+        <div class="composer-meta">
+          <label><input id="toggle-uploads" type="checkbox" checked /> uploaded docs</label>
+          <label><input id="toggle-papers" type="checkbox" checked /> indexed papers</label>
+        </div>
+        <textarea id="composer-input" placeholder="Ask a question about your documents or the indexed literature..."></textarea>
+        <div class="composer-actions">
+          <div id="composer-status" class="muted"></div>
+          <button id="composer-send" type="submit">Send</button>
+        </div>
+      </form>
+    </section>
+  </div>
+
+  <div id="auth-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-backdrop" data-close-modal="true"></div>
+    <div class="modal-panel">
+      <button class="modal-close" type="button" data-close-modal="true">×</button>
+      <div class="modal-tabs">
+        <button type="button" class="modal-tab active" data-view="login">Log in</button>
+        <button type="button" class="modal-tab" data-view="signup">Sign up</button>
+        <button type="button" class="modal-tab" data-view="reset-request">Forgot password</button>
+        <button type="button" class="modal-tab" data-view="api-key">API key</button>
+      </div>
+
+      <div id="modal-flash" class="modal-flash"></div>
+
+      <div data-auth-view="login" class="modal-view visible">
+        <form id="login-form" class="stack">
+          <input name="email" type="email" placeholder="Email" required />
+          <input name="password" type="password" placeholder="Password" required />
+          <button type="submit">Log in</button>
+        </form>
+        <button id="google-login-button" class="oauth-button" type="button">Continue with Google</button>
+      </div>
+
+      <div data-auth-view="signup" class="modal-view">
+        <form id="signup-form" class="stack">
+          <input name="display_name" type="text" placeholder="Name" />
+          <input name="email" type="email" placeholder="Email" required />
+          <input name="password" type="password" placeholder="Password" required />
+          <button type="submit">Create account</button>
+        </form>
+      </div>
+
+      <div data-auth-view="reset-request" class="modal-view">
+        <form id="forgot-form" class="stack">
+          <input name="email" type="email" placeholder="Email" required />
+          <button type="submit">Send reset link</button>
+        </form>
+      </div>
+
+      <div data-auth-view="reset-password" class="modal-view">
+        <form id="reset-form" class="stack">
+          <input id="reset-token-input" name="token" type="text" placeholder="Reset token" required />
+          <input name="password" type="password" placeholder="New password" required />
+          <button type="submit">Reset password</button>
+        </form>
+      </div>
+
+      <div data-auth-view="api-key" class="modal-view">
+        <p class="muted">You get 3 free assistant responses. After that, add your own Anthropic API key to continue chatting.</p>
+        <form id="api-key-form" class="stack">
+          <input name="api_key" type="password" placeholder="Anthropic API key" required />
+          <button type="submit">Save key</button>
+        </form>
+        <button id="delete-api-key-button" class="danger-link" type="button">Delete saved key</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

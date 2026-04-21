@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,6 +13,23 @@ from paperbase.models import PaperMetadata, SearchRequest, SearchSectionRequest
 from paperbase.repository import MemoryPaperRepository
 from paperbase.service import PaperbaseService, get_service
 from paperbase.storage import MemoryObjectStore
+
+
+class FakeEmailSender:
+    def __init__(self) -> None:
+        self.reset_emails: list[tuple[str, str]] = []
+
+    def send_password_reset(self, *, email: str, reset_link: str) -> None:
+        self.reset_emails.append((email, reset_link))
+
+
+class FakeChatModel:
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    def complete(self, *, api_key: str, prompt: str, system_prompt: str) -> str:
+        self.prompts.append(prompt)
+        return f"Grounded answer with citations [S1]\n\nAPI key used: {api_key[:6]}"
 
 
 @pytest.fixture
@@ -27,6 +45,26 @@ def service() -> PaperbaseService:
         repository=MemoryPaperRepository(),
         object_store=MemoryObjectStore(),
     )
+
+
+@pytest.fixture
+def browser_service() -> tuple[PaperbaseService, FakeEmailSender, FakeChatModel]:
+    email_sender = FakeEmailSender()
+    chat_model = FakeChatModel()
+    settings = Settings(
+        storage_backend="memory",
+        database_url="memory://",
+        api_key="test-token",
+        anthropic_api_key="product-key-123",
+    )
+    service = PaperbaseService(
+        settings=settings,
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=email_sender,
+        chat_model=chat_model,
+    )
+    return service, email_sender, chat_model
 
 
 def _sample_paper(arxiv_id: str, *, title: str, abstract: str) -> PaperMetadata:
@@ -741,3 +779,102 @@ def test_init_creates_trigram_indexes_for_summary_and_tldr():
     assert "summary_short gin_trgm_ops" in combined
     assert "papers_tldr_trgm" in combined
     assert "tldr gin_trgm_ops" in combined
+
+
+def test_browser_auth_and_password_reset_flow(browser_service):
+    service, email_sender, _ = browser_service
+    app.dependency_overrides[get_service] = lambda: service
+    client = TestClient(app)
+
+    signup = client.post(
+        "/v1/browser/auth/signup",
+        json={"email": "user@example.com", "password": "topsecret123", "display_name": "User"},
+    )
+    assert signup.status_code == 200
+    assert signup.json()["authenticated"] is True
+    assert signup.json()["remaining_free_responses"] == 3
+
+    session = client.get("/v1/browser/session")
+    assert session.json()["user"]["email"] == "user@example.com"
+
+    forgot = client.post("/v1/browser/auth/forgot-password", json={"email": "user@example.com"})
+    assert forgot.status_code == 200
+    assert email_sender.reset_emails
+    reset_link = email_sender.reset_emails[0][1]
+    reset_token = parse_qs(urlparse(reset_link).query)["reset_token"][0]
+
+    reset = client.post("/v1/browser/auth/reset-password", json={"token": reset_token, "password": "newsecret456"})
+    assert reset.status_code == 200
+
+    logout = client.post("/v1/browser/auth/logout")
+    assert logout.status_code == 200
+
+    login = client.post("/v1/browser/auth/login", json={"email": "user@example.com", "password": "newsecret456"})
+    assert login.status_code == 200
+    assert login.json()["authenticated"] is True
+
+    app.dependency_overrides.clear()
+
+
+def test_browser_uploads_and_chat_require_api_key_after_free_quota(monkeypatch, browser_service):
+    service, _, chat_model = browser_service
+    app.dependency_overrides[get_service] = lambda: service
+    client = TestClient(app)
+
+    signup = client.post(
+        "/v1/browser/auth/signup",
+        json={"email": "chat@example.com", "password": "topsecret123", "display_name": "Chat User"},
+    )
+    assert signup.status_code == 200
+
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda paper: _rich_extraction(text="Methods section explains grounding and citations."),
+    )
+    service.index_arxiv_paper(
+        "2401.77777",
+        paper=_sample_paper("2401.77777", title="Grounding Paper", abstract="A paper about grounded citations"),
+    )
+
+    upload = client.post(
+        "/v1/browser/uploads",
+        data={"tags": "methods,notes"},
+        files={"file": ("notes.md", b"# Notes\n\nThese uploaded notes discuss methods and grounding.", "text/markdown")},
+    )
+    assert upload.status_code == 200
+    assert upload.json()["tags"] == ["methods", "notes"]
+
+    thread = client.post("/v1/browser/chats", json={"title": "New chat"}).json()
+    thread_id = thread["thread_id"]
+
+    for _ in range(3):
+        response = client.post(
+            f"/v1/browser/chats/{thread_id}/messages",
+            json={"content": "Explain the methods grounding with citations", "tag_filters": ["methods"]},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["state"] == "completed"
+        assert payload["assistant_message"]["citations"]
+
+    gated = client.post(
+        f"/v1/browser/chats/{thread_id}/messages",
+        json={"content": "One more answer please", "tag_filters": ["methods"]},
+    )
+    assert gated.status_code == 200
+    assert gated.json()["state"] == "api_key_required"
+
+    save_key = client.put("/v1/browser/settings/anthropic-key", json={"api_key": "anthropic-user-key-999"})
+    assert save_key.status_code == 200
+    assert save_key.json()["has_anthropic_api_key"] is True
+
+    resumed = client.post(
+        f"/v1/browser/chats/{thread_id}/messages",
+        json={"content": "Continue with my saved key", "tag_filters": ["methods"]},
+    )
+    assert resumed.status_code == 200
+    assert resumed.json()["state"] == "completed"
+    assert any("S1" in prompt for prompt in chat_model.prompts)
+
+    app.dependency_overrides.clear()

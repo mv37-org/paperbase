@@ -2,30 +2,48 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
 import os
 
-from fastapi import Depends, FastAPI, Query, Response
+from authlib.integrations.starlette_client import OAuth
+from fastapi import Depends, FastAPI, File, Form, Query, Request, Response, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
+from starlette.middleware.sessions import SessionMiddleware
 
-from .auth import require_bearer_token
+from .auth import clear_browser_session_cookie, require_bearer_token, require_browser_user, set_browser_session_cookie
 from .config import get_settings
 from .logging_utils import build_log_config
 from .models import (
+    BrowserSessionResponse,
+    ChatThreadListResponse,
+    ChatThreadResponse,
+    CreateChatThreadRequest,
     FileContentResponse,
     FileListResponse,
+    ForgotPasswordRequest,
     GrepRequest,
     GrepResponse,
     IntegrationProbeResponse,
     JobResponse,
+    LoginRequest,
     ManifestResponse,
     PaperResponse,
+    ResetPasswordRequest,
     ResultSetResponse,
+    SaveAnthropicKeyRequest,
     SearchPaperResult,
     SearchRequest,
     SearchResponse,
     SearchSectionRequest,
     SearchSectionResponse,
+    SendChatMessageRequest,
+    SendChatMessageResponse,
+    SignupRequest,
     TableResponse,
     FigureResponse,
+    UploadListResponse,
+    UploadedDocumentResponse,
 )
 from .service import PaperbaseService, get_service
 
@@ -34,12 +52,56 @@ app = FastAPI(
     version="0.1.0",
     description="Hosted backend for indexing and serving scientific paper artifacts",
 )
+_app_settings = get_settings()
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=_app_settings.app_secret,
+    same_site="lax",
+    https_only=_app_settings.browser_session_secure,
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[_app_settings.browser_origin],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 def _resolve_bind_address() -> tuple[str, int]:
     host = os.getenv("PAPERBASE_API_HOST", "0.0.0.0")
     port = int(os.getenv("PAPERBASE_API_PORT") or os.getenv("PORT") or "8080")
     return host, port
+
+
+def _parse_tags(raw_tags: str) -> list[str]:
+    values: list[str] = []
+    for item in raw_tags.replace("\n", ",").split(","):
+        cleaned = item.strip()
+        if cleaned:
+            values.append(cleaned)
+    return values
+
+
+def _browser_session_token(request: Request) -> str | None:
+    settings = get_settings()
+    return request.cookies.get(settings.browser_session_cookie_name)
+
+
+@lru_cache(maxsize=1)
+def get_google_oauth_client():
+    settings = get_settings()
+    if not settings.google_client_id or not settings.google_client_secret:
+        return None
+    oauth = OAuth()
+    oauth.register(
+        name="google",
+        server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
+        client_id=settings.google_client_id,
+        client_secret=settings.google_client_secret,
+        client_kwargs={"scope": "openid email profile"},
+    )
+    return oauth.create_client("google")
 
 
 @app.get("/health")
@@ -180,6 +242,179 @@ def probe_integrations(response: Response, service: PaperbaseService = Depends(g
     if not result.ok:
         response.status_code = 503
     return result
+
+
+@app.get("/v1/browser/session", response_model=BrowserSessionResponse)
+def browser_session(request: Request, service: PaperbaseService = Depends(get_service)) -> BrowserSessionResponse:
+    return service.get_browser_session(_browser_session_token(request))
+
+
+@app.post("/v1/browser/auth/signup", response_model=BrowserSessionResponse)
+def browser_signup(
+    request: SignupRequest,
+    response: Response,
+    service: PaperbaseService = Depends(get_service),
+) -> BrowserSessionResponse:
+    session_response, raw_token = service.register_browser_user(request)
+    set_browser_session_cookie(response, raw_token, get_settings())
+    return session_response
+
+
+@app.post("/v1/browser/auth/login", response_model=BrowserSessionResponse)
+def browser_login(
+    request: LoginRequest,
+    response: Response,
+    service: PaperbaseService = Depends(get_service),
+) -> BrowserSessionResponse:
+    session_response, raw_token = service.authenticate_browser_user(request)
+    set_browser_session_cookie(response, raw_token, get_settings())
+    return session_response
+
+
+@app.post("/v1/browser/auth/logout")
+def browser_logout(
+    request: Request,
+    response: Response,
+    service: PaperbaseService = Depends(get_service),
+) -> dict[str, str]:
+    service.logout_browser_session(_browser_session_token(request))
+    clear_browser_session_cookie(response, get_settings())
+    return {"status": "ok"}
+
+
+@app.post("/v1/browser/auth/forgot-password")
+def browser_forgot_password(
+    request: ForgotPasswordRequest,
+    service: PaperbaseService = Depends(get_service),
+) -> dict[str, str]:
+    return service.request_password_reset(request)
+
+
+@app.post("/v1/browser/auth/reset-password")
+def browser_reset_password(
+    request: ResetPasswordRequest,
+    service: PaperbaseService = Depends(get_service),
+) -> dict[str, str]:
+    return service.reset_password(request)
+
+
+@app.get("/v1/browser/auth/google/start")
+async def browser_google_start(request: Request):
+    client = get_google_oauth_client()
+    settings = get_settings()
+    if client is None:
+        return RedirectResponse(f"{settings.chat_public_url.rstrip('/')}/?auth_error=google_not_configured", status_code=302)
+    redirect_uri = settings.google_oauth_redirect_url or str(request.url_for("browser_google_callback"))
+    return await client.authorize_redirect(request, redirect_uri)
+
+
+@app.get("/v1/browser/auth/google/callback", name="browser_google_callback")
+async def browser_google_callback(
+    request: Request,
+    service: PaperbaseService = Depends(get_service),
+):
+    settings = get_settings()
+    client = get_google_oauth_client()
+    if client is None:
+        return RedirectResponse(f"{settings.chat_public_url.rstrip('/')}/?auth_error=google_not_configured", status_code=302)
+    try:
+        token = await client.authorize_access_token(request)
+        userinfo = token.get("userinfo") or await client.parse_id_token(request, token)
+        if not userinfo:
+            raise RuntimeError("Google did not return user info")
+        email = userinfo.get("email")
+        subject = userinfo.get("sub")
+        name = userinfo.get("name") or userinfo.get("given_name") or ""
+        if not email or not subject:
+            raise RuntimeError("Google response was missing email or subject")
+        session_response, raw_token = service.upsert_google_browser_user(
+            google_subject=subject,
+            email=email,
+            display_name=name,
+        )
+        response = RedirectResponse(f"{settings.chat_public_url.rstrip('/')}/?auth=google", status_code=302)
+        set_browser_session_cookie(response, raw_token, settings)
+        return response
+    except Exception:
+        return RedirectResponse(f"{settings.chat_public_url.rstrip('/')}/?auth_error=google_callback_failed", status_code=302)
+
+
+@app.put("/v1/browser/settings/anthropic-key", response_model=BrowserSessionResponse)
+def browser_save_anthropic_key(
+    request: SaveAnthropicKeyRequest,
+    user=Depends(require_browser_user),
+    service: PaperbaseService = Depends(get_service),
+) -> BrowserSessionResponse:
+    return service.save_user_anthropic_key(user, request)
+
+
+@app.delete("/v1/browser/settings/anthropic-key", response_model=BrowserSessionResponse)
+def browser_delete_anthropic_key(
+    user=Depends(require_browser_user),
+    service: PaperbaseService = Depends(get_service),
+) -> BrowserSessionResponse:
+    return service.delete_user_anthropic_key(user)
+
+
+@app.get("/v1/browser/uploads", response_model=UploadListResponse)
+def browser_list_uploads(
+    user=Depends(require_browser_user),
+    service: PaperbaseService = Depends(get_service),
+) -> UploadListResponse:
+    return service.list_uploaded_documents(user)
+
+
+@app.post("/v1/browser/uploads", response_model=UploadedDocumentResponse)
+async def browser_upload_document(
+    file: UploadFile = File(...),
+    tags: str = Form(default=""),
+    user=Depends(require_browser_user),
+    service: PaperbaseService = Depends(get_service),
+) -> UploadedDocumentResponse:
+    data = await file.read()
+    return service.upload_document(
+        user=user,
+        filename=file.filename or "upload.bin",
+        content_type=file.content_type or "application/octet-stream",
+        data=data,
+        tags=_parse_tags(tags),
+    )
+
+
+@app.get("/v1/browser/chats", response_model=ChatThreadListResponse)
+def browser_list_chats(
+    user=Depends(require_browser_user),
+    service: PaperbaseService = Depends(get_service),
+) -> ChatThreadListResponse:
+    return service.list_chat_threads(user)
+
+
+@app.post("/v1/browser/chats", response_model=ChatThreadResponse)
+def browser_create_chat(
+    request: CreateChatThreadRequest,
+    user=Depends(require_browser_user),
+    service: PaperbaseService = Depends(get_service),
+) -> ChatThreadResponse:
+    return service.create_chat_thread(user, request)
+
+
+@app.get("/v1/browser/chats/{thread_id}", response_model=ChatThreadResponse)
+def browser_get_chat(
+    thread_id: str,
+    user=Depends(require_browser_user),
+    service: PaperbaseService = Depends(get_service),
+) -> ChatThreadResponse:
+    return service.get_chat_thread(user, thread_id)
+
+
+@app.post("/v1/browser/chats/{thread_id}/messages", response_model=SendChatMessageResponse)
+def browser_send_chat_message(
+    thread_id: str,
+    request: SendChatMessageRequest,
+    user=Depends(require_browser_user),
+    service: PaperbaseService = Depends(get_service),
+) -> SendChatMessageResponse:
+    return service.send_chat_message(user, thread_id, request)
 
 
 def main() -> None:

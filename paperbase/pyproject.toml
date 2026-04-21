@@ -9,11 +9,15 @@ description = "Hosted backend for indexing and serving scientific papers"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "authlib>=1.3",
+    "argon2-cffi>=23.1",
     "beautifulsoup4>=4.12",
+    "cryptography>=43.0",
     "docling>=2.15",
     "fastapi>=0.115",
     "google-cloud-storage>=2.18",
     "google-genai>=0.3",
+    "itsdangerous>=2.2",
     "pgvector>=0.3",
     "pydantic>=2.8",
     "pydantic-settings>=2.6",

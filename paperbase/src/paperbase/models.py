@@ -173,3 +173,127 @@ class IntegrationProbeResponse(BaseModel):
     checked_at: datetime
     database: IntegrationProbeComponent
     storage: IntegrationProbeComponent
+
+
+class BrowserUser(BaseModel):
+    user_id: str
+    email: str
+    display_name: str = ""
+    free_responses_used: int = 0
+
+
+class BrowserSessionResponse(BaseModel):
+    authenticated: bool
+    user: BrowserUser | None = None
+    remaining_free_responses: int = 0
+    has_anthropic_api_key: bool = False
+
+
+class SignupRequest(BaseModel):
+    email: str = Field(min_length=3)
+    password: str = Field(min_length=8)
+    display_name: str = ""
+
+
+class LoginRequest(BaseModel):
+    email: str = Field(min_length=3)
+    password: str = Field(min_length=8)
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: str = Field(min_length=3)
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str = Field(min_length=8)
+    password: str = Field(min_length=8)
+
+
+class SaveAnthropicKeyRequest(BaseModel):
+    api_key: str = Field(min_length=8)
+
+
+class UploadedDocumentResponse(BaseModel):
+    document_id: str
+    user_id: str
+    title: str
+    source_filename: str
+    content_type: str
+    tags: list[str] = Field(default_factory=list)
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class UploadListResponse(BaseModel):
+    documents: list[UploadedDocumentResponse] = Field(default_factory=list)
+    available_tags: list[str] = Field(default_factory=list)
+
+
+class UploadedDocumentSectionResult(BaseModel):
+    document_id: str
+    title: str
+    path: str
+    chunk_kind: str
+    preview: str
+    tags: list[str] = Field(default_factory=list)
+    score: float | None = None
+
+
+class ChatCitation(BaseModel):
+    source_id: str
+    source_kind: str
+    title: str
+    path: str
+    excerpt: str
+    paper_id: str | None = None
+    document_id: str | None = None
+    tags: list[str] = Field(default_factory=list)
+
+
+class ChatMessageResponse(BaseModel):
+    message_id: str
+    role: str
+    content_markdown: str
+    citations: list[ChatCitation] = Field(default_factory=list)
+    created_at: datetime
+    status: str = "completed"
+
+
+class ChatThreadSummary(BaseModel):
+    thread_id: str
+    title: str
+    created_at: datetime
+    updated_at: datetime
+    last_message_preview: str = ""
+
+
+class ChatThreadResponse(BaseModel):
+    thread_id: str
+    title: str
+    created_at: datetime
+    updated_at: datetime
+    messages: list[ChatMessageResponse] = Field(default_factory=list)
+
+
+class CreateChatThreadRequest(BaseModel):
+    title: str = ""
+
+
+class SendChatMessageRequest(BaseModel):
+    content: str = Field(min_length=1)
+    tag_filters: list[str] = Field(default_factory=list)
+    include_uploads: bool = True
+    include_papers: bool = True
+
+
+class SendChatMessageResponse(BaseModel):
+    thread: ChatThreadResponse
+    assistant_message: ChatMessageResponse | None = None
+    remaining_free_responses: int = 0
+    has_anthropic_api_key: bool = False
+    state: str = "completed"
+
+
+class ChatThreadListResponse(BaseModel):
+    threads: list[ChatThreadSummary] = Field(default_factory=list)

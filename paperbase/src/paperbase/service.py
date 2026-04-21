@@ -6,38 +6,61 @@ import json
 import logging
 import re
 from dataclasses import asdict
+from datetime import timedelta
 from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 from fastapi import HTTPException
 
 from .config import Settings, get_settings
-from .extractors import build_manifest, figure_index_payload, index_paper_artifacts, table_csv_bytes, table_index_payload, table_json_bytes
+from .emailer import EmailSender, ResendEmailSender
+from .extractors import build_manifest, extract_uploaded_document, figure_index_payload, index_paper_artifacts, table_csv_bytes, table_index_payload, table_json_bytes
+from .llm import AnthropicChatModelClient, ChatModelClient
 from .models import (
+    BrowserSessionResponse,
+    BrowserUser,
+    ChatCitation,
+    ChatMessageResponse,
+    ChatThreadListResponse,
+    ChatThreadResponse,
+    ChatThreadSummary,
+    CreateChatThreadRequest,
     FileContentResponse,
     FileListResponse,
     FileObject,
     FigureResponse,
+    ForgotPasswordRequest,
     GrepResponse,
     IntegrationProbeComponent,
     IntegrationProbeResponse,
     JobResponse,
+    LoginRequest,
     ManifestResponse,
     PaperMetadata,
     PaperResponse,
+    ResetPasswordRequest,
     ResultSetResponse,
+    SaveAnthropicKeyRequest,
     SearchPaperResult,
     SearchRequest,
     SearchResponse,
     SearchSectionRequest,
     SearchSectionResponse,
+    SendChatMessageRequest,
+    SendChatMessageResponse,
+    SignupRequest,
     TableResponse,
+    UploadListResponse,
+    UploadedDocumentResponse,
+    UploadedDocumentSectionResult,
 )
 from .repository import PaperRepository, build_repository
+from .security import SecretCipher, api_key_hint, hash_password, new_browser_token, token_hash, verify_password
 from .summaries import build_paper_summaries
 from .storage import ObjectStore, StoredObject, build_object_store
 from . import sources
-from .utils import canonical_paper_id, new_id, utcnow
+from .utils import canonical_paper_id, new_id, slugify, utcnow
 
 
 logger = logging.getLogger(__name__)
@@ -468,6 +491,57 @@ class OptionalReranker:
         return [float(s) for s in scores]
 
 
+def _normalize_email(email: str) -> str:
+    return email.strip().lower()
+
+
+def _normalize_tags(tags: list[str]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for tag in tags:
+        cleaned = slugify(tag)
+        if cleaned not in seen:
+            seen.add(cleaned)
+            normalized.append(cleaned)
+    return normalized
+
+
+def _split_sentences(text: str) -> list[str]:
+    collapsed = " ".join(text.split()).strip()
+    if not collapsed:
+        return []
+    parts = [segment.strip() for segment in collapsed.replace("\n", " ").split(". ") if segment.strip()]
+    return parts
+
+
+def _best_excerpt(text: str, question: str, *, max_sentences: int = 2, max_chars: int = 420) -> str:
+    question_words = {word for word in slugify(question).split("-") if word}
+    candidates: list[tuple[int, int, str]] = []
+    for index, sentence in enumerate(_split_sentences(text) or [text.strip()]):
+        sentence_words = {word for word in slugify(sentence).split("-") if word}
+        overlap = len(question_words & sentence_words)
+        candidates.append((overlap * 10 + max(0, 3 - index), index, sentence.strip()))
+    chosen = sorted(candidates, key=lambda item: (item[0], -item[1]), reverse=True)[:max_sentences]
+    excerpt = ". ".join(sentence for _, _, sentence in sorted(chosen, key=lambda item: item[1])).strip()
+    return excerpt[:max_chars].rstrip()
+
+
+def _query_variants(question: str) -> list[str]:
+    words = [word for word in slugify(question).split("-") if len(word) > 3]
+    variants = [question.strip()]
+    if words:
+        variants.append(" ".join(words[:4]))
+        variants.extend(words[:4])
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in variants:
+        normalized = value.strip().lower()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            deduped.append(value.strip())
+    return deduped[:5]
+
+
 class PaperbaseService:
     def __init__(
         self,
@@ -475,15 +549,342 @@ class PaperbaseService:
         settings: Settings,
         repository: PaperRepository,
         object_store: ObjectStore,
+        email_sender: EmailSender | None = None,
+        chat_model: ChatModelClient | None = None,
     ) -> None:
         self.settings = settings
         self.repository = repository
         self.object_store = object_store
         self.embeddings = OptionalEmbeddingProvider(settings)
         self.reranker = OptionalReranker(settings)
+        self.email_sender = email_sender or ResendEmailSender(settings)
+        self.chat_model = chat_model or AnthropicChatModelClient(settings)
+        self.secret_cipher = SecretCipher(settings)
 
     def init(self) -> None:
         self.repository.init()
+
+    def _remaining_free_responses(self, user: BrowserUser) -> int:
+        return max(self.settings.free_chat_response_limit - user.free_responses_used, 0)
+
+    def _browser_session_response(self, user: BrowserUser | None) -> BrowserSessionResponse:
+        if user is None:
+            return BrowserSessionResponse(authenticated=False)
+        api_key_record = self.repository.get_anthropic_api_key_record(user.user_id)  # type: ignore[attr-defined]
+        return BrowserSessionResponse(
+            authenticated=True,
+            user=user,
+            remaining_free_responses=self._remaining_free_responses(user),
+            has_anthropic_api_key=api_key_record is not None,
+        )
+
+    def register_browser_user(self, request: SignupRequest) -> tuple[BrowserSessionResponse, str]:
+        email = _normalize_email(request.email)
+        if self.repository.get_browser_user_by_email(email):  # type: ignore[attr-defined]
+            raise HTTPException(status_code=409, detail="An account with that email already exists")
+        user = self.repository.create_browser_user(  # type: ignore[attr-defined]
+            email=email,
+            display_name=request.display_name.strip(),
+            password_hash=hash_password(request.password),
+        )
+        session_token = self._create_browser_session(user.user_id)
+        return self._browser_session_response(user), session_token
+
+    def authenticate_browser_user(self, request: LoginRequest) -> tuple[BrowserSessionResponse, str]:
+        email = _normalize_email(request.email)
+        user = self.repository.get_browser_user_by_email(email)  # type: ignore[attr-defined]
+        if user is None:
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+        password_hash_value = self.repository.get_browser_password_hash(user.user_id)  # type: ignore[attr-defined]
+        if not password_hash_value or not verify_password(password_hash_value, request.password):
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+        session_token = self._create_browser_session(user.user_id)
+        return self._browser_session_response(user), session_token
+
+    def _create_browser_session(self, user_id: str) -> str:
+        raw_token = new_browser_token()
+        self.repository.create_browser_session(  # type: ignore[attr-defined]
+            user_id=user_id,
+            token_hash_value=token_hash(raw_token),
+            expires_at=utcnow() + timedelta(seconds=self.settings.browser_session_ttl_seconds),
+        )
+        return raw_token
+
+    def get_browser_session(self, raw_token: str | None) -> BrowserSessionResponse:
+        if not raw_token:
+            return BrowserSessionResponse(authenticated=False)
+        user = self.repository.get_browser_user_by_session_token_hash(token_hash(raw_token))  # type: ignore[attr-defined]
+        return self._browser_session_response(user)
+
+    def get_current_browser_user(self, raw_token: str | None) -> BrowserUser | None:
+        if not raw_token:
+            return None
+        return self.repository.get_browser_user_by_session_token_hash(token_hash(raw_token))  # type: ignore[attr-defined]
+
+    def logout_browser_session(self, raw_token: str | None) -> None:
+        if raw_token:
+            self.repository.delete_browser_session(token_hash(raw_token))  # type: ignore[attr-defined]
+
+    def request_password_reset(self, request: ForgotPasswordRequest) -> dict[str, str]:
+        email = _normalize_email(request.email)
+        user = self.repository.get_browser_user_by_email(email)  # type: ignore[attr-defined]
+        if user is None:
+            return {"status": "ok"}
+        raw_token = new_browser_token()
+        self.repository.create_password_reset_token(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            token_hash_value=token_hash(raw_token),
+            expires_at=utcnow() + timedelta(seconds=self.settings.password_reset_ttl_seconds),
+        )
+        reset_link = f"{self.settings.chat_public_url.rstrip('/')}/?reset_token={raw_token}"
+        self.email_sender.send_password_reset(email=user.email, reset_link=reset_link)
+        return {"status": "ok"}
+
+    def reset_password(self, request: ResetPasswordRequest) -> dict[str, str]:
+        user = self.repository.consume_password_reset_token(token_hash(request.token))  # type: ignore[attr-defined]
+        if user is None:
+            raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+        self.repository.set_browser_user_password(user.user_id, hash_password(request.password))  # type: ignore[attr-defined]
+        return {"status": "ok"}
+
+    def upsert_google_browser_user(self, *, google_subject: str, email: str, display_name: str) -> tuple[BrowserSessionResponse, str]:
+        email = _normalize_email(email)
+        user = self.repository.get_browser_user_by_google_subject(google_subject)  # type: ignore[attr-defined]
+        if user is None:
+            existing = self.repository.get_browser_user_by_email(email)  # type: ignore[attr-defined]
+            user = existing or self.repository.create_browser_user(  # type: ignore[attr-defined]
+                email=email,
+                display_name=display_name.strip(),
+                password_hash=None,
+            )
+            self.repository.link_google_identity(user_id=user.user_id, google_subject=google_subject, email=email)  # type: ignore[attr-defined]
+        session_token = self._create_browser_session(user.user_id)
+        return self._browser_session_response(user), session_token
+
+    def save_user_anthropic_key(self, user: BrowserUser, request: SaveAnthropicKeyRequest) -> BrowserSessionResponse:
+        self.repository.save_anthropic_api_key(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            encrypted_api_key=self.secret_cipher.encrypt(request.api_key.strip()),
+            hint=api_key_hint(request.api_key),
+        )
+        return self._browser_session_response(user)
+
+    def delete_user_anthropic_key(self, user: BrowserUser) -> BrowserSessionResponse:
+        self.repository.delete_anthropic_api_key(user.user_id)  # type: ignore[attr-defined]
+        return self._browser_session_response(user)
+
+    def list_uploaded_documents(self, user: BrowserUser) -> UploadListResponse:
+        documents = self.repository.list_uploaded_documents(user.user_id)  # type: ignore[attr-defined]
+        tag_set = sorted({tag for document in documents for tag in document.tags})
+        return UploadListResponse(documents=documents, available_tags=tag_set)
+
+    def upload_document(
+        self,
+        *,
+        user: BrowserUser,
+        filename: str,
+        content_type: str,
+        data: bytes,
+        tags: list[str],
+    ) -> UploadedDocumentResponse:
+        if len(data) > self.settings.upload_max_bytes:
+            raise HTTPException(status_code=413, detail="Upload is too large")
+        normalized_tags = _normalize_tags(tags)
+        basename = Path(filename).name or "upload.bin"
+        title = Path(basename).stem.replace("-", " ").replace("_", " ").strip() or basename
+        document = self.repository.create_uploaded_document(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            title=title,
+            source_filename=basename,
+            content_type=content_type or "application/octet-stream",
+            tags=normalized_tags,
+            storage_path="",
+            extracted_text_path=None,
+            status="processing",
+        )
+        prefix = f"uploads/{user.user_id}/{document.document_id}"
+        original_path = f"{prefix}/original/{basename}"
+        self.object_store.put_bytes(original_path, data, content_type=content_type)
+        try:
+            extraction = extract_uploaded_document(basename, data, content_type=content_type)
+            text_chunks: list[dict[str, str]] = [{"path": "text/full.md", "chunk_kind": "full_text", "content": extraction.text_markdown}]
+            self.object_store.put_text(f"{prefix}/text/full.md", extraction.text_markdown, content_type="text/markdown")
+            for section in extraction.sections:
+                self.object_store.put_text(f"{prefix}/sections/{section.slug}.md", section.markdown, content_type="text/markdown")
+                text_chunks.append(
+                    {
+                        "path": f"sections/{section.slug}.md",
+                        "chunk_kind": "section",
+                        "content": section.markdown,
+                    }
+                )
+            self.repository.replace_uploaded_document_chunks(document.document_id, text_chunks)  # type: ignore[attr-defined]
+            updated = self.repository.update_uploaded_document(  # type: ignore[attr-defined]
+                document_id=document.document_id,
+                title=title,
+                tags=normalized_tags,
+                extracted_text_path=f"{prefix}/text/full.md",
+                status="ready",
+            )
+            if updated is None:
+                raise RuntimeError("Uploaded document record vanished during processing")
+            return updated
+        except Exception:
+            failed = self.repository.update_uploaded_document(  # type: ignore[attr-defined]
+                document_id=document.document_id,
+                title=title,
+                tags=normalized_tags,
+                extracted_text_path=None,
+                status="failed",
+            )
+            if failed is None:
+                raise
+            raise
+
+    def list_chat_threads(self, user: BrowserUser) -> ChatThreadListResponse:
+        return ChatThreadListResponse(threads=self.repository.list_chat_threads(user.user_id))  # type: ignore[attr-defined]
+
+    def create_chat_thread(self, user: BrowserUser, request: CreateChatThreadRequest) -> ChatThreadResponse:
+        summary = self.repository.create_chat_thread(user_id=user.user_id, title=request.title.strip() or "New chat")  # type: ignore[attr-defined]
+        thread = self.repository.get_chat_thread(user_id=user.user_id, thread_id=summary.thread_id)  # type: ignore[attr-defined]
+        if thread is None:
+            raise HTTPException(status_code=500, detail="Chat thread could not be created")
+        return thread
+
+    def get_chat_thread(self, user: BrowserUser, thread_id: str) -> ChatThreadResponse:
+        thread = self.repository.get_chat_thread(user_id=user.user_id, thread_id=thread_id)  # type: ignore[attr-defined]
+        if thread is None:
+            raise HTTPException(status_code=404, detail="Chat thread not found")
+        return thread
+
+    def _build_citations(self, *, question: str, user: BrowserUser, request: SendChatMessageRequest) -> list[ChatCitation]:
+        citations: list[ChatCitation] = []
+        next_source_index = 1
+        seen_sources: set[tuple[str, str]] = set()
+        queries = _query_variants(question)
+        if request.include_uploads:
+            for query in queries:
+                upload_hits = self.repository.search_uploaded_document_sections(  # type: ignore[attr-defined]
+                    user_id=user.user_id,
+                    query=query,
+                    limit=6,
+                    tag_filters=request.tag_filters,
+                )
+                for hit in upload_hits[:4]:
+                    key = ("uploaded_document", f"{hit.document_id}:{hit.path}")
+                    if key in seen_sources:
+                        continue
+                    seen_sources.add(key)
+                    citations.append(
+                        ChatCitation(
+                            source_id=f"S{next_source_index}",
+                            source_kind="uploaded_document",
+                            title=hit.title,
+                            path=hit.path,
+                            excerpt=_best_excerpt(hit.preview, question),
+                            document_id=hit.document_id,
+                            tags=hit.tags,
+                        )
+                    )
+                    next_source_index += 1
+                    if len(citations) >= 4:
+                        break
+                if len(citations) >= 4:
+                    break
+        if request.include_papers:
+            for query in queries:
+                paper_hits = self.repository.search_sections(query, limit=6)  # type: ignore[attr-defined]
+                for hit in paper_hits[:4]:
+                    key = ("paperbase_paper", f"{hit.paper_id}:{hit.path}")
+                    if key in seen_sources:
+                        continue
+                    seen_sources.add(key)
+                    try:
+                        content = self.read_file(hit.paper_id, hit.path).content
+                    except HTTPException:
+                        content = hit.preview
+                    citations.append(
+                        ChatCitation(
+                            source_id=f"S{next_source_index}",
+                            source_kind="paperbase_paper",
+                            title=hit.title,
+                            path=hit.path,
+                            excerpt=_best_excerpt(content, question),
+                            paper_id=hit.paper_id,
+                        )
+                    )
+                    next_source_index += 1
+                    if len(citations) >= 8:
+                        break
+                if len(citations) >= 8:
+                    break
+        return citations
+
+    def _choose_anthropic_api_key(self, user: BrowserUser) -> tuple[str | None, bool]:
+        user_key_record = self.repository.get_anthropic_api_key_record(user.user_id)  # type: ignore[attr-defined]
+        if user.free_responses_used < self.settings.free_chat_response_limit and self.settings.anthropic_api_key:
+            return self.settings.anthropic_api_key, True
+        if user_key_record:
+            return self.secret_cipher.decrypt(user_key_record["encrypted_api_key"]), False
+        return None, False
+
+    def send_chat_message(self, user: BrowserUser, thread_id: str, request: SendChatMessageRequest) -> SendChatMessageResponse:
+        thread = self.get_chat_thread(user, thread_id)
+        user_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
+            thread_id=thread_id,
+            role="user",
+            content_markdown=request.content.strip(),
+        )
+        if thread.title == "New chat":
+            self.repository.rename_chat_thread(thread_id=thread_id, title=request.content.strip()[:60])  # type: ignore[attr-defined]
+        citations = self._build_citations(question=request.content, user=user, request=request)
+        resolved_user = self.repository.get_browser_user_by_id(user.user_id) or user  # type: ignore[attr-defined]
+        api_key_value, using_free_tier = self._choose_anthropic_api_key(resolved_user)
+        if not api_key_value:
+            refreshed = self.get_chat_thread(user, thread_id)
+            return SendChatMessageResponse(
+                thread=refreshed,
+                assistant_message=None,
+                remaining_free_responses=self._remaining_free_responses(resolved_user),
+                has_anthropic_api_key=self.repository.get_anthropic_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
+                state="api_key_required",
+            )
+
+        conversation_lines = []
+        for message in thread.messages[-6:] + [user_message]:
+            conversation_lines.append(f"{message.role.upper()}: {message.content_markdown}")
+        sources_block = "\n\n".join(
+            f"{citation.source_id} | {citation.source_kind} | {citation.title} | {citation.path}\n{citation.excerpt}"
+            for citation in citations
+        )
+        system_prompt = (
+            "You are Paperbase Chat. Answer using only the provided sources when possible. "
+            "Always cite source ids inline like [S1]. If the sources are insufficient, say so plainly."
+        )
+        prompt = (
+            "Conversation:\n"
+            + "\n".join(conversation_lines)
+            + "\n\nSources:\n"
+            + sources_block
+            + "\n\nAnswer the final user message. Keep the answer concise, grounded, and cited."
+        )
+        answer = self.chat_model.complete(api_key=api_key_value, prompt=prompt, system_prompt=system_prompt)
+        assistant_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
+            thread_id=thread_id,
+            role="assistant",
+            content_markdown=answer,
+            citations=[citation.model_dump() for citation in citations],
+        )
+        if using_free_tier:
+            resolved_user = self.repository.increment_free_responses_used(user.user_id) or resolved_user  # type: ignore[attr-defined]
+        refreshed = self.get_chat_thread(user, thread_id)
+        return SendChatMessageResponse(
+            thread=refreshed,
+            assistant_message=assistant_message,
+            remaining_free_responses=self._remaining_free_responses(resolved_user),
+            has_anthropic_api_key=self.repository.get_anthropic_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
+            state="completed",
+        )
 
     def enqueue_index_job(self, arxiv_id: str, *, force: bool = False) -> JobResponse:
         job = self.repository.create_job("index_paper", {"arxiv_id": arxiv_id, "force": force})
