@@ -95,7 +95,7 @@ button, input, textarea {
 
 .landing-copy {
   display: grid;
-  gap: 8px;
+  gap: 5px;
   line-height: 1.64;
   font-size: 15px;
 }

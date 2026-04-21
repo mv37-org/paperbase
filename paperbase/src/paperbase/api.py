@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 import os
+from urllib.parse import urlsplit
 
 from authlib.integrations.starlette_client import OAuth
 from fastapi import Depends, FastAPI, File, Form, Query, Request, Response, UploadFile
@@ -86,6 +87,26 @@ def _parse_tags(raw_tags: str) -> list[str]:
 def _browser_session_token(request: Request) -> str | None:
     settings = get_settings()
     return request.cookies.get(settings.browser_session_cookie_name)
+
+
+def _is_safe_return_to(value: str | None) -> bool:
+    if not value:
+        return False
+    parts = urlsplit(value)
+    return parts.scheme in {"http", "https"} and bool(parts.netloc)
+
+
+def _chat_redirect_base(request: Request, settings, *, return_to: str | None = None) -> str:
+    if _is_safe_return_to(return_to):
+        return return_to.rstrip("/")
+    session_return_to = request.session.pop("browser_google_return_to", None)
+    if _is_safe_return_to(session_return_to):
+        return session_return_to.rstrip("/")
+    referer = request.headers.get("referer")
+    if _is_safe_return_to(referer):
+        parts = urlsplit(referer)
+        return f"{parts.scheme}://{parts.netloc}"
+    return settings.chat_public_url.rstrip("/")
 
 
 @lru_cache(maxsize=1)
@@ -299,11 +320,14 @@ def browser_reset_password(
 
 
 @app.get("/v1/browser/auth/google/start")
-async def browser_google_start(request: Request):
+async def browser_google_start(request: Request, return_to: str | None = Query(default=None)):
     client = get_google_oauth_client()
     settings = get_settings()
+    redirect_base = _chat_redirect_base(request, settings, return_to=return_to)
+    if _is_safe_return_to(return_to):
+        request.session["browser_google_return_to"] = return_to
     if client is None:
-        return RedirectResponse(f"{settings.chat_public_url.rstrip('/')}/?auth_error=google_not_configured", status_code=302)
+        return RedirectResponse(f"{redirect_base}/?auth_error=google_not_configured", status_code=302)
     redirect_uri = settings.google_oauth_redirect_url or str(request.url_for("browser_google_callback"))
     return await client.authorize_redirect(request, redirect_uri)
 
@@ -315,8 +339,9 @@ async def browser_google_callback(
 ):
     settings = get_settings()
     client = get_google_oauth_client()
+    redirect_base = _chat_redirect_base(request, settings)
     if client is None:
-        return RedirectResponse(f"{settings.chat_public_url.rstrip('/')}/?auth_error=google_not_configured", status_code=302)
+        return RedirectResponse(f"{redirect_base}/?auth_error=google_not_configured", status_code=302)
     try:
         token = await client.authorize_access_token(request)
         userinfo = token.get("userinfo") or await client.parse_id_token(request, token)
@@ -332,11 +357,11 @@ async def browser_google_callback(
             email=email,
             display_name=name,
         )
-        response = RedirectResponse(f"{settings.chat_public_url.rstrip('/')}/?auth=google", status_code=302)
+        response = RedirectResponse(f"{redirect_base}/?auth=google", status_code=302)
         set_browser_session_cookie(response, raw_token, settings)
         return response
     except Exception:
-        return RedirectResponse(f"{settings.chat_public_url.rstrip('/')}/?auth_error=google_callback_failed", status_code=302)
+        return RedirectResponse(f"{redirect_base}/?auth_error=google_callback_failed", status_code=302)
 
 
 @app.put("/v1/browser/settings/anthropic-key", response_model=BrowserSessionResponse)

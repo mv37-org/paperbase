@@ -878,3 +878,21 @@ def test_browser_uploads_and_chat_require_api_key_after_free_quota(monkeypatch, 
     assert any("S1" in prompt for prompt in chat_model.prompts)
 
     app.dependency_overrides.clear()
+
+
+def test_browser_google_start_redirects_back_to_return_to_when_not_configured(monkeypatch, service: PaperbaseService):
+    app.dependency_overrides[get_service] = lambda: service
+    client = TestClient(app)
+
+    monkeypatch.setattr("paperbase.api.get_google_oauth_client", lambda: None)
+
+    response = client.get(
+        "/v1/browser/auth/google/start",
+        params={"return_to": "http://127.0.0.1:8080"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    assert response.headers["location"] == "http://127.0.0.1:8080/?auth_error=google_not_configured"
+
+    app.dependency_overrides.clear()

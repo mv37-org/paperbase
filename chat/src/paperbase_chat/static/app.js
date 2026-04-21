@@ -486,7 +486,8 @@
 
     document.querySelectorAll("[data-google-login='true']").forEach((node) => {
       node.addEventListener("click", () => {
-        window.location.href = `${API_BASE}/v1/browser/auth/google/start`;
+        const returnTo = encodeURIComponent(window.location.origin);
+        window.location.href = `${API_BASE}/v1/browser/auth/google/start?return_to=${returnTo}`;
       });
     });
 

@@ -11,11 +11,13 @@ def test_home_renders_static_shell():
     response = client.get("/")
 
     assert response.status_code == 200
-    assert "paperbase" in response.text
+    assert "Paperbase | MV37" in response.text
+    assert "Paperbase" in response.text
     assert "Research patterns for building better AI agents and systems." in response.text
     assert "Paperbase helps AI researchers and agent builders keep up with fast-moving work without losing track of the original sources." in response.text
     assert "Ask broad questions, compare ideas across papers, and pull out the design patterns that matter" in response.text
     assert 'href="https://mv37.org"' in response.text
+    assert 'href="/static/favicon.png"' in response.text
     assert "Continue with Google" in response.text
     assert "Create a new account" in response.text
     assert "Already have an account? Log in" in response.text
@@ -33,6 +35,10 @@ def test_static_assets_are_served():
 
     assert response.status_code == 200
     assert "PAPERBASE_BASE_URL" in response.text
+
+    favicon = client.get("/static/favicon.png")
+
+    assert favicon.status_code == 200
 
 
 def test_health_endpoint():
