@@ -488,7 +488,7 @@ textarea::placeholder,
 .app-shell {
   position: relative;
   display: grid;
-  grid-template-columns: 300px minmax(0, 1fr);
+  grid-template-columns: 280px minmax(0, 1fr);
   min-height: 100vh;
   background: var(--bg);
 }
@@ -501,7 +501,7 @@ textarea::placeholder,
   position: relative;
   z-index: 3;
   min-height: 100vh;
-  padding: 20px 16px;
+  padding: 18px 14px;
   border-right: 1px solid var(--line);
   background: #fcfbf8;
   display: flex;
@@ -734,6 +734,8 @@ textarea::placeholder,
 
 .sidebar-section-label {
   margin-bottom: 0;
+  text-transform: none;
+  letter-spacing: 0;
 }
 
 .sidebar-settings-footer {
@@ -1303,6 +1305,15 @@ textarea:hover,
 
   .app-shell.sidebar-collapsed .sidebar {
     padding-inline: 6px;
+  }
+
+  .app-shell.sidebar-collapsed .sidebar-toggle {
+    background: var(--accent-soft);
+    border-color: var(--line);
+  }
+
+  .app-shell.sidebar-collapsed .sidebar-toggle .icon-image {
+    opacity: 1;
   }
 
   .app-shell.sidebar-collapsed .sidebar-title,
