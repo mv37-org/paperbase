@@ -4,7 +4,7 @@ This repo has **three boxes**:
 
 - `paperbase/` = the server box
 - `paperbase-plugin/` = the plugin box for Codex and Claude Code
-- `chat/` = the lightweight web chat box for talking to indexed papers
+- `chat/` = the web chat product for the `paperbase` browser experience
 
 If you are 5 years old:
 
@@ -27,9 +27,9 @@ The plugin knows how to:
 
 The chat app knows how to:
 
-- search indexed papers already stored in paperbase
-- pick one paper and ask follow-up questions about it
-- answer with grounded excerpts from the indexed sections
+- serve the browser UI for the chat product
+- talk to the `paperbase` browser API over HTTP
+- ship a React frontend built with VitePlus from `chat/frontend/`
 
 ## What “index a paper” means
 
@@ -67,6 +67,8 @@ That will:
 - install `paperbase`
 - install `paperbase-plugin`
 - install `chat`
+- install the `chat/frontend` VitePlus dependencies
+- build the React frontend into `chat/src/paperbase_chat/static/`
 - install test dependencies
 
 ## How to run tests
@@ -206,7 +208,7 @@ make run-chat
 ```
 
 That starts the chat UI on `http://127.0.0.1:8091` by default.
-It talks to `paperbase` over HTTP using the same `PAPERBASE_BASE_URL` and `PAPERBASE_API_KEY` values already used by the plugin.
+It talks to `paperbase` over HTTP using the same `PAPERBASE_BASE_URL` and `PAPERBASE_API_KEY` values already used by the plugin, while serving the built React app from `chat/src/paperbase_chat/static/`.
 
 ## How to use it from Codex locally
 

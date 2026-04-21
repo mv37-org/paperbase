@@ -1,24 +1,24 @@
 # paperbase-chat
 
-`paperbase-chat` is a lightweight web app for asking grounded questions about
-papers that are already indexed in `paperbase`.
+`paperbase-chat` is the browser product in this repo. It keeps `paperbase` as
+the backend API and uses a separate React frontend in `chat/frontend/` built
+with VitePlus.
 
-It does not add a second paper store.
-It sits on top of the existing `paperbase` API and uses:
+The important split is:
 
-- paper search to pick an indexed paper
-- section search to find relevant passages
-- file reads to pull the strongest evidence into the chat reply
+- `paperbase/` owns auth, sessions, uploads, retrieval, and chat APIs
+- `paperbase-plugin/` stays unchanged
+- `chat/` serves the built frontend bundle and the lightweight FastAPI shell
 
-## What the MVP does
+## Frontend stack
 
-- search indexed papers already stored in `paperbase`
-- open a single paper and ask follow-up questions about it
-- answer with grounded excerpts from the paper
-- show which sections were used for each reply
+The chat UI now lives in:
 
-The answers are intentionally evidence-first. This is a thin chat shell over
-the artifacts `paperbase` already knows how to serve.
+- `chat/frontend/` for React, Slate, and VitePlus source code
+- `chat/src/paperbase_chat/static/` for the built assets served by FastAPI
+
+VitePlus builds directly into the Python package's static directory, so the
+browser app can be shipped without changing the backend API shape.
 
 ## Run it locally
 
@@ -34,7 +34,15 @@ Then, in another terminal:
 make run-chat
 ```
 
-By default the chat app runs on [http://127.0.0.1:8091](http://127.0.0.1:8091).
+That target installs the frontend dependencies, builds the React app into
+`chat/src/paperbase_chat/static/`, and starts the chat server on
+[http://127.0.0.1:8091](http://127.0.0.1:8091).
+
+If you only want to rebuild the frontend bundle:
+
+```bash
+make build-chat-frontend
+```
 
 ## Environment
 

@@ -24,7 +24,9 @@ def test_home_renders_static_shell():
     assert "Forgot password" in response.text
     assert "Use your account to continue." in response.text
     assert 'id="auth-tabs"' not in response.text
-    assert "/static/editor.js" in response.text
+    assert 'id="root"' in response.text
+    assert "/static/app.js" in response.text
+    assert "/static/app.css" in response.text
     assert "__PAPERBASE_BASE_URL__" not in response.text
 
 
@@ -34,7 +36,12 @@ def test_static_assets_are_served():
     response = client.get("/static/app.js")
 
     assert response.status_code == 200
-    assert "PAPERBASE_BASE_URL" in response.text
+    assert "javascript" in response.headers["content-type"]
+
+    stylesheet = client.get("/static/app.css")
+
+    assert stylesheet.status_code == 200
+    assert "css" in stylesheet.headers["content-type"]
 
     favicon = client.get("/static/favicon.png")
 

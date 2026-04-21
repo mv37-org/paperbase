@@ -1,9 +1,11 @@
 PYTHON := python3
+VP ?= vp
 VENV := .venv
 VENV_PYTHON := $(VENV)/bin/python
 VENV_BIN := $(VENV)/bin
 PIP := $(VENV_PYTHON) -m pip
 PYTEST := $(VENV_PYTHON) -m pytest
+CHAT_FRONTEND_DIR := $(CURDIR)/chat/frontend
 API_HOST ?= 127.0.0.1
 API_PORT ?= 8080
 PLUGIN_MCP_HOST ?= 127.0.0.1
@@ -27,7 +29,7 @@ API_LOG := $(RUN_DIR)/paperbase-api.log
 WORKER_LOG := $(RUN_DIR)/paperbase-worker.log
 PLUGIN_LOG := $(RUN_DIR)/paperbase-plugin-mcp.log
 
-.PHONY: help venv install install-paperbase install-plugin install-chat test test-paperbase test-plugin test-chat run-api run-worker run-plugin-mcp run-chat start-all start-local flush kill-all clean
+.PHONY: help venv install install-paperbase install-plugin install-chat build-chat-frontend test test-paperbase test-plugin test-chat run-api run-worker run-plugin-mcp run-chat start-all start-local flush kill-all clean
 
 help:
 	@echo "Available targets:"
@@ -35,7 +37,8 @@ help:
 	@echo "  make install         Install paperbase, paperbase-plugin, and chat with dev deps"
 	@echo "  make install-paperbase Install only the paperbase backend"
 	@echo "  make install-plugin  Install only the paperbase plugin"
-	@echo "  make install-chat    Install only the paperbase chat app"
+	@echo "  make install-chat    Install the paperbase chat app and build the VitePlus frontend"
+	@echo "  make build-chat-frontend Install frontend deps and build chat/static assets"
 	@echo "  make test            Run all tests"
 	@echo "  make test-paperbase  Run backend tests only"
 	@echo "  make test-plugin     Run plugin tests only"
@@ -58,8 +61,7 @@ $(VENV_PYTHON):
 
 venv: $(VENV_PYTHON)
 
-install: venv
-	$(PIP) install -e './paperbase[dev]' -e './paperbase-plugin[dev]' -e './chat[dev]'
+install: install-paperbase install-plugin install-chat
 
 install-paperbase: venv
 	$(PIP) install -e './paperbase[dev]'
@@ -67,8 +69,12 @@ install-paperbase: venv
 install-plugin: venv
 	$(PIP) install -e './paperbase-plugin[dev]'
 
-install-chat: venv
+install-chat: venv build-chat-frontend
 	$(PIP) install -e './chat[dev]'
+
+build-chat-frontend:
+	cd $(CHAT_FRONTEND_DIR) && $(VP) install
+	cd $(CHAT_FRONTEND_DIR) && $(VP) build
 
 test: test-paperbase test-plugin test-chat
 
@@ -78,19 +84,19 @@ test-paperbase: venv
 test-plugin: venv
 	$(PYTEST) paperbase-plugin/tests -q
 
-test-chat: venv
+test-chat: venv build-chat-frontend
 	$(PYTEST) chat/tests -q
 
-run-api: install
+run-api: install-paperbase
 	$(VENV_BIN)/paperbase-api
 
-run-worker: install
+run-worker: install-paperbase
 	$(VENV_BIN)/paperbase-worker
 
-run-plugin-mcp: install
+run-plugin-mcp: install-plugin
 	$(VENV_BIN)/paperbase-plugin-mcp
 
-run-chat: install
+run-chat: install-chat
 	$(VENV_BIN)/paperbase-chat
 
 start-all: install

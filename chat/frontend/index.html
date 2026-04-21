@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Paperbase | MV37</title>
+    <link rel="icon" href="/static/favicon.png" type="image/png" />
+  </head>
+  <body>
+    <script>
+      window.PAPERBASE_BASE_URL = "__PAPERBASE_BASE_URL__";
+    </script>
+    <div id="root">
+      <main class="landing-page app-boot-fallback">
+        <div class="landing-column">
+          <a class="brandline brandline-link" href="https://mv37.org" target="_blank" rel="noreferrer">MV37</a>
+          <h1 class="landing-title">Paperbase</h1>
+          <p class="landing-subtitle">Research patterns for building better AI agents and systems.</p>
+          <div class="landing-copy">
+            <p>Paperbase helps AI researchers and agent builders keep up with fast-moving work without losing track of the original sources.</p>
+            <p>Ask broad questions, compare ideas across papers, and pull out the design patterns that matter when you are building agents and AI systems.</p>
+          </div>
+          <div class="prompt-shell">
+            <button class="prompt-clip" type="button" aria-label="Attach document">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M16.5 6.5 9 14a3 3 0 1 0 4.24 4.24l7.01-7.02a5 5 0 0 0-7.07-7.07L5.46 11.9a7 7 0 1 0 9.9 9.9l6.01-6.01"></path>
+              </svg>
+            </button>
+            <div class="landing-editor-root">
+              <div class="mention-editor">
+                <div class="mention-editor-surface">
+                  <div class="mention-editor-input app-boot-placeholder">Ask about agent loops, eval design, memory systems, or inference architecture. Type @ to tag a paper.</div>
+                </div>
+              </div>
+            </div>
+            <button class="prompt-button" id="landing-start-button" type="button">Start</button>
+          </div>
+          <section class="examples">
+            <div class="section-label">Examples</div>
+            <p class="section-subtitle">Starting points for agent design, eval strategy, and production AI system questions.</p>
+            <div class="example-list">
+              <button class="example-pill" type="button">Reliable multi-step agents</button>
+              <button class="example-pill" type="button">Practical agent eval stack</button>
+              <button class="example-pill" type="button">Retrieval, memory, and tool use</button>
+            </div>
+          </section>
+        </div>
+      </main>
+      <div class="hidden">
+        <div>Continue with Google</div>
+        <div>Create a new account</div>
+        <div>Already have an account? Log in</div>
+        <div>Forgot password</div>
+        <div>Use your account to continue.</div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

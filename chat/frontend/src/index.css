@@ -27,9 +27,15 @@
   color: #ffffff;
 }
 
-html, body {
+html,
+body,
+#root {
   margin: 0;
   min-height: 100%;
+}
+
+html,
+body {
   color: var(--text);
   background: var(--bg);
   font-family: "Georgia", "Iowan Old Style", serif;
@@ -38,7 +44,9 @@ html, body {
   text-rendering: optimizeLegibility;
 }
 
-button, input, textarea {
+button,
+input,
+textarea {
   font: inherit;
   outline: none;
 }
@@ -98,6 +106,10 @@ button, input, textarea {
   gap: 5px;
   line-height: 1.64;
   font-size: 15px;
+}
+
+.landing-copy p {
+  margin: 0;
 }
 
 .prompt-shell,
@@ -187,12 +199,6 @@ textarea::placeholder,
   font-size: 12px;
 }
 
-.prompt-textarea {
-  min-height: 22px;
-  max-height: 160px;
-  overflow: hidden;
-}
-
 .mention-editor {
   display: grid;
   gap: 6px;
@@ -224,7 +230,8 @@ textarea::placeholder,
   color: rgba(107, 98, 89, 0.82) !important;
 }
 
-.mention-editor-placeholder {
+.mention-editor-placeholder,
+.app-boot-placeholder {
   font-size: 12px;
   color: rgba(107, 98, 89, 0.82);
   pointer-events: none;
@@ -313,6 +320,13 @@ textarea::placeholder,
   display: grid;
   gap: 10px;
   margin-top: 12px;
+}
+
+.section-label {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
 }
 
 .section-subtitle {
@@ -416,7 +430,7 @@ textarea::placeholder,
 
 .tag-chip.active {
   background: #1b1611;
-  color: white;
+  color: #ffffff;
 }
 
 .chat-stage {
