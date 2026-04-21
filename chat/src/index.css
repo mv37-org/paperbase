@@ -285,7 +285,7 @@ textarea {
   align-items: stretch;
   min-height: 60px;
   border-bottom: 1px solid rgba(27, 22, 17, 0.08);
-  border-radius: 0;
+  border-radius: 4px 4px 0 0;
   background: #faf8f4;
   overflow: hidden;
 }
@@ -298,7 +298,7 @@ textarea {
   box-sizing: border-box;
   overflow-x: hidden;
   overflow-wrap: anywhere;
-  padding: 8px 10px;
+  padding: 6px 8px;
   font-size: 14px;
   line-height: 1.55;
 }
@@ -306,7 +306,7 @@ textarea {
 .chat-prompt-shell .mention-editor-input [data-slate-placeholder="true"] {
   font-size: 14px !important;
   line-height: 1.55 !important;
-  padding: 8px 10px !important;
+  padding: 6px 8px !important;
   color: rgba(107, 98, 89, 0.82) !important;
 }
 
