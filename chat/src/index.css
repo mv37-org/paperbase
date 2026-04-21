@@ -284,6 +284,7 @@ textarea {
   display: flex;
   align-items: stretch;
   min-height: 60px;
+  max-height: 450px;
   border-bottom: 1px solid rgba(27, 22, 17, 0.08);
   border-radius: 5px 5px 0 0;
   background: #faf8f4;
@@ -292,11 +293,12 @@ textarea {
 
 .chat-prompt-shell .mention-editor-input {
   width: 100%;
-  height: 60px;
+  height: auto;
   min-height: 60px;
-  max-height: 156px;
+  max-height: 450px;
   box-sizing: border-box;
   overflow-x: hidden;
+  overflow-y: auto;
   overflow-wrap: anywhere;
   padding: 6px 8px;
   font-size: 14px;
@@ -348,6 +350,23 @@ textarea {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   font-size: 12px;
   white-space: nowrap;
+}
+
+.prompt-button-label {
+  display: inline-flex;
+  align-items: center;
+}
+
+.prompt-button-shortcut {
+  display: inline-flex;
+  align-items: center;
+  padding-left: 6px;
+  border-left: 1px solid rgba(255, 255, 255, 0.24);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: 0;
+  opacity: 0.84;
 }
 
 .chat-prompt-shell .prompt-button.loading {

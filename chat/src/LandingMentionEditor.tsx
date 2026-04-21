@@ -442,7 +442,12 @@ export function LandingMentionEditor({
               aria-busy={submitLoading}
             >
               {submitLoading ? <span className="prompt-button-spinner" aria-hidden="true" /> : null}
-              <span>{submitLabel}</span>
+              <span className="prompt-button-label">{submitLabel}</span>
+              {submitOnShiftEnter && !submitLoading ? (
+                <span className="prompt-button-shortcut" aria-hidden="true">
+                  Shift + Enter
+                </span>
+              ) : null}
             </button>
           </div>
         ) : (
