@@ -21,6 +21,7 @@
     landingUploadTrigger: document.getElementById("landing-upload-trigger"),
     exampleList: document.getElementById("example-list"),
     authModal: document.getElementById("auth-modal"),
+    authTabs: document.getElementById("auth-tabs"),
     modalFlash: document.getElementById("modal-flash"),
     sessionSummary: document.getElementById("session-summary"),
     quotaRow: document.getElementById("quota-row"),
@@ -87,6 +88,7 @@
 
   function showAuthModal(view = "login") {
     state.authView = view;
+    el.authTabs.classList.toggle("hidden", view === "api-key");
     authTabs().forEach((tab) => {
       tab.classList.toggle("active", tab.dataset.view === view);
     });
@@ -363,6 +365,10 @@
 
     authTabs().forEach((tab) => {
       tab.addEventListener("click", () => showAuthModal(tab.dataset.view));
+    });
+
+    document.querySelectorAll("[data-auth-link]").forEach((node) => {
+      node.addEventListener("click", () => showAuthModal(node.dataset.authLink));
     });
 
     el.landingPromptForm.addEventListener("submit", async (event) => {

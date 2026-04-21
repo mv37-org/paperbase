@@ -16,6 +16,8 @@ def test_home_renders_static_shell():
     assert "Attach your own notes or drafts, compare them with the literature" in response.text
     assert 'href="https://mv37.org"' in response.text
     assert "Continue with Google" in response.text
+    assert "Create a new account" in response.text
+    assert "Forgot password" in response.text
     assert "__PAPERBASE_BASE_URL__" not in response.text
 
 

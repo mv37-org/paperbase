@@ -115,6 +115,7 @@ button, input, textarea {
 .upload-form button,
 .composer-actions button,
 .oauth-button,
+.primary-button,
 .stack button {
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -155,6 +156,12 @@ textarea {
 }
 
 #landing-start-button {
+  background: var(--blue);
+  border-color: var(--blue-border);
+  color: #ffffff;
+}
+
+.primary-button {
   background: var(--blue);
   border-color: var(--blue-border);
   color: #ffffff;
@@ -469,6 +476,33 @@ textarea {
 .oauth-button {
   margin-top: 12px;
   width: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
+.oauth-button svg {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+}
+
+.auth-links {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+  justify-items: center;
+}
+
+.auth-link {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  text-decoration: none;
 }
 
 @media (max-width: 980px) {
