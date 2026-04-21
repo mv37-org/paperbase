@@ -285,12 +285,23 @@ export function LandingMentionEditor({
   }, []);
 
   const renderPlaceholder = useCallback((props: Parameters<NonNullable<ComponentProps<typeof Editable>["renderPlaceholder"]>>[0]) => {
+    const attributes =
+      variant === "chat"
+        ? {
+            ...props.attributes,
+            style: {
+              ...props.attributes.style,
+              top: 6,
+            },
+          }
+        : props.attributes;
+
     return (
-      <span {...props.attributes} className="mention-editor-placeholder">
+      <span {...attributes} className="mention-editor-placeholder">
         {props.children}
       </span>
     );
-  }, []);
+  }, [variant]);
 
   const onKeyDown = useCallback(
     (event: KeyboardEvent<HTMLDivElement>) => {
