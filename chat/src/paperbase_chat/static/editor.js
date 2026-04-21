@@ -102,6 +102,17 @@ function renderElement(props) {
   return h(DefaultElement, props);
 }
 
+function renderPlaceholder(props) {
+  return h(
+    "span",
+    {
+      ...props.attributes,
+      className: "mention-editor-placeholder",
+    },
+    props.children,
+  );
+}
+
 function LandingMentionEditor() {
   const [editor] = useState(() => withMentions(withReact(createEditor())));
   const [value, setValue] = useState(INITIAL_VALUE);
@@ -253,6 +264,7 @@ function LandingMentionEditor() {
         h(Editable, {
           className: "mention-editor-input",
           renderElement,
+          renderPlaceholder,
           onKeyDown,
           placeholder: "Ask about agent loops, eval design, memory systems, or inference architecture. Type @ to tag a paper.",
           spellCheck: false,
