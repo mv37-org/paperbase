@@ -1015,6 +1015,17 @@ textarea {
   text-align: center;
 }
 
+.modal-heading-icon {
+  display: block;
+  margin: 0 auto 10px;
+}
+
+.modal-heading-icon-claude {
+  width: 28px;
+  height: 28px;
+  opacity: 1;
+}
+
 .modal-title {
   margin: 0;
   font-size: 16px;
@@ -1133,10 +1144,10 @@ textarea {
 .api-key-meter {
   display: grid;
   gap: 8px;
-  padding: 10px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: rgba(27, 22, 17, 0.02);
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
 
 .api-key-meter-header {
@@ -1145,7 +1156,7 @@ textarea {
   justify-content: space-between;
   gap: 12px;
   color: var(--muted);
-  font-size: 12px;
+  font-size: 11px;
   line-height: 1.4;
 }
 
@@ -1156,20 +1167,22 @@ textarea {
 .api-key-form {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
+  gap: 6px;
   align-items: center;
 }
 
 .api-key-form input,
 .api-key-save-button {
-  min-height: 32px;
-  height: 32px;
-  max-height: 32px;
+  min-height: 28px;
+  height: 28px;
+  max-height: 28px;
+  font-size: 12px;
 }
 
 .api-key-save-button {
   margin-top: 0 !important;
   white-space: nowrap;
+  padding-inline: 10px;
 }
 
 .api-key-saved-row {

@@ -801,6 +801,9 @@ export default function App() {
             ×
           </button>
           <div className="modal-heading">
+            {authView === "api-key" ? (
+              <AppIcon src={staticAssetPath("claude.svg")} className="modal-heading-icon modal-heading-icon-claude" />
+            ) : null}
             <h2 id="auth-modal-title" className="modal-title">
               {authCopy.title}
             </h2>
