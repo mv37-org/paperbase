@@ -1,0 +1,49 @@
+name: verify
+
+on:
+  push:
+    branches:
+      - main
+      - "codex/**"
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: paperbase
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d paperbase"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      PAPERBASE_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/paperbase
+      PAPERBASE_STORAGE_BACKEND: local
+      PAPERBASE_LOCAL_STORAGE_ROOT: .paperbase-data
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install vp
+        run: curl -fsSL https://vite.plus | bash
+
+      - name: Add vp to PATH
+        run: echo "$HOME/.vite-plus/bin" >> "$GITHUB_PATH"
+
+      - name: Setup workspace
+        run: make setup
+
+      - name: Verify repo
+        run: make test

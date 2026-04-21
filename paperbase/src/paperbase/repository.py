@@ -1901,9 +1901,10 @@ class SqlAlchemyPaperRepository(PaperRepository):
             ).all()
         papers: list[SearchPaperResult] = []
         for result_item, paper in rows:
+            payload = _paper_from_orm(paper).model_dump(exclude={"tldr"})
             papers.append(
                 SearchPaperResult(
-                    **_paper_from_orm(paper).model_dump(),
+                    **payload,
                     score=result_item.score,
                     source=result_item.source,
                     tldr=result_item.tldr,

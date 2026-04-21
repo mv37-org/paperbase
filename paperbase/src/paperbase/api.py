@@ -162,7 +162,7 @@ def health() -> dict[str, str]:
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request) -> HTMLResponse:
     if not _STATIC_DIR.exists():
-        return HTMLResponse("Chat frontend not built. Run `make build-chat-frontend`.", status_code=503)
+        return HTMLResponse("Chat frontend not built. Run `cd chat && vp build`.", status_code=503)
     html = (_STATIC_DIR / "index.html").read_text(encoding="utf-8")
     api_base_url = str(request.base_url).rstrip("/")
     html = html.replace("__PAPERBASE_BASE_URL__", api_base_url)

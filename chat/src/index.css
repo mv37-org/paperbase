@@ -95,7 +95,11 @@ textarea {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   font-size: 12px;
   line-height: 1;
-  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease, box-shadow 120ms ease,
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease,
+    box-shadow 120ms ease,
     transform 120ms ease;
 }
 
@@ -183,7 +187,10 @@ textarea {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   box-shadow: 0 4px 12px rgba(16, 24, 40, 0.05);
-  transition: border-color 120ms ease, box-shadow 120ms ease, background-color 120ms ease;
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease,
+    background-color 120ms ease;
 }
 
 .prompt-shell:focus-within,
@@ -205,7 +212,12 @@ textarea {
   color: var(--text);
   padding: 9px 14px;
   cursor: pointer;
-  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease, box-shadow 120ms ease, transform 120ms ease;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease,
+    box-shadow 120ms ease,
+    transform 120ms ease;
 }
 
 .prompt-clip {
@@ -412,7 +424,10 @@ textarea {
   color: var(--text);
   font-size: 14px;
   line-height: 1.5;
-  transition: border-color 120ms ease, box-shadow 120ms ease, background-color 120ms ease;
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease,
+    background-color 120ms ease;
 }
 
 .prompt-input {
@@ -523,7 +538,9 @@ textarea::placeholder,
   padding: 7px 8px;
   text-align: left;
   cursor: pointer;
-  transition: background-color 120ms ease, color 120ms ease;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
 }
 
 .mention-suggestion.active,
@@ -639,7 +656,10 @@ textarea::placeholder,
   --chat-sidebar-width: 280px;
   --chat-drawer-width: 0px;
   --chat-fixed-composer-bottom: 24px;
-  --chat-fixed-composer-width: min(560px, calc((100vw - var(--chat-sidebar-width) - var(--chat-drawer-width) - 48px) * 0.7));
+  --chat-fixed-composer-width: min(
+    560px,
+    calc((100vw - var(--chat-sidebar-width) - var(--chat-drawer-width) - 48px) * 0.7)
+  );
   --chat-fixed-composer-left: calc(
     var(--chat-sidebar-width) + ((100vw - var(--chat-sidebar-width) - var(--chat-drawer-width)) / 2)
   );
@@ -1176,7 +1196,12 @@ textarea::placeholder,
   width: calc(100vw - var(--chat-sidebar-width) - var(--chat-drawer-width));
   height: 180px;
   pointer-events: none;
-  background: linear-gradient(to bottom, rgba(255, 255, 255, 0), rgba(255, 255, 255, 0.92) 58%, #ffffff 100%);
+  background: linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0),
+    rgba(255, 255, 255, 0.92) 58%,
+    #ffffff 100%
+  );
   z-index: 2;
 }
 
@@ -2317,12 +2342,19 @@ textarea:hover,
 .auth-link,
 .composer-form,
 .composer-meta label {
-  transition: border-color 120ms ease, background-color 120ms ease, color 120ms ease, box-shadow 120ms ease, transform 120ms ease;
+  transition:
+    border-color 120ms ease,
+    background-color 120ms ease,
+    color 120ms ease,
+    box-shadow 120ms ease,
+    transform 120ms ease;
 }
 
 .composer-form:focus-within {
   border-color: #1d4ed8;
-  box-shadow: 0 4px 12px rgba(16, 24, 40, 0.05), 0 0 0 3px rgba(37, 99, 235, 0.12);
+  box-shadow:
+    0 4px 12px rgba(16, 24, 40, 0.05),
+    0 0 0 3px rgba(37, 99, 235, 0.12);
 }
 
 .chat-prompt-shell .mention-editor-input [data-slate-placeholder="true"] {

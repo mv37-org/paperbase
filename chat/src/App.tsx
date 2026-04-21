@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, ChangeEvent, FormEvent, UIEvent } from "react";
+import type { CSSProperties, ChangeEvent, UIEvent } from "react";
 
 import {
   api,
@@ -60,18 +60,24 @@ const AUTH_VIEW_COPY: Record<AuthView, { title: string; caption: string }> = {
 const EXAMPLES = [
   {
     label: "Reliable multi-step agents",
-    description: "See which papers actually support planning, reflection, and recovery patterns in real agent loops.",
-    prompt: "What patterns are emerging for reliable multi-step agents, and which papers actually validate them?",
+    description:
+      "See which papers actually support planning, reflection, and recovery patterns in real agent loops.",
+    prompt:
+      "What patterns are emerging for reliable multi-step agents, and which papers actually validate them?",
   },
   {
     label: "Practical agent eval stack",
-    description: "Compare evaluation approaches and translate them into a lightweight stack for a product team.",
-    prompt: "Compare recent approaches to agent evals and recommend a practical stack for a small product team.",
+    description:
+      "Compare evaluation approaches and translate them into a lightweight stack for a product team.",
+    prompt:
+      "Compare recent approaches to agent evals and recommend a practical stack for a small product team.",
   },
   {
     label: "Retrieval, memory, and tool use",
-    description: "Survey how current systems combine context retrieval, memory, and tools in production settings.",
-    prompt: "Summarize recent research on retrieval, memory, and tool use for production AI systems.",
+    description:
+      "Survey how current systems combine context retrieval, memory, and tools in production settings.",
+    prompt:
+      "Summarize recent research on retrieval, memory, and tool use for production AI systems.",
   },
 ];
 
@@ -150,9 +156,7 @@ function restoreTabs() {
   try {
     const parsed = JSON.parse(localStorage.getItem(OPEN_TABS_KEY) ?? "[]");
     return Array.isArray(parsed)
-      ? parsed
-          .filter((value): value is string => typeof value === "string")
-          .slice(-MAX_OPEN_TABS)
+      ? parsed.filter((value): value is string => typeof value === "string").slice(-MAX_OPEN_TABS)
       : [];
   } catch {
     return [];
@@ -166,7 +170,10 @@ function appendOpenTab(current: string[], threadId: string) {
   return [...current, threadId].slice(-MAX_OPEN_TABS);
 }
 
-function isMessageListNearBottom(element: HTMLDivElement, threshold = MESSAGE_LIST_BOTTOM_THRESHOLD) {
+function isMessageListNearBottom(
+  element: HTMLDivElement,
+  threshold = MESSAGE_LIST_BOTTOM_THRESHOLD,
+) {
   return element.scrollHeight - element.scrollTop - element.clientHeight <= threshold;
 }
 
@@ -242,12 +249,29 @@ function formatThreadAge(value: string) {
 
 function GoogleButton() {
   return (
-    <button className="oauth-button" data-google-login="true" type="button" onClick={() => (window.location.href = googleLoginUrl())}>
+    <button
+      className="oauth-button"
+      data-google-login="true"
+      type="button"
+      onClick={() => (window.location.href = googleLoginUrl())}
+    >
       <svg viewBox="0 0 18 18" aria-hidden="true">
-        <path fill="#4285F4" d="M17.64 9.2c0-.63-.06-1.24-.16-1.82H9v3.44h4.84a4.14 4.14 0 0 1-1.8 2.71v2.25h2.9c1.7-1.57 2.7-3.88 2.7-6.58Z" />
-        <path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.9-2.25c-.8.54-1.84.86-3.06.86-2.35 0-4.34-1.59-5.05-3.72H.96v2.32A9 9 0 0 0 9 18Z" />
-        <path fill="#FBBC05" d="M3.95 10.71A5.4 5.4 0 0 1 3.67 9c0-.6.1-1.19.28-1.71V4.97H.96A9 9 0 0 0 0 9c0 1.45.35 2.82.96 4.03l2.99-2.32Z" />
-        <path fill="#EA4335" d="M9 3.58c1.32 0 2.5.45 3.43 1.33l2.57-2.57C13.46.9 11.42 0 9 0A9 9 0 0 0 .96 4.97l2.99 2.32C4.66 5.17 6.65 3.58 9 3.58Z" />
+        <path
+          fill="#4285F4"
+          d="M17.64 9.2c0-.63-.06-1.24-.16-1.82H9v3.44h4.84a4.14 4.14 0 0 1-1.8 2.71v2.25h2.9c1.7-1.57 2.7-3.88 2.7-6.58Z"
+        />
+        <path
+          fill="#34A853"
+          d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.9-2.25c-.8.54-1.84.86-3.06.86-2.35 0-4.34-1.59-5.05-3.72H.96v2.32A9 9 0 0 0 9 18Z"
+        />
+        <path
+          fill="#FBBC05"
+          d="M3.95 10.71A5.4 5.4 0 0 1 3.67 9c0-.6.1-1.19.28-1.71V4.97H.96A9 9 0 0 0 0 9c0 1.45.35 2.82.96 4.03l2.99-2.32Z"
+        />
+        <path
+          fill="#EA4335"
+          d="M9 3.58c1.32 0 2.5.45 3.43 1.33l2.57-2.57C13.46.9 11.42 0 9 0A9 9 0 0 0 .96 4.97l2.99 2.32C4.66 5.17 6.65 3.58 9 3.58Z"
+        />
       </svg>
       <span>Continue with Google</span>
     </button>
@@ -255,7 +279,14 @@ function GoogleButton() {
 }
 
 function AppIcon({ src, className = "" }: { src: string; className?: string }) {
-  return <img src={src} alt="" aria-hidden="true" className={className ? `icon-image ${className}` : "icon-image"} />;
+  return (
+    <img
+      src={src}
+      alt=""
+      aria-hidden="true"
+      className={className ? `icon-image ${className}` : "icon-image"}
+    />
+  );
 }
 
 export default function App() {
@@ -272,8 +303,8 @@ export default function App() {
   const [landingPrompt, setLandingPrompt] = useState("");
   const [composerInput, setComposerInput] = useState("");
   const [composerStatus, setComposerStatus] = useState("");
-  const [includeUploads, setIncludeUploads] = useState(true);
-  const [includePapers, setIncludePapers] = useState(true);
+  const [includeUploads] = useState(true);
+  const [includePapers] = useState(true);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
@@ -281,13 +312,16 @@ export default function App() {
   const [paperDrawer, setPaperDrawer] = useState<PaperDrawerState>(() => drawerStateFromUrl());
   const [paperDrawerPaper, setPaperDrawerPaper] = useState<PaperResponse | null>(null);
   const [paperDrawerContent, setPaperDrawerContent] = useState<PaperDrawerContent | null>(null);
-  const [paperDrawerStatus, setPaperDrawerStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [paperDrawerStatus, setPaperDrawerStatus] = useState<
+    "idle" | "loading" | "ready" | "error"
+  >("idle");
   const [paperDrawerError, setPaperDrawerError] = useState("");
   const [messageListAtBottom, setMessageListAtBottom] = useState(true);
 
   const sessionRef = useRef<BrowserSessionResponse | null>(null);
   const threadMapRef = useRef<Record<string, ChatThreadResponse>>({});
   const openTabsRef = useRef<string[]>([]);
+  const tabsStorageHydratedRef = useRef(false);
   const appUploadRef = useRef<HTMLInputElement | null>(null);
   const accountMenuRef = useRef<HTMLDivElement | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
@@ -302,6 +336,12 @@ export default function App() {
 
   useEffect(() => {
     openTabsRef.current = openTabs;
+    if (!tabsStorageHydratedRef.current) {
+      tabsStorageHydratedRef.current = true;
+      if (openTabs.length === 0) {
+        return;
+      }
+    }
     localStorage.setItem(OPEN_TABS_KEY, JSON.stringify(openTabs));
   }, [openTabs]);
 
@@ -356,7 +396,7 @@ export default function App() {
   const authCopy = AUTH_VIEW_COPY[authView];
   const authenticated = Boolean(session?.authenticated);
   const sidebarThreads = useMemo(() => threads.filter(shouldShowThreadInSidebar), [threads]);
-  const activeThread = activeThreadId ? threadMap[activeThreadId] ?? null : null;
+  const activeThread = activeThreadId ? (threadMap[activeThreadId] ?? null) : null;
   const isChatEmpty = !activeThread || activeThread.messages.length === 0;
   const paperDrawerOpen = Boolean(paperDrawer);
   const openTabItems = useMemo(
@@ -457,7 +497,9 @@ export default function App() {
           return;
         }
         setPaperDrawerStatus("error");
-        setPaperDrawerError(error instanceof Error ? error.message : "Paper content could not be loaded.");
+        setPaperDrawerError(
+          error instanceof Error ? error.message : "Paper content could not be loaded.",
+        );
       }
     })();
 
@@ -498,7 +540,10 @@ export default function App() {
   }, [session]);
 
   const freeResponseSegments = useMemo(() => {
-    const remaining = Math.max(0, Math.min(FREE_RESPONSE_LIMIT, sessionSummary?.remainingFreeResponses ?? FREE_RESPONSE_LIMIT));
+    const remaining = Math.max(
+      0,
+      Math.min(FREE_RESPONSE_LIMIT, sessionSummary?.remainingFreeResponses ?? FREE_RESPONSE_LIMIT),
+    );
     return Array.from({ length: FREE_RESPONSE_LIMIT }, (_, index) => ({
       key: index,
       active: index < remaining,
@@ -538,19 +583,24 @@ export default function App() {
     updateDrawerUrl(nextState);
   }, []);
 
-  const updateThread = useCallback((threadId: string, updater: (thread: ChatThreadResponse | null) => ChatThreadResponse) => {
-    setThreadMap((current) => ({
-      ...current,
-      [threadId]: updater(current[threadId] ?? null),
-    }));
-  }, []);
+  const updateThread = useCallback(
+    (threadId: string, updater: (thread: ChatThreadResponse | null) => ChatThreadResponse) => {
+      setThreadMap((current) => ({
+        ...current,
+        [threadId]: updater(current[threadId] ?? null),
+      }));
+    },
+    [],
+  );
 
   const handleCitationClick = useCallback(
     (message: ChatMessageResponse, citation: ChatCitation) => {
-      document.getElementById(sourceCardId(message.message_id, citation.source_id))?.scrollIntoView({
-        behavior: "smooth",
-        block: "nearest",
-      });
+      document
+        .getElementById(sourceCardId(message.message_id, citation.source_id))
+        ?.scrollIntoView({
+          behavior: "smooth",
+          block: "nearest",
+        });
       if (citation.paper_id) {
         openPaperDrawer(citation.paper_id, citation.path);
       }
@@ -608,7 +658,8 @@ export default function App() {
           return currentActive;
         }
         const closingIndex = current.indexOf(threadId);
-        const fallbackId = nextTabs[Math.max(0, closingIndex - 1)] ?? nextTabs[closingIndex] ?? null;
+        const fallbackId =
+          nextTabs[Math.max(0, closingIndex - 1)] ?? nextTabs[closingIndex] ?? null;
         return fallbackId;
       });
       return nextTabs;
@@ -635,7 +686,10 @@ export default function App() {
 
       updateThread(threadId, (thread) => ({
         thread_id: thread?.thread_id ?? threadId,
-        title: (thread?.title ?? "New chat") === "New chat" ? content.slice(0, 60) : thread?.title ?? "New chat",
+        title:
+          (thread?.title ?? "New chat") === "New chat"
+            ? content.slice(0, 60)
+            : (thread?.title ?? "New chat"),
         created_at: thread?.created_at ?? now,
         updated_at: now,
         messages: [...(thread?.messages ?? []), optimisticUserMessage],
@@ -682,7 +736,10 @@ export default function App() {
                 updated_at: new Date().toISOString(),
                 messages: (thread?.messages ?? []).map((message) =>
                   message.message_id === payload.message_id
-                    ? { ...message, content_markdown: `${message.content_markdown}${payload.delta}` }
+                    ? {
+                        ...message,
+                        content_markdown: `${message.content_markdown}${payload.delta}`,
+                      }
                     : message,
                 ),
               }));
@@ -701,7 +758,9 @@ export default function App() {
                 }),
                 updated_at: new Date().toISOString(),
                 messages: (thread?.messages ?? []).map((message) =>
-                  message.message_id === payload.assistant_message.message_id ? payload.assistant_message : message,
+                  message.message_id === payload.assistant_message.message_id
+                    ? payload.assistant_message
+                    : message,
                 ),
               }));
               return;
@@ -737,7 +796,9 @@ export default function App() {
           setComposerStatus("");
           await refreshThreads();
           if (payload.state === "api_key_required") {
-            showErrorFlash("You have used your 3 free responses. Add an Anthropic API key to continue.");
+            showErrorFlash(
+              "You have used your 3 free responses. Add an Anthropic API key to continue.",
+            );
             setAuthView("api-key");
             setAuthModalOpen(true);
           }
@@ -755,7 +816,9 @@ export default function App() {
               messages: [],
             }),
             messages: (thread?.messages ?? []).map((message) =>
-              message.message_id === streamingMessageId ? { ...message, status: "failed" } : message,
+              message.message_id === streamingMessageId
+                ? { ...message, status: "failed" }
+                : message,
             ),
           }));
         }
@@ -778,7 +841,9 @@ export default function App() {
         );
         setComposerStatus("");
         await refreshThreads();
-        showErrorFlash("You have used your 3 free responses. Add an Anthropic API key to continue.");
+        showErrorFlash(
+          "You have used your 3 free responses. Add an Anthropic API key to continue.",
+        );
         setAuthView("api-key");
         setAuthModalOpen(true);
         return gatingPayload;
@@ -810,7 +875,14 @@ export default function App() {
       setComposerStatus("");
       return null;
     },
-    [fetchAndStoreThread, includePapers, includeUploads, refreshThreads, showErrorFlash, updateThread],
+    [
+      fetchAndStoreThread,
+      includePapers,
+      includeUploads,
+      refreshThreads,
+      showErrorFlash,
+      updateThread,
+    ],
   );
 
   const bootstrapAuthenticatedUi = useCallback(async () => {
@@ -838,7 +910,14 @@ export default function App() {
     if (firstOpen) {
       await openThread(firstOpen);
     }
-  }, [createNewThread, fetchAndStoreThread, openThread, refreshThreads, refreshUploads, sendMessage]);
+  }, [
+    createNewThread,
+    fetchAndStoreThread,
+    openThread,
+    refreshThreads,
+    refreshUploads,
+    sendMessage,
+  ]);
 
   useEffect(() => {
     void (async () => {
@@ -865,12 +944,15 @@ export default function App() {
     });
   }, [bootstrapAuthenticatedUi, showErrorFlash]);
 
-  const openAuthModal = useCallback((view: AuthView) => {
-    clearFlash();
-    setAuthView(view);
-    setAuthModalOpen(true);
-    setAccountMenuOpen(false);
-  }, [clearFlash]);
+  const openAuthModal = useCallback(
+    (view: AuthView) => {
+      clearFlash();
+      setAuthView(view);
+      setAuthModalOpen(true);
+      setAccountMenuOpen(false);
+    },
+    [clearFlash],
+  );
 
   const handleAuthSuccess = useCallback(
     async (nextSession: BrowserSessionResponse) => {
@@ -881,23 +963,20 @@ export default function App() {
     [bootstrapAuthenticatedUi, closeAuthModal],
   );
 
-  const handleLandingSubmit = useCallback(
-    async () => {
-      const prompt = landingPrompt.trim();
-      if (!prompt) {
-        return;
-      }
-      if (!sessionRef.current?.authenticated) {
-        rememberPendingPrompt(prompt);
-        openAuthModal("login");
-        return;
-      }
-      const thread = await createNewThread();
-      setLandingPrompt("");
-      await sendMessage(thread.thread_id, prompt);
-    },
-    [createNewThread, landingPrompt, openAuthModal, sendMessage],
-  );
+  const handleLandingSubmit = useCallback(async () => {
+    const prompt = landingPrompt.trim();
+    if (!prompt) {
+      return;
+    }
+    if (!sessionRef.current?.authenticated) {
+      rememberPendingPrompt(prompt);
+      openAuthModal("login");
+      return;
+    }
+    const thread = await createNewThread();
+    setLandingPrompt("");
+    await sendMessage(thread.thread_id, prompt);
+  }, [createNewThread, landingPrompt, openAuthModal, sendMessage]);
 
   const handleExample = useCallback(
     async (prompt: string) => {
@@ -910,11 +989,14 @@ export default function App() {
     [openAuthModal],
   );
 
-  const handleUpload = useCallback(async (file: File) => {
-    await uploadDocument(file);
-    await refreshUploads();
-    setComposerStatus(`Attached ${file.name}`);
-  }, [refreshUploads]);
+  const handleUpload = useCallback(
+    async (file: File) => {
+      await uploadDocument(file);
+      await refreshUploads();
+      setComposerStatus(`Attached ${file.name}`);
+    },
+    [refreshUploads],
+  );
 
   const onUploadChange = useCallback(
     async (event: ChangeEvent<HTMLInputElement>) => {
@@ -933,22 +1015,26 @@ export default function App() {
     [handleUpload],
   );
 
-  const handleComposerSubmit = useCallback(
-    async () => {
-      if (streamingThreadId) {
-        return;
-      }
-      const content = composerInput.trim();
-      if (!content) {
-        return;
-      }
-      const threadId = activeThreadId ?? (await createNewThread()).thread_id;
-      setComposerInput("");
-      scrollMessageListToBottom();
-      await sendMessage(threadId, content);
-    },
-    [activeThreadId, composerInput, createNewThread, scrollMessageListToBottom, sendMessage, streamingThreadId],
-  );
+  const handleComposerSubmit = useCallback(async () => {
+    if (streamingThreadId) {
+      return;
+    }
+    const content = composerInput.trim();
+    if (!content) {
+      return;
+    }
+    const threadId = activeThreadId ?? (await createNewThread()).thread_id;
+    setComposerInput("");
+    scrollMessageListToBottom();
+    await sendMessage(threadId, content);
+  }, [
+    activeThreadId,
+    composerInput,
+    createNewThread,
+    scrollMessageListToBottom,
+    sendMessage,
+    streamingThreadId,
+  ]);
 
   const resetAuthenticatedState = useCallback(() => {
     setSession(null);
@@ -995,7 +1081,11 @@ export default function App() {
   }, [createNewThread]);
 
   const handleReadDocs = useCallback(() => {
-    window.open(new URL("/docs", window.location.origin).toString(), "_blank", "noopener,noreferrer");
+    window.open(
+      new URL("/docs", window.location.origin).toString(),
+      "_blank",
+      "noopener,noreferrer",
+    );
   }, []);
 
   const handleLogout = useCallback(async () => {
@@ -1034,13 +1124,25 @@ export default function App() {
             <span className="landing-login-label">Log in</span>
           </button>
           <div className="landing-column">
-            <a className="brandline brandline-link" href="https://mv37.org" target="_blank" rel="noreferrer">
+            <a
+              className="brandline brandline-link"
+              href="https://mv37.org"
+              target="_blank"
+              rel="noreferrer"
+            >
               MV37
             </a>
             <h1 className="landing-title">Paperbase</h1>
-            <p className="landing-subtitle">Research patterns for building better AI agents and systems.</p>
+            <p className="landing-subtitle">
+              Research patterns for building better AI agents and systems.
+            </p>
             <div className="landing-copy">
-              <p>Paperbase helps AI researchers and agent builders keep up with fast-moving work without losing track of the original sources, so they can ask broad questions, compare ideas across papers, and pull out the design patterns that matter when building agents and AI systems.</p>
+              <p>
+                Paperbase helps AI researchers and agent builders keep up with fast-moving work
+                without losing track of the original sources, so they can ask broad questions,
+                compare ideas across papers, and pull out the design patterns that matter when
+                building agents and AI systems.
+              </p>
             </div>
             <LandingMentionEditor
               attachButtonId="landing-upload-trigger"
@@ -1056,7 +1158,12 @@ export default function App() {
               <div className="section-label">Examples</div>
               <div className="example-list">
                 {EXAMPLES.map((example) => (
-                  <button key={example.label} type="button" className="example-pill" onClick={() => void handleExample(example.prompt)}>
+                  <button
+                    key={example.label}
+                    type="button"
+                    className="example-pill"
+                    onClick={() => void handleExample(example.prompt)}
+                  >
                     <span className="example-title">{example.label}</span>
                     <span className="example-description">{example.description}</span>
                   </button>
@@ -1093,18 +1200,30 @@ export default function App() {
                   onClick={handleSidebarToggle}
                 >
                   <AppIcon
-                    src={staticAssetPath(sidebarCollapsed ? "show-sidebar.svg" : "hide-sidebar.svg")}
+                    src={staticAssetPath(
+                      sidebarCollapsed ? "show-sidebar.svg" : "hide-sidebar.svg",
+                    )}
                     className="sidebar-toggle-icon"
                   />
                 </button>
               </div>
               <div className="sidebar-quick-actions">
-                <button id="new-chat-button" className="sidebar-quick-action" onClick={() => void handleNewChat()}>
-                  <AppIcon src={staticAssetPath("edit.svg")} className="sidebar-quick-action-icon" />
+                <button
+                  id="new-chat-button"
+                  className="sidebar-quick-action"
+                  onClick={() => void handleNewChat()}
+                >
+                  <AppIcon
+                    src={staticAssetPath("edit.svg")}
+                    className="sidebar-quick-action-icon"
+                  />
                   <span className="sidebar-quick-action-label">New chat</span>
                 </button>
                 <button type="button" className="sidebar-quick-action" onClick={handleReadDocs}>
-                  <AppIcon src={staticAssetPath("docs.svg")} className="sidebar-quick-action-icon" />
+                  <AppIcon
+                    src={staticAssetPath("docs.svg")}
+                    className="sidebar-quick-action-icon"
+                  />
                   <span className="sidebar-quick-action-label">Read docs</span>
                 </button>
               </div>
@@ -1127,7 +1246,9 @@ export default function App() {
                         <div className="thread-card-copy">
                           <strong className="thread-card-title">{title}</strong>
                         </div>
-                        <span className="thread-card-age">{formatThreadAge(thread.updated_at)}</span>
+                        <span className="thread-card-age">
+                          {formatThreadAge(thread.updated_at)}
+                        </span>
                       </button>
                     );
                   })}
@@ -1147,7 +1268,10 @@ export default function App() {
                     aria-expanded={accountMenuOpen}
                     onClick={() => setAccountMenuOpen((current) => !current)}
                   >
-                    <AppIcon src={staticAssetPath("settings.svg")} className="sidebar-settings-icon" />
+                    <AppIcon
+                      src={staticAssetPath("settings.svg")}
+                      className="sidebar-settings-icon"
+                    />
                     <span>Settings</span>
                   </button>
                   {accountMenuOpen ? (
@@ -1159,7 +1283,10 @@ export default function App() {
                             {sessionSummary.remainingFreeResponses}/{FREE_RESPONSE_LIMIT} left
                           </span>
                         </div>
-                        <div className="usage-meter" aria-label={`${sessionSummary.remainingFreeResponses} of ${FREE_RESPONSE_LIMIT} free responses left`}>
+                        <div
+                          className="usage-meter"
+                          aria-label={`${sessionSummary.remainingFreeResponses} of ${FREE_RESPONSE_LIMIT} free responses left`}
+                        >
                           {freeResponseSegments.map((segment) => (
                             <span
                               key={segment.key}
@@ -1188,7 +1315,10 @@ export default function App() {
                         role="menuitem"
                         onClick={() => void handleLogout()}
                       >
-                        <AppIcon src={staticAssetPath("logout.svg")} className="account-menu-item-icon" />
+                        <AppIcon
+                          src={staticAssetPath("logout.svg")}
+                          className="account-menu-item-icon"
+                        />
                         Log out
                       </button>
                     </div>
@@ -1209,11 +1339,18 @@ export default function App() {
                     onClick={handleSidebarToggle}
                   >
                     <AppIcon
-                      src={staticAssetPath(mobileSidebarOpen ? "hide-sidebar.svg" : "show-sidebar.svg")}
+                      src={staticAssetPath(
+                        mobileSidebarOpen ? "hide-sidebar.svg" : "show-sidebar.svg",
+                      )}
                       className="sidebar-toggle-icon"
                     />
                   </button>
-                  <div className="chat-tab-strip" role="tablist" aria-label="Open tabs" style={tabStripStyle}>
+                  <div
+                    className="chat-tab-strip"
+                    role="tablist"
+                    aria-label="Open tabs"
+                    style={tabStripStyle}
+                  >
                     {openTabItems.map((tab) => (
                       <div
                         key={tab.threadId}
@@ -1269,7 +1406,9 @@ export default function App() {
                       onClick={handleSidebarToggle}
                     >
                       <AppIcon
-                        src={staticAssetPath(mobileSidebarOpen ? "hide-sidebar.svg" : "show-sidebar.svg")}
+                        src={staticAssetPath(
+                          mobileSidebarOpen ? "hide-sidebar.svg" : "show-sidebar.svg",
+                        )}
                         className="sidebar-toggle-icon"
                       />
                     </button>
@@ -1300,14 +1439,18 @@ export default function App() {
                             </span>
                           </div>
                         ) : null}
-                        <div className={`message-bubble ${message.role === "assistant" ? "assistant" : "user"}`}>
+                        <div
+                          className={`message-bubble ${message.role === "assistant" ? "assistant" : "user"}`}
+                        >
                           {message.role === "assistant" ? (
                             <MarkdownRenderer
                               markdown={message.content_markdown}
                               className="message-markdown"
                               interactiveCitations
                               onCitationClick={(sourceId) => {
-                                const citation = message.citations.find((item) => item.source_id === sourceId);
+                                const citation = message.citations.find(
+                                  (item) => item.source_id === sourceId,
+                                );
                                 if (citation) {
                                   handleCitationClick(message, citation);
                                 }
@@ -1319,7 +1462,9 @@ export default function App() {
                         </div>
                         {message.role === "assistant" ? (
                           <div className="assistant-hover-actions">
-                            {hoverTime ? <span className="assistant-hover-time">{hoverTime}</span> : null}
+                            {hoverTime ? (
+                              <span className="assistant-hover-time">{hoverTime}</span>
+                            ) : null}
                             <button
                               type="button"
                               className="assistant-copy-button"
@@ -1344,21 +1489,28 @@ export default function App() {
                               >
                                 <div className="citation-card-header">
                                   <div>
-                                    <span className="citation-card-source-id">{citation.source_id}</span>
-                                    <strong className="citation-card-title">{citation.title}</strong>
+                                    <span className="citation-card-source-id">
+                                      {citation.source_id}
+                                    </span>
+                                    <strong className="citation-card-title">
+                                      {citation.title}
+                                    </strong>
                                   </div>
                                   {citation.paper_id ? (
                                     <button
                                       type="button"
                                       className="citation-card-action"
-                                      onClick={() => openPaperDrawer(citation.paper_id!, citation.path)}
+                                      onClick={() =>
+                                        openPaperDrawer(citation.paper_id!, citation.path)
+                                      }
                                     >
                                       Open paper
                                     </button>
                                   ) : null}
                                 </div>
                                 <div className="citation-card-path">
-                                  {citation.source_kind === "paperbase_paper" ? "Paper" : "Upload"} · {citation.path}
+                                  {citation.source_kind === "paperbase_paper" ? "Paper" : "Upload"}{" "}
+                                  · {citation.path}
                                 </div>
                                 <p className="citation-card-excerpt">{citation.excerpt}</p>
                               </div>
@@ -1368,7 +1520,9 @@ export default function App() {
                       </article>
                     );
                   })}
-                  {activeStreamInView ? <div className="message-streaming-status">Working...</div> : null}
+                  {activeStreamInView ? (
+                    <div className="message-streaming-status">Working...</div>
+                  ) : null}
                 </div>
               )}
             </div>
@@ -1405,7 +1559,13 @@ export default function App() {
               value={composerInput}
               variant="chat"
             />
-            <input ref={appUploadRef} id="app-upload-file" className="hidden-file-input" type="file" onChange={onUploadChange} />
+            <input
+              ref={appUploadRef}
+              id="app-upload-file"
+              className="hidden-file-input"
+              type="file"
+              onChange={onUploadChange}
+            />
           </section>
 
           {paperDrawerOpen ? (
@@ -1413,10 +1573,17 @@ export default function App() {
               <div className="paper-drawer-header">
                 <div>
                   <div className="paper-drawer-eyebrow">Cited paper</div>
-                  <strong className="paper-drawer-title">{paperDrawerPaper?.title ?? "Loading paper"}</strong>
+                  <strong className="paper-drawer-title">
+                    {paperDrawerPaper?.title ?? "Loading paper"}
+                  </strong>
                   {paperDrawer ? <div className="paper-drawer-path">{paperDrawer.path}</div> : null}
                 </div>
-                <button type="button" className="paper-drawer-close" aria-label="Close paper drawer" onClick={closePaperDrawer}>
+                <button
+                  type="button"
+                  className="paper-drawer-close"
+                  aria-label="Close paper drawer"
+                  onClick={closePaperDrawer}
+                >
                   ×
                 </button>
               </div>
@@ -1432,10 +1599,17 @@ export default function App() {
               ) : null}
 
               <div className="paper-drawer-body">
-                {paperDrawerStatus === "loading" ? <div className="paper-drawer-placeholder">Loading cited paper…</div> : null}
-                {paperDrawerStatus === "error" ? <div className="paper-drawer-error">{paperDrawerError}</div> : null}
+                {paperDrawerStatus === "loading" ? (
+                  <div className="paper-drawer-placeholder">Loading cited paper…</div>
+                ) : null}
+                {paperDrawerStatus === "error" ? (
+                  <div className="paper-drawer-error">{paperDrawerError}</div>
+                ) : null}
                 {paperDrawerStatus === "ready" && paperDrawerContent?.kind === "markdown" ? (
-                  <MarkdownRenderer markdown={paperDrawerContent.file.content} className="paper-drawer-markdown" />
+                  <MarkdownRenderer
+                    markdown={paperDrawerContent.file.content}
+                    className="paper-drawer-markdown"
+                  />
                 ) : null}
                 {paperDrawerStatus === "ready" && paperDrawerContent?.kind === "figure" ? (
                   <div className="paper-drawer-figure">
@@ -1446,13 +1620,19 @@ export default function App() {
                         alt={paperDrawerContent.figure.caption}
                       />
                     ) : null}
-                    <MarkdownRenderer markdown={paperDrawerContent.figure.caption} className="paper-drawer-markdown" />
+                    <MarkdownRenderer
+                      markdown={paperDrawerContent.figure.caption}
+                      className="paper-drawer-markdown"
+                    />
                   </div>
                 ) : null}
                 {paperDrawerStatus === "ready" && paperDrawerContent?.kind === "table" ? (
                   <div className="paper-drawer-table-wrap">
                     {paperDrawerContent.table.caption ? (
-                      <MarkdownRenderer markdown={paperDrawerContent.table.caption} className="paper-drawer-markdown" />
+                      <MarkdownRenderer
+                        markdown={paperDrawerContent.table.caption}
+                        className="paper-drawer-markdown"
+                      />
                     ) : null}
                     <div className="paper-drawer-table-scroll">
                       <table className="paper-drawer-table">
@@ -1460,7 +1640,11 @@ export default function App() {
                           {paperDrawerContent.table.rows.map((row, rowIndex) => (
                             <tr key={`${paperDrawerContent.table.table_id}-${rowIndex}`}>
                               {row.map((cell, cellIndex) => (
-                                <td key={`${paperDrawerContent.table.table_id}-${rowIndex}-${cellIndex}`}>{cell}</td>
+                                <td
+                                  key={`${paperDrawerContent.table.table_id}-${rowIndex}-${cellIndex}`}
+                                >
+                                  {cell}
+                                </td>
                               ))}
                             </tr>
                           ))}
@@ -1475,15 +1659,28 @@ export default function App() {
         </div>
       ) : null}
 
-      <div id="auth-modal" className={`modal${authModalOpen ? "" : " hidden"}`} role="dialog" aria-modal="true">
+      <div
+        id="auth-modal"
+        className={`modal${authModalOpen ? "" : " hidden"}`}
+        role="dialog"
+        aria-modal="true"
+      >
         <div className="modal-backdrop" data-close-modal="true" onClick={closeAuthModal} />
         <div className="modal-panel">
-          <button className="modal-close" type="button" data-close-modal="true" onClick={closeAuthModal}>
+          <button
+            className="modal-close"
+            type="button"
+            data-close-modal="true"
+            onClick={closeAuthModal}
+          >
             ×
           </button>
           <div className="modal-heading">
             {authView === "api-key" ? (
-              <AppIcon src={staticAssetPath("claude.svg")} className="modal-heading-icon modal-heading-icon-claude" />
+              <AppIcon
+                src={staticAssetPath("claude.svg")}
+                className="modal-heading-icon modal-heading-icon-claude"
+              />
             ) : null}
             <h2 id="auth-modal-title" className="modal-title">
               {authCopy.title}
@@ -1512,14 +1709,20 @@ export default function App() {
             </div>
           ) : null}
 
-          <div className={`modal-view${authView === "login" ? " visible" : ""}`} data-auth-view="login">
+          <div
+            className={`modal-view${authView === "login" ? " visible" : ""}`}
+            data-auth-view="login"
+          >
             <form
               id="login-form"
               className="stack"
               onSubmit={async (event) => {
                 event.preventDefault();
                 try {
-                  const nextSession = (await postForm("/v1/browser/auth/login", event.currentTarget)) as BrowserSessionResponse;
+                  const nextSession = (await postForm(
+                    "/v1/browser/auth/login",
+                    event.currentTarget,
+                  )) as BrowserSessionResponse;
                   await handleAuthSuccess(nextSession);
                 } catch (error) {
                   showErrorFlash(error instanceof Error ? error.message : "Login failed");
@@ -1537,20 +1740,30 @@ export default function App() {
               <button type="button" className="auth-link" onClick={() => setAuthView("signup")}>
                 Create a new account
               </button>
-              <button type="button" className="auth-link" onClick={() => setAuthView("reset-request")}>
+              <button
+                type="button"
+                className="auth-link"
+                onClick={() => setAuthView("reset-request")}
+              >
                 Forgot password
               </button>
             </div>
           </div>
 
-          <div className={`modal-view${authView === "signup" ? " visible" : ""}`} data-auth-view="signup">
+          <div
+            className={`modal-view${authView === "signup" ? " visible" : ""}`}
+            data-auth-view="signup"
+          >
             <form
               id="signup-form"
               className="stack"
               onSubmit={async (event) => {
                 event.preventDefault();
                 try {
-                  const nextSession = (await postForm("/v1/browser/auth/signup", event.currentTarget)) as BrowserSessionResponse;
+                  const nextSession = (await postForm(
+                    "/v1/browser/auth/signup",
+                    event.currentTarget,
+                  )) as BrowserSessionResponse;
                   await handleAuthSuccess(nextSession);
                 } catch (error) {
                   showErrorFlash(error instanceof Error ? error.message : "Sign up failed");
@@ -1572,7 +1785,10 @@ export default function App() {
             </div>
           </div>
 
-          <div className={`modal-view${authView === "reset-request" ? " visible" : ""}`} data-auth-view="reset-request">
+          <div
+            className={`modal-view${authView === "reset-request" ? " visible" : ""}`}
+            data-auth-view="reset-request"
+          >
             <form
               id="forgot-form"
               className="stack"
@@ -1598,7 +1814,10 @@ export default function App() {
             </div>
           </div>
 
-          <div className={`modal-view${authView === "reset-password" ? " visible" : ""}`} data-auth-view="reset-password">
+          <div
+            className={`modal-view${authView === "reset-password" ? " visible" : ""}`}
+            data-auth-view="reset-password"
+          >
             <form
               id="reset-form"
               className="stack"
@@ -1613,7 +1832,13 @@ export default function App() {
                 }
               }}
             >
-              <input name="token" type="text" placeholder="Reset token" defaultValue={new URLSearchParams(window.location.search).get("reset_token") ?? ""} required />
+              <input
+                name="token"
+                type="text"
+                placeholder="Reset token"
+                defaultValue={new URLSearchParams(window.location.search).get("reset_token") ?? ""}
+                required
+              />
               <input name="password" type="password" placeholder="New password" required />
               <button className="primary-button" type="submit">
                 Reset password
@@ -1621,13 +1846,17 @@ export default function App() {
             </form>
           </div>
 
-          <div className={`modal-view${authView === "api-key" ? " visible" : ""}`} data-auth-view="api-key">
+          <div
+            className={`modal-view${authView === "api-key" ? " visible" : ""}`}
+            data-auth-view="api-key"
+          >
             <div className="api-key-panel">
               <div className="api-key-meter">
                 <div className="api-key-meter-header">
                   <span>Free responses</span>
                   <span>
-                    {sessionSummary?.remainingFreeResponses ?? FREE_RESPONSE_LIMIT}/{FREE_RESPONSE_LIMIT} left
+                    {sessionSummary?.remainingFreeResponses ?? FREE_RESPONSE_LIMIT}/
+                    {FREE_RESPONSE_LIMIT} left
                   </span>
                 </div>
                 <div
@@ -1657,11 +1886,16 @@ export default function App() {
                     title="Delete saved key"
                     onClick={async () => {
                       try {
-                        const nextSession = await api<BrowserSessionResponse>("/v1/browser/settings/anthropic-key", { method: "DELETE" });
+                        const nextSession = await api<BrowserSessionResponse>(
+                          "/v1/browser/settings/anthropic-key",
+                          { method: "DELETE" },
+                        );
                         setSession(nextSession);
                         showNoteFlash("Anthropic API key removed.");
                       } catch (error) {
-                        showErrorFlash(error instanceof Error ? error.message : "Deleting API key failed");
+                        showErrorFlash(
+                          error instanceof Error ? error.message : "Deleting API key failed",
+                        );
                       }
                     }}
                   >
@@ -1681,15 +1915,22 @@ export default function App() {
                   onSubmit={async (event) => {
                     event.preventDefault();
                     try {
-                      const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
-                      const nextSession = await api<BrowserSessionResponse>("/v1/browser/settings/anthropic-key", {
-                        method: "PUT",
-                        body: JSON.stringify(payload),
-                      });
+                      const payload = Object.fromEntries(
+                        new FormData(event.currentTarget).entries(),
+                      );
+                      const nextSession = await api<BrowserSessionResponse>(
+                        "/v1/browser/settings/anthropic-key",
+                        {
+                          method: "PUT",
+                          body: JSON.stringify(payload),
+                        },
+                      );
                       setSession(nextSession);
                       showNoteFlash("Anthropic API key saved.");
                     } catch (error) {
-                      showErrorFlash(error instanceof Error ? error.message : "Saving API key failed");
+                      showErrorFlash(
+                        error instanceof Error ? error.message : "Saving API key failed",
+                      );
                     }
                   }}
                 >

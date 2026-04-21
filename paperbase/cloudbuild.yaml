@@ -1,14 +1,15 @@
 steps:
   - name: node:20-bookworm
-    id: build-chat-frontend
+    id: build-chat-static
     entrypoint: bash
     dir: chat
     args:
       - -ceu
       - |
-        corepack enable
-        pnpm install --frozen-lockfile
-        pnpm run build
+        curl -fsSL https://vite.plus | bash
+        export PATH="$HOME/.vite-plus/bin:$PATH"
+        vp install
+        vp build
 
   - name: gcr.io/cloud-builders/docker
     id: pull-build-cache

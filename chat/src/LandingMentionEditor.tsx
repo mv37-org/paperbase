@@ -1,7 +1,15 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ComponentProps, CSSProperties, FormEvent, KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
-import { createEditor, Editor, Element as SlateElement, Node, Range, Text, Transforms } from "slate";
+import {
+  createEditor,
+  Editor,
+  Element as SlateElement,
+  Node,
+  Range,
+  Text,
+  Transforms,
+} from "slate";
 import type { BaseRange, Descendant } from "slate";
 import { Editable, ReactEditor, Slate, withReact } from "slate-react";
 
@@ -13,9 +21,21 @@ const MOCK_PAPERS = [
   { id: "paper-3", title: "Voyager: An Open-Ended Embodied Agent", venue: "arXiv" },
   { id: "paper-4", title: "Generative Agents: Interactive Simulacra", venue: "UIST" },
   { id: "paper-5", title: "MemGPT: Towards LLMs as Operating Systems", venue: "arXiv" },
-  { id: "paper-6", title: "Reflexion: Language Agents with Verbal Reinforcement Learning", venue: "NeurIPS" },
-  { id: "paper-7", title: "A Survey of Large Language Model Based Autonomous Agents", venue: "TMLR" },
-  { id: "paper-8", title: "Toolformer: Language Models Can Teach Themselves to Use Tools", venue: "NeurIPS" },
+  {
+    id: "paper-6",
+    title: "Reflexion: Language Agents with Verbal Reinforcement Learning",
+    venue: "NeurIPS",
+  },
+  {
+    id: "paper-7",
+    title: "A Survey of Large Language Model Based Autonomous Agents",
+    venue: "TMLR",
+  },
+  {
+    id: "paper-8",
+    title: "Toolformer: Language Models Can Teach Themselves to Use Tools",
+    venue: "NeurIPS",
+  },
 ];
 
 type MentionElement = {
@@ -57,8 +77,10 @@ function createInitialValue(): Descendant[] {
 
 function withMentions(editor: Editor & ReactEditor) {
   const { isInline, isVoid } = editor;
-  editor.isInline = (element) => (SlateElement.isElement(element) && element.type === "mention" ? true : isInline(element));
-  editor.isVoid = (element) => (SlateElement.isElement(element) && element.type === "mention" ? true : isVoid(element));
+  editor.isInline = (element) =>
+    SlateElement.isElement(element) && element.type === "mention" ? true : isInline(element);
+  editor.isVoid = (element) =>
+    SlateElement.isElement(element) && element.type === "mention" ? true : isVoid(element);
   return editor;
 }
 
@@ -100,7 +122,9 @@ function mockSearchPapers(query: string) {
   return new Promise<typeof MOCK_PAPERS>((resolve) => {
     const normalized = query.trim().toLowerCase();
     window.setTimeout(() => {
-      resolve(MOCK_PAPERS.filter((paper) => paper.title.toLowerCase().includes(normalized)).slice(0, 5));
+      resolve(
+        MOCK_PAPERS.filter((paper) => paper.title.toLowerCase().includes(normalized)).slice(0, 5),
+      );
     }, 140);
   });
 }
@@ -117,7 +141,11 @@ function plainTextToValue(text: string): Descendant[] {
   ];
 }
 
-function insertMention(editor: Editor & ReactEditor, target: BaseRange, paper: (typeof MOCK_PAPERS)[number]) {
+function insertMention(
+  editor: Editor & ReactEditor,
+  target: BaseRange,
+  paper: (typeof MOCK_PAPERS)[number],
+) {
   const mention: MentionElement = {
     type: "mention",
     paperId: paper.id,
@@ -169,14 +197,17 @@ export function LandingMentionEditor({
   const [target, setTarget] = useState<BaseRange | null>(null);
   const [search, setSearch] = useState("");
   const [index, setIndex] = useState(0);
-  const [suggestions, setSuggestions] = useState<(typeof MOCK_PAPERS)>([]);
+  const [suggestions, setSuggestions] = useState<typeof MOCK_PAPERS>([]);
   const [popoverStyle, setPopoverStyle] = useState<CSSProperties | null>(null);
   const shellRef = useRef<HTMLFormElement | null>(null);
 
   const tags = useMemo(() => extractMentionTags(value), [value]);
   const showSuggestions = Boolean(target && suggestions.length > 0);
   const composerClassName = variant === "chat" ? "chat-composer" : "landing-composer";
-  const shellClassName = variant === "chat" ? "prompt-shell composer-form chat-prompt-shell" : "prompt-shell landing-prompt-shell";
+  const shellClassName =
+    variant === "chat"
+      ? "prompt-shell composer-form chat-prompt-shell"
+      : "prompt-shell landing-prompt-shell";
 
   useEffect(() => {
     const nextPlainText = serialize(value).trimEnd();
@@ -235,7 +266,10 @@ export function LandingMentionEditor({
 
       if (beforeMatch && afterMatch) {
         const query = beforeMatch[2];
-        const mentionStart = Editor.before(editor, start, { unit: "character", distance: query.length + 1 });
+        const mentionStart = Editor.before(editor, start, {
+          unit: "character",
+          distance: query.length + 1,
+        });
         const mentionRange = mentionStart ? Editor.range(editor, mentionStart, start) : null;
         if (!mentionRange) {
           setTarget(null);
@@ -266,42 +300,48 @@ export function LandingMentionEditor({
     [editor, target],
   );
 
-  const renderElement = useCallback((props: Parameters<NonNullable<ComponentProps<typeof Editable>["renderElement"]>>[0]) => {
-    if (SlateElement.isElement(props.element) && props.element.type === "mention") {
+  const renderElement = useCallback(
+    (props: Parameters<NonNullable<ComponentProps<typeof Editable>["renderElement"]>>[0]) => {
+      if (SlateElement.isElement(props.element) && props.element.type === "mention") {
+        return (
+          <span
+            {...props.attributes}
+            contentEditable={false}
+            className="mention-token"
+            data-paper-id={props.element.paperId}
+          >
+            @{props.element.title}
+            {props.children}
+          </span>
+        );
+      }
+
+      return <p {...props.attributes}>{props.children}</p>;
+    },
+    [],
+  );
+
+  const renderPlaceholder = useCallback(
+    (props: Parameters<NonNullable<ComponentProps<typeof Editable>["renderPlaceholder"]>>[0]) => {
+      const attributes =
+        variant === "chat"
+          ? {
+              ...props.attributes,
+              style: {
+                ...props.attributes.style,
+                top: 6,
+              },
+            }
+          : props.attributes;
+
       return (
-        <span
-          {...props.attributes}
-          contentEditable={false}
-          className="mention-token"
-          data-paper-id={props.element.paperId}
-        >
-          @{props.element.title}
+        <span {...attributes} className="mention-editor-placeholder">
           {props.children}
         </span>
       );
-    }
-
-    return <p {...props.attributes}>{props.children}</p>;
-  }, []);
-
-  const renderPlaceholder = useCallback((props: Parameters<NonNullable<ComponentProps<typeof Editable>["renderPlaceholder"]>>[0]) => {
-    const attributes =
-      variant === "chat"
-        ? {
-            ...props.attributes,
-            style: {
-              ...props.attributes.style,
-              top: 6,
-            },
-          }
-        : props.attributes;
-
-    return (
-      <span {...attributes} className="mention-editor-placeholder">
-        {props.children}
-      </span>
-    );
-  }, [variant]);
+    },
+    [variant],
+  );
 
   const onKeyDown = useCallback(
     (event: KeyboardEvent<HTMLDivElement>) => {
@@ -311,7 +351,13 @@ export function LandingMentionEditor({
           Editor.insertText(editor, "\n");
           return;
         }
-        if (submitOnEnter && event.key === "Enter" && !event.shiftKey && !disabled && !event.nativeEvent.isComposing) {
+        if (
+          submitOnEnter &&
+          event.key === "Enter" &&
+          !event.shiftKey &&
+          !disabled &&
+          !event.nativeEvent.isComposing
+        ) {
           event.preventDefault();
           onSubmit();
         }
@@ -461,7 +507,10 @@ export function LandingMentionEditor({
               {submitLoading ? <span className="prompt-button-spinner" aria-hidden="true" /> : null}
               <span className="prompt-button-label">{submitLabel}</span>
               {submitOnEnter && !submitLoading ? (
-                <span className="prompt-button-shortcut prompt-button-shortcut-enter" aria-hidden="true">
+                <span
+                  className="prompt-button-shortcut prompt-button-shortcut-enter"
+                  aria-hidden="true"
+                >
                   <svg viewBox="0 0 16 16">
                     <path d="M12.5 3.5v6H4.5" />
                     <path d="m7.5 6.5-3 3 3 3" />

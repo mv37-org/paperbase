@@ -12,7 +12,7 @@ SRC_DIR = PLUGIN_ROOT / "src"
 
 sys.path.insert(0, str(SRC_DIR))
 
-from paperbase_plugin.mcp_server import main
+from paperbase_plugin.mcp_server import main  # noqa: E402
 
 
 if __name__ == "__main__":

@@ -1,3 +1,5 @@
 # paperbase-plugin
 
-`paperbase-plugin` exposes the hosted `paperbase` backend to both Codex and Claude Code.
+`paperbase-plugin/` contains the MCP bridge that talks to the `paperbase` backend.
+
+Use the repo-root [README](../README.md) for setup, env, and the supported local workflow.
