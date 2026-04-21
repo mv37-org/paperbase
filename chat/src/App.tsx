@@ -33,7 +33,7 @@ const AUTH_VIEW_COPY: Record<AuthView, { title: string; caption: string }> = {
   signup: { title: "Create account", caption: "Create your account." },
   "reset-request": { title: "Forgot password", caption: "Get reset link." },
   "reset-password": { title: "Reset password", caption: "Choose a new password for your account." },
-  "api-key": { title: "Anthropic API key", caption: "Add your key after the free responses run out." },
+  "api-key": { title: "Anthropic API key", caption: "Use your own key." },
 };
 
 const EXAMPLES = [
@@ -219,6 +219,8 @@ export default function App() {
       active: index < remaining,
     }));
   }, [sessionSummary]);
+
+  const maskedApiKey = "sk-ant-••••••••••••••";
 
   const clearFlash = useCallback(() => {
     setFlash("");
@@ -871,46 +873,84 @@ export default function App() {
           </div>
 
           <div className={`modal-view${authView === "api-key" ? " visible" : ""}`} data-auth-view="api-key">
-            <p className="muted">You get 3 free assistant responses. After that, add your own Anthropic API key to continue chatting.</p>
-            <form
-              id="api-key-form"
-              className="stack"
-              onSubmit={async (event) => {
-                event.preventDefault();
-                try {
-                  const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
-                  const nextSession = await api<BrowserSessionResponse>("/v1/browser/settings/anthropic-key", {
-                    method: "PUT",
-                    body: JSON.stringify(payload),
-                  });
-                  setSession(nextSession);
-                  showNoteFlash("Anthropic API key saved.");
-                } catch (error) {
-                  showErrorFlash(error instanceof Error ? error.message : "Saving API key failed");
-                }
-              }}
-            >
-              <input name="api_key" type="password" placeholder="Anthropic API key" required />
-              <button className="primary-button" type="submit">
-                Save key
-              </button>
-            </form>
-            <button
-              id="delete-api-key-button"
-              className="danger-link"
-              type="button"
-              onClick={async () => {
-                try {
-                  const nextSession = await api<BrowserSessionResponse>("/v1/browser/settings/anthropic-key", { method: "DELETE" });
-                  setSession(nextSession);
-                  showNoteFlash("Anthropic API key removed.");
-                } catch (error) {
-                  showErrorFlash(error instanceof Error ? error.message : "Deleting API key failed");
-                }
-              }}
-            >
-              Delete saved key
-            </button>
+            <div className="api-key-panel">
+              <div className="api-key-meter">
+                <div className="api-key-meter-header">
+                  <span>Free responses</span>
+                  <span>
+                    {sessionSummary?.remainingFreeResponses ?? FREE_RESPONSE_LIMIT}/{FREE_RESPONSE_LIMIT} left
+                  </span>
+                </div>
+                <div
+                  className="usage-meter api-key-usage-meter"
+                  aria-label={`${sessionSummary?.remainingFreeResponses ?? FREE_RESPONSE_LIMIT} of ${FREE_RESPONSE_LIMIT} free responses left`}
+                >
+                  {freeResponseSegments.map((segment) => (
+                    <span
+                      key={segment.key}
+                      className={`usage-meter-segment${segment.active ? " active" : ""}`}
+                    />
+                  ))}
+                </div>
+              </div>
+
+              {sessionSummary?.hasAnthropicApiKey ? (
+                <div className="api-key-saved-row">
+                  <div className="api-key-saved-copy">
+                    <div className="api-key-saved-label">Saved key</div>
+                    <div className="api-key-saved-value">{maskedApiKey}</div>
+                  </div>
+                  <button
+                    id="delete-api-key-button"
+                    className="api-key-delete-button"
+                    type="button"
+                    aria-label="Delete saved key"
+                    title="Delete saved key"
+                    onClick={async () => {
+                      try {
+                        const nextSession = await api<BrowserSessionResponse>("/v1/browser/settings/anthropic-key", { method: "DELETE" });
+                        setSession(nextSession);
+                        showNoteFlash("Anthropic API key removed.");
+                      } catch (error) {
+                        showErrorFlash(error instanceof Error ? error.message : "Deleting API key failed");
+                      }
+                    }}
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M4 7h16" />
+                      <path d="M9 7V4h6v3" />
+                      <path d="M8 7l1 13h6l1-13" />
+                      <path d="M10.5 11v5" />
+                      <path d="M13.5 11v5" />
+                    </svg>
+                  </button>
+                </div>
+              ) : (
+                <form
+                  id="api-key-form"
+                  className="api-key-form"
+                  onSubmit={async (event) => {
+                    event.preventDefault();
+                    try {
+                      const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
+                      const nextSession = await api<BrowserSessionResponse>("/v1/browser/settings/anthropic-key", {
+                        method: "PUT",
+                        body: JSON.stringify(payload),
+                      });
+                      setSession(nextSession);
+                      showNoteFlash("Anthropic API key saved.");
+                    } catch (error) {
+                      showErrorFlash(error instanceof Error ? error.message : "Saving API key failed");
+                    }
+                  }}
+                >
+                  <input name="api_key" type="password" placeholder="Anthropic API key" required />
+                  <button className="primary-button api-key-save-button" type="submit">
+                    Save key
+                  </button>
+                </form>
+              )}
+            </div>
           </div>
         </div>
       </div>
