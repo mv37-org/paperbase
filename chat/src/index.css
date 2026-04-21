@@ -957,10 +957,12 @@ textarea {
 }
 
 .auth-links {
-  display: grid;
-  gap: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
   margin-top: 10px;
-  justify-items: center;
+  gap: 0;
 }
 
 .auth-link {
@@ -973,6 +975,19 @@ textarea {
   text-decoration: underline;
   text-underline-offset: 2px;
   transition: color 120ms ease;
+}
+
+.auth-link + .auth-link {
+  position: relative;
+  margin-left: 14px;
+}
+
+.auth-link + .auth-link::before {
+  content: "•";
+  position: absolute;
+  left: -10px;
+  color: var(--muted);
+  text-decoration: none;
 }
 
 .modal-panel .danger-link {
