@@ -54,6 +54,10 @@ const EXAMPLES = [
   },
 ];
 
+function staticAssetPath(name: string) {
+  return `${import.meta.env.BASE_URL}${name.replace(/^\/+/, "")}`;
+}
+
 function consumePendingPrompt() {
   const prompt = sessionStorage.getItem(PENDING_PROMPT_KEY);
   sessionStorage.removeItem(PENDING_PROMPT_KEY);
@@ -529,7 +533,7 @@ export default function App() {
             onClick={() => openAuthModal("login")}
           >
             <span className="landing-login-icon" aria-hidden="true">
-              <AppIcon src="/login.svg" className="landing-login-icon-image" />
+              <AppIcon src={staticAssetPath("login.svg")} className="landing-login-icon-image" />
             </span>
             <span className="landing-login-label">Log in</span>
           </button>
@@ -592,7 +596,10 @@ export default function App() {
                   aria-expanded={!sidebarCollapsed}
                   onClick={handleSidebarToggle}
                 >
-                  <AppIcon src={sidebarCollapsed ? "/show-sidebar.svg" : "/hide-sidebar.svg"} className="sidebar-toggle-icon" />
+                  <AppIcon
+                    src={staticAssetPath(sidebarCollapsed ? "show-sidebar.svg" : "hide-sidebar.svg")}
+                    className="sidebar-toggle-icon"
+                  />
                 </button>
               </div>
               <button id="new-chat-button" className="sidebar-primary-action" onClick={() => void handleNewChat()}>
@@ -639,7 +646,7 @@ export default function App() {
                     aria-expanded={accountMenuOpen}
                     onClick={() => setAccountMenuOpen((current) => !current)}
                   >
-                    <AppIcon src="/settings.svg" className="sidebar-settings-icon" />
+                    <AppIcon src={staticAssetPath("settings.svg")} className="sidebar-settings-icon" />
                     <span>Settings</span>
                   </button>
                   {accountMenuOpen ? (
@@ -667,7 +674,10 @@ export default function App() {
                         role="menuitem"
                         onClick={() => openAuthModal("api-key")}
                       >
-                        <AppIcon src="/claude.svg" className="account-menu-item-icon account-menu-item-icon-claude" />
+                        <AppIcon
+                          src={staticAssetPath("claude.svg")}
+                          className="account-menu-item-icon account-menu-item-icon-claude"
+                        />
                         {sessionSummary.hasAnthropicApiKey ? "Manage API key" : "Add API key"}
                       </button>
                       <button
@@ -677,7 +687,7 @@ export default function App() {
                         role="menuitem"
                         onClick={() => void handleLogout()}
                       >
-                        <AppIcon src="/logout.svg" className="account-menu-item-icon" />
+                        <AppIcon src={staticAssetPath("logout.svg")} className="account-menu-item-icon" />
                         Log out
                       </button>
                     </div>
@@ -694,7 +704,10 @@ export default function App() {
               aria-label={mobileSidebarOpen ? "Close sidebar" : "Open sidebar"}
               onClick={handleSidebarToggle}
             >
-              <AppIcon src={mobileSidebarOpen ? "/hide-sidebar.svg" : "/show-sidebar.svg"} className="sidebar-toggle-icon" />
+              <AppIcon
+                src={staticAssetPath(mobileSidebarOpen ? "hide-sidebar.svg" : "show-sidebar.svg")}
+                className="sidebar-toggle-icon"
+              />
             </button>
             <div className="chat-stage-spacer" />
             <form id="composer-form" className="composer-form" onSubmit={handleComposerSubmit}>
