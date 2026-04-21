@@ -25,6 +25,7 @@ import type {
 const OPEN_TABS_KEY = "paperbase-open-tabs";
 const PENDING_PROMPT_KEY = "paperbase-pending-prompt";
 const SIDEBAR_COLLAPSED_KEY = "paperbase-sidebar-collapsed";
+const FREE_RESPONSE_LIMIT = 3;
 
 const AUTH_VIEW_COPY: Record<AuthView, { title: string; caption: string }> = {
   login: { title: "Log in", caption: "Use your account to continue." },
@@ -134,12 +135,14 @@ export default function App() {
   const [includePapers, setIncludePapers] = useState(true);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
 
   const sessionRef = useRef<BrowserSessionResponse | null>(null);
   const threadMapRef = useRef<Record<string, ChatThreadResponse>>({});
   const openTabsRef = useRef<string[]>([]);
   const appUploadRef = useRef<HTMLInputElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  const accountMenuRef = useRef<HTMLDivElement | null>(null);
 
   useAutosizeTextarea(composerRef, composerInput);
 
@@ -182,6 +185,28 @@ export default function App() {
     };
   }, [mobileSidebarOpen]);
 
+  useEffect(() => {
+    if (!accountMenuOpen) {
+      return;
+    }
+    const handlePointerDown = (event: MouseEvent) => {
+      if (accountMenuRef.current && !accountMenuRef.current.contains(event.target as Node)) {
+        setAccountMenuOpen(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setAccountMenuOpen(false);
+      }
+    };
+    window.addEventListener("mousedown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("mousedown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [accountMenuOpen]);
+
   const authCopy = AUTH_VIEW_COPY[authView];
   const activeThread = activeThreadId ? threadMap[activeThreadId] ?? null : null;
   const authenticated = Boolean(session?.authenticated);
@@ -193,11 +218,18 @@ export default function App() {
     return {
       displayName: session.user.display_name || session.user.email,
       email: session.user.email,
-      quota: `${session.remaining_free_responses} free responses left · ${
-        session.has_anthropic_api_key ? "personal Anthropic key saved" : "no personal key saved"
-      }`,
+      remainingFreeResponses: session.remaining_free_responses,
+      hasAnthropicApiKey: session.has_anthropic_api_key,
     };
   }, [session]);
+
+  const freeResponseSegments = useMemo(() => {
+    const remaining = Math.max(0, Math.min(FREE_RESPONSE_LIMIT, sessionSummary?.remainingFreeResponses ?? FREE_RESPONSE_LIMIT));
+    return Array.from({ length: FREE_RESPONSE_LIMIT }, (_, index) => ({
+      key: index,
+      active: index < remaining,
+    }));
+  }, [sessionSummary]);
 
   const refreshThreads = useCallback(async () => {
     const payload = await loadThreads();
@@ -331,6 +363,7 @@ export default function App() {
     setFlash("");
     setAuthView(view);
     setAuthModalOpen(true);
+    setAccountMenuOpen(false);
   }, []);
 
   const handleAuthSuccess = useCallback(
@@ -419,9 +452,11 @@ export default function App() {
     setComposerInput("");
     setComposerStatus("");
     setMobileSidebarOpen(false);
+    setAccountMenuOpen(false);
   }, []);
 
   const handleSidebarToggle = useCallback(() => {
+    setAccountMenuOpen(false);
     if (window.matchMedia("(max-width: 980px)").matches) {
       setMobileSidebarOpen((current) => !current);
       return;
@@ -433,12 +468,14 @@ export default function App() {
     async (threadId: string) => {
       await openThread(threadId);
       setMobileSidebarOpen(false);
+      setAccountMenuOpen(false);
     },
     [openThread],
   );
 
   const handleNewChat = useCallback(async () => {
     setMobileSidebarOpen(false);
+    setAccountMenuOpen(false);
     return createNewThread();
   }, [createNewThread]);
 
@@ -523,7 +560,10 @@ export default function App() {
             type="button"
             className="sidebar-scrim"
             aria-label="Close sidebar"
-            onClick={() => setMobileSidebarOpen(false)}
+            onClick={() => {
+              setMobileSidebarOpen(false);
+              setAccountMenuOpen(false);
+            }}
           />
           <aside className="sidebar">
             <div className="sidebar-top">
@@ -555,38 +595,6 @@ export default function App() {
               </button>
             </div>
 
-            <section className="sidebar-section sidebar-card">
-              <div className="sidebar-section-header">
-                <div className="section-label">Account</div>
-              </div>
-              {sessionSummary ? (
-                <div id="session-summary" className="session-card">
-                  <div className="session-avatar">{getInitials(sessionSummary.displayName, "PB")}</div>
-                  <div className="session-copy">
-                    <strong>{sessionSummary.displayName}</strong>
-                    <div className="muted">{sessionSummary.email}</div>
-                    <div className="quota-row" id="quota-row">
-                      {sessionSummary.quota}
-                    </div>
-                  </div>
-                </div>
-              ) : null}
-              <div className="sidebar-action-list">
-                <button id="manage-key-button" className="sidebar-link" onClick={() => openAuthModal("api-key")}>
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M15 7a4 4 0 1 0-5.94 3.5L5 14.56V19h4.44l2.06-2.06V14.5H14l1.5-1.5h2.06L19 11.56V9h-2.44A4 4 0 0 0 15 7Z" />
-                  </svg>
-                  <span>Manage Anthropic key</span>
-                </button>
-                <button id="logout-button" className="sidebar-link" onClick={() => void handleLogout()}>
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M10 7V5a2 2 0 0 1 2-2h6v18h-6a2 2 0 0 1-2-2v-2M15 12H3m0 0 4-4m-4 4 4 4" />
-                  </svg>
-                  <span>Log out</span>
-                </button>
-              </div>
-            </section>
-
             <section className="sidebar-section sidebar-card history-section">
               <div className="sidebar-section-header">
                 <div className="section-label">Previous sessions</div>
@@ -617,6 +625,73 @@ export default function App() {
                 <div className="thread-empty">Start a conversation and it will show up here for quick access.</div>
               )}
             </section>
+
+            {sessionSummary ? (
+              <section className="sidebar-account-footer">
+                <div className="sidebar-account-row">
+                  <div className="session-avatar">{getInitials(sessionSummary.displayName, "PB")}</div>
+                  <div className="session-copy">
+                    <strong>{sessionSummary.displayName}</strong>
+                    <div className="muted">{sessionSummary.email}</div>
+                  </div>
+                  <div ref={accountMenuRef} className="sidebar-menu-wrap">
+                    <button
+                      type="button"
+                      id="account-menu-button"
+                      className="sidebar-account-trigger"
+                      aria-label="Open account menu"
+                      aria-haspopup="menu"
+                      aria-expanded={accountMenuOpen}
+                      onClick={() => setAccountMenuOpen((current) => !current)}
+                    >
+                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <circle cx="5" cy="12" r="1.8" />
+                        <circle cx="12" cy="12" r="1.8" />
+                        <circle cx="19" cy="12" r="1.8" />
+                      </svg>
+                    </button>
+                    {accountMenuOpen ? (
+                      <div className="account-menu" role="menu" aria-label="Account actions">
+                        <div className="account-menu-progress">
+                          <div className="account-menu-label-row">
+                            <span>Free responses</span>
+                            <span>
+                              {sessionSummary.remainingFreeResponses}/{FREE_RESPONSE_LIMIT} left
+                            </span>
+                          </div>
+                          <div className="usage-meter" aria-label={`${sessionSummary.remainingFreeResponses} of ${FREE_RESPONSE_LIMIT} free responses left`}>
+                            {freeResponseSegments.map((segment) => (
+                              <span
+                                key={segment.key}
+                                className={`usage-meter-segment${segment.active ? " active" : ""}`}
+                              />
+                            ))}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          id="manage-key-button"
+                          className="account-menu-item"
+                          role="menuitem"
+                          onClick={() => openAuthModal("api-key")}
+                        >
+                          {sessionSummary.hasAnthropicApiKey ? "Manage API key" : "Add API key"}
+                        </button>
+                        <button
+                          type="button"
+                          id="logout-button"
+                          className="account-menu-item danger"
+                          role="menuitem"
+                          onClick={() => void handleLogout()}
+                        >
+                          Log out
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              </section>
+            ) : null}
           </aside>
 
           <section className="chat-stage">

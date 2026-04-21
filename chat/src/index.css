@@ -671,6 +671,103 @@ textarea::placeholder,
   font-size: 15px;
 }
 
+.sidebar-account-row .session-copy .muted {
+  font-size: 12px;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sidebar-menu-wrap {
+  position: relative;
+}
+
+.sidebar-account-trigger {
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border: 1px solid rgba(27, 22, 17, 0.08);
+  border-radius: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.68);
+  color: var(--muted);
+  box-shadow: 0 10px 24px rgba(28, 24, 19, 0.08);
+}
+
+.sidebar-account-trigger svg {
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
+}
+
+.account-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 10px);
+  width: min(260px, calc(100vw - 56px));
+  padding: 10px;
+  border-radius: 20px;
+  border: 1px solid rgba(27, 22, 17, 0.08);
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 22px 44px rgba(28, 24, 19, 0.16);
+  backdrop-filter: blur(20px);
+  display: grid;
+  gap: 4px;
+  z-index: 5;
+}
+
+.account-menu-progress {
+  display: grid;
+  gap: 8px;
+  padding: 4px 4px 10px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid rgba(27, 22, 17, 0.08);
+}
+
+.account-menu-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.usage-meter {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.usage-meter-segment {
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(27, 22, 17, 0.12);
+}
+
+.usage-meter-segment.active {
+  background: linear-gradient(135deg, #2563eb, #38bdf8);
+}
+
+.account-menu-item {
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 14px;
+  background: transparent;
+  text-align: left;
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.account-menu-item.danger {
+  color: #a03333;
+}
+
 .quota-row {
   margin-top: 4px;
   padding: 8px 10px;
@@ -704,6 +801,19 @@ textarea::placeholder,
 .history-section {
   min-height: 0;
   flex: 1;
+}
+
+.sidebar-account-footer {
+  margin-top: auto;
+  padding-top: 14px;
+  border-top: 1px solid rgba(27, 22, 17, 0.08);
+}
+
+.sidebar-account-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
 }
 
 .thread-list,
@@ -1213,6 +1323,11 @@ textarea {
   border-color: rgba(27, 22, 17, 0.08);
 }
 
+.sidebar-account-trigger:hover,
+.account-menu-item:hover {
+  background: rgba(27, 22, 17, 0.04);
+}
+
 .sidebar-icon-button:hover {
   transform: translateY(-1px);
   background: rgba(255, 255, 255, 0.94);
@@ -1288,6 +1403,7 @@ textarea:hover,
 .sidebar-icon-button,
 .sidebar-button,
 .sidebar-link,
+.sidebar-account-trigger,
 .sidebar-primary-action,
 .thread-header-action,
 .danger-link,
@@ -1321,7 +1437,8 @@ textarea:hover,
 
   .app-shell.sidebar-collapsed .sidebar-top,
   .app-shell.sidebar-collapsed .sidebar-action-list,
-  .app-shell.sidebar-collapsed .thread-list {
+  .app-shell.sidebar-collapsed .thread-list,
+  .app-shell.sidebar-collapsed .sidebar-account-row {
     justify-items: center;
   }
 
@@ -1356,6 +1473,22 @@ textarea:hover,
 
   .app-shell.sidebar-collapsed .thread-card-icon {
     margin-inline: auto;
+  }
+
+  .app-shell.sidebar-collapsed .sidebar-account-row {
+    grid-template-columns: 1fr;
+  }
+
+  .app-shell.sidebar-collapsed .sidebar-menu-wrap {
+    width: 100%;
+    display: grid;
+    justify-items: center;
+  }
+
+  .app-shell.sidebar-collapsed .account-menu {
+    right: auto;
+    left: calc(100% + 12px);
+    bottom: 0;
   }
 }
 
