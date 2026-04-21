@@ -322,6 +322,39 @@ For trigger-based continuous deployment with a custom Cloud Build service accoun
 
 That build config sets `options.logging: CLOUD_LOGGING_ONLY`, which avoids the Cloud Build error you hit when a trigger uses a user-specified build service account.
 
+## Running the Cloud Run container locally
+
+If what you want is local parity with the Cloud Run image, do not use Cloud Build.
+Use the same Docker image that Cloud Run will run:
+
+```bash
+cp paperbase/.env.example paperbase/.env
+```
+
+Fill in `paperbase/.env`, then:
+
+```bash
+make docker-run-paperbase
+```
+
+That builds `paperbase/Dockerfile` locally and runs the API container on `http://127.0.0.1:8080`.
+
+To run the worker container locally from the exact same image:
+
+```bash
+make docker-run-paperbase-worker
+```
+
+Useful overrides:
+
+- `DOCKER_ENV_FILE=/absolute/path/to/envfile`
+- `DOCKER_PAPERBASE_IMAGE=paperbase-api-local`
+- `DOCKER_API_PORT=8080`
+- `DOCKER_WORKER_PORT=8081`
+- `DOCKER_STORAGE_ROOT=$(pwd)/.paperbase-data-docker`
+
+Those targets mount `DOCKER_STORAGE_ROOT` into the container at `/data` and force `PAPERBASE_LOCAL_STORAGE_ROOT=/data`, so `PAPERBASE_STORAGE_BACKEND=local` works cleanly in Docker.
+
 ## Repo layout
 
 ```text
