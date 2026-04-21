@@ -1329,7 +1329,7 @@ export default function App() {
               submitButtonId="composer-send"
               submitLabel={streamingThreadId ? "Thinking..." : "Send"}
               submitLoading={Boolean(streamingThreadId)}
-              submitOnShiftEnter
+              submitOnEnter
               suggestionsPlacement="above"
               value={composerInput}
               variant="chat"

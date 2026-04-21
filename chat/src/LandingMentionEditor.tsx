@@ -139,7 +139,7 @@ type Props = {
   onChange: (value: string) => void;
   onSubmit: () => void;
   placeholder?: string;
-  submitOnShiftEnter?: boolean;
+  submitOnEnter?: boolean;
   submitButtonId?: string;
   submitLabel?: string;
   submitLoading?: boolean;
@@ -157,7 +157,7 @@ export function LandingMentionEditor({
   onChange,
   onSubmit,
   placeholder = "Ask about agents, evals, or inference. Type @ to tag a paper.",
-  submitOnShiftEnter = false,
+  submitOnEnter = false,
   submitButtonId,
   submitLabel = "Start",
   submitLoading = false,
@@ -295,7 +295,12 @@ export function LandingMentionEditor({
   const onKeyDown = useCallback(
     (event: KeyboardEvent<HTMLDivElement>) => {
       if (!target || suggestions.length === 0) {
-        if (submitOnShiftEnter && event.key === "Enter" && event.shiftKey && !disabled) {
+        if (event.key === "Enter" && event.shiftKey && !disabled) {
+          event.preventDefault();
+          Editor.insertText(editor, "\n");
+          return;
+        }
+        if (submitOnEnter && event.key === "Enter" && !event.shiftKey && !disabled && !event.nativeEvent.isComposing) {
           event.preventDefault();
           onSubmit();
         }
@@ -321,7 +326,7 @@ export function LandingMentionEditor({
         setTarget(null);
       }
     },
-    [chooseSuggestion, disabled, index, onSubmit, submitOnShiftEnter, suggestions, target],
+    [chooseSuggestion, disabled, editor, index, onSubmit, submitOnEnter, suggestions, target],
   );
 
   const handleSubmit = useCallback(
@@ -440,12 +445,16 @@ export function LandingMentionEditor({
               type="submit"
               disabled={disabled}
               aria-busy={submitLoading}
+              title={submitOnEnter ? "Enter to send. Shift + Enter for new line." : undefined}
             >
               {submitLoading ? <span className="prompt-button-spinner" aria-hidden="true" /> : null}
               <span className="prompt-button-label">{submitLabel}</span>
-              {submitOnShiftEnter && !submitLoading ? (
-                <span className="prompt-button-shortcut" aria-hidden="true">
-                  Shift + Enter
+              {submitOnEnter && !submitLoading ? (
+                <span className="prompt-button-shortcut prompt-button-shortcut-enter" aria-hidden="true">
+                  <svg viewBox="0 0 16 16">
+                    <path d="M12.5 3.5v6H4.5" />
+                    <path d="m7.5 6.5-3 3 3 3" />
+                  </svg>
                 </span>
               ) : null}
             </button>
