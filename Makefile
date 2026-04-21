@@ -130,6 +130,7 @@ start-all: install build-chat-frontend
 		exit 1; \
 	fi
 	@echo "Started paperbase API    pid=$$(cat $(API_PID)) log=$(API_LOG)"
+	@echo "Chat URL                 $(PAPERBASE_BASE_URL)"
 	@echo "Started paperbase worker pid=$$(cat $(WORKER_PID)) log=$(WORKER_LOG)"
 	@echo "Started plugin MCP       pid=$$(cat $(PLUGIN_PID)) url=$(PLUGIN_MCP_URL) log=$(PLUGIN_LOG)"
 
@@ -165,6 +166,7 @@ start-local: install build-chat-frontend
 		exit 1; \
 	fi
 	@echo "Started local API       pid=$$(cat $(API_PID)) url=$(PAPERBASE_BASE_URL) log=$(API_LOG)"
+	@echo "Chat URL                $(PAPERBASE_BASE_URL)"
 	@echo "Started local worker    pid=$$(cat $(WORKER_PID)) log=$(WORKER_LOG)"
 	@echo "Started local plugin    pid=$$(cat $(PLUGIN_PID)) url=$(PLUGIN_MCP_URL) log=$(PLUGIN_LOG)"
 	@echo "Local Postgres URL      $(LOCAL_DATABASE_URL)"
