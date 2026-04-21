@@ -1,250 +1,124 @@
-PYTHON := python3
-VP ?= vp
-VENV := .venv
-VENV_PYTHON := $(VENV)/bin/python
-VENV_BIN := $(VENV)/bin
-PIP := $(VENV_PYTHON) -m pip
-PYTEST := $(VENV_PYTHON) -m pytest
-CHAT_FRONTEND_DIR := $(CURDIR)/chat
-API_HOST ?= 127.0.0.1
-API_PORT ?= 8080
-PLUGIN_MCP_HOST ?= 127.0.0.1
-PLUGIN_MCP_PORT ?= 8090
-PAPERBASE_BASE_URL ?= http://$(API_HOST):$(API_PORT)
-PLUGIN_MCP_URL := http://$(PLUGIN_MCP_HOST):$(PLUGIN_MCP_PORT)/mcp
-LOCAL_DATABASE_URL ?= postgresql+psycopg:///paperbase
-LOCAL_STORAGE_ROOT ?= $(CURDIR)/.paperbase-data
-LOCAL_API_KEY ?= development-token
-LOCAL_LOG_LEVEL ?= DEBUG
-LOCAL_LOG_FORMAT ?= json
-LOCAL_STREAM_LOGS ?= 1
-LOCAL_AUTO_SYNC_LATEST ?= 0
-LOCAL_INITIAL_SYNC_LATEST ?= 0
-LOCAL_STACK_ENV = env PAPERBASE_DATABASE_URL="$(LOCAL_DATABASE_URL)" PAPERBASE_STORAGE_BACKEND="local" PAPERBASE_LOCAL_STORAGE_ROOT="$(LOCAL_STORAGE_ROOT)" PAPERBASE_API_KEY="$(LOCAL_API_KEY)" PAPERBASE_BASE_URL="$(PAPERBASE_BASE_URL)" PAPERBASE_LOG_LEVEL="$(LOCAL_LOG_LEVEL)" PAPERBASE_LOG_FORMAT="$(LOCAL_LOG_FORMAT)" PAPERBASE_WORKER_AUTO_SYNC_LATEST="$(LOCAL_AUTO_SYNC_LATEST)" PAPERBASE_WORKER_INITIAL_SYNC_LATEST="$(LOCAL_INITIAL_SYNC_LATEST)"
-RUN_DIR := .run
-API_PID := $(RUN_DIR)/paperbase-api.pid
-WORKER_PID := $(RUN_DIR)/paperbase-worker.pid
-PLUGIN_PID := $(RUN_DIR)/paperbase-plugin-mcp.pid
-API_LOG := $(RUN_DIR)/paperbase-api.log
-WORKER_LOG := $(RUN_DIR)/paperbase-worker.log
-PLUGIN_LOG := $(RUN_DIR)/paperbase-plugin-mcp.log
+SHELL := /bin/bash
+.SHELLFLAGS := -eu -o pipefail -c
+.DEFAULT_GOAL := help
 
-.PHONY: help venv install install-paperbase install-plugin install-chat build-chat-frontend test test-paperbase test-plugin test-chat run-api run-worker run-plugin-mcp run-chat start-all start-local flush kill-all clean
+VENV := .venv
+VENV_BIN := $(VENV)/bin
+PYTHON := $(VENV_BIN)/python
+PIP := $(PYTHON) -m pip
+PYTEST := $(VENV_BIN)/pytest
+RUFF := $(VENV_BIN)/ruff
+PAPERBASE_API := $(VENV_BIN)/paperbase-api
+PAPERBASE_DEV := $(VENV_BIN)/paperbase-dev
+PAPERBASE_WORKER := $(VENV_BIN)/paperbase-worker
+RUN_DIR := .run
+CHAT_DIR := chat
+STATIC_DIR := paperbase/src/paperbase/static
+VP_INSTALL_CMD := curl -fsSL https://vite.plus | bash
+
+.PHONY: help setup doctor dev test clean _require_vp _require_setup _stop_stack
 
 help:
-	@echo "Available targets:"
-	@echo "  make venv            Create .venv and bootstrap pip"
-	@echo "  make install         Install paperbase, paperbase-plugin, and chat frontend deps"
-	@echo "  make install-paperbase Install only the paperbase backend"
-	@echo "  make install-plugin  Install only the paperbase plugin"
-	@echo "  make install-chat    Install chat frontend dependencies"
-	@echo "  make build-chat-frontend Install frontend deps and build assets into paperbase/static"
-	@echo "  make test            Run all tests"
-	@echo "  make test-paperbase  Run backend tests only"
-	@echo "  make test-plugin     Run plugin tests only"
-	@echo "  make test-chat       Run chat frontend checks only"
-	@echo "  make run-api         Run the paperbase FastAPI server"
-	@echo "  make run-worker      Run the paperbase background worker"
-	@echo "  make run-plugin-mcp  Run the plugin MCP server locally"
-	@echo "  make run-chat        Run the chat VitePlus dev server"
-	@echo "  make start-all       Start API, worker, and plugin MCP HTTP bridge in the background"
-	@echo "  make start-local     Start local Postgres/filesystem stack with JSON logs attached"
-	@echo "                       Options: LOCAL_STREAM_LOGS=0 LOCAL_AUTO_SYNC_LATEST=1 LOCAL_INITIAL_SYNC_LATEST=1"
-	@echo "  make flush           Reset the local Postgres schema and clear local artifact storage"
-	@echo "                       Options: LOCAL_DATABASE_URL=... LOCAL_STORAGE_ROOT=..."
-	@echo "  make kill-all        Stop all paperbase API, worker, and plugin MCP processes"
-	@echo "  make clean           Remove local caches and test artifacts"
+	@printf "paper-ai local workflow\n\n"
+	@printf "  make setup   Install Python packages, chat dependencies, the repo .env, and Git hooks.\n"
+	@printf "  make doctor  Verify vp, Python, Postgres, pgvector, ports, and the repo .env.\n"
+	@printf "  make dev     Initialize local storage/database and run API, worker, MCP bridge, and chat.\n"
+	@printf "  make test    Run Ruff, chat checks, frontend build, backend tests, and plugin tests.\n"
+	@printf "  make clean   Stop local services and remove generated logs, caches, and frontend output.\n"
 
-$(VENV_PYTHON):
-	$(PYTHON) -m venv $(VENV)
-	$(VENV_PYTHON) -m ensurepip --upgrade
-
-venv: $(VENV_PYTHON)
-
-install: install-paperbase install-plugin install-chat
-
-install-paperbase: venv
-	$(PIP) install -e './paperbase[dev]'
-
-install-plugin: venv
-	$(PIP) install -e './paperbase-plugin[dev]'
-
-install-chat:
-	cd $(CHAT_FRONTEND_DIR) && $(VP) install
-
-build-chat-frontend: install-chat
-	cd $(CHAT_FRONTEND_DIR) && $(VP) build
-
-test: test-paperbase test-plugin test-chat
-
-test-paperbase: venv build-chat-frontend
-	$(PYTEST) paperbase/tests -q
-
-test-plugin: venv
-	$(PYTEST) paperbase-plugin/tests -q
-
-test-chat: build-chat-frontend
-	cd $(CHAT_FRONTEND_DIR) && $(VP) run typecheck
-
-run-api: install-paperbase build-chat-frontend
-	$(VENV_BIN)/paperbase-api
-
-run-worker: install-paperbase
-	$(VENV_BIN)/paperbase-worker
-
-run-plugin-mcp: install-plugin
-	$(VENV_BIN)/paperbase-plugin-mcp
-
-run-chat: install-chat
-	cd $(CHAT_FRONTEND_DIR) && $(VP) dev
-
-start-all: install build-chat-frontend
-	@mkdir -p $(RUN_DIR)
-	@$(MAKE) kill-all >/dev/null
-	@nohup env PAPERBASE_API_HOST=$(API_HOST) PAPERBASE_API_PORT=$(API_PORT) $(VENV_BIN)/paperbase-api > $(API_LOG) 2>&1 & echo $$! > $(API_PID)
-	@nohup $(VENV_BIN)/paperbase-worker > $(WORKER_LOG) 2>&1 & echo $$! > $(WORKER_PID)
-	@nohup env PAPERBASE_BASE_URL=$(PAPERBASE_BASE_URL) PAPERBASE_PLUGIN_TRANSPORT=streamable-http FASTMCP_HOST=$(PLUGIN_MCP_HOST) FASTMCP_PORT=$(PLUGIN_MCP_PORT) $(VENV_BIN)/paperbase-plugin-mcp > $(PLUGIN_LOG) 2>&1 & echo $$! > $(PLUGIN_PID)
-	@sleep 2
-	@if ! kill -0 "$$(cat $(API_PID))" 2>/dev/null; then \
-		echo "paperbase API failed to stay up"; \
-		sed -n '1,120p' $(API_LOG); \
-		$(MAKE) kill-all >/dev/null; \
-		exit 1; \
+setup:
+	@$(MAKE) --no-print-directory _require_vp
+	@if [ ! -d "$(VENV)" ]; then \
+		python3 -m venv "$(VENV)"; \
 	fi
-	@if ! kill -0 "$$(cat $(WORKER_PID))" 2>/dev/null; then \
-		echo "paperbase worker failed to stay up"; \
-		sed -n '1,120p' $(WORKER_LOG); \
-		$(MAKE) kill-all >/dev/null; \
-		exit 1; \
+	@$(PIP) install --upgrade pip
+	@$(PIP) install -e "./paperbase[dev]" -e "./paperbase-plugin[dev]"
+	@if [ ! -f .env ]; then \
+		cp .env.example .env; \
 	fi
-	@if ! kill -0 "$$(cat $(PLUGIN_PID))" 2>/dev/null; then \
-		echo "paperbase plugin MCP bridge failed to stay up"; \
-		sed -n '1,120p' $(PLUGIN_LOG); \
-		$(MAKE) kill-all >/dev/null; \
-		exit 1; \
-	fi
-	@if ! curl -fsS $(PAPERBASE_BASE_URL)/health >/dev/null; then \
-		echo "paperbase API failed health check"; \
-		sed -n '1,120p' $(API_LOG); \
-		$(MAKE) kill-all >/dev/null; \
-		exit 1; \
-	fi
-	@echo "Started paperbase API    pid=$$(cat $(API_PID)) log=$(API_LOG)"
-	@echo "Chat URL                 $(PAPERBASE_BASE_URL)"
-	@echo "Started paperbase worker pid=$$(cat $(WORKER_PID)) log=$(WORKER_LOG)"
-	@echo "Started plugin MCP       pid=$$(cat $(PLUGIN_PID)) url=$(PLUGIN_MCP_URL) log=$(PLUGIN_LOG)"
+	@(cd "$(CHAT_DIR)" && vp install)
+	@mkdir -p "$(RUN_DIR)"
+	@chmod +x .githooks/pre-push
+	@git config --local core.hooksPath .githooks
+	@printf "Setup complete. Review .env before running make dev.\n"
 
-start-local: install build-chat-frontend
-	@mkdir -p $(RUN_DIR) "$(LOCAL_STORAGE_ROOT)"
-	@$(MAKE) kill-all >/dev/null
-	@nohup $(LOCAL_STACK_ENV) PAPERBASE_API_HOST=$(API_HOST) PAPERBASE_API_PORT=$(API_PORT) $(VENV_BIN)/paperbase-api > $(API_LOG) 2>&1 & echo $$! > $(API_PID)
-	@nohup $(LOCAL_STACK_ENV) $(VENV_BIN)/paperbase-worker > $(WORKER_LOG) 2>&1 & echo $$! > $(WORKER_PID)
-	@nohup $(LOCAL_STACK_ENV) PAPERBASE_PLUGIN_TRANSPORT=streamable-http FASTMCP_HOST=$(PLUGIN_MCP_HOST) FASTMCP_PORT=$(PLUGIN_MCP_PORT) $(VENV_BIN)/paperbase-plugin-mcp > $(PLUGIN_LOG) 2>&1 & echo $$! > $(PLUGIN_PID)
-	@sleep 2
-	@if ! kill -0 "$$(cat $(API_PID))" 2>/dev/null; then \
-		echo "paperbase API failed to stay up"; \
-		sed -n '1,120p' $(API_LOG); \
-		$(MAKE) kill-all >/dev/null; \
-		exit 1; \
-	fi
-	@if ! kill -0 "$$(cat $(WORKER_PID))" 2>/dev/null; then \
-		echo "paperbase worker failed to stay up"; \
-		sed -n '1,120p' $(WORKER_LOG); \
-		$(MAKE) kill-all >/dev/null; \
-		exit 1; \
-	fi
-	@if ! kill -0 "$$(cat $(PLUGIN_PID))" 2>/dev/null; then \
-		echo "paperbase plugin MCP bridge failed to stay up"; \
-		sed -n '1,120p' $(PLUGIN_LOG); \
-		$(MAKE) kill-all >/dev/null; \
-		exit 1; \
-	fi
-	@if ! curl -fsS $(PAPERBASE_BASE_URL)/health >/dev/null; then \
-		echo "paperbase API failed health check"; \
-		sed -n '1,120p' $(API_LOG); \
-		$(MAKE) kill-all >/dev/null; \
-		exit 1; \
-	fi
-	@echo "Started local API       pid=$$(cat $(API_PID)) url=$(PAPERBASE_BASE_URL) log=$(API_LOG)"
-	@echo "Chat URL                $(PAPERBASE_BASE_URL)"
-	@echo "Started local worker    pid=$$(cat $(WORKER_PID)) log=$(WORKER_LOG)"
-	@echo "Started local plugin    pid=$$(cat $(PLUGIN_PID)) url=$(PLUGIN_MCP_URL) log=$(PLUGIN_LOG)"
-	@echo "Local Postgres URL      $(LOCAL_DATABASE_URL)"
-	@echo "Local storage root      $(LOCAL_STORAGE_ROOT)"
-	@echo "Auto sync latest        $(LOCAL_AUTO_SYNC_LATEST)"
-	@echo "Initial sync latest     $(LOCAL_INITIAL_SYNC_LATEST)"
-	@echo "Log format/level        $(LOCAL_LOG_FORMAT)/$(LOCAL_LOG_LEVEL)"
-	@if [ "$(LOCAL_STREAM_LOGS)" = "1" ]; then \
-		echo "Streaming logs. Press Ctrl-C to detach; use 'make kill-all' to stop the stack."; \
-		tail -n +1 -F $(API_LOG) $(WORKER_LOG) $(PLUGIN_LOG); \
-	fi
+doctor:
+	@$(MAKE) --no-print-directory _require_vp
+	@$(MAKE) --no-print-directory _require_setup
+	@"$(PAPERBASE_DEV)" doctor
 
-flush: install-paperbase
-	@$(MAKE) kill-all >/dev/null
-	@$(VENV_PYTHON) $(CURDIR)/scripts/flush_local.py \
-		--database-url "$(LOCAL_DATABASE_URL)" \
-		--storage-root "$(LOCAL_STORAGE_ROOT)" \
-		--repo-root "$(CURDIR)"
-	@echo "Flushed local paperbase state"
-	@echo "Local Postgres URL      $(LOCAL_DATABASE_URL)"
-	@echo "Local storage root      $(LOCAL_STORAGE_ROOT)"
+dev:
+	@$(MAKE) --no-print-directory _require_vp
+	@$(MAKE) --no-print-directory _require_setup
+	@"$(PAPERBASE_DEV)" init-local
+	@$(MAKE) --no-print-directory _stop_stack
+	@rm -rf "$(RUN_DIR)"
+	@mkdir -p "$(RUN_DIR)"
+	@set -a; \
+	source ./.env; \
+	set +a; \
+	PYTHONUNBUFFERED=1 "$(PAPERBASE_API)" >"$(RUN_DIR)/api.log" 2>&1 & \
+	echo $$! >"$(RUN_DIR)/api.pid"; \
+	PYTHONUNBUFFERED=1 "$(PAPERBASE_WORKER)" >"$(RUN_DIR)/worker.log" 2>&1 & \
+	echo $$! >"$(RUN_DIR)/worker.pid"; \
+	PYTHONUNBUFFERED=1 \
+	PAPERBASE_PLUGIN_TRANSPORT="$${PAPERBASE_PLUGIN_TRANSPORT:-streamable-http}" \
+	PAPERBASE_PLUGIN_MOUNT_PATH="$${PAPERBASE_PLUGIN_MOUNT_PATH:-/mcp}" \
+	FASTMCP_HOST="$${FASTMCP_HOST:-127.0.0.1}" \
+	FASTMCP_PORT="$${FASTMCP_PORT:-8090}" \
+	"$(PYTHON)" paperbase-plugin/scripts/run_mcp.py >"$(RUN_DIR)/plugin.log" 2>&1 & \
+	echo $$! >"$(RUN_DIR)/plugin.pid"; \
+	cleanup() { \
+		$(MAKE) -C "$(CURDIR)" --no-print-directory _stop_stack; \
+	}; \
+	trap cleanup EXIT INT TERM; \
+	printf "API log:    %s/api.log\n" "$(RUN_DIR)"; \
+	printf "Worker log: %s/worker.log\n" "$(RUN_DIR)"; \
+	printf "Plugin log: %s/plugin.log\n" "$(RUN_DIR)"; \
+	printf "Stopping the local stack when the chat dev server exits.\n"; \
+	cd "$(CHAT_DIR)" && VITE_PAPERBASE_BASE_URL="$${VITE_PAPERBASE_BASE_URL:-http://127.0.0.1:8080}" vp dev
 
-kill-all:
-	@mkdir -p $(RUN_DIR)
-	@for pid_file in $(API_PID) $(WORKER_PID) $(PLUGIN_PID); do \
-		if [ -f "$$pid_file" ]; then \
-			pid=$$(cat "$$pid_file"); \
-			if kill -0 "$$pid" 2>/dev/null; then \
-				kill "$$pid" 2>/dev/null || true; \
-				for _ in 1 2 3 4 5; do \
-					if kill -0 "$$pid" 2>/dev/null; then \
-						sleep 1; \
-					else \
-						break; \
-					fi; \
-				done; \
-				if kill -0 "$$pid" 2>/dev/null; then \
-					kill -9 "$$pid" 2>/dev/null || true; \
-				fi; \
-				echo "Stopped pid $$pid"; \
-			fi; \
-			rm -f "$$pid_file"; \
-		fi; \
-	done
-	@for pattern in paperbase-api paperbase-worker paperbase-plugin-mcp; do \
-		pids=$$(pgrep -f "$$pattern" 2>/dev/null || true); \
-		if [ -n "$$pids" ]; then \
-			kill $$pids 2>/dev/null || true; \
-		fi; \
-	done
-	@if command -v lsof >/dev/null 2>&1; then \
-		for port in $(API_PORT) $(PLUGIN_MCP_PORT); do \
-			pids=$$(lsof -ti tcp:$$port 2>/dev/null || true); \
-			if [ -n "$$pids" ]; then \
-				kill $$pids 2>/dev/null || true; \
-			fi; \
-		done; \
-	fi
-	@sleep 1
-	@for pattern in paperbase-api paperbase-worker paperbase-plugin-mcp; do \
-		pids=$$(pgrep -f "$$pattern" 2>/dev/null || true); \
-		if [ -n "$$pids" ]; then \
-			kill -9 $$pids 2>/dev/null || true; \
-		fi; \
-	done
-	@if command -v lsof >/dev/null 2>&1; then \
-		for port in $(API_PORT) $(PLUGIN_MCP_PORT); do \
-			pids=$$(lsof -ti tcp:$$port 2>/dev/null || true); \
-			if [ -n "$$pids" ]; then \
-				kill -9 $$pids 2>/dev/null || true; \
-			fi; \
-		done; \
-	fi
-	@rm -f $(API_PID) $(WORKER_PID) $(PLUGIN_PID)
+test:
+	@$(MAKE) --no-print-directory _require_vp
+	@$(MAKE) --no-print-directory _require_setup
+	@"$(RUFF)" check paperbase/src paperbase/tests paperbase-plugin/src paperbase-plugin/tests paperbase-plugin/scripts
+	@(cd "$(CHAT_DIR)" && set -a && source ../.env && set +a && vp check)
+	@(cd "$(CHAT_DIR)" && set -a && source ../.env && set +a && vp build)
+	@"$(PYTEST)" paperbase/tests
+	@"$(PYTEST)" paperbase-plugin/tests
 
 clean:
-	rm -rf .pytest_cache
-	rm -rf paperbase/.pytest_cache paperbase-plugin/.pytest_cache
-	rm -rf paperbase/tests/__pycache__ paperbase-plugin/tests/__pycache__
-	find paperbase paperbase-plugin -type d -name "__pycache__" -prune -exec rm -rf {} +
-	rm -rf $(RUN_DIR)
+	@$(MAKE) --no-print-directory _stop_stack
+	@rm -rf "$(RUN_DIR)" .pytest_cache .ruff_cache "$(STATIC_DIR)" chat/.vite chat/dist paperbase/.venv paperbase-plugin/.venv
+	@find . -name "__pycache__" -type d -prune -exec rm -rf {} +
+	@find . -name ".DS_Store" -type f -delete
+	@printf "Removed generated logs, caches, and frontend output.\n"
+
+_require_vp:
+	@if ! command -v vp >/dev/null 2>&1; then \
+		printf "vp is required for this repo. Install it with:\n  %s\n" "$(VP_INSTALL_CMD)"; \
+		exit 1; \
+	fi
+
+_require_setup:
+	@test -x "$(PAPERBASE_DEV)" || { \
+		printf "Run make setup first.\n"; \
+		exit 1; \
+	}
+	@test -f .env || { \
+		printf "Missing .env. Run make setup or copy .env.example to .env.\n"; \
+		exit 1; \
+	}
+
+_stop_stack:
+	@if [ ! -d "$(RUN_DIR)" ]; then \
+		exit 0; \
+	fi; \
+	shopt -s nullglob; \
+	for pid_file in "$(RUN_DIR)"/*.pid; do \
+		pid="$$(cat "$$pid_file" 2>/dev/null || true)"; \
+		if [ -n "$$pid" ] && kill -0 "$$pid" 2>/dev/null; then \
+			kill "$$pid" 2>/dev/null || true; \
+		fi; \
+		rm -f "$$pid_file"; \
+	done

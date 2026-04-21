@@ -15,5 +15,10 @@ build/
 .eggs/
 *.egg
 .env
+paperbase/.venv/
+paperbase-plugin/.venv/
+paperbase/src/paperbase/static/
+paperbase/cloudrun.api.env.yaml
+paperbase/cloudrun.worker.env.yaml
 *.db
 *.npy

@@ -1,0 +1,31 @@
+name: verify
+
+on:
+  push:
+    branches:
+      - main
+      - "codex/**"
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install vp
+        run: curl -fsSL https://vite.plus | bash
+
+      - name: Add vp to PATH
+        run: echo "$HOME/.vite-plus/bin" >> "$GITHUB_PATH"
+
+      - name: Setup workspace
+        run: make setup
+
+      - name: Verify repo
+        run: make test

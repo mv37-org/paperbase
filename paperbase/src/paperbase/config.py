@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import hashlib
 import base64
+import hashlib
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -27,12 +28,49 @@ DEFAULT_AI_CATEGORIES = [
 ]
 
 
+def repo_root(start: Path | None = None) -> Path | None:
+    anchor = Path(__file__).resolve() if start is None else start.resolve()
+    current = anchor if anchor.is_dir() else anchor.parent
+    for candidate in (current, *current.parents):
+        if (
+            (candidate / "Makefile").is_file()
+            and (candidate / "chat").is_dir()
+            and (candidate / "paperbase").is_dir()
+            and (candidate / "paperbase-plugin").is_dir()
+        ):
+            return candidate
+    return None
+
+
+def settings_env_file() -> Path:
+    root = repo_root()
+    if root is not None:
+        return root / ".env"
+
+    current = Path(__file__).resolve().parent
+    for candidate in (current, *current.parents):
+        if (candidate / "pyproject.toml").is_file():
+            return candidate / ".env"
+    return Path(".env")
+
+
+def resolve_repo_path(raw_path: str) -> Path:
+    path = Path(raw_path).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+
+    root = repo_root()
+    if root is not None:
+        return (root / path).resolve()
+    return path.resolve()
+
+
 class Settings(BaseSettings):
     """Runtime configuration sourced from environment variables."""
 
     model_config = SettingsConfigDict(
         env_prefix="PAPERBASE_",
-        env_file=".env",
+        env_file=str(settings_env_file()),
         extra="ignore",
     )
 

@@ -1,15 +1,17 @@
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite-plus";
 
 const devApiTarget = process.env.VITE_PAPERBASE_BASE_URL ?? "http://127.0.0.1:8080";
+const repoRoot = dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
   base: "/static/",
   plugins: [react()],
   build: {
-    outDir: resolve(__dirname, "../paperbase/src/paperbase/static"),
+    outDir: resolve(repoRoot, "../paperbase/src/paperbase/static"),
     emptyOutDir: true,
     rollupOptions: {
       output: {

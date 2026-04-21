@@ -6,7 +6,6 @@ import json
 import logging
 import re
 from collections.abc import Iterator
-from dataclasses import asdict
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import timedelta
@@ -27,7 +26,6 @@ from .models import (
     ChatMessageResponse,
     ChatThreadListResponse,
     ChatThreadResponse,
-    ChatThreadSummary,
     CreateChatThreadRequest,
     FileContentResponse,
     FileListResponse,
@@ -56,14 +54,13 @@ from .models import (
     TableResponse,
     UploadListResponse,
     UploadedDocumentResponse,
-    UploadedDocumentSectionResult,
 )
 from .repository import PaperRepository, build_repository
 from .security import SecretCipher, api_key_hint, hash_password, new_browser_token, password_needs_rehash, token_hash, verify_password
 from .summaries import build_paper_summaries
-from .storage import ObjectStore, StoredObject, build_object_store
+from .storage import ObjectStore, build_object_store
 from . import sources
-from .utils import canonical_paper_id, new_id, slugify, utcnow
+from .utils import new_id, slugify, utcnow
 
 
 logger = logging.getLogger(__name__)

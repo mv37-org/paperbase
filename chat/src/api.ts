@@ -11,11 +11,12 @@ import type {
   UploadListResponse,
 } from "./types";
 
-const RAW_API_BASE = (window as typeof window & { PAPERBASE_BASE_URL?: string }).PAPERBASE_BASE_URL ?? "";
+const RAW_API_BASE =
+  (window as typeof window & { PAPERBASE_BASE_URL?: string }).PAPERBASE_BASE_URL ?? "";
 const API_BASE =
   RAW_API_BASE && !RAW_API_BASE.startsWith("__")
     ? RAW_API_BASE
-    : (import.meta.env.VITE_PAPERBASE_BASE_URL as string | undefined) ?? "";
+    : ((import.meta.env.VITE_PAPERBASE_BASE_URL as string | undefined) ?? "");
 
 let browserCsrfToken: string | null = null;
 
@@ -25,7 +26,10 @@ export type SendThreadMessagePayload = {
   include_papers: boolean;
 };
 
-type StreamEventHandler = <T extends keyof ChatStreamEventMap>(eventName: T, payload: ChatStreamEventMap[T]) => void;
+type StreamEventHandler = <T extends keyof ChatStreamEventMap>(
+  eventName: T,
+  payload: ChatStreamEventMap[T],
+) => void;
 
 export class StreamingChatError extends Error {
   canFallback: boolean;
@@ -47,7 +51,7 @@ function syncBrowserSession(payload: unknown) {
     return;
   }
   const session = payload as BrowserSessionResponse;
-  browserCsrfToken = session.authenticated ? session.csrf_token ?? null : null;
+  browserCsrfToken = session.authenticated ? (session.csrf_token ?? null) : null;
 }
 
 function clearBrowserSessionToken() {
@@ -146,7 +150,9 @@ export function loadSession() {
 }
 
 export function logoutBrowserSession() {
-  return api<{ status: string }>("/v1/browser/auth/logout", { method: "POST" }).finally(clearBrowserSessionToken);
+  return api<{ status: string }>("/v1/browser/auth/logout", { method: "POST" }).finally(
+    clearBrowserSessionToken,
+  );
 }
 
 export function loadUploads() {
@@ -241,7 +247,10 @@ export async function sendThreadMessageStream(
       emitBlock(trailing);
     }
   } catch (error) {
-    throw new StreamingChatError(error instanceof Error ? error.message : "Streaming request failed", !sawEvent);
+    throw new StreamingChatError(
+      error instanceof Error ? error.message : "Streaming request failed",
+      !sawEvent,
+    );
   } finally {
     reader.releaseLock();
   }
@@ -270,7 +279,9 @@ export function getBrowserPaperFile(paperId: string, path: string) {
 }
 
 export function getBrowserPaperFigure(paperId: string, figureId: string) {
-  return api<FigureResponse>(`/v1/browser/papers/${paperId}/figures/${figureId}`, { method: "GET" });
+  return api<FigureResponse>(`/v1/browser/papers/${paperId}/figures/${figureId}`, {
+    method: "GET",
+  });
 }
 
 export function getBrowserPaperTable(paperId: string, tableId: string) {
