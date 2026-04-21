@@ -892,6 +892,38 @@ textarea::placeholder,
 
 .chat-stage-spacer {
   flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+}
+
+.chat-empty-state {
+  max-width: 320px;
+  text-align: center;
+}
+
+.chat-empty-eyebrow {
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.2;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.chat-empty-state strong {
+  display: block;
+  font-size: 22px;
+  line-height: 1.08;
+  letter-spacing: -0.03em;
+}
+
+.chat-empty-state p {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.55;
 }
 
 .composer-form {

@@ -243,6 +243,7 @@ export default function App() {
   const authCopy = AUTH_VIEW_COPY[authView];
   const authenticated = Boolean(session?.authenticated);
   const sidebarThreads = useMemo(() => threads.filter(shouldShowThreadInSidebar), [threads]);
+  const activeThread = activeThreadId ? threadMap[activeThreadId] ?? null : null;
 
   const sessionSummary = useMemo(() => {
     if (!session?.user) {
@@ -749,7 +750,19 @@ export default function App() {
                 className="sidebar-toggle-icon"
               />
             </button>
-            <div className="chat-stage-spacer" />
+            <div className="chat-stage-spacer">
+              {!activeThread || activeThread.messages.length === 0 ? (
+                <div className="chat-empty-state">
+                  <div className="chat-empty-eyebrow">Empty chat</div>
+                  <strong>{activeThread ? "Start the conversation" : "Start a new chat"}</strong>
+                  <p>
+                    {activeThread
+                      ? "Ask about papers, compare ideas, or pull out patterns for the system you are building."
+                      : "Choose a previous session or start a new chat to begin."}
+                  </p>
+                </div>
+              ) : null}
+            </div>
             <form id="composer-form" className="composer-form" onSubmit={handleComposerSubmit}>
               <div className="composer-shell">
                 <button
