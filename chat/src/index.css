@@ -790,6 +790,15 @@ textarea::placeholder,
   align-content: start;
 }
 
+.thread-list {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.thread-list::-webkit-scrollbar {
+  display: none;
+}
+
 .thread-card,
 .doc-card {
   height: 30px;
