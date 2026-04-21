@@ -185,18 +185,29 @@ export function LandingMentionEditor({ value: plainText, onChange }: Props) {
       }
 
       const [start] = Range.edges(selection);
-      const before = Editor.before(editor, start, { unit: "word" });
-      const beforeRange = before && Editor.range(editor, before, start);
+      const blockEntry = Editor.above(editor, {
+        at: start,
+        match: (node) => SlateElement.isElement(node) && Editor.isBlock(editor, node),
+      });
+      const blockStart = blockEntry ? Editor.start(editor, blockEntry[1]) : null;
+      const beforeRange = blockStart ? Editor.range(editor, blockStart, start) : null;
       const beforeText = beforeRange ? Editor.string(editor, beforeRange) : "";
-      const beforeMatch = beforeText.match(/^@([\w.-]{2,})$/);
+      const beforeMatch = beforeText.match(/(^|\s)@([\w.-]{2,})$/);
       const after = Editor.after(editor, start);
       const afterRange = after && Editor.range(editor, start, after);
       const afterText = afterRange ? Editor.string(editor, afterRange) : "";
       const afterMatch = afterText.match(/^(\s|$)/);
 
-      if (beforeMatch && afterMatch && beforeRange) {
-        setTarget(beforeRange);
-        setSearch(beforeMatch[1]);
+      if (beforeMatch && afterMatch) {
+        const query = beforeMatch[2];
+        const mentionStart = Editor.before(editor, start, { unit: "character", distance: query.length + 1 });
+        const mentionRange = mentionStart ? Editor.range(editor, mentionStart, start) : null;
+        if (!mentionRange) {
+          setTarget(null);
+          return;
+        }
+        setTarget(mentionRange);
+        setSearch(query);
         setIndex(0);
         return;
       }

@@ -10,7 +10,7 @@ const RAW_API_BASE = (window as typeof window & { PAPERBASE_BASE_URL?: string })
 const API_BASE =
   RAW_API_BASE && !RAW_API_BASE.startsWith("__")
     ? RAW_API_BASE
-    : (import.meta.env.VITE_PAPERBASE_BASE_URL as string | undefined) ?? "http://127.0.0.1:8080";
+    : (import.meta.env.VITE_PAPERBASE_BASE_URL as string | undefined) ?? "";
 
 async function parsePayload(response: Response) {
   if (response.status === 204) {
