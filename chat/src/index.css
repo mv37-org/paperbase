@@ -1392,6 +1392,9 @@ textarea::placeholder,
   max-width: 100%;
   overflow-x: auto;
   margin: 0.9em 0;
+  border: 1px solid rgba(27, 22, 17, 0.14);
+  border-radius: 4px;
+  background: #ffffff;
 }
 
 .message-markdown table,
@@ -1411,8 +1414,14 @@ textarea::placeholder,
 .paper-drawer-markdown td,
 .paper-drawer-table td {
   padding: 8px 10px;
-  border: 1px solid rgba(27, 22, 17, 0.1);
+  border: 1px solid rgba(27, 22, 17, 0.14);
   vertical-align: top;
+}
+
+.message-markdown th,
+.paper-drawer-markdown th {
+  background: #f8f6f1;
+  font-weight: 600;
 }
 
 .message-markdown a,
