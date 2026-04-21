@@ -208,7 +208,6 @@ export default function App() {
   }, [accountMenuOpen]);
 
   const authCopy = AUTH_VIEW_COPY[authView];
-  const activeThread = activeThreadId ? threadMap[activeThreadId] ?? null : null;
   const authenticated = Boolean(session?.authenticated);
 
   const sessionSummary = useMemo(() => {
@@ -580,13 +579,7 @@ export default function App() {
                     <path d="M4 7h16M4 12h16M4 17h16" />
                   </svg>
                 </button>
-                <div className="brand-lockup">
-                  <div className="brand-mark">PB</div>
-                  <div className="brand-copy">
-                    <div className="brandline">Paperbase</div>
-                    <div className="brand-caption">Research-backed chat</div>
-                  </div>
-                </div>
+                <div className="sidebar-title">Paperbase</div>
               </div>
               <button id="new-chat-button" className="sidebar-primary-action" onClick={() => void handleNewChat()}>
                 <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -597,10 +590,6 @@ export default function App() {
             </div>
 
             <section className="sidebar-section sidebar-card history-section">
-              <div className="sidebar-section-header">
-                <div className="section-label">Previous sessions</div>
-                <div className="section-count">{threads.length}</div>
-              </div>
               {threads.length > 0 ? (
                 <div id="thread-list" className="thread-list">
                   {threads.map((thread) => {
@@ -616,180 +605,90 @@ export default function App() {
                         <div className="thread-card-icon">{getInitials(title, "N")}</div>
                         <div className="thread-card-copy">
                           <strong>{title}</strong>
-                          <div className="muted">{thread.last_message_preview || "No messages yet"}</div>
                         </div>
                       </button>
                     );
                   })}
                 </div>
-              ) : (
-                <div className="thread-empty">Start a conversation and it will show up here for quick access.</div>
-              )}
+              ) : null}
             </section>
 
             {sessionSummary ? (
-              <section className="sidebar-account-footer">
-                <div className="sidebar-account-row">
-                  <div className="session-avatar">{getInitials(sessionSummary.displayName, "PB")}</div>
-                  <div className="session-copy">
-                    <strong>{sessionSummary.displayName}</strong>
-                    <div className="muted">{sessionSummary.email}</div>
-                  </div>
-                  <div ref={accountMenuRef} className="sidebar-menu-wrap">
-                    <button
-                      type="button"
-                      id="account-menu-button"
-                      className="sidebar-account-trigger"
-                      aria-label="Open account menu"
-                      aria-haspopup="menu"
-                      aria-expanded={accountMenuOpen}
-                      onClick={() => setAccountMenuOpen((current) => !current)}
-                    >
-                      <svg viewBox="0 0 24 24" aria-hidden="true">
-                        <circle cx="5" cy="12" r="1.8" />
-                        <circle cx="12" cy="12" r="1.8" />
-                        <circle cx="19" cy="12" r="1.8" />
-                      </svg>
-                    </button>
-                    {accountMenuOpen ? (
-                      <div className="account-menu" role="menu" aria-label="Account actions">
-                        <div className="account-menu-progress">
-                          <div className="account-menu-label-row">
-                            <span>Free responses</span>
-                            <span>
-                              {sessionSummary.remainingFreeResponses}/{FREE_RESPONSE_LIMIT} left
-                            </span>
-                          </div>
-                          <div className="usage-meter" aria-label={`${sessionSummary.remainingFreeResponses} of ${FREE_RESPONSE_LIMIT} free responses left`}>
-                            {freeResponseSegments.map((segment) => (
-                              <span
-                                key={segment.key}
-                                className={`usage-meter-segment${segment.active ? " active" : ""}`}
-                              />
-                            ))}
-                          </div>
+              <section className="sidebar-settings-footer">
+                <div ref={accountMenuRef} className="sidebar-menu-wrap">
+                  <button
+                    type="button"
+                    id="account-menu-button"
+                    className="sidebar-settings-button"
+                    aria-label="Open settings"
+                    aria-haspopup="menu"
+                    aria-expanded={accountMenuOpen}
+                    onClick={() => setAccountMenuOpen((current) => !current)}
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M10 4H4v6" />
+                      <path d="M20 14v6h-6" />
+                      <path d="M20 10V4h-6" />
+                      <path d="M4 14v6h6" />
+                    </svg>
+                    <span>Settings</span>
+                  </button>
+                  {accountMenuOpen ? (
+                    <div className="account-menu" role="menu" aria-label="Account actions">
+                      <div className="account-menu-progress">
+                        <div className="account-menu-label-row">
+                          <span>Free responses</span>
+                          <span>
+                            {sessionSummary.remainingFreeResponses}/{FREE_RESPONSE_LIMIT} left
+                          </span>
                         </div>
-                        <button
-                          type="button"
-                          id="manage-key-button"
-                          className="account-menu-item"
-                          role="menuitem"
-                          onClick={() => openAuthModal("api-key")}
-                        >
-                          {sessionSummary.hasAnthropicApiKey ? "Manage API key" : "Add API key"}
-                        </button>
-                        <button
-                          type="button"
-                          id="logout-button"
-                          className="account-menu-item danger"
-                          role="menuitem"
-                          onClick={() => void handleLogout()}
-                        >
-                          Log out
-                        </button>
+                        <div className="usage-meter" aria-label={`${sessionSummary.remainingFreeResponses} of ${FREE_RESPONSE_LIMIT} free responses left`}>
+                          {freeResponseSegments.map((segment) => (
+                            <span
+                              key={segment.key}
+                              className={`usage-meter-segment${segment.active ? " active" : ""}`}
+                            />
+                          ))}
+                        </div>
                       </div>
-                    ) : null}
-                  </div>
+                      <button
+                        type="button"
+                        id="manage-key-button"
+                        className="account-menu-item"
+                        role="menuitem"
+                        onClick={() => openAuthModal("api-key")}
+                      >
+                        {sessionSummary.hasAnthropicApiKey ? "Manage API key" : "Add API key"}
+                      </button>
+                      <button
+                        type="button"
+                        id="logout-button"
+                        className="account-menu-item danger"
+                        role="menuitem"
+                        onClick={() => void handleLogout()}
+                      >
+                        Log out
+                      </button>
+                    </div>
+                  ) : null}
                 </div>
               </section>
             ) : null}
           </aside>
 
           <section className="chat-stage">
-            <div id="thread-header" className="thread-header">
-              <div className="thread-header-main">
-                <button
-                  type="button"
-                  className="sidebar-icon-button chat-sidebar-toggle"
-                  aria-label={mobileSidebarOpen ? "Close sidebar" : "Open sidebar"}
-                  onClick={handleSidebarToggle}
-                >
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M4 7h16M4 12h16M4 17h16" />
-                  </svg>
-                </button>
-                {activeThread ? (
-                  <div className="thread-summary">
-                    <div className="thread-summary-label">Current chat</div>
-                    <strong>{displayThreadTitle(activeThread.title)}</strong>
-                    <div className="muted">{activeThread.messages.length} messages in this thread</div>
-                  </div>
-                ) : (
-                  <div className="thread-summary">
-                    <div className="thread-summary-label">Workspace</div>
-                    <strong>Start a new chat</strong>
-                    <div className="muted">Ask a question, compare papers, or upload supporting documents.</div>
-                  </div>
-                )}
-              </div>
-              <button type="button" className="thread-header-action" onClick={() => void handleNewChat()}>
-                <svg viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M12 5v14M5 12h14" />
-                </svg>
-                <span>New chat</span>
-              </button>
-            </div>
-            <div id="tab-strip" className="tab-strip">
-              {openTabs.map((threadId) => {
-                const thread = threadMap[threadId];
-                if (!thread) {
-                  return null;
-                }
-                return (
-                  <button
-                    key={threadId}
-                    type="button"
-                    className={`tab${activeThreadId === threadId ? " active" : ""}`}
-                    onClick={() => void handleThreadSelection(threadId)}
-                  >
-                    <span className="tab-title">{displayThreadTitle(thread.title)}</span>
-                    <span className="tab-meta">{thread.messages.length}</span>
-                  </button>
-                );
-              })}
-            </div>
-            <div id="message-list" className="message-list">
-              {activeThread?.messages.length ? (
-                activeThread.messages.map((message) => (
-                  <article key={message.message_id} className={`message ${message.role}`}>
-                    <div className="message-meta">{message.role}</div>
-                    <div>{message.content_markdown}</div>
-                    {message.citations.length > 0 ? (
-                      <div className="message-citations">
-                        {message.citations.map((citation) => (
-                          <div key={`${message.message_id}-${citation.source_id}`} className="citation-card">
-                            <strong>
-                              {citation.source_id} · {citation.title}
-                            </strong>
-                            <div className="muted">{citation.path}</div>
-                            <div className="muted">{citation.excerpt}</div>
-                          </div>
-                        ))}
-                      </div>
-                    ) : null}
-                  </article>
-                ))
-              ) : (
-                <div className="message-empty-state">
-                  <div className="message-empty-eyebrow">Ready when you are</div>
-                  <strong>{activeThread ? "Send the first prompt" : "Choose a chat or create one"}</strong>
-                  <p>
-                    {activeThread
-                      ? "Use the composer below to ask about indexed papers, uploaded docs, or current research directions."
-                      : "Your open threads and previous sessions stay organized here so you can move between research questions without losing context."}
-                  </p>
-                </div>
-              )}
-            </div>
+            <button
+              type="button"
+              className="sidebar-icon-button chat-sidebar-toggle"
+              aria-label={mobileSidebarOpen ? "Close sidebar" : "Open sidebar"}
+              onClick={handleSidebarToggle}
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M4 7h16M4 12h16M4 17h16" />
+              </svg>
+            </button>
+            <div className="chat-stage-spacer" />
             <form id="composer-form" className="composer-form" onSubmit={handleComposerSubmit}>
-              <div className="composer-meta">
-                <label>
-                  <input type="checkbox" checked={includeUploads} onChange={(event) => setIncludeUploads(event.target.checked)} /> uploaded docs
-                </label>
-                <label>
-                  <input type="checkbox" checked={includePapers} onChange={(event) => setIncludePapers(event.target.checked)} /> indexed papers
-                </label>
-              </div>
               <div className="composer-shell">
                 <button
                   type="button"
@@ -815,11 +714,6 @@ export default function App() {
                 </button>
               </div>
               <input ref={appUploadRef} id="app-upload-file" className="hidden-file-input" type="file" onChange={onUploadChange} />
-              <div className="composer-actions">
-                <div id="composer-status" className="muted">
-                  {composerStatus}
-                </div>
-              </div>
             </form>
           </section>
         </div>
