@@ -59,11 +59,63 @@ textarea {
   display: flex;
   justify-content: center;
   padding: 140px 24px 96px;
+  position: relative;
 }
 
 .landing-column {
   width: 100%;
   max-width: 580px;
+}
+
+.landing-login-button {
+  position: absolute;
+  top: 24px;
+  right: 24px;
+  height: 24px;
+  max-height: 24px;
+  display: inline-flex;
+  align-items: stretch;
+  padding: 0;
+  border: 1px solid var(--blue-border);
+  border-radius: var(--radius);
+  background: rgba(37, 99, 235, 0.1);
+  color: var(--blue-border);
+  overflow: hidden;
+  cursor: pointer;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 12px;
+  line-height: 1;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease, box-shadow 120ms ease,
+    transform 120ms ease;
+}
+
+.landing-login-icon,
+.landing-login-label {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+}
+
+.landing-login-icon {
+  width: 24px;
+  min-width: 24px;
+}
+
+.landing-login-icon svg {
+  width: 12px;
+  height: 12px;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.landing-login-label {
+  padding: 0 8px;
+  border-left: 1px solid var(--blue-border);
+  color: inherit;
 }
 
 .brandline {
@@ -1132,11 +1184,28 @@ textarea {
 }
 
 .brandline-link:hover,
+.landing-login-button:hover,
 .sidebar-button:hover,
 .sidebar-link:hover,
 .danger-link:hover,
 .auth-link:hover {
   color: var(--text);
+}
+
+.landing-login-button:hover {
+  color: var(--blue-border);
+  background: rgba(37, 99, 235, 0.14);
+  box-shadow: 0 8px 16px rgba(37, 99, 235, 0.12);
+}
+
+.landing-login-button:active {
+  background: rgba(37, 99, 235, 0.18);
+  box-shadow: inset 0 1px 2px rgba(29, 78, 216, 0.14);
+  transform: translateY(1px);
+}
+
+.landing-login-button:focus-visible {
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.16);
 }
 
 .sidebar-link:hover {
@@ -1291,6 +1360,11 @@ textarea:hover,
 }
 
 @media (max-width: 980px) {
+  .landing-login-button {
+    top: 16px;
+    right: 16px;
+  }
+
   .app-shell {
     grid-template-columns: 1fr;
   }
