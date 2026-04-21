@@ -734,6 +734,7 @@ textarea::placeholder,
   gap: 0;
   min-height: 0;
   overflow: auto;
+  align-content: start;
 }
 
 .thread-card,
