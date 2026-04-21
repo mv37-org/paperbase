@@ -601,6 +601,7 @@ export default function App() {
             </div>
 
             <section className="sidebar-section sidebar-card history-section">
+              <div className="section-label sidebar-section-label">Previous sessions</div>
               {threads.length > 0 ? (
                 <div id="thread-list" className="thread-list">
                   {threads.map((thread) => {

@@ -705,6 +705,10 @@ textarea::placeholder,
   flex: 1;
 }
 
+.sidebar-section-label {
+  margin-bottom: 6px;
+}
+
 .sidebar-settings-footer {
   margin-top: auto;
   padding-top: 14px;
@@ -721,7 +725,9 @@ textarea::placeholder,
 
 .thread-card,
 .doc-card {
-  padding: 8px 6px;
+  height: 30px;
+  max-height: 30px;
+  padding: 0 6px;
   cursor: pointer;
 }
 
@@ -739,7 +745,7 @@ textarea::placeholder,
 
 .thread-card-copy strong {
   font-size: 13px;
-  line-height: 1.4;
+  line-height: 30px;
   font-weight: 500;
   white-space: nowrap;
   overflow: hidden;
@@ -1276,6 +1282,7 @@ textarea:hover,
   .app-shell.sidebar-collapsed .sidebar-title,
   .app-shell.sidebar-collapsed .sidebar-primary-action span,
   .app-shell.sidebar-collapsed .thread-card-copy,
+  .app-shell.sidebar-collapsed .sidebar-section-label,
   .app-shell.sidebar-collapsed .sidebar-settings-button span {
     display: none;
   }
