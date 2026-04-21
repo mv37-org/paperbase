@@ -49,7 +49,6 @@ make build-chat-frontend
 `paperbase-chat` reads:
 
 - `PAPERBASE_BASE_URL` for the backend base URL
-- `PAPERBASE_API_KEY` for the backend bearer token
 - `PAPERBASE_CHAT_HOST` for the bind host
 - `PAPERBASE_CHAT_PORT` for the bind port
 

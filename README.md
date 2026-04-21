@@ -208,7 +208,7 @@ make run-chat
 ```
 
 That starts the chat UI on `http://127.0.0.1:8091` by default.
-It talks to `paperbase` over HTTP using the same `PAPERBASE_BASE_URL` and `PAPERBASE_API_KEY` values already used by the plugin, while serving the built React app from `chat/src/paperbase_chat/static/`.
+It serves the built React app from `chat/src/paperbase_chat/static/` and points browser requests at `paperbase` with `PAPERBASE_BASE_URL`.
 
 ## How to use it from Codex locally
 
