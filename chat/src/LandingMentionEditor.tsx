@@ -283,7 +283,7 @@ export function LandingMentionEditor({ value: plainText, onChange }: Props) {
             renderElement={renderElement}
             renderPlaceholder={renderPlaceholder}
             onKeyDown={onKeyDown}
-            placeholder="Ask about agent loops, eval design, memory systems, or inference architecture. Type @ to tag a paper."
+            placeholder="Ask about agent design, evals, or inference. Type @ to tag a paper."
             spellCheck={false}
             autoFocus={false}
           />

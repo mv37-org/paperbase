@@ -365,8 +365,7 @@ export default function App() {
             <h1 className="landing-title">Paperbase</h1>
             <p className="landing-subtitle">Research patterns for building better AI agents and systems.</p>
             <div className="landing-copy">
-              <p>Paperbase helps AI researchers and agent builders keep up with fast-moving work without losing track of the original sources.</p>
-              <p>Ask broad questions, compare ideas across papers, and pull out the design patterns that matter when you are building agents and AI systems.</p>
+              <p>Paperbase helps AI researchers and agent builders keep up with fast-moving work without losing track of the original sources, so they can ask broad questions, compare ideas across papers, and pull out the design patterns that matter when building agents and AI systems.</p>
             </div>
 
             <form className="prompt-shell" onSubmit={handleLandingSubmit}>
