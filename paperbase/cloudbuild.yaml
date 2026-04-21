@@ -7,7 +7,7 @@ steps:
       - -ceu
       - |
         curl -fsSL https://vite.plus | bash
-        export PATH="$HOME/.vite-plus/bin:$PATH"
+        export PATH="$$HOME/.vite-plus/bin:$$PATH"
         vp install
         vp build
 

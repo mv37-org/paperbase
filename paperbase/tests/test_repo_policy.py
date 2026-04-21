@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from paperbase.config import repo_root
 
 
@@ -25,3 +27,19 @@ def test_profile_workflow_delegates_to_make_profile():
     workflow = _read_repo_file(".github/workflows/profile.yml")
 
     assert "make profile" in workflow
+
+
+def test_cloudbuild_uses_supported_substitutions_only():
+    cloudbuild = _read_repo_file("paperbase/cloudbuild.yaml")
+    pattern = re.compile(r"(?<!\$)\$(\{[_A-Z][_A-Z0-9]*\}|[A-Z][A-Z0-9_]*)")
+
+    tokens = [match.group(1).strip("{}") for match in pattern.finditer(cloudbuild)]
+    invalid = sorted(
+        {
+            token
+            for token in tokens
+            if token not in {"PROJECT_ID", "SHORT_SHA"} and not token.startswith("_")
+        }
+    )
+
+    assert invalid == []
