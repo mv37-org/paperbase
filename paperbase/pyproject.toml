@@ -41,6 +41,9 @@ paperbase-worker = "paperbase.worker:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+paperbase = ["static/*", "static/assets/*", "static/chunks/*"]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]

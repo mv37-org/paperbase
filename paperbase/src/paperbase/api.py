@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from functools import lru_cache
 import os
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from authlib.integrations.starlette_client import OAuth
 from fastapi import Depends, FastAPI, File, Form, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
 from .auth import clear_browser_session_cookie, require_bearer_token, require_browser_user, set_browser_session_cookie
@@ -54,6 +56,18 @@ app = FastAPI(
     description="Hosted backend for indexing and serving scientific paper artifacts",
 )
 _app_settings = get_settings()
+_PACKAGE_DIR = Path(__file__).resolve().parent
+_STATIC_DIR = _PACKAGE_DIR / "static"
+
+
+def _allowed_browser_origins() -> list[str]:
+    origins: list[str] = []
+    for value in (_app_settings.browser_origin, _app_settings.chat_public_url):
+        if value and value not in origins:
+            origins.append(value)
+    return origins
+
+
 app.add_middleware(
     SessionMiddleware,
     secret_key=_app_settings.app_secret,
@@ -62,11 +76,12 @@ app.add_middleware(
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[_app_settings.browser_origin],
+    allow_origins=_allowed_browser_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.mount("/static", StaticFiles(directory=_STATIC_DIR, check_dir=False), name="static")
 
 
 def _resolve_bind_address() -> tuple[str, int]:
@@ -128,6 +143,16 @@ def get_google_oauth_client():
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/", response_class=HTMLResponse)
+def home(request: Request) -> HTMLResponse:
+    if not _STATIC_DIR.exists():
+        return HTMLResponse("Chat frontend not built. Run `make build-chat-frontend`.", status_code=503)
+    html = (_STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    api_base_url = str(request.base_url).rstrip("/")
+    html = html.replace("__PAPERBASE_BASE_URL__", api_base_url)
+    return HTMLResponse(html)
 
 
 @app.post("/v1/index/papers/arxiv/{arxiv_id}", response_model=JobResponse, dependencies=[Depends(require_bearer_token)])

@@ -7,7 +7,7 @@ export default defineConfig({
   base: "/static/",
   plugins: [react()],
   build: {
-    outDir: resolve(__dirname, "../src/paperbase_chat/static"),
+    outDir: resolve(__dirname, "../paperbase/src/paperbase/static"),
     emptyOutDir: true,
     rollupOptions: {
       output: {

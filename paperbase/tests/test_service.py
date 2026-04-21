@@ -297,6 +297,38 @@ def test_api_flow_for_jobs_and_results(monkeypatch, service: PaperbaseService):
     app.dependency_overrides.clear()
 
 
+def test_root_serves_built_chat_shell():
+    client = TestClient(app)
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert "Paperbase | MV37" in response.text
+    assert 'id="root"' in response.text
+    assert 'href="/static/favicon.png"' in response.text
+    assert "/static/app.js" in response.text
+    assert "/static/app.css" in response.text
+    assert "__PAPERBASE_BASE_URL__" not in response.text
+
+
+def test_static_chat_assets_are_served():
+    client = TestClient(app)
+
+    response = client.get("/static/app.js")
+
+    assert response.status_code == 200
+    assert "javascript" in response.headers["content-type"]
+
+    stylesheet = client.get("/static/app.css")
+
+    assert stylesheet.status_code == 200
+    assert "css" in stylesheet.headers["content-type"]
+
+    favicon = client.get("/static/favicon.png")
+
+    assert favicon.status_code == 200
+
+
 def test_api_bind_address_prefers_explicit_port_then_platform_port(monkeypatch):
     monkeypatch.delenv("PAPERBASE_API_HOST", raising=False)
     monkeypatch.delenv("PAPERBASE_API_PORT", raising=False)

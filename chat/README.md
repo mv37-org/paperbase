@@ -1,24 +1,23 @@
-# paperbase-chat
+# chat
 
-`paperbase-chat` is the browser product in this repo. It keeps `paperbase` as
-the backend API and uses a separate React frontend in `chat/frontend/` built
-with VitePlus.
+`chat/` is the frontend workspace for the Paperbase browser product. It is a
+pure React + VitePlus app with no Python wrapper.
 
 The important split is:
 
 - `paperbase/` owns auth, sessions, uploads, retrieval, and chat APIs
 - `paperbase-plugin/` stays unchanged
-- `chat/` serves the built frontend bundle and the lightweight FastAPI shell
+- `chat/` contains the frontend source only
 
 ## Frontend stack
 
 The chat UI now lives in:
 
-- `chat/frontend/` for React, Slate, and VitePlus source code
-- `chat/src/paperbase_chat/static/` for the built assets served by FastAPI
+- `chat/src/` for React, Slate, and VitePlus source code
+- `paperbase/src/paperbase/static/` for the built assets served by `paperbase`
 
-VitePlus builds directly into the Python package's static directory, so the
-browser app can be shipped without changing the backend API shape.
+VitePlus builds directly into the `paperbase` package's static directory so the
+main backend can serve the app.
 
 ## Run it locally
 
@@ -28,17 +27,16 @@ Start the backend stack first:
 make start-local
 ```
 
-Then, in another terminal:
+To run the frontend dev server in another terminal:
 
 ```bash
 make run-chat
 ```
 
-That target installs the frontend dependencies, builds the React app into
-`chat/src/paperbase_chat/static/`, and starts the chat server on
-[http://127.0.0.1:8091](http://127.0.0.1:8091).
+That starts VitePlus on [http://127.0.0.1:5173](http://127.0.0.1:5173).
+The backend API and browser auth endpoints still come from `paperbase`.
 
-If you only want to rebuild the frontend bundle:
+If you want `paperbase` to serve the built app directly, rebuild the frontend bundle:
 
 ```bash
 make build-chat-frontend
@@ -46,10 +44,9 @@ make build-chat-frontend
 
 ## Environment
 
-`paperbase-chat` reads:
+The frontend reads:
 
 - `PAPERBASE_BASE_URL` for the backend base URL
-- `PAPERBASE_CHAT_HOST` for the bind host
-- `PAPERBASE_CHAT_PORT` for the bind port
+- `VITE_PAPERBASE_BASE_URL` as an optional Vite dev fallback when the HTML placeholder is not replaced by `paperbase`
 
-The defaults match the local stack from the repo `Makefile`.
+The default local dev setup points at `http://127.0.0.1:8080`.

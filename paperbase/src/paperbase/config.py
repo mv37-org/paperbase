@@ -42,8 +42,8 @@ class Settings(BaseSettings):
     local_storage_root: str = Field(default=".paperbase-data")
     log_level: str = Field(default="INFO")
     log_format: str = Field(default="text")
-    browser_origin: str = Field(default="http://127.0.0.1:8091")
-    chat_public_url: str = Field(default="http://127.0.0.1:8091")
+    browser_origin: str = Field(default="http://127.0.0.1:5173")
+    chat_public_url: str = Field(default="http://127.0.0.1:8080")
     app_secret: str = Field(default="paperbase-development-secret")
     encryption_key: str | None = None
     browser_session_cookie_name: str = Field(default="paperbase_browser_session")

@@ -5,7 +5,7 @@ VENV_PYTHON := $(VENV)/bin/python
 VENV_BIN := $(VENV)/bin
 PIP := $(VENV_PYTHON) -m pip
 PYTEST := $(VENV_PYTHON) -m pytest
-CHAT_FRONTEND_DIR := $(CURDIR)/chat/frontend
+CHAT_FRONTEND_DIR := $(CURDIR)/chat
 API_HOST ?= 127.0.0.1
 API_PORT ?= 8080
 PLUGIN_MCP_HOST ?= 127.0.0.1
@@ -34,19 +34,19 @@ PLUGIN_LOG := $(RUN_DIR)/paperbase-plugin-mcp.log
 help:
 	@echo "Available targets:"
 	@echo "  make venv            Create .venv and bootstrap pip"
-	@echo "  make install         Install paperbase, paperbase-plugin, and chat with dev deps"
+	@echo "  make install         Install paperbase, paperbase-plugin, and chat frontend deps"
 	@echo "  make install-paperbase Install only the paperbase backend"
 	@echo "  make install-plugin  Install only the paperbase plugin"
-	@echo "  make install-chat    Install the paperbase chat app and build the VitePlus frontend"
-	@echo "  make build-chat-frontend Install frontend deps and build chat/static assets"
+	@echo "  make install-chat    Install chat frontend dependencies"
+	@echo "  make build-chat-frontend Install frontend deps and build assets into paperbase/static"
 	@echo "  make test            Run all tests"
 	@echo "  make test-paperbase  Run backend tests only"
 	@echo "  make test-plugin     Run plugin tests only"
-	@echo "  make test-chat       Run chat app tests only"
+	@echo "  make test-chat       Run chat frontend checks only"
 	@echo "  make run-api         Run the paperbase FastAPI server"
 	@echo "  make run-worker      Run the paperbase background worker"
 	@echo "  make run-plugin-mcp  Run the plugin MCP server locally"
-	@echo "  make run-chat        Run the lightweight paper chat app"
+	@echo "  make run-chat        Run the chat VitePlus dev server"
 	@echo "  make start-all       Start API, worker, and plugin MCP HTTP bridge in the background"
 	@echo "  make start-local     Start local Postgres/filesystem stack with JSON logs attached"
 	@echo "                       Options: LOCAL_STREAM_LOGS=0 LOCAL_AUTO_SYNC_LATEST=1 LOCAL_INITIAL_SYNC_LATEST=1"
@@ -69,25 +69,24 @@ install-paperbase: venv
 install-plugin: venv
 	$(PIP) install -e './paperbase-plugin[dev]'
 
-install-chat: venv build-chat-frontend
-	$(PIP) install -e './chat[dev]'
-
-build-chat-frontend:
+install-chat:
 	cd $(CHAT_FRONTEND_DIR) && $(VP) install
+
+build-chat-frontend: install-chat
 	cd $(CHAT_FRONTEND_DIR) && $(VP) build
 
 test: test-paperbase test-plugin test-chat
 
-test-paperbase: venv
+test-paperbase: venv build-chat-frontend
 	$(PYTEST) paperbase/tests -q
 
 test-plugin: venv
 	$(PYTEST) paperbase-plugin/tests -q
 
-test-chat: venv build-chat-frontend
-	$(PYTEST) chat/tests -q
+test-chat: build-chat-frontend
+	cd $(CHAT_FRONTEND_DIR) && $(VP) run typecheck
 
-run-api: install-paperbase
+run-api: install-paperbase build-chat-frontend
 	$(VENV_BIN)/paperbase-api
 
 run-worker: install-paperbase
@@ -97,9 +96,9 @@ run-plugin-mcp: install-plugin
 	$(VENV_BIN)/paperbase-plugin-mcp
 
 run-chat: install-chat
-	$(VENV_BIN)/paperbase-chat
+	cd $(CHAT_FRONTEND_DIR) && $(VP) dev
 
-start-all: install
+start-all: install build-chat-frontend
 	@mkdir -p $(RUN_DIR)
 	@$(MAKE) kill-all >/dev/null
 	@nohup env PAPERBASE_API_HOST=$(API_HOST) PAPERBASE_API_PORT=$(API_PORT) $(VENV_BIN)/paperbase-api > $(API_LOG) 2>&1 & echo $$! > $(API_PID)
@@ -134,7 +133,7 @@ start-all: install
 	@echo "Started paperbase worker pid=$$(cat $(WORKER_PID)) log=$(WORKER_LOG)"
 	@echo "Started plugin MCP       pid=$$(cat $(PLUGIN_PID)) url=$(PLUGIN_MCP_URL) log=$(PLUGIN_LOG)"
 
-start-local: install
+start-local: install build-chat-frontend
 	@mkdir -p $(RUN_DIR) "$(LOCAL_STORAGE_ROOT)"
 	@$(MAKE) kill-all >/dev/null
 	@nohup $(LOCAL_STACK_ENV) PAPERBASE_API_HOST=$(API_HOST) PAPERBASE_API_PORT=$(API_PORT) $(VENV_BIN)/paperbase-api > $(API_LOG) 2>&1 & echo $$! > $(API_PID)

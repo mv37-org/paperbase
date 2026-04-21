@@ -29,7 +29,7 @@ The chat app knows how to:
 
 - serve the browser UI for the chat product
 - talk to the `paperbase` browser API over HTTP
-- ship a React frontend built with VitePlus from `chat/frontend/`
+- ship a React frontend built with VitePlus from `chat/`
 
 ## What “index a paper” means
 
@@ -66,9 +66,7 @@ That will:
 - create `.venv/`
 - install `paperbase`
 - install `paperbase-plugin`
-- install `chat`
-- install the `chat/frontend` VitePlus dependencies
-- build the React frontend into `chat/src/paperbase_chat/static/`
+- install the `chat/` VitePlus dependencies
 - install test dependencies
 
 ## How to run tests
@@ -201,14 +199,22 @@ That runs the shared MCP server from `paperbase-plugin/` over normal stdio, whic
 
 ## How to run the lightweight chat app locally
 
-Start the backend first, then in another terminal:
+To work on the frontend with a Vite dev server:
 
 ```bash
 make run-chat
 ```
 
-That starts the chat UI on `http://127.0.0.1:8091` by default.
-It serves the built React app from `chat/src/paperbase_chat/static/` and points browser requests at `paperbase` with `PAPERBASE_BASE_URL`.
+That starts the chat UI on `http://127.0.0.1:5173` by default and points browser requests at `paperbase`.
+
+If you want the main backend to serve the built chat app, build the frontend and run the API:
+
+```bash
+make build-chat-frontend
+make run-api
+```
+
+That serves the built app from `paperbase/src/paperbase/static/` at `http://127.0.0.1:8080`.
 
 ## How to use it from Codex locally
 
