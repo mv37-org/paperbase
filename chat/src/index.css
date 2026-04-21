@@ -780,6 +780,7 @@ textarea::placeholder,
   text-transform: none;
   letter-spacing: 0;
   font-size: 12px;
+  color: var(--text);
 }
 
 .sidebar-settings-footer {
