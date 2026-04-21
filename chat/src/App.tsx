@@ -83,18 +83,6 @@ function displayThreadTitle(title: string) {
   return title.trim() || "New chat";
 }
 
-function getInitials(value: string, fallback = "PB") {
-  const tokens = value
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2);
-  if (tokens.length === 0) {
-    return fallback;
-  }
-  return tokens.map((token) => token[0]?.toUpperCase() ?? "").join("");
-}
-
 function GoogleButton() {
   return (
     <button className="oauth-button" data-google-login="true" type="button" onClick={() => (window.location.href = googleLoginUrl())}>
@@ -623,7 +611,6 @@ export default function App() {
                         title={title}
                         onClick={() => void handleThreadSelection(thread.thread_id)}
                       >
-                        <div className="thread-card-icon">{getInitials(title, "N")}</div>
                         <div className="thread-card-copy">
                           <strong>{title}</strong>
                         </div>

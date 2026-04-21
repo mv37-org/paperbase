@@ -714,49 +714,36 @@ textarea::placeholder,
 .thread-list,
 .document-list {
   display: grid;
-  gap: 4px;
+  gap: 0;
   min-height: 0;
   overflow: auto;
 }
 
 .thread-card,
 .doc-card {
-  padding: 12px;
+  padding: 8px 6px;
   cursor: pointer;
 }
 
 .thread-card {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: center;
-  gap: 12px;
+  display: block;
   border-radius: var(--radius);
   background: transparent;
   border: 1px solid transparent;
 }
 
-.thread-card-icon {
-  width: 30px;
-  height: 30px;
-  border-radius: var(--radius);
-  display: grid;
-  place-items: center;
-  background: transparent;
-  color: var(--muted);
-  border: 1px solid var(--line);
-  font-size: 11px;
-  font-weight: 500;
-  letter-spacing: 0.04em;
-}
-
 .thread-card-copy {
   min-width: 0;
-  display: block;
+  display: grid;
 }
 
 .thread-card-copy strong {
-  font-size: 14px;
-  line-height: 1.3;
+  font-size: 13px;
+  line-height: 1.4;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .thread-card.active,
