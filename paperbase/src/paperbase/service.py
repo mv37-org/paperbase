@@ -316,43 +316,36 @@ class PaperbaseService:
         chunks_updated = 0
         page = max(64, min(limit, 512))
         remaining = limit
-        # Guard against infinite loops: a paper whose embedding encode keeps
-        # failing would otherwise stay in the frontier forever.
-        attempted: set[str] = set()
+        # Keyset cursor over the same ordering used by the repo method. Advances
+        # after every fetched page so a paper that failed to encode this round
+        # does not keep the frontier stuck (failed rows still match the
+        # backfill predicate).
+        after: PaperResponse | None = None
 
         while remaining > 0:
             batch = self.repository.list_papers_needing_embedding_backfill(
                 limit=min(page, remaining),
                 include_chunks=include_chunks,
+                after=after,
             )
             if not batch:
                 break
-            new_in_batch = [p for p in batch if p.paper_id not in attempted]
-            if not new_in_batch:
-                # Frontier hasn't changed — every candidate has already been
-                # tried this run. Stop instead of spinning forever.
-                break
-            for paper in new_in_batch:
-                attempted.add(paper.paper_id)
 
-            # Paper-level embeddings in one batched encode for the papers that
-            # still need the paper vector.
-            papers_for_paper_embed = [
-                p for p in new_in_batch if self._paper_needs_paper_embedding(p)
+            # Paper-level embeddings in one batched encode.
+            inputs = [
+                "\n".join(
+                    part for part in (paper.title, paper.tldr or paper.abstract, paper.summary_short) if part
+                )
+                for paper in batch
             ]
-            if papers_for_paper_embed:
-                inputs = [
-                    "\n".join(p for p in (paper.title, paper.tldr or paper.abstract, paper.summary_short) if p)
-                    for paper in papers_for_paper_embed
-                ]
-                vectors = self.embeddings.encode_batch(inputs)
-                if vectors is not None and len(vectors) == len(papers_for_paper_embed):
-                    for paper, vector in zip(papers_for_paper_embed, vectors):
-                        self.repository.update_paper_embedding(paper.paper_id, vector)
-                        papers_updated += 1
+            vectors = self.embeddings.encode_batch(inputs)
+            if vectors is not None and len(vectors) == len(batch):
+                for paper, vector in zip(batch, vectors):
+                    self.repository.update_paper_embedding(paper.paper_id, vector)
+                    papers_updated += 1
 
             if include_chunks:
-                for paper in new_in_batch:
+                for paper in batch:
                     missing = self.repository.list_chunks_missing_embedding(paper.paper_id)
                     if not missing:
                         continue
@@ -365,14 +358,14 @@ class PaperbaseService:
                         self.repository.update_chunk_embedding(chunk["chunk_id"], vector)
                         chunks_updated += 1
 
-            remaining -= len(new_in_batch)
+            after = batch[-1]
+            remaining -= len(batch)
             logger.info(
                 "reindex_missing_embeddings progress",
                 extra={
                     "event": "reindex.progress",
                     "papers_updated": papers_updated,
                     "chunks_updated": chunks_updated,
-                    "attempted": len(attempted),
                 },
             )
 
@@ -382,16 +375,9 @@ class PaperbaseService:
                 "event": "reindex.completed",
                 "papers_updated": papers_updated,
                 "chunks_updated": chunks_updated,
-                "attempted": len(attempted),
             },
         )
         return {"papers_updated": papers_updated, "chunks_updated": chunks_updated}
-
-    def _paper_needs_paper_embedding(self, paper: PaperResponse) -> bool:
-        """Best-effort hint for the memory repo; the SQL repo carries embeddings
-        in the row but PaperResponse doesn't ship them, so we always try to
-        refresh a paper's vector when it shows up in the backfill frontier."""
-        return True
 
     def enqueue_summarize_top_cited_job(self, *, limit: int = 500_000) -> JobResponse:
         job = self.repository.create_job("summarize_top_cited", {"limit": limit})
@@ -495,6 +481,9 @@ class PaperbaseService:
                     if len(in_flight) >= window:
                         _drain(wait_all=False)
                     in_flight.add(pool.submit(_summarize_one, paper))
+                # Advance the keyset cursor even if some submissions failed;
+                # failed papers still match the predicate, so without advancing
+                # the next fetch would return the same frontier forever.
                 after = batch[-1]
                 remaining -= len(batch)
             _drain(wait_all=True)

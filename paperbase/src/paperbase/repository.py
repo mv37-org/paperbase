@@ -136,6 +136,55 @@ class JobORM(Base):
     finished_at: Mapped[Any | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+_SUGGEST_HIGHLIGHT_RADIUS = 80
+_SUGGEST_HIGHLIGHT_FALLBACK = 160
+
+
+def _extract_highlight(text_value: str | None, query: str) -> str:
+    """Produce a short snippet of ``text_value`` anchored on ``query``.
+
+    Case-insensitive substring search; if the query isn't a literal substring
+    (fuzzy-only trigram match), return the leading slice so the frontend still
+    has something coherent to render.
+    """
+    text_value = (text_value or "").strip()
+    if not text_value:
+        return ""
+    haystack = text_value.lower()
+    needle = query.strip().lower()
+    if needle and needle in haystack:
+        idx = haystack.find(needle)
+        start = max(0, idx - _SUGGEST_HIGHLIGHT_RADIUS)
+        end = min(len(text_value), idx + len(needle) + _SUGGEST_HIGHLIGHT_RADIUS)
+        prefix = "…" if start > 0 else ""
+        suffix = "…" if end < len(text_value) else ""
+        return f"{prefix}{text_value[start:end].strip()}{suffix}"
+    return text_value[:_SUGGEST_HIGHLIGHT_FALLBACK].strip()
+
+
+def _suggest_row_to_payload(q: str, row: Any) -> dict[str, Any]:
+    matched_field = row["matched_field"]
+    if matched_field == "authors":
+        highlight_source = row.get("authors")
+    elif matched_field == "summary":
+        highlight_source = row.get("summary_short") or row.get("tldr")
+    else:
+        # title_prefix or title
+        highlight_source = row.get("title")
+    return {
+        "paper_id": row["paper_id"],
+        "arxiv_id": row["arxiv_id"],
+        "title": row["title"],
+        "authors": row["authors"],
+        "summary_short": row.get("summary_short") or row.get("tldr") or "",
+        "citation_count": row.get("citation_count") or 0,
+        "published": row.get("published") or "",
+        "score": float(row.get("score") or 0.0),
+        "matched_field": matched_field,
+        "highlight_snippet": _extract_highlight(highlight_source, q),
+    }
+
+
 def _paper_from_orm(row: PaperORM) -> PaperResponse:
     return PaperResponse(
         paper_id=row.paper_id,
@@ -220,7 +269,12 @@ class PaperRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def list_papers_needing_summary(self, *, limit: int, after: PaperResponse | None = None) -> list[PaperResponse]:
+    def list_papers_needing_summary(
+        self,
+        *,
+        limit: int,
+        after: PaperResponse | None = None,
+    ) -> list[PaperResponse]:
         raise NotImplementedError
 
     @abstractmethod
@@ -229,6 +283,7 @@ class PaperRepository(ABC):
         *,
         limit: int,
         include_chunks: bool = True,
+        after: PaperResponse | None = None,
     ) -> list[PaperResponse]:
         """Return papers whose paper-level embedding is missing OR, when
         ``include_chunks`` is true, papers that have at least one chunk with a
@@ -603,7 +658,12 @@ class SqlAlchemyPaperRepository(PaperRepository):
             session.flush()
             return _paper_from_orm(row)
 
-    def list_papers_needing_summary(self, *, limit: int, after: PaperResponse | None = None) -> list[PaperResponse]:
+    def list_papers_needing_summary(
+        self,
+        *,
+        limit: int,
+        after: PaperResponse | None = None,
+    ) -> list[PaperResponse]:
         query = (
             select(PaperORM)
             .where((PaperORM.summary_eli5 == "") | (PaperORM.summary_eli5.is_(None)))
@@ -643,7 +703,14 @@ class SqlAlchemyPaperRepository(PaperRepository):
         *,
         limit: int,
         include_chunks: bool = True,
+        after: PaperResponse | None = None,
     ) -> list[PaperResponse]:
+        """Keyset-paginated backfill frontier. Use the same ordering as
+        ``list_papers_needing_summary`` so both backfill loops share a single
+        advancement story — passing the last returned paper as ``after`` on the
+        next call skips past it regardless of whether its embedding actually
+        got written.
+        """
         base_sql = """
             SELECT papers.*
             FROM papers
@@ -652,6 +719,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 papers.embedding IS NULL
                 {chunk_predicate}
               )
+              {after_predicate}
             ORDER BY
               papers.influential_citation_count DESC NULLS LAST,
               papers.citation_count DESC NULLS LAST,
@@ -665,10 +733,33 @@ class SqlAlchemyPaperRepository(PaperRepository):
             if include_chunks
             else ""
         )
-        sql = text(base_sql.format(chunk_predicate=chunk_predicate))
+        params: dict[str, Any] = {"limit": limit}
+        after_predicate = ""
+        if after is not None:
+            after_predicate = """AND (
+                papers.influential_citation_count < :after_influential
+                OR (papers.influential_citation_count = :after_influential
+                    AND papers.citation_count < :after_citation)
+                OR (papers.influential_citation_count = :after_influential
+                    AND papers.citation_count = :after_citation
+                    AND papers.published < :after_published)
+                OR (papers.influential_citation_count = :after_influential
+                    AND papers.citation_count = :after_citation
+                    AND papers.published = :after_published
+                    AND papers.paper_id > :after_paper_id)
+            )"""
+            params.update(
+                {
+                    "after_influential": after.influential_citation_count or 0,
+                    "after_citation": after.citation_count or 0,
+                    "after_published": after.published or "",
+                    "after_paper_id": after.paper_id,
+                }
+            )
+        sql = text(base_sql.format(chunk_predicate=chunk_predicate, after_predicate=after_predicate))
         with self._session() as session:
             rows = session.scalars(
-                select(PaperORM).from_statement(sql).params(limit=limit)
+                select(PaperORM).from_statement(sql).params(**params)
             ).all()
         return [_paper_from_orm(row) for row in rows]
 
@@ -794,6 +885,9 @@ class SqlAlchemyPaperRepository(PaperRepository):
         q = (q or "").strip()
         if not q:
             return []
+        # Match on title, authors, summary_short, and tldr (in that preference
+        # order when resolving matched_field). `%` uses pg_trgm word-similarity
+        # and is backed by GIN indexes created in init().
         sql = text(
             """
             WITH scored AS (
@@ -807,21 +901,28 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     citation_count,
                     published,
                     similarity(coalesce(title, ''), :q) AS title_sim,
-                    similarity(coalesce(authors, ''), :q) AS authors_sim
+                    similarity(coalesce(authors, ''), :q) AS authors_sim,
+                    GREATEST(
+                        similarity(coalesce(summary_short, ''), :q),
+                        similarity(coalesce(tldr, ''), :q)
+                    ) AS summary_sim
                 FROM papers
                 WHERE title % :q
                    OR authors % :q
+                   OR summary_short % :q
+                   OR tldr % :q
                    OR title ILIKE :prefix_like
             )
             SELECT
                 paper_id, arxiv_id, title, authors, summary_short, tldr,
                 citation_count, published,
-                title_sim, authors_sim,
-                GREATEST(title_sim, authors_sim) AS score,
+                title_sim, authors_sim, summary_sim,
+                GREATEST(title_sim, authors_sim, summary_sim) AS score,
                 CASE
                     WHEN title ILIKE :prefix_like THEN 'title_prefix'
-                    WHEN title_sim >= authors_sim THEN 'title'
-                    ELSE 'authors'
+                    WHEN title_sim >= authors_sim AND title_sim >= summary_sim THEN 'title'
+                    WHEN authors_sim >= summary_sim THEN 'authors'
+                    ELSE 'summary'
                 END AS matched_field
             FROM scored
             ORDER BY
@@ -838,17 +939,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 {"q": q, "prefix_like": f"{q}%", "limit": limit},
             ).mappings().all()
         return [
-            {
-                "paper_id": row["paper_id"],
-                "arxiv_id": row["arxiv_id"],
-                "title": row["title"],
-                "authors": row["authors"],
-                "summary_short": row["summary_short"] or row["tldr"] or "",
-                "citation_count": row["citation_count"] or 0,
-                "published": row["published"] or "",
-                "score": float(row["score"] or 0.0),
-                "matched_field": row["matched_field"],
-            }
+            _suggest_row_to_payload(q, row)
             for row in rows
         ]
 
@@ -1486,7 +1577,12 @@ class MemoryPaperRepository(PaperRepository):
         self.papers[paper_id] = updated
         return updated
 
-    def list_papers_needing_summary(self, *, limit: int, after: PaperResponse | None = None) -> list[PaperResponse]:
+    def list_papers_needing_summary(
+        self,
+        *,
+        limit: int,
+        after: PaperResponse | None = None,
+    ) -> list[PaperResponse]:
         candidates = [
             paper
             for paper in self.papers.values()
@@ -1509,6 +1605,7 @@ class MemoryPaperRepository(PaperRepository):
         *,
         limit: int,
         include_chunks: bool = True,
+        after: PaperResponse | None = None,
     ) -> list[PaperResponse]:
         def needs_backfill(paper: PaperResponse) -> bool:
             if paper.index_status != "indexed":
@@ -1524,9 +1621,17 @@ class MemoryPaperRepository(PaperRepository):
 
         candidates = [paper for paper in self.papers.values() if needs_backfill(paper)]
         candidates.sort(
-            key=lambda p: (p.influential_citation_count, p.citation_count, p.published, p.paper_id),
-            reverse=True,
+            key=lambda p: (
+                -(p.influential_citation_count or 0),
+                -(p.citation_count or 0),
+                -int((p.published or "").replace("-", "") or 0),
+                p.paper_id,
+            )
         )
+        if after is not None:
+            candidates = [
+                paper for paper in candidates if _paper_needs_summary_after(paper, after)
+            ]
         return candidates[:limit]
 
     def update_paper_embedding(self, paper_id: str, embedding: list[float]) -> None:
@@ -1596,33 +1701,35 @@ class MemoryPaperRepository(PaperRepository):
         q_lower = q.lower()
         hits: list[dict[str, Any]] = []
         for paper in self.papers.values():
-            title = (paper.title or "")
-            authors = (paper.authors or "")
+            title = paper.title or ""
+            authors = paper.authors or ""
+            summary_text = paper.summary_short or paper.tldr or ""
             title_prefix = title.lower().startswith(q_lower)
             title_match = q_lower in title.lower()
             authors_match = q_lower in authors.lower()
-            if not (title_prefix or title_match or authors_match):
+            summary_match = q_lower in summary_text.lower()
+            if not (title_prefix or title_match or authors_match or summary_match):
                 continue
             if title_prefix:
-                matched_field = "title_prefix"
-                score = 1.0
+                matched_field, score, highlight_source = "title_prefix", 1.0, title
             elif title_match:
-                matched_field = "title"
-                score = 0.8
+                matched_field, score, highlight_source = "title", 0.8, title
+            elif authors_match:
+                matched_field, score, highlight_source = "authors", 0.6, authors
             else:
-                matched_field = "authors"
-                score = 0.6
+                matched_field, score, highlight_source = "summary", 0.5, summary_text
             hits.append(
                 {
                     "paper_id": paper.paper_id,
                     "arxiv_id": paper.arxiv_id,
                     "title": paper.title,
                     "authors": paper.authors,
-                    "summary_short": paper.summary_short or paper.tldr or "",
+                    "summary_short": summary_text,
                     "citation_count": paper.citation_count or 0,
                     "published": paper.published or "",
                     "score": score,
                     "matched_field": matched_field,
+                    "highlight_snippet": _extract_highlight(highlight_source, q),
                 }
             )
         hits.sort(
