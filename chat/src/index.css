@@ -113,6 +113,13 @@ textarea {
   stroke-linejoin: round;
 }
 
+.landing-login-icon svg path:nth-of-type(2),
+.landing-login-icon svg path:nth-of-type(3) {
+  transition: transform 140ms ease;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
 .landing-login-label {
   padding: 0 8px;
   border-left: 1px solid currentColor;
@@ -1280,6 +1287,13 @@ textarea {
   color: var(--landing-login-blue);
   background: rgba(43, 98, 228, 0.14);
   box-shadow: 0 3px 10px rgba(43, 98, 228, 0.08);
+}
+
+.landing-login-button:hover .landing-login-icon svg path:nth-of-type(2),
+.landing-login-button:hover .landing-login-icon svg path:nth-of-type(3),
+.landing-login-button:focus-visible .landing-login-icon svg path:nth-of-type(2),
+.landing-login-button:focus-visible .landing-login-icon svg path:nth-of-type(3) {
+  transform: translateX(1.5px);
 }
 
 .landing-login-button:active {
