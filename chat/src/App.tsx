@@ -161,6 +161,14 @@ function displayThreadTitle(title: string) {
   return title.trim() || "New chat";
 }
 
+function truncateTabTitle(title: string) {
+  const words = displayThreadTitle(title).split(/\s+/).filter(Boolean);
+  if (words.length <= 4) {
+    return words.join(" ");
+  }
+  return `${words.slice(0, 4).join(" ")}…`;
+}
+
 function shouldShowThreadInSidebar(thread: ChatThreadSummary) {
   return thread.title.trim().length > 0 || thread.last_message_preview.trim().length > 0;
 }
@@ -312,8 +320,21 @@ export default function App() {
   const authenticated = Boolean(session?.authenticated);
   const sidebarThreads = useMemo(() => threads.filter(shouldShowThreadInSidebar), [threads]);
   const activeThread = activeThreadId ? threadMap[activeThreadId] ?? null : null;
-  const activeThreadTitle = activeThread ? displayThreadTitle(activeThread.title) : "New chat";
   const paperDrawerOpen = Boolean(paperDrawer);
+  const openTabItems = useMemo(
+    () =>
+      openTabs.map((threadId) => {
+        const loadedThread = threadMap[threadId];
+        const summary = threads.find((thread) => thread.thread_id === threadId);
+        const title = loadedThread?.title ?? summary?.title ?? "New chat";
+        return {
+          threadId,
+          title: displayThreadTitle(title),
+          tabTitle: truncateTabTitle(title),
+        };
+      }),
+    [openTabs, threadMap, threads],
+  );
 
   useEffect(() => {
     const handlePopState = () => {
@@ -506,6 +527,21 @@ export default function App() {
     },
     [refreshThreads],
   );
+
+  const closeThreadTab = useCallback((threadId: string) => {
+    setOpenTabs((current) => {
+      const nextTabs = current.filter((value) => value !== threadId);
+      setActiveThreadId((currentActive) => {
+        if (currentActive !== threadId) {
+          return currentActive;
+        }
+        const closingIndex = current.indexOf(threadId);
+        const fallbackId = nextTabs[Math.max(0, closingIndex - 1)] ?? nextTabs[closingIndex] ?? null;
+        return fallbackId;
+      });
+      return nextTabs;
+    });
+  }, []);
 
   const sendMessage = useCallback(
     async (threadId: string, content: string) => {
@@ -700,10 +736,11 @@ export default function App() {
   const bootstrapAuthenticatedUi = useCallback(async () => {
     await refreshUploads();
     const restoredTabs = restoreTabs();
-    setOpenTabs(restoredTabs);
     const loadedThreads = await refreshThreads();
     const availableIds = new Set(loadedThreads.map((thread) => thread.thread_id));
-    for (const threadId of restoredTabs) {
+    const validRestoredTabs = restoredTabs.filter((threadId) => availableIds.has(threadId));
+    setOpenTabs(validRestoredTabs);
+    for (const threadId of validRestoredTabs) {
       if (availableIds.has(threadId) && !threadMapRef.current[threadId]) {
         await fetchAndStoreThread(threadId);
       }
@@ -717,14 +754,9 @@ export default function App() {
       return;
     }
 
-    const firstOpen = restoredTabs.find((threadId) => availableIds.has(threadId));
+    const firstOpen = validRestoredTabs[0];
     if (firstOpen) {
       await openThread(firstOpen);
-      return;
-    }
-
-    if (loadedThreads.length > 0) {
-      await openThread(loadedThreads[0].thread_id);
     }
   }, [createNewThread, fetchAndStoreThread, openThread, refreshThreads, refreshUploads, sendMessage]);
 
@@ -1099,14 +1131,42 @@ export default function App() {
                     className="sidebar-toggle-icon"
                   />
                 </button>
-                <div className="chat-stage-header-copy">
-                  <div className="chat-stage-header-eyebrow">Chat</div>
-                  <strong className="chat-stage-header-title">{activeThreadTitle}</strong>
-                  <div className="chat-stage-header-meta">
-                    {activeThread
-                      ? `${activeThread.messages.length} message${activeThread.messages.length === 1 ? "" : "s"}`
-                      : "Grounded answers from your papers and uploads."}
-                  </div>
+                <div className="chat-tab-strip" role="tablist" aria-label="Open tabs">
+                  {openTabItems.map((tab) => (
+                    <div
+                      key={tab.threadId}
+                      role="tab"
+                      tabIndex={0}
+                      aria-selected={activeThreadId === tab.threadId}
+                      className={`chat-tab${activeThreadId === tab.threadId ? " active" : ""}`}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          void handleThreadSelection(tab.threadId);
+                        }
+                      }}
+                    >
+                      <button
+                        type="button"
+                        className="chat-tab-trigger"
+                        title={tab.title}
+                        onClick={() => void handleThreadSelection(tab.threadId)}
+                      >
+                        <span className="chat-tab-title">{tab.tabTitle}</span>
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={`Close ${tab.title}`}
+                        className="chat-tab-close"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          closeThreadTab(tab.threadId);
+                        }}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
                 </div>
               </div>
             </header>
@@ -1116,7 +1176,7 @@ export default function App() {
                 <div className="chat-stage-spacer">
                   <div className="chat-empty-state">
                     <div className="chat-empty-eyebrow">Empty chat</div>
-                    <strong>{activeThread ? "Start the conversation" : "Start a new chat"}</strong>
+                    <strong>{activeThread ? "Start the conversation" : "Open a chat tab"}</strong>
                     <p>
                       {activeThread
                         ? "Ask about papers, compare ideas, or pull out patterns for the system you are building."
