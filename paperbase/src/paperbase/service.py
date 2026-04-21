@@ -135,6 +135,77 @@ def _table_to_indexable_text(table: Any) -> str:
     return "\n".join(parts).strip()
 
 
+class _TransformersCLSEmbedder:
+    """Wrap a raw HuggingFace AutoModel with CLS pooling + L2 normalization.
+
+    Used for SPECTER2-family models that don't ship a sentence-transformers
+    ``modules.json`` (they're published as adapter-format checkpoints). The
+    SPECTER2 authors document the intended usage as:
+        1. tokenize ``title + SEP + abstract`` up to 512 tokens,
+        2. run through the base encoder,
+        3. take the ``[CLS]`` token,
+        4. L2-normalize.
+    That is exactly what this class does.
+    """
+
+    def __init__(self, model_name: str) -> None:
+        from transformers import AutoModel, AutoTokenizer
+        import torch
+
+        self._torch = torch
+        self._tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self._model = AutoModel.from_pretrained(model_name).eval()
+        # Pick the best available device once, cache it on self; keeps encode
+        # batches off the default CPU path when we have MPS or CUDA.
+        if torch.cuda.is_available():
+            self._device = "cuda"
+        elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            self._device = "mps"
+        else:
+            self._device = "cpu"
+        self._model.to(self._device)
+
+    def encode(
+        self,
+        texts: list[str],
+        *,
+        normalize_embeddings: bool = True,
+        convert_to_numpy: bool = True,
+        show_progress_bar: bool = False,
+    ):
+        torch = self._torch
+        inputs = self._tokenizer(
+            texts,
+            padding=True,
+            truncation=True,
+            max_length=512,
+            return_tensors="pt",
+        ).to(self._device)
+        with torch.inference_mode():
+            hidden = self._model(**inputs).last_hidden_state
+        pooled = hidden[:, 0, :]
+        if normalize_embeddings:
+            pooled = torch.nn.functional.normalize(pooled, p=2, dim=1)
+        if convert_to_numpy:
+            return pooled.detach().cpu().numpy()
+        return pooled
+
+
+# HuggingFace model names that do not ship a sentence-transformers bundle and
+# must be loaded via raw transformers + CLS pooling. Match on substring so that
+# both ``allenai/specter2_base`` and future Allen AI SciRepEval variants
+# (``scirepeval_*``) pick up the same path.
+_TRANSFORMERS_CLS_MODEL_TOKENS: tuple[str, ...] = (
+    "specter2",
+    "scirepeval",
+)
+
+
+def _needs_raw_transformers_path(model_name: str) -> bool:
+    lowered = model_name.lower()
+    return any(token in lowered for token in _TRANSFORMERS_CLS_MODEL_TOKENS)
+
+
 class OptionalEmbeddingProvider:
     # Module-level flags so we log each distinct disabled-state exactly once,
     # rather than once per query.
@@ -158,6 +229,37 @@ class OptionalEmbeddingProvider:
         cached = _MODEL_CACHE.get(self._model_name)
         if cached is not None:
             return cached
+
+        # SPECTER2 and the SciRepEval family are published as adapter models
+        # (no sentence-transformers modules.json); load them via raw
+        # transformers with CLS pooling. Everything else goes through the
+        # sentence-transformers auto-loader, which handles its own pooling.
+        if _needs_raw_transformers_path(self._model_name):
+            try:
+                model = _TransformersCLSEmbedder(self._model_name)
+            except ImportError as exc:
+                if not OptionalEmbeddingProvider._logged_import_failure:
+                    logger.warning(
+                        "Embeddings disabled: transformers import failed",
+                        extra={"event": "embed.import_failed", "error": str(exc)},
+                    )
+                    OptionalEmbeddingProvider._logged_import_failure = True
+                return None
+            except Exception as exc:
+                if not OptionalEmbeddingProvider._logged_load_failure:
+                    logger.warning(
+                        "Embeddings disabled: model failed to load (transformers path)",
+                        extra={
+                            "event": "embed.load_failed",
+                            "model": self._model_name,
+                            "error": str(exc),
+                        },
+                    )
+                    OptionalEmbeddingProvider._logged_load_failure = True
+                return None
+            _MODEL_CACHE[self._model_name] = model
+            return model
+
         try:
             from sentence_transformers import SentenceTransformer
         except Exception as exc:
@@ -198,7 +300,12 @@ class OptionalEmbeddingProvider:
         if model is None:
             return None
         try:
-            vectors = model.encode(texts, normalize_embeddings=True, convert_to_numpy=True, show_progress_bar=False)
+            vectors = model.encode(
+                texts,
+                normalize_embeddings=True,
+                convert_to_numpy=True,
+                show_progress_bar=False,
+            )
         except Exception as exc:
             # This one we log every time — query-level failures are actionable,
             # and we don't want to hide a flapping model behind a once-flag.
