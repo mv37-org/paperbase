@@ -94,10 +94,9 @@
     <div class="modal-backdrop" data-close-modal="true"></div>
     <div class="modal-panel">
       <button class="modal-close" type="button" data-close-modal="true">×</button>
-      <div id="auth-tabs" class="modal-tabs">
-        <button type="button" class="modal-tab active" data-view="login">Log in</button>
-        <button type="button" class="modal-tab" data-view="signup">Sign up</button>
-        <button type="button" class="modal-tab" data-view="reset-request">Forgot password</button>
+      <div class="modal-heading">
+        <h2 id="auth-modal-title" class="modal-title">Log in</h2>
+        <p id="auth-modal-caption" class="modal-caption">Use your account to continue.</p>
       </div>
 
       <div id="modal-flash" class="modal-flash"></div>
@@ -108,7 +107,7 @@
           <input name="password" type="password" placeholder="Password" required />
           <button class="primary-button" type="submit">Log in</button>
         </form>
-        <button id="google-login-button" class="oauth-button" type="button">
+        <button class="oauth-button" data-google-login="true" type="button">
           <svg viewBox="0 0 18 18" aria-hidden="true">
             <path fill="#4285F4" d="M17.64 9.2c0-.63-.06-1.24-.16-1.82H9v3.44h4.84a4.14 4.14 0 0 1-1.8 2.71v2.25h2.9c1.7-1.57 2.7-3.88 2.7-6.58Z"/>
             <path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.9-2.25c-.8.54-1.84.86-3.06.86-2.35 0-4.34-1.59-5.05-3.72H.96v2.32A9 9 0 0 0 9 18Z"/>
@@ -128,22 +127,37 @@
           <input name="display_name" type="text" placeholder="Name" />
           <input name="email" type="email" placeholder="Email" required />
           <input name="password" type="password" placeholder="Password" required />
-          <button type="submit">Create account</button>
+          <button class="primary-button" type="submit">Create account</button>
         </form>
+        <button class="oauth-button" data-google-login="true" type="button">
+          <svg viewBox="0 0 18 18" aria-hidden="true">
+            <path fill="#4285F4" d="M17.64 9.2c0-.63-.06-1.24-.16-1.82H9v3.44h4.84a4.14 4.14 0 0 1-1.8 2.71v2.25h2.9c1.7-1.57 2.7-3.88 2.7-6.58Z"/>
+            <path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.9-2.25c-.8.54-1.84.86-3.06.86-2.35 0-4.34-1.59-5.05-3.72H.96v2.32A9 9 0 0 0 9 18Z"/>
+            <path fill="#FBBC05" d="M3.95 10.71A5.4 5.4 0 0 1 3.67 9c0-.6.1-1.19.28-1.71V4.97H.96A9 9 0 0 0 0 9c0 1.45.35 2.82.96 4.03l2.99-2.32Z"/>
+            <path fill="#EA4335" d="M9 3.58c1.32 0 2.5.45 3.43 1.33l2.57-2.57C13.46.9 11.42 0 9 0A9 9 0 0 0 .96 4.97l2.99 2.32C4.66 5.17 6.65 3.58 9 3.58Z"/>
+          </svg>
+          <span>Continue with Google</span>
+        </button>
+        <div class="auth-links">
+          <button type="button" class="auth-link" data-auth-link="login">Already have an account? Log in</button>
+        </div>
       </div>
 
       <div data-auth-view="reset-request" class="modal-view">
         <form id="forgot-form" class="stack">
           <input name="email" type="email" placeholder="Email" required />
-          <button type="submit">Send reset link</button>
+          <button class="primary-button" type="submit">Send reset link</button>
         </form>
+        <div class="auth-links">
+          <button type="button" class="auth-link" data-auth-link="login">Back to log in</button>
+        </div>
       </div>
 
       <div data-auth-view="reset-password" class="modal-view">
         <form id="reset-form" class="stack">
           <input id="reset-token-input" name="token" type="text" placeholder="Reset token" required />
           <input name="password" type="password" placeholder="New password" required />
-          <button type="submit">Reset password</button>
+          <button class="primary-button" type="submit">Reset password</button>
         </form>
       </div>
 
@@ -151,7 +165,7 @@
         <p class="muted">You get 3 free assistant responses. After that, add your own Anthropic API key to continue chatting.</p>
         <form id="api-key-form" class="stack">
           <input name="api_key" type="password" placeholder="Anthropic API key" required />
-          <button type="submit">Save key</button>
+          <button class="primary-button" type="submit">Save key</button>
         </form>
         <button id="delete-api-key-button" class="danger-link" type="button">Delete saved key</button>
       </div>

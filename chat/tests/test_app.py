@@ -17,7 +17,10 @@ def test_home_renders_static_shell():
     assert 'href="https://mv37.org"' in response.text
     assert "Continue with Google" in response.text
     assert "Create a new account" in response.text
+    assert "Already have an account? Log in" in response.text
     assert "Forgot password" in response.text
+    assert "Use your account to continue." in response.text
+    assert 'id="auth-tabs"' not in response.text
     assert "__PAPERBASE_BASE_URL__" not in response.text
 
 

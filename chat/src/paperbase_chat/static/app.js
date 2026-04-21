@@ -2,6 +2,13 @@
   const API_BASE = window.PAPERBASE_BASE_URL;
   const OPEN_TABS_KEY = "paperbase-open-tabs";
   const PENDING_PROMPT_KEY = "paperbase-pending-prompt";
+  const AUTH_VIEW_COPY = {
+    login: { title: "Log in", caption: "Use your account to continue." },
+    signup: { title: "Create account", caption: "Start a workspace for tracking research-backed product decisions." },
+    "reset-request": { title: "Forgot password", caption: "We will send you a reset link if the account exists." },
+    "reset-password": { title: "Reset password", caption: "Choose a new password for your account." },
+    "api-key": { title: "Anthropic API key", caption: "Add your key after the free responses run out." },
+  };
 
   const state = {
     session: null,
@@ -21,7 +28,8 @@
     landingUploadTrigger: document.getElementById("landing-upload-trigger"),
     exampleList: document.getElementById("example-list"),
     authModal: document.getElementById("auth-modal"),
-    authTabs: document.getElementById("auth-tabs"),
+    modalTitle: document.getElementById("auth-modal-title"),
+    modalCaption: document.getElementById("auth-modal-caption"),
     modalFlash: document.getElementById("modal-flash"),
     sessionSummary: document.getElementById("session-summary"),
     quotaRow: document.getElementById("quota-row"),
@@ -39,17 +47,12 @@
     appUploadFile: document.getElementById("app-upload-file"),
     logoutButton: document.getElementById("logout-button"),
     manageKeyButton: document.getElementById("manage-key-button"),
-    googleLoginButton: document.getElementById("google-login-button"),
     deleteApiKeyButton: document.getElementById("delete-api-key-button"),
     resetTokenInput: document.getElementById("reset-token-input"),
   };
 
   function authViews() {
     return Array.from(document.querySelectorAll("[data-auth-view]"));
-  }
-
-  function authTabs() {
-    return Array.from(document.querySelectorAll(".modal-tab"));
   }
 
   async function api(path, options = {}) {
@@ -88,10 +91,9 @@
 
   function showAuthModal(view = "login") {
     state.authView = view;
-    el.authTabs.classList.toggle("hidden", view === "api-key");
-    authTabs().forEach((tab) => {
-      tab.classList.toggle("active", tab.dataset.view === view);
-    });
+    const copy = AUTH_VIEW_COPY[view] || AUTH_VIEW_COPY.login;
+    el.modalTitle.textContent = copy.title;
+    el.modalCaption.textContent = copy.caption;
     authViews().forEach((viewNode) => {
       viewNode.classList.toggle("visible", viewNode.dataset.authView === view);
     });
@@ -363,10 +365,6 @@
       node.addEventListener("click", hideAuthModal);
     });
 
-    authTabs().forEach((tab) => {
-      tab.addEventListener("click", () => showAuthModal(tab.dataset.view));
-    });
-
     document.querySelectorAll("[data-auth-link]").forEach((node) => {
       node.addEventListener("click", () => showAuthModal(node.dataset.authLink));
     });
@@ -456,8 +454,10 @@
 
     el.manageKeyButton.addEventListener("click", () => showAuthModal("api-key"));
 
-    el.googleLoginButton.addEventListener("click", () => {
-      window.location.href = `${API_BASE}/v1/browser/auth/google/start`;
+    document.querySelectorAll("[data-google-login='true']").forEach((node) => {
+      node.addEventListener("click", () => {
+        window.location.href = `${API_BASE}/v1/browser/auth/google/start`;
+      });
     });
 
     document.getElementById("login-form").addEventListener("submit", async (event) => {

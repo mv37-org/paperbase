@@ -35,7 +35,6 @@ button, input, textarea {
 
 .brandline,
 .section-label,
-.modal-tab,
 .sidebar-button,
 .sidebar-link,
 .danger-link,
@@ -155,12 +154,7 @@ textarea {
   min-width: 0;
 }
 
-#landing-start-button {
-  background: var(--blue);
-  border-color: var(--blue-border);
-  color: #ffffff;
-}
-
+.prompt-button,
 .primary-button {
   background: var(--blue);
   border-color: var(--blue-border);
@@ -420,8 +414,8 @@ textarea {
 
 .modal-panel {
   position: relative;
-  width: min(460px, calc(100vw - 32px));
-  padding: 22px;
+  width: min(280px, calc(100vw - 32px));
+  padding: 16px;
   border-radius: var(--radius);
   background: var(--paper-strong);
   border: 1px solid var(--line);
@@ -436,27 +430,24 @@ textarea {
   border: 0;
   background: none;
   cursor: pointer;
-  font-size: 24px;
+  font-size: 20px;
 }
 
-.modal-tabs {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-bottom: 16px;
+.modal-heading {
+  margin-bottom: 12px;
 }
 
-.modal-tab {
-  border: 1px solid var(--line);
-  background: transparent;
-  border-radius: var(--radius);
-  padding: 8px 12px;
-  cursor: pointer;
+.modal-title {
+  margin: 0;
+  font-size: 16px;
+  line-height: 1.2;
 }
 
-.modal-tab.active {
-  background: var(--accent);
-  color: white;
+.modal-caption {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .modal-view {
@@ -468,9 +459,10 @@ textarea {
 }
 
 .modal-flash {
-  min-height: 22px;
-  margin-bottom: 12px;
+  min-height: 18px;
+  margin-bottom: 10px;
   color: var(--muted);
+  font-size: 12px;
 }
 
 .oauth-button {
