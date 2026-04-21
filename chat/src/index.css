@@ -931,9 +931,9 @@ textarea::placeholder,
 }
 
 .composer-form {
-  border: 0;
-  background: transparent;
-  box-shadow: none;
+  border: 1px solid var(--line);
+  background: var(--paper);
+  box-shadow: 0 4px 12px rgba(16, 24, 40, 0.05);
 }
 
 .chat-stage-header {
@@ -1248,8 +1248,7 @@ textarea::placeholder,
   display: grid;
   gap: 8px;
   padding: 12px 24px 24px;
-  border-top: 1px solid var(--line);
-  background: var(--paper);
+  background: transparent;
 }
 
 .composer-status {
