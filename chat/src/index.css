@@ -175,27 +175,28 @@ textarea {
 .landing-prompt-shell {
   margin-top: 0;
   display: flex;
-  align-items: stretch;
+  align-items: center;
   gap: 8px;
-  padding: 4px 8px;
+  padding: 4px;
   min-height: 44px;
 }
 
 .landing-prompt-shell .landing-editor-root {
   flex: 1 1 auto;
-  display: block;
+  display: flex;
+  align-items: center;
   min-width: 0;
 }
 
 .landing-prompt-shell .prompt-clip {
-  align-self: start;
+  align-self: center;
   flex: 0 0 auto;
-  margin-top: 3px;
+  margin-top: 0;
 }
 
 .landing-prompt-shell .prompt-button {
   flex: 0 0 auto;
-  align-self: end;
+  align-self: center;
   margin-left: auto;
 }
 
@@ -245,6 +246,12 @@ textarea::placeholder,
   width: 100%;
 }
 
+.landing-prompt-shell .mention-editor {
+  display: flex;
+  align-items: center;
+  min-height: 30px;
+}
+
 .mention-editor-input {
   min-height: 20px;
   max-height: 120px;
@@ -259,8 +266,9 @@ textarea::placeholder,
 }
 
 .landing-prompt-shell .mention-editor-input {
-  min-height: 32px;
-  padding-top: 4px;
+  width: 100%;
+  min-height: auto;
+  padding-top: 0;
 }
 
 .mention-editor-input p {
