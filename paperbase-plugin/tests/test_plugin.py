@@ -192,3 +192,46 @@ async def test_mcp_server_exposes_tools(client_session: ClientSession):
     assert qa_payload["shortlisted_papers"][0]["paper_id"] == "arxiv:1"
     assert qa_payload["evidence"][0]["path"] == "sections/introduction.md"
     assert "Agent Paper" in qa_payload["answer"]
+
+
+def test_research_qa_trusts_server_pass_through(monkeypatch):
+    """Short-query server response like [question] must be treated as
+    authoritative — research_qa should not fall back into the heuristic
+    rewriter. Also verifies the reverse: an empty response *does* fall back.
+    """
+    from paperbase_plugin import research_qa as research_qa_module
+
+    class PassThroughClient(StubClient):
+        def __init__(self) -> None:
+            self.expand_calls: list[str] = []
+
+        def expand_query(self, query: str, *, variants: int = 4) -> list[str]:
+            self.expand_calls.append(query)
+            # Mirror the server's short-query behavior.
+            return [query]
+
+    heuristic_calls: list[str] = []
+    original = research_qa_module.rewrite_queries
+
+    def instrumented_rewrite(question: str, *, max_queries: int = 6) -> list[str]:
+        heuristic_calls.append(question)
+        return original(question, max_queries=max_queries)
+
+    monkeypatch.setattr(research_qa_module, "rewrite_queries", instrumented_rewrite)
+
+    client = PassThroughClient()
+    result = research_qa_module.run_research_qa(client, question="agents")
+    assert result["rewritten_queries"] == ["agents"]
+    assert heuristic_calls == [], "heuristic should not run when server responded"
+    assert client.expand_calls == ["agents"]
+
+    # Empty server response *does* fall back to heuristic.
+    class EmptyClient(PassThroughClient):
+        def expand_query(self, query: str, *, variants: int = 4) -> list[str]:
+            self.expand_calls.append(query)
+            return []
+
+    empty_client = EmptyClient()
+    heuristic_calls.clear()
+    research_qa_module.run_research_qa(empty_client, question="how do you build an agent?")
+    assert heuristic_calls, "heuristic must run when server declines"

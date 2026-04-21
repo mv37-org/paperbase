@@ -224,7 +224,19 @@ class PaperRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def list_papers_missing_embedding(self, *, limit: int, offset: int = 0) -> list[PaperResponse]:
+    def list_papers_needing_embedding_backfill(
+        self,
+        *,
+        limit: int,
+        include_chunks: bool = True,
+    ) -> list[PaperResponse]:
+        """Return papers whose paper-level embedding is missing OR, when
+        ``include_chunks`` is true, papers that have at least one chunk with a
+        missing embedding.
+
+        Always returns the current frontier — callers should fetch without an
+        offset and rely on the predicate to drop rows as they get repaired.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -248,6 +260,15 @@ class PaperRepository(ABC):
         query_embedding: list[float] | None = None,
     ) -> dict[str, str]:
         """Return {paper_id: best_chunk_content} for each paper id."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def suggest_papers(self, q: str, *, limit: int = 10) -> list[dict[str, Any]]:
+        """Typeahead-style lookup over title/authors trigram match."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def stats(self) -> dict[str, Any]:
         raise NotImplementedError
 
     @abstractmethod
@@ -399,6 +420,18 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 text(
                     "CREATE INDEX IF NOT EXISTS paper_refs_dst_paper_id "
                     "ON paper_refs (dst_paper_id) WHERE dst_paper_id IS NOT NULL"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS papers_title_trgm "
+                    "ON papers USING gin (title gin_trgm_ops)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS papers_authors_trgm "
+                    "ON papers USING gin (authors gin_trgm_ops)"
                 )
             )
 
@@ -605,20 +638,37 @@ class SqlAlchemyPaperRepository(PaperRepository):
             rows = session.scalars(query).all()
         return [_paper_from_orm(row) for row in rows]
 
-    def list_papers_missing_embedding(self, *, limit: int, offset: int = 0) -> list[PaperResponse]:
+    def list_papers_needing_embedding_backfill(
+        self,
+        *,
+        limit: int,
+        include_chunks: bool = True,
+    ) -> list[PaperResponse]:
+        base_sql = """
+            SELECT papers.*
+            FROM papers
+            WHERE papers.index_status = 'indexed'
+              AND (
+                papers.embedding IS NULL
+                {chunk_predicate}
+              )
+            ORDER BY
+              papers.influential_citation_count DESC NULLS LAST,
+              papers.citation_count DESC NULLS LAST,
+              papers.published DESC,
+              papers.paper_id ASC
+            LIMIT :limit
+        """
+        chunk_predicate = (
+            "OR EXISTS (SELECT 1 FROM text_chunks WHERE text_chunks.paper_id = papers.paper_id "
+            "AND text_chunks.embedding IS NULL)"
+            if include_chunks
+            else ""
+        )
+        sql = text(base_sql.format(chunk_predicate=chunk_predicate))
         with self._session() as session:
             rows = session.scalars(
-                select(PaperORM)
-                .where(PaperORM.embedding.is_(None))
-                .where(PaperORM.index_status == "indexed")
-                .order_by(
-                    PaperORM.influential_citation_count.desc(),
-                    PaperORM.citation_count.desc(),
-                    PaperORM.published.desc(),
-                    PaperORM.paper_id.asc(),
-                )
-                .offset(offset)
-                .limit(limit)
+                select(PaperORM).from_statement(sql).params(limit=limit)
             ).all()
         return [_paper_from_orm(row) for row in rows]
 
@@ -739,6 +789,101 @@ class SqlAlchemyPaperRepository(PaperRepository):
         with self._session() as session:
             rows = session.execute(sql, params).mappings().all()
         return {row["paper_id"]: (row["content"] or "")[:2000] for row in rows}
+
+    def suggest_papers(self, q: str, *, limit: int = 10) -> list[dict[str, Any]]:
+        q = (q or "").strip()
+        if not q:
+            return []
+        sql = text(
+            """
+            WITH scored AS (
+                SELECT
+                    paper_id,
+                    arxiv_id,
+                    title,
+                    authors,
+                    summary_short,
+                    tldr,
+                    citation_count,
+                    published,
+                    similarity(coalesce(title, ''), :q) AS title_sim,
+                    similarity(coalesce(authors, ''), :q) AS authors_sim
+                FROM papers
+                WHERE title % :q
+                   OR authors % :q
+                   OR title ILIKE :prefix_like
+            )
+            SELECT
+                paper_id, arxiv_id, title, authors, summary_short, tldr,
+                citation_count, published,
+                title_sim, authors_sim,
+                GREATEST(title_sim, authors_sim) AS score,
+                CASE
+                    WHEN title ILIKE :prefix_like THEN 'title_prefix'
+                    WHEN title_sim >= authors_sim THEN 'title'
+                    ELSE 'authors'
+                END AS matched_field
+            FROM scored
+            ORDER BY
+                (CASE WHEN title ILIKE :prefix_like THEN 1 ELSE 0 END) DESC,
+                score DESC,
+                citation_count DESC NULLS LAST,
+                published DESC
+            LIMIT :limit
+            """
+        )
+        with self._session() as session:
+            rows = session.execute(
+                sql,
+                {"q": q, "prefix_like": f"{q}%", "limit": limit},
+            ).mappings().all()
+        return [
+            {
+                "paper_id": row["paper_id"],
+                "arxiv_id": row["arxiv_id"],
+                "title": row["title"],
+                "authors": row["authors"],
+                "summary_short": row["summary_short"] or row["tldr"] or "",
+                "citation_count": row["citation_count"] or 0,
+                "published": row["published"] or "",
+                "score": float(row["score"] or 0.0),
+                "matched_field": row["matched_field"],
+            }
+            for row in rows
+        ]
+
+    def stats(self) -> dict[str, Any]:
+        sql = text(
+            """
+            SELECT
+                COUNT(*) AS total_papers,
+                COUNT(*) FILTER (WHERE index_status = 'indexed') AS indexed_papers,
+                COUNT(*) FILTER (WHERE embedding IS NOT NULL) AS papers_with_embedding,
+                COUNT(*) FILTER (WHERE summary_eli5 IS NOT NULL AND summary_eli5 <> '') AS papers_with_summary,
+                MAX(indexed_at) AS last_indexed_at
+            FROM papers
+            """
+        )
+        chunk_sql = text(
+            """
+            SELECT
+                COUNT(*) AS total_chunks,
+                COUNT(*) FILTER (WHERE embedding IS NOT NULL) AS chunks_with_embedding
+            FROM text_chunks
+            """
+        )
+        with self._session() as session:
+            paper_row = session.execute(sql).mappings().one()
+            chunk_row = session.execute(chunk_sql).mappings().one()
+        return {
+            "total_papers": int(paper_row["total_papers"] or 0),
+            "indexed_papers": int(paper_row["indexed_papers"] or 0),
+            "papers_with_embedding": int(paper_row["papers_with_embedding"] or 0),
+            "papers_with_summary": int(paper_row["papers_with_summary"] or 0),
+            "total_chunks": int(chunk_row["total_chunks"] or 0),
+            "chunks_with_embedding": int(chunk_row["chunks_with_embedding"] or 0),
+            "last_indexed_at": paper_row["last_indexed_at"],
+        }
 
     _SELECT_PAPER_COLUMNS = """
         paper_id,
@@ -1254,6 +1399,9 @@ class MemoryPaperRepository(PaperRepository):
         self.result_sets: dict[str, ResultSetResponse] = {}
         self.jobs: dict[str, JobResponse] = {}
         self.paper_refs: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        # Paper-level embeddings, tracked out-of-band because PaperResponse
+        # doesn't carry them on the wire.
+        self.paper_embeddings: dict[str, list[float] | None] = {}
 
     def init(self) -> None:
         return None
@@ -1278,6 +1426,8 @@ class MemoryPaperRepository(PaperRepository):
         response = PaperResponse(paper_id=paper_id, **canonical.model_dump())
         self.papers[paper_id] = response
         self.search_documents[paper_id] = search_document
+        if embedding is not None:
+            self.paper_embeddings[paper_id] = embedding
         return response
 
     def upsert_paper_shallow(self, paper: PaperMetadata) -> PaperResponse:
@@ -1321,7 +1471,12 @@ class MemoryPaperRepository(PaperRepository):
         return self.papers.get(canonical_paper_id(arxiv_id))
 
     def replace_text_chunks(self, paper_id: str, chunks: list[dict[str, Any]]) -> None:
-        self.text_chunks[paper_id] = chunks
+        # Match the SQL path: assign a stable chunk_id so downstream updates
+        # like update_chunk_embedding can find the row again.
+        stamped: list[dict[str, Any]] = []
+        for chunk in chunks:
+            stamped.append({**chunk, "chunk_id": chunk.get("chunk_id") or new_id("chunk")})
+        self.text_chunks[paper_id] = stamped
 
     def update_summaries(self, paper_id: str, *, summary_short: str, summary_eli5: str) -> PaperResponse | None:
         existing = self.papers.get(paper_id)
@@ -1349,22 +1504,34 @@ class MemoryPaperRepository(PaperRepository):
             candidates = [paper for paper in candidates if _paper_needs_summary_after(paper, after)]
         return candidates[:limit]
 
-    def list_papers_missing_embedding(self, *, limit: int, offset: int = 0) -> list[PaperResponse]:
-        candidates = [
-            paper for paper in self.papers.values() if paper.index_status == "indexed"
-        ]
+    def list_papers_needing_embedding_backfill(
+        self,
+        *,
+        limit: int,
+        include_chunks: bool = True,
+    ) -> list[PaperResponse]:
+        def needs_backfill(paper: PaperResponse) -> bool:
+            if paper.index_status != "indexed":
+                return False
+            if self.paper_embeddings.get(paper.paper_id) is None:
+                return True
+            if include_chunks:
+                return any(
+                    not chunk.get("embedding")
+                    for chunk in self.text_chunks.get(paper.paper_id, [])
+                )
+            return False
+
+        candidates = [paper for paper in self.papers.values() if needs_backfill(paper)]
         candidates.sort(
             key=lambda p: (p.influential_citation_count, p.citation_count, p.published, p.paper_id),
             reverse=True,
         )
-        return candidates[offset : offset + limit]
+        return candidates[:limit]
 
     def update_paper_embedding(self, paper_id: str, embedding: list[float]) -> None:
-        existing = self.papers.get(paper_id)
-        if existing is not None:
-            # PaperResponse doesn't carry embeddings; the memory repo only
-            # tracks presence implicitly. Nothing to persist.
-            return None
+        if paper_id in self.papers:
+            self.paper_embeddings[paper_id] = embedding
 
     def list_chunks_missing_embedding(self, paper_id: str) -> list[dict[str, Any]]:
         return [chunk for chunk in self.text_chunks.get(paper_id, []) if not chunk.get("embedding")]
@@ -1421,6 +1588,74 @@ class MemoryPaperRepository(PaperRepository):
             if best:
                 out[paper_id] = best[:2000]
         return out
+
+    def suggest_papers(self, q: str, *, limit: int = 10) -> list[dict[str, Any]]:
+        q = (q or "").strip()
+        if not q:
+            return []
+        q_lower = q.lower()
+        hits: list[dict[str, Any]] = []
+        for paper in self.papers.values():
+            title = (paper.title or "")
+            authors = (paper.authors or "")
+            title_prefix = title.lower().startswith(q_lower)
+            title_match = q_lower in title.lower()
+            authors_match = q_lower in authors.lower()
+            if not (title_prefix or title_match or authors_match):
+                continue
+            if title_prefix:
+                matched_field = "title_prefix"
+                score = 1.0
+            elif title_match:
+                matched_field = "title"
+                score = 0.8
+            else:
+                matched_field = "authors"
+                score = 0.6
+            hits.append(
+                {
+                    "paper_id": paper.paper_id,
+                    "arxiv_id": paper.arxiv_id,
+                    "title": paper.title,
+                    "authors": paper.authors,
+                    "summary_short": paper.summary_short or paper.tldr or "",
+                    "citation_count": paper.citation_count or 0,
+                    "published": paper.published or "",
+                    "score": score,
+                    "matched_field": matched_field,
+                }
+            )
+        hits.sort(
+            key=lambda item: (item["score"], item["citation_count"], item["published"]),
+            reverse=True,
+        )
+        return hits[:limit]
+
+    def stats(self) -> dict[str, Any]:
+        total = len(self.papers)
+        indexed = sum(1 for p in self.papers.values() if p.index_status == "indexed")
+        with_summary = sum(1 for p in self.papers.values() if p.summary_eli5)
+        with_embedding = sum(1 for v in self.paper_embeddings.values() if v is not None)
+        total_chunks = sum(len(chunks) for chunks in self.text_chunks.values())
+        chunks_with_embedding = sum(
+            1
+            for chunks in self.text_chunks.values()
+            for chunk in chunks
+            if chunk.get("embedding")
+        )
+        last_indexed = max(
+            (p.indexed_at for p in self.papers.values() if p.indexed_at),
+            default=None,
+        )
+        return {
+            "total_papers": total,
+            "indexed_papers": indexed,
+            "papers_with_embedding": with_embedding,
+            "papers_with_summary": with_summary,
+            "total_chunks": total_chunks,
+            "chunks_with_embedding": chunks_with_embedding,
+            "last_indexed_at": last_indexed,
+        }
 
     def search_local(
         self,

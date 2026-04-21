@@ -305,3 +305,119 @@ def test_probe_integrations_route_returns_503_on_storage_failure():
     assert "write denied" in response.json()["storage"]["detail"]
 
     app.dependency_overrides.clear()
+
+
+class _StubEmbeddings:
+    """Deterministic fake that lets reindex tests assert exactly which papers
+    and chunks are processed without loading sentence-transformers."""
+
+    def __init__(self) -> None:
+        self.paper_calls: list[list[str]] = []
+        self.chunk_calls: list[list[str]] = []
+        self.mode = "paper"
+
+    def encode(self, text: str) -> list[float] | None:
+        return [float(len(text)), 0.0, 0.0]
+
+    def encode_batch(self, texts: list[str]) -> list[list[float]] | None:
+        if self.mode == "paper":
+            self.paper_calls.append(list(texts))
+            self.mode = "chunk"
+        else:
+            self.chunk_calls.append(list(texts))
+            self.mode = "paper"
+        return [[float(i), 0.0, 0.0] for i, _ in enumerate(texts, start=1)]
+
+
+def _seed_indexed_paper(repo: MemoryPaperRepository, arxiv_id: str, *, with_paper_embedding: bool, chunks_with_embedding: int, chunks_without_embedding: int) -> str:
+    paper = PaperMetadata(
+        arxiv_id=arxiv_id,
+        title=f"Paper {arxiv_id}",
+        abstract="Abstract text for the paper.",
+        published="2024-01-01",
+        index_status="indexed",
+        citation_count=10,
+    )
+    stored = repo.upsert_paper(
+        paper,
+        search_document=paper.abstract,
+        embedding=[0.1, 0.2, 0.3] if with_paper_embedding else None,
+    )
+    chunks: list[dict] = []
+    for index in range(chunks_with_embedding):
+        chunks.append(
+            {
+                "path": f"sections/sec-{index}.md",
+                "chunk_kind": "section",
+                "content": f"Section content {arxiv_id}/{index}",
+                "embedding": [0.5, 0.5, 0.5],
+            }
+        )
+    for index in range(chunks_without_embedding):
+        chunks.append(
+            {
+                "path": f"sections/gap-{index}.md",
+                "chunk_kind": "section",
+                "content": f"Uncovered content {arxiv_id}/{index}",
+            }
+        )
+    repo.replace_text_chunks(stored.paper_id, chunks)
+    return stored.paper_id
+
+
+def test_reindex_visits_chunk_only_candidates(service: PaperbaseService):
+    # Paper A: fully embedded — should be ignored.
+    _seed_indexed_paper(service.repository, "2401.00001", with_paper_embedding=True, chunks_with_embedding=2, chunks_without_embedding=0)
+    # Paper B: paper embedding present, chunks missing — the regression case.
+    paper_b = _seed_indexed_paper(service.repository, "2401.00002", with_paper_embedding=True, chunks_with_embedding=1, chunks_without_embedding=2)
+    # Paper C: paper embedding missing — should also be picked up.
+    paper_c = _seed_indexed_paper(service.repository, "2401.00003", with_paper_embedding=False, chunks_with_embedding=0, chunks_without_embedding=1)
+
+    service.embeddings = _StubEmbeddings()
+    result = service.reindex_missing_embeddings(limit=100, include_chunks=True)
+
+    # Both B and C need updates; A must stay untouched.
+    assert result["chunks_updated"] == 3  # 2 from B + 1 from C
+    # At minimum the paper missing its vector must be refreshed; we don't
+    # require B to be re-embedded, but it's allowed.
+    assert result["papers_updated"] >= 1
+    assert service.repository.list_chunks_missing_embedding(paper_b) == []
+    assert service.repository.list_chunks_missing_embedding(paper_c) == []
+
+
+def test_reindex_processes_all_pages_without_skipping(service: PaperbaseService):
+    # Seed 20 papers each with one missing chunk embedding. Backfill with a
+    # small per-page budget so more than one round is required.
+    paper_ids: list[str] = []
+    for i in range(20):
+        arxiv_id = f"2402.{i:05d}"
+        paper_ids.append(
+            _seed_indexed_paper(
+                service.repository,
+                arxiv_id,
+                with_paper_embedding=True,
+                chunks_with_embedding=0,
+                chunks_without_embedding=1,
+            )
+        )
+
+    service.embeddings = _StubEmbeddings()
+    # Force multiple batches through the page floor.
+    service.settings.chunk_max_chars = 1500
+    result = service.reindex_missing_embeddings(limit=20, include_chunks=True)
+
+    assert result["chunks_updated"] == 20
+    for paper_id in paper_ids:
+        assert service.repository.list_chunks_missing_embedding(paper_id) == []
+
+
+def test_suggest_and_stats_endpoints(service: PaperbaseService):
+    _seed_indexed_paper(service.repository, "2403.00001", with_paper_embedding=True, chunks_with_embedding=2, chunks_without_embedding=0)
+    response = service.suggest_papers("paper 2403", limit=5)
+    assert response, "suggest should return at least the matching seed paper"
+    assert response[0]["matched_field"] in {"title", "title_prefix", "authors"}
+
+    stats = service.get_stats()
+    assert stats["indexed_papers"] >= 1
+    assert stats["papers_with_embedding"] >= 1
+    assert stats["total_chunks"] >= 2

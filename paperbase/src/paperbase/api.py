@@ -87,6 +87,20 @@ def expand_query(
     return {"queries": service.expand_query(query, variants=variants)}
 
 
+@app.get("/v1/papers/suggest", dependencies=[Depends(require_bearer_token)])
+def suggest_papers(
+    q: str = Query(..., min_length=1, max_length=128),
+    limit: int = Query(default=10, ge=1, le=50),
+    service: PaperbaseService = Depends(get_service),
+) -> dict[str, list[dict]]:
+    return {"suggestions": service.suggest_papers(q, limit=limit)}
+
+
+@app.get("/v1/stats", dependencies=[Depends(require_bearer_token)])
+def stats(service: PaperbaseService = Depends(get_service)) -> dict:
+    return service.get_stats()
+
+
 @app.get("/v1/papers/{paper_id}", response_model=PaperResponse, dependencies=[Depends(require_bearer_token)])
 def get_paper(paper_id: str, service: PaperbaseService = Depends(get_service)) -> PaperResponse:
     return service.get_paper(paper_id)
