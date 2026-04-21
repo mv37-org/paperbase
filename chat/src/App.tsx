@@ -26,11 +26,12 @@ const OPEN_TABS_KEY = "paperbase-open-tabs";
 const PENDING_PROMPT_KEY = "paperbase-pending-prompt";
 const SIDEBAR_COLLAPSED_KEY = "paperbase-sidebar-collapsed";
 const FREE_RESPONSE_LIMIT = 3;
+type ModalFlashKind = "error" | "note";
 
 const AUTH_VIEW_COPY: Record<AuthView, { title: string; caption: string }> = {
   login: { title: "Log in", caption: "Use your account to continue." },
-  signup: { title: "Create account", caption: "Start a workspace for tracking research-backed product decisions." },
-  "reset-request": { title: "Forgot password", caption: "We will send you a reset link if the account exists." },
+  signup: { title: "Create account", caption: "Create your account." },
+  "reset-request": { title: "Forgot password", caption: "Get reset link." },
   "reset-password": { title: "Reset password", caption: "Choose a new password for your account." },
   "api-key": { title: "Anthropic API key", caption: "Add your key after the free responses run out." },
 };
@@ -128,6 +129,7 @@ export default function App() {
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [authReady, setAuthReady] = useState(false);
   const [flash, setFlash] = useState("");
+  const [flashKind, setFlashKind] = useState<ModalFlashKind>("note");
   const [landingPrompt, setLandingPrompt] = useState("");
   const [composerInput, setComposerInput] = useState("");
   const [composerStatus, setComposerStatus] = useState("");
@@ -230,6 +232,26 @@ export default function App() {
     }));
   }, [sessionSummary]);
 
+  const clearFlash = useCallback(() => {
+    setFlash("");
+    setFlashKind("note");
+  }, []);
+
+  const showErrorFlash = useCallback((message: string) => {
+    setFlash(message);
+    setFlashKind("error");
+  }, []);
+
+  const showNoteFlash = useCallback((message: string) => {
+    setFlash(message);
+    setFlashKind("note");
+  }, []);
+
+  const closeAuthModal = useCallback(() => {
+    setAuthModalOpen(false);
+    clearFlash();
+  }, [clearFlash]);
+
   const refreshThreads = useCallback(async () => {
     const payload = await loadThreads();
     setThreads(payload.threads);
@@ -293,13 +315,13 @@ export default function App() {
       setComposerStatus("");
       await refreshThreads();
       if (payload.state === "api_key_required") {
-        setFlash("You have used your 3 free responses. Add an Anthropic API key to continue.");
+        showErrorFlash("You have used your 3 free responses. Add an Anthropic API key to continue.");
         setAuthView("api-key");
         setAuthModalOpen(true);
       }
       return payload;
     },
-    [includePapers, includeUploads, refreshThreads],
+    [includePapers, includeUploads, refreshThreads, showErrorFlash],
   );
 
   const bootstrapAuthenticatedUi = useCallback(async () => {
@@ -341,7 +363,7 @@ export default function App() {
         setAuthModalOpen(true);
       }
       if (params.get("auth_error")) {
-        setFlash("Google login failed. Try email/password instead.");
+        showErrorFlash("Google login failed. Try email/password instead.");
         setAuthView("login");
         setAuthModalOpen(true);
       }
@@ -356,23 +378,22 @@ export default function App() {
       setComposerStatus("The chat app could not reach paperbase.");
       setAuthReady(true);
     });
-  }, [bootstrapAuthenticatedUi]);
+  }, [bootstrapAuthenticatedUi, showErrorFlash]);
 
   const openAuthModal = useCallback((view: AuthView) => {
-    setFlash("");
+    clearFlash();
     setAuthView(view);
     setAuthModalOpen(true);
     setAccountMenuOpen(false);
-  }, []);
+  }, [clearFlash]);
 
   const handleAuthSuccess = useCallback(
     async (nextSession: BrowserSessionResponse) => {
       setSession(nextSession);
-      setAuthModalOpen(false);
-      setFlash("");
+      closeAuthModal();
       await bootstrapAuthenticatedUi();
     },
-    [bootstrapAuthenticatedUi],
+    [bootstrapAuthenticatedUi, closeAuthModal],
   );
 
   const handleLandingSubmit = useCallback(
@@ -486,13 +507,13 @@ export default function App() {
   useEffect(() => {
     const onAuthExpired = () => {
       resetAuthenticatedState();
-      setFlash("Your session expired. Log in again.");
+      showNoteFlash("Your session expired. Log in again.");
       setAuthView("login");
       setAuthModalOpen(true);
     };
     window.addEventListener("paperbase:auth-expired", onAuthExpired);
     return () => window.removeEventListener("paperbase:auth-expired", onAuthExpired);
-  }, [resetAuthenticatedState]);
+  }, [resetAuthenticatedState, showNoteFlash]);
 
   if (!authReady) {
     return null;
@@ -720,9 +741,9 @@ export default function App() {
       ) : null}
 
       <div id="auth-modal" className={`modal${authModalOpen ? "" : " hidden"}`} role="dialog" aria-modal="true">
-        <div className="modal-backdrop" data-close-modal="true" onClick={() => setAuthModalOpen(false)} />
+        <div className="modal-backdrop" data-close-modal="true" onClick={closeAuthModal} />
         <div className="modal-panel">
-          <button className="modal-close" type="button" data-close-modal="true" onClick={() => setAuthModalOpen(false)}>
+          <button className="modal-close" type="button" data-close-modal="true" onClick={closeAuthModal}>
             ×
           </button>
           <div className="modal-heading">
@@ -734,9 +755,24 @@ export default function App() {
             </p>
           </div>
 
-          <div id="modal-flash" className="modal-flash">
-            {flash}
-          </div>
+          {flash ? (
+            <div
+              id="modal-flash"
+              className={`modal-flash${flashKind === "error" ? " warning" : " note"}`}
+              role={flashKind === "error" ? "alert" : "status"}
+            >
+              {flashKind === "error" ? (
+                <span className="modal-flash-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24">
+                    <path d="M12 4 3.75 18h16.5L12 4Z" />
+                    <path d="M12 9v4" />
+                    <path d="M12 16.5h.01" />
+                  </svg>
+                </span>
+              ) : null}
+              <span className="modal-flash-text">{flash}</span>
+            </div>
+          ) : null}
 
           <div className={`modal-view${authView === "login" ? " visible" : ""}`} data-auth-view="login">
             <form
@@ -748,7 +784,7 @@ export default function App() {
                   const nextSession = (await postForm("/v1/browser/auth/login", event.currentTarget)) as BrowserSessionResponse;
                   await handleAuthSuccess(nextSession);
                 } catch (error) {
-                  setFlash(error instanceof Error ? error.message : "Login failed");
+                  showErrorFlash(error instanceof Error ? error.message : "Login failed");
                 }
               }}
             >
@@ -779,7 +815,7 @@ export default function App() {
                   const nextSession = (await postForm("/v1/browser/auth/signup", event.currentTarget)) as BrowserSessionResponse;
                   await handleAuthSuccess(nextSession);
                 } catch (error) {
-                  setFlash(error instanceof Error ? error.message : "Sign up failed");
+                  showErrorFlash(error instanceof Error ? error.message : "Sign up failed");
                 }
               }}
             >
@@ -806,9 +842,9 @@ export default function App() {
                 event.preventDefault();
                 try {
                   await postForm("/v1/browser/auth/forgot-password", event.currentTarget);
-                  setFlash("If that account exists, a reset link has been sent.");
+                  showNoteFlash("If that account exists, a reset link has been sent.");
                 } catch (error) {
-                  setFlash(error instanceof Error ? error.message : "Password reset failed");
+                  showErrorFlash(error instanceof Error ? error.message : "Password reset failed");
                 }
               }}
             >
@@ -832,10 +868,10 @@ export default function App() {
                 event.preventDefault();
                 try {
                   await postForm("/v1/browser/auth/reset-password", event.currentTarget);
-                  setFlash("Password reset complete. You can now log in.");
+                  showNoteFlash("Password reset complete. You can now log in.");
                   setAuthView("login");
                 } catch (error) {
-                  setFlash(error instanceof Error ? error.message : "Password reset failed");
+                  showErrorFlash(error instanceof Error ? error.message : "Password reset failed");
                 }
               }}
             >
@@ -861,9 +897,9 @@ export default function App() {
                     body: JSON.stringify(payload),
                   });
                   setSession(nextSession);
-                  setFlash("Anthropic API key saved.");
+                  showNoteFlash("Anthropic API key saved.");
                 } catch (error) {
-                  setFlash(error instanceof Error ? error.message : "Saving API key failed");
+                  showErrorFlash(error instanceof Error ? error.message : "Saving API key failed");
                 }
               }}
             >
@@ -880,9 +916,9 @@ export default function App() {
                 try {
                   const nextSession = await api<BrowserSessionResponse>("/v1/browser/settings/anthropic-key", { method: "DELETE" });
                   setSession(nextSession);
-                  setFlash("Anthropic API key removed.");
+                  showNoteFlash("Anthropic API key removed.");
                 } catch (error) {
-                  setFlash(error instanceof Error ? error.message : "Deleting API key failed");
+                  showErrorFlash(error instanceof Error ? error.message : "Deleting API key failed");
                 }
               }}
             >

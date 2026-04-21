@@ -902,6 +902,9 @@ textarea {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .modal-view {
@@ -913,10 +916,57 @@ textarea {
 }
 
 .modal-flash {
-  min-height: 18px;
   margin-bottom: 10px;
-  color: var(--muted);
   font-size: 12px;
+  line-height: 1.4;
+}
+
+.modal-flash.note,
+.modal-flash.warning {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.modal-flash.note {
+  color: var(--muted);
+}
+
+.modal-flash.warning {
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid #caa73d;
+  border-radius: var(--radius);
+  background: #fff6cf;
+  color: #775400;
+}
+
+.modal-flash-icon {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.modal-flash-icon svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.modal-flash-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .oauth-button {
