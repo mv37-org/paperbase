@@ -1128,17 +1128,26 @@ textarea::placeholder,
 }
 
 .chat-message-list.empty {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 24px;
+  padding: 0;
 }
 
 .chat-message-list.empty .chat-stage-spacer {
+  position: relative;
+  flex: 1 1 auto;
   width: 100%;
-  height: auto;
-  min-height: 0;
-  padding: 0;
+  height: 100%;
+  min-height: 100%;
+  padding: 24px;
+}
+
+.empty-state-sidebar-toggle {
+  position: absolute;
+  top: 24px;
+  left: 24px;
 }
 
 .chat-message-column {
@@ -2314,11 +2323,16 @@ textarea:hover,
   }
 
   .chat-message-list.empty {
-    padding: 16px;
+    padding: 0;
   }
 
   .chat-stage-spacer {
     padding: 16px;
+  }
+
+  .empty-state-sidebar-toggle {
+    top: 16px;
+    left: 16px;
   }
 
   .composer-status {
