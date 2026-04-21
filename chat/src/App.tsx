@@ -291,8 +291,7 @@ export default function App() {
   );
 
   const handleLandingSubmit = useCallback(
-    async (event: FormEvent) => {
-      event.preventDefault();
+    async () => {
       const prompt = landingPrompt.trim();
       if (!prompt) {
         return;
@@ -370,32 +369,14 @@ export default function App() {
             <div className="landing-copy">
               <p>Paperbase helps AI researchers and agent builders keep up with fast-moving work without losing track of the original sources, so they can ask broad questions, compare ideas across papers, and pull out the design patterns that matter when building agents and AI systems.</p>
             </div>
-
-            <form className="prompt-shell" onSubmit={handleLandingSubmit}>
-              <button
-                type="button"
-                className="prompt-clip"
-                id="landing-upload-trigger"
-                aria-label="Attach document"
-                onClick={() => {
-                  if (!sessionRef.current?.authenticated) {
-                    openAuthModal("login");
-                    return;
-                  }
-                  appUploadRef.current?.click();
-                }}
-              >
-                <svg viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M16.5 6.5 9 14a3 3 0 1 0 4.24 4.24l7.01-7.02a5 5 0 0 0-7.07-7.07L5.46 11.9a7 7 0 1 0 9.9 9.9l6.01-6.01" />
-                </svg>
-              </button>
-              <div className="landing-editor-root">
-                <LandingMentionEditor value={landingPrompt} onChange={setLandingPrompt} />
-              </div>
-              <button id="landing-start-button" className="prompt-button" type="submit">
-                Start
-              </button>
-            </form>
+            <LandingMentionEditor
+              attachButtonId="landing-upload-trigger"
+              onAttach={() => openAuthModal("login")}
+              onChange={setLandingPrompt}
+              onSubmit={() => void handleLandingSubmit()}
+              submitButtonId="landing-start-button"
+              value={landingPrompt}
+            />
 
             <section className="examples">
               <div className="section-label">Examples</div>

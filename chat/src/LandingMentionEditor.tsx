@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { ComponentProps, KeyboardEvent } from "react";
+import type { ComponentProps, FormEvent, KeyboardEvent } from "react";
 import { createEditor, Editor, Element as SlateElement, Node, Range, Text, Transforms } from "slate";
 import type { BaseRange, Descendant } from "slate";
 import { Editable, ReactEditor, Slate, withReact } from "slate-react";
@@ -129,11 +129,24 @@ function insertMention(editor: Editor & ReactEditor, target: BaseRange, paper: (
 }
 
 type Props = {
+  attachButtonId?: string;
+  onAttach: () => void;
   value: string;
   onChange: (value: string) => void;
+  onSubmit: () => void;
+  submitButtonId?: string;
+  submitLabel?: string;
 };
 
-export function LandingMentionEditor({ value: plainText, onChange }: Props) {
+export function LandingMentionEditor({
+  attachButtonId,
+  onAttach,
+  value: plainText,
+  onChange,
+  onSubmit,
+  submitButtonId,
+  submitLabel = "Start",
+}: Props) {
   const [editor] = useState(() => withMentions(withReact(createEditor())));
   const [value, setValue] = useState<Descendant[]>(plainTextToValue(plainText));
   const [target, setTarget] = useState<BaseRange | null>(null);
@@ -285,45 +298,71 @@ export function LandingMentionEditor({ value: plainText, onChange }: Props) {
     [chooseSuggestion, index, suggestions, target],
   );
 
+  const handleSubmit = useCallback(
+    (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      onSubmit();
+    },
+    [onSubmit],
+  );
+
   return (
-    <div className="mention-editor">
-      <div className="mention-editor-surface">
-        <Slate editor={editor} initialValue={value} onChange={handleChange}>
-          <Editable
-            className="mention-editor-input"
-            renderElement={renderElement}
-            renderPlaceholder={renderPlaceholder}
-            onKeyDown={onKeyDown}
-            placeholder="Ask about agent design, evals, or inference. Type @ to tag a paper."
-            spellCheck={false}
-            autoFocus={false}
-          />
-        </Slate>
-        {target && suggestions.length > 0 ? (
-          <div className="mention-suggestions">
-            {suggestions.map((paper, suggestionIndex) => (
-              <button
-                key={paper.id}
-                type="button"
-                className={`mention-suggestion${suggestionIndex === index ? " active" : ""}`}
-                onMouseDown={(event) => {
-                  event.preventDefault();
-                  chooseSuggestion(paper);
-                }}
-              >
-                <div className="mention-suggestion-title">{paper.title}</div>
-                <div className="mention-suggestion-meta">{paper.venue} research paper</div>
-              </button>
-            ))}
-          </div>
-        ) : null}
-      </div>
+    <div className="landing-composer">
       {tags.length > 0 ? (
         <div className="mention-tags">
           {tags.map((tag) => (
             <span key={tag.id} className="mention-tag">
               {tag.title}
             </span>
+          ))}
+        </div>
+      ) : null}
+      <form className="prompt-shell landing-prompt-shell" onSubmit={handleSubmit}>
+        <button
+          type="button"
+          id={attachButtonId}
+          className="prompt-clip"
+          aria-label="Attach document"
+          onClick={onAttach}
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M16.5 6.5 9 14a3 3 0 1 0 4.24 4.24l7.01-7.02a5 5 0 0 0-7.07-7.07L5.46 11.9a7 7 0 1 0 9.9 9.9l6.01-6.01" />
+          </svg>
+        </button>
+        <div className="landing-editor-root">
+          <div className="mention-editor">
+            <Slate editor={editor} initialValue={value} onChange={handleChange}>
+              <Editable
+                className="mention-editor-input"
+                renderElement={renderElement}
+                renderPlaceholder={renderPlaceholder}
+                onKeyDown={onKeyDown}
+                placeholder="Ask about agents, evals, or inference. Type @ to tag a paper."
+                spellCheck={false}
+                autoFocus={false}
+              />
+            </Slate>
+          </div>
+        </div>
+        <button id={submitButtonId} className="prompt-button" type="submit">
+          {submitLabel}
+        </button>
+      </form>
+      {target && suggestions.length > 0 ? (
+        <div className="mention-suggestions mention-suggestions-popover">
+          {suggestions.map((paper, suggestionIndex) => (
+            <button
+              key={paper.id}
+              type="button"
+              className={`mention-suggestion${suggestionIndex === index ? " active" : ""}`}
+              onMouseDown={(event) => {
+                event.preventDefault();
+                chooseSuggestion(paper);
+              }}
+            >
+              <div className="mention-suggestion-title">{paper.title}</div>
+              <div className="mention-suggestion-meta">{paper.venue} research paper</div>
+            </button>
           ))}
         </div>
       ) : null}
