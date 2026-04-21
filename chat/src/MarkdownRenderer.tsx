@@ -66,38 +66,41 @@ export function MarkdownRenderer({
   interactiveCitations = false,
   onCitationClick,
 }: Props) {
+  const wrapperClassName = ["markdown-renderer", className].filter(Boolean).join(" ");
+
   return (
-    <ReactMarkdown
-      className={className}
-      remarkPlugins={interactiveCitations ? [remarkGfm, citationPlugin] : [remarkGfm]}
-      components={{
-        a: ({ href, children }) => {
-          if (href?.startsWith("paperbase-citation:")) {
-            const sourceId = href.slice("paperbase-citation:".length);
+    <div className={wrapperClassName}>
+      <ReactMarkdown
+        remarkPlugins={interactiveCitations ? [remarkGfm, citationPlugin] : [remarkGfm]}
+        components={{
+          a: ({ href, children }) => {
+            if (href?.startsWith("paperbase-citation:")) {
+              const sourceId = href.slice("paperbase-citation:".length);
+              return (
+                <button
+                  type="button"
+                  className="citation-inline-button"
+                  onClick={() => onCitationClick?.(sourceId)}
+                >
+                  {children}
+                </button>
+              );
+            }
             return (
-              <button
-                type="button"
-                className="citation-inline-button"
-                onClick={() => onCitationClick?.(sourceId)}
-              >
+              <a href={href} target="_blank" rel="noreferrer">
                 {children}
-              </button>
+              </a>
             );
-          }
-          return (
-            <a href={href} target="_blank" rel="noreferrer">
-              {children}
-            </a>
-          );
-        },
-        table: ({ children }) => (
-          <div className="markdown-table-wrap">
-            <table>{children}</table>
-          </div>
-        ),
-      }}
-    >
-      {markdown}
-    </ReactMarkdown>
+          },
+          table: ({ children }) => (
+            <div className="markdown-table-wrap">
+              <table>{children}</table>
+            </div>
+          ),
+        }}
+      >
+        {markdown}
+      </ReactMarkdown>
+    </div>
   );
 }
