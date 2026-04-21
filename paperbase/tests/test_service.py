@@ -1140,6 +1140,35 @@ def test_search_only_tool_results_do_not_create_citations(monkeypatch):
     assert "[S" not in response.assistant_message.content_markdown
 
 
+def test_link_requests_force_tool_use_and_prompt_for_paper_links(monkeypatch, browser_service):
+    service, _, chat_model = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="links@example.com", password="topsecret123", display_name="Links User")
+    )
+    assert session.user is not None
+
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda paper: _rich_extraction(text="## Methods\n\nGrounding methods and benchmark comparisons."),
+    )
+    service.index_arxiv_paper(
+        "2402.42424",
+        paper=_sample_paper("2402.42424", title="Grounding Links Paper", abstract="A paper with useful metadata"),
+    )
+
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
+    service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="Give me links to papers about grounding"),
+    )
+
+    assert chat_model.create_calls[0]["tool_choice"] == {"type": "any"}
+    assert "html_url or pdf_url" in str(chat_model.create_calls[0]["system_prompt"])
+    assert "markdown links to the paper pages or PDFs" in str(chat_model.create_calls[-1]["system_prompt"])
+
+
 def test_browser_chat_stream_emits_citations_and_completion(monkeypatch, browser_service):
     service, _, _ = browser_service
     app.dependency_overrides[get_service] = lambda: service

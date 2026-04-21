@@ -82,7 +82,7 @@ _GROUNDING_INTENT_RE = re.compile(
     r"paper|papers|research|study|studies|citation|citations|cite|source|sources|reference|references|"
     r"figure|figures|table|tables|benchmark|benchmarks|result|results|method|methods|experiment|experiments|"
     r"ablation|dataset|datasets|arxiv|appendix|section|sections|survey|summarize|summary|compare|comparison|"
-    r"uploaded|upload|document|documents|docs|notes?"
+    r"uploaded|upload|document|documents|docs|notes?|link|links|url|urls|pdf|doi"
     r")\b",
     re.IGNORECASE,
 )
@@ -91,7 +91,7 @@ _FORCE_TOOL_QUERY_RE = re.compile(
     r"\b("
     r"cite|citations|source|sources|reference|references|according to|find|search|compare|comparison|"
     r"summarize|summary|survey|method|methods|result|results|figure|figures|table|tables|benchmark|benchmarks|"
-    r"uploaded|document|documents|notes?"
+    r"uploaded|document|documents|notes?|link|links|url|urls|pdf|doi"
     r")\b",
     re.IGNORECASE,
 )
@@ -950,9 +950,11 @@ class PaperbaseService:
     def _chat_tool_system_prompt(self) -> str:
         return (
             "You are Paperbase Chat. You have access to Paperbase research tools that can search papers, sections, files, figures, tables, references, related papers, and the user's uploaded documents. "
-            "Use tools to gather evidence before answering any factual question about papers, research findings, figures, tables, metrics, or uploaded notes. "
+            "Use tools aggressively for research-oriented turns. If the user asks about papers, references, findings, comparisons, methods, figures, tables, benchmarks, uploaded notes, or asks for links, do not rely on parametric memory when Paperbase tools can answer. "
+            "Start with discovery tools to find the right papers, then follow up with evidence tools before making specific factual claims. "
             "Broad discovery tools like paperbase_search, paperbase_get_results, paperbase_get_paper, paperbase_get_related_papers, and paperbase_get_references are for candidate discovery and metadata only. "
             "They are not citable evidence by themselves. Before making specific factual claims, follow up with evidence tools like paperbase_search_sections, paperbase_read_file, paperbase_get_figure, paperbase_get_table, or paperbase_search_uploaded_sections. "
+            "When a final answer should mention papers, recommendations, or reading lists, gather metadata rich enough to include direct paper links such as html_url or pdf_url when available. "
             "On turns where you still need tools, emit tool calls only and do not write any user-facing narrative text. "
             "Once the tool results are sufficient, stop calling tools. The final answer will be generated in a separate step."
         )
@@ -969,6 +971,8 @@ class PaperbaseService:
         return (
             "You are Paperbase Chat. Answer using the gathered Paperbase tool results when possible. "
             "Respond in GitHub-flavored markdown. Use headings, bullets, tables, fenced code blocks, and normal markdown links when they clarify the answer. "
+            "When you mention specific research papers, include markdown links to the paper pages or PDFs from the gathered tool results whenever those URLs are available. "
+            "If the user asked for related reading, recommendations, or references, prefer a compact bullet list with paper title plus link before any longer discussion. "
             "Only cite source ids inline like [S1] when those ids came from evidence-bearing tool results such as section hits, file reads, figure captions, tables, or uploaded-document excerpts. "
             "Do not cite broad search results or metadata-only results. If the gathered sources are insufficient, say so plainly."
         )
