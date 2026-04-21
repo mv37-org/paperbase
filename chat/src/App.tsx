@@ -589,6 +589,7 @@ export default function App() {
           <aside className="sidebar">
             <div className="sidebar-top">
               <div className="sidebar-brand-row">
+                <div className="sidebar-title">Paperbase</div>
                 <button
                   type="button"
                   className="sidebar-icon-button sidebar-toggle"
@@ -600,7 +601,6 @@ export default function App() {
                     <path d="M4 7h16M4 12h16M4 17h16" />
                   </svg>
                 </button>
-                <div className="sidebar-title">Paperbase</div>
               </div>
               <button id="new-chat-button" className="sidebar-primary-action" onClick={() => void handleNewChat()}>
                 <svg viewBox="0 0 24 24" aria-hidden="true">
