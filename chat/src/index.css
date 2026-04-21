@@ -308,16 +308,14 @@ textarea {
 .chat-prompt-shell .mention-editor-input [data-slate-placeholder="true"] {
   font-size: 14px !important;
   line-height: 1.55 !important;
-  padding: 6px 0 !important;
+  padding: 0 !important;
   color: rgba(107, 98, 89, 0.82) !important;
 }
 
 .chat-prompt-shell .mention-editor-placeholder {
-  display: inline-flex;
-  align-items: flex-start;
   font-size: 14px;
   line-height: 1.55;
-  padding: 6px 0;
+  padding: 0;
 }
 
 .chat-prompt-actions {
