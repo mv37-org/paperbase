@@ -83,6 +83,10 @@ function displayThreadTitle(title: string) {
   return title.trim() || "New chat";
 }
 
+function shouldShowThreadInSidebar(thread: ChatThreadSummary) {
+  return thread.title.trim().length > 0 || thread.last_message_preview.trim().length > 0;
+}
+
 function GoogleButton() {
   return (
     <button className="oauth-button" data-google-login="true" type="button" onClick={() => (window.location.href = googleLoginUrl())}>
@@ -203,6 +207,7 @@ export default function App() {
 
   const authCopy = AUTH_VIEW_COPY[authView];
   const authenticated = Boolean(session?.authenticated);
+  const sidebarThreads = useMemo(() => threads.filter(shouldShowThreadInSidebar), [threads]);
 
   const sessionSummary = useMemo(() => {
     if (!session?.user) {
@@ -600,9 +605,9 @@ export default function App() {
 
             <section className="sidebar-section sidebar-card history-section">
               <div className="section-label sidebar-section-label">Previous sessions</div>
-              {threads.length > 0 ? (
+              {sidebarThreads.length > 0 ? (
                 <div id="thread-list" className="thread-list">
-                  {threads.map((thread) => {
+                  {sidebarThreads.map((thread) => {
                     const title = displayThreadTitle(thread.title);
                     return (
                       <button
