@@ -35,14 +35,17 @@ const AUTH_VIEW_COPY: Record<AuthView, { title: string; caption: string }> = {
 const EXAMPLES = [
   {
     label: "Reliable multi-step agents",
+    description: "See which papers actually support planning, reflection, and recovery patterns in real agent loops.",
     prompt: "What patterns are emerging for reliable multi-step agents, and which papers actually validate them?",
   },
   {
     label: "Practical agent eval stack",
+    description: "Compare evaluation approaches and translate them into a lightweight stack for a product team.",
     prompt: "Compare recent approaches to agent evals and recommend a practical stack for a small product team.",
   },
   {
     label: "Retrieval, memory, and tool use",
+    description: "Survey how current systems combine context retrieval, memory, and tools in production settings.",
     prompt: "Summarize recent research on retrieval, memory, and tool use for production AI systems.",
   },
 ];
@@ -396,11 +399,11 @@ export default function App() {
 
             <section className="examples">
               <div className="section-label">Examples</div>
-              <p className="section-subtitle">Starting points for agent design, eval strategy, and production AI system questions.</p>
               <div className="example-list">
                 {EXAMPLES.map((example) => (
                   <button key={example.label} type="button" className="example-pill" onClick={() => void handleExample(example.prompt)}>
-                    {example.label}
+                    <span className="example-title">{example.label}</span>
+                    <span className="example-description">{example.description}</span>
                   </button>
                 ))}
               </div>

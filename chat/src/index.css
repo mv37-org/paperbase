@@ -119,12 +119,18 @@ textarea {
   grid-template-columns: 30px minmax(0, 1fr) auto;
   gap: 8px;
   align-items: center;
-  padding: 6px 8px;
+  padding: 4px 6px;
   background: var(--paper);
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  box-shadow: 0 10px 26px rgba(16, 24, 40, 0.09);
+  box-shadow: 0 4px 12px rgba(16, 24, 40, 0.05);
   transition: border-color 120ms ease, box-shadow 120ms ease, background-color 120ms ease;
+}
+
+.prompt-shell:focus-within,
+.composer-shell:focus-within {
+  border-color: rgba(27, 22, 17, 0.34);
+  box-shadow: 0 4px 12px rgba(16, 24, 40, 0.06);
 }
 
 .prompt-clip,
@@ -353,10 +359,22 @@ textarea::placeholder,
 }
 
 .example-pill {
+  display: grid;
+  gap: 4px;
   padding: 12px 14px;
   cursor: pointer;
   line-height: 1.45;
   font-size: 14px;
+}
+
+.example-title {
+  color: var(--text);
+}
+
+.example-description {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .app-shell {
@@ -697,7 +715,7 @@ textarea {
 .prompt-shell:hover,
 .composer-shell:hover {
   border-color: rgba(27, 22, 17, 0.2);
-  box-shadow: 0 12px 28px rgba(16, 24, 40, 0.12);
+  box-shadow: 0 6px 14px rgba(16, 24, 40, 0.06);
 }
 
 .prompt-clip:hover {
