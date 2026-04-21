@@ -305,3 +305,254 @@ def test_probe_integrations_route_returns_503_on_storage_failure():
     assert "write denied" in response.json()["storage"]["detail"]
 
     app.dependency_overrides.clear()
+
+
+class _StubEmbeddings:
+    """Deterministic fake that lets reindex tests assert exactly which papers
+    and chunks are processed without loading sentence-transformers."""
+
+    def __init__(self) -> None:
+        self.paper_calls: list[list[str]] = []
+        self.chunk_calls: list[list[str]] = []
+        self.mode = "paper"
+
+    def encode(self, text: str) -> list[float] | None:
+        return [float(len(text)), 0.0, 0.0]
+
+    def encode_batch(self, texts: list[str]) -> list[list[float]] | None:
+        if self.mode == "paper":
+            self.paper_calls.append(list(texts))
+            self.mode = "chunk"
+        else:
+            self.chunk_calls.append(list(texts))
+            self.mode = "paper"
+        return [[float(i), 0.0, 0.0] for i, _ in enumerate(texts, start=1)]
+
+
+def _seed_indexed_paper(repo: MemoryPaperRepository, arxiv_id: str, *, with_paper_embedding: bool, chunks_with_embedding: int, chunks_without_embedding: int) -> str:
+    paper = PaperMetadata(
+        arxiv_id=arxiv_id,
+        title=f"Paper {arxiv_id}",
+        abstract="Abstract text for the paper.",
+        published="2024-01-01",
+        index_status="indexed",
+        citation_count=10,
+    )
+    stored = repo.upsert_paper(
+        paper,
+        search_document=paper.abstract,
+        embedding=[0.1, 0.2, 0.3] if with_paper_embedding else None,
+    )
+    chunks: list[dict] = []
+    for index in range(chunks_with_embedding):
+        chunks.append(
+            {
+                "path": f"sections/sec-{index}.md",
+                "chunk_kind": "section",
+                "content": f"Section content {arxiv_id}/{index}",
+                "embedding": [0.5, 0.5, 0.5],
+            }
+        )
+    for index in range(chunks_without_embedding):
+        chunks.append(
+            {
+                "path": f"sections/gap-{index}.md",
+                "chunk_kind": "section",
+                "content": f"Uncovered content {arxiv_id}/{index}",
+            }
+        )
+    repo.replace_text_chunks(stored.paper_id, chunks)
+    return stored.paper_id
+
+
+def test_reindex_visits_chunk_only_candidates(service: PaperbaseService):
+    # Paper A: fully embedded — should be ignored.
+    _seed_indexed_paper(service.repository, "2401.00001", with_paper_embedding=True, chunks_with_embedding=2, chunks_without_embedding=0)
+    # Paper B: paper embedding present, chunks missing — the regression case.
+    paper_b = _seed_indexed_paper(service.repository, "2401.00002", with_paper_embedding=True, chunks_with_embedding=1, chunks_without_embedding=2)
+    # Paper C: paper embedding missing — should also be picked up.
+    paper_c = _seed_indexed_paper(service.repository, "2401.00003", with_paper_embedding=False, chunks_with_embedding=0, chunks_without_embedding=1)
+
+    service.embeddings = _StubEmbeddings()
+    result = service.reindex_missing_embeddings(limit=100, include_chunks=True)
+
+    # Both B and C need updates; A must stay untouched.
+    assert result["chunks_updated"] == 3  # 2 from B + 1 from C
+    # At minimum the paper missing its vector must be refreshed; we don't
+    # require B to be re-embedded, but it's allowed.
+    assert result["papers_updated"] >= 1
+    assert service.repository.list_chunks_missing_embedding(paper_b) == []
+    assert service.repository.list_chunks_missing_embedding(paper_c) == []
+
+
+def test_reindex_processes_all_pages_without_skipping(service: PaperbaseService):
+    # Seed 20 papers each with one missing chunk embedding. Backfill with a
+    # small per-page budget so more than one round is required.
+    paper_ids: list[str] = []
+    for i in range(20):
+        arxiv_id = f"2402.{i:05d}"
+        paper_ids.append(
+            _seed_indexed_paper(
+                service.repository,
+                arxiv_id,
+                with_paper_embedding=True,
+                chunks_with_embedding=0,
+                chunks_without_embedding=1,
+            )
+        )
+
+    service.embeddings = _StubEmbeddings()
+    # Force multiple batches through the page floor.
+    service.settings.chunk_max_chars = 1500
+    result = service.reindex_missing_embeddings(limit=20, include_chunks=True)
+
+    assert result["chunks_updated"] == 20
+    for paper_id in paper_ids:
+        assert service.repository.list_chunks_missing_embedding(paper_id) == []
+
+
+def test_suggest_and_stats_endpoints(service: PaperbaseService):
+    _seed_indexed_paper(service.repository, "2403.00001", with_paper_embedding=True, chunks_with_embedding=2, chunks_without_embedding=0)
+    response = service.suggest_papers("paper 2403", limit=5)
+    assert response, "suggest should return at least the matching seed paper"
+    assert response[0]["matched_field"] in {"title", "title_prefix", "authors", "summary"}
+
+    stats = service.get_stats()
+    assert stats["indexed_papers"] >= 1
+    assert stats["papers_with_embedding"] >= 1
+    assert stats["total_chunks"] >= 2
+
+
+def test_reindex_continues_past_failed_frontier_page(service: PaperbaseService):
+    """Regression for the 'top frontier fails forever' starvation bug.
+
+    Seed 20 papers missing chunk embeddings. First ~10 attempts fail; the
+    remaining ones must still be reached. Before the query-time exclusion fix
+    the loop stalled as soon as every row in the top frontier was in the
+    client-side `attempted` set.
+    """
+    paper_ids: list[str] = []
+    for i in range(20):
+        paper_ids.append(
+            _seed_indexed_paper(
+                service.repository,
+                f"2404.{i:05d}",
+                with_paper_embedding=True,
+                chunks_with_embedding=0,
+                chunks_without_embedding=1,
+            )
+        )
+
+    failing_paper_ids = set(paper_ids[:10])
+
+    class SelectiveFailEmbeddings(_StubEmbeddings):
+        def encode_batch(self, texts: list[str]) -> list[list[float]] | None:
+            # Every other call is a chunk call in our loop order; the chunk
+            # loop iterates per-paper, so we flip based on paper identity via
+            # a sentinel in the text payload. Simpler: fail if any text
+            # mentions a known-to-fail paper id. (Test controls the payloads
+            # via `_seed_indexed_paper`, which stamps ids into content.)
+            if any(any(fid.replace("arxiv:", "") in text for fid in failing_paper_ids) for text in texts):
+                return None
+            return super().encode_batch(texts)
+
+    service.embeddings = SelectiveFailEmbeddings()
+    result = service.reindex_missing_embeddings(limit=20, include_chunks=True)
+
+    # At least one of the non-failing papers past the first frontier must have
+    # been reached. Exact count depends on interleaving with the paper loop,
+    # but the critical property is that we advanced past the failing set.
+    assert result["chunks_updated"] >= 1
+    resolved_ids = [
+        paper_id
+        for paper_id in paper_ids[10:]
+        if not service.repository.list_chunks_missing_embedding(paper_id)
+    ]
+    assert resolved_ids, "reindex should advance past the failing frontier"
+
+
+def test_summarize_top_cited_continues_past_failed_frontier(service: PaperbaseService):
+    """Regression for the same starvation pattern in summarize_top_cited.
+
+    Seed 40 candidate papers. Stub summarization to fail for the first 20 and
+    succeed for the rest. The loop must still reach and update the later
+    papers.
+    """
+    service.settings.summary_provider = "vertex"
+    service.settings.vertex_project = "stub"
+    service.settings.featured_tier_concurrency = 4
+
+    paper_ids: list[str] = []
+    for i in range(40):
+        paper_ids.append(
+            _seed_indexed_paper(
+                service.repository,
+                f"2405.{i:05d}",
+                with_paper_embedding=True,
+                chunks_with_embedding=0,
+                chunks_without_embedding=0,
+            )
+        )
+        # Force needs-summary: wipe the heuristic summary the seed put there.
+        service.repository.update_summaries(paper_ids[-1], summary_short="", summary_eli5="")
+
+    failing = set(paper_ids[:20])
+
+    import paperbase.summaries as summaries_module
+
+    def fake_summary(paper, settings):
+        if paper.paper_id in failing:
+            return None
+        return ("technical summary", "plain summary")
+
+    original = summaries_module.generate_summary_on_demand
+    summaries_module.generate_summary_on_demand = fake_summary  # type: ignore[attr-defined]
+    try:
+        result = service.summarize_top_cited(limit=40)
+    finally:
+        summaries_module.generate_summary_on_demand = original
+
+    # Any later-ranked paper getting its summary proves the frontier advanced.
+    later_updated = [
+        pid
+        for pid in paper_ids[20:]
+        if (service.repository.get_paper(pid) or type("_", (), {"summary_eli5": ""})).summary_eli5
+    ]
+    assert later_updated, "summarize_top_cited should advance past failures"
+    assert result["updated"] >= 1
+
+
+def test_suggest_papers_matches_summary_text(service: PaperbaseService):
+    """A paper whose term lives only in summary_short must still surface."""
+    paper = PaperMetadata(
+        arxiv_id="2406.00001",
+        title="Totally unrelated headline",
+        abstract="abstract text",
+        summary_short="This paper investigates multi-agent cooperation under partial observability.",
+        authors="Someone, Other",
+        published="2024-06-01",
+        index_status="indexed",
+    )
+    service.repository.upsert_paper(paper, search_document=paper.abstract)
+
+    hits = service.suggest_papers("multi-agent", limit=5)
+    assert hits, "summary_short match should surface the paper"
+    assert hits[0]["matched_field"] == "summary"
+
+
+def test_suggest_papers_returns_highlight_payload(service: PaperbaseService):
+    paper = PaperMetadata(
+        arxiv_id="2406.00002",
+        title="Attention Is All You Need",
+        abstract="abstract",
+        authors="Vaswani et al.",
+        published="2017-06-01",
+        index_status="indexed",
+    )
+    service.repository.upsert_paper(paper, search_document=paper.abstract)
+
+    hits = service.suggest_papers("Attention", limit=5)
+    assert hits
+    top = hits[0]
+    assert "highlight_snippet" in top
+    assert "Attention" in top["highlight_snippet"]

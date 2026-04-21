@@ -199,6 +199,52 @@ def search_semantic_scholar(
     return papers
 
 
+def fetch_references(
+    arxiv_id: str,
+    semantic_scholar_id: str | None,
+    *,
+    limit: int = 100,
+) -> list[dict]:
+    """Fetch outgoing citations from Semantic Scholar.
+
+    Returns a list of dicts with keys: arxiv_id, semantic_scholar_id, title,
+    rank. Only references that have an arXiv id are returned so we can link
+    them back into our own graph.
+    """
+    resolved_s2_id = semantic_scholar_id
+    if not resolved_s2_id:
+        enriched = enrich_with_semantic_scholar([PaperMetadata(arxiv_id=arxiv_id)])
+        resolved_s2_id = enriched[0].semantic_scholar_id if enriched else None
+    if not resolved_s2_id:
+        return []
+    try:
+        response = SESSION.get(
+            f"{S2_API}/paper/{resolved_s2_id}/references",
+            params={"fields": "externalIds,title", "limit": min(limit, 100)},
+            timeout=20,
+        )
+        if response.status_code != 200:
+            return []
+    except requests.RequestException:
+        return []
+    out: list[dict] = []
+    for rank, item in enumerate(response.json().get("data", [])):
+        cited = item.get("citedPaper") or {}
+        external_ids = cited.get("externalIds") or {}
+        ref_arxiv = external_ids.get("ArXiv")
+        if not ref_arxiv:
+            continue
+        out.append(
+            {
+                "arxiv_id": canonical_arxiv_id(ref_arxiv),
+                "semantic_scholar_id": cited.get("paperId"),
+                "title": cited.get("title") or "",
+                "rank": rank,
+            }
+        )
+    return out
+
+
 def get_related_papers(arxiv_id: str, semantic_scholar_id: str | None, *, limit: int = 10) -> list[PaperMetadata]:
     resolved_s2_id = semantic_scholar_id
     if not resolved_s2_id:

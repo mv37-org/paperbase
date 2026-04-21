@@ -215,3 +215,70 @@ def build_paper_summaries(
 def generate_summary_on_demand(paper: PaperMetadata, settings: Settings) -> tuple[str, str] | None:
     """Single-paper online Gemini call for lazy summarization in get_paper."""
     return _vertex_summaries(paper, None, settings)
+
+
+def expand_query_with_gemini(query: str, settings: Settings, *, variants: int = 4) -> list[str]:
+    """Ask Gemini to rewrite the query into diverse retrieval variants.
+
+    Returns [] on any failure (import, unconfigured project, API error) so the
+    caller can transparently fall back to the original query. Trivially short
+    queries are returned unchanged since rewriting is wasteful for keyword hits.
+    """
+    query = (query or "").strip()
+    if not query:
+        return []
+    if settings.summary_provider != "vertex" or not settings.vertex_project:
+        return []
+    if len(query.split()) < 3:
+        return [query]
+    try:
+        from google import genai
+        from google.genai import types as genai_types
+    except ImportError:
+        return []
+    variants = max(1, min(variants, 8))
+    prompt = (
+        "You rewrite research questions into diverse search queries for an AI "
+        "paper retrieval system.\n\n"
+        f"Produce up to {variants} DIFFERENT short queries (max ~10 words each) "
+        "that together cover the question from complementary angles (technical "
+        "terms, method names, synonymous phrasings, narrower/broader scopes).\n"
+        "Return ONLY the queries, one per line, no numbering, no commentary.\n\n"
+        f"Question: {query}\n"
+    )
+    try:
+        client = genai.Client(
+            vertexai=True,
+            project=settings.vertex_project,
+            location=settings.vertex_location,
+        )
+        response = client.models.generate_content(
+            model=settings.summary_model,
+            contents=prompt,
+            config=genai_types.GenerateContentConfig(
+                max_output_tokens=400,
+                temperature=0.4,
+            ),
+        )
+        text = (response.text or "").strip()
+    except Exception as exc:
+        logger.warning(
+            "Vertex query expansion failed",
+            extra={"event": "query_expand.failed", "error": str(exc)},
+        )
+        return []
+    expanded: list[str] = []
+    seen: set[str] = {query.lower()}
+    for line in text.splitlines():
+        candidate = line.strip().lstrip("-*0123456789. ").strip()
+        if not candidate:
+            continue
+        key = candidate.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        expanded.append(candidate)
+        if len(expanded) >= variants:
+            break
+    # Always keep the original query at position 0.
+    return [query, *expanded]

@@ -299,7 +299,16 @@ def run_research_qa(
     evidence_limit: int = 5,
     include_live_sources: bool = False,
 ) -> dict[str, Any]:
-    rewritten_queries = rewrite_queries(question, max_queries=query_limit)
+    # Prefer server-side Gemini-generated variants (covers arbitrary domains).
+    # A truthy server response is authoritative — including a single-item
+    # [question] list, which the server returns intentionally for short
+    # queries. Fall back to the heuristic rewriter only when the server
+    # actually declined (empty response / transport failure).
+    server_variants = client.expand_query(question, variants=query_limit)
+    if server_variants:
+        rewritten_queries = server_variants[:query_limit]
+    else:
+        rewritten_queries = rewrite_queries(question, max_queries=query_limit)
     shortlisted_papers, query_runs = _aggregate_papers(
         client,
         rewritten_queries,

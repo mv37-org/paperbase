@@ -69,6 +69,38 @@ def summarize_top_cited(
     return service.enqueue_summarize_top_cited_job(limit=limit)
 
 
+@app.post("/v1/index/reindex-embeddings", response_model=JobResponse, dependencies=[Depends(require_bearer_token)])
+def reindex_embeddings(
+    limit: int = Query(default=100_000, ge=1, le=5_000_000),
+    include_chunks: bool = Query(default=True),
+    service: PaperbaseService = Depends(get_service),
+) -> JobResponse:
+    return service.enqueue_reindex_embeddings_job(limit=limit, include_chunks=include_chunks)
+
+
+@app.post("/v1/query/expand", dependencies=[Depends(require_bearer_token)])
+def expand_query(
+    query: str = Query(..., min_length=1),
+    variants: int = Query(default=4, ge=1, le=8),
+    service: PaperbaseService = Depends(get_service),
+) -> dict[str, list[str]]:
+    return {"queries": service.expand_query(query, variants=variants)}
+
+
+@app.get("/v1/papers/suggest", dependencies=[Depends(require_bearer_token)])
+def suggest_papers(
+    q: str = Query(..., min_length=1, max_length=128),
+    limit: int = Query(default=10, ge=1, le=50),
+    service: PaperbaseService = Depends(get_service),
+) -> dict[str, list[dict]]:
+    return {"suggestions": service.suggest_papers(q, limit=limit)}
+
+
+@app.get("/v1/stats", dependencies=[Depends(require_bearer_token)])
+def stats(service: PaperbaseService = Depends(get_service)) -> dict:
+    return service.get_stats()
+
+
 @app.get("/v1/papers/{paper_id}", response_model=PaperResponse, dependencies=[Depends(require_bearer_token)])
 def get_paper(paper_id: str, service: PaperbaseService = Depends(get_service)) -> PaperResponse:
     return service.get_paper(paper_id)
@@ -126,6 +158,15 @@ def grep_results(
 @app.get("/v1/papers/{paper_id}/related", response_model=list[SearchPaperResult], dependencies=[Depends(require_bearer_token)])
 def related(paper_id: str, service: PaperbaseService = Depends(get_service)) -> list[SearchPaperResult]:
     return service.get_related_papers(paper_id)
+
+
+@app.get("/v1/papers/{paper_id}/references", dependencies=[Depends(require_bearer_token)])
+def references(
+    paper_id: str,
+    refresh: bool = Query(default=False),
+    service: PaperbaseService = Depends(get_service),
+) -> list[dict]:
+    return service.get_paper_references(paper_id, refresh=refresh)
 
 
 @app.get("/v1/jobs/{job_id}", response_model=JobResponse, dependencies=[Depends(require_bearer_token)])

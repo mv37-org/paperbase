@@ -120,3 +120,37 @@ class PaperbaseClient:
 
     def get_job(self, job_id: str) -> dict[str, Any]:
         return self._request("GET", f"/v1/jobs/{job_id}")
+
+    def expand_query(self, query: str, *, variants: int = 4) -> list[str]:
+        """Ask the paperbase server for query variants.
+
+        Returns the server's response verbatim on success (which may be a
+        single-item list for trivially short queries — that is the server's
+        intended pass-through). Returns an empty list on any failure so the
+        caller can cleanly distinguish "server declined" from "server said
+        don't expand this" and fall back to a heuristic only when we truly
+        got no response.
+        """
+        try:
+            payload = self._request(
+                "POST",
+                "/v1/query/expand",
+                params={"query": query, "variants": variants},
+            )
+        except requests.RequestException as exc:
+            logger.warning(
+                "Server-side query expansion unavailable; falling back",
+                extra={"event": "plugin.query_expand.failed", "error": str(exc)},
+            )
+            return []
+        queries = payload.get("queries") if isinstance(payload, dict) else None
+        if not queries:
+            return []
+        return list(queries)
+
+    def get_paper_references(self, paper_id: str, *, refresh: bool = False) -> list[dict[str, Any]]:
+        return self._request(
+            "GET",
+            f"/v1/papers/{paper_id}/references",
+            params={"refresh": str(refresh).lower()},
+        )
