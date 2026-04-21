@@ -1072,6 +1072,7 @@ textarea::placeholder,
   flex: 1 1 auto;
   display: flex;
   align-items: stretch;
+  justify-content: flex-start;
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: none;
@@ -1082,9 +1083,10 @@ textarea::placeholder,
 }
 
 .chat-tab {
-  flex: 1 1 0;
+  flex: 0 1 min(175px, calc(100% / var(--chat-tab-count, 1)));
+  width: min(175px, calc(100% / var(--chat-tab-count, 1)));
   min-width: 0;
-  max-width: none;
+  max-width: 175px;
   height: 39px;
   display: flex;
   align-items: center;

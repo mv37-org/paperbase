@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ChangeEvent, FormEvent } from "react";
+import type { CSSProperties, ChangeEvent, FormEvent } from "react";
 
 import {
   api,
@@ -40,6 +40,7 @@ const OPEN_TABS_KEY = "paperbase-open-tabs";
 const PENDING_PROMPT_KEY = "paperbase-pending-prompt";
 const SIDEBAR_COLLAPSED_KEY = "paperbase-sidebar-collapsed";
 const FREE_RESPONSE_LIMIT = 3;
+const MAX_OPEN_TABS = 8;
 type ModalFlashKind = "error" | "note";
 type PaperDrawerState = { paperId: string; path: string } | null;
 type PaperDrawerContent =
@@ -147,10 +148,21 @@ function rememberPendingPrompt(prompt: string) {
 function restoreTabs() {
   try {
     const parsed = JSON.parse(localStorage.getItem(OPEN_TABS_KEY) ?? "[]");
-    return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === "string") : [];
+    return Array.isArray(parsed)
+      ? parsed
+          .filter((value): value is string => typeof value === "string")
+          .slice(-MAX_OPEN_TABS)
+      : [];
   } catch {
     return [];
   }
+}
+
+function appendOpenTab(current: string[], threadId: string) {
+  if (current.includes(threadId)) {
+    return current;
+  }
+  return [...current, threadId].slice(-MAX_OPEN_TABS);
 }
 
 function restoreSidebarCollapsed() {
@@ -356,6 +368,13 @@ export default function App() {
     [openTabs, threadMap, threads],
   );
   const hasOpenTabs = openTabItems.length > 0;
+  const tabStripStyle = useMemo(
+    () =>
+      ({
+        "--chat-tab-count": Math.max(1, openTabItems.length),
+      }) as CSSProperties,
+    [openTabItems.length],
+  );
 
   useEffect(() => {
     const handlePopState = () => {
@@ -531,7 +550,7 @@ export default function App() {
       if (!threadMapRef.current[threadId]) {
         await fetchAndStoreThread(threadId);
       }
-      setOpenTabs((current) => (current.includes(threadId) ? current : [...current, threadId]));
+      setOpenTabs((current) => appendOpenTab(current, threadId));
       setActiveThreadId(threadId);
     },
     [fetchAndStoreThread],
@@ -541,7 +560,7 @@ export default function App() {
     async (title = "") => {
       const thread = await createThread(title);
       setThreadMap((current) => ({ ...current, [thread.thread_id]: thread }));
-      setOpenTabs((current) => (current.includes(thread.thread_id) ? current : [...current, thread.thread_id]));
+      setOpenTabs((current) => appendOpenTab(current, thread.thread_id));
       setActiveThreadId(thread.thread_id);
       await refreshThreads();
       return thread;
@@ -1161,7 +1180,7 @@ export default function App() {
                       className="sidebar-toggle-icon"
                     />
                   </button>
-                  <div className="chat-tab-strip" role="tablist" aria-label="Open tabs">
+                  <div className="chat-tab-strip" role="tablist" aria-label="Open tabs" style={tabStripStyle}>
                     {openTabItems.map((tab) => (
                       <div
                         key={tab.threadId}
