@@ -533,6 +533,7 @@ export default function App() {
               onChange={setLandingPrompt}
               onSubmit={() => void handleLandingSubmit()}
               submitButtonId="landing-start-button"
+              submitLabel="Ask Paperbase"
               value={landingPrompt}
             />
 

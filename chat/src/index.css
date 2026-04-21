@@ -238,6 +238,7 @@ textarea {
   align-items: center;
   gap: 8px;
   padding: 4px;
+  border-radius: 6px;
   min-height: 44px;
 }
 
@@ -297,8 +298,9 @@ textarea::placeholder,
 }
 
 #landing-start-button {
-  padding: 7px 12px;
+  padding: 7px 14px;
   font-size: 12px;
+  white-space: nowrap;
 }
 
 .mention-editor {
@@ -412,10 +414,13 @@ textarea::placeholder,
 .mention-tag {
   display: inline-flex;
   align-items: center;
-  padding: 4px 8px;
-  border: 1px solid var(--line);
+  padding: 5px 10px;
+  border: 1px solid rgba(43, 98, 228, 0.22);
   border-radius: var(--radius);
-  background: var(--paper);
+  background: rgba(43, 98, 228, 0.14);
+  color: #1f4db8;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-weight: 500;
   font-size: 12px;
   line-height: 1.3;
 }
