@@ -339,6 +339,7 @@ export default function App() {
   const authenticated = Boolean(session?.authenticated);
   const sidebarThreads = useMemo(() => threads.filter(shouldShowThreadInSidebar), [threads]);
   const activeThread = activeThreadId ? threadMap[activeThreadId] ?? null : null;
+  const isChatEmpty = !activeThread || activeThread.messages.length === 0;
   const paperDrawerOpen = Boolean(paperDrawer);
   const openTabItems = useMemo(
     () =>
@@ -1201,8 +1202,8 @@ export default function App() {
               </header>
             ) : null}
 
-            <div ref={messageListRef} className="chat-message-list">
-              {!activeThread || activeThread.messages.length === 0 ? (
+            <div ref={messageListRef} className={`chat-message-list${isChatEmpty ? " empty" : ""}`}>
+              {isChatEmpty ? (
                 <div className="chat-stage-spacer">
                   {!hasOpenTabs ? (
                     <button
