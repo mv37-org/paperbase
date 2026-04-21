@@ -277,7 +277,7 @@ export function LandingMentionEditor({ value: plainText, onChange }: Props) {
   return (
     <div className="mention-editor">
       <div className="mention-editor-surface">
-        <Slate editor={editor} initialValue={INITIAL_VALUE} onChange={handleChange}>
+        <Slate editor={editor} initialValue={value} onChange={handleChange}>
           <Editable
             className="mention-editor-input"
             renderElement={renderElement}
