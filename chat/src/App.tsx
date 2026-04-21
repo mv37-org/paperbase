@@ -511,9 +511,9 @@ export default function App() {
           >
             <span className="landing-login-icon" aria-hidden="true">
               <svg viewBox="0 0 24 24">
-                <path d="M10 8.5V6.75A2.75 2.75 0 0 1 12.75 4h4.5A2.75 2.75 0 0 1 20 6.75v10.5A2.75 2.75 0 0 1 17.25 20h-4.5A2.75 2.75 0 0 1 10 17.25V15.5" />
-                <path d="M14.5 12H4.5" />
-                <path d="m7.75 8.75-3.25 3.25 3.25 3.25" />
+                <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
+                <path d="M3 12h12" />
+                <path d="m10 7 5 5-5 5" />
               </svg>
             </span>
             <span className="landing-login-label">Log in</span>
