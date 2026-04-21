@@ -1,5 +1,17 @@
 steps:
+  - name: node:20-bookworm
+    id: build-chat-frontend
+    entrypoint: bash
+    dir: chat
+    args:
+      - -ceu
+      - |
+        corepack enable
+        pnpm install --frozen-lockfile
+        pnpm run build
+
   - name: gcr.io/cloud-builders/docker
+    id: pull-build-cache
     entrypoint: bash
     args:
       - -ceu
@@ -7,6 +19,7 @@ steps:
         docker pull "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:latest" || exit 0
 
   - name: gcr.io/cloud-builders/docker
+    id: build-api-image
     dir: paperbase
     args:
       - build
@@ -19,6 +32,7 @@ steps:
       - .
 
   - name: gcr.io/cloud-builders/docker
+    id: push-api-image
     entrypoint: bash
     args:
       - -ceu
@@ -27,38 +41,165 @@ steps:
         docker push "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:latest"
 
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    id: deploy-api
     entrypoint: bash
     args:
       - -ceu
       - |
+        if [[ "${_DEPLOY_API}" != "true" ]]; then
+          echo "Skipping API deploy"
+          exit 0
+        fi
+
         image="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:$SHORT_SHA"
         cmd=(
-          gcloud run deploy "${_SERVICE_NAME}"
+          gcloud run deploy "${_API_SERVICE_NAME}"
           --image="${image}"
           --region="${_REGION}"
           --platform=managed
+          --port=8080
+          --cpu="${_API_CPU}"
+          --memory="${_API_MEMORY}"
+          --timeout="${_API_TIMEOUT}"
+          --concurrency="${_API_CONCURRENCY}"
+          --min-instances="${_API_MIN_INSTANCES}"
+          --max-instances="${_API_MAX_INSTANCES}"
           --quiet
         )
 
-        if [[ -n "${_ENV_VARS_FILE}" ]]; then
-          cmd+=(--env-vars-file="${_ENV_VARS_FILE}")
+        if [[ "${_API_ALLOW_UNAUTHENTICATED}" == "true" ]]; then
+          cmd+=(--allow-unauthenticated)
+        else
+          cmd+=(--no-allow-unauthenticated)
         fi
 
-        if [[ -n "${_RUNTIME_SERVICE_ACCOUNT}" ]]; then
-          cmd+=(--service-account="${_RUNTIME_SERVICE_ACCOUNT}")
+        if [[ -n "${_API_ENV_VARS_FILE}" ]]; then
+          cmd+=(--env-vars-file="${_API_ENV_VARS_FILE}")
+        fi
+
+        if [[ -n "${_API_SERVICE_ACCOUNT}" ]]; then
+          cmd+=(--service-account="${_API_SERVICE_ACCOUNT}")
+        fi
+
+        if [[ -n "${_CLOUDSQL_INSTANCES}" ]]; then
+          cmd+=(--add-cloudsql-instances="${_CLOUDSQL_INSTANCES}")
+        fi
+
+        if [[ -n "${_VPC_CONNECTOR}" ]]; then
+          cmd+=(--vpc-connector="${_VPC_CONNECTOR}")
+        fi
+
+        if [[ -n "${_VPC_EGRESS}" ]]; then
+          cmd+=(--vpc-egress="${_VPC_EGRESS}")
+        fi
+
+        if [[ -n "${_API_INGRESS}" ]]; then
+          cmd+=(--ingress="${_API_INGRESS}")
+        fi
+
+        if [[ -n "${_API_SECRETS}" ]]; then
+          cmd+=(--update-secrets="${_API_SECRETS}")
         fi
 
         "${cmd[@]}"
+
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    id: deploy-worker
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        if [[ "${_DEPLOY_WORKER}" != "true" ]]; then
+          echo "Skipping worker deploy"
+          exit 0
+        fi
+
+        image="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:$SHORT_SHA"
+        cmd=(
+          gcloud run deploy "${_WORKER_SERVICE_NAME}"
+          --image="${image}"
+          --region="${_REGION}"
+          --platform=managed
+          --command=paperbase-worker
+          --port=8080
+          --cpu="${_WORKER_CPU}"
+          --memory="${_WORKER_MEMORY}"
+          --timeout="${_WORKER_TIMEOUT}"
+          --concurrency="${_WORKER_CONCURRENCY}"
+          --min-instances="${_WORKER_MIN_INSTANCES}"
+          --max-instances="${_WORKER_MAX_INSTANCES}"
+          --no-allow-unauthenticated
+          --quiet
+        )
+
+        if [[ -n "${_WORKER_ENV_VARS_FILE}" ]]; then
+          cmd+=(--env-vars-file="${_WORKER_ENV_VARS_FILE}")
+        fi
+
+        if [[ -n "${_WORKER_SERVICE_ACCOUNT}" ]]; then
+          cmd+=(--service-account="${_WORKER_SERVICE_ACCOUNT}")
+        fi
+
+        if [[ -n "${_CLOUDSQL_INSTANCES}" ]]; then
+          cmd+=(--add-cloudsql-instances="${_CLOUDSQL_INSTANCES}")
+        fi
+
+        if [[ -n "${_VPC_CONNECTOR}" ]]; then
+          cmd+=(--vpc-connector="${_VPC_CONNECTOR}")
+        fi
+
+        if [[ -n "${_VPC_EGRESS}" ]]; then
+          cmd+=(--vpc-egress="${_VPC_EGRESS}")
+        fi
+
+        if [[ -n "${_WORKER_INGRESS}" ]]; then
+          cmd+=(--ingress="${_WORKER_INGRESS}")
+        fi
+
+        if [[ -n "${_WORKER_SECRETS}" ]]; then
+          cmd+=(--update-secrets="${_WORKER_SECRETS}")
+        fi
+
+        "${cmd[@]}"
+
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:$SHORT_SHA
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:latest
 
 options:
   logging: CLOUD_LOGGING_ONLY
 
 substitutions:
-  _SERVICE_NAME: paperbase-api
   _REGION: us-central1
   _AR_REPO: paperbase
   _IMAGE_NAME: paperbase-api
-  _ENV_VARS_FILE: ""
-  _RUNTIME_SERVICE_ACCOUNT: ""
+  _DEPLOY_API: "true"
+  _DEPLOY_WORKER: "true"
+  _API_SERVICE_NAME: paperbase-api
+  _WORKER_SERVICE_NAME: paperbase-worker
+  _API_ENV_VARS_FILE: paperbase/cloudrun.api.env.yaml
+  _WORKER_ENV_VARS_FILE: paperbase/cloudrun.worker.env.yaml
+  _API_SERVICE_ACCOUNT: ""
+  _WORKER_SERVICE_ACCOUNT: ""
+  _API_ALLOW_UNAUTHENTICATED: "true"
+  _CLOUDSQL_INSTANCES: ""
+  _VPC_CONNECTOR: ""
+  _VPC_EGRESS: ""
+  _API_INGRESS: ""
+  _WORKER_INGRESS: internal
+  _API_SECRETS: ""
+  _WORKER_SECRETS: ""
+  _API_CPU: "2"
+  _API_MEMORY: 6Gi
+  _API_TIMEOUT: 300s
+  _API_CONCURRENCY: "80"
+  _API_MIN_INSTANCES: "0"
+  _API_MAX_INSTANCES: "2"
+  _WORKER_CPU: "2"
+  _WORKER_MEMORY: 6Gi
+  _WORKER_TIMEOUT: 3600s
+  _WORKER_CONCURRENCY: "1"
+  _WORKER_MIN_INSTANCES: "1"
+  _WORKER_MAX_INSTANCES: "1"
 
-timeout: 1800s
+timeout: 2400s
