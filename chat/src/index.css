@@ -523,6 +523,7 @@ textarea::placeholder,
 }
 
 .sidebar-title {
+  font-family: "Georgia", "Iowan Old Style", serif;
   font-size: 18px;
   line-height: 1.1;
   letter-spacing: -0.03em;
