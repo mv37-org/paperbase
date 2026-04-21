@@ -1,0 +1,84 @@
+# Cloud Run service manifest for the paperbase worker.
+# Deploy with:
+#   gcloud run services replace cloudrun.worker.service.yaml --region=YOUR_REGION --project=YOUR_PROJECT_ID
+#
+# Shares the same container image as paperbase-api but overrides the entry
+# point to `paperbase-worker`. The worker binary detects Cloud Run's $PORT
+# and runs a tiny FastAPI sidecar for /health so Cloud Run's health check
+# keeps the container alive while the job loop runs in a background thread.
+#
+# Scaling: min = max = 1. `claim_pending_job` uses row-locking so multi-
+# instance would be safe, but horizontal scale mostly amplifies rate-limit
+# exposure against arXiv / S2 / Vertex. Scale later if job volume justifies.
+
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: paperbase-worker
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "1"
+        autoscaling.knative.dev/maxScale: "1"
+    spec:
+      containerConcurrency: 1
+      timeoutSeconds: 3600
+      containers:
+        - image: us-central1-docker.pkg.dev/YOUR_PROJECT_ID/YOUR_REPOSITORY/paperbase-api:latest
+          command: ["paperbase-worker"]
+          ports:
+            - name: http1
+              containerPort: 8080
+          env:
+            - name: PAPERBASE_API_KEY
+              value: change-me
+            - name: PAPERBASE_DATABASE_URL
+              value: postgresql+psycopg://postgres:postgres@YOUR_DB_HOST:5432/paperbase
+            - name: PAPERBASE_STORAGE_BACKEND
+              value: gcs
+            - name: PAPERBASE_GCS_PROJECT
+              value: YOUR_PROJECT_ID
+            - name: PAPERBASE_GCS_BUCKET
+              value: YOUR_BUCKET
+            - name: PAPERBASE_PRESIGN_TTL_SECONDS
+              value: "3600"
+            - name: PAPERBASE_SYNC_INTERVAL_SECONDS
+              value: "3600"
+            - name: PAPERBASE_WORKER_POLL_INTERVAL_SECONDS
+              value: "10"
+            - name: PAPERBASE_WORKER_AUTO_SYNC_LATEST
+              value: "true"
+            - name: PAPERBASE_WORKER_INITIAL_SYNC_LATEST
+              value: "false"
+            - name: PAPERBASE_LATEST_SYNC_DAYS
+              value: "7"
+            - name: PAPERBASE_LATEST_SYNC_LIMIT_PER_CATEGORY
+              value: "100"
+            # Embeddings are required for indexing, same config as the API.
+            - name: PAPERBASE_EMBEDDING_MODEL
+              value: allenai/specter2_base
+            - name: PAPERBASE_EMBEDDING_DIM
+              value: "768"
+            # Reranker is not loaded on the worker — only search() uses it.
+            - name: PAPERBASE_RERANK_MODEL
+              value: ""
+            # Summaries: "none" keeps mass ingest cheap; flip to "vertex" once
+            # PAPERBASE_VERTEX_PROJECT is populated if you want lazy summaries.
+            - name: PAPERBASE_SUMMARY_PROVIDER
+              value: none
+            - name: PAPERBASE_SUMMARY_MODEL
+              value: gemini-2.5-flash-lite
+            - name: PAPERBASE_VERTEX_PROJECT
+              value: YOUR_PROJECT_ID
+            - name: PAPERBASE_VERTEX_LOCATION
+              value: us-central1
+            - name: PAPERBASE_FEATURED_TIER_CONCURRENCY
+              value: "16"
+            # Matches the API — SPECTER2 + docling live in memory, and the
+            # summarize_top_cited / reindex_missing_embeddings paths are the
+            # worker's heaviest users.
+          resources:
+            limits:
+              cpu: "2"
+              memory: 6Gi

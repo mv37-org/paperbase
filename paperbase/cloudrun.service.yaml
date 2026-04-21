@@ -43,7 +43,9 @@ spec:
             - name: PAPERBASE_EMBEDDING_DIM
               value: "768"
             - name: PAPERBASE_RERANK_MODEL
-              value: ""  # set to BAAI/bge-reranker-v2-m3 to enable cross-encoder rerank
+              value: BAAI/bge-reranker-v2-m3
+            - name: PAPERBASE_RERANK_TOP_K
+              value: "50"
             # Summaries: "none" skips LLM entirely at ingest (use this for 50M-scale harvests).
             # Set to "vertex" after migration + when PAPERBASE_VERTEX_PROJECT is configured to
             # enable lazy on-read summarization and the summarize_top_cited job.
@@ -62,4 +64,6 @@ spec:
           resources:
             limits:
               cpu: "2"
-              memory: 4Gi
+              # SPECTER2 (~450 MB) + BGE-reranker-v2-m3 (~2.2 GB) + docling
+              # (~1.2 GB) + Python runtime state leaves ~2 GB headroom at 6Gi.
+              memory: 6Gi
