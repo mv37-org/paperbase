@@ -489,6 +489,21 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     "ON papers USING gin (authors gin_trgm_ops)"
                 )
             )
+            # Summary / tldr trigram indexes back the suggest endpoint's
+            # widened ILIKE '%q%' branch. Without these, summary-only
+            # typeahead hits the papers table sequentially on every keystroke.
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS papers_summary_short_trgm "
+                    "ON papers USING gin (summary_short gin_trgm_ops)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS papers_tldr_trgm "
+                    "ON papers USING gin (tldr gin_trgm_ops)"
+                )
+            )
 
     def probe(self) -> IntegrationProbeComponent:
         result = 0

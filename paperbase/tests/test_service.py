@@ -314,19 +314,20 @@ class _StubEmbeddings:
     def __init__(self) -> None:
         self.paper_calls: list[list[str]] = []
         self.chunk_calls: list[list[str]] = []
-        self.mode = "paper"
 
     def encode(self, text: str) -> list[float] | None:
         return [float(len(text)), 0.0, 0.0]
 
     def encode_batch(self, texts: list[str]) -> list[list[float]] | None:
-        if self.mode == "paper":
-            self.paper_calls.append(list(texts))
-            self.mode = "chunk"
-        else:
-            self.chunk_calls.append(list(texts))
-            self.mode = "paper"
+        self.chunk_calls.append(list(texts))
         return [[float(i), 0.0, 0.0] for i, _ in enumerate(texts, start=1)]
+
+    def encode_paper_batch(self, pairs: list[tuple[str, str]]) -> list[list[float]] | None:
+        # Record the flattened text the reindex loop would have sent through
+        # the single-string encode_batch path previously, so existing
+        # assertions that inspect paper_calls keep working.
+        self.paper_calls.append(["\n".join(part for part in pair if part) for pair in pairs])
+        return [[float(i), 0.0, 0.0] for i, _ in enumerate(pairs, start=1)]
 
 
 def _seed_indexed_paper(repo: MemoryPaperRepository, arxiv_id: str, *, with_paper_embedding: bool, chunks_with_embedding: int, chunks_without_embedding: int) -> str:
@@ -556,3 +557,187 @@ def test_suggest_papers_returns_highlight_payload(service: PaperbaseService):
     top = hits[0]
     assert "highlight_snippet" in top
     assert "Attention" in top["highlight_snippet"]
+
+
+def test_specter2_embedder_uses_text_pair_tokenization():
+    """The SPECTER2 raw-transformers path must build `title [SEP] body` via
+    the tokenizer's pair API, not a newline-joined single string. Regressing
+    this silently drifts vectors away from the space SPECTER2 was trained on.
+    """
+    from paperbase.service import _TransformersCLSEmbedder
+
+    tokenizer_calls: list[dict[str, object]] = []
+
+    class _FakeBatch(dict):
+        """Behaves like a tokenizer BatchEncoding: supports `.to()` and
+        `**unpacking` into model call kwargs."""
+        def to(self, device):
+            return self
+
+    class _FakeTokenizer:
+        def __call__(self, *args, **kwargs):
+            tokenizer_calls.append(dict(kwargs))
+            return _FakeBatch(input_ids=[[0]])
+
+    class _FakeHidden:
+        def __init__(self, arr):
+            self._arr = arr
+        @property
+        def last_hidden_state(self):
+            return self
+        def __getitem__(self, _idx):
+            class _Tensor:
+                def __init__(self, arr):
+                    self._arr = arr
+                def detach(self):
+                    return self
+                def cpu(self):
+                    return self
+                def numpy(self):
+                    return self._arr
+            return _Tensor(self._arr)
+
+    class _FakeModel:
+        def __call__(self, **_kwargs):
+            class _Out:
+                pass
+            import numpy as np
+            out = _Out()
+            out.last_hidden_state = _FakeHiddenState(np.array([[0.1, 0.2, 0.3]], dtype="float32"))
+            return out
+        def eval(self):
+            return self
+        def to(self, device):
+            return self
+
+    class _FakeHiddenState:
+        def __init__(self, arr):
+            self._arr = arr
+        def __getitem__(self, _idx):
+            class _Row:
+                def __init__(self, arr):
+                    self._arr = arr
+                def detach(self):
+                    return self
+                def cpu(self):
+                    return self
+                def numpy(self):
+                    return self._arr
+            return _Row(self._arr)
+
+    embedder = _TransformersCLSEmbedder.__new__(_TransformersCLSEmbedder)
+    import torch
+
+    # Stub torch.nn.functional.normalize so _run doesn't execute real math
+    # against our fake tensors.
+    original_normalize = torch.nn.functional.normalize
+    torch.nn.functional.normalize = lambda tensor, **_kw: tensor
+    try:
+        embedder._torch = torch
+        embedder._tokenizer = _FakeTokenizer()
+        embedder._model = _FakeModel()
+        embedder._device = "cpu"
+
+        # Pair input → tokenizer must be called with text= and text_pair=.
+        embedder.encode_pairs([
+            ("Attention Is All You Need", "We propose a model based solely on attention."),
+        ])
+        assert tokenizer_calls, "tokenizer should have been invoked"
+        call = tokenizer_calls[-1]
+        assert call.get("text") == ["Attention Is All You Need"]
+        assert call.get("text_pair") == ["We propose a model based solely on attention."]
+        assert call.get("max_length") == 512
+
+        # Chunk input (no pair) → no text_pair kwarg, single-sequence path.
+        tokenizer_calls.clear()
+        embedder.encode(["Section: Introduction. We describe..."])
+        assert tokenizer_calls
+        call = tokenizer_calls[-1]
+        assert "text_pair" not in call
+    finally:
+        torch.nn.functional.normalize = original_normalize
+
+
+def test_encode_paper_drops_summary_short_from_paper_embedding_input(monkeypatch):
+    """Paper-level vector input must not include summary_short. SPECTER2 was
+    never trained on that heuristic-generated text; keeping it in the input
+    drifts the vectors away from the training distribution.
+    """
+    from paperbase.config import Settings
+    from paperbase.service import OptionalEmbeddingProvider
+
+    settings = Settings(
+        storage_backend="memory",
+        database_url="memory://",
+        api_key="test",
+        summary_provider="none",
+        embedding_model="allenai/specter2_base",
+        embedding_dim=768,
+    )
+    provider = OptionalEmbeddingProvider(settings)
+
+    received: list[tuple[str, str | None]] = []
+
+    class _FakeSpecterModel:
+        def encode_pairs(self, pairs, **_):
+            received.extend(pairs)
+            return [[0.0] * settings.embedding_dim for _ in pairs]
+
+    monkeypatch.setattr(provider, "_model", lambda: _FakeSpecterModel())
+
+    vector = provider.encode_paper(
+        title="Attention Is All You Need",
+        body="We propose a model based solely on attention mechanisms.",
+    )
+    assert vector is not None
+    assert received == [
+        ("Attention Is All You Need", "We propose a model based solely on attention mechanisms.")
+    ]
+    # Guard: caller builds the pair; heuristic summaries must not leak in.
+    assert all("summary" not in (pair[0] or "").lower() for pair in received)
+    assert all("summary" not in (pair[1] or "").lower() for pair in received)
+
+
+def test_init_creates_trigram_indexes_for_summary_and_tldr():
+    """Verify that SqlAlchemyPaperRepository.init() issues CREATE INDEX DDL
+    for summary_short and tldr trigram ops. The suggest endpoint's widened
+    ILIKE branch depends on those indexes to stay out of sequential-scan
+    territory under typeahead load.
+    """
+    from paperbase.repository import Base, SqlAlchemyPaperRepository
+
+    statements: list[str] = []
+
+    class _FakeConn:
+        def execute(self, stmt, *args, **kwargs):
+            text_attr = getattr(stmt, "text", None)
+            if text_attr is not None:
+                statements.append(text_attr)
+
+    class _FakeBegin:
+        def __enter__(self):
+            return _FakeConn()
+        def __exit__(self, *exc):
+            return False
+
+    class _FakeEngine:
+        url = None
+        def begin(self):
+            return _FakeBegin()
+
+    repo = SqlAlchemyPaperRepository.__new__(SqlAlchemyPaperRepository)
+    repo._engine = _FakeEngine()
+    repo._session_factory = None  # type: ignore[assignment]
+
+    original_create_all = Base.metadata.create_all
+    Base.metadata.create_all = lambda engine: None
+    try:
+        repo.init()
+    finally:
+        Base.metadata.create_all = original_create_all
+
+    combined = "\n".join(statements)
+    assert "papers_summary_short_trgm" in combined
+    assert "summary_short gin_trgm_ops" in combined
+    assert "papers_tldr_trgm" in combined
+    assert "tldr gin_trgm_ops" in combined
