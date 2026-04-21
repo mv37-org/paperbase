@@ -25,16 +25,90 @@ class FakeEmailSender:
 
 class FakeChatModel:
     def __init__(self) -> None:
-        self.prompts: list[str] = []
+        self.create_calls: list[dict[str, object]] = []
+        self.stream_calls: list[dict[str, object]] = []
         self.stream_chunks: list[str] = ["Grounded ", "answer with citations [S1]"]
         self.fail_stream_after_chunks: int | None = None
 
-    def complete(self, *, api_key: str, prompt: str, system_prompt: str) -> str:
-        self.prompts.append(prompt)
-        return f"Grounded answer with citations [S1]\n\nAPI key used: {api_key[:6]}"
+    def create_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+        self.create_calls.append(
+            {
+                "api_key": api_key,
+                "messages": messages,
+                "system_prompt": system_prompt,
+                "tools": tools,
+                "tool_choice": tool_choice,
+            }
+        )
+        if tools:
+            tool_names = [tool.get("name") for tool in tools if isinstance(tool, dict)]
+            has_tool_results = any(
+                message.get("role") == "user"
+                and isinstance(message.get("content"), list)
+                and any(block.get("type") == "tool_result" for block in message.get("content"))
+                for message in messages
+                if isinstance(message, dict)
+            )
+            if tool_choice == {"type": "any"} or not has_tool_results:
+                raw_query = next(
+                    (
+                        str(message.get("content"))
+                        for message in reversed(messages)
+                        if isinstance(message, dict)
+                        and message.get("role") == "user"
+                        and isinstance(message.get("content"), str)
+                    ),
+                    "grounding",
+                )
+                query_words = [
+                    token.strip(".,!?():;").lower()
+                    for token in raw_query.split()
+                    if len(token.strip(".,!?():;")) > 3
+                ]
+                if any(word.startswith("ground") for word in query_words):
+                    query = "grounding"
+                elif "methods" in query_words:
+                    query = "methods"
+                else:
+                    query = " ".join(query_words[:2]) or raw_query
+                tool_name = (
+                    "paperbase_search"
+                    if "paperbase_search" in tool_names
+                    else "paperbase_search_sections"
+                    if "paperbase_search_sections" in tool_names
+                    else str(tool_names[0])
+                )
+                return {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_search_sections",
+                            "name": tool_name,
+                            "input": {"query": query, "limit": 3},
+                        }
+                    ],
+                    "stop_reason": "tool_use",
+                }
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": f"Grounded answer with citations [S1]\n\nAPI key used: {api_key[:6]}",
+                }
+            ],
+            "stop_reason": "end_turn",
+        }
 
-    def stream_complete(self, *, api_key: str, prompt: str, system_prompt: str):
-        self.prompts.append(prompt)
+    def stream_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+        self.stream_calls.append(
+            {
+                "api_key": api_key,
+                "messages": messages,
+                "system_prompt": system_prompt,
+                "tools": tools,
+                "tool_choice": tool_choice,
+            }
+        )
         for index, chunk in enumerate(self.stream_chunks):
             if self.fail_stream_after_chunks is not None and index >= self.fail_stream_after_chunks:
                 raise RuntimeError("stream blew up")
@@ -945,7 +1019,9 @@ def test_browser_uploads_and_chat_require_api_key_after_free_quota(monkeypatch, 
     )
     assert resumed.status_code == 200
     assert resumed.json()["state"] == "completed"
-    assert any("S1" in prompt for prompt in chat_model.prompts)
+    assert chat_model.create_calls
+    assert chat_model.create_calls[0]["tool_choice"] == {"type": "any"}
+    assert chat_model.create_calls[0]["tools"]
 
     app.dependency_overrides.clear()
 

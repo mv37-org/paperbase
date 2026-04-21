@@ -8,6 +8,7 @@ import re
 from collections.abc import Iterator
 from dataclasses import asdict
 from dataclasses import dataclass
+from dataclasses import field
 from datetime import timedelta
 from functools import lru_cache
 from pathlib import Path
@@ -544,11 +545,87 @@ def _query_variants(question: str) -> list[str]:
     return deduped[:5]
 
 
+def _tool_int(value: Any, *, default: int, minimum: int = 1, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(parsed, maximum))
+
+
+def _tool_bool(value: Any, *, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
+def _truncate_tool_text(text: str, *, limit: int) -> tuple[str, bool]:
+    normalized = text or ""
+    if len(normalized) <= limit:
+        return normalized, False
+    clipped = normalized[:limit].rstrip()
+    return f"{clipped}\n\n[truncated]", True
+
+
+def _extract_message_text(payload: dict[str, Any]) -> str:
+    parts = [item.get("text", "") for item in payload.get("content", []) if item.get("type") == "text"]
+    return "\n".join(part for part in parts if part).strip()
+
+
+_CHAT_TOOL_MAX_ROUNDS = 4
+_CHAT_TOOL_MAX_CALLS_PER_ROUND = 6
+_CHAT_TOOL_MAX_FILE_CHARS = 12_000
+_CHAT_TOOL_MAX_TABLE_ROWS = 40
+_CHAT_TOOL_MAX_FILE_LIST = 200
+
+
+@dataclass
+class ChatCitationRegistry:
+    citations: list[ChatCitation] = field(default_factory=list)
+    _by_key: dict[tuple[str, str], ChatCitation] = field(default_factory=dict)
+    _next_source_index: int = 1
+
+    def register(
+        self,
+        *,
+        key: tuple[str, str],
+        source_kind: str,
+        title: str,
+        path: str,
+        excerpt: str,
+        paper_id: str | None = None,
+        document_id: str | None = None,
+        tags: list[str] | None = None,
+    ) -> ChatCitation:
+        existing = self._by_key.get(key)
+        if existing is not None:
+            return existing
+        citation = ChatCitation(
+            source_id=f"S{self._next_source_index}",
+            source_kind=source_kind,
+            title=title,
+            path=path,
+            excerpt=excerpt,
+            paper_id=paper_id,
+            document_id=document_id,
+            tags=list(tags or []),
+        )
+        self._next_source_index += 1
+        self._by_key[key] = citation
+        self.citations.append(citation)
+        return citation
+
+
 @dataclass
 class PreparedChatGeneration:
     thread: ChatThreadResponse
     user_message: ChatMessageResponse
-    citations: list[ChatCitation]
     resolved_user: BrowserUser
     api_key_value: str | None
     using_free_tier: bool
@@ -771,69 +848,6 @@ class PaperbaseService:
             raise HTTPException(status_code=404, detail="Chat thread not found")
         return thread
 
-    def _build_citations(self, *, question: str, user: BrowserUser, request: SendChatMessageRequest) -> list[ChatCitation]:
-        citations: list[ChatCitation] = []
-        next_source_index = 1
-        seen_sources: set[tuple[str, str]] = set()
-        queries = _query_variants(question)
-        if request.include_uploads:
-            for query in queries:
-                upload_hits = self.repository.search_uploaded_document_sections(  # type: ignore[attr-defined]
-                    user_id=user.user_id,
-                    query=query,
-                    limit=6,
-                    tag_filters=request.tag_filters,
-                )
-                for hit in upload_hits[:4]:
-                    key = ("uploaded_document", f"{hit.document_id}:{hit.path}")
-                    if key in seen_sources:
-                        continue
-                    seen_sources.add(key)
-                    citations.append(
-                        ChatCitation(
-                            source_id=f"S{next_source_index}",
-                            source_kind="uploaded_document",
-                            title=hit.title,
-                            path=hit.path,
-                            excerpt=_best_excerpt(hit.preview, question),
-                            document_id=hit.document_id,
-                            tags=hit.tags,
-                        )
-                    )
-                    next_source_index += 1
-                    if len(citations) >= 4:
-                        break
-                if len(citations) >= 4:
-                    break
-        if request.include_papers:
-            for query in queries:
-                paper_hits = self.repository.search_sections(query, limit=6)  # type: ignore[attr-defined]
-                for hit in paper_hits[:4]:
-                    key = ("paperbase_paper", f"{hit.paper_id}:{hit.path}")
-                    if key in seen_sources:
-                        continue
-                    seen_sources.add(key)
-                    try:
-                        content = self.read_file(hit.paper_id, hit.path).content
-                    except HTTPException:
-                        content = hit.preview
-                    citations.append(
-                        ChatCitation(
-                            source_id=f"S{next_source_index}",
-                            source_kind="paperbase_paper",
-                            title=hit.title,
-                            path=hit.path,
-                            excerpt=_best_excerpt(content, question),
-                            paper_id=hit.paper_id,
-                        )
-                    )
-                    next_source_index += 1
-                    if len(citations) >= 8:
-                        break
-                if len(citations) >= 8:
-                    break
-        return citations
-
     def _choose_anthropic_api_key(self, user: BrowserUser) -> tuple[str | None, bool]:
         user_key_record = self.repository.get_anthropic_api_key_record(user.user_id)  # type: ignore[attr-defined]
         if user.free_responses_used < self.settings.free_chat_response_limit and self.settings.anthropic_api_key:
@@ -858,40 +872,670 @@ class PaperbaseService:
         )
         if thread.title == "New chat":
             self.repository.rename_chat_thread(thread_id=thread_id, title=content[:60])  # type: ignore[attr-defined]
-        citations = self._build_citations(question=content, user=user, request=request)
         resolved_user = self.repository.get_browser_user_by_id(user.user_id) or user  # type: ignore[attr-defined]
         api_key_value, using_free_tier = self._choose_anthropic_api_key(resolved_user)
         return PreparedChatGeneration(
             thread=thread,
             user_message=user_message,
-            citations=citations,
             resolved_user=resolved_user,
             api_key_value=api_key_value,
             using_free_tier=using_free_tier,
         )
 
-    def _chat_system_prompt(self) -> str:
+    def _chat_tool_system_prompt(self) -> str:
         return (
-            "You are Paperbase Chat. Answer using only the provided sources when possible. "
-            "Respond in GitHub-flavored markdown. Use headings, bullets, tables, fenced code blocks, and normal markdown links when they clarify the answer. "
-            "Always cite source ids inline like [S1]. If the sources are insufficient, say so plainly."
+            "You are Paperbase Chat. You have access to Paperbase research tools that can search papers, sections, files, figures, tables, references, related papers, and the user's uploaded documents. "
+            "Use tools to gather evidence before answering any factual question about papers, research findings, figures, tables, metrics, or uploaded notes. "
+            "On turns where you still need tools, emit tool calls only and do not write any user-facing narrative text. "
+            "Once the tool results are sufficient, stop calling tools. The final answer will be generated in a separate step."
         )
 
-    def _chat_prompt(self, prepared: PreparedChatGeneration) -> str:
-        conversation_lines = []
-        for message in prepared.thread.messages[-6:] + [prepared.user_message]:
-            conversation_lines.append(f"{message.role.upper()}: {message.content_markdown}")
-        sources_block = "\n\n".join(
-            f"{citation.source_id} | {citation.source_kind} | {citation.title} | {citation.path}\n{citation.excerpt}"
-            for citation in prepared.citations
-        )
+    def _chat_answer_system_prompt(self) -> str:
         return (
-            "Conversation:\n"
-            + "\n".join(conversation_lines)
-            + "\n\nSources:\n"
-            + sources_block
-            + "\n\nAnswer the final user message. Keep the answer concise, grounded, cited, and well-structured in markdown. Use markdown tables for comparisons when helpful."
+            "You are Paperbase Chat. Answer using the gathered Paperbase tool results when possible. "
+            "Respond in GitHub-flavored markdown. Use headings, bullets, tables, fenced code blocks, and normal markdown links when they clarify the answer. "
+            "Always cite source ids inline like [S1]. If the gathered sources are insufficient, say so plainly."
         )
+
+    def _chat_messages(self, prepared: PreparedChatGeneration) -> list[dict[str, Any]]:
+        messages: list[dict[str, Any]] = []
+        for message in prepared.thread.messages[-6:]:
+            messages.append({"role": message.role, "content": message.content_markdown})
+        messages.append({"role": "user", "content": prepared.user_message.content_markdown})
+        return messages
+
+    def _chat_tool_definitions(self, request: SendChatMessageRequest) -> list[dict[str, Any]]:
+        tools: list[dict[str, Any]] = []
+        if request.include_papers:
+            tools.extend(
+                [
+                    {
+                        "name": "paperbase_search",
+                        "description": "Search Paperbase papers by topic, title, abstract, or author. Use this to find candidate papers and result-set ids before narrowing to sections or specific files.",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {
+                                "query": {"type": "string"},
+                                "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+                                "category": {"type": "string"},
+                                "year": {"type": "string"},
+                                "include_live_sources": {"type": "boolean"},
+                            },
+                            "required": ["query"],
+                        },
+                    },
+                    {
+                        "name": "paperbase_search_sections",
+                        "description": "Search grounded paper sections and captions inside Paperbase. Use this when the user asks about methods, results, experiments, figures, tables, or any specific detail that needs evidence.",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {
+                                "query": {"type": "string"},
+                                "limit": {"type": "integer", "minimum": 1, "maximum": 12},
+                                "result_set_id": {"type": "string"},
+                                "paper_ids": {"type": "array", "items": {"type": "string"}},
+                            },
+                            "required": ["query"],
+                        },
+                    },
+                    {
+                        "name": "paperbase_get_results",
+                        "description": "Load a previously saved search result set by id. Use this when you already have a result_set_id from an earlier tool call and need the shortlisted papers again.",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {"result_set_id": {"type": "string"}},
+                            "required": ["result_set_id"],
+                        },
+                    },
+                    {
+                        "name": "paperbase_grep_results",
+                        "description": "Filter a saved result set by a literal or regex-like pattern and get matching previews. Use this after search when you need a narrower subset of papers containing a specific phrase.",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {
+                                "result_set_id": {"type": "string"},
+                                "pattern": {"type": "string"},
+                                "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+                            },
+                            "required": ["result_set_id", "pattern"],
+                        },
+                    },
+                    {
+                        "name": "paperbase_get_paper",
+                        "description": "Fetch full metadata for a specific paper id. Use this when you need authors, abstract, summary, venue metadata, dates, or citation counts for a paper you already identified.",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {"paper_id": {"type": "string"}},
+                            "required": ["paper_id"],
+                        },
+                    },
+                    {
+                        "name": "paperbase_list_files",
+                        "description": "List the extracted files available for a paper. Use this when you need to discover which sections, figure captions, raw files, or tables exist before reading one.",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {"paper_id": {"type": "string"}},
+                            "required": ["paper_id"],
+                        },
+                    },
+                    {
+                        "name": "paperbase_read_file",
+                        "description": "Read the textual content of a specific extracted file for a paper. Use this for section markdown, captions, manifests, or other text files when you need exact content.",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {
+                                "paper_id": {"type": "string"},
+                                "path": {"type": "string"},
+                            },
+                            "required": ["paper_id", "path"],
+                        },
+                    },
+                    {
+                        "name": "paperbase_get_figure",
+                        "description": "Fetch figure caption metadata for a paper figure id. Use this when the user asks about a figure or architecture diagram and the caption is the primary evidence.",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {
+                                "paper_id": {"type": "string"},
+                                "figure_id": {"type": "string"},
+                            },
+                            "required": ["paper_id", "figure_id"],
+                        },
+                    },
+                    {
+                        "name": "paperbase_get_table",
+                        "description": "Fetch structured table rows and caption metadata for a paper table id. Use this when the user asks for metrics, benchmarks, ablations, or comparisons stored in a table.",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {
+                                "paper_id": {"type": "string"},
+                                "table_id": {"type": "string"},
+                            },
+                            "required": ["paper_id", "table_id"],
+                        },
+                    },
+                    {
+                        "name": "paperbase_get_related_papers",
+                        "description": "Fetch related papers for a known paper id. Use this when the user wants similar work, follow-ons, or neighboring papers in the citation graph.",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {"paper_id": {"type": "string"}},
+                            "required": ["paper_id"],
+                        },
+                    },
+                    {
+                        "name": "paperbase_get_references",
+                        "description": "Fetch the outgoing references for a paper id. Use this when the user asks what a paper cites or wants the citation graph expanded from a known paper.",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {
+                                "paper_id": {"type": "string"},
+                                "refresh": {"type": "boolean"},
+                            },
+                            "required": ["paper_id"],
+                        },
+                    },
+                ]
+            )
+        if request.include_uploads:
+            tools.extend(
+                [
+                    {
+                        "name": "paperbase_list_uploaded_documents",
+                        "description": "List the user's uploaded documents and tags. Use this when you need to discover which uploads are available before searching within them.",
+                        "input_schema": {"type": "object", "properties": {}},
+                    },
+                    {
+                        "name": "paperbase_search_uploaded_sections",
+                        "description": "Search the user's uploaded documents by content and optional tags. Use this when the question may be answered by uploaded notes, PDFs, or documents rather than indexed papers.",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {
+                                "query": {"type": "string"},
+                                "limit": {"type": "integer", "minimum": 1, "maximum": 12},
+                                "tag_filters": {"type": "array", "items": {"type": "string"}},
+                            },
+                            "required": ["query"],
+                        },
+                    },
+                ]
+            )
+        return tools
+
+    def _paper_summary_citation(
+        self,
+        citation_registry: ChatCitationRegistry,
+        *,
+        paper_id: str,
+        title: str,
+        content: str,
+        question: str,
+    ) -> ChatCitation:
+        return citation_registry.register(
+            key=("paperbase_paper", f"{paper_id}:summary"),
+            source_kind="paperbase_paper",
+            title=title,
+            path="summary",
+            excerpt=_best_excerpt(content or title, question),
+            paper_id=paper_id,
+        )
+
+    def _paper_path_citation(
+        self,
+        citation_registry: ChatCitationRegistry,
+        *,
+        paper_id: str,
+        title: str,
+        path: str,
+        content: str,
+        question: str,
+    ) -> ChatCitation:
+        return citation_registry.register(
+            key=("paperbase_paper", f"{paper_id}:{path}"),
+            source_kind="paperbase_paper",
+            title=title,
+            path=path,
+            excerpt=_best_excerpt(content, question),
+            paper_id=paper_id,
+        )
+
+    def _uploaded_citation(
+        self,
+        citation_registry: ChatCitationRegistry,
+        *,
+        document_id: str,
+        title: str,
+        path: str,
+        content: str,
+        question: str,
+        tags: list[str],
+    ) -> ChatCitation:
+        return citation_registry.register(
+            key=("uploaded_document", f"{document_id}:{path}"),
+            source_kind="uploaded_document",
+            title=title,
+            path=path,
+            excerpt=_best_excerpt(content, question),
+            document_id=document_id,
+            tags=tags,
+        )
+
+    def _execute_chat_tool(
+        self,
+        *,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        user: BrowserUser,
+        citation_registry: ChatCitationRegistry,
+    ) -> dict[str, Any]:
+        if tool_name == "paperbase_search":
+            query = str(tool_input.get("query") or "").strip()
+            request = SearchRequest(
+                query=query,
+                limit=_tool_int(tool_input.get("limit"), default=8, maximum=20),
+                category=(str(tool_input.get("category") or "").strip() or None),
+                year=(str(tool_input.get("year") or "").strip() or None),
+                include_live_sources=_tool_bool(tool_input.get("include_live_sources"), default=False),
+            )
+            response = self.search(request)
+            papers = []
+            for paper in response.papers:
+                summary_text = paper.summary_short or paper.tldr or paper.abstract or paper.title
+                citation = self._paper_summary_citation(
+                    citation_registry,
+                    paper_id=paper.paper_id,
+                    title=paper.title,
+                    content=summary_text,
+                    question=query,
+                )
+                abstract_excerpt, truncated = _truncate_tool_text(paper.abstract or summary_text, limit=900)
+                papers.append(
+                    {
+                        "source_id": citation.source_id,
+                        "paper_id": paper.paper_id,
+                        "title": paper.title,
+                        "authors": paper.authors,
+                        "published": paper.published,
+                        "summary_short": paper.summary_short,
+                        "tldr": paper.tldr,
+                        "abstract_excerpt": abstract_excerpt,
+                        "abstract_truncated": truncated,
+                        "citation_count": paper.citation_count,
+                        "influential_citation_count": paper.influential_citation_count,
+                        "source": paper.source,
+                        "score": paper.score,
+                        "index_status": paper.index_status,
+                    }
+                )
+            return {
+                "query": response.query,
+                "result_set_id": response.result_set_id,
+                "expires_at": response.expires_at.isoformat(),
+                "papers": papers,
+            }
+
+        if tool_name == "paperbase_search_sections":
+            query = str(tool_input.get("query") or "").strip()
+            raw_paper_ids = tool_input.get("paper_ids")
+            paper_ids = [str(value) for value in raw_paper_ids] if isinstance(raw_paper_ids, list) else None
+            response = self.search_sections(
+                SearchSectionRequest(
+                    query=query,
+                    limit=_tool_int(tool_input.get("limit"), default=8, maximum=12),
+                    result_set_id=(str(tool_input.get("result_set_id") or "").strip() or None),
+                    paper_ids=paper_ids or None,
+                )
+            )
+            sections = []
+            for hit in response.sections:
+                citation = self._paper_path_citation(
+                    citation_registry,
+                    paper_id=hit.paper_id,
+                    title=hit.title,
+                    path=hit.path,
+                    content=hit.preview,
+                    question=query,
+                )
+                sections.append(
+                    {
+                        "source_id": citation.source_id,
+                        "paper_id": hit.paper_id,
+                        "title": hit.title,
+                        "path": hit.path,
+                        "chunk_kind": hit.chunk_kind,
+                        "preview": hit.preview,
+                        "score": hit.score,
+                    }
+                )
+            return {"query": response.query, "sections": sections}
+
+        if tool_name == "paperbase_get_results":
+            result_set_id = str(tool_input.get("result_set_id") or "").strip()
+            response = self.get_results(result_set_id)
+            papers = []
+            for paper in response.papers:
+                summary_text = paper.summary_short or paper.tldr or paper.abstract or paper.title
+                citation = self._paper_summary_citation(
+                    citation_registry,
+                    paper_id=paper.paper_id,
+                    title=paper.title,
+                    content=summary_text,
+                    question=response.query or paper.title,
+                )
+                papers.append(
+                    {
+                        "source_id": citation.source_id,
+                        "paper_id": paper.paper_id,
+                        "title": paper.title,
+                        "summary_short": paper.summary_short,
+                        "tldr": paper.tldr,
+                        "source": paper.source,
+                        "score": paper.score,
+                    }
+                )
+            return {
+                "result_set_id": response.result_set_id,
+                "query": response.query,
+                "expires_at": response.expires_at.isoformat(),
+                "papers": papers,
+            }
+
+        if tool_name == "paperbase_grep_results":
+            result_set_id = str(tool_input.get("result_set_id") or "").strip()
+            pattern = str(tool_input.get("pattern") or "").strip()
+            response = self.grep_results(
+                result_set_id,
+                pattern,
+                limit=_tool_int(tool_input.get("limit"), default=10, maximum=50),
+            )
+            papers = []
+            for match in response.papers:
+                preview = "\n".join(match.previews[:3])
+                citation = citation_registry.register(
+                    key=("paperbase_paper", f"{match.paper_id}:grep:{pattern}"),
+                    source_kind="paperbase_paper",
+                    title=match.title,
+                    path=f"grep:{pattern}",
+                    excerpt=_best_excerpt(preview, pattern),
+                    paper_id=match.paper_id,
+                )
+                papers.append(
+                    {
+                        "source_id": citation.source_id,
+                        "paper_id": match.paper_id,
+                        "title": match.title,
+                        "match_count": match.match_count,
+                        "previews": match.previews[:5],
+                    }
+                )
+            return {
+                "result_set_id": response.result_set_id,
+                "parent_result_set_id": response.parent_result_set_id,
+                "pattern": response.pattern,
+                "papers": papers,
+                "expires_at": response.expires_at.isoformat(),
+            }
+
+        if tool_name == "paperbase_get_paper":
+            paper_id = str(tool_input.get("paper_id") or "").strip()
+            paper = self.get_paper(paper_id)
+            summary_text = paper.summary_short or paper.tldr or paper.abstract or paper.title
+            citation = self._paper_summary_citation(
+                citation_registry,
+                paper_id=paper.paper_id,
+                title=paper.title,
+                content=summary_text,
+                question=paper.title,
+            )
+            return {
+                "source_id": citation.source_id,
+                "paper": paper.model_dump(mode="json"),
+            }
+
+        if tool_name == "paperbase_list_files":
+            paper_id = str(tool_input.get("paper_id") or "").strip()
+            files = self.list_files(paper_id)
+            return {
+                "paper_id": paper_id,
+                "files": [item.model_dump(mode="json") for item in files.files[:_CHAT_TOOL_MAX_FILE_LIST]],
+                "truncated": len(files.files) > _CHAT_TOOL_MAX_FILE_LIST,
+            }
+
+        if tool_name == "paperbase_read_file":
+            paper_id = str(tool_input.get("paper_id") or "").strip()
+            path = str(tool_input.get("path") or "").strip()
+            file_response = self.read_file(paper_id, path)
+            paper = self.get_paper(paper_id)
+            trimmed, truncated = _truncate_tool_text(file_response.content, limit=_CHAT_TOOL_MAX_FILE_CHARS)
+            citation = self._paper_path_citation(
+                citation_registry,
+                paper_id=paper_id,
+                title=paper.title,
+                path=path,
+                content=trimmed,
+                question=path,
+            )
+            return {
+                "source_id": citation.source_id,
+                "paper_id": paper_id,
+                "path": path,
+                "content": trimmed,
+                "truncated": truncated,
+            }
+
+        if tool_name == "paperbase_get_figure":
+            paper_id = str(tool_input.get("paper_id") or "").strip()
+            figure_id = str(tool_input.get("figure_id") or "").strip()
+            figure = self.get_figure(paper_id, figure_id)
+            paper = self.get_paper(paper_id)
+            path = f"figures/{figure_id}/caption.md"
+            citation = self._paper_path_citation(
+                citation_registry,
+                paper_id=paper_id,
+                title=paper.title,
+                path=path,
+                content=figure.caption,
+                question=figure_id,
+            )
+            return {
+                "source_id": citation.source_id,
+                "paper_id": paper_id,
+                "figure_id": figure.figure_id,
+                "caption": figure.caption,
+                "image_url": figure.image_url,
+                "content_type": figure.content_type,
+            }
+
+        if tool_name == "paperbase_get_table":
+            paper_id = str(tool_input.get("paper_id") or "").strip()
+            table_id = str(tool_input.get("table_id") or "").strip()
+            table = self.get_table(paper_id, table_id)
+            paper = self.get_paper(paper_id)
+            limited_rows = table.rows[:_CHAT_TOOL_MAX_TABLE_ROWS]
+            table_text = "\n".join(" | ".join(row) for row in limited_rows[:6])
+            citation = self._paper_path_citation(
+                citation_registry,
+                paper_id=paper_id,
+                title=paper.title,
+                path=f"tables/{table_id}.json",
+                content=f"{table.caption or ''}\n{table_text}".strip(),
+                question=table_id,
+            )
+            return {
+                "source_id": citation.source_id,
+                "paper_id": paper_id,
+                "table_id": table.table_id,
+                "caption": table.caption,
+                "rows": limited_rows,
+                "truncated": len(table.rows) > len(limited_rows),
+                "csv_url": table.csv_url,
+            }
+
+        if tool_name == "paperbase_get_related_papers":
+            paper_id = str(tool_input.get("paper_id") or "").strip()
+            papers = self.get_related_papers(paper_id)
+            related = []
+            for paper in papers:
+                summary_text = paper.summary_short or paper.tldr or paper.abstract or paper.title
+                citation = self._paper_summary_citation(
+                    citation_registry,
+                    paper_id=paper.paper_id,
+                    title=paper.title,
+                    content=summary_text,
+                    question=paper.title,
+                )
+                related.append(
+                    {
+                        "source_id": citation.source_id,
+                        "paper_id": paper.paper_id,
+                        "title": paper.title,
+                        "summary_short": paper.summary_short,
+                        "tldr": paper.tldr,
+                        "source": paper.source,
+                    }
+                )
+            return {"paper_id": paper_id, "related_papers": related}
+
+        if tool_name == "paperbase_get_references":
+            paper_id = str(tool_input.get("paper_id") or "").strip()
+            refresh = _tool_bool(tool_input.get("refresh"), default=False)
+            references = self.get_paper_references(paper_id, refresh=refresh)
+            return {
+                "paper_id": paper_id,
+                "references": references[:50],
+                "truncated": len(references) > 50,
+            }
+
+        if tool_name == "paperbase_list_uploaded_documents":
+            uploads = self.list_uploaded_documents(user)
+            return {
+                "documents": [document.model_dump(mode="json") for document in uploads.documents],
+                "available_tags": uploads.available_tags,
+            }
+
+        if tool_name == "paperbase_search_uploaded_sections":
+            query = str(tool_input.get("query") or "").strip()
+            raw_tags = tool_input.get("tag_filters")
+            tag_filters = [str(value) for value in raw_tags] if isinstance(raw_tags, list) else []
+            hits = self.repository.search_uploaded_document_sections(  # type: ignore[attr-defined]
+                user_id=user.user_id,
+                query=query,
+                limit=_tool_int(tool_input.get("limit"), default=8, maximum=12),
+                tag_filters=tag_filters,
+            )
+            sections = []
+            for hit in hits:
+                citation = self._uploaded_citation(
+                    citation_registry,
+                    document_id=hit.document_id,
+                    title=hit.title,
+                    path=hit.path,
+                    content=hit.preview,
+                    question=query,
+                    tags=hit.tags,
+                )
+                sections.append(
+                    {
+                        "source_id": citation.source_id,
+                        "document_id": hit.document_id,
+                        "title": hit.title,
+                        "path": hit.path,
+                        "chunk_kind": hit.chunk_kind,
+                        "preview": hit.preview,
+                        "tags": hit.tags,
+                        "score": hit.score,
+                    }
+                )
+            return {"query": query, "sections": sections}
+
+        raise ValueError(f"Unknown tool: {tool_name}")
+
+    def _tool_result_blocks(
+        self,
+        *,
+        tool_uses: list[dict[str, Any]],
+        user: BrowserUser,
+        citation_registry: ChatCitationRegistry,
+    ) -> list[dict[str, Any]]:
+        blocks: list[dict[str, Any]] = []
+        for index, tool_use in enumerate(tool_uses):
+            tool_use_id = str(tool_use.get("id") or "").strip()
+            if not tool_use_id:
+                continue
+            if index >= _CHAT_TOOL_MAX_CALLS_PER_ROUND:
+                payload: dict[str, Any] = {"error": "Too many tool calls requested in one round"}
+                is_error = True
+            else:
+                try:
+                    payload = self._execute_chat_tool(
+                        tool_name=str(tool_use.get("name") or "").strip(),
+                        tool_input=tool_use.get("input") if isinstance(tool_use.get("input"), dict) else {},
+                        user=user,
+                        citation_registry=citation_registry,
+                    )
+                    is_error = False
+                except HTTPException as exc:
+                    payload = {"error": str(exc.detail)}
+                    is_error = True
+                except Exception as exc:
+                    logger.exception(
+                        "Chat tool execution failed",
+                        extra={"event": "chat.tool.failed", "tool_name": tool_use.get("name")},
+                    )
+                    payload = {"error": str(exc) or "Tool execution failed"}
+                    is_error = True
+            block = {
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": json.dumps(payload, ensure_ascii=False),
+            }
+            if is_error:
+                block["is_error"] = True
+            blocks.append(block)
+        return blocks
+
+    def _run_chat_tool_rounds(
+        self,
+        *,
+        prepared: PreparedChatGeneration,
+        user: BrowserUser,
+        request: SendChatMessageRequest,
+    ) -> tuple[list[dict[str, Any]], ChatCitationRegistry]:
+        messages = self._chat_messages(prepared)
+        citation_registry = ChatCitationRegistry()
+        tools = self._chat_tool_definitions(request)
+        if not tools:
+            return messages, citation_registry
+
+        for round_index in range(_CHAT_TOOL_MAX_ROUNDS):
+            tool_choice = {"type": "any"} if round_index == 0 else {"type": "auto"}
+            response = self.chat_model.create_message(
+                api_key=prepared.api_key_value or "",
+                messages=messages,
+                system_prompt=self._chat_tool_system_prompt(),
+                tools=tools,
+                tool_choice=tool_choice,
+            )
+            assistant_content = [
+                block
+                for block in (response.get("content") or [])
+                if isinstance(block, dict)
+            ]
+            tool_uses = [block for block in assistant_content if block.get("type") == "tool_use"]
+            if not tool_uses:
+                break
+            messages.append({"role": "assistant", "content": assistant_content})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": self._tool_result_blocks(
+                        tool_uses=tool_uses,
+                        user=user,
+                        citation_registry=citation_registry,
+                    ),
+                }
+            )
+        return messages, citation_registry
 
     def _api_key_required_response(
         self,
@@ -914,16 +1558,22 @@ class PaperbaseService:
         if not prepared.api_key_value:
             return self._api_key_required_response(user=user, thread_id=thread_id, resolved_user=prepared.resolved_user)
 
-        answer = self.chat_model.complete(
-            api_key=prepared.api_key_value,
-            prompt=self._chat_prompt(prepared),
-            system_prompt=self._chat_system_prompt(),
+        conversation_messages, citation_registry = self._run_chat_tool_rounds(
+            prepared=prepared,
+            user=user,
+            request=request,
         )
+        answer_payload = self.chat_model.create_message(
+            api_key=prepared.api_key_value,
+            messages=conversation_messages,
+            system_prompt=self._chat_answer_system_prompt(),
+        )
+        answer = _extract_message_text(answer_payload)
         assistant_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
             thread_id=thread_id,
             role="assistant",
             content_markdown=answer,
-            citations=[citation.model_dump() for citation in prepared.citations],
+            citations=[citation.model_dump() for citation in citation_registry.citations],
         )
         resolved_user = prepared.resolved_user
         if prepared.using_free_tier:
@@ -948,21 +1598,26 @@ class PaperbaseService:
             yield ("api_key_required", self._api_key_required_response(user=user, thread_id=thread_id, resolved_user=prepared.resolved_user).model_dump(mode="json"))
             return
 
+        conversation_messages, citation_registry = self._run_chat_tool_rounds(
+            prepared=prepared,
+            user=user,
+            request=request,
+        )
         assistant_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
             thread_id=thread_id,
             role="assistant",
             content_markdown="",
-            citations=[citation.model_dump() for citation in prepared.citations],
+            citations=[citation.model_dump() for citation in citation_registry.citations],
             status="streaming",
         )
         yield ("assistant_start", {"assistant_message": assistant_message.model_dump(mode="json")})
 
         chunks: list[str] = []
         try:
-            for delta in self.chat_model.stream_complete(
+            for delta in self.chat_model.stream_message(
                 api_key=prepared.api_key_value,
-                prompt=self._chat_prompt(prepared),
-                system_prompt=self._chat_system_prompt(),
+                messages=conversation_messages,
+                system_prompt=self._chat_answer_system_prompt(),
             ):
                 if not delta:
                     continue
@@ -990,7 +1645,7 @@ class PaperbaseService:
         final_message = self.repository.update_chat_message(  # type: ignore[attr-defined]
             assistant_message.message_id,
             content_markdown="".join(chunks).strip(),
-            citations=[citation.model_dump() for citation in prepared.citations],
+            citations=[citation.model_dump() for citation in citation_registry.citations],
             status="completed",
         )
         if final_message is None:
