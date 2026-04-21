@@ -1146,7 +1146,7 @@ export default function App() {
             ) : null}
           </aside>
 
-          <section className="chat-stage">
+          <section className={`chat-stage${hasOpenTabs ? "" : " no-tabs"}`}>
             {hasOpenTabs ? (
               <header className="chat-stage-header">
                 <div className="chat-stage-header-inner">
