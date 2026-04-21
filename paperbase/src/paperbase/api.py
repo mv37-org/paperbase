@@ -14,7 +14,14 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from .auth import clear_browser_session_cookie, require_bearer_token, require_browser_user, set_browser_session_cookie
+from .auth import (
+    clear_browser_session_cookie,
+    require_bearer_token,
+    require_browser_user,
+    require_browser_write_user,
+    set_browser_session_cookie,
+    set_no_store_headers,
+)
 from .config import get_settings
 from .logging_utils import build_log_config
 from .models import (
@@ -49,6 +56,7 @@ from .models import (
     UploadedDocumentResponse,
 )
 from .service import PaperbaseService, get_service
+from .security import csrf_token_for_session
 
 app = FastAPI(
     title="paperbase",
@@ -291,8 +299,13 @@ def probe_integrations(response: Response, service: PaperbaseService = Depends(g
 
 
 @app.get("/v1/browser/session", response_model=BrowserSessionResponse)
-def browser_session(request: Request, service: PaperbaseService = Depends(get_service)) -> BrowserSessionResponse:
-    return service.get_browser_session(_browser_session_token(request))
+def browser_session(request: Request, response: Response, service: PaperbaseService = Depends(get_service)) -> BrowserSessionResponse:
+    raw_token = _browser_session_token(request)
+    session = service.get_browser_session(raw_token)
+    if session.authenticated and raw_token:
+        session.csrf_token = csrf_token_for_session(raw_token, get_settings())
+    set_no_store_headers(response)
+    return session
 
 
 @app.post("/v1/browser/auth/signup", response_model=BrowserSessionResponse)
@@ -303,6 +316,8 @@ def browser_signup(
 ) -> BrowserSessionResponse:
     session_response, raw_token = service.register_browser_user(request)
     set_browser_session_cookie(response, raw_token, get_settings())
+    session_response.csrf_token = csrf_token_for_session(raw_token, get_settings())
+    set_no_store_headers(response)
     return session_response
 
 
@@ -314,6 +329,8 @@ def browser_login(
 ) -> BrowserSessionResponse:
     session_response, raw_token = service.authenticate_browser_user(request)
     set_browser_session_cookie(response, raw_token, get_settings())
+    session_response.csrf_token = csrf_token_for_session(raw_token, get_settings())
+    set_no_store_headers(response)
     return session_response
 
 
@@ -321,10 +338,12 @@ def browser_login(
 def browser_logout(
     request: Request,
     response: Response,
+    user=Depends(require_browser_write_user),
     service: PaperbaseService = Depends(get_service),
 ) -> dict[str, str]:
     service.logout_browser_session(_browser_session_token(request))
     clear_browser_session_cookie(response, get_settings())
+    set_no_store_headers(response)
     return {"status": "ok"}
 
 
@@ -392,18 +411,32 @@ async def browser_google_callback(
 @app.put("/v1/browser/settings/anthropic-key", response_model=BrowserSessionResponse)
 def browser_save_anthropic_key(
     request: SaveAnthropicKeyRequest,
-    user=Depends(require_browser_user),
+    http_request: Request,
+    response: Response,
+    user=Depends(require_browser_write_user),
     service: PaperbaseService = Depends(get_service),
 ) -> BrowserSessionResponse:
-    return service.save_user_anthropic_key(user, request)
+    session_response = service.save_user_anthropic_key(user, request)
+    raw_token = _browser_session_token(http_request)
+    if session_response.authenticated and raw_token:
+        session_response.csrf_token = csrf_token_for_session(raw_token, get_settings())
+    set_no_store_headers(response)
+    return session_response
 
 
 @app.delete("/v1/browser/settings/anthropic-key", response_model=BrowserSessionResponse)
 def browser_delete_anthropic_key(
-    user=Depends(require_browser_user),
+    request: Request,
+    response: Response,
+    user=Depends(require_browser_write_user),
     service: PaperbaseService = Depends(get_service),
 ) -> BrowserSessionResponse:
-    return service.delete_user_anthropic_key(user)
+    session_response = service.delete_user_anthropic_key(user)
+    raw_token = _browser_session_token(request)
+    if session_response.authenticated and raw_token:
+        session_response.csrf_token = csrf_token_for_session(raw_token, get_settings())
+    set_no_store_headers(response)
+    return session_response
 
 
 @app.get("/v1/browser/uploads", response_model=UploadListResponse)
@@ -418,7 +451,7 @@ def browser_list_uploads(
 async def browser_upload_document(
     file: UploadFile = File(...),
     tags: str = Form(default=""),
-    user=Depends(require_browser_user),
+    user=Depends(require_browser_write_user),
     service: PaperbaseService = Depends(get_service),
 ) -> UploadedDocumentResponse:
     data = await file.read()
@@ -442,7 +475,7 @@ def browser_list_chats(
 @app.post("/v1/browser/chats", response_model=ChatThreadResponse)
 def browser_create_chat(
     request: CreateChatThreadRequest,
-    user=Depends(require_browser_user),
+    user=Depends(require_browser_write_user),
     service: PaperbaseService = Depends(get_service),
 ) -> ChatThreadResponse:
     return service.create_chat_thread(user, request)
@@ -461,7 +494,7 @@ def browser_get_chat(
 def browser_send_chat_message(
     thread_id: str,
     request: SendChatMessageRequest,
-    user=Depends(require_browser_user),
+    user=Depends(require_browser_write_user),
     service: PaperbaseService = Depends(get_service),
 ) -> SendChatMessageResponse:
     return service.send_chat_message(user, thread_id, request)

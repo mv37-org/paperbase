@@ -825,9 +825,12 @@ def test_browser_auth_and_password_reset_flow(browser_service):
     assert signup.status_code == 200
     assert signup.json()["authenticated"] is True
     assert signup.json()["remaining_free_responses"] == 3
+    csrf_token = signup.json()["csrf_token"]
+    assert csrf_token
 
     session = client.get("/v1/browser/session")
     assert session.json()["user"]["email"] == "user@example.com"
+    assert session.json()["csrf_token"] == csrf_token
 
     forgot = client.post("/v1/browser/auth/forgot-password", json={"email": "user@example.com"})
     assert forgot.status_code == 200
@@ -838,12 +841,13 @@ def test_browser_auth_and_password_reset_flow(browser_service):
     reset = client.post("/v1/browser/auth/reset-password", json={"token": reset_token, "password": "newsecret456"})
     assert reset.status_code == 200
 
-    logout = client.post("/v1/browser/auth/logout")
+    logout = client.post("/v1/browser/auth/logout", headers={"X-Paperbase-CSRF": csrf_token})
     assert logout.status_code == 200
 
     login = client.post("/v1/browser/auth/login", json={"email": "user@example.com", "password": "newsecret456"})
     assert login.status_code == 200
     assert login.json()["authenticated"] is True
+    assert login.json()["csrf_token"]
 
     app.dependency_overrides.clear()
 
@@ -858,6 +862,7 @@ def test_browser_uploads_and_chat_require_api_key_after_free_quota(monkeypatch, 
         json={"email": "chat@example.com", "password": "topsecret123", "display_name": "Chat User"},
     )
     assert signup.status_code == 200
+    csrf_headers = {"X-Paperbase-CSRF": signup.json()["csrf_token"]}
 
     monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
     monkeypatch.setattr(
@@ -873,17 +878,19 @@ def test_browser_uploads_and_chat_require_api_key_after_free_quota(monkeypatch, 
         "/v1/browser/uploads",
         data={"tags": "methods,notes"},
         files={"file": ("notes.md", b"# Notes\n\nThese uploaded notes discuss methods and grounding.", "text/markdown")},
+        headers=csrf_headers,
     )
     assert upload.status_code == 200
     assert upload.json()["tags"] == ["methods", "notes"]
 
-    thread = client.post("/v1/browser/chats", json={"title": "New chat"}).json()
+    thread = client.post("/v1/browser/chats", json={"title": "New chat"}, headers=csrf_headers).json()
     thread_id = thread["thread_id"]
 
     for _ in range(3):
         response = client.post(
             f"/v1/browser/chats/{thread_id}/messages",
             json={"content": "Explain the methods grounding with citations", "tag_filters": ["methods"]},
+            headers=csrf_headers,
         )
         assert response.status_code == 200
         payload = response.json()
@@ -893,21 +900,51 @@ def test_browser_uploads_and_chat_require_api_key_after_free_quota(monkeypatch, 
     gated = client.post(
         f"/v1/browser/chats/{thread_id}/messages",
         json={"content": "One more answer please", "tag_filters": ["methods"]},
+        headers=csrf_headers,
     )
     assert gated.status_code == 200
     assert gated.json()["state"] == "api_key_required"
 
-    save_key = client.put("/v1/browser/settings/anthropic-key", json={"api_key": "anthropic-user-key-999"})
+    save_key = client.put("/v1/browser/settings/anthropic-key", json={"api_key": "anthropic-user-key-999"}, headers=csrf_headers)
     assert save_key.status_code == 200
     assert save_key.json()["has_anthropic_api_key"] is True
+    csrf_headers = {"X-Paperbase-CSRF": save_key.json()["csrf_token"]}
 
     resumed = client.post(
         f"/v1/browser/chats/{thread_id}/messages",
         json={"content": "Continue with my saved key", "tag_filters": ["methods"]},
+        headers=csrf_headers,
     )
     assert resumed.status_code == 200
     assert resumed.json()["state"] == "completed"
     assert any("S1" in prompt for prompt in chat_model.prompts)
+
+    app.dependency_overrides.clear()
+
+
+def test_browser_write_endpoints_require_csrf(browser_service):
+    service, _, _ = browser_service
+    app.dependency_overrides[get_service] = lambda: service
+    client = TestClient(app)
+
+    signup = client.post(
+        "/v1/browser/auth/signup",
+        json={"email": "csrf@example.com", "password": "topsecret123", "display_name": "CSRF User"},
+    )
+    assert signup.status_code == 200
+    assert signup.json()["csrf_token"]
+
+    missing_csrf = client.post("/v1/browser/chats", json={"title": "No token"})
+    assert missing_csrf.status_code == 403
+    assert missing_csrf.json()["detail"] == "Invalid CSRF token"
+
+    wrong_origin = client.post(
+        "/v1/browser/chats",
+        json={"title": "Wrong origin"},
+        headers={"X-Paperbase-CSRF": signup.json()["csrf_token"], "Origin": "https://evil.example"},
+    )
+    assert wrong_origin.status_code == 403
+    assert wrong_origin.json()["detail"] == "Cross-site browser requests are not allowed"
 
     app.dependency_overrides.clear()
 

@@ -56,7 +56,7 @@ from .models import (
     UploadedDocumentSectionResult,
 )
 from .repository import PaperRepository, build_repository
-from .security import SecretCipher, api_key_hint, hash_password, new_browser_token, token_hash, verify_password
+from .security import SecretCipher, api_key_hint, hash_password, new_browser_token, password_needs_rehash, token_hash, verify_password
 from .summaries import build_paper_summaries
 from .storage import ObjectStore, StoredObject, build_object_store
 from . import sources
@@ -598,6 +598,8 @@ class PaperbaseService:
         password_hash_value = self.repository.get_browser_password_hash(user.user_id)  # type: ignore[attr-defined]
         if not password_hash_value or not verify_password(password_hash_value, request.password):
             raise HTTPException(status_code=401, detail="Invalid email or password")
+        if password_needs_rehash(password_hash_value):
+            self.repository.set_browser_user_password(user.user_id, hash_password(request.password))  # type: ignore[attr-defined]
         session_token = self._create_browser_session(user.user_id)
         return self._browser_session_response(user), session_token
 

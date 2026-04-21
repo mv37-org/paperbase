@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 from fastapi import Depends, HTTPException, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .config import Settings, get_settings
 from .models import BrowserUser
+from .security import verify_csrf_token
 from .service import PaperbaseService, get_service
 
 
@@ -52,6 +55,29 @@ def clear_browser_session_cookie(response: Response, settings: Settings) -> None
     )
 
 
+def set_no_store_headers(response: Response) -> None:
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+
+
+def _allowed_browser_origins(settings: Settings) -> set[str]:
+    origins = {settings.browser_origin.rstrip("/"), settings.chat_public_url.rstrip("/")}
+    return {origin for origin in origins if origin}
+
+
+def _request_origin(request: Request) -> str | None:
+    origin = request.headers.get("origin")
+    if origin:
+        return origin.rstrip("/")
+    referer = request.headers.get("referer")
+    if not referer:
+        return None
+    parts = urlsplit(referer)
+    if parts.scheme and parts.netloc:
+        return f"{parts.scheme}://{parts.netloc}"
+    return None
+
+
 def get_optional_browser_user(
     request: Request,
     settings: Settings = Depends(get_settings),
@@ -68,4 +94,25 @@ def require_browser_user(
     user = service.get_current_browser_user(request.cookies.get(settings.browser_session_cookie_name))
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+    return user
+
+
+def require_browser_write_user(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    service: PaperbaseService = Depends(get_service),
+) -> BrowserUser:
+    raw_token = request.cookies.get(settings.browser_session_cookie_name)
+    user = service.get_current_browser_user(raw_token)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+
+    request_origin = _request_origin(request)
+    if request_origin and request_origin not in _allowed_browser_origins(settings):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cross-site browser requests are not allowed")
+
+    csrf_header = request.headers.get("x-paperbase-csrf")
+    if not verify_csrf_token(raw_token, csrf_header, settings):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid CSRF token")
+
     return user

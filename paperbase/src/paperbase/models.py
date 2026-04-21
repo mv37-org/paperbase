@@ -187,6 +187,7 @@ class BrowserSessionResponse(BaseModel):
     user: BrowserUser | None = None
     remaining_free_responses: int = 0
     has_anthropic_api_key: bool = False
+    csrf_token: str | None = None
 
 
 class SignupRequest(BaseModel):

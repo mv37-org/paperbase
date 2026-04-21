@@ -12,6 +12,7 @@ export interface BrowserSessionResponse {
   user: BrowserUser | null;
   remaining_free_responses: number;
   has_anthropic_api_key: boolean;
+  csrf_token: string | null;
 }
 
 export interface UploadedDocumentResponse {

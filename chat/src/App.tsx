@@ -9,6 +9,7 @@ import {
   loadSession,
   loadThreads,
   loadUploads,
+  logoutBrowserSession,
   postForm,
   sendThreadMessage,
   uploadDocument,
@@ -103,6 +104,7 @@ export default function App() {
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [authView, setAuthView] = useState<AuthView>("login");
   const [authModalOpen, setAuthModalOpen] = useState(false);
+  const [authReady, setAuthReady] = useState(false);
   const [flash, setFlash] = useState("");
   const [landingPrompt, setLandingPrompt] = useState("");
   const [composerInput, setComposerInput] = useState("");
@@ -268,9 +270,11 @@ export default function App() {
       if (nextSession.authenticated) {
         await bootstrapAuthenticatedUi();
       }
+      setAuthReady(true);
     })().catch((error: unknown) => {
       console.error(error);
       setComposerStatus("The chat app could not reach paperbase.");
+      setAuthReady(true);
     });
   }, [bootstrapAuthenticatedUi]);
 
@@ -356,6 +360,37 @@ export default function App() {
     [activeThreadId, composerInput, createNewThread, sendMessage],
   );
 
+  const resetAuthenticatedState = useCallback(() => {
+    setSession(null);
+    setThreads([]);
+    setThreadMap({});
+    setOpenTabs([]);
+    setActiveThreadId(null);
+    setLandingPrompt("");
+    setComposerInput("");
+    setComposerStatus("");
+  }, []);
+
+  const handleLogout = useCallback(async () => {
+    await logoutBrowserSession();
+    resetAuthenticatedState();
+  }, [resetAuthenticatedState]);
+
+  useEffect(() => {
+    const onAuthExpired = () => {
+      resetAuthenticatedState();
+      setFlash("Your session expired. Log in again.");
+      setAuthView("login");
+      setAuthModalOpen(true);
+    };
+    window.addEventListener("paperbase:auth-expired", onAuthExpired);
+    return () => window.removeEventListener("paperbase:auth-expired", onAuthExpired);
+  }, [resetAuthenticatedState]);
+
+  if (!authReady) {
+    return null;
+  }
+
   return (
     <>
       {!authenticated ? (
@@ -422,15 +457,7 @@ export default function App() {
               <button
                 id="logout-button"
                 className="sidebar-link"
-                onClick={async () => {
-                  await api("/v1/browser/auth/logout", { method: "POST" });
-                  setSession(null);
-                  setThreads([]);
-                  setThreadMap({});
-                  setOpenTabs([]);
-                  setActiveThreadId(null);
-                  setLandingPrompt("");
-                }}
+                onClick={() => void handleLogout()}
               >
                 Log out
               </button>
