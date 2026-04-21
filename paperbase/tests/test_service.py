@@ -905,6 +905,7 @@ def test_init_creates_trigram_indexes_for_summary_and_tldr():
             return _FakeBegin()
 
     repo = SqlAlchemyPaperRepository.__new__(SqlAlchemyPaperRepository)
+    repo._embedding_dim = 768
     repo._engine = _FakeEngine()
     repo._session_factory = None  # type: ignore[assignment]
 
@@ -916,6 +917,8 @@ def test_init_creates_trigram_indexes_for_summary_and_tldr():
         Base.metadata.create_all = original_create_all
 
     combined = "\n".join(statements)
+    assert "ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS embedding VECTOR(768)" in combined
+    assert "ALTER TABLE IF EXISTS text_chunks ADD COLUMN IF NOT EXISTS embedding VECTOR(768)" in combined
     assert "papers_summary_short_trgm" in combined
     assert "summary_short gin_trgm_ops" in combined
     assert "papers_tldr_trgm" in combined

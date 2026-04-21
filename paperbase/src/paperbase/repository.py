@@ -567,6 +567,7 @@ class PaperRepository(ABC):
 
 class SqlAlchemyPaperRepository(PaperRepository):
     def __init__(self, settings: Settings) -> None:
+        self._embedding_dim = settings.embedding_dim
         self._engine = create_engine(settings.database_url, future=True)
         self._session_factory = sessionmaker(self._engine, expire_on_commit=False)
 
@@ -583,12 +584,15 @@ class SqlAlchemyPaperRepository(PaperRepository):
             session.close()
 
     def init(self) -> None:
+        vector_type = f"VECTOR({self._embedding_dim})"
         with self._engine.begin() as connection:
             connection.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
             connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
             connection.execute(text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS summary_short TEXT DEFAULT ''"))
             connection.execute(text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS summary_eli5 TEXT DEFAULT ''"))
             connection.execute(text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS tldr TEXT DEFAULT ''"))
+            connection.execute(text(f"ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS embedding {vector_type}"))
+            connection.execute(text(f"ALTER TABLE IF EXISTS text_chunks ADD COLUMN IF NOT EXISTS embedding {vector_type}"))
             connection.execute(text("ALTER TABLE IF EXISTS text_chunks ADD COLUMN IF NOT EXISTS chunk_index INTEGER DEFAULT 0"))
             connection.execute(text("ALTER TABLE IF EXISTS text_chunks ADD COLUMN IF NOT EXISTS section_depth INTEGER DEFAULT 1"))
             connection.execute(text("ALTER TABLE IF EXISTS text_chunks ADD COLUMN IF NOT EXISTS section_order INTEGER DEFAULT 0"))
