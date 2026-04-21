@@ -105,6 +105,14 @@
     setFlash("");
   }
 
+  function autoResizeTextarea(node) {
+    if (!node) {
+      return;
+    }
+    node.style.height = "0px";
+    node.style.height = `${Math.min(node.scrollHeight, 160)}px`;
+  }
+
   function rememberPendingPrompt(prompt) {
     if (prompt && prompt.trim()) {
       sessionStorage.setItem(PENDING_PROMPT_KEY, prompt.trim());
@@ -361,6 +369,11 @@
   }
 
   function bindEvents() {
+    [el.landingPromptInput, el.composerInput].forEach((node) => {
+      autoResizeTextarea(node);
+      node.addEventListener("input", () => autoResizeTextarea(node));
+    });
+
     document.querySelectorAll("[data-close-modal='true']").forEach((node) => {
       node.addEventListener("click", hideAuthModal);
     });
@@ -382,6 +395,7 @@
       }
       const thread = await createThread();
       el.landingPromptInput.value = "";
+      autoResizeTextarea(el.landingPromptInput);
       await sendMessage(thread.thread_id, prompt);
     });
 
@@ -392,6 +406,7 @@
       }
       const prompt = button.dataset.prompt || "";
       el.landingPromptInput.value = prompt;
+      autoResizeTextarea(el.landingPromptInput);
       rememberPendingPrompt(prompt);
       if (!state.session || !state.session.authenticated) {
         showAuthModal("login");
@@ -438,6 +453,7 @@
         state.activeThreadId = thread.thread_id;
       }
       el.composerInput.value = "";
+      autoResizeTextarea(el.composerInput);
       await sendMessage(state.activeThreadId, content);
     });
 
