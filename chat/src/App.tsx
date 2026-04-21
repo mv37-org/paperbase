@@ -312,6 +312,7 @@ export default function App() {
   const authenticated = Boolean(session?.authenticated);
   const sidebarThreads = useMemo(() => threads.filter(shouldShowThreadInSidebar), [threads]);
   const activeThread = activeThreadId ? threadMap[activeThreadId] ?? null : null;
+  const activeThreadTitle = activeThread ? displayThreadTitle(activeThread.title) : "New chat";
   const paperDrawerOpen = Boolean(paperDrawer);
 
   useEffect(() => {
@@ -1085,17 +1086,30 @@ export default function App() {
           </aside>
 
           <section className="chat-stage">
-            <button
-              type="button"
-              className="sidebar-icon-button chat-sidebar-toggle"
-              aria-label={mobileSidebarOpen ? "Close sidebar" : "Open sidebar"}
-              onClick={handleSidebarToggle}
-            >
-              <AppIcon
-                src={staticAssetPath(mobileSidebarOpen ? "hide-sidebar.svg" : "show-sidebar.svg")}
-                className="sidebar-toggle-icon"
-              />
-            </button>
+            <header className="chat-stage-header">
+              <div className="chat-stage-header-inner">
+                <button
+                  type="button"
+                  className="sidebar-icon-button chat-sidebar-toggle"
+                  aria-label={mobileSidebarOpen ? "Close sidebar" : "Open sidebar"}
+                  onClick={handleSidebarToggle}
+                >
+                  <AppIcon
+                    src={staticAssetPath(mobileSidebarOpen ? "hide-sidebar.svg" : "show-sidebar.svg")}
+                    className="sidebar-toggle-icon"
+                  />
+                </button>
+                <div className="chat-stage-header-copy">
+                  <div className="chat-stage-header-eyebrow">Chat</div>
+                  <strong className="chat-stage-header-title">{activeThreadTitle}</strong>
+                  <div className="chat-stage-header-meta">
+                    {activeThread
+                      ? `${activeThread.messages.length} message${activeThread.messages.length === 1 ? "" : "s"}`
+                      : "Grounded answers from your papers and uploads."}
+                  </div>
+                </div>
+              </div>
+            </header>
 
             <div ref={messageListRef} className="chat-message-list">
               {!activeThread || activeThread.messages.length === 0 ? (
@@ -1111,69 +1125,71 @@ export default function App() {
                   </div>
                 </div>
               ) : (
-                activeThread.messages.map((message) => (
-                  <article
-                    key={message.message_id}
-                    className={`message-row ${message.role === "assistant" ? "assistant" : "user"} status-${message.status}`}
-                  >
-                    <div className="message-meta-row">
-                      <span className="message-role-label">{message.role === "assistant" ? "Paperbase" : "You"}</span>
-                      {message.status !== "completed" ? (
-                        <span className="message-status-label">
-                          {message.status === "streaming" ? "Streaming" : "Failed"}
-                        </span>
-                      ) : null}
-                    </div>
-                    <div className={`message-bubble ${message.role === "assistant" ? "assistant" : "user"}`}>
-                      {message.role === "assistant" ? (
-                        <MarkdownRenderer
-                          markdown={message.content_markdown}
-                          className="message-markdown"
-                          interactiveCitations
-                          onCitationClick={(sourceId) => {
-                            const citation = message.citations.find((item) => item.source_id === sourceId);
-                            if (citation) {
-                              handleCitationClick(message, citation);
-                            }
-                          }}
-                        />
-                      ) : (
-                        <div className="message-plain-text">{message.content_markdown}</div>
-                      )}
-                    </div>
-                    {message.role === "assistant" && message.citations.length > 0 ? (
-                      <div className="message-citations">
-                        {message.citations.map((citation) => (
-                          <div
-                            key={citation.source_id}
-                            id={sourceCardId(message.message_id, citation.source_id)}
-                            className="citation-card"
-                          >
-                            <div className="citation-card-header">
-                              <div>
-                                <span className="citation-card-source-id">{citation.source_id}</span>
-                                <strong className="citation-card-title">{citation.title}</strong>
-                              </div>
-                              {citation.paper_id ? (
-                                <button
-                                  type="button"
-                                  className="citation-card-action"
-                                  onClick={() => openPaperDrawer(citation.paper_id!, citation.path)}
-                                >
-                                  Open paper
-                                </button>
-                              ) : null}
-                            </div>
-                            <div className="citation-card-path">
-                              {citation.source_kind === "paperbase_paper" ? "Paper" : "Upload"} · {citation.path}
-                            </div>
-                            <p className="citation-card-excerpt">{citation.excerpt}</p>
-                          </div>
-                        ))}
+                <div className="chat-message-column">
+                  {activeThread.messages.map((message) => (
+                    <article
+                      key={message.message_id}
+                      className={`message-row ${message.role === "assistant" ? "assistant" : "user"} status-${message.status}`}
+                    >
+                      <div className="message-meta-row">
+                        <span className="message-role-label">{message.role === "assistant" ? "Paperbase" : "You"}</span>
+                        {message.status !== "completed" ? (
+                          <span className="message-status-label">
+                            {message.status === "streaming" ? "Streaming" : "Failed"}
+                          </span>
+                        ) : null}
                       </div>
-                    ) : null}
-                  </article>
-                ))
+                      <div className={`message-bubble ${message.role === "assistant" ? "assistant" : "user"}`}>
+                        {message.role === "assistant" ? (
+                          <MarkdownRenderer
+                            markdown={message.content_markdown}
+                            className="message-markdown"
+                            interactiveCitations
+                            onCitationClick={(sourceId) => {
+                              const citation = message.citations.find((item) => item.source_id === sourceId);
+                              if (citation) {
+                                handleCitationClick(message, citation);
+                              }
+                            }}
+                          />
+                        ) : (
+                          <div className="message-plain-text">{message.content_markdown}</div>
+                        )}
+                      </div>
+                      {message.role === "assistant" && message.citations.length > 0 ? (
+                        <div className="message-citations">
+                          {message.citations.map((citation) => (
+                            <div
+                              key={citation.source_id}
+                              id={sourceCardId(message.message_id, citation.source_id)}
+                              className="citation-card"
+                            >
+                              <div className="citation-card-header">
+                                <div>
+                                  <span className="citation-card-source-id">{citation.source_id}</span>
+                                  <strong className="citation-card-title">{citation.title}</strong>
+                                </div>
+                                {citation.paper_id ? (
+                                  <button
+                                    type="button"
+                                    className="citation-card-action"
+                                    onClick={() => openPaperDrawer(citation.paper_id!, citation.path)}
+                                  >
+                                    Open paper
+                                  </button>
+                                ) : null}
+                              </div>
+                              <div className="citation-card-path">
+                                {citation.source_kind === "paperbase_paper" ? "Paper" : "Upload"} · {citation.path}
+                              </div>
+                              <p className="citation-card-excerpt">{citation.excerpt}</p>
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
+                    </article>
+                  ))}
+                </div>
               )}
             </div>
 
