@@ -70,8 +70,8 @@ textarea {
 .landing-login-button {
   --landing-login-blue: #2b62e4;
   position: absolute;
-  top: 16px;
-  right: 32px;
+  top: 12px;
+  right: 12px;
   height: 24px;
   max-height: 24px;
   display: inline-flex;
@@ -1496,7 +1496,7 @@ textarea:hover,
 @media (max-width: 980px) {
   .landing-login-button {
     top: 12px;
-    right: 20px;
+    right: 12px;
   }
 
   .app-shell {
