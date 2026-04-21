@@ -490,7 +490,7 @@ textarea::placeholder,
 .app-shell {
   position: relative;
   display: grid;
-  grid-template-columns: 320px minmax(0, 1fr);
+  grid-template-columns: 300px minmax(0, 1fr);
   min-height: 100vh;
   background: var(--bg);
 }
@@ -503,9 +503,9 @@ textarea::placeholder,
   position: relative;
   z-index: 3;
   min-height: 100vh;
-  padding: 22px 18px;
+  padding: 20px 16px;
   border-right: 1px solid var(--line);
-  background: var(--paper);
+  background: #fcfbf8;
   display: flex;
   flex-direction: column;
   gap: 20px;
@@ -1171,11 +1171,11 @@ textarea:hover,
 
 @media (min-width: 981px) {
   .app-shell.sidebar-collapsed {
-    grid-template-columns: 68px minmax(0, 1fr);
+    grid-template-columns: 60px minmax(0, 1fr);
   }
 
   .app-shell.sidebar-collapsed .sidebar {
-    padding-inline: 8px;
+    padding-inline: 6px;
   }
 
   .app-shell.sidebar-collapsed .sidebar-title,
@@ -1197,7 +1197,7 @@ textarea:hover,
 
   .app-shell.sidebar-collapsed .sidebar-brand-row {
     width: 100%;
-    justify-content: flex-end;
+    justify-content: center;
   }
 
   .app-shell.sidebar-collapsed .sidebar-top {
