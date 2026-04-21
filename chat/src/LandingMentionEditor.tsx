@@ -142,6 +142,7 @@ type Props = {
   submitOnShiftEnter?: boolean;
   submitButtonId?: string;
   submitLabel?: string;
+  submitLoading?: boolean;
   suggestionsPlacement?: "above" | "below";
   variant?: "landing" | "chat";
 };
@@ -159,6 +160,7 @@ export function LandingMentionEditor({
   submitOnShiftEnter = false,
   submitButtonId,
   submitLabel = "Start",
+  submitLoading = false,
   suggestionsPlacement = "below",
   variant = "landing",
 }: Props) {
@@ -432,8 +434,15 @@ export function LandingMentionEditor({
                 <path d="M16.5 6.5 9 14a3 3 0 1 0 4.24 4.24l7.01-7.02a5 5 0 0 0-7.07-7.07L5.46 11.9a7 7 0 1 0 9.9 9.9l6.01-6.01" />
               </svg>
             </button>
-            <button id={submitButtonId} className="prompt-button" type="submit" disabled={disabled}>
-              {submitLabel}
+            <button
+              id={submitButtonId}
+              className={`prompt-button${submitLoading ? " loading" : ""}`}
+              type="submit"
+              disabled={disabled}
+              aria-busy={submitLoading}
+            >
+              {submitLoading ? <span className="prompt-button-spinner" aria-hidden="true" /> : null}
+              <span>{submitLabel}</span>
             </button>
           </div>
         ) : (

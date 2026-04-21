@@ -1328,6 +1328,7 @@ export default function App() {
               placeholder="Ask about the latest agent and AI systems research. Type @ to tag a paper."
               submitButtonId="composer-send"
               submitLabel={streamingThreadId ? "Thinking..." : "Send"}
+              submitLoading={Boolean(streamingThreadId)}
               submitOnShiftEnter
               suggestionsPlacement="above"
               value={composerInput}

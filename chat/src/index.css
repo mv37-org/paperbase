@@ -284,8 +284,8 @@ textarea {
   display: flex;
   align-items: stretch;
   min-height: 60px;
-  border-bottom: 1px solid rgba(27, 22, 17, 0.08);
-  border-radius: 4px;
+  border-bottom: 0;
+  border-radius: 3px 3px 0 0;
   background: #faf8f4;
   overflow: hidden;
 }
@@ -334,10 +334,36 @@ textarea {
 }
 
 .chat-prompt-shell .prompt-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   margin-left: auto;
-  padding: 7px 14px;
+  min-height: 30px;
+  max-height: 30px;
+  padding: 0 12px;
   font-size: 12px;
   white-space: nowrap;
+}
+
+.chat-prompt-shell .prompt-button.loading {
+  cursor: default;
+}
+
+.prompt-button-spinner {
+  display: block;
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #ffffff;
+  border-radius: 999px;
+  animation: prompt-button-spin 0.7s linear infinite;
+}
+
+@keyframes prompt-button-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .prompt-input,
@@ -578,7 +604,7 @@ textarea::placeholder,
   --chat-sidebar-width: 280px;
   --chat-drawer-width: 0px;
   --chat-fixed-composer-bottom: 24px;
-  --chat-fixed-composer-width: min(800px, calc(100vw - var(--chat-sidebar-width) - var(--chat-drawer-width) - 48px));
+  --chat-fixed-composer-width: min(560px, calc((100vw - var(--chat-sidebar-width) - var(--chat-drawer-width) - 48px) * 0.7));
   --chat-fixed-composer-left: calc(
     var(--chat-sidebar-width) + ((100vw - var(--chat-sidebar-width) - var(--chat-drawer-width)) / 2)
   );
