@@ -1049,8 +1049,10 @@ def test_non_grounded_chat_skips_tools_and_citations(browser_service):
 
     assert response.assistant_message is not None
     assert response.assistant_message.citations == []
+    assert "[S" not in response.assistant_message.content_markdown
     assert len(chat_model.create_calls) == 1
     assert chat_model.create_calls[0]["tools"] is None
+    assert "do not invent source ids" in str(chat_model.create_calls[0]["system_prompt"])
 
 
 def test_search_only_tool_results_do_not_create_citations(monkeypatch):
@@ -1089,7 +1091,7 @@ def test_search_only_tool_results_do_not_create_citations(monkeypatch):
                 "content": [
                     {
                         "type": "text",
-                        "text": "Grounded answer without evidence citations.",
+                        "text": "Grounded answer without evidence citations [S1].",
                     }
                 ],
                 "stop_reason": "end_turn",
@@ -1132,6 +1134,7 @@ def test_search_only_tool_results_do_not_create_citations(monkeypatch):
 
     assert response.assistant_message is not None
     assert response.assistant_message.citations == []
+    assert "[S" not in response.assistant_message.content_markdown
 
 
 def test_browser_chat_stream_emits_citations_and_completion(monkeypatch, browser_service):

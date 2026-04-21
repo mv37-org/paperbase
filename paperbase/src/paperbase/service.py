@@ -96,6 +96,8 @@ _FORCE_TOOL_QUERY_RE = re.compile(
     re.IGNORECASE,
 )
 
+_INLINE_SOURCE_ID_RE = re.compile(r"\[(S\d+)\]")
+
 
 def _query_signals_recency(query: str) -> bool:
     return bool(_RECENCY_SIGNAL_RE.search(query or ""))
@@ -591,6 +593,23 @@ def _should_force_chat_tool_use(question: str, request: SendChatMessageRequest) 
     return bool(_FORCE_TOOL_QUERY_RE.search(question))
 
 
+def _sanitize_inline_citations(answer: str, citations: list[ChatCitation]) -> str:
+    if not answer:
+        return answer
+
+    allowed_source_ids = {citation.source_id for citation in citations}
+
+    def _replace(match: re.Match[str]) -> str:
+        source_id = match.group(1)
+        return match.group(0) if source_id in allowed_source_ids else ""
+
+    sanitized = _INLINE_SOURCE_ID_RE.sub(_replace, answer)
+    sanitized = re.sub(r"\s{2,}", " ", sanitized)
+    sanitized = re.sub(r" +([,.;:!?])", r"\1", sanitized)
+    sanitized = re.sub(r"\n{3,}", "\n\n", sanitized)
+    return sanitized.strip()
+
+
 def _tool_int(value: Any, *, default: int, minimum: int = 1, maximum: int) -> int:
     try:
         parsed = int(value)
@@ -938,7 +957,15 @@ class PaperbaseService:
             "Once the tool results are sufficient, stop calling tools. The final answer will be generated in a separate step."
         )
 
-    def _chat_answer_system_prompt(self) -> str:
+    def _chat_answer_system_prompt(self, *, has_evidence_sources: bool) -> str:
+        if not has_evidence_sources:
+            return (
+                "You are Paperbase Chat. Respond naturally and helpfully in GitHub-flavored markdown. "
+                "If no evidence sources were gathered for this turn, do not cite sources, do not invent source ids like [S1], "
+                "and do not bring up papers or research context unless the user explicitly asks for them. "
+                "Treat any citations that appeared in earlier turns as historical context only, not as active sources for this reply. "
+                "For casual turns such as greetings or small talk, answer briefly and conversationally."
+            )
         return (
             "You are Paperbase Chat. Answer using the gathered Paperbase tool results when possible. "
             "Respond in GitHub-flavored markdown. Use headings, bullets, tables, fenced code blocks, and normal markdown links when they clarify the answer. "
@@ -1552,17 +1579,18 @@ class PaperbaseService:
             user=user,
             request=request,
         )
+        current_turn_citations = citation_registry.citations
         answer_payload = self.chat_model.create_message(
             api_key=prepared.api_key_value,
             messages=conversation_messages,
-            system_prompt=self._chat_answer_system_prompt(),
+            system_prompt=self._chat_answer_system_prompt(has_evidence_sources=bool(current_turn_citations)),
         )
-        answer = _extract_message_text(answer_payload)
+        answer = _sanitize_inline_citations(_extract_message_text(answer_payload), current_turn_citations)
         assistant_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
             thread_id=thread_id,
             role="assistant",
             content_markdown=answer,
-            citations=[citation.model_dump() for citation in citation_registry.citations],
+            citations=[citation.model_dump() for citation in current_turn_citations],
         )
         resolved_user = prepared.resolved_user
         if prepared.using_free_tier:
@@ -1592,11 +1620,12 @@ class PaperbaseService:
             user=user,
             request=request,
         )
+        current_turn_citations = citation_registry.citations
         assistant_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
             thread_id=thread_id,
             role="assistant",
             content_markdown="",
-            citations=[citation.model_dump() for citation in citation_registry.citations],
+            citations=[citation.model_dump() for citation in current_turn_citations],
             status="streaming",
         )
         yield ("assistant_start", {"assistant_message": assistant_message.model_dump(mode="json")})
@@ -1606,7 +1635,7 @@ class PaperbaseService:
             for delta in self.chat_model.stream_message(
                 api_key=prepared.api_key_value,
                 messages=conversation_messages,
-                system_prompt=self._chat_answer_system_prompt(),
+                system_prompt=self._chat_answer_system_prompt(has_evidence_sources=bool(current_turn_citations)),
             ):
                 if not delta:
                     continue
@@ -1633,8 +1662,8 @@ class PaperbaseService:
 
         final_message = self.repository.update_chat_message(  # type: ignore[attr-defined]
             assistant_message.message_id,
-            content_markdown="".join(chunks).strip(),
-            citations=[citation.model_dump() for citation in citation_registry.citations],
+            content_markdown=_sanitize_inline_citations("".join(chunks).strip(), current_turn_citations),
+            citations=[citation.model_dump() for citation in current_turn_citations],
             status="completed",
         )
         if final_message is None:
