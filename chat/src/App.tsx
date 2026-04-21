@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, ChangeEvent, FormEvent } from "react";
+import type { CSSProperties, ChangeEvent, FormEvent, UIEvent } from "react";
 
 import {
   api,
@@ -41,6 +41,7 @@ const PENDING_PROMPT_KEY = "paperbase-pending-prompt";
 const SIDEBAR_COLLAPSED_KEY = "paperbase-sidebar-collapsed";
 const FREE_RESPONSE_LIMIT = 3;
 const MAX_OPEN_TABS = 8;
+const MESSAGE_LIST_BOTTOM_THRESHOLD = 40;
 type ModalFlashKind = "error" | "note";
 type PaperDrawerState = { paperId: string; path: string } | null;
 type PaperDrawerContent =
@@ -165,6 +166,10 @@ function appendOpenTab(current: string[], threadId: string) {
   return [...current, threadId].slice(-MAX_OPEN_TABS);
 }
 
+function isMessageListNearBottom(element: HTMLDivElement, threshold = MESSAGE_LIST_BOTTOM_THRESHOLD) {
+  return element.scrollHeight - element.scrollTop - element.clientHeight <= threshold;
+}
+
 function restoreSidebarCollapsed() {
   return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "true";
 }
@@ -278,6 +283,7 @@ export default function App() {
   const [paperDrawerContent, setPaperDrawerContent] = useState<PaperDrawerContent | null>(null);
   const [paperDrawerStatus, setPaperDrawerStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [paperDrawerError, setPaperDrawerError] = useState("");
+  const [messageListAtBottom, setMessageListAtBottom] = useState(true);
 
   const sessionRef = useRef<BrowserSessionResponse | null>(null);
   const threadMapRef = useRef<Record<string, ChatThreadResponse>>({});
@@ -375,6 +381,20 @@ export default function App() {
       }) as CSSProperties,
     [openTabItems.length],
   );
+  const activeStreamInView = streamingThreadId !== null && streamingThreadId === activeThreadId;
+  const showScrollToLatest = !isChatEmpty && !messageListAtBottom;
+
+  const scrollMessageListToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
+    if (!messageListRef.current) {
+      return;
+    }
+    messageListRef.current.scrollTo({ top: messageListRef.current.scrollHeight, behavior });
+    setMessageListAtBottom(true);
+  }, []);
+
+  const handleMessageListScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
+    setMessageListAtBottom(isMessageListNearBottom(event.currentTarget));
+  }, []);
 
   useEffect(() => {
     const handlePopState = () => {
@@ -450,8 +470,20 @@ export default function App() {
     if (!messageListRef.current) {
       return;
     }
-    messageListRef.current.scrollTop = messageListRef.current.scrollHeight;
-  }, [activeThread]);
+    setMessageListAtBottom(true);
+    requestAnimationFrame(() => {
+      scrollMessageListToBottom();
+    });
+  }, [activeThreadId, scrollMessageListToBottom]);
+
+  useEffect(() => {
+    if (!activeThread || !messageListAtBottom) {
+      return;
+    }
+    requestAnimationFrame(() => {
+      scrollMessageListToBottom();
+    });
+  }, [activeThread, messageListAtBottom, scrollMessageListToBottom]);
 
   const sessionSummary = useMemo(() => {
     if (!session?.user) {
@@ -610,7 +642,7 @@ export default function App() {
       }));
 
       setStreamingThreadId(threadId);
-      setComposerStatus("Streaming...");
+      setComposerStatus("");
 
       try {
         await sendThreadMessageStream(
@@ -912,9 +944,10 @@ export default function App() {
       }
       const threadId = activeThreadId ?? (await createNewThread()).thread_id;
       setComposerInput("");
+      scrollMessageListToBottom();
       await sendMessage(threadId, content);
     },
-    [activeThreadId, composerInput, createNewThread, sendMessage, streamingThreadId],
+    [activeThreadId, composerInput, createNewThread, scrollMessageListToBottom, sendMessage, streamingThreadId],
   );
 
   const resetAuthenticatedState = useCallback(() => {
@@ -1221,7 +1254,11 @@ export default function App() {
               </header>
             ) : null}
 
-            <div ref={messageListRef} className={`chat-message-list${isChatEmpty ? " empty" : ""}`}>
+            <div
+              ref={messageListRef}
+              className={`chat-message-list${isChatEmpty ? " empty" : ""}`}
+              onScroll={handleMessageListScroll}
+            >
               {isChatEmpty ? (
                 <div className="chat-stage-spacer">
                   {!hasOpenTabs ? (
@@ -1331,10 +1368,25 @@ export default function App() {
                       </article>
                     );
                   })}
+                  {activeStreamInView ? <div className="message-streaming-status">Working...</div> : null}
                 </div>
               )}
             </div>
 
+            <div className="chat-composer-fade" aria-hidden="true" />
+            {showScrollToLatest ? (
+              <button
+                type="button"
+                className="chat-scroll-to-latest"
+                aria-label="Scroll to latest message"
+                onClick={() => scrollMessageListToBottom("smooth")}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 5v12" />
+                  <path d="m7 12 5 5 5-5" />
+                </svg>
+              </button>
+            ) : null}
             {composerStatus ? <div className="composer-status">{composerStatus}</div> : null}
             <LandingMentionEditor
               attachButtonId="composer-upload-trigger"

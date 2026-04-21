@@ -873,7 +873,7 @@ class PaperbaseService:
     def _chat_system_prompt(self) -> str:
         return (
             "You are Paperbase Chat. Answer using only the provided sources when possible. "
-            "Use rich markdown when it helps: headings, bullets, tables, fenced code blocks, and normal markdown links. "
+            "Respond in GitHub-flavored markdown. Use headings, bullets, tables, fenced code blocks, and normal markdown links when they clarify the answer. "
             "Always cite source ids inline like [S1]. If the sources are insufficient, say so plainly."
         )
 
@@ -890,7 +890,7 @@ class PaperbaseService:
             + "\n".join(conversation_lines)
             + "\n\nSources:\n"
             + sources_block
-            + "\n\nAnswer the final user message. Keep the answer concise, grounded, cited, and well-structured in markdown."
+            + "\n\nAnswer the final user message. Keep the answer concise, grounded, cited, and well-structured in markdown. Use markdown tables for comparisons when helpful."
         )
 
     def _api_key_required_response(

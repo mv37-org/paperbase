@@ -1169,6 +1169,47 @@ textarea::placeholder,
   padding: 24px 24px 220px;
 }
 
+.chat-composer-fade {
+  position: fixed;
+  left: var(--chat-sidebar-width);
+  bottom: 0;
+  width: calc(100vw - var(--chat-sidebar-width) - var(--chat-drawer-width));
+  height: 180px;
+  pointer-events: none;
+  background: linear-gradient(to bottom, rgba(255, 255, 255, 0), rgba(255, 255, 255, 0.92) 58%, #ffffff 100%);
+  z-index: 2;
+}
+
+.chat-scroll-to-latest {
+  position: fixed;
+  right: calc(var(--chat-drawer-width) + 24px);
+  bottom: calc(var(--chat-fixed-composer-bottom) + 108px);
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid rgba(27, 22, 17, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 6px 18px rgba(16, 24, 40, 0.12);
+  color: var(--text);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 5;
+}
+
+.chat-scroll-to-latest svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .chat-message-list.empty {
   position: relative;
   display: flex;
@@ -1197,6 +1238,13 @@ textarea::placeholder,
   margin: 0 auto;
   display: grid;
   gap: 18px;
+}
+
+.message-streaming-status {
+  color: var(--muted);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .message-row {
@@ -1339,12 +1387,20 @@ textarea::placeholder,
   background: rgba(27, 22, 17, 0.06);
 }
 
+.markdown-table-wrap {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 0.9em 0;
+}
+
 .message-markdown table,
 .paper-drawer-markdown table,
 .paper-drawer-table {
   width: 100%;
+  min-width: max-content;
   border-collapse: collapse;
-  margin: 0.9em 0;
+  margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   font-size: 13px;
 }
@@ -2362,6 +2418,17 @@ textarea:hover,
 
   .chat-message-list {
     padding: 16px 16px 200px;
+  }
+
+  .chat-composer-fade {
+    left: 0;
+    width: 100vw;
+    height: 156px;
+  }
+
+  .chat-scroll-to-latest {
+    right: 16px;
+    bottom: calc(var(--chat-fixed-composer-bottom) + 96px);
   }
 
   .chat-message-list.empty {
