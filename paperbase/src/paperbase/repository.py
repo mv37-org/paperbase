@@ -489,6 +489,21 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     "ON papers USING gin (authors gin_trgm_ops)"
                 )
             )
+            # Summary / tldr trigram indexes back the suggest endpoint's
+            # widened ILIKE '%q%' branch. Without these, summary-only
+            # typeahead hits the papers table sequentially on every keystroke.
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS papers_summary_short_trgm "
+                    "ON papers USING gin (summary_short gin_trgm_ops)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS papers_tldr_trgm "
+                    "ON papers USING gin (tldr gin_trgm_ops)"
+                )
+            )
 
     def probe(self) -> IntegrationProbeComponent:
         result = 0
@@ -885,9 +900,17 @@ class SqlAlchemyPaperRepository(PaperRepository):
         q = (q or "").strip()
         if not q:
             return []
-        # Match on title, authors, summary_short, and tldr (in that preference
-        # order when resolving matched_field). `%` uses pg_trgm word-similarity
-        # and is backed by GIN indexes created in init().
+        # Match shape:
+        #   - ILIKE '%q%' against title/authors/summary/tldr — the primary
+        #     signal for typeahead because pg_trgm's `%` operator (default
+        #     similarity threshold 0.3) is too strict for a short query
+        #     against a long field (e.g. "diffusion" vs "High-Resolution
+        #     Image Synthesis with Latent Diffusion Models" scores ~0.13,
+        #     well below threshold). GIN gin_trgm_ops indexes accelerate
+        #     ILIKE '%term%' lookups, so this stays fast.
+        #   - `%` operator as a fuzzy fallback (catches typos and word
+        #     reorderings that a substring match misses).
+        #   - Title prefix ILIKE as the primary-ranked hit.
         sql = text(
             """
             WITH scored AS (
@@ -905,21 +928,36 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     GREATEST(
                         similarity(coalesce(summary_short, ''), :q),
                         similarity(coalesce(tldr, ''), :q)
-                    ) AS summary_sim
+                    ) AS summary_sim,
+                    (title ILIKE :contains_like) AS title_contains,
+                    (authors ILIKE :contains_like) AS authors_contains,
+                    (summary_short ILIKE :contains_like OR tldr ILIKE :contains_like) AS summary_contains
                 FROM papers
-                WHERE title % :q
-                   OR authors % :q
-                   OR summary_short % :q
-                   OR tldr % :q
-                   OR title ILIKE :prefix_like
+                WHERE
+                    title ILIKE :contains_like
+                    OR authors ILIKE :contains_like
+                    OR summary_short ILIKE :contains_like
+                    OR tldr ILIKE :contains_like
+                    OR title % :q
+                    OR authors % :q
+                    OR summary_short % :q
+                    OR tldr % :q
             )
             SELECT
                 paper_id, arxiv_id, title, authors, summary_short, tldr,
                 citation_count, published,
                 title_sim, authors_sim, summary_sim,
-                GREATEST(title_sim, authors_sim, summary_sim) AS score,
+                title_contains, authors_contains, summary_contains,
+                GREATEST(
+                    CASE WHEN title_contains THEN 1.0 ELSE title_sim END,
+                    CASE WHEN authors_contains THEN 0.9 ELSE authors_sim END,
+                    CASE WHEN summary_contains THEN 0.7 ELSE summary_sim END
+                ) AS score,
                 CASE
                     WHEN title ILIKE :prefix_like THEN 'title_prefix'
+                    WHEN title_contains THEN 'title'
+                    WHEN authors_contains THEN 'authors'
+                    WHEN summary_contains THEN 'summary'
                     WHEN title_sim >= authors_sim AND title_sim >= summary_sim THEN 'title'
                     WHEN authors_sim >= summary_sim THEN 'authors'
                     ELSE 'summary'
@@ -936,7 +974,12 @@ class SqlAlchemyPaperRepository(PaperRepository):
         with self._session() as session:
             rows = session.execute(
                 sql,
-                {"q": q, "prefix_like": f"{q}%", "limit": limit},
+                {
+                    "q": q,
+                    "prefix_like": f"{q}%",
+                    "contains_like": f"%{q}%",
+                    "limit": limit,
+                },
             ).mappings().all()
         return [
             _suggest_row_to_payload(q, row)
