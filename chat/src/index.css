@@ -593,6 +593,42 @@ textarea::placeholder,
   background: var(--blue);
 }
 
+.sidebar-quick-actions {
+  display: grid;
+  gap: 2px;
+}
+
+.sidebar-quick-action {
+  width: 100%;
+  height: 30px;
+  max-height: 30px;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.sidebar-quick-action .icon-image {
+  width: 14px;
+  height: 14px;
+  opacity: 0.72;
+  flex: none;
+}
+
+.sidebar-quick-action-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
 .sidebar-section {
   display: grid;
   gap: 12px;
@@ -736,6 +772,7 @@ textarea::placeholder,
   margin-bottom: 0;
   text-transform: none;
   letter-spacing: 0;
+  font-size: 12px;
 }
 
 .sidebar-settings-footer {
@@ -762,7 +799,10 @@ textarea::placeholder,
 }
 
 .thread-card {
-  display: block;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
   border-radius: var(--radius);
   background: transparent;
   border: 1px solid transparent;
@@ -770,16 +810,25 @@ textarea::placeholder,
 
 .thread-card-copy {
   min-width: 0;
-  display: grid;
+  display: block;
 }
 
-.thread-card-copy strong {
+.thread-card-title {
   font-size: 13px;
-  line-height: 30px;
+  line-height: 1.25;
   font-weight: 500;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  max-width: 132px;
+  display: block;
+}
+
+.thread-card-age {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
 }
 
 .thread-card.active,
@@ -1249,6 +1298,11 @@ textarea {
   box-shadow: none;
 }
 
+.sidebar-quick-action:hover {
+  background: rgba(27, 22, 17, 0.04);
+  border-color: rgba(27, 22, 17, 0.08);
+}
+
 .example-pill:hover,
 .thread-card:hover,
 .citation-card:hover {
@@ -1288,6 +1342,7 @@ textarea:hover,
 .sidebar-button,
 .sidebar-link,
 .sidebar-settings-button,
+.sidebar-quick-action,
 .sidebar-account-trigger,
 .sidebar-primary-action,
 .thread-header-action,
@@ -1317,7 +1372,7 @@ textarea:hover,
   }
 
   .app-shell.sidebar-collapsed .sidebar-title,
-  .app-shell.sidebar-collapsed .sidebar-primary-action span,
+  .app-shell.sidebar-collapsed .sidebar-quick-action-label,
   .app-shell.sidebar-collapsed .thread-card-copy,
   .app-shell.sidebar-collapsed .sidebar-section-label,
   .app-shell.sidebar-collapsed .sidebar-settings-button span {
@@ -1347,12 +1402,16 @@ textarea:hover,
     display: none;
   }
 
-  .app-shell.sidebar-collapsed .sidebar-primary-action,
+  .app-shell.sidebar-collapsed .sidebar-quick-action,
   .app-shell.sidebar-collapsed .sidebar-settings-button {
     width: 32px;
     min-width: 32px;
     padding: 0;
     justify-content: center;
+  }
+
+  .app-shell.sidebar-collapsed .sidebar-quick-action .icon-image {
+    opacity: 1;
   }
 
   .app-shell.sidebar-collapsed .sidebar-settings-footer {

@@ -91,6 +91,37 @@ function shouldShowThreadInSidebar(thread: ChatThreadSummary) {
   return thread.title.trim().length > 0 || thread.last_message_preview.trim().length > 0;
 }
 
+function formatThreadAge(value: string) {
+  const timestamp = Date.parse(value);
+  if (Number.isNaN(timestamp)) {
+    return "";
+  }
+  const deltaMs = Math.max(0, Date.now() - timestamp);
+  const minute = 60 * 1000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+  const week = 7 * day;
+  const month = 30 * day;
+  const year = 365 * day;
+
+  if (deltaMs < hour) {
+    return `${Math.max(1, Math.floor(deltaMs / minute))}m`;
+  }
+  if (deltaMs < day) {
+    return `${Math.floor(deltaMs / hour)}h`;
+  }
+  if (deltaMs < 14 * day) {
+    return `${Math.floor(deltaMs / day)}d`;
+  }
+  if (deltaMs < 8 * week) {
+    return `${Math.floor(deltaMs / week)}w`;
+  }
+  if (deltaMs < year) {
+    return `${Math.floor(deltaMs / month)}mo`;
+  }
+  return `${Math.floor(deltaMs / year)}y`;
+}
+
 function GoogleButton() {
   return (
     <button className="oauth-button" data-google-login="true" type="button" onClick={() => (window.location.href = googleLoginUrl())}>
@@ -502,6 +533,10 @@ export default function App() {
     return createNewThread();
   }, [createNewThread]);
 
+  const handleReadDocs = useCallback(() => {
+    window.open(new URL("/docs", window.location.origin).toString(), "_blank", "noopener,noreferrer");
+  }, []);
+
   const handleLogout = useCallback(async () => {
     await logoutBrowserSession();
     resetAuthenticatedState();
@@ -602,12 +637,16 @@ export default function App() {
                   />
                 </button>
               </div>
-              <button id="new-chat-button" className="sidebar-primary-action" onClick={() => void handleNewChat()}>
-                <svg viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M12 5v14M5 12h14" />
-                </svg>
-                <span>New chat</span>
-              </button>
+              <div className="sidebar-quick-actions">
+                <button id="new-chat-button" className="sidebar-quick-action" onClick={() => void handleNewChat()}>
+                  <AppIcon src={staticAssetPath("edit.svg")} className="sidebar-quick-action-icon" />
+                  <span className="sidebar-quick-action-label">New chat</span>
+                </button>
+                <button type="button" className="sidebar-quick-action" onClick={handleReadDocs}>
+                  <AppIcon src={staticAssetPath("docs.svg")} className="sidebar-quick-action-icon" />
+                  <span className="sidebar-quick-action-label">Read docs</span>
+                </button>
+              </div>
             </div>
 
             <section className="sidebar-section sidebar-card history-section">
@@ -625,8 +664,9 @@ export default function App() {
                         onClick={() => void handleThreadSelection(thread.thread_id)}
                       >
                         <div className="thread-card-copy">
-                          <strong>{title}</strong>
+                          <strong className="thread-card-title">{title}</strong>
                         </div>
+                        <span className="thread-card-age">{formatThreadAge(thread.updated_at)}</span>
                       </button>
                     );
                   })}
