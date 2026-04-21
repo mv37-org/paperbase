@@ -306,13 +306,14 @@ textarea {
 .chat-prompt-shell .mention-editor-input [data-slate-placeholder="true"] {
   font-size: 14px !important;
   line-height: 1.55 !important;
-  padding: 6px 8px !important;
+  padding: 0 !important;
   color: rgba(107, 98, 89, 0.82) !important;
 }
 
 .chat-prompt-shell .mention-editor-placeholder {
   font-size: 14px;
   line-height: 1.55;
+  padding: 0;
 }
 
 .chat-prompt-actions {
@@ -1008,7 +1009,7 @@ textarea::placeholder,
   transform: translateX(-50%);
   width: var(--chat-fixed-composer-width);
   max-width: var(--chat-fixed-composer-width);
-  border: 1px solid rgba(27, 22, 17, 0.12);
+  border: 1px solid rgba(27, 22, 17, 0.15);
   border-radius: 6px;
   background: var(--paper);
   box-shadow: 0 4px 12px rgba(16, 24, 40, 0.05);
@@ -2165,7 +2166,7 @@ textarea:hover,
 .chat-prompt-shell .mention-editor-input [data-slate-placeholder="true"] {
   font-size: 14px !important;
   line-height: 1.55 !important;
-  padding: 6px 8px !important;
+  padding: 0 !important;
 }
 
 @media (min-width: 981px) {
