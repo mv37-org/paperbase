@@ -284,8 +284,8 @@ textarea {
   display: flex;
   align-items: stretch;
   min-height: 60px;
-  border-bottom: 0;
-  border-radius: 3px 3px 0 0;
+  border-bottom: 1px solid rgba(27, 22, 17, 0.08);
+  border-radius: 2px 2px 0 0;
   background: #faf8f4;
   overflow: hidden;
 }
@@ -296,6 +296,8 @@ textarea {
   min-height: 60px;
   max-height: 156px;
   box-sizing: border-box;
+  overflow-x: hidden;
+  overflow-wrap: anywhere;
   padding: 8px 10px;
   font-size: 14px;
   line-height: 1.55;
