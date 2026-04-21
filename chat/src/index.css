@@ -177,8 +177,8 @@ textarea {
   display: flex;
   align-items: stretch;
   gap: 8px;
-  padding: 6px 8px;
-  min-height: 56px;
+  padding: 4px 8px;
+  min-height: 44px;
 }
 
 .landing-prompt-shell .landing-editor-root {
@@ -190,7 +190,7 @@ textarea {
 .landing-prompt-shell .prompt-clip {
   align-self: start;
   flex: 0 0 auto;
-  margin-top: 4px;
+  margin-top: 3px;
 }
 
 .landing-prompt-shell .prompt-button {
@@ -259,8 +259,8 @@ textarea::placeholder,
 }
 
 .landing-prompt-shell .mention-editor-input {
-  min-height: 42px;
-  padding-top: 2px;
+  min-height: 32px;
+  padding-top: 4px;
 }
 
 .mention-editor-input p {
@@ -303,9 +303,7 @@ textarea::placeholder,
 }
 
 .mention-suggestions-popover {
-  width: 100%;
-  margin-top: 8px;
-  max-width: 100%;
+  max-width: min(100vw - 32px, 580px);
 }
 
 .mention-suggestion {

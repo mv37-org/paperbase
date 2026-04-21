@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import type { ComponentProps, FormEvent, KeyboardEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { ComponentProps, CSSProperties, FormEvent, KeyboardEvent } from "react";
+import { createPortal } from "react-dom";
 import { createEditor, Editor, Element as SlateElement, Node, Range, Text, Transforms } from "slate";
 import type { BaseRange, Descendant } from "slate";
 import { Editable, ReactEditor, Slate, withReact } from "slate-react";
@@ -153,8 +154,11 @@ export function LandingMentionEditor({
   const [search, setSearch] = useState("");
   const [index, setIndex] = useState(0);
   const [suggestions, setSuggestions] = useState<(typeof MOCK_PAPERS)>([]);
+  const [popoverStyle, setPopoverStyle] = useState<CSSProperties | null>(null);
+  const shellRef = useRef<HTMLFormElement | null>(null);
 
   const tags = useMemo(() => extractMentionTags(value), [value]);
+  const showSuggestions = Boolean(target && suggestions.length > 0);
 
   useEffect(() => {
     const nextPlainText = serialize(value).trimEnd();
@@ -306,6 +310,49 @@ export function LandingMentionEditor({
     [onSubmit],
   );
 
+  const updatePopoverPosition = useCallback(() => {
+    if (!shellRef.current) {
+      setPopoverStyle(null);
+      return;
+    }
+    const rect = shellRef.current.getBoundingClientRect();
+    const gutter = 16;
+    const width = Math.min(rect.width, window.innerWidth - gutter * 2);
+    const left = Math.min(Math.max(rect.left, gutter), window.innerWidth - gutter - width);
+    setPopoverStyle({
+      position: "fixed",
+      top: rect.bottom + 4,
+      left,
+      width,
+      zIndex: 30,
+    });
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!showSuggestions) {
+      setPopoverStyle(null);
+      return;
+    }
+    updatePopoverPosition();
+    const handleViewportChange = () => updatePopoverPosition();
+    window.addEventListener("resize", handleViewportChange);
+    window.addEventListener("scroll", handleViewportChange, true);
+    const observer =
+      typeof ResizeObserver !== "undefined"
+        ? new ResizeObserver(() => {
+            updatePopoverPosition();
+          })
+        : null;
+    if (observer && shellRef.current) {
+      observer.observe(shellRef.current);
+    }
+    return () => {
+      window.removeEventListener("resize", handleViewportChange);
+      window.removeEventListener("scroll", handleViewportChange, true);
+      observer?.disconnect();
+    };
+  }, [showSuggestions, updatePopoverPosition]);
+
   return (
     <div className="landing-composer">
       {tags.length > 0 ? (
@@ -317,7 +364,7 @@ export function LandingMentionEditor({
           ))}
         </div>
       ) : null}
-      <form className="prompt-shell landing-prompt-shell" onSubmit={handleSubmit}>
+      <form ref={shellRef} className="prompt-shell landing-prompt-shell" onSubmit={handleSubmit}>
         <button
           type="button"
           id={attachButtonId}
@@ -348,24 +395,27 @@ export function LandingMentionEditor({
           {submitLabel}
         </button>
       </form>
-      {target && suggestions.length > 0 ? (
-        <div className="mention-suggestions mention-suggestions-popover">
-          {suggestions.map((paper, suggestionIndex) => (
-            <button
-              key={paper.id}
-              type="button"
-              className={`mention-suggestion${suggestionIndex === index ? " active" : ""}`}
-              onMouseDown={(event) => {
-                event.preventDefault();
-                chooseSuggestion(paper);
-              }}
-            >
-              <div className="mention-suggestion-title">{paper.title}</div>
-              <div className="mention-suggestion-meta">{paper.venue} research paper</div>
-            </button>
-          ))}
-        </div>
-      ) : null}
+      {showSuggestions && popoverStyle && typeof document !== "undefined"
+        ? createPortal(
+            <div className="mention-suggestions mention-suggestions-popover" style={popoverStyle}>
+              {suggestions.map((paper, suggestionIndex) => (
+                <button
+                  key={paper.id}
+                  type="button"
+                  className={`mention-suggestion${suggestionIndex === index ? " active" : ""}`}
+                  onMouseDown={(event) => {
+                    event.preventDefault();
+                    chooseSuggestion(paper);
+                  }}
+                >
+                  <div className="mention-suggestion-title">{paper.title}</div>
+                  <div className="mention-suggestion-meta">{paper.venue} research paper</div>
+                </button>
+              ))}
+            </div>,
+            document.body,
+          )
+        : null}
     </div>
   );
 }
