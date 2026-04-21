@@ -20,11 +20,6 @@ LOCAL_LOG_FORMAT ?= json
 LOCAL_STREAM_LOGS ?= 1
 LOCAL_AUTO_SYNC_LATEST ?= 0
 LOCAL_INITIAL_SYNC_LATEST ?= 0
-DOCKER_PAPERBASE_IMAGE ?= paperbase-api-local
-DOCKER_API_PORT ?= 8080
-DOCKER_WORKER_PORT ?= 8081
-DOCKER_ENV_FILE ?= $(CURDIR)/paperbase/.env
-DOCKER_STORAGE_ROOT ?= $(CURDIR)/.paperbase-data-docker
 LOCAL_STACK_ENV = env PAPERBASE_DATABASE_URL="$(LOCAL_DATABASE_URL)" PAPERBASE_STORAGE_BACKEND="local" PAPERBASE_LOCAL_STORAGE_ROOT="$(LOCAL_STORAGE_ROOT)" PAPERBASE_API_KEY="$(LOCAL_API_KEY)" PAPERBASE_BASE_URL="$(PAPERBASE_BASE_URL)" PAPERBASE_LOG_LEVEL="$(LOCAL_LOG_LEVEL)" PAPERBASE_LOG_FORMAT="$(LOCAL_LOG_FORMAT)" PAPERBASE_WORKER_AUTO_SYNC_LATEST="$(LOCAL_AUTO_SYNC_LATEST)" PAPERBASE_WORKER_INITIAL_SYNC_LATEST="$(LOCAL_INITIAL_SYNC_LATEST)"
 RUN_DIR := .run
 API_PID := $(RUN_DIR)/paperbase-api.pid
@@ -34,7 +29,7 @@ API_LOG := $(RUN_DIR)/paperbase-api.log
 WORKER_LOG := $(RUN_DIR)/paperbase-worker.log
 PLUGIN_LOG := $(RUN_DIR)/paperbase-plugin-mcp.log
 
-.PHONY: help venv install install-paperbase install-plugin install-chat build-chat-frontend test test-paperbase test-plugin test-chat run-api run-worker run-plugin-mcp run-chat start-all start-local docker-build-paperbase docker-run-paperbase docker-run-paperbase-worker flush kill-all clean
+.PHONY: help venv install install-paperbase install-plugin install-chat build-chat-frontend test test-paperbase test-plugin test-chat run-api run-worker run-plugin-mcp run-chat start-all start-local flush kill-all clean
 
 help:
 	@echo "Available targets:"
@@ -55,10 +50,6 @@ help:
 	@echo "  make start-all       Start API, worker, and plugin MCP HTTP bridge in the background"
 	@echo "  make start-local     Start local Postgres/filesystem stack with JSON logs attached"
 	@echo "                       Options: LOCAL_STREAM_LOGS=0 LOCAL_AUTO_SYNC_LATEST=1 LOCAL_INITIAL_SYNC_LATEST=1"
-	@echo "  make docker-build-paperbase Build the Cloud Run-style paperbase image locally"
-	@echo "  make docker-run-paperbase Run the API container locally from the Docker image"
-	@echo "  make docker-run-paperbase-worker Run the worker container locally from the Docker image"
-	@echo "                       Options: DOCKER_PAPERBASE_IMAGE=... DOCKER_ENV_FILE=... DOCKER_API_PORT=... DOCKER_WORKER_PORT=..."
 	@echo "  make flush           Reset the local Postgres schema and clear local artifact storage"
 	@echo "                       Options: LOCAL_DATABASE_URL=... LOCAL_STORAGE_ROOT=..."
 	@echo "  make kill-all        Stop all paperbase API, worker, and plugin MCP processes"
@@ -187,42 +178,6 @@ start-local: install build-chat-frontend
 		echo "Streaming logs. Press Ctrl-C to detach; use 'make kill-all' to stop the stack."; \
 		tail -n +1 -F $(API_LOG) $(WORKER_LOG) $(PLUGIN_LOG); \
 	fi
-
-docker-build-paperbase:
-	docker build -t "$(DOCKER_PAPERBASE_IMAGE)" ./paperbase
-
-docker-run-paperbase: docker-build-paperbase
-	@mkdir -p "$(DOCKER_STORAGE_ROOT)"
-	@if [ ! -f "$(DOCKER_ENV_FILE)" ]; then \
-		echo "Missing env file: $(DOCKER_ENV_FILE)"; \
-		echo "Copy paperbase/.env.example to paperbase/.env first, then fill in the values."; \
-		exit 1; \
-	fi
-	docker run --rm \
-		--name paperbase-api-local \
-		-p "$(DOCKER_API_PORT):8080" \
-		--env-file "$(DOCKER_ENV_FILE)" \
-		-e PORT=8080 \
-		-e PAPERBASE_LOCAL_STORAGE_ROOT=/data \
-		-v "$(DOCKER_STORAGE_ROOT):/data" \
-		"$(DOCKER_PAPERBASE_IMAGE)"
-
-docker-run-paperbase-worker: docker-build-paperbase
-	@mkdir -p "$(DOCKER_STORAGE_ROOT)"
-	@if [ ! -f "$(DOCKER_ENV_FILE)" ]; then \
-		echo "Missing env file: $(DOCKER_ENV_FILE)"; \
-		echo "Copy paperbase/.env.example to paperbase/.env first, then fill in the values."; \
-		exit 1; \
-	fi
-	docker run --rm \
-		--name paperbase-worker-local \
-		-p "$(DOCKER_WORKER_PORT):8080" \
-		--env-file "$(DOCKER_ENV_FILE)" \
-		-e PORT=8080 \
-		-e PAPERBASE_LOCAL_STORAGE_ROOT=/data \
-		-v "$(DOCKER_STORAGE_ROOT):/data" \
-		"$(DOCKER_PAPERBASE_IMAGE)" \
-		paperbase-worker
 
 flush: install-paperbase
 	@$(MAKE) kill-all >/dev/null
