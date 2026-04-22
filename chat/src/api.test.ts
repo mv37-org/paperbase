@@ -106,6 +106,36 @@ describe("chat api", () => {
     window.removeEventListener("paperbase:auth-expired", authExpired);
   });
 
+  it("formats structured validation errors into readable text", async () => {
+    const fetchMock = vi
+      .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            detail: [
+              { loc: ["body", "email"], msg: "Field required" },
+              { loc: ["body", "password"], msg: "Field required" },
+            ],
+          },
+          { status: 422 },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await loadApiModule();
+    const form = document.createElement("form");
+    const email = document.createElement("input");
+    email.name = "email";
+    email.value = "";
+    const password = document.createElement("input");
+    password.name = "password";
+    password.value = "";
+    form.append(email, password);
+
+    await expect(api.postForm("/v1/browser/auth/login", form)).rejects.toThrow(
+      "email: Field required; password: Field required",
+    );
+  });
+
   it("loads paper mention suggestions from the browser endpoint", async () => {
     const fetchMock = vi
       .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()

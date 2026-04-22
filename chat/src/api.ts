@@ -120,6 +120,58 @@ function parseSseEvent(block: string) {
   };
 }
 
+function normalizeErrorMessage(payload: unknown, fallback: string): string {
+  if (typeof payload === "string") {
+    const trimmed = payload.trim();
+    return trimmed || fallback;
+  }
+
+  if (payload == null) {
+    return fallback;
+  }
+
+  if (Array.isArray(payload)) {
+    const messages = payload
+      .map((item) => normalizeErrorMessage(item, ""))
+      .filter((message) => message.trim().length > 0);
+    return messages.length > 0 ? messages.join("; ") : fallback;
+  }
+
+  if (typeof payload === "object") {
+    if ("detail" in payload) {
+      return normalizeErrorMessage((payload as { detail?: unknown }).detail, fallback);
+    }
+    if ("message" in payload) {
+      return normalizeErrorMessage((payload as { message?: unknown }).message, fallback);
+    }
+    if ("error" in payload) {
+      return normalizeErrorMessage((payload as { error?: unknown }).error, fallback);
+    }
+    if ("msg" in payload) {
+      const detail = payload as { msg?: unknown; loc?: unknown };
+      const message = normalizeErrorMessage(detail.msg, fallback);
+      const location = Array.isArray(detail.loc)
+        ? detail.loc
+            .map((part) =>
+              typeof part === "string" || typeof part === "number" ? String(part) : "",
+            )
+            .filter(Boolean)
+            .filter((part, index) => !(index === 0 && ["body", "query", "path"].includes(part)))
+            .join(".")
+        : "";
+      return location ? `${location}: ${message}` : message;
+    }
+    try {
+      const encoded = JSON.stringify(payload);
+      return encoded && encoded !== "{}" ? encoded : fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
+  return String(payload);
+}
+
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = buildHeaders(init);
   const response = await fetch(`${API_BASE}${path}`, {
@@ -131,11 +183,7 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const payload = await parsePayload(response);
   if (!response.ok) {
     handleUnauthorized(response);
-    const detail =
-      payload && typeof payload === "object" && "detail" in payload
-        ? String((payload as { detail?: string }).detail ?? "Request failed")
-        : String(payload ?? "Request failed");
-    throw new Error(detail);
+    throw new Error(normalizeErrorMessage(payload, "Request failed"));
   }
   syncBrowserSession(payload);
   return payload as T;
@@ -208,11 +256,7 @@ export async function sendThreadMessageStream(
   if (!response.ok) {
     handleUnauthorized(response);
     const body = await parsePayload(response);
-    const detail =
-      body && typeof body === "object" && "detail" in body
-        ? String((body as { detail?: string }).detail ?? "Streaming request failed")
-        : String(body ?? "Streaming request failed");
-    throw new StreamingChatError(detail, true);
+    throw new StreamingChatError(normalizeErrorMessage(body, "Streaming request failed"), true);
   }
 
   if (!response.body) {
