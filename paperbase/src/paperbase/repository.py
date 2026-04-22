@@ -598,10 +598,15 @@ class SqlAlchemyPaperRepository(PaperRepository):
             connection.execute(text("ALTER TABLE IF EXISTS text_chunks ADD COLUMN IF NOT EXISTS chunk_index INTEGER DEFAULT 0"))
             connection.execute(text("ALTER TABLE IF EXISTS text_chunks ADD COLUMN IF NOT EXISTS section_depth INTEGER DEFAULT 1"))
             connection.execute(text("ALTER TABLE IF EXISTS text_chunks ADD COLUMN IF NOT EXISTS section_order INTEGER DEFAULT 0"))
+        Base.metadata.create_all(self._engine)
+        with self._engine.begin() as connection:
+            # search_tsv is added after create_all() so it works for both
+            # fresh installs (papers table just created by ORM) and existing
+            # databases (column added via IF NOT EXISTS).
             connection.execute(
                 text(
                     """
-                    ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS search_tsv tsvector
+                    ALTER TABLE papers ADD COLUMN IF NOT EXISTS search_tsv tsvector
                     GENERATED ALWAYS AS (
                         setweight(to_tsvector('english', coalesce(title, '')), 'A') ||
                         setweight(to_tsvector('english', coalesce(tldr, '')), 'A') ||
@@ -614,8 +619,6 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     """
                 )
             )
-        Base.metadata.create_all(self._engine)
-        with self._engine.begin() as connection:
             connection.execute(
                 text(
                     "CREATE INDEX IF NOT EXISTS papers_embedding_hnsw "
