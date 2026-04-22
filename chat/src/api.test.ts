@@ -225,7 +225,7 @@ describe("chat api", () => {
     expect(result.suggestions[0]?.matched_field).toBe("fallback");
   });
 
-  it("creates chats inside the selected project and deletes sessions with CSRF", async () => {
+  it("creates, moves, and deletes project chats with CSRF", async () => {
     const fetchMock = vi
       .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()
       .mockResolvedValueOnce(
@@ -254,17 +254,33 @@ describe("chat api", () => {
           messages: [],
         }),
       )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          thread_id: "thread_3",
+          project_id: "proj_2",
+          project_name: "Agents",
+          project_instructions: "",
+          title: "Project chat",
+          created_at: "2026-04-21T00:00:00Z",
+          updated_at: "2026-04-21T00:00:00Z",
+          messages: [],
+        }),
+      )
       .mockResolvedValueOnce(jsonResponse({ status: "deleted" }));
     vi.stubGlobal("fetch", fetchMock);
     const api = await loadApiModule();
 
     await api.loadSession();
     await api.createThread("Project chat", "proj_9");
+    await api.moveThreadToProject("thread_3", "proj_2");
     await api.deleteThread("thread_3");
 
     const [, createInit] = fetchMock.mock.calls[1] as FetchCall;
-    const [, deleteInit] = fetchMock.mock.calls[2] as FetchCall;
+    const [movePath, moveInit] = fetchMock.mock.calls[2] as FetchCall;
+    const [, deleteInit] = fetchMock.mock.calls[3] as FetchCall;
     expect(createInit?.body).toBe(JSON.stringify({ title: "Project chat", project_id: "proj_9" }));
+    expect(String(movePath)).toBe("/v1/browser/chats/thread_3/project");
+    expect(moveInit?.body).toBe(JSON.stringify({ project_id: "proj_2" }));
     expect(new Headers(deleteInit?.headers).get("X-Paperbase-CSRF")).toBe("csrf-123");
   });
 

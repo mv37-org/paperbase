@@ -305,6 +305,10 @@ class CreateChatThreadRequest(BaseModel):
     project_id: str | None = None
 
 
+class MoveChatThreadProjectRequest(BaseModel):
+    project_id: str = Field(min_length=1)
+
+
 class ProjectSummary(BaseModel):
     project_id: str
     name: str

@@ -2168,6 +2168,36 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 if project is not None:
                     project.updated_at = row.updated_at
 
+    def move_chat_thread_to_project(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+        project_id: str,
+        project_name: str,
+        project_instructions: str,
+    ) -> ChatThreadResponse | None:
+        with self._session() as session:
+            row = session.scalar(
+                select(ChatThreadORM).where(ChatThreadORM.thread_id == thread_id, ChatThreadORM.user_id == user_id)
+            )
+            if row is None:
+                return None
+            updated_at = utcnow()
+            previous_project_id = row.project_id
+            row.project_id = project_id
+            row.project_name = project_name
+            row.project_instructions = project_instructions
+            row.updated_at = updated_at
+            if previous_project_id and previous_project_id != project_id:
+                previous_project = session.get(ProjectORM, previous_project_id)
+                if previous_project is not None:
+                    previous_project.updated_at = updated_at
+            next_project = session.get(ProjectORM, project_id)
+            if next_project is not None:
+                next_project.updated_at = updated_at
+        return self.get_chat_thread(user_id=user_id, thread_id=thread_id)
+
     def list_chat_threads(self, user_id: str) -> list[ChatThreadSummary]:
         with self._session() as session:
             threads = session.scalars(
@@ -3330,6 +3360,36 @@ class MemoryPaperRepository(PaperRepository):
             project = self.projects.get(thread.project_id)
             if project is not None:
                 self.projects[thread.project_id] = project.model_copy(update={"updated_at": updated_at})
+
+    def move_chat_thread_to_project(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+        project_id: str,
+        project_name: str,
+        project_instructions: str,
+    ) -> ChatThreadResponse | None:
+        thread = self.get_chat_thread(user_id=user_id, thread_id=thread_id)
+        if thread is None:
+            return None
+        updated_at = utcnow()
+        updated = thread.model_copy(
+            update={
+                "project_id": project_id,
+                "project_name": project_name,
+                "project_instructions": project_instructions,
+                "updated_at": updated_at,
+            }
+        )
+        self.chat_threads[thread_id] = updated
+        previous_project = self.projects.get(thread.project_id)
+        if previous_project is not None:
+            self.projects[thread.project_id] = previous_project.model_copy(update={"updated_at": updated_at})
+        next_project = self.projects.get(project_id)
+        if next_project is not None:
+            self.projects[project_id] = next_project.model_copy(update={"updated_at": updated_at})
+        return updated
 
     def list_chat_threads(self, user_id: str) -> list[ChatThreadSummary]:
         summaries: list[ChatThreadSummary] = []

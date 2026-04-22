@@ -298,6 +298,13 @@ export function createThread(title = "", projectId?: string) {
   });
 }
 
+export function moveThreadToProject(threadId: string, projectId: string) {
+  return api<ChatThreadResponse>(`/v1/browser/chats/${threadId}/project`, {
+    method: "PATCH",
+    body: JSON.stringify({ project_id: projectId }),
+  });
+}
+
 export function deleteThread(threadId: string) {
   return api<{ status: string }>(`/v1/browser/chats/${threadId}`, { method: "DELETE" });
 }

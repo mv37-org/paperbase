@@ -357,6 +357,19 @@ class StubApiService:
             messages=[],
         )
 
+    def move_chat_thread_to_project(self, user: BrowserUser, thread_id: str, request) -> ChatThreadResponse:
+        self.calls.append(("move_chat_thread_to_project", (user.user_id, thread_id, request.project_id)))
+        return ChatThreadResponse(
+            thread_id=thread_id,
+            project_id=request.project_id,
+            project_name="Agents" if request.project_id == "proj_2" else "General",
+            project_instructions="Study agent systems" if request.project_id == "proj_2" else "",
+            title="Open Thread",
+            created_at=NOW,
+            updated_at=NOW,
+            messages=[],
+        )
+
     def get_chat_thread(self, user: BrowserUser, thread_id: str) -> ChatThreadResponse:
         self.calls.append(("get_chat_thread", (user.user_id, thread_id)))
         return ChatThreadResponse(
@@ -700,6 +713,11 @@ def test_browser_project_and_chat_write_routes_delegate_with_valid_csrf(api_clie
         json={"title": "Project chat", "project_id": "proj_2"},
         headers=headers,
     )
+    moved_chat = client.patch(
+        "/v1/browser/chats/thread_2/project",
+        json={"project_id": "proj_2"},
+        headers=headers,
+    )
     deleted_chat = client.delete("/v1/browser/chats/thread_1", headers=headers)
     deleted_project = client.delete("/v1/browser/projects/proj_2", headers=headers)
 
@@ -709,11 +727,14 @@ def test_browser_project_and_chat_write_routes_delegate_with_valid_csrf(api_clie
     assert updated_project.json()["name"] == "Agents v2"
     assert created_chat.status_code == 200
     assert created_chat.json()["project_id"] == "proj_2"
+    assert moved_chat.status_code == 200
+    assert moved_chat.json()["project_id"] == "proj_2"
     assert deleted_chat.json() == {"status": "deleted"}
     assert deleted_project.json() == {"status": "deleted"}
     assert ("create_project", ("user_1", "Agents", "Study agent systems")) in service.calls
     assert ("update_project", ("user_1", "proj_2", "Agents v2", "Updated instructions")) in service.calls
     assert ("create_chat_thread", ("user_1", "Project chat", "proj_2")) in service.calls
+    assert ("move_chat_thread_to_project", ("user_1", "thread_2", "proj_2")) in service.calls
     assert ("delete_chat_thread", ("user_1", "thread_1")) in service.calls
     assert ("delete_project", ("user_1", "proj_2")) in service.calls
 

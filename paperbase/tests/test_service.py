@@ -13,6 +13,7 @@ from paperbase.extractors import ExtractionOutput, FigureArtifact, RawArtifact, 
 from paperbase.models import (
     CreateChatThreadRequest,
     CreateProjectRequest,
+    MoveChatThreadProjectRequest,
     PaperMetadata,
     SaveAnthropicKeyRequest,
     SaveDaytonaKeyRequest,
@@ -1365,6 +1366,43 @@ def test_project_session_paging_and_thread_deletion(browser_service):
         item for item in service.list_projects(session.user).projects if item.project_id == project.project_id
     )
     assert remaining_project.session_count == 5
+
+
+def test_empty_chat_can_move_between_projects(browser_service):
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="move-empty@example.com", password="topsecret123", display_name="Move Empty")
+    )
+    assert session.user is not None
+
+    project = service.create_project(
+        session.user,
+        CreateProjectRequest(name="Agents", description="Study agent systems"),
+    )
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
+
+    moved = service.move_chat_thread_to_project(
+        session.user,
+        thread.thread_id,
+        MoveChatThreadProjectRequest(project_id=project.project_id),
+    )
+
+    assert moved.project_id == project.project_id
+    assert moved.project_name == "Agents"
+    assert moved.project_instructions == "Study agent systems"
+
+    service.send_chat_message(
+        session.user,
+        moved.thread_id,
+        SendChatMessageRequest(content="Help me brainstorm a short product name"),
+    )
+    with pytest.raises(HTTPException) as exc:
+        service.move_chat_thread_to_project(
+            session.user,
+            moved.thread_id,
+            MoveChatThreadProjectRequest(project_id=project.project_id),
+        )
+    assert exc.value.status_code == 409
 
 
 def test_delete_project_cascades_threads_and_protects_default(browser_service):

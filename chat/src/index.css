@@ -760,15 +760,15 @@ textarea::placeholder,
 }
 
 .sidebar-icon-button {
-  width: 30px;
-  height: 30px;
+  width: 28px;
+  height: 28px;
   padding: 0;
   border-radius: var(--radius);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   background: transparent;
-  border: 1px solid transparent;
+  border: 0;
   color: var(--muted);
 }
 
@@ -779,8 +779,8 @@ textarea::placeholder,
 .sidebar-icon-button .icon-image,
 .sidebar-settings-button .icon-image,
 .account-menu-item .icon-image {
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
   display: block;
 }
 
@@ -798,7 +798,7 @@ textarea::placeholder,
 .sidebar-icon-button .icon-image,
 .sidebar-settings-button .icon-image,
 .account-menu-item .icon-image {
-  opacity: 0.72;
+  opacity: 0.56;
 }
 
 .sidebar-primary-action,
@@ -837,9 +837,9 @@ textarea::placeholder,
 }
 
 .sidebar-quick-action .icon-image {
-  width: 14px;
-  height: 14px;
-  opacity: 0.48;
+  width: 12px;
+  height: 12px;
+  opacity: 0.4;
   flex: none;
 }
 
@@ -1014,7 +1014,12 @@ textarea::placeholder,
 .sidebar-section-actions {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
+}
+
+.sidebar-section-actions .sidebar-icon-button {
+  width: 24px;
+  height: 24px;
 }
 
 .sidebar-settings-footer {
@@ -1063,8 +1068,25 @@ textarea::placeholder,
 .project-card-actions {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
   min-width: 0;
+}
+
+.project-card-main {
+  gap: 8px;
+}
+
+.project-card-actions {
+  gap: 2px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+
+.project-card:hover .project-card-actions,
+.project-card:focus-within .project-card-actions,
+.project-group.menu-open .project-card-actions {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .project-card-title {
@@ -1076,17 +1098,32 @@ textarea::placeholder,
   text-overflow: ellipsis;
 }
 
-.project-card-icon,
 .project-action-icon,
 .sidebar-section-action-icon,
 .thread-card-delete-icon {
-  width: 14px;
-  height: 14px;
+  width: 12px;
+  height: 12px;
+}
+
+.project-card-icon {
+  width: 15px;
+  height: 15px;
+  opacity: 0.34;
+}
+
+.project-card:hover .project-card-icon,
+.project-card.active .project-card-icon,
+.project-card:focus-within .project-card-icon {
+  opacity: 0.48;
+}
+
+.thread-card-delete-icon {
+  opacity: 0.58;
 }
 
 .project-action-button {
-  width: 24px;
-  height: 24px;
+  width: 20px;
+  height: 20px;
 }
 
 .project-session-section {
@@ -1205,11 +1242,12 @@ textarea::placeholder,
 
 .thread-card-delete {
   display: none;
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   padding: 0;
   border: 0;
   background: transparent;
+  border-radius: 6px;
   align-items: center;
   justify-content: center;
   cursor: pointer;
@@ -1221,6 +1259,17 @@ textarea::placeholder,
 
 .thread-card:hover .thread-card-delete {
   display: inline-flex;
+}
+
+.thread-card-delete:hover {
+  background: rgba(27, 22, 17, 0.05);
+}
+
+@media (hover: none) {
+  .project-card-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 
 .thread-card.active,
@@ -2138,6 +2187,11 @@ textarea {
   text-align: center;
 }
 
+.modal-heading-copy {
+  display: grid;
+  gap: 4px;
+}
+
 .modal-heading-icon {
   display: block;
   margin: 0 auto 10px;
@@ -2288,63 +2342,75 @@ textarea {
 
 .settings-panel {
   display: grid;
-  gap: 14px;
+  gap: 0;
 }
 
 .settings-modal-panel .modal-heading {
-  margin-bottom: 16px;
+  margin-bottom: 18px;
   text-align: left;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
 }
 
 .settings-modal-panel .modal-heading-icon {
-  margin: 0 0 10px;
-  width: 20px;
-  height: 20px;
+  margin: 1px 0 0;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  opacity: 0.72;
+}
+
+.settings-modal-panel .modal-heading-copy {
+  min-width: 0;
 }
 
 .settings-tabs {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 18px;
+  padding: 0;
+  border-bottom: 1px solid rgba(27, 22, 17, 0.08);
 }
 
 .settings-tab {
-  border: 1px solid rgba(27, 22, 17, 0.1);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.7);
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
   color: var(--muted);
-  padding: 8px 12px;
+  padding: 0 0 12px;
   font-size: 13px;
   cursor: pointer;
   transition:
     background-color 120ms ease,
     border-color 120ms ease,
-    color 120ms ease,
-    box-shadow 120ms ease;
+    color 120ms ease;
 }
 
 .settings-tab[aria-selected="true"] {
-  background: rgba(23, 111, 230, 0.08);
-  border-color: rgba(23, 111, 230, 0.2);
-  color: var(--blue);
+  background: transparent;
+  border-color: rgba(27, 22, 17, 0.92);
+  color: var(--text);
 }
 
 .settings-tab:focus-visible {
   outline: 2px solid rgba(23, 111, 230, 0.2);
-  outline-offset: 2px;
+  outline-offset: 3px;
 }
 
 .settings-tab-panels {
   display: grid;
+  padding-top: 16px;
 }
 
 .settings-section {
   display: grid;
   gap: 12px;
-  padding: 16px;
-  border: 1px solid rgba(27, 22, 17, 0.08);
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.75);
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   align-content: start;
 }
 
@@ -2383,8 +2449,19 @@ textarea {
   gap: 8px;
 }
 
+.settings-footer-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+
 .settings-submit-button {
   margin-top: 0 !important;
+  min-height: 28px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1;
 }
 
 .settings-secret-row,
@@ -2432,6 +2509,11 @@ textarea {
 .settings-connect-button {
   justify-content: center;
   margin-top: 0 !important;
+  min-height: 28px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1;
 }
 
 .settings-inline-note {
@@ -2682,8 +2764,12 @@ textarea {
 }
 
 .sidebar-icon-button:hover {
-  background: var(--accent-soft);
-  border-color: var(--line);
+  background: rgba(27, 22, 17, 0.05);
+  border-color: transparent;
+}
+
+.sidebar-icon-button:hover .icon-image {
+  opacity: 0.72;
 }
 
 .prompt-shell:hover:not(.chat-prompt-shell),

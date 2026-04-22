@@ -41,6 +41,7 @@ from .models import (
     JobResponse,
     LoginRequest,
     ManifestResponse,
+    MoveChatThreadProjectRequest,
     PaperResponse,
     ProjectListResponse,
     ProjectResponse,
@@ -808,6 +809,16 @@ def browser_get_chat(
     service: PaperbaseService = Depends(get_service),
 ) -> ChatThreadResponse:
     return service.get_chat_thread(user, thread_id)
+
+
+@app.patch("/v1/browser/chats/{thread_id}/project", response_model=ChatThreadResponse)
+def browser_move_chat_to_project(
+    thread_id: str,
+    request: MoveChatThreadProjectRequest,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> ChatThreadResponse:
+    return service.move_chat_thread_to_project(user, thread_id, request)
 
 
 @app.delete("/v1/browser/chats/{thread_id}", response_model=dict[str, str])

@@ -17,6 +17,7 @@ import {
   loadProjects,
   loadSession,
   loadUploads,
+  moveThreadToProject,
   logoutBrowserSession,
   postForm,
   sendThreadMessage,
@@ -270,6 +271,10 @@ function shouldShowThreadInSidebar(thread: ChatThreadSummary) {
   return thread.title.trim().length > 0 || thread.last_message_preview.trim().length > 0;
 }
 
+function isEmptyThread(thread: ChatThreadResponse | null | undefined) {
+  return Boolean(thread) && thread.messages.length === 0;
+}
+
 function formatThreadAge(value: string) {
   const timestamp = Date.parse(value);
   if (Number.isNaN(timestamp)) {
@@ -379,7 +384,6 @@ export default function App() {
   const [projectFormDescription, setProjectFormDescription] = useState("");
   const [projectFormError, setProjectFormError] = useState("");
   const [deleteModalState, setDeleteModalState] = useState<DeleteModalState>(null);
-  const [projectIconKeys, setProjectIconKeys] = useState<Record<string, number>>({});
   const [authView, setAuthView] = useState<AuthView>("login");
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [authReady, setAuthReady] = useState(false);
@@ -878,6 +882,45 @@ export default function App() {
           threads,
           totalCount: Math.max(current.totalCount, threads.length),
           hasMore: Math.max(current.totalCount, threads.length) > threads.length || current.hasMore,
+        };
+      });
+    },
+    [updateProjectSessionCache],
+  );
+
+  const moveThreadBetweenProjectSessions = useCallback(
+    (thread: ChatThreadResponse, previousProjectId: string) => {
+      if (previousProjectId && previousProjectId !== thread.project_id) {
+        updateProjectSessionCache(previousProjectId, (current) => {
+          if (!current?.loaded) {
+            return current;
+          }
+          const nextThreads = current.threads.filter((item) => item.thread_id !== thread.thread_id);
+          const removed = nextThreads.length !== current.threads.length ? 1 : 0;
+          return {
+            ...current,
+            threads: nextThreads,
+            totalCount: Math.max(0, current.totalCount - removed),
+            hasMore:
+              current.hasMore || nextThreads.length < Math.max(0, current.totalCount - removed),
+          };
+        });
+      }
+      updateProjectSessionCache(thread.project_id, (current) => {
+        if (!current?.loaded) {
+          return current;
+        }
+        const summary = threadSummaryFromThread(thread);
+        const existed = current.threads.some((item) => item.thread_id === thread.thread_id);
+        const threads = upsertThreadSummary(current.threads, summary);
+        const totalCount = existed
+          ? current.totalCount
+          : Math.max(current.totalCount + 1, threads.length);
+        return {
+          ...current,
+          threads,
+          totalCount,
+          hasMore: current.hasMore || totalCount > threads.length,
         };
       });
     },
@@ -1442,10 +1485,6 @@ export default function App() {
   const handleProjectSelection = useCallback(
     async (projectId: string) => {
       setSelectedProjectId(projectId);
-      setProjectIconKeys((current) => ({
-        ...current,
-        [projectId]: (current[projectId] ?? 0) + 1,
-      }));
       const expanded = expandedProjectIds.includes(projectId);
       if (expanded) {
         setExpandedProjectIds((current) => current.filter((value) => value !== projectId));
@@ -1595,9 +1634,34 @@ export default function App() {
       setMobileSidebarOpen(false);
       setAccountMenuOpen(false);
       setProjectMenuProjectId(null);
+      const existingEmptyThread = openTabs
+        .map((threadId) => threadMap[threadId] ?? null)
+        .find((thread) => isEmptyThread(thread) && thread.project_id === projectId);
+      if (existingEmptyThread) {
+        setActiveThreadId(existingEmptyThread.thread_id);
+        return;
+      }
+      if (isEmptyThread(activeThread)) {
+        if (activeThread.project_id === projectId) {
+          return;
+        }
+        const movedThread = await moveThreadToProject(activeThread.thread_id, projectId);
+        setThreadMap((current) => ({ ...current, [movedThread.thread_id]: movedThread }));
+        moveThreadBetweenProjectSessions(movedThread, activeThread.project_id);
+        setActiveThreadId(movedThread.thread_id);
+        await refreshProjects();
+        return;
+      }
       await createNewThread("", projectId);
     },
-    [createNewThread],
+    [
+      activeThread,
+      createNewThread,
+      moveThreadBetweenProjectSessions,
+      openTabs,
+      refreshProjects,
+      threadMap,
+    ],
   );
 
   const handleLoadMoreSessions = useCallback(
@@ -1798,7 +1862,7 @@ export default function App() {
                   return (
                     <div
                       key={project.project_id}
-                      className={`project-group${expanded ? " expanded" : ""}`}
+                      className={`project-group${expanded ? " expanded" : ""}${projectMenuProjectId === project.project_id ? " menu-open" : ""}`}
                     >
                       <div
                         role="button"
@@ -1815,21 +1879,27 @@ export default function App() {
                       >
                         <div className="project-card-main">
                           <AppIcon
-                            key={`${project.project_id}-${projectIconKeys[project.project_id] ?? 0}`}
-                            src={staticAssetPath("project.apng.png")}
+                            src={staticAssetPath(
+                              expanded ? "project-opened.svg" : "project-closed.svg",
+                            )}
                             className="project-card-icon"
                           />
                           <strong className="project-card-title">{project.name}</strong>
                         </div>
                         <div
                           className="project-card-actions"
+                          onMouseDown={(event) => event.stopPropagation()}
                           onClick={(event) => event.stopPropagation()}
                         >
                           <button
                             type="button"
                             className="sidebar-icon-button project-action-button"
                             aria-label={`Start chat in ${project.name}`}
-                            onClick={() => void handleProjectStartChat(project.project_id)}
+                            onMouseDown={(event) => event.stopPropagation()}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              void handleProjectStartChat(project.project_id);
+                            }}
                           >
                             <AppIcon
                               src={staticAssetPath("edit.svg")}
@@ -1841,12 +1911,15 @@ export default function App() {
                               projectMenuProjectId === project.project_id ? projectMenuRef : null
                             }
                             className="project-menu-wrap"
+                            onMouseDown={(event) => event.stopPropagation()}
                           >
                             <button
                               type="button"
                               className="sidebar-icon-button project-action-button"
                               aria-label={`Open project menu for ${project.name}`}
-                              onClick={() => {
+                              onMouseDown={(event) => event.stopPropagation()}
+                              onClick={(event) => {
+                                event.stopPropagation();
                                 setSelectedProjectId(project.project_id);
                                 setProjectMenuProjectId((current) =>
                                   current === project.project_id ? null : project.project_id,
@@ -2497,12 +2570,14 @@ export default function App() {
             {authView === "settings" ? (
               <AppIcon src={staticAssetPath("settings.svg")} className="modal-heading-icon" />
             ) : null}
-            <h2 id="auth-modal-title" className="modal-title">
-              {authCopy.title}
-            </h2>
-            <p id="auth-modal-caption" className="modal-caption">
-              {authCopy.caption}
-            </p>
+            <div className="modal-heading-copy">
+              <h2 id="auth-modal-title" className="modal-title">
+                {authCopy.title}
+              </h2>
+              <p id="auth-modal-caption" className="modal-caption">
+                {authCopy.caption}
+              </p>
+            </div>
           </div>
 
           {flash ? (
@@ -2792,9 +2867,11 @@ export default function App() {
                           autoComplete="new-password"
                           required
                         />
-                        <button className="primary-button settings-submit-button" type="submit">
-                          Save key
-                        </button>
+                        <div className="settings-footer-actions">
+                          <button className="primary-button settings-submit-button" type="submit">
+                            Save key
+                          </button>
+                        </div>
                       </form>
                     )}
                   </section>
@@ -2889,9 +2966,11 @@ export default function App() {
                           autoComplete="new-password"
                           required
                         />
-                        <button className="primary-button settings-submit-button" type="submit">
-                          Save key
-                        </button>
+                        <div className="settings-footer-actions">
+                          <button className="primary-button settings-submit-button" type="submit">
+                            Save key
+                          </button>
+                        </div>
                       </form>
                     )}
                   </section>
@@ -2947,16 +3026,18 @@ export default function App() {
                       </div>
                     ) : (
                       <div className="settings-actions">
-                        <button
-                          type="button"
-                          className="primary-button settings-connect-button"
-                          disabled={!sessionSettings.github_oauth_available}
-                          onClick={() => {
-                            window.location.href = githubLoginUrl();
-                          }}
-                        >
-                          Connect GitHub account
-                        </button>
+                        <div className="settings-footer-actions">
+                          <button
+                            type="button"
+                            className="primary-button settings-connect-button"
+                            disabled={!sessionSettings.github_oauth_available}
+                            onClick={() => {
+                              window.location.href = githubLoginUrl();
+                            }}
+                          >
+                            Connect GitHub account
+                          </button>
+                        </div>
                         {!sessionSettings.github_oauth_available ? (
                           <p className="settings-inline-note">
                             GitHub OAuth is not configured in this environment yet.
@@ -3016,9 +3097,11 @@ export default function App() {
                         />
                         <span>Weekly papers review email</span>
                       </label>
-                      <button className="primary-button settings-submit-button" type="submit">
-                        Save notifications
-                      </button>
+                      <div className="settings-footer-actions">
+                        <button className="primary-button settings-submit-button" type="submit">
+                          Save notifications
+                        </button>
+                      </div>
                     </form>
                   </section>
                 ) : null}

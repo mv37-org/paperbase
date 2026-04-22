@@ -28,6 +28,7 @@ from .models import (
     ChatThreadListResponse,
     ChatThreadResponse,
     CreateChatThreadRequest,
+    MoveChatThreadProjectRequest,
     FileContentResponse,
     FileListResponse,
     FileObject,
@@ -1053,6 +1054,29 @@ class PaperbaseService:
         if thread is None:
             raise HTTPException(status_code=404, detail="Chat thread not found")
         return thread
+
+    def move_chat_thread_to_project(
+        self,
+        user: BrowserUser,
+        thread_id: str,
+        request: MoveChatThreadProjectRequest,
+    ) -> ChatThreadResponse:
+        thread = self.get_chat_thread(user, thread_id)
+        if thread.messages:
+            raise HTTPException(status_code=409, detail="Only empty chats can be moved between projects")
+        project = self.repository.get_project(user_id=user.user_id, project_id=request.project_id)  # type: ignore[attr-defined]
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        moved = self.repository.move_chat_thread_to_project(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            thread_id=thread_id,
+            project_id=project.project_id,
+            project_name=project.name,
+            project_instructions=project.description.strip(),
+        )
+        if moved is None:
+            raise HTTPException(status_code=404, detail="Chat thread not found")
+        return moved
 
     def delete_chat_thread(self, user: BrowserUser, thread_id: str) -> None:
         deleted = self.repository.delete_chat_thread(user_id=user.user_id, thread_id=thread_id)  # type: ignore[attr-defined]

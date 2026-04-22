@@ -30,6 +30,7 @@ const apiMocks = vi.hoisted(() => {
     loadSession: vi.fn(),
     loadUploads: vi.fn(),
     landingMentionEditor: vi.fn(() => <div data-testid="mention-editor" />),
+    moveThreadToProject: vi.fn(),
     logoutBrowserSession: vi.fn(),
     postForm: vi.fn(),
     sendThreadMessage: vi.fn(),
@@ -58,6 +59,7 @@ vi.mock("./api", () => ({
   loadProjects: apiMocks.loadProjects,
   loadSession: apiMocks.loadSession,
   loadUploads: apiMocks.loadUploads,
+  moveThreadToProject: apiMocks.moveThreadToProject,
   logoutBrowserSession: apiMocks.logoutBrowserSession,
   postForm: apiMocks.postForm,
   sendThreadMessage: apiMocks.sendThreadMessage,
@@ -156,6 +158,19 @@ function threadResponse(
   };
 }
 
+function emptyThreadResponse(threadId: string, projectId = "proj_1", projectName = "General") {
+  return {
+    thread_id: threadId,
+    project_id: projectId,
+    project_name: projectName,
+    project_instructions: "",
+    title: "New chat",
+    created_at: "2026-04-21T00:00:00Z",
+    updated_at: "2026-04-21T00:00:00Z",
+    messages: [],
+  };
+}
+
 describe("App", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -198,6 +213,9 @@ describe("App", () => {
     apiMocks.deleteProject.mockResolvedValue({ status: "deleted" });
     apiMocks.deleteThread.mockResolvedValue({ status: "deleted" });
     apiMocks.getThread.mockResolvedValue(threadResponse("thread_1", "Recovered thread"));
+    apiMocks.moveThreadToProject.mockResolvedValue(
+      emptyThreadResponse("thread_2", "proj_2", "Agents"),
+    );
     apiMocks.getBrowserPaper.mockResolvedValue({
       paper_id: "arxiv:2401.12345",
       arxiv_id: "2401.12345",
@@ -332,6 +350,74 @@ describe("App", () => {
     });
   });
 
+  it("does not create a duplicate empty chat for the same project", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.createThread.mockResolvedValue(emptyThreadResponse("thread_2"));
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByText("New chat"));
+
+    await waitFor(() => {
+      expect(screen.getByText("Start the conversation")).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByLabelText("Start chat in General"));
+
+    expect(apiMocks.createThread).toHaveBeenCalledTimes(1);
+    expect(apiMocks.moveThreadToProject).not.toHaveBeenCalled();
+  });
+
+  it("moves the current empty chat when starting in another project", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.loadProjects.mockResolvedValue({
+      projects: [projectSummary("proj_1", "General"), projectSummary("proj_2", "Agents", 0)],
+    });
+    apiMocks.createThread.mockResolvedValue(emptyThreadResponse("thread_2"));
+    apiMocks.moveThreadToProject.mockResolvedValue(
+      emptyThreadResponse("thread_2", "proj_2", "Agents"),
+    );
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("Agents")[0]).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByText("New chat"));
+
+    await waitFor(() => {
+      expect(screen.getByText("Start the conversation")).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByLabelText("Start chat in Agents"));
+
+    await waitFor(() => {
+      expect(apiMocks.moveThreadToProject).toHaveBeenCalledWith("thread_2", "proj_2");
+    });
+    expect(apiMocks.createThread).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens the project menu from the action button", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByLabelText("Open project menu for General"));
+
+    await waitFor(() => {
+      expect(screen.getByRole("menuitem", { name: "Rename project" })).toBeTruthy();
+    });
+  });
+
   it("deletes a session from the project list after confirmation", async () => {
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());
 
@@ -439,7 +525,7 @@ describe("App", () => {
   });
 
   it("sets explicit autocomplete hints on auth and settings key inputs", async () => {
-    apiMocks.loadSession.mockResolvedValue({
+    apiMocks.loadSession.mockResolvedValueOnce({
       authenticated: false,
       user: null,
       remaining_free_responses: 3,
@@ -455,8 +541,7 @@ describe("App", () => {
       },
       csrf_token: null,
     });
-
-    render(<App />);
+    const { unmount } = render(<App />);
 
     await waitFor(() => {
       expect(apiMocks.loadSession).toHaveBeenCalledTimes(1);
@@ -482,11 +567,36 @@ describe("App", () => {
     expect(
       document.querySelector("#reset-form input[name='password']")?.getAttribute("autocomplete"),
     ).toBe("new-password");
+
+    unmount();
+
+    apiMocks.loadSession.mockResolvedValueOnce(authenticatedSession());
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(document.querySelector("#account-menu-button")).toBeTruthy();
+    });
+
+    fireEvent.click(document.querySelector("#account-menu-button") as HTMLElement);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Settings" }));
+
+    await waitFor(() => {
+      expect(document.querySelector("#settings-anthropic-form")).toBeTruthy();
+    });
+
     expect(
       document
         .querySelector("#settings-anthropic-form input[name='api_key']")
         ?.getAttribute("autocomplete"),
     ).toBe("new-password");
+
+    fireEvent.click(screen.getByRole("tab", { name: "Sandbox" }));
+
+    await waitFor(() => {
+      expect(document.querySelector("#settings-daytona-form")).toBeTruthy();
+    });
+
     expect(
       document
         .querySelector("#settings-daytona-form input[name='api_key']")
