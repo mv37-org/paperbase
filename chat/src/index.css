@@ -2174,7 +2174,7 @@ textarea {
 }
 
 .settings-modal-panel {
-  width: min(274px, calc(100vw - 32px));
+  width: min(329px, calc(100vw - 32px));
   max-height: min(88vh, 760px);
   overflow: auto;
   padding: 18px 18px 20px;
