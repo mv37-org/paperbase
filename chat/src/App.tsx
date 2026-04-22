@@ -2194,7 +2194,7 @@ export default function App() {
                   <div className="chat-empty-state">
                     <div className="chat-empty-eyebrow">Empty chat</div>
                     {activeThread ? (
-                      <strong>Start the conversation</strong>
+                      <strong>Ask the first research question</strong>
                     ) : (
                       <div className="chat-empty-project-row">
                         <strong>Start new research in</strong>
@@ -2214,8 +2214,8 @@ export default function App() {
                     )}
                     <p>
                       {activeThread
-                        ? "Ask about papers, compare ideas, or pull out patterns for the system you are building."
-                        : "Choose a project, start a new chat in it, or open an existing session to begin."}
+                        ? "Compare papers, trace a topic, or extract the ideas that matter for the system you are building."
+                        : "Pick a project to open a fresh thread, or jump back into an existing session to keep the work moving."}
                     </p>
                   </div>
                 </div>

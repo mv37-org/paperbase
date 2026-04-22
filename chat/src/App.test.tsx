@@ -363,7 +363,7 @@ describe("App", () => {
     fireEvent.click(screen.getByText("New chat"));
 
     await waitFor(() => {
-      expect(screen.getByText("Start the conversation")).toBeTruthy();
+      expect(screen.getByText("Ask the first research question")).toBeTruthy();
     });
 
     fireEvent.click(screen.getByLabelText("Start chat in General"));
@@ -391,7 +391,7 @@ describe("App", () => {
     fireEvent.click(screen.getByText("New chat"));
 
     await waitFor(() => {
-      expect(screen.getByText("Start the conversation")).toBeTruthy();
+      expect(screen.getByText("Ask the first research question")).toBeTruthy();
     });
 
     fireEvent.click(screen.getByLabelText("Start chat in Agents"));

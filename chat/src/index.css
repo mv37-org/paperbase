@@ -1902,13 +1902,15 @@ textarea::placeholder,
 }
 
 .chat-empty-state {
-  max-width: 320px;
+  max-width: 620px;
+  display: grid;
+  justify-items: center;
+  gap: 14px;
   text-align: center;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
 .chat-empty-eyebrow {
-  margin-bottom: 8px;
   color: var(--muted);
   font-size: 11px;
   line-height: 1.2;
@@ -1919,7 +1921,7 @@ textarea::placeholder,
 .chat-empty-state strong {
   display: block;
   font-size: 22px;
-  line-height: 1.08;
+  line-height: 1.05;
   letter-spacing: -0.03em;
 }
 
@@ -1927,7 +1929,7 @@ textarea::placeholder,
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  column-gap: 6px;
+  column-gap: 12px;
   row-gap: 10px;
   flex-wrap: wrap;
 }
@@ -1937,20 +1939,38 @@ textarea::placeholder,
 }
 
 .chat-empty-project-select {
-  min-height: 32px;
-  padding: 0 12px;
-  border-radius: var(--radius);
+  min-height: 44px;
+  min-width: 156px;
+  padding: 0 42px 0 16px;
+  border-radius: 12px;
   border: 1px solid rgba(27, 22, 17, 0.12);
   background: #fffdfa;
-  font-size: 13px;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8' fill='none'%3E%3Cpath d='M1 1.25L6 6.25L11 1.25' stroke='%231B1611' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-position: right 14px center;
+  background-repeat: no-repeat;
+  background-size: 12px 8px;
+  box-shadow: 0 1px 0 rgba(27, 22, 17, 0.03);
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 500;
   line-height: 1;
 }
 
 .chat-empty-state p {
-  margin: 10px 0 0;
+  margin: 0;
+  max-width: 560px;
   color: var(--muted);
-  font-size: 14px;
-  line-height: 1.55;
+  font-size: 15px;
+  line-height: 1.6;
+  text-wrap: balance;
+}
+
+.chat-empty-project-select:focus {
+  outline: none;
+  border-color: rgba(27, 22, 17, 0.22);
+  box-shadow: 0 0 0 3px rgba(27, 22, 17, 0.06);
 }
 
 .composer-form {
