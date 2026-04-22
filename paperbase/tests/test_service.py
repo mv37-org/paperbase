@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -8,6 +9,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from paperbase.api import _resolve_bind_address, app
+from paperbase.browser_code import DaytonaRunResult, GitHubCommitInfo, GitHubRepoInfo
 from paperbase.config import Settings, get_settings
 from paperbase.extractors import ExtractionOutput, FigureArtifact, RawArtifact, SectionArtifact, TableArtifact
 from paperbase.models import (
@@ -15,6 +17,7 @@ from paperbase.models import (
     CreateProjectRequest,
     MoveChatThreadProjectRequest,
     PaperMetadata,
+    ProjectRepoSyncRequest,
     SaveAnthropicKeyRequest,
     SaveDaytonaKeyRequest,
     SearchRequest,
@@ -127,6 +130,48 @@ class FakeChatModel:
             if self.fail_stream_after_chunks is not None and index >= self.fail_stream_after_chunks:
                 raise RuntimeError("stream blew up")
             yield chunk
+
+
+class FakeGitHubRepoManager:
+    def __init__(self) -> None:
+        self.ensure_repo_calls: list[dict[str, object]] = []
+        self.sync_project_files_calls: list[dict[str, object]] = []
+
+    def ensure_repo(self, **kwargs) -> GitHubRepoInfo:
+        self.ensure_repo_calls.append(kwargs)
+        return GitHubRepoInfo(
+            repo_name="paperbase-general-123abc",
+            repo_url="https://github.com/octocat/paperbase-general-123abc",
+            default_branch="main",
+        )
+
+    def sync_project_files(self, **kwargs) -> GitHubCommitInfo:
+        self.sync_project_files_calls.append(kwargs)
+        return GitHubCommitInfo(
+            repo_name="paperbase-general-123abc",
+            repo_url="https://github.com/octocat/paperbase-general-123abc",
+            default_branch="main",
+            commit_sha="abc123",
+            commit_url="https://github.com/octocat/paperbase-general-123abc/commit/abc123",
+        )
+
+
+class FakeDaytonaRunner:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def run(self, *, api_key: str, code: str) -> DaytonaRunResult:
+        self.calls.append({"api_key": api_key, "code": code})
+        started = datetime(2026, 4, 22, 0, 0, tzinfo=timezone.utc)
+        finished = datetime(2026, 4, 22, 0, 0, 1, tzinfo=timezone.utc)
+        return DaytonaRunResult(
+            status="completed",
+            stdout="runner output",
+            stderr="",
+            exit_code=0,
+            started_at=started,
+            finished_at=finished,
+        )
 
 
 def _parse_sse_events(body: str) -> list[tuple[str, dict]]:
@@ -1073,6 +1118,146 @@ def test_browser_settings_round_trip(browser_service):
 
     assert cleared.settings.has_daytona_api_key is False
     assert disconnected.settings.has_github_connection is False
+
+
+def test_python_file_creation_requires_github_and_normalizes_names(browser_service):
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="python@example.com", password="topsecret123", display_name="Python User")
+    )
+    assert session.user is not None
+
+    project_id = service.list_projects(session.user).projects[0].project_id
+
+    with pytest.raises(HTTPException) as excinfo:
+        service.create_python_file(session.user, project_id)
+    assert excinfo.value.status_code == 409
+
+    service.save_github_connection(
+        session.user,
+        github_user_id="42",
+        github_login="octocat",
+        access_token="github-access-token",
+        scope="repo,read:user",
+    )
+
+    first = service.create_python_file(session.user, project_id)
+    second = service.create_python_file(session.user, project_id)
+    renamed = service.update_python_file(
+        session.user,
+        first.file_id,
+        filename="analysis",
+        content="print('hello')",
+    )
+
+    assert first.filename == "something.py"
+    assert second.filename == "something_2.py"
+    assert renamed.filename == "analysis.py"
+    assert renamed.content == "print('hello')"
+
+
+def test_python_file_sync_project_repo_writes_metadata_and_files():
+    repo_manager = FakeGitHubRepoManager()
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        github_repo_manager=repo_manager,
+    )
+
+    session, _ = service.register_browser_user(
+        SignupRequest(email="sync@example.com", password="topsecret123", display_name="Sync User")
+    )
+    assert session.user is not None
+    service.save_github_connection(
+        session.user,
+        github_user_id="42",
+        github_login="octocat",
+        access_token="github-access-token",
+        scope="repo,read:user",
+    )
+
+    project = service.list_projects(session.user).projects[0]
+    python_file = service.create_python_file(session.user, project.project_id)
+    service.update_python_file(
+        session.user,
+        python_file.file_id,
+        filename="analysis.py",
+        content="print('sync')",
+    )
+
+    synced = service.sync_project_repo(
+        session.user,
+        project.project_id,
+        ProjectRepoSyncRequest(commit_message="Save analysis.py"),
+    )
+
+    assert synced.repo_exists is True
+    assert synced.github_repo_name == "paperbase-general-123abc"
+    assert synced.last_sync_commit_sha == "abc123"
+    assert len(repo_manager.ensure_repo_calls) == 1
+    assert len(repo_manager.sync_project_files_calls) == 1
+    synced_files = repo_manager.sync_project_files_calls[0]["files"]
+    assert synced_files["analysis.py"] == "print('sync')"
+    assert ".paperbase" in synced_files
+    assert json.loads(synced_files[".paperbase"])["project_id"] == project.project_id
+
+
+def test_run_python_file_requires_daytona_and_uses_saved_content():
+    daytona_runner = FakeDaytonaRunner()
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        daytona_runner=daytona_runner,
+    )
+
+    session, _ = service.register_browser_user(
+        SignupRequest(email="run@example.com", password="topsecret123", display_name="Run User")
+    )
+    assert session.user is not None
+    service.save_github_connection(
+        session.user,
+        github_user_id="42",
+        github_login="octocat",
+        access_token="github-access-token",
+        scope="repo,read:user",
+    )
+
+    project_id = service.list_projects(session.user).projects[0].project_id
+    python_file = service.create_python_file(session.user, project_id)
+    service.update_python_file(
+        session.user,
+        python_file.file_id,
+        filename=None,
+        content="print('run')",
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        service.run_python_file(session.user, python_file.file_id)
+    assert excinfo.value.status_code == 409
+
+    service.save_user_daytona_key(
+        session.user,
+        SaveDaytonaKeyRequest(api_key="daytona-user-key-999"),
+    )
+    result = service.run_python_file(session.user, python_file.file_id)
+
+    assert result.status == "completed"
+    assert result.stdout == "runner output"
+    assert daytona_runner.calls == [
+        {"api_key": "daytona-user-key-999", "code": "print('run')"}
+    ]
 
 
 def test_browser_uploads_and_chat_require_api_key_after_free_quota(monkeypatch, browser_service):

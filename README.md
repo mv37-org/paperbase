@@ -39,7 +39,7 @@ The sections in that file map to deployment like this:
 Optional browser-account settings now hang off the same API env surface:
 
 - `PAPERBASE_GOOGLE_*` powers Google sign-in
-- `PAPERBASE_GITHUB_*` powers the in-app GitHub connection flow
+- `PAPERBASE_GITHUB_*` powers the in-app GitHub connection flow and project repo sync
 - logged-in users can store Anthropic and Daytona keys plus a weekly papers review email preference
 
 ## Commands
@@ -75,8 +75,11 @@ The repo has four moving pieces:
 The browser chat experience is project-based:
 
 - projects are persisted in the backend and own chat sessions
-- the sidebar lazily loads session summaries per project in pages of five
+- the sidebar lazily loads mixed project items per project, so chats and Python files appear together
 - project descriptions are snapped onto new sessions as per-session prompt context, so later project edits do not rewrite existing chats
+- Python files are project-scoped tabs backed by Monaco in a high-contrast editor view
+- creating or saving a Python file requires a connected GitHub account with repo access
+- `Save` creates a single Paperbase-managed GitHub commit for the current project, and `Run` saves first, then executes the saved file through the user’s Daytona API key
 
 `make dev` runs all of these locally:
 

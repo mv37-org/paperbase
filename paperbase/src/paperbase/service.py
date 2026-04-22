@@ -15,6 +15,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from .browser_code import DaytonaExecutionError, DaytonaPythonRunner, GitHubProjectRepoManager, GitHubSyncError
 from .config import Settings, get_settings
 from .emailer import EmailSender, ResendEmailSender
 from .extractors import build_manifest, extract_uploaded_document, figure_index_payload, index_paper_artifacts, table_csv_bytes, table_index_payload, table_json_bytes
@@ -42,11 +43,16 @@ from .models import (
     ManifestResponse,
     PaperMetadata,
     PaperResponse,
+    ProjectItemPageResponse,
+    ProjectRepoSyncRequest,
+    ProjectRepoSyncResponse,
     ProjectListResponse,
     ProjectResponse,
     ProjectSessionPageResponse,
+    PythonFileResponse,
     ResetPasswordRequest,
     ResultSetResponse,
+    RunPythonFileResponse,
     SaveAnthropicKeyRequest,
     SaveDaytonaKeyRequest,
     SearchPaperResult,
@@ -103,6 +109,7 @@ _FORCE_TOOL_QUERY_RE = re.compile(
 )
 
 _INLINE_SOURCE_ID_RE = re.compile(r"\[(S\d+)\]")
+_PYTHON_FILENAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _query_signals_recency(query: str) -> bool:
@@ -123,6 +130,28 @@ def _section_depth_for(section: Any) -> int:
     if _APPENDIX_TITLE_RE.search(title):
         return 3
     return 1
+
+
+def _normalize_python_filename(raw_filename: str) -> str:
+    value = (raw_filename or "").strip()
+    if not value:
+        raise HTTPException(status_code=422, detail="Python filename is required")
+    if "/" in value or "\\" in value or value.startswith(".") or " " in value:
+        raise HTTPException(status_code=422, detail="Use a valid Python filename")
+    if value.endswith(".py"):
+        stem = value[:-3]
+    elif "." in value:
+        raise HTTPException(status_code=422, detail="Only .py filenames are supported")
+    else:
+        stem = value
+    if not _PYTHON_FILENAME_RE.fullmatch(stem):
+        raise HTTPException(status_code=422, detail="Use a valid Python filename")
+    return f"{stem}.py"
+
+
+def _github_scope_allows_repo_write(scope: str) -> bool:
+    values = {part.strip() for part in (scope or "").split(",") if part.strip()}
+    return "repo" in values or "public_repo" in values
 
 
 def _stride_chunks(text: str, *, max_chars: int, overlap: int) -> list[str]:
@@ -711,6 +740,8 @@ class PaperbaseService:
         object_store: ObjectStore,
         email_sender: EmailSender | None = None,
         chat_model: ChatModelClient | None = None,
+        github_repo_manager: GitHubProjectRepoManager | None = None,
+        daytona_runner: DaytonaPythonRunner | None = None,
     ) -> None:
         self.settings = settings
         self.repository = repository
@@ -720,6 +751,8 @@ class PaperbaseService:
         self.email_sender = email_sender or ResendEmailSender(settings)
         self.chat_model = chat_model or AnthropicChatModelClient(settings)
         self.secret_cipher = SecretCipher(settings)
+        self.github_repo_manager = github_repo_manager or GitHubProjectRepoManager()
+        self.daytona_runner = daytona_runner or DaytonaPythonRunner()
 
     def init(self) -> None:
         self.repository.init()
@@ -900,6 +933,26 @@ class PaperbaseService:
         self.repository.delete_github_connection(user.user_id)  # type: ignore[attr-defined]
         return self._browser_session_response(user)
 
+    def _get_daytona_api_key(self, user: BrowserUser) -> str:
+        record = self.repository.get_daytona_api_key_record(user.user_id)  # type: ignore[attr-defined]
+        if record is None:
+            raise HTTPException(status_code=409, detail="Add a Daytona API key before running Python files")
+        return self.secret_cipher.decrypt(record["encrypted_api_key"])
+
+    def _get_github_connection(self, user: BrowserUser) -> dict[str, str]:
+        record = self.repository.get_github_connection_record(user.user_id)  # type: ignore[attr-defined]
+        if record is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Connect GitHub before creating or saving Python files",
+            )
+        if not _github_scope_allows_repo_write(record.get("scope", "")):
+            raise HTTPException(
+                status_code=409,
+                detail="Reconnect GitHub with repo access before creating or saving Python files",
+            )
+        return record
+
     def list_uploaded_documents(self, user: BrowserUser) -> UploadListResponse:
         documents = self.repository.list_uploaded_documents(user.user_id)  # type: ignore[attr-defined]
         tag_set = sorted({tag for document in documents for tag in document.tags})
@@ -1026,6 +1079,164 @@ class PaperbaseService:
         if page is None:
             raise HTTPException(status_code=404, detail="Project not found")
         return page
+
+    def list_project_items(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        *,
+        limit: int = 25,
+        offset: int = 0,
+    ) -> ProjectItemPageResponse:
+        page = self.repository.list_project_items(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+            limit=limit,
+            offset=offset,
+        )
+        if page is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        return page
+
+    def create_python_file(self, user: BrowserUser, project_id: str) -> PythonFileResponse:
+        self._get_github_connection(user)
+        project = self.repository.get_project(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        created = self.repository.create_python_file(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+            filename="something.py",
+            content="",
+        )
+        if created is None:
+            raise HTTPException(status_code=500, detail="Python file could not be created")
+        return created
+
+    def get_python_file(self, user: BrowserUser, file_id: str) -> PythonFileResponse:
+        python_file = self.repository.get_python_file(user_id=user.user_id, file_id=file_id)  # type: ignore[attr-defined]
+        if python_file is None:
+            raise HTTPException(status_code=404, detail="Python file not found")
+        return python_file
+
+    def update_python_file(
+        self,
+        user: BrowserUser,
+        file_id: str,
+        *,
+        filename: str | None,
+        content: str | None,
+    ) -> PythonFileResponse:
+        self._get_github_connection(user)
+        normalized_filename = _normalize_python_filename(filename) if filename is not None else None
+        python_file = self.repository.update_python_file(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            file_id=file_id,
+            filename=normalized_filename,
+            content=content,
+        )
+        if python_file is None:
+            raise HTTPException(status_code=404, detail="Python file not found")
+        return python_file
+
+    def get_project_repo_sync(self, user: BrowserUser, project_id: str) -> ProjectRepoSyncResponse:
+        sync = self.repository.get_project_repo_sync(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
+        if sync is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        return sync
+
+    def sync_project_repo(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        request: ProjectRepoSyncRequest,
+    ) -> ProjectRepoSyncResponse:
+        github = self._get_github_connection(user)
+        commit_message = request.commit_message.strip()
+        if not commit_message:
+            raise HTTPException(status_code=422, detail="Commit message is required")
+        project = self.repository.get_project(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        python_files = self.repository.list_project_python_files(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+        )
+        if python_files is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        sync = self.repository.get_project_repo_sync(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
+        try:
+            access_token = self.secret_cipher.decrypt(github["encrypted_access_token"])
+            if sync is None or not sync.repo_exists:
+                repo_info = self.github_repo_manager.ensure_repo(
+                    access_token=access_token,
+                    owner_login=github["github_login"],
+                    project_name=project.name,
+                    project_id=project.project_id,
+                    description=f"Paperbase project: {project.name}",
+                )
+                repo_name = repo_info.repo_name
+                repo_url = repo_info.repo_url
+                default_branch = repo_info.default_branch or "main"
+            else:
+                repo_name = sync.github_repo_name
+                repo_url = sync.github_repo_url
+                default_branch = sync.default_branch or "main"
+            synced_at = utcnow()
+            manifest = {
+                "project_id": project.project_id,
+                "project_name": project.name,
+                "saved_at": synced_at.isoformat(),
+                "item_count": len(python_files),
+            }
+            files_to_sync = {
+                ".paperbase": json.dumps(manifest, indent=2, sort_keys=True),
+                **{python_file.filename: python_file.content for python_file in python_files},
+            }
+            commit_info = self.github_repo_manager.sync_project_files(
+                access_token=access_token,
+                owner_login=github["github_login"],
+                repo_name=repo_name,
+                repo_url=repo_url,
+                default_branch=default_branch,
+                files=files_to_sync,
+                commit_message=commit_message,
+                author_name=github["github_login"],
+                author_email=f"{github['github_login']}@users.noreply.github.com",
+            )
+        except GitHubSyncError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+        saved = self.repository.save_project_repo_sync(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+            github_repo_name=commit_info.repo_name,
+            github_repo_url=commit_info.repo_url,
+            default_branch=commit_info.default_branch,
+            last_sync_commit_sha=commit_info.commit_sha,
+            last_sync_commit_url=commit_info.commit_url,
+            last_synced_at=synced_at,
+        )
+        if saved is None:
+            raise HTTPException(status_code=500, detail="Project repository metadata could not be saved")
+        return saved
+
+    def run_python_file(self, user: BrowserUser, file_id: str) -> RunPythonFileResponse:
+        python_file = self.get_python_file(user, file_id)
+        api_key = self._get_daytona_api_key(user)
+        try:
+            result = self.daytona_runner.run(api_key=api_key, code=python_file.content)
+        except DaytonaExecutionError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return RunPythonFileResponse(
+            file_id=python_file.file_id,
+            status=result.status,
+            stdout=result.stdout,
+            stderr=result.stderr,
+            exit_code=result.exit_code,
+            started_at=result.started_at,
+            finished_at=result.finished_at,
+        )
 
     def create_chat_thread(self, user: BrowserUser, request: CreateChatThreadRequest) -> ChatThreadResponse:
         project: ProjectResponse | None = None

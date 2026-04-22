@@ -31,10 +31,15 @@ from paperbase.models import (
     FileObject,
     JobResponse,
     PaperResponse,
+    ProjectItemPageResponse,
+    ProjectItemSummary,
     ProjectListResponse,
+    ProjectRepoSyncResponse,
     ProjectResponse,
     ProjectSessionPageResponse,
+    PythonFileResponse,
     ResultSetResponse,
+    RunPythonFileResponse,
     SearchPaperResult,
     UploadListResponse,
 )
@@ -92,6 +97,47 @@ def _project(
         description=description,
         is_default=is_default,
         session_count=session_count,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
+def _project_item(
+    item_id: str = "thread_1",
+    *,
+    item_kind: str = "thread",
+    project_id: str = "proj_1",
+    title: str = "Open Thread",
+    thread_id: str | None = "thread_1",
+    file_id: str | None = None,
+    filename: str = "",
+) -> ProjectItemSummary:
+    return ProjectItemSummary(
+        item_id=item_id,
+        item_kind=item_kind,
+        project_id=project_id,
+        title=title,
+        created_at=NOW,
+        updated_at=NOW,
+        thread_id=thread_id,
+        file_id=file_id,
+        last_message_preview="Recent message" if item_kind == "thread" else "",
+        filename=filename,
+    )
+
+
+def _python_file(
+    file_id: str = "file_1",
+    *,
+    project_id: str = "proj_1",
+    filename: str = "something.py",
+    content: str = "",
+) -> PythonFileResponse:
+    return PythonFileResponse(
+        file_id=file_id,
+        project_id=project_id,
+        filename=filename,
+        content=content,
         created_at=NOW,
         updated_at=NOW,
     )
@@ -342,6 +388,93 @@ class StubApiService:
             limit=limit,
             total_count=1,
             has_more=False,
+        )
+
+    def list_project_items(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        *,
+        limit: int = 25,
+        offset: int = 0,
+    ) -> ProjectItemPageResponse:
+        self.calls.append(("list_project_items", (user.user_id, project_id, limit, offset)))
+        return ProjectItemPageResponse(
+            project_id=project_id,
+            items=[
+                _project_item(
+                    "thread_1",
+                    item_kind="thread",
+                    project_id=project_id,
+                    title="Open Thread",
+                    thread_id="thread_1",
+                ),
+                _project_item(
+                    "file_1",
+                    item_kind="python_file",
+                    project_id=project_id,
+                    title="something.py",
+                    thread_id=None,
+                    file_id="file_1",
+                    filename="something.py",
+                ),
+            ],
+            offset=offset,
+            limit=limit,
+            total_count=2,
+            has_more=False,
+        )
+
+    def create_python_file(self, user: BrowserUser, project_id: str) -> PythonFileResponse:
+        self.calls.append(("create_python_file", (user.user_id, project_id)))
+        return _python_file("file_1", project_id=project_id, filename="something.py")
+
+    def get_python_file(self, user: BrowserUser, file_id: str) -> PythonFileResponse:
+        self.calls.append(("get_python_file", (user.user_id, file_id)))
+        return _python_file(file_id, filename="something.py", content="print('hello')")
+
+    def update_python_file(
+        self,
+        user: BrowserUser,
+        file_id: str,
+        *,
+        filename: str | None,
+        content: str | None,
+    ) -> PythonFileResponse:
+        self.calls.append(("update_python_file", (user.user_id, file_id, filename, content)))
+        return _python_file(
+            file_id,
+            filename=filename or "something.py",
+            content=content or "",
+        )
+
+    def run_python_file(self, user: BrowserUser, file_id: str) -> RunPythonFileResponse:
+        self.calls.append(("run_python_file", (user.user_id, file_id)))
+        return RunPythonFileResponse(
+            file_id=file_id,
+            status="completed",
+            stdout="runner output",
+            stderr="",
+            exit_code=0,
+            started_at=NOW,
+            finished_at=NOW,
+        )
+
+    def get_project_repo_sync(self, user: BrowserUser, project_id: str) -> ProjectRepoSyncResponse:
+        self.calls.append(("get_project_repo_sync", (user.user_id, project_id)))
+        return ProjectRepoSyncResponse(project_id=project_id, repo_exists=False)
+
+    def sync_project_repo(self, user: BrowserUser, project_id: str, request) -> ProjectRepoSyncResponse:
+        self.calls.append(("sync_project_repo", (user.user_id, project_id, request.commit_message)))
+        return ProjectRepoSyncResponse(
+            project_id=project_id,
+            repo_exists=True,
+            github_repo_name="paperbase-general-123abc",
+            github_repo_url="https://github.com/octocat/paperbase-general-123abc",
+            default_branch="main",
+            last_sync_commit_sha="abc123",
+            last_sync_commit_url="https://github.com/octocat/paperbase-general-123abc/commit/abc123",
+            last_synced_at=NOW,
         )
 
     def create_chat_thread(self, user: BrowserUser, request) -> ChatThreadResponse:
@@ -718,6 +851,24 @@ def test_browser_project_and_chat_write_routes_delegate_with_valid_csrf(api_clie
         json={"project_id": "proj_2"},
         headers=headers,
     )
+    created_python_file = client.post(
+        "/v1/browser/projects/proj_2/python-files",
+        headers=headers,
+    )
+    updated_python_file = client.patch(
+        "/v1/browser/python-files/file_1",
+        json={"filename": "analysis.py", "content": "print('hello')"},
+        headers=headers,
+    )
+    ran_python_file = client.post(
+        "/v1/browser/python-files/file_1/run",
+        headers=headers,
+    )
+    synced_project_repo = client.post(
+        "/v1/browser/projects/proj_2/repo-sync",
+        json={"commit_message": "Save analysis.py"},
+        headers=headers,
+    )
     deleted_chat = client.delete("/v1/browser/chats/thread_1", headers=headers)
     deleted_project = client.delete("/v1/browser/projects/proj_2", headers=headers)
 
@@ -729,14 +880,46 @@ def test_browser_project_and_chat_write_routes_delegate_with_valid_csrf(api_clie
     assert created_chat.json()["project_id"] == "proj_2"
     assert moved_chat.status_code == 200
     assert moved_chat.json()["project_id"] == "proj_2"
+    assert created_python_file.status_code == 200
+    assert created_python_file.json()["filename"] == "something.py"
+    assert updated_python_file.status_code == 200
+    assert updated_python_file.json()["filename"] == "analysis.py"
+    assert ran_python_file.status_code == 200
+    assert ran_python_file.json()["stdout"] == "runner output"
+    assert synced_project_repo.status_code == 200
+    assert synced_project_repo.json()["github_repo_name"] == "paperbase-general-123abc"
     assert deleted_chat.json() == {"status": "deleted"}
     assert deleted_project.json() == {"status": "deleted"}
     assert ("create_project", ("user_1", "Agents", "Study agent systems")) in service.calls
     assert ("update_project", ("user_1", "proj_2", "Agents v2", "Updated instructions")) in service.calls
     assert ("create_chat_thread", ("user_1", "Project chat", "proj_2")) in service.calls
     assert ("move_chat_thread_to_project", ("user_1", "thread_2", "proj_2")) in service.calls
+    assert ("create_python_file", ("user_1", "proj_2")) in service.calls
+    assert ("update_python_file", ("user_1", "file_1", "analysis.py", "print('hello')")) in service.calls
+    assert ("run_python_file", ("user_1", "file_1")) in service.calls
+    assert ("sync_project_repo", ("user_1", "proj_2", "Save analysis.py")) in service.calls
     assert ("delete_chat_thread", ("user_1", "thread_1")) in service.calls
     assert ("delete_project", ("user_1", "proj_2")) in service.calls
+
+
+def test_browser_project_item_routes_delegate_to_service(api_client):
+    client, service, settings = api_client
+    client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
+
+    items = client.get("/v1/browser/projects/proj_1/items?limit=25&offset=0")
+    python_file = client.get("/v1/browser/python-files/file_1")
+    repo_sync = client.get("/v1/browser/projects/proj_1/repo-sync")
+
+    assert items.status_code == 200
+    assert items.json()["items"][0]["item_kind"] == "thread"
+    assert items.json()["items"][1]["item_kind"] == "python_file"
+    assert python_file.status_code == 200
+    assert python_file.json()["content"] == "print('hello')"
+    assert repo_sync.status_code == 200
+    assert repo_sync.json()["repo_exists"] is False
+    assert ("list_project_items", ("user_1", "proj_1", 25, 0)) in service.calls
+    assert ("get_python_file", ("user_1", "file_1")) in service.calls
+    assert ("get_project_repo_sync", ("user_1", "proj_1")) in service.calls
 
 
 def test_google_callback_success_sets_cookie_and_redirects_to_saved_return_to(api_client, monkeypatch):

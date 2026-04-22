@@ -28,9 +28,14 @@ from .models import (
     JobResponse,
     PaperMetadata,
     PaperResponse,
+    ProjectItemPageResponse,
+    ProjectItemSummary,
+    ProjectRepoSyncResponse,
     ProjectResponse,
     ProjectSessionPageResponse,
     ProjectSummary,
+    PythonFileResponse,
+    PythonFileSummary,
     ResultSetResponse,
     UploadedDocumentResponse,
     UploadedDocumentSectionResult,
@@ -213,6 +218,24 @@ def _fallback_row_to_payload(row: Any) -> dict[str, Any]:
     }
 
 
+def _resolve_unique_python_filename(
+    filename: str,
+    existing_filenames: Iterable[str],
+    *,
+    exclude_filename: str | None = None,
+) -> str:
+    taken = {value for value in existing_filenames if value and value != exclude_filename}
+    if filename not in taken:
+        return filename
+    stem = filename[:-3]
+    index = 2
+    candidate = f"{stem}_{index}.py"
+    while candidate in taken:
+        index += 1
+        candidate = f"{stem}_{index}.py"
+    return candidate
+
+
 class BrowserUserORM(Base):
     __tablename__ = "browser_users"
 
@@ -340,6 +363,38 @@ class ChatThreadORM(Base):
     updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class PythonFileORM(Base):
+    __tablename__ = "python_files"
+
+    file_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("browser_users.user_id", ondelete="CASCADE"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.project_id", ondelete="CASCADE"), index=True)
+    filename: Mapped[str] = mapped_column(Text, default="something.py")
+    content: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class ProjectRepoSyncORM(Base):
+    __tablename__ = "project_repo_syncs"
+
+    project_repo_sync_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("browser_users.user_id", ondelete="CASCADE"), index=True)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.project_id", ondelete="CASCADE"),
+        unique=True,
+        index=True,
+    )
+    github_repo_name: Mapped[str] = mapped_column(String(255), default="")
+    github_repo_url: Mapped[str] = mapped_column(Text, default="")
+    default_branch: Mapped[str] = mapped_column(String(255), default="main")
+    last_sync_commit_sha: Mapped[str] = mapped_column(String(255), default="")
+    last_sync_commit_url: Mapped[str] = mapped_column(Text, default="")
+    last_synced_at: Mapped[Any | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class ChatMessageORM(Base):
     __tablename__ = "chat_messages"
 
@@ -446,6 +501,72 @@ def _chat_thread_summary_from_orm(row: ChatThreadORM, *, last_message_preview: s
         created_at=row.created_at,
         updated_at=row.updated_at,
         last_message_preview=last_message_preview,
+    )
+
+
+def _python_file_summary_from_orm(row: PythonFileORM) -> PythonFileSummary:
+    return PythonFileSummary(
+        file_id=row.file_id,
+        project_id=row.project_id,
+        filename=row.filename,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _python_file_from_orm(row: PythonFileORM) -> PythonFileResponse:
+    return PythonFileResponse(
+        file_id=row.file_id,
+        project_id=row.project_id,
+        filename=row.filename,
+        content=row.content or "",
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _project_repo_sync_from_orm(
+    row: ProjectRepoSyncORM | None,
+    *,
+    project_id: str,
+) -> ProjectRepoSyncResponse:
+    if row is None:
+        return ProjectRepoSyncResponse(project_id=project_id, repo_exists=False)
+    return ProjectRepoSyncResponse(
+        project_id=project_id,
+        repo_exists=True,
+        github_repo_name=row.github_repo_name or "",
+        github_repo_url=row.github_repo_url or "",
+        default_branch=row.default_branch or "main",
+        last_sync_commit_sha=row.last_sync_commit_sha or "",
+        last_sync_commit_url=row.last_sync_commit_url or "",
+        last_synced_at=row.last_synced_at,
+    )
+
+
+def _project_item_from_thread_summary(summary: ChatThreadSummary) -> ProjectItemSummary:
+    return ProjectItemSummary(
+        item_id=summary.thread_id,
+        item_kind="thread",
+        project_id=summary.project_id,
+        title=summary.title,
+        created_at=summary.created_at,
+        updated_at=summary.updated_at,
+        thread_id=summary.thread_id,
+        last_message_preview=summary.last_message_preview,
+    )
+
+
+def _project_item_from_python_file(summary: PythonFileSummary) -> ProjectItemSummary:
+    return ProjectItemSummary(
+        item_id=summary.file_id,
+        item_kind="python_file",
+        project_id=summary.project_id,
+        title=summary.filename,
+        created_at=summary.created_at,
+        updated_at=summary.updated_at,
+        file_id=summary.file_id,
+        filename=summary.filename,
     )
 
 
@@ -749,6 +870,18 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 text(
                     "CREATE INDEX IF NOT EXISTS chat_threads_project_id_idx "
                     "ON chat_threads (project_id)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS python_files_project_filename_unique "
+                    "ON python_files (project_id, filename)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS python_files_project_updated_at_idx "
+                    "ON python_files (project_id, updated_at DESC)"
                 )
             )
             connection.execute(
@@ -1814,6 +1947,32 @@ class SqlAlchemyPaperRepository(PaperRepository):
             )
             return _browser_user_settings_from_orm(row)
 
+    def get_daytona_api_key_record(self, user_id: str) -> dict[str, str] | None:
+        with self._session() as session:
+            row = session.scalar(
+                select(BrowserUserSettingsORM).where(BrowserUserSettingsORM.user_id == user_id)
+            )
+            if row is None or not row.encrypted_daytona_api_key:
+                return None
+            return {
+                "encrypted_api_key": row.encrypted_daytona_api_key,
+                "api_key_hint": row.daytona_api_key_hint or "",
+            }
+
+    def get_github_connection_record(self, user_id: str) -> dict[str, str] | None:
+        with self._session() as session:
+            row = session.scalar(
+                select(BrowserUserSettingsORM).where(BrowserUserSettingsORM.user_id == user_id)
+            )
+            if row is None or not row.encrypted_github_access_token or not row.github_login:
+                return None
+            return {
+                "github_user_id": row.github_user_id or "",
+                "github_login": row.github_login or "",
+                "encrypted_access_token": row.encrypted_github_access_token,
+                "scope": row.github_scope or "",
+            }
+
     def save_daytona_api_key(self, *, user_id: str, encrypted_api_key: str, hint: str) -> None:
         with self._session() as session:
             row = self._get_or_create_browser_user_settings_row(session, user_id)
@@ -2011,11 +2170,17 @@ class SqlAlchemyPaperRepository(PaperRepository):
             )
             if project is None:
                 return None
-            session_count = int(
+            thread_count = int(
                 session.scalar(select(func.count()).select_from(ChatThreadORM).where(ChatThreadORM.project_id == project.project_id))
                 or 0
             )
-            return ProjectResponse(**_project_from_orm(project, session_count=session_count).model_dump())
+            file_count = int(
+                session.scalar(select(func.count()).select_from(PythonFileORM).where(PythonFileORM.project_id == project.project_id))
+                or 0
+            )
+            return ProjectResponse(
+                **_project_from_orm(project, session_count=thread_count + file_count).model_dump()
+            )
 
     def list_projects(self, user_id: str) -> list[ProjectSummary]:
         with self._session() as session:
@@ -2025,7 +2190,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 .where(ProjectORM.user_id == user_id)
                 .order_by(ProjectORM.is_default.desc(), ProjectORM.updated_at.desc(), ProjectORM.created_at.asc())
             ).all()
-            counts = {
+            thread_counts = {
                 project_id: count
                 for project_id, count in session.execute(
                     select(ChatThreadORM.project_id, func.count())
@@ -2033,7 +2198,22 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     .group_by(ChatThreadORM.project_id)
                 ).all()
             }
-        return [_project_from_orm(project, session_count=int(counts.get(project.project_id, 0))) for project in projects]
+            file_counts = {
+                project_id: count
+                for project_id, count in session.execute(
+                    select(PythonFileORM.project_id, func.count())
+                    .where(PythonFileORM.user_id == user_id)
+                    .group_by(PythonFileORM.project_id)
+                ).all()
+            }
+        return [
+            _project_from_orm(
+                project,
+                session_count=int(thread_counts.get(project.project_id, 0))
+                + int(file_counts.get(project.project_id, 0)),
+            )
+            for project in projects
+        ]
 
     def get_project(self, *, user_id: str, project_id: str) -> ProjectResponse | None:
         with self._session() as session:
@@ -2042,11 +2222,17 @@ class SqlAlchemyPaperRepository(PaperRepository):
             )
             if project is None:
                 return None
-            session_count = int(
+            thread_count = int(
                 session.scalar(select(func.count()).select_from(ChatThreadORM).where(ChatThreadORM.project_id == project_id))
                 or 0
             )
-        return ProjectResponse(**_project_from_orm(project, session_count=session_count).model_dump())
+            file_count = int(
+                session.scalar(select(func.count()).select_from(PythonFileORM).where(PythonFileORM.project_id == project_id))
+                or 0
+            )
+        return ProjectResponse(
+            **_project_from_orm(project, session_count=thread_count + file_count).model_dump()
+        )
 
     def create_project(self, *, user_id: str, name: str, description: str) -> ProjectResponse:
         row = ProjectORM(
@@ -2133,6 +2319,201 @@ class SqlAlchemyPaperRepository(PaperRepository):
             total_count=total_count,
             has_more=offset + len(results) < total_count,
         )
+
+    def list_project_items(
+        self,
+        *,
+        user_id: str,
+        project_id: str,
+        limit: int,
+        offset: int,
+    ) -> ProjectItemPageResponse | None:
+        with self._session() as session:
+            project = session.scalar(
+                select(ProjectORM).where(ProjectORM.project_id == project_id, ProjectORM.user_id == user_id)
+            )
+            if project is None:
+                return None
+
+            thread_rows = session.scalars(
+                select(ChatThreadORM)
+                .where(ChatThreadORM.user_id == user_id, ChatThreadORM.project_id == project_id)
+            ).all()
+            items: list[ProjectItemSummary] = []
+            for thread in thread_rows:
+                last_message = session.scalar(
+                    select(ChatMessageORM)
+                    .where(ChatMessageORM.thread_id == thread.thread_id)
+                    .order_by(ChatMessageORM.created_at.desc())
+                    .limit(1)
+                )
+                preview = (last_message.content_markdown[:120] if last_message else "").strip()
+                items.append(
+                    _project_item_from_thread_summary(
+                        _chat_thread_summary_from_orm(thread, last_message_preview=preview)
+                    )
+                )
+
+            file_rows = session.scalars(
+                select(PythonFileORM)
+                .where(PythonFileORM.user_id == user_id, PythonFileORM.project_id == project_id)
+            ).all()
+            items.extend(_project_item_from_python_file(_python_file_summary_from_orm(row)) for row in file_rows)
+
+        items.sort(key=lambda item: (item.updated_at, item.created_at), reverse=True)
+        page = items[offset : offset + limit]
+        return ProjectItemPageResponse(
+            project_id=project_id,
+            items=page,
+            offset=offset,
+            limit=limit,
+            total_count=len(items),
+            has_more=offset + len(page) < len(items),
+        )
+
+    def list_project_python_files(
+        self,
+        *,
+        user_id: str,
+        project_id: str,
+    ) -> list[PythonFileResponse] | None:
+        with self._session() as session:
+            project = session.scalar(
+                select(ProjectORM).where(ProjectORM.project_id == project_id, ProjectORM.user_id == user_id)
+            )
+            if project is None:
+                return None
+            rows = session.scalars(
+                select(PythonFileORM)
+                .where(PythonFileORM.user_id == user_id, PythonFileORM.project_id == project_id)
+                .order_by(PythonFileORM.updated_at.desc())
+            ).all()
+        return [_python_file_from_orm(row) for row in rows]
+
+    def create_python_file(
+        self,
+        *,
+        user_id: str,
+        project_id: str,
+        filename: str,
+        content: str = "",
+    ) -> PythonFileResponse | None:
+        with self._session() as session:
+            project = session.scalar(
+                select(ProjectORM).where(ProjectORM.project_id == project_id, ProjectORM.user_id == user_id)
+            )
+            if project is None:
+                return None
+            existing_filenames = session.scalars(
+                select(PythonFileORM.filename).where(PythonFileORM.project_id == project_id)
+            ).all()
+            resolved_filename = _resolve_unique_python_filename(filename, existing_filenames)
+            row = PythonFileORM(
+                file_id=new_id("pyf"),
+                user_id=user_id,
+                project_id=project_id,
+                filename=resolved_filename,
+                content=content,
+            )
+            session.add(row)
+            project.updated_at = utcnow()
+        return _python_file_from_orm(row)
+
+    def get_python_file(self, *, user_id: str, file_id: str) -> PythonFileResponse | None:
+        with self._session() as session:
+            row = session.scalar(
+                select(PythonFileORM).where(PythonFileORM.file_id == file_id, PythonFileORM.user_id == user_id)
+            )
+            if row is None:
+                return None
+        return _python_file_from_orm(row)
+
+    def update_python_file(
+        self,
+        *,
+        user_id: str,
+        file_id: str,
+        filename: str | None = None,
+        content: str | None = None,
+    ) -> PythonFileResponse | None:
+        with self._session() as session:
+            row = session.scalar(
+                select(PythonFileORM).where(PythonFileORM.file_id == file_id, PythonFileORM.user_id == user_id)
+            )
+            if row is None:
+                return None
+            updated_at = utcnow()
+            if filename is not None and filename.strip():
+                existing_filenames = session.scalars(
+                    select(PythonFileORM.filename).where(PythonFileORM.project_id == row.project_id)
+                ).all()
+                row.filename = _resolve_unique_python_filename(
+                    filename,
+                    existing_filenames,
+                    exclude_filename=row.filename,
+                )
+            if content is not None:
+                row.content = content
+            row.updated_at = updated_at
+            project = session.get(ProjectORM, row.project_id)
+            if project is not None:
+                project.updated_at = updated_at
+        return self.get_python_file(user_id=user_id, file_id=file_id)
+
+    def get_project_repo_sync(self, *, user_id: str, project_id: str) -> ProjectRepoSyncResponse | None:
+        with self._session() as session:
+            project = session.scalar(
+                select(ProjectORM).where(ProjectORM.project_id == project_id, ProjectORM.user_id == user_id)
+            )
+            if project is None:
+                return None
+            row = session.scalar(
+                select(ProjectRepoSyncORM).where(
+                    ProjectRepoSyncORM.project_id == project_id,
+                    ProjectRepoSyncORM.user_id == user_id,
+                )
+            )
+        return _project_repo_sync_from_orm(row, project_id=project_id)
+
+    def save_project_repo_sync(
+        self,
+        *,
+        user_id: str,
+        project_id: str,
+        github_repo_name: str,
+        github_repo_url: str,
+        default_branch: str,
+        last_sync_commit_sha: str,
+        last_sync_commit_url: str,
+        last_synced_at: Any,
+    ) -> ProjectRepoSyncResponse | None:
+        with self._session() as session:
+            project = session.scalar(
+                select(ProjectORM).where(ProjectORM.project_id == project_id, ProjectORM.user_id == user_id)
+            )
+            if project is None:
+                return None
+            row = session.scalar(
+                select(ProjectRepoSyncORM).where(
+                    ProjectRepoSyncORM.project_id == project_id,
+                    ProjectRepoSyncORM.user_id == user_id,
+                )
+            )
+            if row is None:
+                row = ProjectRepoSyncORM(
+                    project_repo_sync_id=new_id("prs"),
+                    user_id=user_id,
+                    project_id=project_id,
+                )
+                session.add(row)
+            row.github_repo_name = github_repo_name
+            row.github_repo_url = github_repo_url
+            row.default_branch = default_branch
+            row.last_sync_commit_sha = last_sync_commit_sha
+            row.last_sync_commit_url = last_sync_commit_url
+            row.last_synced_at = last_synced_at
+            row.updated_at = utcnow()
+        return self.get_project_repo_sync(user_id=user_id, project_id=project_id)
 
     def create_chat_thread(
         self,
@@ -2531,6 +2912,8 @@ class MemoryPaperRepository(PaperRepository):
         self.password_reset_tokens: dict[str, dict[str, Any]] = {}
         self.user_api_keys: dict[str, dict[str, str]] = {}
         self.browser_user_settings: dict[str, BrowserUserSettingsResponse] = {}
+        self.daytona_api_key_records: dict[str, dict[str, str]] = {}
+        self.github_connection_records: dict[str, dict[str, str]] = {}
         self.uploaded_documents: dict[str, UploadedDocumentResponse] = {}
         self.uploaded_document_chunks: dict[str, list[dict[str, str]]] = defaultdict(list)
         self.projects: dict[str, ProjectResponse] = {}
@@ -2538,6 +2921,9 @@ class MemoryPaperRepository(PaperRepository):
         self.default_projects_by_user: dict[str, str] = {}
         self.chat_threads: dict[str, ChatThreadResponse] = {}
         self.chat_thread_users: dict[str, str] = {}
+        self.python_files: dict[str, PythonFileResponse] = {}
+        self.python_file_users: dict[str, str] = {}
+        self.project_repo_syncs: dict[str, ProjectRepoSyncResponse] = {}
 
     def init(self) -> None:
         return None
@@ -3063,8 +3449,18 @@ class MemoryPaperRepository(PaperRepository):
     def get_browser_user_settings(self, user_id: str) -> BrowserUserSettingsResponse:
         return self.browser_user_settings.get(user_id, BrowserUserSettingsResponse())
 
+    def get_daytona_api_key_record(self, user_id: str) -> dict[str, str] | None:
+        return self.daytona_api_key_records.get(user_id)
+
+    def get_github_connection_record(self, user_id: str) -> dict[str, str] | None:
+        return self.github_connection_records.get(user_id)
+
     def save_daytona_api_key(self, *, user_id: str, encrypted_api_key: str, hint: str) -> None:
         current = self._get_or_create_browser_user_settings(user_id)
+        self.daytona_api_key_records[user_id] = {
+            "encrypted_api_key": encrypted_api_key,
+            "api_key_hint": hint,
+        }
         self.browser_user_settings[user_id] = current.model_copy(
             update={
                 "has_daytona_api_key": True,
@@ -3074,6 +3470,7 @@ class MemoryPaperRepository(PaperRepository):
 
     def delete_daytona_api_key(self, user_id: str) -> None:
         current = self._get_or_create_browser_user_settings(user_id)
+        self.daytona_api_key_records.pop(user_id, None)
         self.browser_user_settings[user_id] = current.model_copy(
             update={
                 "has_daytona_api_key": False,
@@ -3100,6 +3497,7 @@ class MemoryPaperRepository(PaperRepository):
             if candidate_user_id == user_id:
                 continue
             if settings.github_login == github_login:
+                self.github_connection_records.pop(candidate_user_id, None)
                 self.browser_user_settings[candidate_user_id] = settings.model_copy(
                     update={
                         "has_github_connection": False,
@@ -3107,6 +3505,12 @@ class MemoryPaperRepository(PaperRepository):
                     }
                 )
         current = self._get_or_create_browser_user_settings(user_id)
+        self.github_connection_records[user_id] = {
+            "github_user_id": github_user_id,
+            "github_login": github_login,
+            "encrypted_access_token": encrypted_access_token,
+            "scope": scope,
+        }
         self.browser_user_settings[user_id] = current.model_copy(
             update={
                 "has_github_connection": True,
@@ -3116,6 +3520,7 @@ class MemoryPaperRepository(PaperRepository):
 
     def delete_github_connection(self, user_id: str) -> None:
         current = self._get_or_create_browser_user_settings(user_id)
+        self.github_connection_records.pop(user_id, None)
         self.browser_user_settings[user_id] = current.model_copy(
             update={
                 "has_github_connection": False,
@@ -3217,7 +3622,10 @@ class MemoryPaperRepository(PaperRepository):
         return self._ensure_default_project(user_id)
 
     def get_default_project(self, user_id: str) -> ProjectResponse | None:
-        return self.projects.get(self.default_projects_by_user.get(user_id, ""))
+        project_id = self.default_projects_by_user.get(user_id, "")
+        if not project_id:
+            return None
+        return self.get_project(user_id=user_id, project_id=project_id)
 
     def list_projects(self, user_id: str) -> list[ProjectSummary]:
         self._ensure_default_project(user_id)
@@ -3225,12 +3633,22 @@ class MemoryPaperRepository(PaperRepository):
         for project in self.projects.values():
             if self.project_users.get(project.project_id) != user_id:
                 continue
-            session_count = sum(
+            thread_count = sum(
                 1
                 for thread in self.chat_threads.values()
                 if self.chat_thread_users.get(thread.thread_id) == user_id and thread.project_id == project.project_id
             )
-            summaries.append(ProjectSummary(**project.model_copy(update={"session_count": session_count}).model_dump()))
+            file_count = sum(
+                1
+                for python_file in self.python_files.values()
+                if self.python_file_users.get(python_file.file_id) == user_id
+                and python_file.project_id == project.project_id
+            )
+            summaries.append(
+                ProjectSummary(
+                    **project.model_copy(update={"session_count": thread_count + file_count}).model_dump()
+                )
+            )
         summaries.sort(key=lambda item: (not item.is_default, -item.updated_at.timestamp(), item.created_at.timestamp()))
         return summaries
 
@@ -3240,12 +3658,18 @@ class MemoryPaperRepository(PaperRepository):
             return None
         if self.project_users.get(project_id) != user_id:
             return None
-        session_count = sum(
+        thread_count = sum(
             1
             for thread in self.chat_threads.values()
             if self.chat_thread_users.get(thread.thread_id) == user_id and thread.project_id == project_id
         )
-        return project.model_copy(update={"session_count": session_count})
+        file_count = sum(
+            1
+            for python_file in self.python_files.values()
+            if self.python_file_users.get(python_file.file_id) == user_id
+            and python_file.project_id == project_id
+        )
+        return project.model_copy(update={"session_count": thread_count + file_count})
 
     def create_project(self, *, user_id: str, name: str, description: str) -> ProjectResponse:
         self._ensure_default_project(user_id)
@@ -3279,6 +3703,11 @@ class MemoryPaperRepository(PaperRepository):
             if self.chat_thread_users.get(thread_id) == user_id and thread.project_id == project_id:
                 self.chat_threads.pop(thread_id, None)
                 self.chat_thread_users.pop(thread_id, None)
+        for file_id, python_file in list(self.python_files.items()):
+            if self.python_file_users.get(file_id) == user_id and python_file.project_id == project_id:
+                self.python_files.pop(file_id, None)
+                self.python_file_users.pop(file_id, None)
+        self.project_repo_syncs.pop(project_id, None)
         self.projects.pop(project_id, None)
         self.project_users.pop(project_id, None)
         return True
@@ -3317,6 +3746,175 @@ class MemoryPaperRepository(PaperRepository):
             total_count=total_count,
             has_more=offset + len(page) < total_count,
         )
+
+    def list_project_items(
+        self,
+        *,
+        user_id: str,
+        project_id: str,
+        limit: int,
+        offset: int,
+    ) -> ProjectItemPageResponse | None:
+        project = self.get_project(user_id=user_id, project_id=project_id)
+        if project is None:
+            return None
+        items: list[ProjectItemSummary] = [
+            _project_item_from_thread_summary(summary)
+            for summary in self.list_project_chat_threads(
+                user_id=user_id,
+                project_id=project_id,
+                limit=10_000,
+                offset=0,
+            ).threads
+        ]
+        items.extend(
+            _project_item_from_python_file(
+                PythonFileSummary(
+                    file_id=file.file_id,
+                    project_id=file.project_id,
+                    filename=file.filename,
+                    created_at=file.created_at,
+                    updated_at=file.updated_at,
+                )
+            )
+            for file in self.python_files.values()
+            if self.python_file_users.get(file.file_id) == user_id and file.project_id == project_id
+        )
+        items.sort(key=lambda item: (item.updated_at, item.created_at), reverse=True)
+        page = items[offset : offset + limit]
+        return ProjectItemPageResponse(
+            project_id=project_id,
+            items=page,
+            offset=offset,
+            limit=limit,
+            total_count=len(items),
+            has_more=offset + len(page) < len(items),
+        )
+
+    def list_project_python_files(
+        self,
+        *,
+        user_id: str,
+        project_id: str,
+    ) -> list[PythonFileResponse] | None:
+        if self.get_project(user_id=user_id, project_id=project_id) is None:
+            return None
+        files = [
+            file
+            for file in self.python_files.values()
+            if self.python_file_users.get(file.file_id) == user_id and file.project_id == project_id
+        ]
+        files.sort(key=lambda item: item.updated_at, reverse=True)
+        return files
+
+    def create_python_file(
+        self,
+        *,
+        user_id: str,
+        project_id: str,
+        filename: str,
+        content: str = "",
+    ) -> PythonFileResponse | None:
+        project = self.get_project(user_id=user_id, project_id=project_id)
+        if project is None:
+            return None
+        existing = [
+            file.filename
+            for file in self.python_files.values()
+            if self.python_file_users.get(file.file_id) == user_id and file.project_id == project_id
+        ]
+        resolved_filename = _resolve_unique_python_filename(filename, existing)
+        now = utcnow()
+        file = PythonFileResponse(
+            file_id=new_id("pyf"),
+            project_id=project_id,
+            filename=resolved_filename,
+            content=content,
+            created_at=now,
+            updated_at=now,
+        )
+        self.python_files[file.file_id] = file
+        self.python_file_users[file.file_id] = user_id
+        self.projects[project_id] = project.model_copy(update={"updated_at": now})
+        return file
+
+    def get_python_file(self, *, user_id: str, file_id: str) -> PythonFileResponse | None:
+        if self.python_file_users.get(file_id) != user_id:
+            return None
+        return self.python_files.get(file_id)
+
+    def update_python_file(
+        self,
+        *,
+        user_id: str,
+        file_id: str,
+        filename: str | None = None,
+        content: str | None = None,
+    ) -> PythonFileResponse | None:
+        current = self.get_python_file(user_id=user_id, file_id=file_id)
+        if current is None:
+            return None
+        next_filename = current.filename
+        if filename is not None and filename.strip():
+            existing = [
+                file.filename
+                for file in self.python_files.values()
+                if self.python_file_users.get(file.file_id) == user_id
+                and file.project_id == current.project_id
+            ]
+            next_filename = _resolve_unique_python_filename(
+                filename,
+                existing,
+                exclude_filename=current.filename,
+            )
+        updated_at = utcnow()
+        updated = current.model_copy(
+            update={
+                "filename": next_filename,
+                "content": current.content if content is None else content,
+                "updated_at": updated_at,
+            }
+        )
+        self.python_files[file_id] = updated
+        project = self.projects.get(current.project_id)
+        if project is not None:
+            self.projects[current.project_id] = project.model_copy(update={"updated_at": updated_at})
+        return updated
+
+    def get_project_repo_sync(self, *, user_id: str, project_id: str) -> ProjectRepoSyncResponse | None:
+        if self.get_project(user_id=user_id, project_id=project_id) is None:
+            return None
+        return self.project_repo_syncs.get(
+            project_id,
+            ProjectRepoSyncResponse(project_id=project_id, repo_exists=False),
+        )
+
+    def save_project_repo_sync(
+        self,
+        *,
+        user_id: str,
+        project_id: str,
+        github_repo_name: str,
+        github_repo_url: str,
+        default_branch: str,
+        last_sync_commit_sha: str,
+        last_sync_commit_url: str,
+        last_synced_at: Any,
+    ) -> ProjectRepoSyncResponse | None:
+        if self.get_project(user_id=user_id, project_id=project_id) is None:
+            return None
+        response = ProjectRepoSyncResponse(
+            project_id=project_id,
+            repo_exists=True,
+            github_repo_name=github_repo_name,
+            github_repo_url=github_repo_url,
+            default_branch=default_branch,
+            last_sync_commit_sha=last_sync_commit_sha,
+            last_sync_commit_url=last_sync_commit_url,
+            last_synced_at=last_synced_at,
+        )
+        self.project_repo_syncs[project_id] = response
+        return response
 
     def create_chat_thread(
         self,

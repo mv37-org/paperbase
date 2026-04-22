@@ -1282,6 +1282,26 @@ textarea::placeholder,
   box-shadow: none;
 }
 
+.python-file-card {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+}
+
+.python-file-card-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.python-file-card-icon {
+  width: 14px;
+  height: 14px;
+  opacity: 0.78;
+}
+
+.thread-card-rename {
+  color: var(--muted);
+}
+
 .tag-filter-row {
   display: flex;
   gap: 10px;
@@ -1505,6 +1525,160 @@ textarea::placeholder,
   height: 100%;
   min-height: 100%;
   padding: 24px;
+}
+
+.chat-message-list.python-file-view {
+  padding: 24px;
+}
+
+.python-file-stage {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  gap: 16px;
+  min-height: calc(100vh - 190px);
+  padding: 8px 8px 24px;
+}
+
+.python-file-stage-loading {
+  align-content: center;
+  justify-items: center;
+  color: #e6e6e6;
+  background: #0c0c0c;
+  border-radius: 20px;
+}
+
+.python-file-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.python-file-header-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.python-file-eyebrow {
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: rgba(27, 22, 17, 0.56);
+}
+
+.python-file-title-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.python-file-title {
+  font-size: 18px;
+  line-height: 1.2;
+}
+
+.python-file-dirty {
+  font-size: 12px;
+  color: rgba(27, 22, 17, 0.54);
+}
+
+.python-file-toolbar {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.python-file-save-button,
+.python-file-run-button {
+  height: 36px;
+  padding: 0 16px;
+  border-radius: 12px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.python-file-save-button {
+  border: 1px solid rgba(27, 22, 17, 0.12);
+  background: rgba(255, 255, 255, 0.88);
+  color: var(--text);
+}
+
+.python-file-run-button {
+  border: 1px solid #2f61e3;
+  background: #2f61e3;
+  color: #ffffff;
+  box-shadow: 0 12px 28px rgba(47, 97, 227, 0.24);
+}
+
+.python-file-run-button.disabled,
+.python-file-run-button:disabled {
+  background: rgba(47, 97, 227, 0.12);
+  border-color: rgba(47, 97, 227, 0.18);
+  color: rgba(47, 97, 227, 0.52);
+  box-shadow: none;
+  cursor: not-allowed;
+}
+
+.python-run-error {
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(155, 57, 57, 0.1);
+  color: #8a2d2d;
+  font-size: 13px;
+}
+
+.python-editor-shell {
+  min-height: 540px;
+  border-radius: 20px;
+  overflow: hidden;
+  background: #0c0c0c;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 20px 48px rgba(8, 12, 24, 0.2);
+}
+
+.python-run-panel {
+  display: grid;
+  gap: 12px;
+  padding: 18px;
+  border-radius: 18px;
+  background: #121417;
+  color: #f5f7fb;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.python-run-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+}
+
+.python-run-block {
+  display: grid;
+  gap: 8px;
+}
+
+.python-run-block-label {
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.62);
+}
+
+.python-run-block pre {
+  margin: 0;
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "SFMono-Regular", "SF Mono", ui-monospace, monospace;
+  font-size: 12px;
+  line-height: 1.55;
 }
 
 .empty-state-sidebar-toggle {
@@ -2415,6 +2589,19 @@ textarea {
   padding: 18px 18px 20px;
 }
 
+.python-save-modal-panel {
+  width: min(420px, calc(100vw - 32px));
+}
+
+.python-save-success {
+  text-align: center;
+}
+
+.python-save-success-line {
+  font-size: 13px;
+  line-height: 1.6;
+}
+
 .modal-close {
   position: absolute;
   top: 12px;
@@ -2948,6 +3135,15 @@ textarea {
 .chat-empty-action-tag.notes:hover {
   background: rgba(227, 183, 73, 0.26);
   box-shadow: 0 3px 10px rgba(201, 146, 18, 0.1);
+}
+
+.python-file-save-button:hover {
+  background: #ffffff;
+}
+
+.python-file-run-button:not(:disabled):hover {
+  background: #2556d8;
+  border-color: #2556d8;
 }
 
 .chat-tab:hover {

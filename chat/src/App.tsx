@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ChangeEvent, UIEvent } from "react";
+import Editor from "@monaco-editor/react";
 
 import {
   api,
+  createPythonFile,
   createProject,
   createThread,
   deleteProject,
@@ -11,20 +13,26 @@ import {
   getBrowserPaperFigure,
   getBrowserPaperFile,
   getBrowserPaperTable,
+  getProjectRepoSync,
+  getPythonFile,
+  githubLoginUrl,
   getThread,
   googleLoginUrl,
-  loadProjectSessions,
+  loadProjectItems,
   loadProjects,
   loadSession,
   loadUploads,
   moveThreadToProject,
   logoutBrowserSession,
   postForm,
+  runPythonFile,
   sendThreadMessage,
   sendThreadMessageStream,
   suggestBrowserPapers,
   StreamingChatError,
+  syncProjectRepo,
   updateProject,
+  updatePythonFile,
   uploadDocument,
 } from "./api";
 import { LandingMentionEditor } from "./LandingMentionEditor";
@@ -40,7 +48,12 @@ import type {
   FigureResponse,
   FileContentResponse,
   PaperResponse,
+  ProjectItemSummary,
+  ProjectRepoSyncResponse,
   ProjectSummary,
+  PythonFileResponse,
+  RunPythonFileResponse,
+  SendChatMessageResponse,
   TableResponse,
 } from "./types";
 
@@ -55,8 +68,9 @@ type PaperDrawerContent =
   | { kind: "markdown"; path: string; file: FileContentResponse }
   | { kind: "figure"; path: string; figure: FigureResponse }
   | { kind: "table"; path: string; table: TableResponse };
-type ProjectSessionState = {
-  threads: ChatThreadSummary[];
+type OpenTab = { kind: "thread"; id: string } | { kind: "python_file"; id: string };
+type ProjectItemState = {
+  items: ProjectItemSummary[];
   totalCount: number;
   hasMore: boolean;
   loaded: boolean;
@@ -64,6 +78,23 @@ type ProjectSessionState = {
   loadingMore: boolean;
   error: string;
 };
+type PythonFileDraft = {
+  content: string;
+  dirty: boolean;
+};
+type PythonFileRunState = {
+  running: boolean;
+  result: RunPythonFileResponse | null;
+  error: string;
+};
+type SaveModalState = {
+  fileId: string;
+  commitMessage: string;
+  saving: boolean;
+  error: string;
+  repoSync: ProjectRepoSyncResponse | null;
+  success: ProjectRepoSyncResponse | null;
+} | null;
 type ProjectModalState = { mode: "create" } | { mode: "edit"; projectId: string };
 type DeleteModalState =
   | { kind: "project"; projectId: string; name: string }
@@ -216,19 +247,37 @@ function rememberPendingPrompt(prompt: string) {
 function restoreTabs() {
   try {
     const parsed = JSON.parse(localStorage.getItem(OPEN_TABS_KEY) ?? "[]");
-    return Array.isArray(parsed)
-      ? parsed.filter((value): value is string => typeof value === "string").slice(-MAX_OPEN_TABS)
-      : [];
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    const restored: OpenTab[] = [];
+    for (const value of parsed) {
+      if (typeof value === "string") {
+        restored.push({ kind: "thread", id: value });
+        continue;
+      }
+      if (
+        value &&
+        typeof value === "object" &&
+        "kind" in value &&
+        "id" in value &&
+        (value.kind === "thread" || value.kind === "python_file") &&
+        typeof value.id === "string"
+      ) {
+        restored.push({ kind: value.kind, id: value.id });
+      }
+    }
+    return restored.slice(-MAX_OPEN_TABS);
   } catch {
     return [];
   }
 }
 
-function appendOpenTab(current: string[], threadId: string) {
-  if (current.includes(threadId)) {
+function appendOpenTab(current: OpenTab[], tab: OpenTab) {
+  if (current.some((item) => item.kind === tab.kind && item.id === tab.id)) {
     return current;
   }
-  return [...current, threadId].slice(-MAX_OPEN_TABS);
+  return [...current, tab].slice(-MAX_OPEN_TABS);
 }
 
 function isMessageListNearBottom(
@@ -324,13 +373,48 @@ function threadSummaryFromThread(thread: ChatThreadResponse): ChatThreadSummary 
   };
 }
 
-function upsertThreadSummary(
-  current: ChatThreadSummary[],
-  summary: ChatThreadSummary,
-): ChatThreadSummary[] {
-  return [summary, ...current.filter((item) => item.thread_id !== summary.thread_id)].sort(
+function projectItemFromThread(thread: ChatThreadResponse): ProjectItemSummary {
+  const summary = threadSummaryFromThread(thread);
+  return {
+    item_id: summary.thread_id,
+    item_kind: "thread",
+    project_id: summary.project_id,
+    title: summary.title,
+    created_at: summary.created_at,
+    updated_at: summary.updated_at,
+    thread_id: summary.thread_id,
+    file_id: null,
+    last_message_preview: summary.last_message_preview,
+    filename: "",
+  };
+}
+
+function projectItemFromPythonFile(file: PythonFileResponse): ProjectItemSummary {
+  return {
+    item_id: file.file_id,
+    item_kind: "python_file",
+    project_id: file.project_id,
+    title: file.filename,
+    created_at: file.created_at,
+    updated_at: file.updated_at,
+    thread_id: null,
+    file_id: file.file_id,
+    last_message_preview: "",
+    filename: file.filename,
+  };
+}
+
+function upsertProjectItem(
+  current: ProjectItemSummary[],
+  item: ProjectItemSummary,
+): ProjectItemSummary[] {
+  return [item, ...current.filter((entry) => entry.item_id !== item.item_id)].sort(
     (left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at),
   );
+}
+
+function displayPythonFilename(filename: string) {
+  return filename.trim() || "something.py";
 }
 
 function GoogleButton() {
@@ -392,18 +476,22 @@ function EmptyStateActionIcon({ asset }: { asset: string }) {
 export default function App() {
   const [session, setSession] = useState<BrowserSessionResponse | null>(null);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
-  const [projectSessions, setProjectSessions] = useState<Record<string, ProjectSessionState>>({});
+  const [projectItems, setProjectItems] = useState<Record<string, ProjectItemState>>({});
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [expandedProjectIds, setExpandedProjectIds] = useState<string[]>([]);
   const [threadMap, setThreadMap] = useState<Record<string, ChatThreadResponse>>({});
-  const [openTabs, setOpenTabs] = useState<string[]>([]);
-  const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
+  const [pythonFileMap, setPythonFileMap] = useState<Record<string, PythonFileResponse>>({});
+  const [pythonFileDrafts, setPythonFileDrafts] = useState<Record<string, PythonFileDraft>>({});
+  const [pythonFileRuns, setPythonFileRuns] = useState<Record<string, PythonFileRunState>>({});
+  const [openTabs, setOpenTabs] = useState<OpenTab[]>([]);
+  const [activeTab, setActiveTab] = useState<OpenTab | null>(null);
   const [projectMenuProjectId, setProjectMenuProjectId] = useState<string | null>(null);
   const [projectModalState, setProjectModalState] = useState<ProjectModalState | null>(null);
   const [projectFormName, setProjectFormName] = useState("");
   const [projectFormDescription, setProjectFormDescription] = useState("");
   const [projectFormError, setProjectFormError] = useState("");
   const [deleteModalState, setDeleteModalState] = useState<DeleteModalState>(null);
+  const [saveModalState, setSaveModalState] = useState<SaveModalState>(null);
   const [authView, setAuthView] = useState<AuthView>("login");
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [authReady, setAuthReady] = useState(false);
@@ -433,8 +521,10 @@ export default function App() {
   const sessionRef = useRef<BrowserSessionResponse | null>(null);
   const projectsRef = useRef<ProjectSummary[]>([]);
   const selectedProjectIdRef = useRef<string | null>(null);
-  const projectSessionsRef = useRef<Record<string, ProjectSessionState>>({});
+  const projectItemsRef = useRef<Record<string, ProjectItemState>>({});
   const threadMapRef = useRef<Record<string, ChatThreadResponse>>({});
+  const pythonFileMapRef = useRef<Record<string, PythonFileResponse>>({});
+  const pythonFileDraftsRef = useRef<Record<string, PythonFileDraft>>({});
   const tabsStorageHydratedRef = useRef(false);
   const appUploadRef = useRef<HTMLInputElement | null>(null);
   const accountMenuRef = useRef<HTMLDivElement | null>(null);
@@ -460,8 +550,16 @@ export default function App() {
   }, [selectedProjectId]);
 
   useEffect(() => {
-    projectSessionsRef.current = projectSessions;
-  }, [projectSessions]);
+    projectItemsRef.current = projectItems;
+  }, [projectItems]);
+
+  useEffect(() => {
+    pythonFileMapRef.current = pythonFileMap;
+  }, [pythonFileMap]);
+
+  useEffect(() => {
+    pythonFileDraftsRef.current = pythonFileDrafts;
+  }, [pythonFileDrafts]);
 
   useEffect(() => {
     if (!tabsStorageHydratedRef.current) {
@@ -574,8 +672,20 @@ export default function App() {
 
   const authCopy = AUTH_VIEW_COPY[authView];
   const authenticated = Boolean(session?.authenticated);
+  const activeThreadId = activeTab?.kind === "thread" ? activeTab.id : null;
+  const activePythonFileId = activeTab?.kind === "python_file" ? activeTab.id : null;
   const activeThread = activeThreadId ? (threadMap[activeThreadId] ?? null) : null;
-  const isChatEmpty = !activeThread || activeThread.messages.length === 0;
+  const activePythonFile = activePythonFileId ? (pythonFileMap[activePythonFileId] ?? null) : null;
+  const activePythonDraft = activePythonFileId
+    ? (pythonFileDrafts[activePythonFileId] ?? null)
+    : null;
+  const activePythonRun = activePythonFileId
+    ? (pythonFileRuns[activePythonFileId] ?? { running: false, result: null, error: "" })
+    : { running: false, result: null, error: "" };
+  const activePythonContent = activePythonDraft?.content ?? activePythonFile?.content ?? "";
+  const isChatEmpty =
+    activeTab == null ||
+    (activeTab.kind === "thread" && (!activeThread || activeThread.messages.length === 0));
   const paperDrawerOpen = Boolean(paperDrawer);
   const emptyStateProject =
     projects.find((project) => project.project_id === selectedProjectId) ?? projects[0] ?? null;
@@ -597,16 +707,29 @@ export default function App() {
   );
   const openTabItems = useMemo(
     () =>
-      openTabs.map((threadId) => {
-        const loadedThread = threadMap[threadId];
-        const title = loadedThread?.title ?? "New chat";
+      openTabs.map((tab) => {
+        if (tab.kind === "thread") {
+          const loadedThread = threadMap[tab.id];
+          const title = loadedThread?.title ?? "New chat";
+          return {
+            key: `thread:${tab.id}`,
+            kind: tab.kind,
+            id: tab.id,
+            title: displayThreadTitle(title),
+            tabTitle: truncateTabTitle(title),
+          };
+        }
+        const loadedFile = pythonFileMap[tab.id];
+        const title = displayPythonFilename(loadedFile?.filename ?? "something.py");
         return {
-          threadId,
-          title: displayThreadTitle(title),
+          key: `python_file:${tab.id}`,
+          kind: tab.kind,
+          id: tab.id,
+          title,
           tabTitle: truncateTabTitle(title),
         };
       }),
-    [openTabs, threadMap],
+    [openTabs, pythonFileMap, threadMap],
   );
   const hasOpenTabs = openTabItems.length > 0;
   const tabStripStyle = useMemo(
@@ -617,7 +740,7 @@ export default function App() {
     [openTabItems.length],
   );
   const activeStreamInView = streamingThreadId !== null && streamingThreadId === activeThreadId;
-  const showScrollToLatest = !isChatEmpty && !messageListAtBottom;
+  const showScrollToLatest = activeTab?.kind === "thread" && !isChatEmpty && !messageListAtBottom;
 
   const scrollMessageListToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
     if (!messageListRef.current) {
@@ -814,12 +937,9 @@ export default function App() {
     return payload.projects;
   }, []);
 
-  const updateProjectSessionCache = useCallback(
-    (
-      projectId: string,
-      updater: (current: ProjectSessionState | null) => ProjectSessionState | null,
-    ) => {
-      setProjectSessions((current) => {
+  const updateProjectItemCache = useCallback(
+    (projectId: string, updater: (current: ProjectItemState | null) => ProjectItemState | null) => {
+      setProjectItems((current) => {
         const nextValue = updater(current[projectId] ?? null);
         if (nextValue === null) {
           const nextState = { ...current };
@@ -849,9 +969,9 @@ export default function App() {
         return next;
       });
       setOpenTabs((current) => {
-        const nextTabs = current.filter((value) => !ids.has(value));
-        setActiveThreadId((currentActive) => {
-          if (!currentActive || !ids.has(currentActive)) {
+        const nextTabs = current.filter((value) => value.kind !== "thread" || !ids.has(value.id));
+        setActiveTab((currentActive) => {
+          if (!currentActive || currentActive.kind !== "thread" || !ids.has(currentActive.id)) {
             return currentActive;
           }
           return nextTabs[nextTabs.length - 1] ?? null;
@@ -859,32 +979,33 @@ export default function App() {
         return nextTabs;
       });
       if (projectId) {
-        updateProjectSessionCache(projectId, (current) => {
+        updateProjectItemCache(projectId, (current) => {
           if (!current) {
             return current;
           }
-          const nextThreads = current.threads.filter((thread) => !ids.has(thread.thread_id));
-          const removedCount = current.threads.length - nextThreads.length;
+          const nextItems = current.items.filter(
+            (item) => item.item_kind !== "thread" || !ids.has(item.thread_id ?? ""),
+          );
+          const removedCount = current.items.length - nextItems.length;
           return {
             ...current,
-            threads: nextThreads,
+            items: nextItems,
             totalCount: Math.max(0, current.totalCount - removedCount),
             hasMore:
-              current.hasMore ||
-              nextThreads.length < Math.max(0, current.totalCount - removedCount),
+              current.hasMore || nextItems.length < Math.max(0, current.totalCount - removedCount),
           };
         });
       }
     },
-    [updateProjectSessionCache],
+    [updateProjectItemCache],
   );
 
-  const fetchProjectSessions = useCallback(
+  const fetchProjectItems = useCallback(
     async (projectId: string, append = false) => {
-      const existing = projectSessionsRef.current[projectId];
-      const offset = append ? (existing?.threads.length ?? 0) : 0;
-      updateProjectSessionCache(projectId, (current) => ({
-        threads: current?.threads ?? [],
+      const existing = projectItemsRef.current[projectId];
+      const offset = append ? (existing?.items.length ?? 0) : 0;
+      updateProjectItemCache(projectId, (current) => ({
+        items: current?.items ?? [],
         totalCount: current?.totalCount ?? 0,
         hasMore: current?.hasMore ?? false,
         loaded: current?.loaded ?? false,
@@ -893,19 +1014,18 @@ export default function App() {
         error: "",
       }));
       try {
-        const page = await loadProjectSessions(projectId, 5, offset);
-        updateProjectSessionCache(projectId, (current) => {
-          const threads = append
+        const page = await loadProjectItems(projectId, 25, offset);
+        updateProjectItemCache(projectId, (current) => {
+          const items = append
             ? [
-                ...(current?.threads ?? []),
-                ...page.threads.filter(
-                  (thread) =>
-                    !(current?.threads ?? []).some((item) => item.thread_id === thread.thread_id),
+                ...(current?.items ?? []),
+                ...page.items.filter(
+                  (item) => !(current?.items ?? []).some((entry) => entry.item_id === item.item_id),
                 ),
               ]
-            : page.threads;
+            : page.items;
           return {
-            threads,
+            items,
             totalCount: page.total_count,
             hasMore: page.has_more,
             loaded: true,
@@ -916,77 +1036,93 @@ export default function App() {
         });
         return page;
       } catch (error) {
-        updateProjectSessionCache(projectId, (current) => ({
-          threads: current?.threads ?? [],
+        updateProjectItemCache(projectId, (current) => ({
+          items: current?.items ?? [],
           totalCount: current?.totalCount ?? 0,
           hasMore: current?.hasMore ?? false,
           loaded: current?.loaded ?? false,
           loading: false,
           loadingMore: false,
-          error: error instanceof Error ? error.message : "Sessions could not be loaded.",
+          error: error instanceof Error ? error.message : "Project items could not be loaded.",
         }));
         throw error;
       }
     },
-    [updateProjectSessionCache],
+    [updateProjectItemCache],
   );
 
-  const upsertThreadIntoProjectSessions = useCallback(
+  const upsertThreadIntoProjectItems = useCallback(
     (thread: ChatThreadResponse) => {
-      updateProjectSessionCache(thread.project_id, (current) => {
+      updateProjectItemCache(thread.project_id, (current) => {
         if (!current?.loaded) {
           return current;
         }
-        const summary = threadSummaryFromThread(thread);
-        const threads = upsertThreadSummary(current.threads, summary);
+        const items = upsertProjectItem(current.items, projectItemFromThread(thread));
         return {
           ...current,
-          threads,
-          totalCount: Math.max(current.totalCount, threads.length),
-          hasMore: Math.max(current.totalCount, threads.length) > threads.length || current.hasMore,
+          items,
+          totalCount: Math.max(current.totalCount, items.length),
+          hasMore: Math.max(current.totalCount, items.length) > items.length || current.hasMore,
         };
       });
     },
-    [updateProjectSessionCache],
+    [updateProjectItemCache],
   );
 
-  const moveThreadBetweenProjectSessions = useCallback(
+  const upsertPythonFileIntoProjectItems = useCallback(
+    (file: PythonFileResponse) => {
+      updateProjectItemCache(file.project_id, (current) => {
+        if (!current?.loaded) {
+          return current;
+        }
+        const items = upsertProjectItem(current.items, projectItemFromPythonFile(file));
+        return {
+          ...current,
+          items,
+          totalCount: Math.max(current.totalCount, items.length),
+          hasMore: Math.max(current.totalCount, items.length) > items.length || current.hasMore,
+        };
+      });
+    },
+    [updateProjectItemCache],
+  );
+
+  const moveThreadBetweenProjectItems = useCallback(
     (thread: ChatThreadResponse, previousProjectId: string) => {
       if (previousProjectId && previousProjectId !== thread.project_id) {
-        updateProjectSessionCache(previousProjectId, (current) => {
+        updateProjectItemCache(previousProjectId, (current) => {
           if (!current?.loaded) {
             return current;
           }
-          const nextThreads = current.threads.filter((item) => item.thread_id !== thread.thread_id);
-          const removed = nextThreads.length !== current.threads.length ? 1 : 0;
+          const nextItems = current.items.filter((item) => item.thread_id !== thread.thread_id);
+          const removed = nextItems.length !== current.items.length ? 1 : 0;
           return {
             ...current,
-            threads: nextThreads,
+            items: nextItems,
             totalCount: Math.max(0, current.totalCount - removed),
             hasMore:
-              current.hasMore || nextThreads.length < Math.max(0, current.totalCount - removed),
+              current.hasMore || nextItems.length < Math.max(0, current.totalCount - removed),
           };
         });
       }
-      updateProjectSessionCache(thread.project_id, (current) => {
+      updateProjectItemCache(thread.project_id, (current) => {
         if (!current?.loaded) {
           return current;
         }
-        const summary = threadSummaryFromThread(thread);
-        const existed = current.threads.some((item) => item.thread_id === thread.thread_id);
-        const threads = upsertThreadSummary(current.threads, summary);
+        const existed = current.items.some((item) => item.thread_id === thread.thread_id);
+        const items = upsertProjectItem(current.items, projectItemFromThread(thread));
         const totalCount = existed
           ? current.totalCount
-          : Math.max(current.totalCount + 1, threads.length);
+          : Math.max(current.totalCount + 1, items.length);
         return {
           ...current,
-          threads,
+          items,
           totalCount,
-          hasMore: current.hasMore || totalCount > threads.length,
+          hasMore: current.hasMore || totalCount > items.length,
         };
       });
     },
-    [updateProjectSessionCache],
+    [updateProjectItemCache],
   );
 
   const fetchAndStoreThread = useCallback(
@@ -994,20 +1130,45 @@ export default function App() {
       const thread = await getThread(threadId);
       setThreadMap((current) => ({ ...current, [thread.thread_id]: thread }));
       setSelectedProjectId(thread.project_id);
-      upsertThreadIntoProjectSessions(thread);
+      upsertThreadIntoProjectItems(thread);
       return thread;
     },
-    [upsertThreadIntoProjectSessions],
+    [upsertThreadIntoProjectItems],
   );
 
   const openThread = useCallback(
     async (threadId: string) => {
       const thread = threadMapRef.current[threadId] ?? (await fetchAndStoreThread(threadId));
-      setOpenTabs((current) => appendOpenTab(current, threadId));
-      setActiveThreadId(threadId);
+      setOpenTabs((current) => appendOpenTab(current, { kind: "thread", id: threadId }));
+      setActiveTab({ kind: "thread", id: threadId });
       setSelectedProjectId(thread.project_id);
     },
     [fetchAndStoreThread],
+  );
+
+  const fetchAndStorePythonFile = useCallback(
+    async (fileId: string) => {
+      const file = await getPythonFile(fileId);
+      setPythonFileMap((current) => ({ ...current, [file.file_id]: file }));
+      setSelectedProjectId(file.project_id);
+      setPythonFileDrafts((current) => ({
+        ...current,
+        [file.file_id]: current[file.file_id] ?? { content: file.content, dirty: false },
+      }));
+      upsertPythonFileIntoProjectItems(file);
+      return file;
+    },
+    [upsertPythonFileIntoProjectItems],
+  );
+
+  const openPythonFile = useCallback(
+    async (fileId: string) => {
+      const file = pythonFileMapRef.current[fileId] ?? (await fetchAndStorePythonFile(fileId));
+      setOpenTabs((current) => appendOpenTab(current, { kind: "python_file", id: fileId }));
+      setActiveTab({ kind: "python_file", id: fileId });
+      setSelectedProjectId(file.project_id);
+    },
+    [fetchAndStorePythonFile],
   );
 
   const createNewThread = useCallback(
@@ -1019,27 +1180,27 @@ export default function App() {
       }
       const thread = await createThread(title, projectId);
       setThreadMap((current) => ({ ...current, [thread.thread_id]: thread }));
-      setOpenTabs((current) => appendOpenTab(current, thread.thread_id));
-      setActiveThreadId(thread.thread_id);
+      setOpenTabs((current) => appendOpenTab(current, { kind: "thread", id: thread.thread_id }));
+      setActiveTab({ kind: "thread", id: thread.thread_id });
       setSelectedProjectId(thread.project_id);
-      upsertThreadIntoProjectSessions(thread);
+      upsertThreadIntoProjectItems(thread);
       await refreshProjects();
       return thread;
     },
-    [refreshProjects, upsertThreadIntoProjectSessions],
+    [refreshProjects, upsertThreadIntoProjectItems],
   );
 
-  const closeThreadTab = useCallback((threadId: string) => {
+  const closeTab = useCallback((tab: OpenTab) => {
     setOpenTabs((current) => {
-      const nextTabs = current.filter((value) => value !== threadId);
-      setActiveThreadId((currentActive) => {
-        if (currentActive !== threadId) {
+      const nextTabs = current.filter((value) => value.kind !== tab.kind || value.id !== tab.id);
+      setActiveTab((currentActive) => {
+        if (!currentActive || currentActive.kind !== tab.kind || currentActive.id !== tab.id) {
           return currentActive;
         }
-        const closingIndex = current.indexOf(threadId);
-        const fallbackId =
-          nextTabs[Math.max(0, closingIndex - 1)] ?? nextTabs[closingIndex] ?? null;
-        return fallbackId;
+        const closingIndex = current.findIndex(
+          (value) => value.kind === tab.kind && value.id === tab.id,
+        );
+        return nextTabs[Math.max(0, closingIndex - 1)] ?? nextTabs[closingIndex] ?? null;
       });
       return nextTabs;
     });
@@ -1187,7 +1348,7 @@ export default function App() {
           });
           setThreadMap((current) => ({ ...current, [threadId]: payload.thread }));
           setSelectedProjectId(payload.thread.project_id);
-          upsertThreadIntoProjectSessions(payload.thread);
+          upsertThreadIntoProjectItems(payload.thread);
           setSession((current) =>
             current
               ? {
@@ -1238,7 +1399,7 @@ export default function App() {
       if (gatingPayload) {
         setThreadMap((current) => ({ ...current, [threadId]: gatingPayload.thread }));
         setSelectedProjectId(gatingPayload.thread.project_id);
-        upsertThreadIntoProjectSessions(gatingPayload.thread);
+        upsertThreadIntoProjectItems(gatingPayload.thread);
         setSession((current) =>
           current
             ? {
@@ -1261,7 +1422,7 @@ export default function App() {
       if (streamError) {
         setComposerStatus(streamError);
         const refreshedThread = await fetchAndStoreThread(threadId);
-        upsertThreadIntoProjectSessions(refreshedThread);
+        upsertThreadIntoProjectItems(refreshedThread);
         await refreshProjects();
         return null;
       }
@@ -1278,7 +1439,7 @@ export default function App() {
         );
         setComposerStatus("");
         const refreshedThread = await fetchAndStoreThread(threadId);
-        upsertThreadIntoProjectSessions(refreshedThread);
+        upsertThreadIntoProjectItems(refreshedThread);
         await refreshProjects();
         return donePayload;
       }
@@ -1292,7 +1453,7 @@ export default function App() {
       includeUploads,
       refreshProjects,
       showErrorFlash,
-      upsertThreadIntoProjectSessions,
+      upsertThreadIntoProjectItems,
       updateThread,
     ],
   );
@@ -1301,11 +1462,15 @@ export default function App() {
     await refreshUploads();
     const loadedProjects = await refreshProjects();
     const restoredTabs = restoreTabs();
-    const validRestoredTabs: string[] = [];
-    for (const threadId of restoredTabs) {
+    const validRestoredTabs: OpenTab[] = [];
+    for (const tab of restoredTabs) {
       try {
-        await fetchAndStoreThread(threadId);
-        validRestoredTabs.push(threadId);
+        if (tab.kind === "thread") {
+          await fetchAndStoreThread(tab.id);
+        } else {
+          await fetchAndStorePythonFile(tab.id);
+        }
+        validRestoredTabs.push(tab);
       } catch (error) {
         console.error(error);
       }
@@ -1322,14 +1487,27 @@ export default function App() {
 
     const firstOpen = validRestoredTabs[0];
     if (firstOpen) {
-      setActiveThreadId(firstOpen);
+      setActiveTab(firstOpen);
       setSelectedProjectId(
-        threadMapRef.current[firstOpen]?.project_id ?? loadedProjects[0]?.project_id ?? null,
+        firstOpen.kind === "thread"
+          ? (threadMapRef.current[firstOpen.id]?.project_id ??
+              loadedProjects[0]?.project_id ??
+              null)
+          : (pythonFileMapRef.current[firstOpen.id]?.project_id ??
+              loadedProjects[0]?.project_id ??
+              null),
       );
     } else if (loadedProjects[0]) {
       setSelectedProjectId(loadedProjects[0].project_id);
     }
-  }, [createNewThread, fetchAndStoreThread, refreshProjects, refreshUploads, sendMessage]);
+  }, [
+    createNewThread,
+    fetchAndStorePythonFile,
+    fetchAndStoreThread,
+    refreshProjects,
+    refreshUploads,
+    sendMessage,
+  ]);
 
   useEffect(() => {
     void (async () => {
@@ -1490,18 +1668,22 @@ export default function App() {
   const resetAuthenticatedState = useCallback(() => {
     setSession(null);
     setProjects([]);
-    setProjectSessions({});
+    setProjectItems({});
     setSelectedProjectId(null);
     setExpandedProjectIds([]);
     setThreadMap({});
+    setPythonFileMap({});
+    setPythonFileDrafts({});
+    setPythonFileRuns({});
     setOpenTabs([]);
-    setActiveThreadId(null);
+    setActiveTab(null);
     setProjectMenuProjectId(null);
     setProjectModalState(null);
     setProjectFormName("");
     setProjectFormDescription("");
     setProjectFormError("");
     setDeleteModalState(null);
+    setSaveModalState(null);
     setLandingPrompt("");
     setComposerInput("");
     setComposerStatus("");
@@ -1536,6 +1718,16 @@ export default function App() {
     [openThread],
   );
 
+  const handlePythonFileSelection = useCallback(
+    async (fileId: string) => {
+      await openPythonFile(fileId);
+      setMobileSidebarOpen(false);
+      setAccountMenuOpen(false);
+      setProjectMenuProjectId(null);
+    },
+    [openPythonFile],
+  );
+
   const handleNewChat = useCallback(async () => {
     setMobileSidebarOpen(false);
     setAccountMenuOpen(false);
@@ -1553,13 +1745,13 @@ export default function App() {
       }
       setExpandedProjectIds((current) => [...current, projectId]);
       if (
-        !projectSessionsRef.current[projectId]?.loaded &&
-        !projectSessionsRef.current[projectId]?.loading
+        !projectItemsRef.current[projectId]?.loaded &&
+        !projectItemsRef.current[projectId]?.loading
       ) {
-        await fetchProjectSessions(projectId);
+        await fetchProjectItems(projectId);
       }
     },
-    [expandedProjectIds, fetchProjectSessions],
+    [expandedProjectIds, fetchProjectItems],
   );
 
   const handleToggleAllProjects = useCallback(async () => {
@@ -1571,10 +1763,10 @@ export default function App() {
     setExpandedProjectIds(nextExpanded);
     await Promise.all(
       nextExpanded
-        .filter((projectId) => !projectSessionsRef.current[projectId]?.loaded)
-        .map((projectId) => fetchProjectSessions(projectId)),
+        .filter((projectId) => !projectItemsRef.current[projectId]?.loaded)
+        .map((projectId) => fetchProjectItems(projectId)),
     );
-  }, [allProjectsExpanded, fetchProjectSessions, projects]);
+  }, [allProjectsExpanded, fetchProjectItems, projects]);
 
   const openCreateProjectModal = useCallback(() => {
     setProjectModalState({ mode: "create" });
@@ -1625,7 +1817,7 @@ export default function App() {
         setExpandedProjectIds((current) =>
           current.includes(project.project_id) ? current : [...current, project.project_id],
         );
-        await fetchProjectSessions(project.project_id);
+        await fetchProjectItems(project.project_id);
       } else {
         await updateProject(projectModalState.projectId, name, projectFormDescription.trim());
         await refreshProjects();
@@ -1636,7 +1828,7 @@ export default function App() {
     }
   }, [
     closeProjectModal,
-    fetchProjectSessions,
+    fetchProjectItems,
     projectFormDescription,
     projectFormName,
     projectModalState,
@@ -1669,11 +1861,55 @@ export default function App() {
         const deletedThreadIds = Object.values(threadMapRef.current)
           .filter((thread) => thread.project_id === projectId)
           .map((thread) => thread.thread_id);
-        const cachedThreadIds =
-          projectSessionsRef.current[projectId]?.threads.map((thread) => thread.thread_id) ?? [];
+        const cachedItems = projectItemsRef.current[projectId]?.items ?? [];
+        const cachedThreadIds = cachedItems
+          .filter((item) => item.item_kind === "thread")
+          .map((item) => item.thread_id ?? "");
+        const deletedFileIds = Object.values(pythonFileMapRef.current)
+          .filter((pythonFile) => pythonFile.project_id === projectId)
+          .map((pythonFile) => pythonFile.file_id);
+        const cachedFileIds = cachedItems
+          .filter((item) => item.item_kind === "python_file")
+          .map((item) => item.file_id ?? "");
         await deleteProject(projectId);
         removeThreadIdsLocally([...new Set([...deletedThreadIds, ...cachedThreadIds])], projectId);
-        setProjectSessions((current) => {
+        setPythonFileMap((current) => {
+          const next = { ...current };
+          for (const fileId of [...deletedFileIds, ...cachedFileIds]) {
+            delete next[fileId];
+          }
+          return next;
+        });
+        setPythonFileDrafts((current) => {
+          const next = { ...current };
+          for (const fileId of [...deletedFileIds, ...cachedFileIds]) {
+            delete next[fileId];
+          }
+          return next;
+        });
+        setPythonFileRuns((current) => {
+          const next = { ...current };
+          for (const fileId of [...deletedFileIds, ...cachedFileIds]) {
+            delete next[fileId];
+          }
+          return next;
+        });
+        setOpenTabs((current) => {
+          const ids = new Set([...deletedFileIds, ...cachedFileIds]);
+          const nextTabs = current.filter((tab) => tab.kind !== "python_file" || !ids.has(tab.id));
+          setActiveTab((currentActive) => {
+            if (
+              !currentActive ||
+              currentActive.kind !== "python_file" ||
+              !ids.has(currentActive.id)
+            ) {
+              return currentActive;
+            }
+            return nextTabs[nextTabs.length - 1] ?? null;
+          });
+          return nextTabs;
+        });
+        setProjectItems((current) => {
           const next = { ...current };
           delete next[projectId];
           return next;
@@ -1698,10 +1934,11 @@ export default function App() {
       setAccountMenuOpen(false);
       setProjectMenuProjectId(null);
       const existingEmptyThread = openTabs
-        .map((threadId) => threadMap[threadId] ?? null)
+        .filter((tab) => tab.kind === "thread")
+        .map((tab) => threadMap[tab.id] ?? null)
         .find((thread) => isEmptyThread(thread) && thread.project_id === projectId);
       if (existingEmptyThread) {
-        setActiveThreadId(existingEmptyThread.thread_id);
+        setActiveTab({ kind: "thread", id: existingEmptyThread.thread_id });
         return;
       }
       if (isEmptyThread(activeThread)) {
@@ -1710,8 +1947,8 @@ export default function App() {
         }
         const movedThread = await moveThreadToProject(activeThread.thread_id, projectId);
         setThreadMap((current) => ({ ...current, [movedThread.thread_id]: movedThread }));
-        moveThreadBetweenProjectSessions(movedThread, activeThread.project_id);
-        setActiveThreadId(movedThread.thread_id);
+        moveThreadBetweenProjectItems(movedThread, activeThread.project_id);
+        setActiveTab({ kind: "thread", id: movedThread.thread_id });
         await refreshProjects();
         return;
       }
@@ -1720,19 +1957,210 @@ export default function App() {
     [
       activeThread,
       createNewThread,
-      moveThreadBetweenProjectSessions,
+      moveThreadBetweenProjectItems,
       openTabs,
       refreshProjects,
       threadMap,
     ],
   );
 
-  const handleLoadMoreSessions = useCallback(
+  const handleLoadMoreItems = useCallback(
     async (projectId: string) => {
-      await fetchProjectSessions(projectId, true);
+      await fetchProjectItems(projectId, true);
     },
-    [fetchProjectSessions],
+    [fetchProjectItems],
   );
+
+  const handleCreatePythonFile = useCallback(async () => {
+    if (!sessionSettings.has_github_connection) {
+      showErrorFlash("Connect GitHub before creating Python files.");
+      openAuthModal("settings", "version-control");
+      return;
+    }
+    const projectId = selectedProjectIdRef.current ?? projectsRef.current[0]?.project_id;
+    if (!projectId) {
+      setComposerStatus("Create a project before adding a Python file.");
+      return;
+    }
+    try {
+      const pythonFile = await createPythonFile(projectId);
+      setPythonFileMap((current) => ({ ...current, [pythonFile.file_id]: pythonFile }));
+      setPythonFileDrafts((current) => ({
+        ...current,
+        [pythonFile.file_id]: { content: pythonFile.content, dirty: false },
+      }));
+      setPythonFileRuns((current) => ({
+        ...current,
+        [pythonFile.file_id]: { running: false, result: null, error: "" },
+      }));
+      upsertPythonFileIntoProjectItems(pythonFile);
+      setOpenTabs((current) =>
+        appendOpenTab(current, { kind: "python_file", id: pythonFile.file_id }),
+      );
+      setActiveTab({ kind: "python_file", id: pythonFile.file_id });
+      setSelectedProjectId(pythonFile.project_id);
+      await refreshProjects();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Python file could not be created.";
+      if (message.toLowerCase().includes("github")) {
+        showErrorFlash(message);
+        openAuthModal("settings", "version-control");
+        return;
+      }
+      setComposerStatus(message);
+    }
+  }, [
+    openAuthModal,
+    refreshProjects,
+    sessionSettings.has_github_connection,
+    showErrorFlash,
+    upsertPythonFileIntoProjectItems,
+  ]);
+
+  const persistPythonFile = useCallback(
+    async (fileId: string, content: string) => {
+      const updated = await updatePythonFile(fileId, { content });
+      setPythonFileMap((current) => ({ ...current, [updated.file_id]: updated }));
+      setPythonFileDrafts((current) => ({
+        ...current,
+        [updated.file_id]: { content: updated.content, dirty: false },
+      }));
+      upsertPythonFileIntoProjectItems(updated);
+      await refreshProjects();
+      return updated;
+    },
+    [refreshProjects, upsertPythonFileIntoProjectItems],
+  );
+
+  const openSaveModal = useCallback(
+    async (fileId: string) => {
+      if (!sessionSettings.has_github_connection) {
+        showErrorFlash("Connect GitHub before saving Python files.");
+        openAuthModal("settings", "version-control");
+        return;
+      }
+      const file = pythonFileMapRef.current[fileId] ?? (await fetchAndStorePythonFile(fileId));
+      const repoSync = await getProjectRepoSync(file.project_id);
+      setSaveModalState({
+        fileId,
+        commitMessage: `Save ${file.filename}`,
+        saving: false,
+        error: "",
+        repoSync,
+        success: null,
+      });
+    },
+    [fetchAndStorePythonFile, openAuthModal, sessionSettings.has_github_connection, showErrorFlash],
+  );
+
+  const closeSaveModal = useCallback(() => {
+    setSaveModalState(null);
+  }, []);
+
+  const confirmSaveModal = useCallback(async () => {
+    if (!saveModalState) {
+      return;
+    }
+    const fileId = saveModalState.fileId;
+    const currentFile = pythonFileMapRef.current[fileId] ?? (await fetchAndStorePythonFile(fileId));
+    const nextContent = pythonFileDraftsRef.current[fileId]?.content ?? currentFile.content;
+    setSaveModalState((current) => (current ? { ...current, saving: true, error: "" } : current));
+    try {
+      const savedFile = await persistPythonFile(fileId, nextContent);
+      const sync = await syncProjectRepo(savedFile.project_id, saveModalState.commitMessage);
+      setSaveModalState((current) =>
+        current ? { ...current, saving: false, success: sync, repoSync: sync } : current,
+      );
+    } catch (error) {
+      setSaveModalState((current) =>
+        current
+          ? {
+              ...current,
+              saving: false,
+              error: error instanceof Error ? error.message : "Project could not be saved.",
+            }
+          : current,
+      );
+    }
+  }, [fetchAndStorePythonFile, persistPythonFile, saveModalState]);
+
+  const handleRenamePythonFile = useCallback(
+    async (fileId: string) => {
+      const currentFile =
+        pythonFileMapRef.current[fileId] ?? (await fetchAndStorePythonFile(fileId));
+      const nextName = window.prompt("Rename Python file", currentFile.filename);
+      if (!nextName) {
+        return;
+      }
+      try {
+        const updated = await updatePythonFile(fileId, { filename: nextName });
+        setPythonFileMap((current) => ({ ...current, [updated.file_id]: updated }));
+        setPythonFileDrafts((current) => ({
+          ...current,
+          [updated.file_id]: current[updated.file_id] ?? {
+            content: updated.content,
+            dirty: false,
+          },
+        }));
+        upsertPythonFileIntoProjectItems(updated);
+        await refreshProjects();
+      } catch (error) {
+        setComposerStatus(
+          error instanceof Error ? error.message : "Python file could not be renamed.",
+        );
+      }
+    },
+    [fetchAndStorePythonFile, refreshProjects, upsertPythonFileIntoProjectItems],
+  );
+
+  const handleRunActivePythonFile = useCallback(async () => {
+    if (!activePythonFileId) {
+      return;
+    }
+    if (!sessionSettings.has_github_connection) {
+      showErrorFlash("Connect GitHub before running Python files.");
+      openAuthModal("settings", "version-control");
+      return;
+    }
+    if (!sessionSettings.has_daytona_api_key) {
+      return;
+    }
+    try {
+      const currentFile =
+        pythonFileMapRef.current[activePythonFileId] ??
+        (await fetchAndStorePythonFile(activePythonFileId));
+      const nextContent =
+        pythonFileDraftsRef.current[activePythonFileId]?.content ?? currentFile.content;
+      setPythonFileRuns((current) => ({
+        ...current,
+        [activePythonFileId]: { running: true, result: null, error: "" },
+      }));
+      const savedFile = await persistPythonFile(activePythonFileId, nextContent);
+      await syncProjectRepo(savedFile.project_id, `Run ${savedFile.filename}`);
+      const result = await runPythonFile(activePythonFileId);
+      setPythonFileRuns((current) => ({
+        ...current,
+        [activePythonFileId]: { running: false, result, error: "" },
+      }));
+    } catch (error) {
+      setPythonFileRuns((current) => ({
+        ...current,
+        [activePythonFileId]: {
+          running: false,
+          result: null,
+          error: error instanceof Error ? error.message : "Python file could not be run.",
+        },
+      }));
+    }
+  }, [
+    activePythonFileId,
+    fetchAndStorePythonFile,
+    openAuthModal,
+    persistPythonFile,
+    sessionSettings.has_github_connection,
+    sessionSettings.has_daytona_api_key,
+    showErrorFlash,
+  ]);
 
   const handleReadDocs = useCallback(() => {
     window.open(
@@ -1942,7 +2370,7 @@ export default function App() {
               <div id="project-list" className="project-list">
                 {projects.map((project) => {
                   const expanded = expandedProjectIds.includes(project.project_id);
-                  const sessionState = projectSessions[project.project_id];
+                  const itemState = projectItems[project.project_id];
                   return (
                     <div
                       key={project.project_id}
@@ -2043,34 +2471,45 @@ export default function App() {
                       </div>
                       {expanded ? (
                         <div className="project-session-section">
-                          {sessionState?.loading ? (
-                            <div className="project-session-state">Loading sessions…</div>
+                          {itemState?.loading ? (
+                            <div className="project-session-state">Loading items…</div>
                           ) : null}
-                          {sessionState?.error ? (
-                            <div className="project-session-state error">{sessionState.error}</div>
+                          {itemState?.error ? (
+                            <div className="project-session-state error">{itemState.error}</div>
                           ) : null}
-                          {sessionState?.loaded ? (
+                          {itemState?.loaded ? (
                             <>
-                              {sessionState.threads.length > 0 ? (
+                              {itemState.items.length > 0 ? (
                                 <div className="thread-list project-thread-list">
-                                  {sessionState.threads
-                                    .filter(shouldShowThreadInSidebar)
-                                    .map((thread) => {
-                                      const title = displayThreadTitle(thread.title);
+                                  {itemState.items.map((item) => {
+                                    if (item.item_kind === "thread") {
+                                      if (
+                                        !shouldShowThreadInSidebar({
+                                          thread_id: item.thread_id ?? "",
+                                          project_id: item.project_id,
+                                          title: item.title,
+                                          created_at: item.created_at,
+                                          updated_at: item.updated_at,
+                                          last_message_preview: item.last_message_preview,
+                                        })
+                                      ) {
+                                        return null;
+                                      }
+                                      const title = displayThreadTitle(item.title);
                                       return (
                                         <div
-                                          key={thread.thread_id}
+                                          key={item.item_id}
                                           role="button"
                                           tabIndex={0}
-                                          className={`thread-card${activeThreadId === thread.thread_id ? " active" : ""}`}
+                                          className={`thread-card${activeThreadId === item.thread_id ? " active" : ""}`}
                                           title={title}
                                           onClick={() =>
-                                            void handleThreadSelection(thread.thread_id)
+                                            void handleThreadSelection(item.thread_id ?? "")
                                           }
                                           onKeyDown={(event) => {
                                             if (event.key === "Enter" || event.key === " ") {
                                               event.preventDefault();
-                                              void handleThreadSelection(thread.thread_id);
+                                              void handleThreadSelection(item.thread_id ?? "");
                                             }
                                           }}
                                         >
@@ -2078,7 +2517,7 @@ export default function App() {
                                             <strong className="thread-card-title">{title}</strong>
                                           </div>
                                           <span className="thread-card-age">
-                                            {formatThreadAge(thread.updated_at)}
+                                            {formatThreadAge(item.updated_at)}
                                           </span>
                                           <button
                                             type="button"
@@ -2088,7 +2527,7 @@ export default function App() {
                                               event.stopPropagation();
                                               openDeleteThreadModal(
                                                 project.project_id,
-                                                thread.thread_id,
+                                                item.thread_id ?? "",
                                                 title,
                                               );
                                             }}
@@ -2100,19 +2539,66 @@ export default function App() {
                                           </button>
                                         </div>
                                       );
-                                    })}
+                                    }
+                                    const title = displayPythonFilename(
+                                      item.filename || item.title,
+                                    );
+                                    return (
+                                      <div
+                                        key={item.item_id}
+                                        role="button"
+                                        tabIndex={0}
+                                        className={`thread-card python-file-card${activePythonFileId === item.file_id ? " active" : ""}`}
+                                        title={title}
+                                        onClick={() =>
+                                          void handlePythonFileSelection(item.file_id ?? "")
+                                        }
+                                        onKeyDown={(event) => {
+                                          if (event.key === "Enter" || event.key === " ") {
+                                            event.preventDefault();
+                                            void handlePythonFileSelection(item.file_id ?? "");
+                                          }
+                                        }}
+                                      >
+                                        <div className="thread-card-copy python-file-card-copy">
+                                          <AppIcon
+                                            src={staticAssetPath("python.svg")}
+                                            className="python-file-card-icon"
+                                          />
+                                          <strong className="thread-card-title">{title}</strong>
+                                        </div>
+                                        <span className="thread-card-age">
+                                          {formatThreadAge(item.updated_at)}
+                                        </span>
+                                        <button
+                                          type="button"
+                                          className="thread-card-delete thread-card-rename"
+                                          aria-label={`Rename ${title}`}
+                                          onClick={(event) => {
+                                            event.stopPropagation();
+                                            void handleRenamePythonFile(item.file_id ?? "");
+                                          }}
+                                        >
+                                          <AppIcon
+                                            src={staticAssetPath("edit.svg")}
+                                            className="thread-card-delete-icon"
+                                          />
+                                        </button>
+                                      </div>
+                                    );
+                                  })}
                                 </div>
                               ) : (
-                                <div className="project-session-state">No sessions yet.</div>
+                                <div className="project-session-state">No items yet.</div>
                               )}
-                              {sessionState.hasMore ? (
+                              {itemState.hasMore ? (
                                 <button
                                   type="button"
                                   className="project-show-more"
-                                  disabled={sessionState.loadingMore}
-                                  onClick={() => void handleLoadMoreSessions(project.project_id)}
+                                  disabled={itemState.loadingMore}
+                                  onClick={() => void handleLoadMoreItems(project.project_id)}
                                 >
-                                  {sessionState.loadingMore ? "Loading…" : "Show more"}
+                                  {itemState.loadingMore ? "Loading…" : "Show more"}
                                 </button>
                               ) : null}
                             </>
@@ -2213,15 +2699,19 @@ export default function App() {
                   >
                     {openTabItems.map((tab) => (
                       <div
-                        key={tab.threadId}
+                        key={tab.key}
                         role="tab"
                         tabIndex={0}
-                        aria-selected={activeThreadId === tab.threadId}
-                        className={`chat-tab${activeThreadId === tab.threadId ? " active" : ""}`}
+                        aria-selected={activeTab?.kind === tab.kind && activeTab.id === tab.id}
+                        className={`chat-tab${activeTab?.kind === tab.kind && activeTab.id === tab.id ? " active" : ""}`}
                         onKeyDown={(event) => {
                           if (event.key === "Enter" || event.key === " ") {
                             event.preventDefault();
-                            void handleThreadSelection(tab.threadId);
+                            if (tab.kind === "thread") {
+                              void handleThreadSelection(tab.id);
+                            } else {
+                              void handlePythonFileSelection(tab.id);
+                            }
                           }
                         }}
                       >
@@ -2229,7 +2719,13 @@ export default function App() {
                           type="button"
                           className="chat-tab-trigger"
                           title={tab.title}
-                          onClick={() => void handleThreadSelection(tab.threadId)}
+                          onClick={() => {
+                            if (tab.kind === "thread") {
+                              void handleThreadSelection(tab.id);
+                            } else {
+                              void handlePythonFileSelection(tab.id);
+                            }
+                          }}
                         >
                           <span className="chat-tab-title">{tab.tabTitle}</span>
                         </button>
@@ -2239,7 +2735,7 @@ export default function App() {
                           className="chat-tab-close"
                           onClick={(event) => {
                             event.stopPropagation();
-                            closeThreadTab(tab.threadId);
+                            closeTab({ kind: tab.kind, id: tab.id });
                           }}
                         >
                           ×
@@ -2253,10 +2749,103 @@ export default function App() {
 
             <div
               ref={messageListRef}
-              className={`chat-message-list${isChatEmpty ? " empty" : ""}`}
+              className={`chat-message-list${isChatEmpty ? " empty" : ""}${activeTab?.kind === "python_file" ? " python-file-view" : ""}`}
               onScroll={handleMessageListScroll}
             >
-              {isChatEmpty ? (
+              {activeTab?.kind === "python_file" ? (
+                activePythonFile ? (
+                  <div className="python-file-stage">
+                    <div className="python-file-header">
+                      <div className="python-file-header-copy">
+                        <span className="python-file-eyebrow">Python file</span>
+                        <div className="python-file-title-row">
+                          <strong className="python-file-title">
+                            {displayPythonFilename(activePythonFile.filename)}
+                          </strong>
+                          {activePythonDraft?.dirty ? (
+                            <span className="python-file-dirty">Unsaved changes</span>
+                          ) : null}
+                        </div>
+                      </div>
+                      <div className="python-file-toolbar">
+                        <button
+                          type="button"
+                          className="python-file-save-button"
+                          onClick={() => void openSaveModal(activePythonFile.file_id)}
+                        >
+                          Save
+                        </button>
+                        <button
+                          type="button"
+                          className={`python-file-run-button${sessionSettings.has_daytona_api_key ? "" : " disabled"}`}
+                          disabled={!sessionSettings.has_daytona_api_key || activePythonRun.running}
+                          onClick={() => void handleRunActivePythonFile()}
+                        >
+                          {activePythonRun.running ? "Running..." : "Run"}
+                        </button>
+                      </div>
+                    </div>
+                    {activePythonRun.error ? (
+                      <div className="python-run-error">{activePythonRun.error}</div>
+                    ) : null}
+                    <div className="python-editor-shell">
+                      <Editor
+                        height="100%"
+                        language="python"
+                        theme="hc-black"
+                        value={activePythonContent}
+                        onChange={(value) => {
+                          const nextContent = value ?? "";
+                          setPythonFileDrafts((current) => ({
+                            ...current,
+                            [activePythonFile.file_id]: {
+                              content: nextContent,
+                              dirty:
+                                nextContent !==
+                                (pythonFileMapRef.current[activePythonFile.file_id]?.content ?? ""),
+                            },
+                          }));
+                        }}
+                        options={{
+                          automaticLayout: true,
+                          fontSize: 14,
+                          minimap: { enabled: false },
+                          scrollBeyondLastLine: false,
+                          wordWrap: "on",
+                        }}
+                      />
+                    </div>
+                    {activePythonRun.result ? (
+                      <div className="python-run-panel">
+                        <div className="python-run-panel-header">
+                          <strong>
+                            {activePythonRun.result.status === "completed"
+                              ? "Latest run"
+                              : "Run failed"}
+                          </strong>
+                          <span>Exit code {activePythonRun.result.exit_code}</span>
+                        </div>
+                        {activePythonRun.result.stdout ? (
+                          <div className="python-run-block">
+                            <div className="python-run-block-label">stdout</div>
+                            <pre>{activePythonRun.result.stdout}</pre>
+                          </div>
+                        ) : null}
+                        {activePythonRun.result.stderr ? (
+                          <div className="python-run-block">
+                            <div className="python-run-block-label">stderr</div>
+                            <pre>{activePythonRun.result.stderr}</pre>
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : (
+                  <div className="python-file-stage python-file-stage-loading">
+                    Loading Python file...
+                  </div>
+                )
+              ) : isChatEmpty ? (
                 <div className="chat-stage-spacer">
                   {!hasOpenTabs ? (
                     <button
@@ -2362,7 +2951,11 @@ export default function App() {
                     ) : null}
                     {composerEditor}
                     <div className="chat-empty-actions">
-                      <button type="button" className="chat-empty-action-tag python">
+                      <button
+                        type="button"
+                        className="chat-empty-action-tag python"
+                        onClick={() => void handleCreatePythonFile()}
+                      >
                         <span className="chat-empty-action-icon" aria-hidden="true">
                           <EmptyStateActionIcon asset="python.svg" />
                         </span>
@@ -2481,7 +3074,9 @@ export default function App() {
               )}
             </div>
 
-            {!isChatEmpty ? <div className="chat-composer-fade" aria-hidden="true" /> : null}
+            {activeTab?.kind === "thread" && !isChatEmpty ? (
+              <div className="chat-composer-fade" aria-hidden="true" />
+            ) : null}
             {showScrollToLatest ? (
               <button
                 type="button"
@@ -2495,7 +3090,7 @@ export default function App() {
                 </svg>
               </button>
             ) : null}
-            {!isChatEmpty ? (
+            {activeTab?.kind === "thread" && !isChatEmpty ? (
               <>
                 {composerStatus ? <div className="composer-status">{composerStatus}</div> : null}
                 {composerEditor}
@@ -2600,6 +3195,85 @@ export default function App() {
           ) : null}
         </div>
       ) : null}
+
+      <div
+        id="python-save-modal"
+        className={`modal${saveModalState ? "" : " hidden"}`}
+        role="dialog"
+        aria-modal="true"
+      >
+        <div className="modal-backdrop" onClick={closeSaveModal} />
+        <div className="modal-panel python-save-modal-panel">
+          <button className="modal-close" type="button" onClick={closeSaveModal}>
+            ×
+          </button>
+          <div className="modal-heading">
+            <h2 className="modal-title">Save Python file</h2>
+            <p className="modal-caption">
+              {saveModalState?.repoSync?.repo_exists
+                ? "Paperbase will commit the current project files to the linked project repository."
+                : "Paperbase will create a dedicated GitHub repository for this project and commit the current files."}
+            </p>
+          </div>
+          {saveModalState?.error ? (
+            <div className="modal-flash warning" role="alert">
+              <span className="modal-flash-text">{saveModalState.error}</span>
+            </div>
+          ) : null}
+          <div className="modal-view visible">
+            {saveModalState?.success ? (
+              <div className="stack python-save-success">
+                <div className="python-save-success-line">
+                  Saved to{" "}
+                  <a href={saveModalState.success.github_repo_url} target="_blank" rel="noreferrer">
+                    {saveModalState.success.github_repo_name}
+                  </a>
+                  .
+                </div>
+                {saveModalState.success.last_sync_commit_url ? (
+                  <div className="python-save-success-line">
+                    <a
+                      href={saveModalState.success.last_sync_commit_url}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      View commit
+                    </a>
+                  </div>
+                ) : null}
+                <button className="primary-button" type="button" onClick={closeSaveModal}>
+                  Close
+                </button>
+              </div>
+            ) : (
+              <form
+                className="stack"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void confirmSaveModal();
+                }}
+              >
+                <input
+                  id="python-save-message-input"
+                  name="commit_message"
+                  type="text"
+                  placeholder="Commit message"
+                  value={saveModalState?.commitMessage ?? ""}
+                  onChange={(event) =>
+                    setSaveModalState((current) =>
+                      current ? { ...current, commitMessage: event.target.value } : current,
+                    )
+                  }
+                  required
+                />
+                <button className="primary-button" type="submit" disabled={saveModalState?.saving}>
+                  {saveModalState?.saving ? "Saving..." : "Save to GitHub"}
+                </button>
+              </form>
+            )}
+          </div>
+        </div>
+      </div>
 
       <div
         id="project-modal"

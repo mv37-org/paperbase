@@ -43,11 +43,16 @@ from .models import (
     ManifestResponse,
     MoveChatThreadProjectRequest,
     PaperResponse,
+    ProjectItemPageResponse,
+    ProjectRepoSyncRequest,
+    ProjectRepoSyncResponse,
     ProjectListResponse,
     ProjectResponse,
     ProjectSessionPageResponse,
+    PythonFileResponse,
     ResetPasswordRequest,
     ResultSetResponse,
+    RunPythonFileResponse,
     SaveAnthropicKeyRequest,
     SaveDaytonaKeyRequest,
     SearchPaperResult,
@@ -59,6 +64,7 @@ from .models import (
     SendChatMessageResponse,
     SignupRequest,
     TableResponse,
+    UpdatePythonFileRequest,
     UpdateNotificationsRequest,
     UpdateProjectRequest,
     FigureResponse,
@@ -567,7 +573,7 @@ async def browser_github_start(
             status_code=302,
         )
     redirect_uri = settings.github_oauth_redirect_url or str(request.url_for("browser_github_callback"))
-    return await client.authorize_redirect(request, redirect_uri)
+    return await client.authorize_redirect(request, redirect_uri, scope="read:user repo")
 
 
 @app.get("/v1/browser/auth/github/callback", name="browser_github_callback")
@@ -791,6 +797,78 @@ def browser_list_project_sessions(
     service: PaperbaseService = Depends(get_service),
 ) -> ProjectSessionPageResponse:
     return service.list_project_chat_threads(user, project_id, limit=limit, offset=offset)
+
+
+@app.get("/v1/browser/projects/{project_id}/items", response_model=ProjectItemPageResponse)
+def browser_list_project_items(
+    project_id: str,
+    limit: int = Query(25, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    user=Depends(require_browser_user),
+    service: PaperbaseService = Depends(get_service),
+) -> ProjectItemPageResponse:
+    return service.list_project_items(user, project_id, limit=limit, offset=offset)
+
+
+@app.post("/v1/browser/projects/{project_id}/python-files", response_model=PythonFileResponse)
+def browser_create_python_file(
+    project_id: str,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> PythonFileResponse:
+    return service.create_python_file(user, project_id)
+
+
+@app.get("/v1/browser/python-files/{file_id}", response_model=PythonFileResponse)
+def browser_get_python_file(
+    file_id: str,
+    user=Depends(require_browser_user),
+    service: PaperbaseService = Depends(get_service),
+) -> PythonFileResponse:
+    return service.get_python_file(user, file_id)
+
+
+@app.patch("/v1/browser/python-files/{file_id}", response_model=PythonFileResponse)
+def browser_update_python_file(
+    file_id: str,
+    request: UpdatePythonFileRequest,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> PythonFileResponse:
+    return service.update_python_file(
+        user,
+        file_id,
+        filename=request.filename,
+        content=request.content,
+    )
+
+
+@app.post("/v1/browser/python-files/{file_id}/run", response_model=RunPythonFileResponse)
+def browser_run_python_file(
+    file_id: str,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> RunPythonFileResponse:
+    return service.run_python_file(user, file_id)
+
+
+@app.get("/v1/browser/projects/{project_id}/repo-sync", response_model=ProjectRepoSyncResponse)
+def browser_get_project_repo_sync(
+    project_id: str,
+    user=Depends(require_browser_user),
+    service: PaperbaseService = Depends(get_service),
+) -> ProjectRepoSyncResponse:
+    return service.get_project_repo_sync(user, project_id)
+
+
+@app.post("/v1/browser/projects/{project_id}/repo-sync", response_model=ProjectRepoSyncResponse)
+def browser_sync_project_repo(
+    project_id: str,
+    request: ProjectRepoSyncRequest,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> ProjectRepoSyncResponse:
+    return service.sync_project_repo(user, project_id, request)
 
 
 @app.post("/v1/browser/chats", response_model=ChatThreadResponse)

@@ -346,6 +346,70 @@ class ProjectSessionPageResponse(BaseModel):
     has_more: bool = False
 
 
+class PythonFileSummary(BaseModel):
+    file_id: str
+    project_id: str
+    filename: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class PythonFileResponse(PythonFileSummary):
+    content: str = ""
+
+
+class UpdatePythonFileRequest(BaseModel):
+    filename: str | None = None
+    content: str | None = None
+
+
+class ProjectItemSummary(BaseModel):
+    item_id: str
+    item_kind: str
+    project_id: str
+    title: str
+    created_at: datetime
+    updated_at: datetime
+    thread_id: str | None = None
+    file_id: str | None = None
+    last_message_preview: str = ""
+    filename: str = ""
+
+
+class ProjectItemPageResponse(BaseModel):
+    project_id: str
+    items: list[ProjectItemSummary] = Field(default_factory=list)
+    offset: int = 0
+    limit: int = 0
+    total_count: int = 0
+    has_more: bool = False
+
+
+class RunPythonFileResponse(BaseModel):
+    file_id: str
+    status: str
+    stdout: str = ""
+    stderr: str = ""
+    exit_code: int = 0
+    started_at: datetime
+    finished_at: datetime
+
+
+class ProjectRepoSyncRequest(BaseModel):
+    commit_message: str = Field(min_length=1)
+
+
+class ProjectRepoSyncResponse(BaseModel):
+    project_id: str
+    repo_exists: bool = False
+    github_repo_name: str = ""
+    github_repo_url: str = ""
+    default_branch: str = "main"
+    last_sync_commit_sha: str = ""
+    last_sync_commit_url: str = ""
+    last_synced_at: datetime | None = None
+
+
 class SendChatMessageRequest(BaseModel):
     content: str = Field(min_length=1)
     tag_filters: list[str] = Field(default_factory=list)

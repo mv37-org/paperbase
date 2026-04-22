@@ -160,6 +160,61 @@ export interface ProjectSessionPageResponse {
   has_more: boolean;
 }
 
+export interface PythonFileSummary {
+  file_id: string;
+  project_id: string;
+  filename: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PythonFileResponse extends PythonFileSummary {
+  content: string;
+}
+
+export interface ProjectItemSummary {
+  item_id: string;
+  item_kind: "thread" | "python_file";
+  project_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  thread_id?: string | null;
+  file_id?: string | null;
+  last_message_preview: string;
+  filename: string;
+}
+
+export interface ProjectItemPageResponse {
+  project_id: string;
+  items: ProjectItemSummary[];
+  offset: number;
+  limit: number;
+  total_count: number;
+  has_more: boolean;
+}
+
+export interface RunPythonFileResponse {
+  file_id: string;
+  status: "completed" | "failed";
+  stdout: string;
+  stderr: string;
+  exit_code: number;
+  started_at: string;
+  finished_at: string;
+}
+
+export interface ProjectRepoSyncResponse {
+  project_id: string;
+  repo_exists: boolean;
+  github_repo_name: string;
+  github_repo_url: string;
+  default_branch: string;
+  last_sync_commit_sha: string;
+  last_sync_commit_url: string;
+  last_synced_at?: string | null;
+}
+
 export interface SendChatMessageResponse {
   thread: ChatThreadResponse;
   assistant_message: ChatMessageResponse | null;

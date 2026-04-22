@@ -7,9 +7,13 @@ import type {
   FileContentResponse,
   MentionSuggestionResult,
   PaperResponse,
+  ProjectItemPageResponse,
+  ProjectRepoSyncResponse,
   ProjectListResponse,
   ProjectResponse,
   ProjectSessionPageResponse,
+  PythonFileResponse,
+  RunPythonFileResponse,
   SendChatMessageResponse,
   TableResponse,
   UploadListResponse,
@@ -285,6 +289,56 @@ export function loadProjectSessions(projectId: string, limit = 5, offset = 0) {
     `/v1/browser/projects/${projectId}/sessions?${params.toString()}`,
     { method: "GET" },
   );
+}
+
+export function loadProjectItems(projectId: string, limit = 25, offset = 0) {
+  const params = new URLSearchParams({
+    limit: String(limit),
+    offset: String(offset),
+  });
+  return api<ProjectItemPageResponse>(
+    `/v1/browser/projects/${projectId}/items?${params.toString()}`,
+    { method: "GET" },
+  );
+}
+
+export function createPythonFile(projectId: string) {
+  return api<PythonFileResponse>(`/v1/browser/projects/${projectId}/python-files`, {
+    method: "POST",
+  });
+}
+
+export function getPythonFile(fileId: string) {
+  return api<PythonFileResponse>(`/v1/browser/python-files/${fileId}`, { method: "GET" });
+}
+
+export function updatePythonFile(
+  fileId: string,
+  payload: { filename?: string | null; content?: string | null },
+) {
+  return api<PythonFileResponse>(`/v1/browser/python-files/${fileId}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function runPythonFile(fileId: string) {
+  return api<RunPythonFileResponse>(`/v1/browser/python-files/${fileId}/run`, {
+    method: "POST",
+  });
+}
+
+export function getProjectRepoSync(projectId: string) {
+  return api<ProjectRepoSyncResponse>(`/v1/browser/projects/${projectId}/repo-sync`, {
+    method: "GET",
+  });
+}
+
+export function syncProjectRepo(projectId: string, commitMessage: string) {
+  return api<ProjectRepoSyncResponse>(`/v1/browser/projects/${projectId}/repo-sync`, {
+    method: "POST",
+    body: JSON.stringify({ commit_message: commitMessage }),
+  });
 }
 
 export function getThread(threadId: string) {
