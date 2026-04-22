@@ -419,11 +419,14 @@ describe("App", () => {
     fireEvent.click(document.querySelector("#account-menu-button") as HTMLElement);
     fireEvent.click(screen.getByRole("menuitem", { name: "Settings" }));
 
-    expect(screen.getByText("Inference")).toBeTruthy();
-    expect(screen.getByText("Sandbox")).toBeTruthy();
-    expect(screen.getByText("Version control")).toBeTruthy();
-    expect(screen.getByText("Notifications")).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.getByRole("tab", { name: "Inference", selected: true })).toBeTruthy();
+    });
+    expect(screen.getByRole("tab", { name: "Sandbox" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Version control" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Notifications" })).toBeTruthy();
 
+    fireEvent.click(screen.getByRole("tab", { name: "Notifications" }));
     fireEvent.click(screen.getByLabelText("Weekly papers review email"));
     fireEvent.submit(document.querySelector("#settings-notifications-form") as HTMLFormElement);
 

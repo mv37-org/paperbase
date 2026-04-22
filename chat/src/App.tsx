@@ -90,6 +90,27 @@ const DEFAULT_BROWSER_SETTINGS = {
   weekly_papers_review_email: false,
 };
 
+type SettingsTab = "inference" | "sandbox" | "version-control" | "notifications";
+
+const SETTINGS_TABS: Array<{ id: SettingsTab; label: string }> = [
+  { id: "inference", label: "Inference" },
+  { id: "sandbox", label: "Sandbox" },
+  { id: "version-control", label: "Version control" },
+  { id: "notifications", label: "Notifications" },
+];
+
+const normalizeSettingsTab = (value: string | null): SettingsTab | null => {
+  if (
+    value === "inference" ||
+    value === "sandbox" ||
+    value === "version-control" ||
+    value === "notifications"
+  ) {
+    return value;
+  }
+  return null;
+};
+
 const EXAMPLES = [
   {
     label: "Reliable multi-step agents",
@@ -362,6 +383,7 @@ export default function App() {
   const [authView, setAuthView] = useState<AuthView>("login");
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [authReady, setAuthReady] = useState(false);
+  const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTab>("inference");
   const [flash, setFlash] = useState("");
   const [flashKind, setFlashKind] = useState<ModalFlashKind>("note");
   const [landingPrompt, setLandingPrompt] = useState("");
@@ -1213,28 +1235,33 @@ export default function App() {
       }
       const authStatus = params.get("auth");
       const authError = params.get("auth_error");
-      const settingsSection = params.get("settings");
+      const settingsSection = normalizeSettingsTab(params.get("settings"));
       if (authStatus === "github_connected") {
         showNoteFlash("GitHub connected.");
+        setActiveSettingsTab("version-control");
         setAuthView("settings");
         setAuthModalOpen(true);
       } else if (authError === "github_not_configured") {
         showErrorFlash("GitHub OAuth is not configured yet.");
+        setActiveSettingsTab("version-control");
         setAuthView("settings");
         setAuthModalOpen(true);
       } else if (authError === "github_auth_required") {
         showErrorFlash("Log in again before connecting GitHub.");
+        setActiveSettingsTab("version-control");
         setAuthView("settings");
         setAuthModalOpen(true);
       } else if (authError === "github_callback_failed") {
         showErrorFlash("GitHub connection failed. Try again.");
+        setActiveSettingsTab("version-control");
         setAuthView("settings");
         setAuthModalOpen(true);
       } else if (authError) {
         showErrorFlash("Google login failed. Try email/password instead.");
         setAuthView("login");
         setAuthModalOpen(true);
-      } else if (settingsSection === "version-control") {
+      } else if (settingsSection) {
+        setActiveSettingsTab(settingsSection);
         setAuthView("settings");
         setAuthModalOpen(true);
       }
@@ -1260,8 +1287,11 @@ export default function App() {
   }, [bootstrapAuthenticatedUi, showErrorFlash, showNoteFlash]);
 
   const openAuthModal = useCallback(
-    (view: AuthView) => {
+    (view: AuthView, settingsTab: SettingsTab = "inference") => {
       clearFlash();
+      if (view === "settings") {
+        setActiveSettingsTab(settingsTab);
+      }
       setAuthView(view);
       setAuthModalOpen(true);
       setAccountMenuOpen(false);
@@ -1973,7 +2003,7 @@ export default function App() {
                         id="settings-menu-item"
                         className="account-menu-item"
                         role="menuitem"
-                        onClick={() => openAuthModal("settings")}
+                        onClick={() => openAuthModal("settings", "inference")}
                       >
                         <AppIcon
                           src={staticAssetPath("settings.svg")}
@@ -2655,297 +2685,343 @@ export default function App() {
             data-auth-view="settings"
           >
             <div className="settings-panel">
-              <div className="settings-sections">
-                <section className="settings-section">
-                  <div className="settings-section-header">
-                    <h3>Inference</h3>
-                    {sessionSummary?.hasAnthropicApiKey ? (
-                      <span className="settings-status-pill">Connected</span>
-                    ) : null}
-                  </div>
-                  <p className="settings-section-copy">
-                    Add the Anthropic key Paperbase should use for model inference after the free
-                    responses run out.
-                  </p>
-                  {sessionSummary?.hasAnthropicApiKey ? (
-                    <div className="settings-secret-row">
-                      <div className="settings-secret-copy">
-                        <div className="settings-secret-label">Anthropic API key</div>
-                        <div className="settings-secret-value">
-                          {sessionSettings.anthropic_api_key_hint || "Saved"}
-                        </div>
-                      </div>
-                      <button
-                        id="delete-anthropic-key-button"
-                        className="api-key-delete-button"
-                        type="button"
-                        aria-label="Delete saved Anthropic API key"
-                        title="Delete saved Anthropic API key"
-                        onClick={async () => {
-                          try {
-                            const nextSession = await api<BrowserSessionResponse>(
-                              "/v1/browser/settings/anthropic-key",
-                              { method: "DELETE" },
-                            );
-                            setSession(nextSession);
-                            showNoteFlash("Anthropic API key removed.");
-                          } catch (error) {
-                            showErrorFlash(
-                              error instanceof Error ? error.message : "Deleting API key failed",
-                            );
-                          }
-                        }}
-                      >
-                        <svg viewBox="0 0 24 24" aria-hidden="true">
-                          <path d="M4 7h16" />
-                          <path d="M9 7V4h6v3" />
-                          <path d="M8 7l1 13h6l1-13" />
-                          <path d="M10.5 11v5" />
-                          <path d="M13.5 11v5" />
-                        </svg>
-                      </button>
-                    </div>
-                  ) : (
-                    <form
-                      id="settings-anthropic-form"
-                      className="settings-form"
-                      onSubmit={async (event) => {
-                        event.preventDefault();
-                        try {
-                          const payload = Object.fromEntries(
-                            new FormData(event.currentTarget).entries(),
-                          );
-                          const nextSession = await api<BrowserSessionResponse>(
-                            "/v1/browser/settings/anthropic-key",
-                            {
-                              method: "PUT",
-                              body: JSON.stringify(payload),
-                            },
-                          );
-                          setSession(nextSession);
-                          showNoteFlash("Anthropic API key saved.");
-                        } catch (error) {
-                          showErrorFlash(
-                            error instanceof Error ? error.message : "Saving API key failed",
-                          );
-                        }
-                      }}
-                    >
-                      <input
-                        name="api_key"
-                        type="password"
-                        placeholder="Anthropic API key"
-                        autoComplete="new-password"
-                        required
-                      />
-                      <button className="primary-button settings-submit-button" type="submit">
-                        Save key
-                      </button>
-                    </form>
-                  )}
-                </section>
+              <div className="settings-tabs" role="tablist" aria-label="Settings sections">
+                {SETTINGS_TABS.map((tab) => (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    role="tab"
+                    id={`settings-tab-${tab.id}`}
+                    className="settings-tab"
+                    aria-selected={activeSettingsTab === tab.id}
+                    aria-controls={`settings-panel-${tab.id}`}
+                    tabIndex={activeSettingsTab === tab.id ? 0 : -1}
+                    onClick={() => setActiveSettingsTab(tab.id)}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
 
-                <section className="settings-section">
-                  <div className="settings-section-header">
-                    <h3>Sandbox</h3>
-                    {sessionSettings.has_daytona_api_key ? (
-                      <span className="settings-status-pill">Connected</span>
-                    ) : null}
-                  </div>
-                  <p className="settings-section-copy">
-                    Add the Daytona API key Paperbase should use for sandbox execution.
-                  </p>
-                  {sessionSettings.has_daytona_api_key ? (
-                    <div className="settings-secret-row">
-                      <div className="settings-secret-copy">
-                        <div className="settings-secret-label">Daytona API key</div>
-                        <div className="settings-secret-value">
-                          {sessionSettings.daytona_api_key_hint || "Saved"}
-                        </div>
-                      </div>
-                      <button
-                        id="delete-daytona-key-button"
-                        className="api-key-delete-button"
-                        type="button"
-                        aria-label="Delete saved Daytona API key"
-                        title="Delete saved Daytona API key"
-                        onClick={async () => {
-                          try {
-                            const nextSession = await api<BrowserSessionResponse>(
-                              "/v1/browser/settings/daytona-key",
-                              { method: "DELETE" },
-                            );
-                            setSession(nextSession);
-                            showNoteFlash("Daytona API key removed.");
-                          } catch (error) {
-                            showErrorFlash(
-                              error instanceof Error
-                                ? error.message
-                                : "Deleting Daytona key failed",
-                            );
-                          }
-                        }}
-                      >
-                        <svg viewBox="0 0 24 24" aria-hidden="true">
-                          <path d="M4 7h16" />
-                          <path d="M9 7V4h6v3" />
-                          <path d="M8 7l1 13h6l1-13" />
-                          <path d="M10.5 11v5" />
-                          <path d="M13.5 11v5" />
-                        </svg>
-                      </button>
-                    </div>
-                  ) : (
-                    <form
-                      id="settings-daytona-form"
-                      className="settings-form"
-                      onSubmit={async (event) => {
-                        event.preventDefault();
-                        try {
-                          const payload = Object.fromEntries(
-                            new FormData(event.currentTarget).entries(),
-                          );
-                          const nextSession = await api<BrowserSessionResponse>(
-                            "/v1/browser/settings/daytona-key",
-                            {
-                              method: "PUT",
-                              body: JSON.stringify(payload),
-                            },
-                          );
-                          setSession(nextSession);
-                          showNoteFlash("Daytona API key saved.");
-                        } catch (error) {
-                          showErrorFlash(
-                            error instanceof Error ? error.message : "Saving Daytona key failed",
-                          );
-                        }
-                      }}
-                    >
-                      <input
-                        name="api_key"
-                        type="password"
-                        placeholder="Daytona API key"
-                        autoComplete="new-password"
-                        required
-                      />
-                      <button className="primary-button settings-submit-button" type="submit">
-                        Save key
-                      </button>
-                    </form>
-                  )}
-                </section>
-
-                <section className="settings-section">
-                  <div className="settings-section-header">
-                    <h3>Version control</h3>
-                    {sessionSettings.has_github_connection ? (
-                      <span className="settings-status-pill">Connected</span>
-                    ) : null}
-                  </div>
-                  <p className="settings-section-copy">
-                    Connect GitHub so Paperbase can create repositories, pull repositories, and push
-                    commits on your behalf.
-                  </p>
-                  {sessionSettings.has_github_connection ? (
-                    <div className="settings-connected-card">
-                      <div>
-                        <div className="settings-secret-label">GitHub account</div>
-                        <div className="settings-secret-value">
-                          {sessionSettings.github_login || "Connected"}
-                        </div>
-                      </div>
-                      <button
-                        type="button"
-                        className="secondary-button"
-                        onClick={async () => {
-                          try {
-                            const nextSession = await api<BrowserSessionResponse>(
-                              "/v1/browser/settings/github",
-                              { method: "DELETE" },
-                            );
-                            setSession(nextSession);
-                            showNoteFlash("GitHub disconnected.");
-                          } catch (error) {
-                            showErrorFlash(
-                              error instanceof Error
-                                ? error.message
-                                : "Disconnecting GitHub failed",
-                            );
-                          }
-                        }}
-                      >
-                        Disconnect
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="settings-actions">
-                      <button
-                        type="button"
-                        className="secondary-button settings-connect-button"
-                        disabled={!sessionSettings.github_oauth_available}
-                        onClick={() => {
-                          window.location.href = githubLoginUrl();
-                        }}
-                      >
-                        Connect GitHub account
-                      </button>
-                      {!sessionSettings.github_oauth_available ? (
-                        <p className="settings-inline-note">
-                          GitHub OAuth is not configured in this environment yet.
-                        </p>
+              <div className="settings-tab-panels">
+                {activeSettingsTab === "inference" ? (
+                  <section
+                    className="settings-section"
+                    role="tabpanel"
+                    id="settings-panel-inference"
+                    aria-labelledby="settings-tab-inference"
+                  >
+                    <div className="settings-section-header">
+                      <h3>Inference</h3>
+                      {sessionSummary?.hasAnthropicApiKey ? (
+                        <span className="settings-status-pill">Connected</span>
                       ) : null}
                     </div>
-                  )}
-                </section>
+                    <p className="settings-section-copy">
+                      Add the Anthropic key Paperbase should use for model inference after the free
+                      responses run out.
+                    </p>
+                    {sessionSummary?.hasAnthropicApiKey ? (
+                      <div className="settings-secret-row">
+                        <div className="settings-secret-copy">
+                          <div className="settings-secret-label">Anthropic API key</div>
+                          <div className="settings-secret-value">
+                            {sessionSettings.anthropic_api_key_hint || "Saved"}
+                          </div>
+                        </div>
+                        <button
+                          id="delete-anthropic-key-button"
+                          className="api-key-delete-button"
+                          type="button"
+                          aria-label="Delete saved Anthropic API key"
+                          title="Delete saved Anthropic API key"
+                          onClick={async () => {
+                            try {
+                              const nextSession = await api<BrowserSessionResponse>(
+                                "/v1/browser/settings/anthropic-key",
+                                { method: "DELETE" },
+                              );
+                              setSession(nextSession);
+                              showNoteFlash("Anthropic API key removed.");
+                            } catch (error) {
+                              showErrorFlash(
+                                error instanceof Error ? error.message : "Deleting API key failed",
+                              );
+                            }
+                          }}
+                        >
+                          <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M4 7h16" />
+                            <path d="M9 7V4h6v3" />
+                            <path d="M8 7l1 13h6l1-13" />
+                            <path d="M10.5 11v5" />
+                            <path d="M13.5 11v5" />
+                          </svg>
+                        </button>
+                      </div>
+                    ) : (
+                      <form
+                        id="settings-anthropic-form"
+                        className="settings-form"
+                        onSubmit={async (event) => {
+                          event.preventDefault();
+                          try {
+                            const payload = Object.fromEntries(
+                              new FormData(event.currentTarget).entries(),
+                            );
+                            const nextSession = await api<BrowserSessionResponse>(
+                              "/v1/browser/settings/anthropic-key",
+                              {
+                                method: "PUT",
+                                body: JSON.stringify(payload),
+                              },
+                            );
+                            setSession(nextSession);
+                            showNoteFlash("Anthropic API key saved.");
+                          } catch (error) {
+                            showErrorFlash(
+                              error instanceof Error ? error.message : "Saving API key failed",
+                            );
+                          }
+                        }}
+                      >
+                        <input
+                          name="api_key"
+                          type="password"
+                          placeholder="Anthropic API key"
+                          autoComplete="new-password"
+                          required
+                        />
+                        <button className="primary-button settings-submit-button" type="submit">
+                          Save key
+                        </button>
+                      </form>
+                    )}
+                  </section>
+                ) : null}
 
-                <section className="settings-section">
-                  <div className="settings-section-header">
-                    <h3>Notifications</h3>
-                  </div>
-                  <p className="settings-section-copy">
-                    Choose whether you want the weekly papers review email.
-                  </p>
-                  <form
-                    id="settings-notifications-form"
-                    className="settings-form notifications-form"
-                    onSubmit={async (event) => {
-                      event.preventDefault();
-                      try {
-                        const nextSession = await api<BrowserSessionResponse>(
-                          "/v1/browser/settings/notifications",
-                          {
-                            method: "PUT",
-                            body: JSON.stringify({
-                              weekly_papers_review_email: weeklyPapersReviewEmail,
-                            }),
-                          },
-                        );
-                        setSession(nextSession);
-                        showNoteFlash("Notification preferences saved.");
-                      } catch (error) {
-                        showErrorFlash(
-                          error instanceof Error
-                            ? error.message
-                            : "Saving notification preferences failed",
-                        );
-                      }
-                    }}
+                {activeSettingsTab === "sandbox" ? (
+                  <section
+                    className="settings-section"
+                    role="tabpanel"
+                    id="settings-panel-sandbox"
+                    aria-labelledby="settings-tab-sandbox"
                   >
-                    <label className="settings-checkbox-row">
-                      <input
-                        id="weekly-papers-review-email"
-                        name="weekly_papers_review_email"
-                        type="checkbox"
-                        checked={weeklyPapersReviewEmail}
-                        onChange={(event) => setWeeklyPapersReviewEmail(event.target.checked)}
-                      />
-                      <span>Weekly papers review email</span>
-                    </label>
-                    <button className="primary-button settings-submit-button" type="submit">
-                      Save notifications
-                    </button>
-                  </form>
-                </section>
+                    <div className="settings-section-header">
+                      <h3>Sandbox</h3>
+                      {sessionSettings.has_daytona_api_key ? (
+                        <span className="settings-status-pill">Connected</span>
+                      ) : null}
+                    </div>
+                    <p className="settings-section-copy">
+                      Add the Daytona API key Paperbase should use for sandbox execution.
+                    </p>
+                    {sessionSettings.has_daytona_api_key ? (
+                      <div className="settings-secret-row">
+                        <div className="settings-secret-copy">
+                          <div className="settings-secret-label">Daytona API key</div>
+                          <div className="settings-secret-value">
+                            {sessionSettings.daytona_api_key_hint || "Saved"}
+                          </div>
+                        </div>
+                        <button
+                          id="delete-daytona-key-button"
+                          className="api-key-delete-button"
+                          type="button"
+                          aria-label="Delete saved Daytona API key"
+                          title="Delete saved Daytona API key"
+                          onClick={async () => {
+                            try {
+                              const nextSession = await api<BrowserSessionResponse>(
+                                "/v1/browser/settings/daytona-key",
+                                { method: "DELETE" },
+                              );
+                              setSession(nextSession);
+                              showNoteFlash("Daytona API key removed.");
+                            } catch (error) {
+                              showErrorFlash(
+                                error instanceof Error
+                                  ? error.message
+                                  : "Deleting Daytona key failed",
+                              );
+                            }
+                          }}
+                        >
+                          <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M4 7h16" />
+                            <path d="M9 7V4h6v3" />
+                            <path d="M8 7l1 13h6l1-13" />
+                            <path d="M10.5 11v5" />
+                            <path d="M13.5 11v5" />
+                          </svg>
+                        </button>
+                      </div>
+                    ) : (
+                      <form
+                        id="settings-daytona-form"
+                        className="settings-form"
+                        onSubmit={async (event) => {
+                          event.preventDefault();
+                          try {
+                            const payload = Object.fromEntries(
+                              new FormData(event.currentTarget).entries(),
+                            );
+                            const nextSession = await api<BrowserSessionResponse>(
+                              "/v1/browser/settings/daytona-key",
+                              {
+                                method: "PUT",
+                                body: JSON.stringify(payload),
+                              },
+                            );
+                            setSession(nextSession);
+                            showNoteFlash("Daytona API key saved.");
+                          } catch (error) {
+                            showErrorFlash(
+                              error instanceof Error ? error.message : "Saving Daytona key failed",
+                            );
+                          }
+                        }}
+                      >
+                        <input
+                          name="api_key"
+                          type="password"
+                          placeholder="Daytona API key"
+                          autoComplete="new-password"
+                          required
+                        />
+                        <button className="primary-button settings-submit-button" type="submit">
+                          Save key
+                        </button>
+                      </form>
+                    )}
+                  </section>
+                ) : null}
+
+                {activeSettingsTab === "version-control" ? (
+                  <section
+                    className="settings-section"
+                    role="tabpanel"
+                    id="settings-panel-version-control"
+                    aria-labelledby="settings-tab-version-control"
+                  >
+                    <div className="settings-section-header">
+                      <h3>Version control</h3>
+                      {sessionSettings.has_github_connection ? (
+                        <span className="settings-status-pill">Connected</span>
+                      ) : null}
+                    </div>
+                    <p className="settings-section-copy">
+                      Connect GitHub so Paperbase can create repositories, pull repositories, and
+                      push commits on your behalf.
+                    </p>
+                    {sessionSettings.has_github_connection ? (
+                      <div className="settings-connected-card">
+                        <div>
+                          <div className="settings-secret-label">GitHub account</div>
+                          <div className="settings-secret-value">
+                            {sessionSettings.github_login || "Connected"}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          onClick={async () => {
+                            try {
+                              const nextSession = await api<BrowserSessionResponse>(
+                                "/v1/browser/settings/github",
+                                { method: "DELETE" },
+                              );
+                              setSession(nextSession);
+                              showNoteFlash("GitHub disconnected.");
+                            } catch (error) {
+                              showErrorFlash(
+                                error instanceof Error
+                                  ? error.message
+                                  : "Disconnecting GitHub failed",
+                              );
+                            }
+                          }}
+                        >
+                          Disconnect
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="settings-actions">
+                        <button
+                          type="button"
+                          className="primary-button settings-connect-button"
+                          disabled={!sessionSettings.github_oauth_available}
+                          onClick={() => {
+                            window.location.href = githubLoginUrl();
+                          }}
+                        >
+                          Connect GitHub account
+                        </button>
+                        {!sessionSettings.github_oauth_available ? (
+                          <p className="settings-inline-note">
+                            GitHub OAuth is not configured in this environment yet.
+                          </p>
+                        ) : null}
+                      </div>
+                    )}
+                  </section>
+                ) : null}
+
+                {activeSettingsTab === "notifications" ? (
+                  <section
+                    className="settings-section"
+                    role="tabpanel"
+                    id="settings-panel-notifications"
+                    aria-labelledby="settings-tab-notifications"
+                  >
+                    <div className="settings-section-header">
+                      <h3>Notifications</h3>
+                    </div>
+                    <p className="settings-section-copy">
+                      Choose whether you want the weekly papers review email.
+                    </p>
+                    <form
+                      id="settings-notifications-form"
+                      className="settings-form notifications-form"
+                      onSubmit={async (event) => {
+                        event.preventDefault();
+                        try {
+                          const nextSession = await api<BrowserSessionResponse>(
+                            "/v1/browser/settings/notifications",
+                            {
+                              method: "PUT",
+                              body: JSON.stringify({
+                                weekly_papers_review_email: weeklyPapersReviewEmail,
+                              }),
+                            },
+                          );
+                          setSession(nextSession);
+                          showNoteFlash("Notification preferences saved.");
+                        } catch (error) {
+                          showErrorFlash(
+                            error instanceof Error
+                              ? error.message
+                              : "Saving notification preferences failed",
+                          );
+                        }
+                      }}
+                    >
+                      <label className="settings-checkbox-row">
+                        <input
+                          id="weekly-papers-review-email"
+                          name="weekly_papers_review_email"
+                          type="checkbox"
+                          checked={weeklyPapersReviewEmail}
+                          onChange={(event) => setWeeklyPapersReviewEmail(event.target.checked)}
+                        />
+                        <span>Weekly papers review email</span>
+                      </label>
+                      <button className="primary-button settings-submit-button" type="submit">
+                        Save notifications
+                      </button>
+                    </form>
+                  </section>
+                ) : null}
               </div>
             </div>
           </div>

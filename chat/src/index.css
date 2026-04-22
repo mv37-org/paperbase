@@ -912,7 +912,7 @@ textarea::placeholder,
   align-items: center;
   gap: 10px;
   min-width: 0;
-  padding: 8px 10px 10px;
+  padding: 8px 10px;
   color: var(--text);
 }
 
@@ -942,7 +942,9 @@ textarea::placeholder,
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-weight: 500;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 400;
 }
 
 .account-menu-divider {
@@ -2300,16 +2302,46 @@ textarea {
   height: 20px;
 }
 
-.settings-sections {
+.settings-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.settings-tab {
+  border: 1px solid rgba(27, 22, 17, 0.1);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.7);
+  color: var(--muted);
+  padding: 8px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.settings-tab[aria-selected="true"] {
+  background: rgba(23, 111, 230, 0.08);
+  border-color: rgba(23, 111, 230, 0.2);
+  color: var(--blue);
+}
+
+.settings-tab:focus-visible {
+  outline: 2px solid rgba(23, 111, 230, 0.2);
+  outline-offset: 2px;
+}
+
+.settings-tab-panels {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
 }
 
 .settings-section {
   display: grid;
   gap: 12px;
-  padding: 14px;
+  padding: 16px;
   border: 1px solid rgba(27, 22, 17, 0.08);
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.75);
@@ -2399,6 +2431,7 @@ textarea {
 
 .settings-connect-button {
   justify-content: center;
+  margin-top: 0 !important;
 }
 
 .settings-inline-note {
@@ -2812,8 +2845,8 @@ textarea:hover,
   }
 
   @media (max-width: 820px) {
-    .settings-sections {
-      grid-template-columns: 1fr;
+    .settings-tabs {
+      flex-direction: column;
     }
   }
 
