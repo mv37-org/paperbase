@@ -375,56 +375,6 @@ function AppIcon({ src, className = "" }: { src: string; className?: string }) {
   );
 }
 
-function EmptyStateTagIcon({ kind }: { kind: "python" | "notes" }) {
-  if (kind === "python") {
-    return (
-      <svg viewBox="0 0 18 18" aria-hidden="true">
-        <path
-          d="M5.5 2.75h5.25l3 3v9.5H5.5Z"
-          fill="none"
-          stroke="currentColor"
-          strokeLinejoin="round"
-          strokeWidth="1.35"
-        />
-        <path
-          d="M10.75 2.75v3h3"
-          fill="none"
-          stroke="currentColor"
-          strokeLinejoin="round"
-          strokeWidth="1.35"
-        />
-        <path
-          d="M7.1 11.75h1.35l.75-1.15.75 1.15h1.35"
-          fill="none"
-          stroke="currentColor"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          strokeWidth="1.2"
-        />
-      </svg>
-    );
-  }
-
-  return (
-    <svg viewBox="0 0 18 18" aria-hidden="true">
-      <path
-        d="M4.5 3.25h9a1 1 0 0 1 1 1v9.5l-2.35-1.55H4.5a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1Z"
-        fill="none"
-        stroke="currentColor"
-        strokeLinejoin="round"
-        strokeWidth="1.35"
-      />
-      <path
-        d="M6.6 6.8h4.9M6.6 9.2h4.2"
-        fill="none"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeWidth="1.2"
-      />
-    </svg>
-  );
-}
-
 export default function App() {
   const [session, setSession] = useState<BrowserSessionResponse | null>(null);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
@@ -2400,13 +2350,19 @@ export default function App() {
                     <div className="chat-empty-actions">
                       <button type="button" className="chat-empty-action-tag python">
                         <span className="chat-empty-action-icon" aria-hidden="true">
-                          <EmptyStateTagIcon kind="python" />
+                          <AppIcon
+                            src={staticAssetPath("python.svg")}
+                            className="chat-empty-action-icon-image"
+                          />
                         </span>
                         <span className="chat-empty-action-label">Add python file</span>
                       </button>
                       <button type="button" className="chat-empty-action-tag notes">
                         <span className="chat-empty-action-icon" aria-hidden="true">
-                          <EmptyStateTagIcon kind="notes" />
+                          <AppIcon
+                            src={staticAssetPath("note.svg")}
+                            className="chat-empty-action-icon-image"
+                          />
                         </span>
                         <span className="chat-empty-action-label">Add notes</span>
                       </button>

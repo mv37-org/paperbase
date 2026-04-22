@@ -2080,25 +2080,25 @@ textarea::placeholder,
 .chat-empty-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 8px;
   width: min(
     calc((var(--chat-fixed-composer-width) + 120px) * 0.75),
     calc((100vw - var(--chat-sidebar-width) - var(--chat-drawer-width) - 48px) * 0.75)
   );
   max-width: 100%;
-  justify-content: flex-start;
+  justify-content: center;
 }
 
 .chat-empty-action-tag {
   display: inline-flex;
   align-items: stretch;
-  min-height: 30px;
+  min-height: 26px;
   padding: 0;
-  border-radius: 6px;
+  border-radius: 5px;
   overflow: hidden;
   cursor: pointer;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 500;
   line-height: 1;
   transition:
@@ -2130,17 +2130,25 @@ textarea::placeholder,
 }
 
 .chat-empty-action-icon {
-  width: 32px;
-  min-width: 32px;
+  width: 26px;
+  min-width: 26px;
 }
 
-.chat-empty-action-icon svg {
-  width: 15px;
-  height: 15px;
+.chat-empty-action-icon-image {
+  width: 13px;
+  height: 13px;
+}
+
+.chat-empty-action-tag.python .chat-empty-action-icon-image {
+  filter: invert(36%) sepia(79%) saturate(2182%) hue-rotate(216deg) brightness(94%) contrast(92%);
+}
+
+.chat-empty-action-tag.notes .chat-empty-action-icon-image {
+  filter: invert(49%) sepia(84%) saturate(611%) hue-rotate(4deg) brightness(98%) contrast(96%);
 }
 
 .chat-empty-action-label {
-  padding: 0 12px;
+  padding: 0 9px;
   border-left: 1px solid currentColor;
 }
 
