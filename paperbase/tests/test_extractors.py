@@ -1,6 +1,15 @@
 from __future__ import annotations
 
-from paperbase.extractors import _extract_sections, index_paper_artifacts
+import io
+import tarfile
+
+from paperbase.extractors import (
+    _extract_latex_text,
+    _extract_sections,
+    _latex_to_markdown,
+    _sanitize_extracted_text,
+    index_paper_artifacts,
+)
 from paperbase.models import PaperMetadata
 
 
@@ -83,3 +92,149 @@ def test_index_paper_artifacts_splits_html_into_real_sections(monkeypatch):
     assert extraction.sections[3].markdown == "Train with Adam."
     assert "## Introduction" in extraction.text_markdown
     assert "## Training Setup" in extraction.text_markdown
+
+
+def test_sanitize_extracted_text_drops_latex_preamble_residue():
+    raw = "\n".join(
+        [
+            "-.5em",
+            "%6pt",
+            "[10pt,twocolumn,letterpaper]article",
+            "cvpr",
+            "graphicx",
+            "amsmath",
+            "[1]#1",
+            "\\usepackage{babel}",
+            "",
+            "Deeper neural networks are more difficult to train.",
+            "We present a residual learning framework.",
+            "",
+            "An ensemble achieves 3.57\\% error on ImageNet.",
+            "",
+            "-1em",
+        ]
+    )
+
+    cleaned = _sanitize_extracted_text(raw)
+
+    assert cleaned == (
+        "Deeper neural networks are more difficult to train.\n"
+        "We present a residual learning framework.\n"
+        "\n"
+        "An ensemble achieves 3.57% error on ImageNet."
+    )
+
+
+def test_latex_to_markdown_emits_section_headers_and_strips_preamble():
+    latex = r"""
+\documentclass[10pt,twocolumn]{article}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\title{Neural Machine Translation}
+\begin{document}
+\maketitle
+\begin{abstract}
+We propose an attention-based translation model.
+\end{abstract}
+\section{Introduction}
+Sequence to sequence learning has improved translation quality.
+\section{Learning to Align and Translate}
+We introduce a joint alignment mechanism.
+\subsection{Decoder}
+The decoder attends to encoder states.
+\end{document}
+"""
+
+    markdown = _latex_to_markdown(latex)
+
+    assert "documentclass" not in markdown
+    assert "amsmath" not in markdown
+    assert "## Abstract" in markdown
+    assert "## Introduction" in markdown
+    assert "## Learning to Align and Translate" in markdown
+    assert "### Decoder" in markdown
+    assert "We propose an attention-based translation model." in markdown
+
+
+def test_extract_sections_splits_on_arbitrary_markdown_headers():
+    markdown = "\n".join(
+        [
+            "# Neural Machine Translation",
+            "",
+            "## Abstract",
+            "",
+            "We propose an attention model.",
+            "",
+            "## Learning to Align and Translate",
+            "",
+            "Joint alignment improves results.",
+            "",
+            "### Decoder",
+            "",
+            "The decoder attends to encoder states.",
+        ]
+    )
+
+    sections = _extract_sections(markdown)
+
+    assert [section.slug for section in sections] == [
+        "abstract",
+        "learning-to-align-and-translate",
+        "decoder",
+    ]
+    assert sections[0].markdown == "We propose an attention model."
+    assert sections[1].markdown == "Joint alignment improves results."
+    assert sections[2].markdown == "The decoder attends to encoder states."
+
+
+def _build_tex_tarball(files: dict[str, str]) -> bytes:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for name, body in files.items():
+            data = body.encode("utf-8")
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+def test_extract_latex_text_resolves_input_and_include_directives():
+    entrypoint = (
+        "\\documentclass{article}\n"
+        "\\begin{document}\n"
+        "\\input{intro}\n"
+        "\\include{methods/method}\n"
+        "\\end{document}\n"
+    )
+    intro = "\\section{Introduction}\nWe study attention.\n"
+    method = "\\section{Method}\nWe align and translate.\n"
+
+    tarball = _build_tex_tarball(
+        {
+            "main.tex": entrypoint,
+            "intro.tex": intro,
+            "methods/method.tex": method,
+        }
+    )
+
+    resolved = _extract_latex_text(tarball)
+
+    assert resolved is not None
+    assert "\\section{Introduction}" in resolved
+    assert "\\section{Method}" in resolved
+    assert "\\input{" not in resolved
+    assert "\\include{" not in resolved
+
+
+def test_extract_latex_text_skips_includepdf_wrapper():
+    wrapper = (
+        "\\documentclass{article}\n"
+        "\\usepackage{pdfpages}\n"
+        "\\begin{document}\n"
+        "\\includepdf[pages=1-last]{paper.pdf}\n"
+        "\\end{document}\n"
+    )
+
+    tarball = _build_tex_tarball({"arxiv.tex": wrapper})
+
+    assert _extract_latex_text(tarball) is None

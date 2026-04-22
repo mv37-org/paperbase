@@ -2209,6 +2209,8 @@ class PaperbaseService:
             rrf_k=k,
             citation_boost_scale=self.settings.citation_boost_scale,
             citation_boost_max=self.settings.citation_boost_max,
+            recency_boost_max=self.settings.recency_boost_max,
+            recency_half_life_years=self.settings.recency_half_life_years,
         )
 
         arxiv_results: list[PaperMetadata] = []
@@ -2255,6 +2257,8 @@ class PaperbaseService:
         from math import log10
 
         for pid, paper in candidates.items():
+            if paper.source == "local":
+                continue
             citation_boost = min(
                 self.settings.citation_boost_scale * log10(1 + (paper.citation_count or 0)),
                 self.settings.citation_boost_max,
@@ -2264,7 +2268,7 @@ class PaperbaseService:
         fused = sorted(rrf.items(), key=lambda item: item[1], reverse=True)
         fused_papers = [candidates[pid] for pid, _ in fused if pid in candidates]
 
-        if self.reranker.enabled():
+        if request.rerank and self.reranker.enabled():
             rerank_head = fused_papers[: self.reranker.top_k]
             rerank_tail = fused_papers[self.reranker.top_k :]
             best_chunks = self.repository.best_chunk_for_papers(
@@ -2285,11 +2289,17 @@ class PaperbaseService:
             ]
             rerank_scores = self.reranker.score(request.query, doc_texts)
             if rerank_scores is not None and len(rerank_scores) == len(rerank_head):
-                head_ranked = sorted(
-                    zip(rerank_head, rerank_scores), key=lambda pair: pair[1], reverse=True
-                )
+                nudge = self.settings.rerank_citation_nudge
+                adjusted = [
+                    (
+                        paper,
+                        float(score) + nudge * log10(1 + (paper.citation_count or 0)),
+                    )
+                    for paper, score in zip(rerank_head, rerank_scores)
+                ]
+                head_ranked = sorted(adjusted, key=lambda pair: pair[1], reverse=True)
                 for paper, score in head_ranked:
-                    paper.score = float(score)
+                    paper.score = score
                 fused_papers = [paper for paper, _ in head_ranked] + rerank_tail
             else:
                 for paper in rerank_head:

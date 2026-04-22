@@ -23,6 +23,61 @@ SESSION.headers.update({"User-Agent": "paperbase/0.1.0 (paper extractor)"})
 _HTML_SECTION_CLASSES = {"ltx_section", "ltx_subsection", "ltx_subsubsection"}
 _HTML_CONTENT_TAGS = ("p", "li", "figcaption", "caption")
 
+_BARE_LATEX_SPACING_RE = re.compile(
+    r"^\s*-?\d*\.?\d+(?:em|pt|ex|cm|in|mm|bp|pc|sp|mu)\s*$"
+)
+_PACKAGE_OPTS_RESIDUE_RE = re.compile(r"^\s*\[[^\]]*\][A-Za-z@]+\s*$")
+_NEWCMD_RESIDUE_RE = re.compile(r"^\s*\[\d+\]#\d+.*$")
+_LATEX_PREAMBLE_CMD_RE = re.compile(
+    r"^\s*\\(?:documentclass|usepackage|RequirePackage|bibliographystyle|bibliography|"
+    r"input|include|newcommand|renewcommand|providecommand|def|let|setlength|setcounter|"
+    r"vspace|hspace|smallskip|medskip|bigskip|noindent|par|newpage|clearpage|"
+    r"pagestyle|thispagestyle|hypersetup|graphicspath|maketitle)\b"
+)
+_LATEX_LEAKED_PACKAGE_TOKENS = frozenset(
+    {
+        "amsmath", "amssymb", "amsfonts", "amsthm", "graphicx", "graphics",
+        "epsfig", "hyperref", "url", "geometry", "fontenc", "inputenc",
+        "babel", "natbib", "biblatex", "color", "xcolor", "tikz", "pgfplots",
+        "subcaption", "subfigure", "caption", "wrapfig", "float", "multirow",
+        "multicol", "tabularx", "tabulary", "longtable", "array", "booktabs",
+        "soul", "ulem", "cite", "times", "newtxtext", "newtxmath", "mathptmx",
+        "helvet", "courier", "mathpazo", "lmodern", "cvpr", "iclr", "iclr2024",
+        "iclr2025", "neurips", "neurips_2024", "icml", "icml2024", "aaai",
+        "ijcai", "acl", "comment",
+    }
+)
+
+
+def _sanitize_extracted_text(text: str) -> str:
+    """Strip residual LaTeX preamble noise that escaped earlier extraction passes."""
+    if not text:
+        return text
+    cleaned: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+        stripped = line.lstrip()
+        if not stripped:
+            cleaned.append("")
+            continue
+        if stripped.startswith("%"):
+            continue
+        if _BARE_LATEX_SPACING_RE.match(line):
+            continue
+        if _PACKAGE_OPTS_RESIDUE_RE.match(line):
+            continue
+        if _NEWCMD_RESIDUE_RE.match(line):
+            continue
+        if _LATEX_PREAMBLE_CMD_RE.match(line):
+            continue
+        if stripped.lower() in _LATEX_LEAKED_PACKAGE_TOKENS:
+            continue
+        cleaned.append(line)
+    out = "\n".join(cleaned)
+    out = re.sub(r"\\([%&#$_])", r"\1", out)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
+
 
 @dataclass(slots=True)
 class RawArtifact:
@@ -77,9 +132,11 @@ class ExtractionOutput:
 
 def fetch_html(arxiv_id: str) -> str | None:
     response = SESSION.get(f"https://arxiv.org/html/{arxiv_id}", timeout=30)
-    if response.status_code == 200 and "<html" in response.text[:1000].lower():
-        return response.text
-    return None
+    if response.status_code != 200 or "<html" not in response.text[:1000].lower():
+        return None
+    if "ltx_section" not in response.text:
+        return None
+    return response.text
 
 
 def fetch_source(arxiv_id: str) -> bytes | None:
@@ -115,7 +172,7 @@ def _clean_html_to_markdown(html: str) -> str:
             merged[-1] += f" {line}"
         else:
             merged.append(line)
-    return "\n\n".join(merged)
+    return _sanitize_extracted_text("\n\n".join(merged))
 
 
 def _normalize_text(value: str) -> str:
@@ -167,7 +224,7 @@ def _section_from_html_tag(tag: object, *, title: str, seen: set[str]) -> Sectio
     heading = clone.find(re.compile(r"^h[1-6]$"))
     if heading is not None:
         heading.decompose()
-    markdown = _render_html_fragment(clone)
+    markdown = _sanitize_extracted_text(_render_html_fragment(clone))
     if not markdown:
         return None
     return SectionArtifact(title=title, slug=make_slug(title, seen), markdown=markdown)
@@ -209,7 +266,37 @@ def _assemble_markdown_from_sections(paper: PaperMetadata, sections: list[Sectio
     return "\n\n".join(parts).strip()
 
 
+_MARKDOWN_HEADER_RE = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*$", re.MULTILINE)
+
+
+def _split_by_markdown_headers(markdown: str) -> list[SectionArtifact] | None:
+    matches = list(_MARKDOWN_HEADER_RE.finditer(markdown))
+    if not matches:
+        return None
+    if len(matches[0].group(1)) == 1 and len(matches) > 1:
+        matches = matches[1:]
+    if not matches:
+        return None
+    sections: list[SectionArtifact] = []
+    seen: set[str] = set()
+    for index, match in enumerate(matches):
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(markdown)
+        title = _normalize_section_title(match.group(2)).title()
+        sections.append(
+            SectionArtifact(
+                title=title,
+                slug=make_slug(title, seen),
+                markdown=markdown[start:end].strip(),
+            )
+        )
+    return sections
+
+
 def _extract_sections(markdown: str) -> list[SectionArtifact]:
+    header_sections = _split_by_markdown_headers(markdown)
+    if header_sections:
+        return header_sections
     section_pattern = re.compile(
         r"^(?:#{1,6}\s*)?(?:\d+(?:\.\d+){0,3}\.?\s+)?(Abstract|Introduction|Related Work|Background|"
         r"Methodology|Method|Methods|Approach|Model|Architecture|"
@@ -415,26 +502,53 @@ def _extract_latex_figures(latex: str) -> list[FigureArtifact]:
     return figures
 
 
+_LATEX_INPUT_RE = re.compile(r"\\(?:input|include|subfile)\{([^}]+)\}")
+
+
+def _resolve_latex_inputs(content: str, tex_by_name: dict[str, str], depth: int = 0) -> str:
+    if depth > 8:
+        return content
+
+    def _replace(match: re.Match[str]) -> str:
+        ref = match.group(1).strip()
+        candidate_keys = (ref, f"{ref}.tex", ref.lstrip("./"), f"{ref.lstrip('./')}.tex")
+        for key in candidate_keys:
+            if key in tex_by_name:
+                return "\n" + _resolve_latex_inputs(tex_by_name[key], tex_by_name, depth + 1) + "\n"
+        for key, body in tex_by_name.items():
+            if key.endswith("/" + ref) or key.endswith("/" + ref + ".tex"):
+                return "\n" + _resolve_latex_inputs(body, tex_by_name, depth + 1) + "\n"
+        return ""
+
+    return _LATEX_INPUT_RE.sub(_replace, content)
+
+
 def _extract_latex_text(source_bytes: bytes) -> str | None:
     try:
         if source_bytes[:2] == b"\x1f\x8b" or source_bytes[:4] == b"PK\x03\x04":
             file_obj = io.BytesIO(source_bytes)
             try:
                 with tarfile.open(fileobj=file_obj, mode="r:gz") as archive:
-                    tex_files = [member for member in archive.getmembers() if member.name.endswith(".tex")]
-                    if not tex_files:
-                        return None
-                    for member in tex_files:
-                        candidate = archive.extractfile(member)
-                        if candidate is None:
+                    tex_by_name: dict[str, str] = {}
+                    for member in archive.getmembers():
+                        if not member.name.endswith(".tex"):
                             continue
-                        content = candidate.read().decode("utf-8", errors="replace")
-                        if "\\begin{document}" in content:
-                            return content
-                    candidate = archive.extractfile(tex_files[0])
-                    if candidate is None:
+                        handle = archive.extractfile(member)
+                        if handle is None:
+                            continue
+                        tex_by_name[member.name] = handle.read().decode("utf-8", errors="replace")
+                    if not tex_by_name:
                         return None
-                    return candidate.read().decode("utf-8", errors="replace")
+                    entrypoint = next(
+                        (body for body in tex_by_name.values() if "\\begin{document}" in body),
+                        None,
+                    )
+                    if entrypoint is None:
+                        entrypoint = max(tex_by_name.values(), key=len)
+                    resolved = _resolve_latex_inputs(entrypoint, tex_by_name)
+                    if "\\includepdf" in resolved and not re.search(r"\\section\b", resolved):
+                        return None
+                    return resolved
             except tarfile.TarError:
                 return None
         text = source_bytes.decode("utf-8", errors="replace")
@@ -446,9 +560,19 @@ def _extract_latex_text(source_bytes: bytes) -> str | None:
 
 
 def _latex_to_markdown(latex: str) -> str:
-    text = re.sub(r"\\begin\{abstract\}(.*?)\\end\{abstract\}", r"\nAbstract\n\1\n", latex, flags=re.DOTALL)
-    text = re.sub(r"\\(?:sub)*section\*?\{([^}]*)\}", r"\n\1\n", text)
-    text = re.sub(r"\\paragraph\*?\{([^}]*)\}", r"\n\1\n", text)
+    text = latex
+    body_start = text.find("\\begin{document}")
+    if body_start != -1:
+        text = text[body_start + len("\\begin{document}"):]
+    body_end = text.find("\\end{document}")
+    if body_end != -1:
+        text = text[:body_end]
+    text = re.sub(r"(?<!\\)%[^\n]*", "", text)
+    text = re.sub(r"\\begin\{abstract\}(.*?)\\end\{abstract\}", r"\n\n## Abstract\n\n\1\n\n", text, flags=re.DOTALL)
+    text = re.sub(r"\\section\*?\{([^}]*)\}", r"\n\n## \1\n\n", text)
+    text = re.sub(r"\\subsection\*?\{([^}]*)\}", r"\n\n### \1\n\n", text)
+    text = re.sub(r"\\subsubsection\*?\{([^}]*)\}", r"\n\n#### \1\n\n", text)
+    text = re.sub(r"\\paragraph\*?\{([^}]*)\}", r"\n\n**\1**\n\n", text)
     text = re.sub(r"\\(?:text(?:bf|it|tt|rm|sf)|emph|textsc)\{([^}]*)\}", r"\1", text)
     text = re.sub(r"\\(?:cite|citep|citet|ref|eqref|label)\{[^}]*\}", "", text)
     text = re.sub(
@@ -462,8 +586,10 @@ def _latex_to_markdown(latex: str) -> str:
     text = re.sub(r"\\\w+\b", "", text)
     text = re.sub(r"[{}]", "", text)
     text = re.sub(r"\$+([^$]+)\$+", r"\1", text)
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    return "\n\n".join(lines)
+    lines = [line.rstrip() for line in text.splitlines()]
+    body = "\n".join(lines)
+    body = re.sub(r"\n{3,}", "\n\n", body)
+    return _sanitize_extracted_text(body)
 
 
 def _docling_export_dict(document: object) -> dict:
