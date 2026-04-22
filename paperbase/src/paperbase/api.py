@@ -295,7 +295,6 @@ def references(
 def browser_suggest_papers(
     q: str = Query(..., min_length=1, max_length=128),
     limit: int = Query(default=10, ge=1, le=50),
-    user=Depends(require_browser_user),
     service: PaperbaseService = Depends(get_service),
 ) -> dict[str, list[dict]]:
     return {"suggestions": service.suggest_papers(q, limit=limit)}

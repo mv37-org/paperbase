@@ -1150,6 +1150,7 @@ export default function App() {
               onAttach={() => openAuthModal("login")}
               onChange={setLandingPrompt}
               onSubmit={() => void handleLandingSubmit()}
+              searchPapers={suggestBrowserPapers}
               submitButtonId="landing-start-button"
               submitLabel="Start"
               value={landingPrompt}

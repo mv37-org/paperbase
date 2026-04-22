@@ -24,6 +24,7 @@ const apiMocks = vi.hoisted(() => {
     loadSession: vi.fn(),
     loadThreads: vi.fn(),
     loadUploads: vi.fn(),
+    landingMentionEditor: vi.fn(() => <div data-testid="mention-editor" />),
     logoutBrowserSession: vi.fn(),
     postForm: vi.fn(),
     sendThreadMessage: vi.fn(),
@@ -56,7 +57,7 @@ vi.mock("./api", () => ({
 }));
 
 vi.mock("./LandingMentionEditor", () => ({
-  LandingMentionEditor: () => <div data-testid="mention-editor" />,
+  LandingMentionEditor: apiMocks.landingMentionEditor,
 }));
 
 vi.mock("./MarkdownRenderer", () => ({
@@ -195,6 +196,10 @@ describe("App", () => {
       expect(document.querySelector("#landing-login-button")).toBeTruthy();
     });
     expect(document.querySelector("#app-shell")).toBeNull();
+    expect(apiMocks.landingMentionEditor).toHaveBeenCalled();
+    expect(apiMocks.landingMentionEditor.mock.calls[0]?.[0]?.searchPapers).toBe(
+      apiMocks.suggestBrowserPapers,
+    );
   });
 
   it("restores previously open tabs for an authenticated session", async () => {
