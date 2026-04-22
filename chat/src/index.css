@@ -2047,9 +2047,19 @@ textarea::placeholder,
   border-radius: 6px;
   background: rgba(27, 22, 17, 0.025);
   color: var(--text);
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
   text-align: left;
   font-size: 12px;
   cursor: pointer;
+}
+
+.chat-empty-project-create-icon {
+  width: 12px;
+  height: 12px;
+  opacity: 0.72;
+  flex: none;
 }
 
 .chat-empty-project-create:hover {
@@ -3013,7 +3023,6 @@ textarea {
 .sidebar-quick-action:hover {
   color: var(--text);
   background: rgba(27, 22, 17, 0.04);
-  border-color: rgba(27, 22, 17, 0.08);
 }
 
 .sidebar-quick-action:hover .icon-image {

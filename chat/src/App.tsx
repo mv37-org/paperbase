@@ -2383,7 +2383,11 @@ export default function App() {
                               className="chat-empty-project-create"
                               onClick={openCreateProjectModal}
                             >
-                              Create new project
+                              <AppIcon
+                                src={staticAssetPath("new-project.svg")}
+                                className="chat-empty-project-create-icon"
+                              />
+                              <span>Create new project</span>
                             </button>
                           </div>
                         ) : null}
