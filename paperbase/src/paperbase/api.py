@@ -138,6 +138,15 @@ def _sse_event(event_name: str, payload: object) -> str:
     return f"event: {event_name}\ndata: {json.dumps(jsonable_encoder(payload), ensure_ascii=False)}\n\n"
 
 
+def _suggestion_response(service: PaperbaseService, q: str, *, limit: int) -> dict[str, object]:
+    suggestions = service.suggest_papers(q, limit=limit)
+    fallback = False
+    if not suggestions:
+        suggestions = service.suggest_fallback_papers(limit=min(limit, 6))
+        fallback = True
+    return {"suggestions": suggestions, "fallback": fallback}
+
+
 @lru_cache(maxsize=1)
 def get_google_oauth_client():
     settings = get_settings()
@@ -214,8 +223,8 @@ def suggest_papers(
     q: str = Query(..., min_length=1, max_length=128),
     limit: int = Query(default=10, ge=1, le=50),
     service: PaperbaseService = Depends(get_service),
-) -> dict[str, list[dict]]:
-    return {"suggestions": service.suggest_papers(q, limit=limit)}
+) -> dict[str, object]:
+    return _suggestion_response(service, q, limit=limit)
 
 
 @app.get("/v1/stats", dependencies=[Depends(require_bearer_token)])
@@ -296,8 +305,8 @@ def browser_suggest_papers(
     q: str = Query(..., min_length=1, max_length=128),
     limit: int = Query(default=10, ge=1, le=50),
     service: PaperbaseService = Depends(get_service),
-) -> dict[str, list[dict]]:
-    return {"suggestions": service.suggest_papers(q, limit=limit)}
+) -> dict[str, object]:
+    return _suggestion_response(service, q, limit=limit)
 
 
 @app.get("/v1/browser/papers/{paper_id}", response_model=PaperResponse)

@@ -174,3 +174,8 @@ export interface MentionSuggestion {
   matched_field: string;
   highlight_snippet: string;
 }
+
+export interface MentionSuggestionResult {
+  suggestions: MentionSuggestion[];
+  fallback: boolean;
+}

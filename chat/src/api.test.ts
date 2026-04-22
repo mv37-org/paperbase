@@ -111,6 +111,7 @@ describe("chat api", () => {
       .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()
       .mockResolvedValueOnce(
         jsonResponse({
+          fallback: false,
           suggestions: [
             {
               paper_id: "arxiv:2401.12345",
@@ -130,13 +131,45 @@ describe("chat api", () => {
     vi.stubGlobal("fetch", fetchMock);
     const api = await loadApiModule();
 
-    const suggestions = await api.suggestBrowserPapers("benchmark paper", 7);
+    const result = await api.suggestBrowserPapers("benchmark paper", 7);
 
     const [path, init] = fetchMock.mock.calls[0] as FetchCall;
     expect(path).toBe("/v1/browser/papers/suggest?q=benchmark+paper&limit=7");
     expect(init?.method).toBe("GET");
-    expect(suggestions).toHaveLength(1);
-    expect(suggestions[0]?.paper_id).toBe("arxiv:2401.12345");
+    expect(result.fallback).toBe(false);
+    expect(result.suggestions).toHaveLength(1);
+    expect(result.suggestions[0]?.paper_id).toBe("arxiv:2401.12345");
+  });
+
+  it("returns fallback mention suggestions when the backend reports no direct matches", async () => {
+    const fetchMock = vi
+      .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          fallback: true,
+          suggestions: [
+            {
+              paper_id: "arxiv:2409.99999",
+              arxiv_id: "2409.99999",
+              title: "Fallback Paper",
+              authors: "Ada Lovelace",
+              summary_short: "Suggested fallback paper.",
+              citation_count: 30,
+              published: "2026-04-01",
+              score: 0,
+              matched_field: "fallback",
+              highlight_snippet: "Suggested fallback paper.",
+            },
+          ],
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await loadApiModule();
+
+    const result = await api.suggestBrowserPapers("nomatch", 6);
+
+    expect(result.fallback).toBe(true);
+    expect(result.suggestions[0]?.matched_field).toBe("fallback");
   });
 
   it("parses streamed SSE events even when chunk boundaries split the payload", async () => {

@@ -738,6 +738,52 @@ def test_suggest_papers_returns_highlight_payload(service: PaperbaseService):
     assert "Attention" in top["highlight_snippet"]
 
 
+def test_suggest_fallback_papers_returns_indexed_ranked_papers(service: PaperbaseService):
+    indexed_high = PaperMetadata(
+        arxiv_id="2406.00003",
+        title="Top Indexed Paper",
+        abstract="abstract",
+        summary_short="Top fallback summary",
+        authors="Ada Lovelace",
+        published="2026-04-01",
+        citation_count=50,
+        influential_citation_count=7,
+        index_status="indexed",
+    )
+    indexed_low = PaperMetadata(
+        arxiv_id="2406.00004",
+        title="Lower Ranked Indexed Paper",
+        abstract="abstract",
+        authors="Grace Hopper",
+        published="2025-04-01",
+        citation_count=5,
+        influential_citation_count=1,
+        index_status="indexed",
+    )
+    pending = PaperMetadata(
+        arxiv_id="2406.00005",
+        title="Pending Paper",
+        abstract="abstract",
+        authors="Alan Turing",
+        published="2026-04-02",
+        citation_count=500,
+        influential_citation_count=50,
+        index_status="pending",
+    )
+    service.repository.upsert_paper(indexed_low, search_document=indexed_low.abstract)
+    service.repository.upsert_paper(pending, search_document=pending.abstract)
+    service.repository.upsert_paper(indexed_high, search_document=indexed_high.abstract)
+
+    hits = service.suggest_fallback_papers(limit=5)
+
+    assert [hit["title"] for hit in hits[:2]] == [
+        "Top Indexed Paper",
+        "Lower Ranked Indexed Paper",
+    ]
+    assert all(hit["matched_field"] == "fallback" for hit in hits)
+    assert "Pending Paper" not in {hit["title"] for hit in hits}
+
+
 def test_specter2_embedder_uses_text_pair_tokenization():
     """The SPECTER2 raw-transformers path must build `title [SEP] body` via
     the tokenizer's pair API, not a newline-joined single string. Regressing

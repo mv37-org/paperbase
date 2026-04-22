@@ -13,7 +13,7 @@ import {
 import type { BaseRange, Descendant } from "slate";
 import { Editable, ReactEditor, Slate, withReact } from "slate-react";
 
-import type { MentionSuggestion, MentionTag } from "./types";
+import type { MentionSuggestion, MentionSuggestionResult, MentionTag } from "./types";
 
 type MentionElement = {
   type: "mention";
@@ -107,6 +107,31 @@ function plainTextToValue(text: string): Descendant[] {
   ];
 }
 
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function renderHighlightedText(text: string, query: string) {
+  const trimmedQuery = query.trim();
+  if (!text || !trimmedQuery) {
+    return text;
+  }
+  const pattern = new RegExp(`(${escapeRegExp(trimmedQuery)})`, "ig");
+  const parts = text.split(pattern);
+  if (parts.length === 1) {
+    return text;
+  }
+  return parts.map((part, index) =>
+    part.toLowerCase() === trimmedQuery.toLowerCase() ? (
+      <mark key={`${part}-${index}`} className="mention-suggestion-highlight">
+        {part}
+      </mark>
+    ) : (
+      part
+    ),
+  );
+}
+
 function insertMention(editor: Editor & ReactEditor, target: BaseRange, paper: MentionSuggestion) {
   const mention: MentionElement = {
     type: "mention",
@@ -127,7 +152,7 @@ type Props = {
   onAttach: () => void;
   value: string;
   onChange: (value: string) => void;
-  searchPapers?: (query: string, limit?: number) => Promise<MentionSuggestion[]>;
+  searchPapers?: (query: string, limit?: number) => Promise<MentionSuggestionResult>;
   onSubmit: () => void;
   placeholder?: string;
   submitOnEnter?: boolean;
@@ -162,6 +187,7 @@ export function LandingMentionEditor({
   const [search, setSearch] = useState("");
   const [index, setIndex] = useState(0);
   const [suggestions, setSuggestions] = useState<MentionSuggestion[]>([]);
+  const [fallbackSuggestions, setFallbackSuggestions] = useState(false);
   const [popoverStyle, setPopoverStyle] = useState<CSSProperties | null>(null);
   const shellRef = useRef<HTMLFormElement | null>(null);
 
@@ -190,20 +216,23 @@ export function LandingMentionEditor({
   useEffect(() => {
     if (!target || search.length < 2 || !searchPapers) {
       setSuggestions([]);
+      setFallbackSuggestions(false);
       return;
     }
     let stale = false;
     const timeoutId = window.setTimeout(() => {
-      searchPapers(search, 5)
-        .then((results) => {
+      searchPapers(search, 6)
+        .then((result) => {
           if (!stale) {
-            setSuggestions(results);
+            setSuggestions(result.suggestions);
+            setFallbackSuggestions(result.fallback);
             setIndex(0);
           }
         })
         .catch(() => {
           if (!stale) {
             setSuggestions([]);
+            setFallbackSuggestions(false);
           }
         });
     }, 120);
@@ -267,6 +296,7 @@ export function LandingMentionEditor({
       insertMention(editor, target, paper);
       setTarget(null);
       setSuggestions([]);
+      setFallbackSuggestions(false);
       setSearch("");
       ReactEditor.focus(editor);
     },
@@ -515,9 +545,14 @@ export function LandingMentionEditor({
       {showSuggestions && popoverStyle && typeof document !== "undefined"
         ? createPortal(
             <div className="mention-suggestions mention-suggestions-popover" style={popoverStyle}>
+              {fallbackSuggestions ? (
+                <div className="mention-suggestions-banner">
+                  No matches found, some suggestions...
+                </div>
+              ) : null}
               {suggestions.map((paper, suggestionIndex) => (
                 <button
-                  key={paper.id}
+                  key={paper.paper_id}
                   type="button"
                   className={`mention-suggestion${suggestionIndex === index ? " active" : ""}`}
                   onMouseDown={(event) => {
@@ -525,12 +560,18 @@ export function LandingMentionEditor({
                     chooseSuggestion(paper);
                   }}
                 >
-                  <div className="mention-suggestion-title">{paper.title}</div>
+                  <div className="mention-suggestion-title">
+                    {renderHighlightedText(paper.title, search)}
+                  </div>
                   {suggestionMeta(paper) ? (
-                    <div className="mention-suggestion-meta">{suggestionMeta(paper)}</div>
+                    <div className="mention-suggestion-meta">
+                      {renderHighlightedText(suggestionMeta(paper), search)}
+                    </div>
                   ) : null}
                   {paper.highlight_snippet ? (
-                    <div className="mention-suggestion-snippet">{paper.highlight_snippet}</div>
+                    <div className="mention-suggestion-snippet">
+                      {renderHighlightedText(paper.highlight_snippet, search)}
+                    </div>
                   ) : null}
                 </button>
               ))}

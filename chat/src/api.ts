@@ -5,7 +5,7 @@ import type {
   ChatThreadResponse,
   FigureResponse,
   FileContentResponse,
-  MentionSuggestion,
+  MentionSuggestionResult,
   PaperResponse,
   SendChatMessageResponse,
   TableResponse,
@@ -165,11 +165,9 @@ export async function suggestBrowserPapers(query: string, limit = 5) {
     q: query,
     limit: String(limit),
   });
-  const response = await api<{ suggestions: MentionSuggestion[] }>(
-    `/v1/browser/papers/suggest?${params.toString()}`,
-    { method: "GET" },
-  );
-  return response.suggestions;
+  return api<MentionSuggestionResult>(`/v1/browser/papers/suggest?${params.toString()}`, {
+    method: "GET",
+  });
 }
 
 export function loadThreads() {

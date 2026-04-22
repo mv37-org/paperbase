@@ -192,6 +192,23 @@ def _suggest_row_to_payload(q: str, row: Any) -> dict[str, Any]:
     }
 
 
+def _fallback_row_to_payload(row: Any) -> dict[str, Any]:
+    summary_text = row.get("summary_short") or row.get("tldr") or ""
+    highlight_source = summary_text or row.get("title") or ""
+    return {
+        "paper_id": row["paper_id"],
+        "arxiv_id": row["arxiv_id"],
+        "title": row["title"],
+        "authors": row.get("authors") or "",
+        "summary_short": summary_text,
+        "citation_count": row.get("citation_count") or 0,
+        "published": row.get("published") or "",
+        "score": float(row.get("score") or 0.0),
+        "matched_field": "fallback",
+        "highlight_snippet": _extract_highlight(highlight_source, ""),
+    }
+
+
 class BrowserUserORM(Base):
     __tablename__ = "browser_users"
 
@@ -475,6 +492,11 @@ class PaperRepository(ABC):
     @abstractmethod
     def suggest_papers(self, q: str, *, limit: int = 10) -> list[dict[str, Any]]:
         """Typeahead-style lookup over title/authors trigram match."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def suggest_fallback_papers(self, *, limit: int = 6) -> list[dict[str, Any]]:
+        """Return a small set of indexed papers when no typeahead matches exist."""
         raise NotImplementedError
 
     @abstractmethod
@@ -1144,6 +1166,32 @@ class SqlAlchemyPaperRepository(PaperRepository):
             _suggest_row_to_payload(q, row)
             for row in rows
         ]
+
+    def suggest_fallback_papers(self, *, limit: int = 6) -> list[dict[str, Any]]:
+        sql = text(
+            """
+            SELECT
+                paper_id,
+                arxiv_id,
+                title,
+                authors,
+                summary_short,
+                tldr,
+                citation_count,
+                published
+            FROM papers
+            WHERE index_status = 'indexed'
+            ORDER BY
+                influential_citation_count DESC NULLS LAST,
+                citation_count DESC NULLS LAST,
+                published DESC,
+                paper_id ASC
+            LIMIT :limit
+            """
+        )
+        with self._session() as session:
+            rows = session.execute(sql, {"limit": limit}).mappings().all()
+        return [_fallback_row_to_payload(row) for row in rows]
 
     def stats(self) -> dict[str, Any]:
         sql = text(
@@ -2314,6 +2362,33 @@ class MemoryPaperRepository(PaperRepository):
             reverse=True,
         )
         return hits[:limit]
+
+    def suggest_fallback_papers(self, *, limit: int = 6) -> list[dict[str, Any]]:
+        ranked = sorted(
+            (paper for paper in self.papers.values() if paper.index_status == "indexed"),
+            key=lambda paper: (
+                paper.influential_citation_count or 0,
+                paper.citation_count or 0,
+                paper.published or "",
+                paper.paper_id,
+            ),
+            reverse=True,
+        )
+        rows = [
+            {
+                "paper_id": paper.paper_id,
+                "arxiv_id": paper.arxiv_id,
+                "title": paper.title,
+                "authors": paper.authors,
+                "summary_short": paper.summary_short,
+                "tldr": paper.tldr,
+                "citation_count": paper.citation_count or 0,
+                "published": paper.published or "",
+                "score": 0.0,
+            }
+            for paper in ranked[:limit]
+        ]
+        return [_fallback_row_to_payload(row) for row in rows]
 
     def stats(self) -> dict[str, Any]:
         total = len(self.papers)
