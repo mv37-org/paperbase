@@ -653,8 +653,9 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add python file" }));
 
     await waitFor(() => {
-      expect(screen.getByText("Python file")).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Save" })).toBeTruthy();
     });
+    expect(screen.queryByText("Python file")).toBeNull();
 
     fireEvent.change(screen.getByTestId("monaco-editor"), {
       target: { value: "print('hello')" },

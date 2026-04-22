@@ -459,10 +459,10 @@ function AppIcon({ src, className = "" }: { src: string; className?: string }) {
   );
 }
 
-function EmptyStateActionIcon({ asset }: { asset: string }) {
+function MaskedAssetIcon({ asset, className }: { asset: string; className: string }) {
   return (
     <span
-      className="chat-empty-action-icon-glyph"
+      className={className}
       aria-hidden="true"
       style={
         {
@@ -471,6 +471,10 @@ function EmptyStateActionIcon({ asset }: { asset: string }) {
       }
     />
   );
+}
+
+function EmptyStateActionIcon({ asset }: { asset: string }) {
+  return <MaskedAssetIcon asset={asset} className="chat-empty-action-icon-glyph" />;
 }
 
 export default function App() {
@@ -2755,25 +2759,23 @@ export default function App() {
               {activeTab?.kind === "python_file" ? (
                 activePythonFile ? (
                   <div className="python-file-stage">
-                    <div className="python-file-header">
-                      <div className="python-file-header-copy">
-                        <span className="python-file-eyebrow">Python file</span>
-                        <div className="python-file-title-row">
-                          <strong className="python-file-title">
-                            {displayPythonFilename(activePythonFile.filename)}
-                          </strong>
-                          {activePythonDraft?.dirty ? (
-                            <span className="python-file-dirty">Unsaved changes</span>
-                          ) : null}
-                        </div>
-                      </div>
+                    <div className="python-editor-shell">
                       <div className="python-file-toolbar">
+                        {activePythonDraft?.dirty ? (
+                          <span className="python-file-dirty">Unsaved changes</span>
+                        ) : null}
                         <button
                           type="button"
                           className="python-file-save-button"
                           onClick={() => void openSaveModal(activePythonFile.file_id)}
                         >
-                          Save
+                          <span className="python-file-action-icon" aria-hidden="true">
+                            <MaskedAssetIcon
+                              asset="github.svg"
+                              className="python-file-action-glyph"
+                            />
+                          </span>
+                          <span className="python-file-action-label">Save</span>
                         </button>
                         <button
                           type="button"
@@ -2781,14 +2783,17 @@ export default function App() {
                           disabled={!sessionSettings.has_daytona_api_key || activePythonRun.running}
                           onClick={() => void handleRunActivePythonFile()}
                         >
-                          {activePythonRun.running ? "Running..." : "Run"}
+                          <span className="python-file-action-icon" aria-hidden="true">
+                            <MaskedAssetIcon
+                              asset="play.svg"
+                              className="python-file-action-glyph"
+                            />
+                          </span>
+                          <span className="python-file-action-label">
+                            {activePythonRun.running ? "Running..." : "Run"}
+                          </span>
                         </button>
                       </div>
-                    </div>
-                    {activePythonRun.error ? (
-                      <div className="python-run-error">{activePythonRun.error}</div>
-                    ) : null}
-                    <div className="python-editor-shell">
                       <Editor
                         height="100%"
                         language="python"
@@ -2810,35 +2815,42 @@ export default function App() {
                           automaticLayout: true,
                           fontSize: 14,
                           minimap: { enabled: false },
+                          padding: {
+                            top: 52,
+                            bottom: activePythonRun.result || activePythonRun.error ? 200 : 24,
+                          },
                           scrollBeyondLastLine: false,
                           wordWrap: "on",
                         }}
                       />
-                    </div>
-                    {activePythonRun.result ? (
-                      <div className="python-run-panel">
-                        <div className="python-run-panel-header">
-                          <strong>
-                            {activePythonRun.result.status === "completed"
-                              ? "Latest run"
-                              : "Run failed"}
-                          </strong>
-                          <span>Exit code {activePythonRun.result.exit_code}</span>
+                      {activePythonRun.error ? (
+                        <div className="python-run-error">{activePythonRun.error}</div>
+                      ) : null}
+                      {activePythonRun.result ? (
+                        <div className="python-run-panel">
+                          <div className="python-run-panel-header">
+                            <strong>
+                              {activePythonRun.result.status === "completed"
+                                ? "Latest run"
+                                : "Run failed"}
+                            </strong>
+                            <span>Exit code {activePythonRun.result.exit_code}</span>
+                          </div>
+                          {activePythonRun.result.stdout ? (
+                            <div className="python-run-block">
+                              <div className="python-run-block-label">stdout</div>
+                              <pre>{activePythonRun.result.stdout}</pre>
+                            </div>
+                          ) : null}
+                          {activePythonRun.result.stderr ? (
+                            <div className="python-run-block">
+                              <div className="python-run-block-label">stderr</div>
+                              <pre>{activePythonRun.result.stderr}</pre>
+                            </div>
+                          ) : null}
                         </div>
-                        {activePythonRun.result.stdout ? (
-                          <div className="python-run-block">
-                            <div className="python-run-block-label">stdout</div>
-                            <pre>{activePythonRun.result.stdout}</pre>
-                          </div>
-                        ) : null}
-                        {activePythonRun.result.stderr ? (
-                          <div className="python-run-block">
-                            <div className="python-run-block-label">stderr</div>
-                            <pre>{activePythonRun.result.stderr}</pre>
-                          </div>
-                        ) : null}
-                      </div>
-                    ) : null}
+                      ) : null}
+                    </div>
                   </div>
                 ) : (
                   <div className="python-file-stage python-file-stage-loading">
