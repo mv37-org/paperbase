@@ -2174,7 +2174,7 @@ textarea {
 }
 
 .settings-modal-panel {
-  width: min(760px, calc(100vw - 32px));
+  width: min(532px, calc(100vw - 32px));
   max-height: min(88vh, 760px);
   overflow: auto;
   padding: 18px 18px 20px;
@@ -2356,15 +2356,15 @@ textarea {
 }
 
 .settings-modal-panel .modal-heading {
-  margin-bottom: 18px;
+  margin-bottom: 16px;
   text-align: left;
   display: flex;
-  align-items: flex-start;
-  gap: 12px;
+  align-items: center;
+  gap: 10px;
 }
 
 .settings-modal-panel .modal-heading-icon {
-  margin: 1px 0 0;
+  margin: 0;
   width: 18px;
   height: 18px;
   flex: 0 0 auto;
@@ -2373,6 +2373,11 @@ textarea {
 
 .settings-modal-panel .modal-heading-copy {
   min-width: 0;
+  gap: 2px;
+}
+
+.settings-modal-panel .modal-caption {
+  margin-top: 0;
 }
 
 .settings-tabs {
@@ -2422,36 +2427,6 @@ textarea {
   border-radius: 0;
   background: transparent;
   align-content: start;
-}
-
-.settings-section-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.settings-section-header h3 {
-  margin: 0;
-  font-size: 14px;
-  line-height: 1.2;
-}
-
-.settings-status-pill {
-  padding: 4px 8px;
-  border-radius: 999px;
-  background: rgba(23, 111, 230, 0.08);
-  color: var(--blue);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-}
-
-.settings-section-copy {
-  margin: 0;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.5;
 }
 
 .settings-form {
@@ -2651,11 +2626,11 @@ textarea {
 }
 
 .api-key-delete-button {
-  width: 32px;
-  height: 32px;
+  width: 16px;
+  height: 16px;
   padding: 0;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
+  border: 0;
+  border-radius: 6px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -2664,15 +2639,15 @@ textarea {
   cursor: pointer;
 }
 
-.api-key-delete-button svg {
-  width: 14px;
-  height: 14px;
+.api-key-delete-button:hover {
+  background: rgba(27, 22, 17, 0.05);
+}
+
+.api-key-delete-icon {
+  width: 12px;
+  height: 12px;
   display: block;
-  stroke: currentColor;
-  stroke-width: 1.8;
-  fill: none;
-  stroke-linecap: round;
-  stroke-linejoin: round;
+  opacity: 0.58;
 }
 
 .oauth-button svg {

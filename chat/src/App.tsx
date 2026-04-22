@@ -77,7 +77,7 @@ const AUTH_VIEW_COPY: Record<AuthView, { title: string; caption: string }> = {
   "reset-password": { title: "Reset password", caption: "Choose a new password for your account." },
   settings: {
     title: "Settings",
-    caption: "Manage inference, sandbox, version control, and notifications.",
+    caption: "Manage inference, sandbox, and version control.",
   },
 };
 
@@ -91,22 +91,30 @@ const DEFAULT_BROWSER_SETTINGS = {
   weekly_papers_review_email: false,
 };
 
-type SettingsTab = "inference" | "sandbox" | "version-control" | "notifications";
+type SettingsTab = "inference" | "sandbox" | "version-control";
 
-const SETTINGS_TABS: Array<{ id: SettingsTab; label: string }> = [
-  { id: "inference", label: "Inference" },
-  { id: "sandbox", label: "Sandbox" },
-  { id: "version-control", label: "Version control" },
-  { id: "notifications", label: "Notifications" },
+const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; caption: string }> = [
+  {
+    id: "inference",
+    label: "Inference",
+    caption:
+      "Add the Anthropic key Paperbase should use for model inference after the free responses run out.",
+  },
+  {
+    id: "sandbox",
+    label: "Sandbox",
+    caption: "Add the Daytona API key Paperbase should use for sandbox execution.",
+  },
+  {
+    id: "version-control",
+    label: "Version control",
+    caption:
+      "Connect GitHub so Paperbase can create repositories, pull repositories, and push commits on your behalf.",
+  },
 ];
 
 const normalizeSettingsTab = (value: string | null): SettingsTab | null => {
-  if (
-    value === "inference" ||
-    value === "sandbox" ||
-    value === "version-control" ||
-    value === "notifications"
-  ) {
+  if (value === "inference" || value === "sandbox" || value === "version-control") {
     return value;
   }
   return null;
@@ -393,7 +401,6 @@ export default function App() {
   const [landingPrompt, setLandingPrompt] = useState("");
   const [composerInput, setComposerInput] = useState("");
   const [composerStatus, setComposerStatus] = useState("");
-  const [weeklyPapersReviewEmail, setWeeklyPapersReviewEmail] = useState(false);
   const [includeUploads] = useState(true);
   const [includePapers] = useState(true);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -422,13 +429,6 @@ export default function App() {
 
   useEffect(() => {
     sessionRef.current = session;
-  }, [session]);
-
-  useEffect(() => {
-    setWeeklyPapersReviewEmail(
-      session?.settings?.weekly_papers_review_email ??
-        DEFAULT_BROWSER_SETTINGS.weekly_papers_review_email,
-    );
   }, [session]);
 
   useEffect(() => {
@@ -676,6 +676,11 @@ export default function App() {
     };
   }, [session]);
   const sessionSettings = sessionSummary?.settings ?? DEFAULT_BROWSER_SETTINGS;
+  const activeSettingsConfig = useMemo(
+    () => SETTINGS_TABS.find((tab) => tab.id === activeSettingsTab) ?? SETTINGS_TABS[0],
+    [activeSettingsTab],
+  );
+  const authCaption = authView === "settings" ? activeSettingsConfig.caption : authCopy.caption;
 
   const clearFlash = useCallback(() => {
     setFlash("");
@@ -1443,7 +1448,6 @@ export default function App() {
     setLandingPrompt("");
     setComposerInput("");
     setComposerStatus("");
-    setWeeklyPapersReviewEmail(false);
     setMobileSidebarOpen(false);
     setAccountMenuOpen(false);
     setStreamingThreadId(null);
@@ -2575,7 +2579,7 @@ export default function App() {
                 {authCopy.title}
               </h2>
               <p id="auth-modal-caption" className="modal-caption">
-                {authCopy.caption}
+                {authCaption}
               </p>
             </div>
           </div>
@@ -2786,16 +2790,6 @@ export default function App() {
                     id="settings-panel-inference"
                     aria-labelledby="settings-tab-inference"
                   >
-                    <div className="settings-section-header">
-                      <h3>Inference</h3>
-                      {sessionSummary?.hasAnthropicApiKey ? (
-                        <span className="settings-status-pill">Connected</span>
-                      ) : null}
-                    </div>
-                    <p className="settings-section-copy">
-                      Add the Anthropic key Paperbase should use for model inference after the free
-                      responses run out.
-                    </p>
                     {sessionSummary?.hasAnthropicApiKey ? (
                       <div className="settings-secret-row">
                         <div className="settings-secret-copy">
@@ -2825,13 +2819,10 @@ export default function App() {
                             }
                           }}
                         >
-                          <svg viewBox="0 0 24 24" aria-hidden="true">
-                            <path d="M4 7h16" />
-                            <path d="M9 7V4h6v3" />
-                            <path d="M8 7l1 13h6l1-13" />
-                            <path d="M10.5 11v5" />
-                            <path d="M13.5 11v5" />
-                          </svg>
+                          <AppIcon
+                            src={staticAssetPath("delete-session.svg")}
+                            className="api-key-delete-icon"
+                          />
                         </button>
                       </div>
                     ) : (
@@ -2884,15 +2875,6 @@ export default function App() {
                     id="settings-panel-sandbox"
                     aria-labelledby="settings-tab-sandbox"
                   >
-                    <div className="settings-section-header">
-                      <h3>Sandbox</h3>
-                      {sessionSettings.has_daytona_api_key ? (
-                        <span className="settings-status-pill">Connected</span>
-                      ) : null}
-                    </div>
-                    <p className="settings-section-copy">
-                      Add the Daytona API key Paperbase should use for sandbox execution.
-                    </p>
                     {sessionSettings.has_daytona_api_key ? (
                       <div className="settings-secret-row">
                         <div className="settings-secret-copy">
@@ -2924,13 +2906,10 @@ export default function App() {
                             }
                           }}
                         >
-                          <svg viewBox="0 0 24 24" aria-hidden="true">
-                            <path d="M4 7h16" />
-                            <path d="M9 7V4h6v3" />
-                            <path d="M8 7l1 13h6l1-13" />
-                            <path d="M10.5 11v5" />
-                            <path d="M13.5 11v5" />
-                          </svg>
+                          <AppIcon
+                            src={staticAssetPath("delete-session.svg")}
+                            className="api-key-delete-icon"
+                          />
                         </button>
                       </div>
                     ) : (
@@ -2983,16 +2962,6 @@ export default function App() {
                     id="settings-panel-version-control"
                     aria-labelledby="settings-tab-version-control"
                   >
-                    <div className="settings-section-header">
-                      <h3>Version control</h3>
-                      {sessionSettings.has_github_connection ? (
-                        <span className="settings-status-pill">Connected</span>
-                      ) : null}
-                    </div>
-                    <p className="settings-section-copy">
-                      Connect GitHub so Paperbase can create repositories, pull repositories, and
-                      push commits on your behalf.
-                    </p>
                     {sessionSettings.has_github_connection ? (
                       <div className="settings-connected-card">
                         <div>
@@ -3045,64 +3014,6 @@ export default function App() {
                         ) : null}
                       </div>
                     )}
-                  </section>
-                ) : null}
-
-                {activeSettingsTab === "notifications" ? (
-                  <section
-                    className="settings-section"
-                    role="tabpanel"
-                    id="settings-panel-notifications"
-                    aria-labelledby="settings-tab-notifications"
-                  >
-                    <div className="settings-section-header">
-                      <h3>Notifications</h3>
-                    </div>
-                    <p className="settings-section-copy">
-                      Choose whether you want the weekly papers review email.
-                    </p>
-                    <form
-                      id="settings-notifications-form"
-                      className="settings-form notifications-form"
-                      onSubmit={async (event) => {
-                        event.preventDefault();
-                        try {
-                          const nextSession = await api<BrowserSessionResponse>(
-                            "/v1/browser/settings/notifications",
-                            {
-                              method: "PUT",
-                              body: JSON.stringify({
-                                weekly_papers_review_email: weeklyPapersReviewEmail,
-                              }),
-                            },
-                          );
-                          setSession(nextSession);
-                          showNoteFlash("Notification preferences saved.");
-                        } catch (error) {
-                          showErrorFlash(
-                            error instanceof Error
-                              ? error.message
-                              : "Saving notification preferences failed",
-                          );
-                        }
-                      }}
-                    >
-                      <label className="settings-checkbox-row">
-                        <input
-                          id="weekly-papers-review-email"
-                          name="weekly_papers_review_email"
-                          type="checkbox"
-                          checked={weeklyPapersReviewEmail}
-                          onChange={(event) => setWeeklyPapersReviewEmail(event.target.checked)}
-                        />
-                        <span>Weekly papers review email</span>
-                      </label>
-                      <div className="settings-footer-actions">
-                        <button className="primary-button settings-submit-button" type="submit">
-                          Save notifications
-                        </button>
-                      </div>
-                    </form>
                   </section>
                 ) : null}
               </div>

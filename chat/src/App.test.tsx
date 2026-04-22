@@ -486,15 +486,8 @@ describe("App", () => {
     });
   });
 
-  it("opens the settings modal from the account menu and saves notification preferences", async () => {
+  it("opens the settings modal with tab-specific copy and no notifications tab", async () => {
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());
-    apiMocks.api.mockResolvedValue({
-      ...authenticatedSession(),
-      settings: {
-        ...authenticatedSession().settings,
-        weekly_papers_review_email: true,
-      },
-    });
 
     render(<App />);
 
@@ -510,18 +503,17 @@ describe("App", () => {
     });
     expect(screen.getByRole("tab", { name: "Sandbox" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "Version control" })).toBeTruthy();
-    expect(screen.getByRole("tab", { name: "Notifications" })).toBeTruthy();
+    expect(screen.queryByRole("tab", { name: "Notifications" })).toBeNull();
+    expect(
+      screen.getAllByText(
+        "Add the Anthropic key Paperbase should use for model inference after the free responses run out.",
+      ),
+    ).toHaveLength(1);
 
-    fireEvent.click(screen.getByRole("tab", { name: "Notifications" }));
-    fireEvent.click(screen.getByLabelText("Weekly papers review email"));
-    fireEvent.submit(document.querySelector("#settings-notifications-form") as HTMLFormElement);
-
-    await waitFor(() => {
-      expect(apiMocks.api).toHaveBeenCalledWith("/v1/browser/settings/notifications", {
-        method: "PUT",
-        body: JSON.stringify({ weekly_papers_review_email: true }),
-      });
-    });
+    fireEvent.click(screen.getByRole("tab", { name: "Sandbox" }));
+    expect(
+      screen.getAllByText("Add the Daytona API key Paperbase should use for sandbox execution."),
+    ).toHaveLength(1);
   });
 
   it("sets explicit autocomplete hints on auth and settings key inputs", async () => {
