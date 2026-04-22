@@ -1927,17 +1927,23 @@ textarea::placeholder,
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  column-gap: 6px;
+  row-gap: 10px;
   flex-wrap: wrap;
+}
+
+.chat-empty-project-row strong {
+  display: inline;
 }
 
 .chat-empty-project-select {
   min-height: 32px;
-  padding: 0 10px;
-  border-radius: 999px;
+  padding: 0 12px;
+  border-radius: var(--radius);
   border: 1px solid rgba(27, 22, 17, 0.12);
   background: #fffdfa;
   font-size: 13px;
+  line-height: 1;
 }
 
 .chat-empty-state p {
