@@ -5,6 +5,7 @@ import type {
   ChatThreadResponse,
   FigureResponse,
   FileContentResponse,
+  MentionSuggestion,
   PaperResponse,
   SendChatMessageResponse,
   TableResponse,
@@ -157,6 +158,18 @@ export function logoutBrowserSession() {
 
 export function loadUploads() {
   return api<UploadListResponse>("/v1/browser/uploads", { method: "GET" });
+}
+
+export async function suggestBrowserPapers(query: string, limit = 5) {
+  const params = new URLSearchParams({
+    q: query,
+    limit: String(limit),
+  });
+  const response = await api<{ suggestions: MentionSuggestion[] }>(
+    `/v1/browser/papers/suggest?${params.toString()}`,
+    { method: "GET" },
+  );
+  return response.suggestions;
 }
 
 export function loadThreads() {

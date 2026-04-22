@@ -17,6 +17,7 @@ import {
   postForm,
   sendThreadMessage,
   sendThreadMessageStream,
+  suggestBrowserPapers,
   StreamingChatError,
   uploadDocument,
 } from "./api";
@@ -1551,6 +1552,7 @@ export default function App() {
               onChange={setComposerInput}
               onSubmit={() => void handleComposerSubmit()}
               placeholder="Ask about the latest agent and AI systems research. Type @ to tag a paper."
+              searchPapers={suggestBrowserPapers}
               submitButtonId="composer-send"
               submitLabel={streamingThreadId ? "Thinking..." : "Send"}
               submitLoading={Boolean(streamingThreadId)}

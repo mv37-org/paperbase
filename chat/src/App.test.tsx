@@ -28,6 +28,7 @@ const apiMocks = vi.hoisted(() => {
     postForm: vi.fn(),
     sendThreadMessage: vi.fn(),
     sendThreadMessageStream: vi.fn(),
+    suggestBrowserPapers: vi.fn(),
     StreamingChatError: MockStreamingChatError,
     uploadDocument: vi.fn(),
   };
@@ -49,6 +50,7 @@ vi.mock("./api", () => ({
   postForm: apiMocks.postForm,
   sendThreadMessage: apiMocks.sendThreadMessage,
   sendThreadMessageStream: apiMocks.sendThreadMessageStream,
+  suggestBrowserPapers: apiMocks.suggestBrowserPapers,
   StreamingChatError: apiMocks.StreamingChatError,
   uploadDocument: apiMocks.uploadDocument,
 }));

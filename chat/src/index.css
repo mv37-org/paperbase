@@ -561,6 +561,13 @@ textarea::placeholder,
   line-height: 1.4;
 }
 
+.mention-suggestion-snippet {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .mention-tags {
   display: flex;
   flex-wrap: wrap;

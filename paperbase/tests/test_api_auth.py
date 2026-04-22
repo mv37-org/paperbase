@@ -411,14 +411,18 @@ def test_browser_get_routes_accept_session_cookie_without_csrf(api_client):
     client, service, settings = api_client
     client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
 
+    suggested = client.get("/v1/browser/papers/suggest?q=ground&limit=5")
     uploads = client.get("/v1/browser/uploads")
     chats = client.get("/v1/browser/chats")
     thread = client.get("/v1/browser/chats/thread_1")
 
+    assert suggested.status_code == 200
+    assert suggested.json()["suggestions"][0]["matched_field"] == "title"
     assert uploads.status_code == 200
     assert uploads.json()["available_tags"] == ["benchmark"]
     assert chats.json()["threads"][0]["thread_id"] == "thread_1"
     assert thread.json()["messages"][0]["content_markdown"] == "Grounded answer"
+    assert ("suggest_papers", ("ground", 5)) in service.calls
     assert ("list_uploaded_documents", "user_1") in service.calls
     assert ("get_chat_thread", ("user_1", "thread_1")) in service.calls
 

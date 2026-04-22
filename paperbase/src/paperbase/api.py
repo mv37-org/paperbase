@@ -291,6 +291,16 @@ def references(
     return service.get_paper_references(paper_id, refresh=refresh)
 
 
+@app.get("/v1/browser/papers/suggest")
+def browser_suggest_papers(
+    q: str = Query(..., min_length=1, max_length=128),
+    limit: int = Query(default=10, ge=1, le=50),
+    user=Depends(require_browser_user),
+    service: PaperbaseService = Depends(get_service),
+) -> dict[str, list[dict]]:
+    return {"suggestions": service.suggest_papers(q, limit=limit)}
+
+
 @app.get("/v1/browser/papers/{paper_id}", response_model=PaperResponse)
 def browser_get_paper(
     paper_id: str,
