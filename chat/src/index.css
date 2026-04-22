@@ -1632,7 +1632,7 @@ textarea::placeholder,
 
 .python-file-run-button {
   border: 1px solid #2d5fd7;
-  background: #dfe9ff;
+  background: #ebf2ff;
   color: #2d5fd7;
 }
 
@@ -3271,7 +3271,7 @@ textarea {
 }
 
 .python-file-run-button:not(:disabled):hover {
-  background: #d3e2ff;
+  background: #dee9ff;
   border-color: #2457d1;
 }
 
