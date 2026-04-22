@@ -54,7 +54,7 @@ from .models import (
     ResultSetResponse,
     RunPythonFileResponse,
     SaveAnthropicKeyRequest,
-    SaveDaytonaKeyRequest,
+    SaveModalCredentialsRequest,
     SearchPaperResult,
     SearchRequest,
     SearchResponse,
@@ -321,7 +321,9 @@ def get_paper(paper_id: str, service: PaperbaseService = Depends(get_service)) -
     return service.get_paper(paper_id)
 
 
-@app.get("/v1/papers/{paper_id}/manifest", response_model=ManifestResponse, dependencies=[Depends(require_bearer_token)])
+@app.get(
+    "/v1/papers/{paper_id}/manifest", response_model=ManifestResponse, dependencies=[Depends(require_bearer_token)]
+)
 def get_manifest(paper_id: str, service: PaperbaseService = Depends(get_service)) -> ManifestResponse:
     return service.get_manifest(paper_id)
 
@@ -331,17 +333,29 @@ def list_files(paper_id: str, service: PaperbaseService = Depends(get_service)) 
     return service.list_files(paper_id)
 
 
-@app.get("/v1/papers/{paper_id}/files/{path:path}", response_model=FileContentResponse, dependencies=[Depends(require_bearer_token)])
+@app.get(
+    "/v1/papers/{paper_id}/files/{path:path}",
+    response_model=FileContentResponse,
+    dependencies=[Depends(require_bearer_token)],
+)
 def read_file(paper_id: str, path: str, service: PaperbaseService = Depends(get_service)) -> FileContentResponse:
     return service.read_file(paper_id, path)
 
 
-@app.get("/v1/papers/{paper_id}/figures/{figure_id}", response_model=FigureResponse, dependencies=[Depends(require_bearer_token)])
+@app.get(
+    "/v1/papers/{paper_id}/figures/{figure_id}",
+    response_model=FigureResponse,
+    dependencies=[Depends(require_bearer_token)],
+)
 def get_figure(paper_id: str, figure_id: str, service: PaperbaseService = Depends(get_service)) -> FigureResponse:
     return service.get_figure(paper_id, figure_id)
 
 
-@app.get("/v1/papers/{paper_id}/tables/{table_id}", response_model=TableResponse, dependencies=[Depends(require_bearer_token)])
+@app.get(
+    "/v1/papers/{paper_id}/tables/{table_id}",
+    response_model=TableResponse,
+    dependencies=[Depends(require_bearer_token)],
+)
 def get_table(paper_id: str, table_id: str, service: PaperbaseService = Depends(get_service)) -> TableResponse:
     return service.get_table(paper_id, table_id)
 
@@ -352,7 +366,9 @@ def search(request: SearchRequest, service: PaperbaseService = Depends(get_servi
 
 
 @app.post("/v1/search/sections", response_model=SearchSectionResponse, dependencies=[Depends(require_bearer_token)])
-def search_sections(request: SearchSectionRequest, service: PaperbaseService = Depends(get_service)) -> SearchSectionResponse:
+def search_sections(
+    request: SearchSectionRequest, service: PaperbaseService = Depends(get_service)
+) -> SearchSectionResponse:
     return service.search_sections(request)
 
 
@@ -370,7 +386,11 @@ def grep_results(
     return service.grep_results(result_set_id, request.pattern, limit=request.limit)
 
 
-@app.get("/v1/papers/{paper_id}/related", response_model=list[SearchPaperResult], dependencies=[Depends(require_bearer_token)])
+@app.get(
+    "/v1/papers/{paper_id}/related",
+    response_model=list[SearchPaperResult],
+    dependencies=[Depends(require_bearer_token)],
+)
 def related(paper_id: str, service: PaperbaseService = Depends(get_service)) -> list[SearchPaperResult]:
     return service.get_related_papers(paper_id)
 
@@ -437,8 +457,12 @@ def get_job(job_id: str, service: PaperbaseService = Depends(get_service)) -> Jo
     return service.get_job(job_id)
 
 
-@app.post("/v1/debug/integrations", response_model=IntegrationProbeResponse, dependencies=[Depends(require_bearer_token)])
-def probe_integrations(response: Response, service: PaperbaseService = Depends(get_service)) -> IntegrationProbeResponse:
+@app.post(
+    "/v1/debug/integrations", response_model=IntegrationProbeResponse, dependencies=[Depends(require_bearer_token)]
+)
+def probe_integrations(
+    response: Response, service: PaperbaseService = Depends(get_service)
+) -> IntegrationProbeResponse:
     result = service.probe_integrations()
     if not result.ok:
         response.status_code = 503
@@ -446,7 +470,9 @@ def probe_integrations(response: Response, service: PaperbaseService = Depends(g
 
 
 @app.get("/v1/browser/session", response_model=BrowserSessionResponse)
-def browser_session(request: Request, response: Response, service: PaperbaseService = Depends(get_service)) -> BrowserSessionResponse:
+def browser_session(
+    request: Request, response: Response, service: PaperbaseService = Depends(get_service)
+) -> BrowserSessionResponse:
     raw_token = _browser_session_token(request)
     session = service.get_browser_session(raw_token)
     if session.authenticated and raw_token:
@@ -656,15 +682,15 @@ def browser_delete_anthropic_key(
     )
 
 
-@app.put("/v1/browser/settings/daytona-key", response_model=BrowserSessionResponse)
-def browser_save_daytona_key(
-    request: SaveDaytonaKeyRequest,
+@app.put("/v1/browser/settings/modal-credentials", response_model=BrowserSessionResponse)
+def browser_save_modal_credentials(
+    request: SaveModalCredentialsRequest,
     http_request: Request,
     response: Response,
     user=Depends(require_browser_write_user),
     service: PaperbaseService = Depends(get_service),
 ) -> BrowserSessionResponse:
-    session_response = service.save_user_daytona_key(user, request)
+    session_response = service.save_user_modal_credentials(user, request)
     return _browser_session_response_with_csrf(
         session_response,
         request=http_request,
@@ -672,14 +698,14 @@ def browser_save_daytona_key(
     )
 
 
-@app.delete("/v1/browser/settings/daytona-key", response_model=BrowserSessionResponse)
-def browser_delete_daytona_key(
+@app.delete("/v1/browser/settings/modal-credentials", response_model=BrowserSessionResponse)
+def browser_delete_modal_credentials(
     request: Request,
     response: Response,
     user=Depends(require_browser_write_user),
     service: PaperbaseService = Depends(get_service),
 ) -> BrowserSessionResponse:
-    session_response = service.delete_user_daytona_key(user)
+    session_response = service.delete_user_modal_credentials(user)
     return _browser_session_response_with_csrf(
         session_response,
         request=request,

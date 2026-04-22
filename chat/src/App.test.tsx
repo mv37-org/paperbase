@@ -12,6 +12,13 @@ const apiMocks = vi.hoisted(() => {
     }
   }
 
+  class MockStreamingChatAbortError extends Error {
+    constructor(message = "Streaming request aborted") {
+      super(message);
+      this.name = "StreamingChatAbortError";
+    }
+  }
+
   class MockApiError extends Error {
     status: number;
     payload: unknown;
@@ -46,7 +53,26 @@ const apiMocks = vi.hoisted(() => {
     loadProjects: vi.fn(),
     loadSession: vi.fn(),
     loadUploads: vi.fn(),
-    landingMentionEditor: vi.fn(() => <div data-testid="mention-editor" />),
+    landingMentionEditor: vi.fn((props: Record<string, unknown>) => (
+      <div data-testid={`mention-editor-${String(props.variant ?? "landing")}`}>
+        {props.submitButtonId ? (
+          <button
+            id={String(props.submitButtonId)}
+            type="button"
+            disabled={props.submitMode === "stop" ? false : Boolean(props.disabled)}
+            onClick={() => {
+              if (props.submitMode === "stop") {
+                (props.onStop as (() => void) | undefined)?.();
+                return;
+              }
+              (props.onSubmit as (() => void) | undefined)?.();
+            }}
+          >
+            {String(props.submitLabel ?? "Start")}
+          </button>
+        ) : null}
+      </div>
+    )),
     moveThreadToProject: vi.fn(),
     logoutBrowserSession: vi.fn(),
     postForm: vi.fn(),
@@ -54,6 +80,7 @@ const apiMocks = vi.hoisted(() => {
     sendThreadMessage: vi.fn(),
     sendThreadMessageStream: vi.fn(),
     suggestBrowserPapers: vi.fn(),
+    StreamingChatAbortError: MockStreamingChatAbortError,
     StreamingChatError: MockStreamingChatError,
     syncProjectRepo: vi.fn(),
     updateProject: vi.fn(),
@@ -91,6 +118,7 @@ vi.mock("./api", () => ({
   sendThreadMessage: apiMocks.sendThreadMessage,
   sendThreadMessageStream: apiMocks.sendThreadMessageStream,
   suggestBrowserPapers: apiMocks.suggestBrowserPapers,
+  StreamingChatAbortError: apiMocks.StreamingChatAbortError,
   StreamingChatError: apiMocks.StreamingChatError,
   syncProjectRepo: apiMocks.syncProjectRepo,
   updateProject: apiMocks.updateProject,
@@ -140,8 +168,8 @@ function authenticatedSession(
     csrf_token: string | null;
     settings: Partial<{
       anthropic_api_key_hint: string;
-      has_daytona_api_key: boolean;
-      daytona_api_key_hint: string;
+      has_modal_credentials: boolean;
+      modal_token_id_hint: string;
       has_github_connection: boolean;
       github_login: string;
       github_oauth_available: boolean;
@@ -161,8 +189,8 @@ function authenticatedSession(
     has_anthropic_api_key: overrides.has_anthropic_api_key ?? false,
     settings: {
       anthropic_api_key_hint: "",
-      has_daytona_api_key: false,
-      daytona_api_key_hint: "",
+      has_modal_credentials: false,
+      modal_token_id_hint: "",
       has_github_connection: false,
       github_login: "",
       github_oauth_available: true,
@@ -794,7 +822,7 @@ describe("App", () => {
     apiMocks.loadSession.mockResolvedValue(
       authenticatedSession({
         settings: {
-          has_daytona_api_key: true,
+          has_modal_credentials: true,
           has_github_connection: true,
           github_login: "octocat",
         },
@@ -922,6 +950,74 @@ describe("App", () => {
     });
   });
 
+  it("shows tool activity rows, uses a thinking label, and aborts on stop", async () => {
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+    sessionStorage.setItem(PENDING_PROMPT_KEY, "Find the grounding methods");
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.createThread.mockResolvedValue(threadResponse("thread_2", "New chat"));
+
+    let streamSignal: AbortSignal | undefined;
+    let releaseStream: (() => void) | null = null;
+    const streamDone = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+
+    apiMocks.sendThreadMessageStream.mockImplementation(
+      async (
+        _threadId: string,
+        _payload: unknown,
+        onEvent: (eventName: string, payload: unknown) => void,
+        options?: { signal?: AbortSignal },
+      ) => {
+        streamSignal = options?.signal;
+        onEvent("tool_start", {
+          tool_call_id: "tool_1",
+          tool_name: "paperbase_search",
+          label: 'paper search for "grounding"',
+        });
+        onEvent("tool_done", {
+          tool_call_id: "tool_1",
+          tool_name: "paperbase_search",
+          label: 'paper search for "grounding"',
+          is_error: false,
+        });
+        onEvent("assistant_start", {
+          assistant_message: {
+            message_id: "msg_stream",
+            role: "assistant",
+            content_markdown: "",
+            citations: [],
+            created_at: "2026-04-21T00:00:00Z",
+            status: "streaming",
+          },
+        });
+        await streamDone;
+      },
+    );
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
+    });
+    await waitFor(() => {
+      expect(screen.getByText('Did paper search for "grounding"')).toBeTruthy();
+    });
+    await waitFor(() => {
+      expect(screen.getByText("Thinking")).toBeTruthy();
+    });
+    expect(screen.queryByText("Streaming")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+
+    await waitFor(() => {
+      expect(streamSignal?.aborted).toBe(true);
+    });
+
+    releaseStream?.();
+    randomSpy.mockRestore();
+  });
+
   it("opens the settings modal with tab-specific copy and no notifications tab", async () => {
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());
 
@@ -943,7 +1039,7 @@ describe("App", () => {
     expect(screen.getAllByText("Manage Anthropic inference API key.")).toHaveLength(1);
 
     fireEvent.click(screen.getByRole("tab", { name: "Sandbox" }));
-    expect(screen.getAllByText("Manage Daytona sandbox API key.")).toHaveLength(1);
+    expect(screen.getAllByText("Manage Modal sandbox credentials.")).toHaveLength(1);
   });
 
   it("sets explicit autocomplete hints on auth and settings key inputs", async () => {
@@ -954,8 +1050,8 @@ describe("App", () => {
       has_anthropic_api_key: false,
       settings: {
         anthropic_api_key_hint: "",
-        has_daytona_api_key: false,
-        daytona_api_key_hint: "",
+        has_modal_credentials: false,
+        modal_token_id_hint: "",
         has_github_connection: false,
         github_login: "",
         github_oauth_available: false,
@@ -1016,12 +1112,17 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Sandbox" }));
 
     await waitFor(() => {
-      expect(document.querySelector("#settings-daytona-form")).toBeTruthy();
+      expect(document.querySelector("#settings-modal-form")).toBeTruthy();
     });
 
     expect(
       document
-        .querySelector("#settings-daytona-form input[name='api_key']")
+        .querySelector("#settings-modal-form input[name='token_id']")
+        ?.getAttribute("autocomplete"),
+    ).toBe("new-password");
+    expect(
+      document
+        .querySelector("#settings-modal-form input[name='token_secret']")
         ?.getAttribute("autocomplete"),
     ).toBe("new-password");
   });

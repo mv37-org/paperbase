@@ -10,11 +10,11 @@ from fastapi.testclient import TestClient
 
 from paperbase.api import _resolve_bind_address, app
 from paperbase.browser_code import (
-    DaytonaRunResult,
     GitHubCommitInfo,
     GitHubConflictFile,
     GitHubRepoInfo,
     GitHubSyncConflictError,
+    ModalRunResult,
 )
 from paperbase.config import Settings, get_settings
 from paperbase.extractors import ExtractionOutput, FigureArtifact, RawArtifact, SectionArtifact, TableArtifact
@@ -25,7 +25,7 @@ from paperbase.models import (
     PaperMetadata,
     ProjectRepoSyncRequest,
     SaveAnthropicKeyRequest,
-    SaveDaytonaKeyRequest,
+    SaveModalCredentialsRequest,
     SearchRequest,
     SearchSectionRequest,
     SendChatMessageRequest,
@@ -165,15 +165,15 @@ class FakeGitHubRepoManager:
         )
 
 
-class FakeDaytonaRunner:
+class FakeModalRunner:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
 
-    def run(self, *, api_key: str, code: str) -> DaytonaRunResult:
-        self.calls.append({"api_key": api_key, "code": code})
+    def run(self, *, token_id: str, token_secret: str, code: str) -> ModalRunResult:
+        self.calls.append({"token_id": token_id, "token_secret": token_secret, "code": code})
         started = datetime(2026, 4, 22, 0, 0, tzinfo=timezone.utc)
         finished = datetime(2026, 4, 22, 0, 0, 1, tzinfo=timezone.utc)
-        return DaytonaRunResult(
+        return ModalRunResult(
             status="completed",
             stdout="runner output",
             stderr="",
@@ -1156,9 +1156,12 @@ def test_browser_settings_round_trip(browser_service):
         session.user,
         SaveAnthropicKeyRequest(api_key="anthropic-user-key-999"),
     )
-    daytona = service.save_user_daytona_key(
+    modal_credentials = service.save_user_modal_credentials(
         session.user,
-        SaveDaytonaKeyRequest(api_key="daytona-user-key-999"),
+        SaveModalCredentialsRequest(
+            token_id="modal-token-id-999",
+            token_secret="modal-token-secret-999",
+        ),
     )
     notifications = service.update_user_notification_preferences(
         session.user,
@@ -1174,16 +1177,16 @@ def test_browser_settings_round_trip(browser_service):
 
     assert anthropic.has_anthropic_api_key is True
     assert anthropic.settings.anthropic_api_key_hint.startswith("anth")
-    assert daytona.settings.has_daytona_api_key is True
-    assert daytona.settings.daytona_api_key_hint.startswith("dayt")
+    assert modal_credentials.settings.has_modal_credentials is True
+    assert modal_credentials.settings.modal_token_id_hint.startswith("moda")
     assert notifications.settings.weekly_papers_review_email is True
     assert github.settings.has_github_connection is True
     assert github.settings.github_login == "octocat"
 
-    cleared = service.delete_user_daytona_key(session.user)
+    cleared = service.delete_user_modal_credentials(session.user)
     disconnected = service.delete_github_connection(session.user)
 
-    assert cleared.settings.has_daytona_api_key is False
+    assert cleared.settings.has_modal_credentials is False
     assert disconnected.settings.has_github_connection is False
 
 
@@ -1424,8 +1427,8 @@ def test_sync_project_repo_surfaces_merge_conflicts():
     assert detail["conflicts"][0]["path"] == "src/analysis.py"
 
 
-def test_run_python_file_requires_daytona_and_uses_saved_content():
-    daytona_runner = FakeDaytonaRunner()
+def test_run_python_file_requires_modal_credentials_and_uses_saved_content():
+    modal_runner = FakeModalRunner()
     service = PaperbaseService(
         settings=Settings(
             storage_backend="memory",
@@ -1435,7 +1438,7 @@ def test_run_python_file_requires_daytona_and_uses_saved_content():
         ),
         repository=MemoryPaperRepository(),
         object_store=MemoryObjectStore(),
-        daytona_runner=daytona_runner,
+        modal_runner=modal_runner,
     )
 
     session, _ = service.register_browser_user(
@@ -1463,15 +1466,24 @@ def test_run_python_file_requires_daytona_and_uses_saved_content():
         service.run_python_file(session.user, python_file.file_id)
     assert excinfo.value.status_code == 409
 
-    service.save_user_daytona_key(
+    service.save_user_modal_credentials(
         session.user,
-        SaveDaytonaKeyRequest(api_key="daytona-user-key-999"),
+        SaveModalCredentialsRequest(
+            token_id="modal-token-id-999",
+            token_secret="modal-token-secret-999",
+        ),
     )
     result = service.run_python_file(session.user, python_file.file_id)
 
     assert result.status == "completed"
     assert result.stdout == "runner output"
-    assert daytona_runner.calls == [{"api_key": "daytona-user-key-999", "code": "print('run')"}]
+    assert modal_runner.calls == [
+        {
+            "token_id": "modal-token-id-999",
+            "token_secret": "modal-token-secret-999",
+            "code": "print('run')",
+        }
+    ]
 
 
 def test_browser_uploads_and_chat_require_api_key_after_free_quota(monkeypatch, browser_service):
@@ -1873,10 +1885,13 @@ def test_browser_chat_stream_emits_citations_and_completion(monkeypatch, browser
         events = _parse_sse_events("".join(response.iter_text()))
 
     event_names = [event_name for event_name, _ in events]
-    assert event_names[0] == "assistant_start"
+    assert event_names[:2] == ["tool_start", "tool_done"]
+    assert events[0][1]["label"]
+    assert "assistant_start" in event_names
     assert "delta" in event_names
     assert event_names[-1] == "done"
-    assert events[0][1]["assistant_message"]["citations"]
+    assistant_start_index = event_names.index("assistant_start")
+    assert events[assistant_start_index][1]["assistant_message"]["citations"]
     assert events[-1][1]["assistant_message"]["status"] == "completed"
 
     refreshed = client.get(f"/v1/browser/chats/{thread_id}").json()
@@ -1958,7 +1973,9 @@ def test_browser_chat_stream_marks_partial_failure(monkeypatch, browser_service)
         assert response.status_code == 200
         events = _parse_sse_events("".join(response.iter_text()))
 
-    assert [event_name for event_name, _ in events][:2] == ["assistant_start", "delta"]
+    event_names = [event_name for event_name, _ in events]
+    assert event_names[:3] == ["tool_start", "tool_done", "assistant_start"]
+    assert "delta" in event_names
     assert events[-1][0] == "error"
     refreshed = client.get(f"/v1/browser/chats/{thread_id}").json()
     assert refreshed["messages"][-1]["status"] == "failed"

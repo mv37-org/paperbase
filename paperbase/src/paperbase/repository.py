@@ -11,7 +11,22 @@ from datetime import timedelta
 from typing import Any
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, create_engine, delete, func, or_, select, text
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    create_engine,
+    delete,
+    func,
+    or_,
+    select,
+    text,
+)
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
@@ -284,7 +299,9 @@ class AnthropicAPIKeyORM(Base):
     __tablename__ = "anthropic_api_keys"
 
     anthropic_api_key_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    user_id: Mapped[str] = mapped_column(ForeignKey("browser_users.user_id", ondelete="CASCADE"), unique=True, index=True)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("browser_users.user_id", ondelete="CASCADE"), unique=True, index=True
+    )
     encrypted_api_key: Mapped[str] = mapped_column(Text)
     api_key_hint: Mapped[str] = mapped_column(String(32), default="")
     created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -295,9 +312,14 @@ class BrowserUserSettingsORM(Base):
     __tablename__ = "browser_user_settings"
 
     browser_user_settings_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    user_id: Mapped[str] = mapped_column(ForeignKey("browser_users.user_id", ondelete="CASCADE"), unique=True, index=True)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("browser_users.user_id", ondelete="CASCADE"), unique=True, index=True
+    )
     encrypted_daytona_api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     daytona_api_key_hint: Mapped[str] = mapped_column(String(32), default="")
+    encrypted_modal_token_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    encrypted_modal_token_secret: Mapped[str | None] = mapped_column(Text, nullable=True)
+    modal_token_id_hint: Mapped[str] = mapped_column(String(32), default="")
     weekly_papers_review_email: Mapped[bool] = mapped_column(Boolean, default=False)
     github_user_id: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
     github_login: Mapped[str] = mapped_column(String(255), default="")
@@ -327,7 +349,9 @@ class UploadedDocumentChunkORM(Base):
     __tablename__ = "uploaded_document_chunks"
 
     chunk_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    document_id: Mapped[str] = mapped_column(ForeignKey("uploaded_documents.document_id", ondelete="CASCADE"), index=True)
+    document_id: Mapped[str] = mapped_column(
+        ForeignKey("uploaded_documents.document_id", ondelete="CASCADE"), index=True
+    )
     path: Mapped[str] = mapped_column(Text)
     chunk_kind: Mapped[str] = mapped_column(String(32), default="section")
     content: Mapped[str] = mapped_column(Text)
@@ -459,8 +483,8 @@ def _browser_user_settings_from_orm(row: BrowserUserSettingsORM | None) -> Brows
     if row is None:
         return BrowserUserSettingsResponse()
     return BrowserUserSettingsResponse(
-        has_daytona_api_key=bool(row.encrypted_daytona_api_key),
-        daytona_api_key_hint=row.daytona_api_key_hint or "",
+        has_modal_credentials=bool(row.encrypted_modal_token_id and row.encrypted_modal_token_secret),
+        modal_token_id_hint=row.modal_token_id_hint or "",
         has_github_connection=bool(row.encrypted_github_access_token and row.github_login),
         github_login=row.github_login or "",
         weekly_papers_review_email=bool(row.weekly_papers_review_email),
@@ -812,9 +836,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
         session: Session,
         user_id: str,
     ) -> BrowserUserSettingsORM:
-        row = session.scalar(
-            select(BrowserUserSettingsORM).where(BrowserUserSettingsORM.user_id == user_id)
-        )
+        row = session.scalar(select(BrowserUserSettingsORM).where(BrowserUserSettingsORM.user_id == user_id))
         if row is not None:
             return row
         row = BrowserUserSettingsORM(
@@ -828,14 +850,14 @@ class SqlAlchemyPaperRepository(PaperRepository):
     def _backfill_projects(self) -> None:
         with self._session() as session:
             users = session.scalars(select(BrowserUserORM)).all()
-            default_projects = {
-                user.user_id: self._ensure_default_project_row(session, user.user_id) for user in users
-            }
+            default_projects = {user.user_id: self._ensure_default_project_row(session, user.user_id) for user in users}
             threads = session.scalars(
                 select(ChatThreadORM).where((ChatThreadORM.project_id.is_(None)) | (ChatThreadORM.project_id == ""))
             ).all()
             for thread in threads:
-                project = default_projects.get(thread.user_id) or self._ensure_default_project_row(session, thread.user_id)
+                project = default_projects.get(thread.user_id) or self._ensure_default_project_row(
+                    session, thread.user_id
+                )
                 thread.project_id = project.project_id
                 if not thread.project_name:
                     thread.project_name = project.name
@@ -847,30 +869,61 @@ class SqlAlchemyPaperRepository(PaperRepository):
         with self._engine.begin() as connection:
             connection.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
             connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-            connection.execute(text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS summary_short TEXT DEFAULT ''"))
-            connection.execute(text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS summary_eli5 TEXT DEFAULT ''"))
+            connection.execute(
+                text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS summary_short TEXT DEFAULT ''")
+            )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS summary_eli5 TEXT DEFAULT ''")
+            )
             connection.execute(text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS tldr TEXT DEFAULT ''"))
             connection.execute(text(f"ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS embedding {vector_type}"))
-            connection.execute(text(f"ALTER TABLE IF EXISTS text_chunks ADD COLUMN IF NOT EXISTS embedding {vector_type}"))
-            connection.execute(text("ALTER TABLE IF EXISTS text_chunks ADD COLUMN IF NOT EXISTS chunk_index INTEGER DEFAULT 0"))
-            connection.execute(text("ALTER TABLE IF EXISTS text_chunks ADD COLUMN IF NOT EXISTS section_depth INTEGER DEFAULT 1"))
-            connection.execute(text("ALTER TABLE IF EXISTS text_chunks ADD COLUMN IF NOT EXISTS section_order INTEGER DEFAULT 0"))
-            connection.execute(text("ALTER TABLE IF EXISTS chat_threads ADD COLUMN IF NOT EXISTS project_id VARCHAR(64)"))
-            connection.execute(text("ALTER TABLE IF EXISTS chat_threads ADD COLUMN IF NOT EXISTS project_name TEXT DEFAULT ''"))
-            connection.execute(text("ALTER TABLE IF EXISTS chat_threads ADD COLUMN IF NOT EXISTS project_instructions TEXT DEFAULT ''"))
-        Base.metadata.create_all(self._engine)
-        with self._engine.begin() as connection:
+            connection.execute(
+                text(f"ALTER TABLE IF EXISTS text_chunks ADD COLUMN IF NOT EXISTS embedding {vector_type}")
+            )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS text_chunks ADD COLUMN IF NOT EXISTS chunk_index INTEGER DEFAULT 0")
+            )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS text_chunks ADD COLUMN IF NOT EXISTS section_depth INTEGER DEFAULT 1")
+            )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS text_chunks ADD COLUMN IF NOT EXISTS section_order INTEGER DEFAULT 0")
+            )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS chat_threads ADD COLUMN IF NOT EXISTS project_id VARCHAR(64)")
+            )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS chat_threads ADD COLUMN IF NOT EXISTS project_name TEXT DEFAULT ''")
+            )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS chat_threads ADD COLUMN IF NOT EXISTS project_instructions TEXT DEFAULT ''")
+            )
             connection.execute(
                 text(
-                    "CREATE UNIQUE INDEX IF NOT EXISTS projects_default_per_user "
-                    "ON projects (user_id) WHERE is_default"
+                    "ALTER TABLE IF EXISTS browser_user_settings ADD COLUMN IF NOT EXISTS encrypted_modal_token_id TEXT"
                 )
             )
             connection.execute(
                 text(
-                    "CREATE INDEX IF NOT EXISTS chat_threads_project_id_idx "
-                    "ON chat_threads (project_id)"
+                    "ALTER TABLE IF EXISTS browser_user_settings "
+                    "ADD COLUMN IF NOT EXISTS encrypted_modal_token_secret TEXT"
                 )
+            )
+            connection.execute(
+                text(
+                    "ALTER TABLE IF EXISTS browser_user_settings "
+                    "ADD COLUMN IF NOT EXISTS modal_token_id_hint VARCHAR(32) DEFAULT ''"
+                )
+            )
+        Base.metadata.create_all(self._engine)
+        with self._engine.begin() as connection:
+            connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS projects_default_per_user ON projects (user_id) WHERE is_default"
+                )
+            )
+            connection.execute(
+                text("CREATE INDEX IF NOT EXISTS chat_threads_project_id_idx ON chat_threads (project_id)")
             )
             connection.execute(
                 text(
@@ -910,12 +963,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     "ON text_chunks USING gin (content gin_trgm_ops)"
                 )
             )
-            connection.execute(
-                text(
-                    "CREATE INDEX IF NOT EXISTS paper_refs_dst_arxiv_id "
-                    "ON paper_refs (dst_arxiv_id)"
-                )
-            )
+            connection.execute(text("CREATE INDEX IF NOT EXISTS paper_refs_dst_arxiv_id ON paper_refs (dst_arxiv_id)"))
             connection.execute(
                 text(
                     "CREATE INDEX IF NOT EXISTS paper_refs_dst_paper_id "
@@ -923,16 +971,10 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 )
             )
             connection.execute(
-                text(
-                    "CREATE INDEX IF NOT EXISTS papers_title_trgm "
-                    "ON papers USING gin (title gin_trgm_ops)"
-                )
+                text("CREATE INDEX IF NOT EXISTS papers_title_trgm ON papers USING gin (title gin_trgm_ops)")
             )
             connection.execute(
-                text(
-                    "CREATE INDEX IF NOT EXISTS papers_authors_trgm "
-                    "ON papers USING gin (authors gin_trgm_ops)"
-                )
+                text("CREATE INDEX IF NOT EXISTS papers_authors_trgm ON papers USING gin (authors gin_trgm_ops)")
             )
             # Summary / tldr trigram indexes back the suggest endpoint's
             # widened ILIKE '%q%' branch. Without these, summary-only
@@ -944,10 +986,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 )
             )
             connection.execute(
-                text(
-                    "CREATE INDEX IF NOT EXISTS papers_tldr_trgm "
-                    "ON papers USING gin (tldr gin_trgm_ops)"
-                )
+                text("CREATE INDEX IF NOT EXISTS papers_tldr_trgm ON papers USING gin (tldr gin_trgm_ops)")
             )
         self._backfill_projects()
 
@@ -1219,9 +1258,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
             )
         sql = text(base_sql.format(chunk_predicate=chunk_predicate, after_predicate=after_predicate))
         with self._session() as session:
-            rows = session.scalars(
-                select(PaperORM).from_statement(sql).params(**params)
-            ).all()
+            rows = session.scalars(select(PaperORM).from_statement(sql).params(**params)).all()
         return [_paper_from_orm(row) for row in rows]
 
     def update_paper_embedding(self, paper_id: str, embedding: list[float]) -> None:
@@ -1233,12 +1270,16 @@ class SqlAlchemyPaperRepository(PaperRepository):
 
     def list_chunks_missing_embedding(self, paper_id: str) -> list[dict[str, Any]]:
         with self._session() as session:
-            rows = session.execute(
-                select(TextChunkORM).where(
-                    TextChunkORM.paper_id == paper_id,
-                    TextChunkORM.embedding.is_(None),
+            rows = (
+                session.execute(
+                    select(TextChunkORM).where(
+                        TextChunkORM.paper_id == paper_id,
+                        TextChunkORM.embedding.is_(None),
+                    )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
         return [
             {
                 "chunk_id": row.chunk_id,
@@ -1276,9 +1317,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
     def get_paper_refs(self, paper_id: str) -> list[dict[str, Any]]:
         with self._session() as session:
             rows = session.scalars(
-                select(PaperRefORM)
-                .where(PaperRefORM.src_paper_id == paper_id)
-                .order_by(PaperRefORM.rank.asc())
+                select(PaperRefORM).where(PaperRefORM.src_paper_id == paper_id).order_by(PaperRefORM.rank.asc())
             ).all()
         return [
             {
@@ -1418,19 +1457,20 @@ class SqlAlchemyPaperRepository(PaperRepository):
             """
         )
         with self._session() as session:
-            rows = session.execute(
-                sql,
-                {
-                    "q": q,
-                    "prefix_like": f"{q}%",
-                    "contains_like": f"%{q}%",
-                    "limit": limit,
-                },
-            ).mappings().all()
-        return [
-            _suggest_row_to_payload(q, row)
-            for row in rows
-        ]
+            rows = (
+                session.execute(
+                    sql,
+                    {
+                        "q": q,
+                        "prefix_like": f"{q}%",
+                        "contains_like": f"%{q}%",
+                        "limit": limit,
+                    },
+                )
+                .mappings()
+                .all()
+            )
+        return [_suggest_row_to_payload(q, row) for row in rows]
 
     def suggest_fallback_papers(self, *, limit: int = 6) -> list[dict[str, Any]]:
         sql = text(
@@ -1604,10 +1644,14 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 """
             )
             with self._session() as session:
-                vector_rows = session.execute(
-                    vector_sql,
-                    {"query_embedding": embedding_literal, "candidate_pool": candidate_pool},
-                ).mappings().all()
+                vector_rows = (
+                    session.execute(
+                        vector_sql,
+                        {"query_embedding": embedding_literal, "candidate_pool": candidate_pool},
+                    )
+                    .mappings()
+                    .all()
+                )
 
         with self._session() as session:
             lexical_rows = session.execute(lexical_sql, lexical_params).mappings().all()
@@ -1698,8 +1742,8 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     ELSE 1.0
                 END AS depth_weight
             FROM text_chunks tc
-            {' '.join(joins)}
-            WHERE {' AND '.join(filters)}
+            {" ".join(joins)}
+            WHERE {" AND ".join(filters)}
             ORDER BY lexical_score DESC, depth_weight DESC, kind_score DESC, p.citation_count DESC, p.published DESC
             LIMIT :candidate_pool
             """
@@ -1751,8 +1795,8 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     END AS depth_weight,
                     1 - (tc.embedding <=> CAST(:query_embedding AS vector)) AS vector_score
                 FROM text_chunks tc
-                {' '.join(vector_joins)}
-                WHERE {' AND '.join(vector_filters)}
+                {" ".join(vector_joins)}
+                WHERE {" AND ".join(vector_filters)}
                 ORDER BY tc.embedding <=> CAST(:query_embedding AS vector)
                 LIMIT :candidate_pool
                 """
@@ -1942,28 +1986,23 @@ class SqlAlchemyPaperRepository(PaperRepository):
 
     def get_browser_user_settings(self, user_id: str) -> BrowserUserSettingsResponse:
         with self._session() as session:
-            row = session.scalar(
-                select(BrowserUserSettingsORM).where(BrowserUserSettingsORM.user_id == user_id)
-            )
+            row = session.scalar(select(BrowserUserSettingsORM).where(BrowserUserSettingsORM.user_id == user_id))
             return _browser_user_settings_from_orm(row)
 
-    def get_daytona_api_key_record(self, user_id: str) -> dict[str, str] | None:
+    def get_modal_credentials_record(self, user_id: str) -> dict[str, str] | None:
         with self._session() as session:
-            row = session.scalar(
-                select(BrowserUserSettingsORM).where(BrowserUserSettingsORM.user_id == user_id)
-            )
-            if row is None or not row.encrypted_daytona_api_key:
+            row = session.scalar(select(BrowserUserSettingsORM).where(BrowserUserSettingsORM.user_id == user_id))
+            if row is None or not row.encrypted_modal_token_id or not row.encrypted_modal_token_secret:
                 return None
             return {
-                "encrypted_api_key": row.encrypted_daytona_api_key,
-                "api_key_hint": row.daytona_api_key_hint or "",
+                "encrypted_token_id": row.encrypted_modal_token_id,
+                "encrypted_token_secret": row.encrypted_modal_token_secret,
+                "token_id_hint": row.modal_token_id_hint or "",
             }
 
     def get_github_connection_record(self, user_id: str) -> dict[str, str] | None:
         with self._session() as session:
-            row = session.scalar(
-                select(BrowserUserSettingsORM).where(BrowserUserSettingsORM.user_id == user_id)
-            )
+            row = session.scalar(select(BrowserUserSettingsORM).where(BrowserUserSettingsORM.user_id == user_id))
             if row is None or not row.encrypted_github_access_token or not row.github_login:
                 return None
             return {
@@ -1973,22 +2012,29 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 "scope": row.github_scope or "",
             }
 
-    def save_daytona_api_key(self, *, user_id: str, encrypted_api_key: str, hint: str) -> None:
+    def save_modal_credentials(
+        self,
+        *,
+        user_id: str,
+        encrypted_token_id: str,
+        encrypted_token_secret: str,
+        token_id_hint: str,
+    ) -> None:
         with self._session() as session:
             row = self._get_or_create_browser_user_settings_row(session, user_id)
-            row.encrypted_daytona_api_key = encrypted_api_key
-            row.daytona_api_key_hint = hint
+            row.encrypted_modal_token_id = encrypted_token_id
+            row.encrypted_modal_token_secret = encrypted_token_secret
+            row.modal_token_id_hint = token_id_hint
             row.updated_at = utcnow()
 
-    def delete_daytona_api_key(self, user_id: str) -> None:
+    def delete_modal_credentials(self, user_id: str) -> None:
         with self._session() as session:
-            row = session.scalar(
-                select(BrowserUserSettingsORM).where(BrowserUserSettingsORM.user_id == user_id)
-            )
+            row = session.scalar(select(BrowserUserSettingsORM).where(BrowserUserSettingsORM.user_id == user_id))
             if row is None:
                 return
-            row.encrypted_daytona_api_key = None
-            row.daytona_api_key_hint = ""
+            row.encrypted_modal_token_id = None
+            row.encrypted_modal_token_secret = None
+            row.modal_token_id_hint = ""
             row.updated_at = utcnow()
 
     def set_weekly_papers_review_email(self, *, user_id: str, enabled: bool) -> None:
@@ -2028,9 +2074,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
 
     def delete_github_connection(self, user_id: str) -> None:
         with self._session() as session:
-            row = session.scalar(
-                select(BrowserUserSettingsORM).where(BrowserUserSettingsORM.user_id == user_id)
-            )
+            row = session.scalar(select(BrowserUserSettingsORM).where(BrowserUserSettingsORM.user_id == user_id))
             if row is None:
                 return
             row.github_user_id = None
@@ -2171,16 +2215,22 @@ class SqlAlchemyPaperRepository(PaperRepository):
             if project is None:
                 return None
             thread_count = int(
-                session.scalar(select(func.count()).select_from(ChatThreadORM).where(ChatThreadORM.project_id == project.project_id))
+                session.scalar(
+                    select(func.count())
+                    .select_from(ChatThreadORM)
+                    .where(ChatThreadORM.project_id == project.project_id)
+                )
                 or 0
             )
             file_count = int(
-                session.scalar(select(func.count()).select_from(PythonFileORM).where(PythonFileORM.project_id == project.project_id))
+                session.scalar(
+                    select(func.count())
+                    .select_from(PythonFileORM)
+                    .where(PythonFileORM.project_id == project.project_id)
+                )
                 or 0
             )
-            return ProjectResponse(
-                **_project_from_orm(project, session_count=thread_count + file_count).model_dump()
-            )
+            return ProjectResponse(**_project_from_orm(project, session_count=thread_count + file_count).model_dump())
 
     def list_projects(self, user_id: str) -> list[ProjectSummary]:
         with self._session() as session:
@@ -2223,16 +2273,18 @@ class SqlAlchemyPaperRepository(PaperRepository):
             if project is None:
                 return None
             thread_count = int(
-                session.scalar(select(func.count()).select_from(ChatThreadORM).where(ChatThreadORM.project_id == project_id))
+                session.scalar(
+                    select(func.count()).select_from(ChatThreadORM).where(ChatThreadORM.project_id == project_id)
+                )
                 or 0
             )
             file_count = int(
-                session.scalar(select(func.count()).select_from(PythonFileORM).where(PythonFileORM.project_id == project_id))
+                session.scalar(
+                    select(func.count()).select_from(PythonFileORM).where(PythonFileORM.project_id == project_id)
+                )
                 or 0
             )
-        return ProjectResponse(
-            **_project_from_orm(project, session_count=thread_count + file_count).model_dump()
-        )
+        return ProjectResponse(**_project_from_orm(project, session_count=thread_count + file_count).model_dump())
 
     def create_project(self, *, user_id: str, name: str, description: str) -> ProjectResponse:
         row = ProjectORM(
@@ -2269,7 +2321,9 @@ class SqlAlchemyPaperRepository(PaperRepository):
             session.execute(
                 delete(ChatThreadORM).where(ChatThreadORM.user_id == user_id, ChatThreadORM.project_id == project_id)
             )
-            session.execute(delete(ProjectORM).where(ProjectORM.project_id == project_id, ProjectORM.user_id == user_id))
+            session.execute(
+                delete(ProjectORM).where(ProjectORM.project_id == project_id, ProjectORM.user_id == user_id)
+            )
         return True
 
     def list_project_chat_threads(
@@ -2336,8 +2390,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 return None
 
             thread_rows = session.scalars(
-                select(ChatThreadORM)
-                .where(ChatThreadORM.user_id == user_id, ChatThreadORM.project_id == project_id)
+                select(ChatThreadORM).where(ChatThreadORM.user_id == user_id, ChatThreadORM.project_id == project_id)
             ).all()
             items: list[ProjectItemSummary] = []
             for thread in thread_rows:
@@ -2355,8 +2408,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 )
 
             file_rows = session.scalars(
-                select(PythonFileORM)
-                .where(PythonFileORM.user_id == user_id, PythonFileORM.project_id == project_id)
+                select(PythonFileORM).where(PythonFileORM.user_id == user_id, PythonFileORM.project_id == project_id)
             ).all()
             items.extend(_project_item_from_python_file(_python_file_summary_from_orm(row)) for row in file_rows)
 
@@ -2582,9 +2634,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
     def list_chat_threads(self, user_id: str) -> list[ChatThreadSummary]:
         with self._session() as session:
             threads = session.scalars(
-                select(ChatThreadORM)
-                .where(ChatThreadORM.user_id == user_id)
-                .order_by(ChatThreadORM.updated_at.desc())
+                select(ChatThreadORM).where(ChatThreadORM.user_id == user_id).order_by(ChatThreadORM.updated_at.desc())
             ).all()
             results: list[ChatThreadSummary] = []
             for thread in threads:
@@ -2847,10 +2897,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
     def claim_pending_job(self) -> JobResponse | None:
         with self._session() as session:
             row = session.scalar(
-                select(JobORM)
-                .where(JobORM.status == "pending")
-                .order_by(JobORM.created_at.asc())
-                .limit(1)
+                select(JobORM).where(JobORM.status == "pending").order_by(JobORM.created_at.asc()).limit(1)
             )
             if row is None:
                 return None
@@ -2887,7 +2934,9 @@ class SqlAlchemyPaperRepository(PaperRepository):
 
     def cleanup_expired_results(self) -> None:
         with self._session() as session:
-            expired_ids = session.scalars(select(ResultSetORM.result_set_id).where(ResultSetORM.expires_at < utcnow())).all()
+            expired_ids = session.scalars(
+                select(ResultSetORM.result_set_id).where(ResultSetORM.expires_at < utcnow())
+            ).all()
             if expired_ids:
                 session.execute(delete(ResultItemORM).where(ResultItemORM.result_set_id.in_(expired_ids)))
                 session.execute(delete(ResultSetORM).where(ResultSetORM.result_set_id.in_(expired_ids)))
@@ -2912,7 +2961,7 @@ class MemoryPaperRepository(PaperRepository):
         self.password_reset_tokens: dict[str, dict[str, Any]] = {}
         self.user_api_keys: dict[str, dict[str, str]] = {}
         self.browser_user_settings: dict[str, BrowserUserSettingsResponse] = {}
-        self.daytona_api_key_records: dict[str, dict[str, str]] = {}
+        self.modal_credentials_records: dict[str, dict[str, str]] = {}
         self.github_connection_records: dict[str, dict[str, str]] = {}
         self.uploaded_documents: dict[str, UploadedDocumentResponse] = {}
         self.uploaded_document_chunks: dict[str, list[dict[str, str]]] = defaultdict(list)
@@ -3044,9 +3093,7 @@ class MemoryPaperRepository(PaperRepository):
         after: PaperResponse | None = None,
     ) -> list[PaperResponse]:
         candidates = [
-            paper
-            for paper in self.papers.values()
-            if not paper.summary_eli5 and paper.index_status == "indexed"
+            paper for paper in self.papers.values() if not paper.summary_eli5 and paper.index_status == "indexed"
         ]
         candidates.sort(
             key=lambda p: (
@@ -3073,10 +3120,7 @@ class MemoryPaperRepository(PaperRepository):
             if self.paper_embeddings.get(paper.paper_id) is None:
                 return True
             if include_chunks:
-                return any(
-                    not chunk.get("embedding")
-                    for chunk in self.text_chunks.get(paper.paper_id, [])
-                )
+                return any(not chunk.get("embedding") for chunk in self.text_chunks.get(paper.paper_id, []))
             return False
 
         candidates = [paper for paper in self.papers.values() if needs_backfill(paper)]
@@ -3089,9 +3133,7 @@ class MemoryPaperRepository(PaperRepository):
             )
         )
         if after is not None:
-            candidates = [
-                paper for paper in candidates if _paper_needs_summary_after(paper, after)
-            ]
+            candidates = [paper for paper in candidates if _paper_needs_summary_after(paper, after)]
         return candidates[:limit]
 
     def update_paper_embedding(self, paper_id: str, embedding: list[float]) -> None:
@@ -3232,10 +3274,7 @@ class MemoryPaperRepository(PaperRepository):
         with_embedding = sum(1 for v in self.paper_embeddings.values() if v is not None)
         total_chunks = sum(len(chunks) for chunks in self.text_chunks.values())
         chunks_with_embedding = sum(
-            1
-            for chunks in self.text_chunks.values()
-            for chunk in chunks
-            if chunk.get("embedding")
+            1 for chunks in self.text_chunks.values() for chunk in chunks if chunk.get("embedding")
         )
         last_indexed = max(
             (p.indexed_at for p in self.papers.values() if p.indexed_at),
@@ -3411,7 +3450,11 @@ class MemoryPaperRepository(PaperRepository):
         return updated
 
     def create_browser_session(self, *, user_id: str, token_hash_value: str, expires_at: Any) -> None:
-        self.browser_sessions[token_hash_value] = {"user_id": user_id, "expires_at": expires_at, "last_seen_at": utcnow()}
+        self.browser_sessions[token_hash_value] = {
+            "user_id": user_id,
+            "expires_at": expires_at,
+            "last_seen_at": utcnow(),
+        }
 
     def get_browser_user_by_session_token_hash(self, token_hash_value: str) -> BrowserUser | None:
         record = self.browser_sessions.get(token_hash_value)
@@ -3449,40 +3492,46 @@ class MemoryPaperRepository(PaperRepository):
     def get_browser_user_settings(self, user_id: str) -> BrowserUserSettingsResponse:
         return self.browser_user_settings.get(user_id, BrowserUserSettingsResponse())
 
-    def get_daytona_api_key_record(self, user_id: str) -> dict[str, str] | None:
-        return self.daytona_api_key_records.get(user_id)
+    def get_modal_credentials_record(self, user_id: str) -> dict[str, str] | None:
+        return self.modal_credentials_records.get(user_id)
 
     def get_github_connection_record(self, user_id: str) -> dict[str, str] | None:
         return self.github_connection_records.get(user_id)
 
-    def save_daytona_api_key(self, *, user_id: str, encrypted_api_key: str, hint: str) -> None:
+    def save_modal_credentials(
+        self,
+        *,
+        user_id: str,
+        encrypted_token_id: str,
+        encrypted_token_secret: str,
+        token_id_hint: str,
+    ) -> None:
         current = self._get_or_create_browser_user_settings(user_id)
-        self.daytona_api_key_records[user_id] = {
-            "encrypted_api_key": encrypted_api_key,
-            "api_key_hint": hint,
+        self.modal_credentials_records[user_id] = {
+            "encrypted_token_id": encrypted_token_id,
+            "encrypted_token_secret": encrypted_token_secret,
+            "token_id_hint": token_id_hint,
         }
         self.browser_user_settings[user_id] = current.model_copy(
             update={
-                "has_daytona_api_key": True,
-                "daytona_api_key_hint": hint,
+                "has_modal_credentials": True,
+                "modal_token_id_hint": token_id_hint,
             }
         )
 
-    def delete_daytona_api_key(self, user_id: str) -> None:
+    def delete_modal_credentials(self, user_id: str) -> None:
         current = self._get_or_create_browser_user_settings(user_id)
-        self.daytona_api_key_records.pop(user_id, None)
+        self.modal_credentials_records.pop(user_id, None)
         self.browser_user_settings[user_id] = current.model_copy(
             update={
-                "has_daytona_api_key": False,
-                "daytona_api_key_hint": "",
+                "has_modal_credentials": False,
+                "modal_token_id_hint": "",
             }
         )
 
     def set_weekly_papers_review_email(self, *, user_id: str, enabled: bool) -> None:
         current = self._get_or_create_browser_user_settings(user_id)
-        self.browser_user_settings[user_id] = current.model_copy(
-            update={"weekly_papers_review_email": enabled}
-        )
+        self.browser_user_settings[user_id] = current.model_copy(update={"weekly_papers_review_email": enabled})
 
     def save_github_connection(
         self,
@@ -3645,11 +3694,11 @@ class MemoryPaperRepository(PaperRepository):
                 and python_file.project_id == project.project_id
             )
             summaries.append(
-                ProjectSummary(
-                    **project.model_copy(update={"session_count": thread_count + file_count}).model_dump()
-                )
+                ProjectSummary(**project.model_copy(update={"session_count": thread_count + file_count}).model_dump())
             )
-        summaries.sort(key=lambda item: (not item.is_default, -item.updated_at.timestamp(), item.created_at.timestamp()))
+        summaries.sort(
+            key=lambda item: (not item.is_default, -item.updated_at.timestamp(), item.created_at.timestamp())
+        )
         return summaries
 
     def get_project(self, *, user_id: str, project_id: str) -> ProjectResponse | None:
@@ -3666,8 +3715,7 @@ class MemoryPaperRepository(PaperRepository):
         file_count = sum(
             1
             for python_file in self.python_files.values()
-            if self.python_file_users.get(python_file.file_id) == user_id
-            and python_file.project_id == project_id
+            if self.python_file_users.get(python_file.file_id) == user_id and python_file.project_id == project_id
         )
         return project.model_copy(update={"session_count": thread_count + file_count})
 
@@ -3859,8 +3907,7 @@ class MemoryPaperRepository(PaperRepository):
             existing = [
                 file.filename
                 for file in self.python_files.values()
-                if self.python_file_users.get(file.file_id) == user_id
-                and file.project_id == current.project_id
+                if self.python_file_users.get(file.file_id) == user_id and file.project_id == current.project_id
             ]
             next_filename = _resolve_unique_python_filename(
                 filename,
@@ -4054,14 +4101,18 @@ class MemoryPaperRepository(PaperRepository):
                 updated_message = message.model_copy(
                     update={
                         "content_markdown": message.content_markdown if content_markdown is None else content_markdown,
-                        "citations": message.citations if citations is None else [ChatCitation.model_validate(citation) for citation in citations],
+                        "citations": message.citations
+                        if citations is None
+                        else [ChatCitation.model_validate(citation) for citation in citations],
                         "status": message.status if status is None else status,
                     }
                 )
                 messages = list(thread.messages)
                 messages[index] = updated_message
                 updated_at = utcnow()
-                self.chat_threads[thread_id] = thread.model_copy(update={"messages": messages, "updated_at": updated_at})
+                self.chat_threads[thread_id] = thread.model_copy(
+                    update={"messages": messages, "updated_at": updated_at}
+                )
                 project = self.projects.get(thread.project_id)
                 if project is not None:
                     self.projects[thread.project_id] = project.model_copy(update={"updated_at": updated_at})
@@ -4106,17 +4157,23 @@ class MemoryPaperRepository(PaperRepository):
     def mark_job_running(self, job_id: str) -> None:
         job = self.jobs.get(job_id)
         if job:
-            self.jobs[job_id] = job.model_copy(update={"status": "running", "updated_at": utcnow(), "started_at": job.started_at or utcnow()})
+            self.jobs[job_id] = job.model_copy(
+                update={"status": "running", "updated_at": utcnow(), "started_at": job.started_at or utcnow()}
+            )
 
     def mark_job_completed(self, job_id: str) -> None:
         job = self.jobs.get(job_id)
         if job:
-            self.jobs[job_id] = job.model_copy(update={"status": "completed", "updated_at": utcnow(), "finished_at": utcnow()})
+            self.jobs[job_id] = job.model_copy(
+                update={"status": "completed", "updated_at": utcnow(), "finished_at": utcnow()}
+            )
 
     def mark_job_failed(self, job_id: str, error: str) -> None:
         job = self.jobs.get(job_id)
         if job:
-            self.jobs[job_id] = job.model_copy(update={"status": "failed", "error": error, "updated_at": utcnow(), "finished_at": utcnow()})
+            self.jobs[job_id] = job.model_copy(
+                update={"status": "failed", "error": error, "updated_at": utcnow(), "finished_at": utcnow()}
+            )
 
     def cleanup_expired_results(self) -> None:
         now = utcnow()

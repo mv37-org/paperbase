@@ -184,8 +184,8 @@ class BrowserUser(BaseModel):
 
 class BrowserUserSettingsResponse(BaseModel):
     anthropic_api_key_hint: str = ""
-    has_daytona_api_key: bool = False
-    daytona_api_key_hint: str = ""
+    has_modal_credentials: bool = False
+    modal_token_id_hint: str = ""
     has_github_connection: bool = False
     github_login: str = ""
     github_oauth_available: bool = False
@@ -225,8 +225,9 @@ class SaveAnthropicKeyRequest(BaseModel):
     api_key: str = Field(min_length=8)
 
 
-class SaveDaytonaKeyRequest(BaseModel):
-    api_key: str = Field(min_length=8)
+class SaveModalCredentialsRequest(BaseModel):
+    token_id: str = Field(min_length=4)
+    token_secret: str = Field(min_length=8)
 
 
 class UpdateNotificationsRequest(BaseModel):

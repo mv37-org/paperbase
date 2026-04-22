@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ChangeEvent, UIEvent } from "react";
 import Editor, { DiffEditor } from "@monaco-editor/react";
 
@@ -30,6 +30,7 @@ import {
   sendThreadMessage,
   sendThreadMessageStream,
   suggestBrowserPapers,
+  StreamingChatAbortError,
   StreamingChatError,
   syncProjectRepo,
   updateProject,
@@ -121,6 +122,20 @@ type DeleteModalState =
   | { kind: "project"; projectId: string; name: string }
   | { kind: "thread"; projectId: string; threadId: string; title: string }
   | null;
+type ToolActivityEntry = {
+  id: string;
+  turnIndex: number;
+  label: string;
+  status: "running" | "completed";
+  startedAt: string;
+  finishedAt: string | null;
+  isError: boolean;
+};
+type ThreadStreamState = {
+  turnIndex: number;
+  thinkingWord: string;
+  assistantStarted: boolean;
+};
 
 const AUTH_VIEW_COPY: Record<AuthView, { title: string; caption: string }> = {
   login: { title: "Log in", caption: "Use your account to continue." },
@@ -135,8 +150,8 @@ const AUTH_VIEW_COPY: Record<AuthView, { title: string; caption: string }> = {
 
 const DEFAULT_BROWSER_SETTINGS = {
   anthropic_api_key_hint: "",
-  has_daytona_api_key: false,
-  daytona_api_key_hint: "",
+  has_modal_credentials: false,
+  modal_token_id_hint: "",
   has_github_connection: false,
   github_login: "",
   github_oauth_available: false,
@@ -154,7 +169,7 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; caption: string }> 
   {
     id: "sandbox",
     label: "Sandbox",
-    caption: "Manage Daytona sandbox API key.",
+    caption: "Manage Modal sandbox credentials.",
   },
   {
     id: "version-control",
@@ -192,6 +207,29 @@ const EXAMPLES = [
     prompt:
       "Summarize recent research on retrieval, memory, and tool use for production AI systems.",
   },
+];
+
+const THINKING_WORDS = [
+  "Thinking",
+  "Pondering",
+  "Brainstorming",
+  "Reasoning",
+  "Considering",
+  "Exploring",
+  "Reflecting",
+  "Analyzing",
+  "Evaluating",
+  "Inspecting",
+  "Tracing",
+  "Mapping",
+  "Digging",
+  "Unpacking",
+  "Drafting",
+  "Refining",
+  "Weighing",
+  "Composing",
+  "Calculating",
+  "Synthesizing",
 ];
 
 function staticAssetPath(name: string) {
@@ -368,6 +406,21 @@ function formatTodayTimeLabel(value: string) {
     hour: "numeric",
     minute: "2-digit",
   }).format(timestamp);
+}
+
+function pickThinkingWord(previous?: string | null) {
+  if (THINKING_WORDS.length === 0) {
+    return "Thinking";
+  }
+  if (THINKING_WORDS.length === 1) {
+    return THINKING_WORDS[0]!;
+  }
+  let next = THINKING_WORDS[Math.floor(Math.random() * THINKING_WORDS.length)] ?? "Thinking";
+  if (previous && next === previous) {
+    const currentIndex = THINKING_WORDS.indexOf(next);
+    next = THINKING_WORDS[(currentIndex + 1) % THINKING_WORDS.length] ?? next;
+  }
+  return next;
 }
 
 function shouldShowThreadInSidebar(thread: ChatThreadSummary) {
@@ -562,6 +615,10 @@ export default function App() {
   const [emptyStateProjectPickerOpen, setEmptyStateProjectPickerOpen] = useState(false);
   const [emptyStateProjectSearch, setEmptyStateProjectSearch] = useState("");
   const [streamingThreadId, setStreamingThreadId] = useState<string | null>(null);
+  const [threadStreamStates, setThreadStreamStates] = useState<Record<string, ThreadStreamState>>(
+    {},
+  );
+  const [toolActivities, setToolActivities] = useState<Record<string, ToolActivityEntry[]>>({});
   const [paperDrawer, setPaperDrawer] = useState<PaperDrawerState>(() => drawerStateFromUrl());
   const [paperDrawerPaper, setPaperDrawerPaper] = useState<PaperResponse | null>(null);
   const [paperDrawerContent, setPaperDrawerContent] = useState<PaperDrawerContent | null>(null);
@@ -585,6 +642,7 @@ export default function App() {
   const emptyStateProjectSearchInputRef = useRef<HTMLInputElement | null>(null);
   const projectMenuRef = useRef<HTMLDivElement | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
+  const streamAbortControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     sessionRef.current = session;
@@ -613,6 +671,14 @@ export default function App() {
   useEffect(() => {
     pythonFileDraftsRef.current = pythonFileDrafts;
   }, [pythonFileDrafts]);
+
+  useEffect(
+    () => () => {
+      streamAbortControllerRef.current?.abort();
+      streamAbortControllerRef.current = null;
+    },
+    [],
+  );
 
   useEffect(() => {
     if (!tabsStorageHydratedRef.current) {
@@ -803,6 +869,29 @@ export default function App() {
       }) as CSSProperties,
     [openTabItems.length],
   );
+  const activeThreadStreamState = activeThreadId
+    ? (threadStreamStates[activeThreadId] ?? null)
+    : null;
+  const activeThreadToolActivities = useMemo(
+    () =>
+      activeThreadId
+        ? [...(toolActivities[activeThreadId] ?? [])].sort((left, right) =>
+            left.turnIndex === right.turnIndex
+              ? Date.parse(left.startedAt) - Date.parse(right.startedAt)
+              : left.turnIndex - right.turnIndex,
+          )
+        : [],
+    [activeThreadId, toolActivities],
+  );
+  const activeThreadToolActivitiesByTurn = useMemo(() => {
+    const grouped = new Map<number, ToolActivityEntry[]>();
+    for (const activity of activeThreadToolActivities) {
+      const existing = grouped.get(activity.turnIndex) ?? [];
+      existing.push(activity);
+      grouped.set(activity.turnIndex, existing);
+    }
+    return grouped;
+  }, [activeThreadToolActivities]);
   const activeStreamInView = streamingThreadId !== null && streamingThreadId === activeThreadId;
   const showScrollToLatest = activeTab?.kind === "thread" && !isChatEmpty && !messageListAtBottom;
 
@@ -967,6 +1056,114 @@ export default function App() {
     [],
   );
 
+  const startThreadStreamState = useCallback((threadId: string, turnIndex: number) => {
+    setThreadStreamStates((current) => ({
+      ...current,
+      [threadId]: {
+        turnIndex,
+        thinkingWord: pickThinkingWord(current[threadId]?.thinkingWord ?? null),
+        assistantStarted: false,
+      },
+    }));
+  }, []);
+
+  const markThreadAssistantStarted = useCallback((threadId: string) => {
+    setThreadStreamStates((current) => {
+      const existing = current[threadId];
+      if (!existing) {
+        return current;
+      }
+      return {
+        ...current,
+        [threadId]: {
+          ...existing,
+          assistantStarted: true,
+        },
+      };
+    });
+  }, []);
+
+  const clearThreadStreamState = useCallback((threadId: string) => {
+    setThreadStreamStates((current) => {
+      if (!(threadId in current)) {
+        return current;
+      }
+      const next = { ...current };
+      delete next[threadId];
+      return next;
+    });
+  }, []);
+
+  const upsertToolActivity = useCallback((threadId: string, nextEntry: ToolActivityEntry) => {
+    setToolActivities((current) => {
+      const existingEntries = current[threadId] ?? [];
+      const nextEntries = existingEntries.some((entry) => entry.id === nextEntry.id)
+        ? existingEntries.map((entry) => (entry.id === nextEntry.id ? nextEntry : entry))
+        : [...existingEntries, nextEntry];
+      return {
+        ...current,
+        [threadId]: nextEntries,
+      };
+    });
+  }, []);
+
+  const completeToolActivity = useCallback(
+    (
+      threadId: string,
+      toolId: string,
+      updates: Partial<Pick<ToolActivityEntry, "finishedAt" | "isError">> = {},
+    ) => {
+      setToolActivities((current) => {
+        const existingEntries = current[threadId] ?? [];
+        if (!existingEntries.some((entry) => entry.id === toolId)) {
+          return current;
+        }
+        return {
+          ...current,
+          [threadId]: existingEntries.map((entry) =>
+            entry.id === toolId
+              ? {
+                  ...entry,
+                  status: "completed",
+                  finishedAt: updates.finishedAt ?? new Date().toISOString(),
+                  isError: updates.isError ?? entry.isError,
+                }
+              : entry,
+          ),
+        };
+      });
+    },
+    [],
+  );
+
+  const completeRunningToolActivitiesForTurn = useCallback(
+    (threadId: string, turnIndex: number) => {
+      setToolActivities((current) => {
+        const existingEntries = current[threadId] ?? [];
+        if (
+          !existingEntries.some(
+            (entry) => entry.turnIndex === turnIndex && entry.status === "running",
+          )
+        ) {
+          return current;
+        }
+        return {
+          ...current,
+          [threadId]: existingEntries.map((entry) =>
+            entry.turnIndex === turnIndex && entry.status === "running"
+              ? {
+                  ...entry,
+                  status: "completed",
+                  finishedAt: new Date().toISOString(),
+                }
+              : entry,
+          ),
+        };
+      });
+    },
+    [],
+  );
+
   const handleCitationClick = useCallback(
     (message: ChatMessageResponse, citation: ChatCitation) => {
       document
@@ -1026,6 +1223,20 @@ export default function App() {
         return;
       }
       setThreadMap((current) => {
+        const next = { ...current };
+        for (const threadId of ids) {
+          delete next[threadId];
+        }
+        return next;
+      });
+      setThreadStreamStates((current) => {
+        const next = { ...current };
+        for (const threadId of ids) {
+          delete next[threadId];
+        }
+        return next;
+      });
+      setToolActivities((current) => {
         const next = { ...current };
         for (const threadId of ids) {
           delete next[threadId];
@@ -1283,6 +1494,8 @@ export default function App() {
       const optimisticUserMessage = createLocalMessage("user", content);
       const now = new Date().toISOString();
       const fallbackThread = threadMapRef.current[threadId];
+      const turnIndex =
+        (fallbackThread?.messages.filter((message) => message.role === "user").length ?? 0) + 1;
       const fallbackProjectId =
         fallbackThread?.project_id ??
         selectedProjectIdRef.current ??
@@ -1298,6 +1511,7 @@ export default function App() {
       let gatingPayload: SendChatMessageResponse | null = null;
       let streamError: string | null = null;
       let streamingMessageId: string | null = null;
+      const streamAbortController = new AbortController();
 
       updateThread(threadId, (thread) => ({
         thread_id: thread?.thread_id ?? threadId,
@@ -1313,7 +1527,9 @@ export default function App() {
         messages: [...(thread?.messages ?? []), optimisticUserMessage],
       }));
 
+      streamAbortControllerRef.current = streamAbortController;
       setStreamingThreadId(threadId);
+      startThreadStreamState(threadId, turnIndex);
       setComposerStatus("");
 
       try {
@@ -1325,9 +1541,30 @@ export default function App() {
             include_papers: includePapers,
           },
           (eventName, payload) => {
+            if (eventName === "tool_start") {
+              upsertToolActivity(threadId, {
+                id: payload.tool_call_id,
+                turnIndex,
+                label: payload.label,
+                status: "running",
+                startedAt: new Date().toISOString(),
+                finishedAt: null,
+                isError: false,
+              });
+              return;
+            }
+
+            if (eventName === "tool_done") {
+              completeToolActivity(threadId, payload.tool_call_id, {
+                isError: payload.is_error,
+              });
+              return;
+            }
+
             if (eventName === "assistant_start") {
               assistantStarted = true;
               streamingMessageId = payload.assistant_message.message_id;
+              markThreadAssistantStarted(threadId);
               updateThread(threadId, (thread) => ({
                 ...(thread ?? {
                   thread_id: threadId,
@@ -1402,8 +1639,35 @@ export default function App() {
               streamError = payload.detail;
             }
           },
+          { signal: streamAbortController.signal },
         );
       } catch (error) {
+        if (error instanceof StreamingChatAbortError) {
+          completeRunningToolActivitiesForTurn(threadId, turnIndex);
+          if (streamingMessageId) {
+            updateThread(threadId, (thread) => ({
+              ...(thread ?? {
+                thread_id: threadId,
+                project_id: fallbackProjectId,
+                project_name: fallbackProjectName,
+                project_instructions: fallbackProjectInstructions,
+                title: content.slice(0, 60),
+                created_at: now,
+                updated_at: now,
+                messages: [],
+              }),
+              updated_at: new Date().toISOString(),
+              messages: (thread?.messages ?? []).map((message) =>
+                message.message_id === streamingMessageId
+                  ? { ...message, status: "completed" }
+                  : message,
+              ),
+            }));
+          }
+          setComposerStatus("");
+          return null;
+        }
+
         if (error instanceof StreamingChatError && error.canFallback && !assistantStarted) {
           const payload = await sendThreadMessage(threadId, {
             content,
@@ -1457,6 +1721,10 @@ export default function App() {
         setComposerStatus(detail);
         throw error;
       } finally {
+        clearThreadStreamState(threadId);
+        if (streamAbortControllerRef.current === streamAbortController) {
+          streamAbortControllerRef.current = null;
+        }
         setStreamingThreadId((current) => (current === threadId ? null : current));
       }
 
@@ -1512,11 +1780,17 @@ export default function App() {
       return null;
     },
     [
+      clearThreadStreamState,
+      completeRunningToolActivitiesForTurn,
+      completeToolActivity,
       fetchAndStoreThread,
       includePapers,
       includeUploads,
+      markThreadAssistantStarted,
       refreshProjects,
       showErrorFlash,
+      startThreadStreamState,
+      upsertToolActivity,
       upsertThreadIntoProjectItems,
       updateThread,
     ],
@@ -1708,6 +1982,10 @@ export default function App() {
     [handleUpload],
   );
 
+  const handleStopStreaming = useCallback(() => {
+    streamAbortControllerRef.current?.abort();
+  }, []);
+
   const handleComposerSubmit = useCallback(async () => {
     if (streamingThreadId) {
       return;
@@ -1755,6 +2033,10 @@ export default function App() {
     setMobileSidebarOpen(false);
     setAccountMenuOpen(false);
     setStreamingThreadId(null);
+    setThreadStreamStates({});
+    setToolActivities({});
+    streamAbortControllerRef.current?.abort();
+    streamAbortControllerRef.current = null;
     setPaperDrawer(null);
     setPaperDrawerPaper(null);
     setPaperDrawerContent(null);
@@ -2398,7 +2680,7 @@ export default function App() {
       openAuthModal("settings", "version-control");
       return;
     }
-    if (!sessionSettings.has_daytona_api_key) {
+    if (!sessionSettings.has_modal_credentials) {
       return;
     }
     try {
@@ -2446,7 +2728,7 @@ export default function App() {
     openAuthModal,
     persistPythonFile,
     sessionSettings.has_github_connection,
-    sessionSettings.has_daytona_api_key,
+    sessionSettings.has_modal_credentials,
     showErrorFlash,
     syncProjectToGitHub,
   ]);
@@ -2487,12 +2769,14 @@ export default function App() {
       inputId="composer-input"
       onAttach={() => appUploadRef.current?.click()}
       onChange={setComposerInput}
+      onStop={handleStopStreaming}
       onSubmit={() => void handleComposerSubmit()}
       placeholder="Ask about the latest agent and AI systems research. Type @ to tag a paper."
       searchPapers={suggestBrowserPapers}
       submitButtonId="composer-send"
-      submitLabel={streamingThreadId ? "Thinking..." : "Send"}
-      submitLoading={Boolean(streamingThreadId)}
+      submitLabel={streamingThreadId ? "Stop" : "Send"}
+      submitMode={streamingThreadId ? "stop" : "submit"}
+      submitLoading={false}
       submitOnEnter
       suggestionsPlacement="above"
       value={composerInput}
@@ -3064,8 +3348,10 @@ export default function App() {
                         </button>
                         <button
                           type="button"
-                          className={`python-file-run-button${sessionSettings.has_daytona_api_key ? "" : " disabled"}`}
-                          disabled={!sessionSettings.has_daytona_api_key || activePythonRun.running}
+                          className={`python-file-run-button${sessionSettings.has_modal_credentials ? "" : " disabled"}`}
+                          disabled={
+                            !sessionSettings.has_modal_credentials || activePythonRun.running
+                          }
                           onClick={() => void handleRunActivePythonFile()}
                         >
                           <span className="python-file-action-icon" aria-hidden="true">
@@ -3269,104 +3555,145 @@ export default function App() {
                 </div>
               ) : (
                 <div className="chat-message-column">
-                  {activeThread.messages.map((message) => {
-                    const hoverTime = formatTodayTimeLabel(message.created_at);
-                    return (
-                      <article
-                        key={message.message_id}
-                        className={`message-row ${message.role === "assistant" ? "assistant" : "user"} status-${message.status}`}
-                      >
-                        {message.status !== "completed" ? (
-                          <div className="message-meta-row">
-                            <span className="message-status-label">
-                              {message.status === "streaming" ? "Streaming" : "Failed"}
-                            </span>
-                          </div>
-                        ) : null}
-                        <div
-                          className={`message-bubble ${message.role === "assistant" ? "assistant" : "user"}`}
-                        >
-                          {message.role === "assistant" ? (
-                            <MarkdownRenderer
-                              markdown={message.content_markdown}
-                              className="message-markdown"
-                              interactiveCitations
-                              onCitationClick={(sourceId) => {
-                                const citation = message.citations.find(
-                                  (item) => item.source_id === sourceId,
-                                );
-                                if (citation) {
-                                  handleCitationClick(message, citation);
-                                }
-                              }}
-                            />
-                          ) : (
-                            <div className="message-plain-text">{message.content_markdown}</div>
-                          )}
-                        </div>
-                        {message.role === "assistant" ? (
-                          <div className="assistant-hover-actions">
-                            {hoverTime ? (
-                              <span className="assistant-hover-time">{hoverTime}</span>
-                            ) : null}
-                            <button
-                              type="button"
-                              className="assistant-copy-button"
-                              aria-label="Copy response"
-                              title="Copy response"
-                              onClick={() => void copyMessage(message.content_markdown)}
-                            >
-                              <svg viewBox="0 0 24 24" aria-hidden="true">
-                                <path d="M9 9h9v11H9z" />
-                                <path d="M6 15H5V4h9v1" />
-                              </svg>
-                            </button>
-                          </div>
-                        ) : null}
-                        {message.role === "assistant" && message.citations.length > 0 ? (
-                          <div className="message-citations">
-                            {message.citations.map((citation) => (
-                              <div
-                                key={citation.source_id}
-                                id={sourceCardId(message.message_id, citation.source_id)}
-                                className="citation-card"
-                              >
-                                <div className="citation-card-header">
-                                  <div>
-                                    <span className="citation-card-source-id">
-                                      {citation.source_id}
-                                    </span>
-                                    <strong className="citation-card-title">
-                                      {citation.title}
-                                    </strong>
-                                  </div>
-                                  {citation.paper_id ? (
-                                    <button
-                                      type="button"
-                                      className="citation-card-action"
-                                      onClick={() =>
-                                        openPaperDrawer(citation.paper_id!, citation.path)
-                                      }
-                                    >
-                                      Open paper
-                                    </button>
-                                  ) : null}
-                                </div>
-                                <div className="citation-card-path">
-                                  {citation.source_kind === "paperbase_paper" ? "Paper" : "Upload"}{" "}
-                                  · {citation.path}
-                                </div>
-                                <p className="citation-card-excerpt">{citation.excerpt}</p>
+                  {(() => {
+                    let userTurnIndex = 0;
+                    return activeThread.messages.map((message) => {
+                      if (message.role === "user") {
+                        userTurnIndex += 1;
+                      }
+                      const turnActivities =
+                        message.role === "user"
+                          ? (activeThreadToolActivitiesByTurn.get(userTurnIndex) ?? [])
+                          : [];
+                      const showThinkingPlaceholder =
+                        message.role === "user" &&
+                        activeStreamInView &&
+                        activeThreadStreamState?.turnIndex === userTurnIndex &&
+                        !activeThreadStreamState.assistantStarted &&
+                        turnActivities.length === 0;
+                      const hoverTime = formatTodayTimeLabel(message.created_at);
+                      return (
+                        <Fragment key={message.message_id}>
+                          <article
+                            className={`message-row ${message.role === "assistant" ? "assistant" : "user"} status-${message.status}`}
+                          >
+                            {message.status !== "completed" ? (
+                              <div className="message-meta-row">
+                                <span
+                                  className={`message-status-label${message.status === "streaming" ? " thinking-shimmer" : ""}`}
+                                >
+                                  {message.status === "streaming"
+                                    ? (activeThreadStreamState?.thinkingWord ?? "Thinking")
+                                    : "Failed"}
+                                </span>
                               </div>
-                            ))}
-                          </div>
-                        ) : null}
-                      </article>
-                    );
-                  })}
-                  {activeStreamInView ? (
-                    <div className="message-streaming-status">Working...</div>
-                  ) : null}
+                            ) : null}
+                            <div
+                              className={`message-bubble ${message.role === "assistant" ? "assistant" : "user"}`}
+                            >
+                              {message.role === "assistant" ? (
+                                <MarkdownRenderer
+                                  markdown={message.content_markdown}
+                                  className="message-markdown"
+                                  interactiveCitations
+                                  onCitationClick={(sourceId) => {
+                                    const citation = message.citations.find(
+                                      (item) => item.source_id === sourceId,
+                                    );
+                                    if (citation) {
+                                      handleCitationClick(message, citation);
+                                    }
+                                  }}
+                                />
+                              ) : (
+                                <div className="message-plain-text">{message.content_markdown}</div>
+                              )}
+                            </div>
+                            {message.role === "assistant" ? (
+                              <div className="assistant-hover-actions">
+                                {hoverTime ? (
+                                  <span className="assistant-hover-time">{hoverTime}</span>
+                                ) : null}
+                                <button
+                                  type="button"
+                                  className="assistant-copy-button"
+                                  aria-label="Copy response"
+                                  title="Copy response"
+                                  onClick={() => void copyMessage(message.content_markdown)}
+                                >
+                                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                                    <path d="M9 9h9v11H9z" />
+                                    <path d="M6 15H5V4h9v1" />
+                                  </svg>
+                                </button>
+                              </div>
+                            ) : null}
+                            {message.role === "assistant" && message.citations.length > 0 ? (
+                              <div className="message-citations">
+                                {message.citations.map((citation) => (
+                                  <div
+                                    key={citation.source_id}
+                                    id={sourceCardId(message.message_id, citation.source_id)}
+                                    className="citation-card"
+                                  >
+                                    <div className="citation-card-header">
+                                      <div>
+                                        <span className="citation-card-source-id">
+                                          {citation.source_id}
+                                        </span>
+                                        <strong className="citation-card-title">
+                                          {citation.title}
+                                        </strong>
+                                      </div>
+                                      {citation.paper_id ? (
+                                        <button
+                                          type="button"
+                                          className="citation-card-action"
+                                          onClick={() =>
+                                            openPaperDrawer(citation.paper_id!, citation.path)
+                                          }
+                                        >
+                                          Open paper
+                                        </button>
+                                      ) : null}
+                                    </div>
+                                    <div className="citation-card-path">
+                                      {citation.source_kind === "paperbase_paper"
+                                        ? "Paper"
+                                        : "Upload"}{" "}
+                                      · {citation.path}
+                                    </div>
+                                    <p className="citation-card-excerpt">{citation.excerpt}</p>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : null}
+                          </article>
+                          {turnActivities.map((activity) => (
+                            <div
+                              key={activity.id}
+                              className={`tool-activity-row status-${activity.status}${activity.isError ? " error" : ""}`}
+                            >
+                              <span
+                                className={`tool-activity-label${activity.status === "running" ? " thinking-shimmer" : ""}`}
+                              >
+                                {activity.status === "running"
+                                  ? `Doing ${activity.label}...`
+                                  : `Did ${activity.label}`}
+                              </span>
+                            </div>
+                          ))}
+                          {showThinkingPlaceholder ? (
+                            <div className="tool-activity-row status-running thinking-only">
+                              <span className="tool-activity-label thinking-shimmer">
+                                {activeThreadStreamState?.thinkingWord ?? "Thinking"}
+                              </span>
+                            </div>
+                          ) : null}
+                        </Fragment>
+                      );
+                    });
+                  })()}
                 </div>
               )}
             </div>
@@ -4152,33 +4479,33 @@ export default function App() {
                     id="settings-panel-sandbox"
                     aria-labelledby="settings-tab-sandbox"
                   >
-                    {sessionSettings.has_daytona_api_key ? (
+                    {sessionSettings.has_modal_credentials ? (
                       <div className="settings-secret-row">
                         <div className="settings-secret-copy">
-                          <div className="settings-secret-label">Daytona API key</div>
+                          <div className="settings-secret-label">Modal token ID</div>
                           <div className="settings-secret-value">
-                            {sessionSettings.daytona_api_key_hint || "Saved"}
+                            {sessionSettings.modal_token_id_hint || "Saved"}
                           </div>
                         </div>
                         <button
-                          id="delete-daytona-key-button"
+                          id="delete-modal-credentials-button"
                           className="api-key-delete-button"
                           type="button"
-                          aria-label="Delete saved Daytona API key"
-                          title="Delete saved Daytona API key"
+                          aria-label="Delete saved Modal credentials"
+                          title="Delete saved Modal credentials"
                           onClick={async () => {
                             try {
                               const nextSession = await api<BrowserSessionResponse>(
-                                "/v1/browser/settings/daytona-key",
+                                "/v1/browser/settings/modal-credentials",
                                 { method: "DELETE" },
                               );
                               setSession(nextSession);
-                              showNoteFlash("Daytona API key removed.");
+                              showNoteFlash("Modal credentials removed.");
                             } catch (error) {
                               showErrorFlash(
                                 error instanceof Error
                                   ? error.message
-                                  : "Deleting Daytona key failed",
+                                  : "Deleting Modal credentials failed",
                               );
                             }
                           }}
@@ -4191,7 +4518,7 @@ export default function App() {
                       </div>
                     ) : (
                       <form
-                        id="settings-daytona-form"
+                        id="settings-modal-form"
                         className="settings-form"
                         onSubmit={async (event) => {
                           event.preventDefault();
@@ -4200,31 +4527,40 @@ export default function App() {
                               new FormData(event.currentTarget).entries(),
                             );
                             const nextSession = await api<BrowserSessionResponse>(
-                              "/v1/browser/settings/daytona-key",
+                              "/v1/browser/settings/modal-credentials",
                               {
                                 method: "PUT",
                                 body: JSON.stringify(payload),
                               },
                             );
                             setSession(nextSession);
-                            showNoteFlash("Daytona API key saved.");
+                            showNoteFlash("Modal credentials saved.");
                           } catch (error) {
                             showErrorFlash(
-                              error instanceof Error ? error.message : "Saving Daytona key failed",
+                              error instanceof Error
+                                ? error.message
+                                : "Saving Modal credentials failed",
                             );
                           }
                         }}
                       >
                         <input
-                          name="api_key"
+                          name="token_id"
                           type="password"
-                          placeholder="Daytona API key"
+                          placeholder="Modal token ID"
+                          autoComplete="new-password"
+                          required
+                        />
+                        <input
+                          name="token_secret"
+                          type="password"
+                          placeholder="Modal token secret"
                           autoComplete="new-password"
                           required
                         />
                         <div className="settings-footer-actions">
                           <button className="primary-button settings-submit-button" type="submit">
-                            Save key
+                            Save credentials
                           </button>
                         </div>
                       </form>

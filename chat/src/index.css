@@ -397,6 +397,17 @@ textarea {
   cursor: default;
 }
 
+.chat-prompt-shell .prompt-button.stop {
+  border-color: rgba(143, 45, 31, 0.18);
+  background: #fff1ee;
+  color: #8f2d1f;
+}
+
+.chat-prompt-shell .prompt-button.stop:hover {
+  border-color: rgba(143, 45, 31, 0.28);
+  background: #ffe6e0;
+}
+
 .prompt-button-spinner {
   display: block;
   width: 12px;
@@ -410,6 +421,22 @@ textarea {
 @keyframes prompt-button-spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+.thinking-shimmer {
+  color: transparent;
+  background-image: linear-gradient(120deg, #8b7967 18%, #20160f 42%, #b89f87 58%, #6f5d4c 82%);
+  background-size: 220% 100%;
+  background-position: 0% 50%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  animation: thinking-shimmer 1.5s linear infinite;
+}
+
+@keyframes thinking-shimmer {
+  to {
+    background-position: 220% 50%;
   }
 }
 
@@ -1632,7 +1659,7 @@ textarea::placeholder,
 
 .python-file-run-button {
   border: 1px solid #2d5fd7;
-  background: #ebf2ff;
+  background: #dceaff;
   color: #2d5fd7;
 }
 
@@ -1731,13 +1758,6 @@ textarea::placeholder,
   gap: 18px;
 }
 
-.message-streaming-status {
-  color: var(--muted);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: 12px;
-  line-height: 1.4;
-}
-
 .message-row {
   display: grid;
   gap: 6px;
@@ -1770,6 +1790,36 @@ textarea::placeholder,
 
 .message-row.status-failed .message-status-label {
   color: #8f2d1f;
+}
+
+.tool-activity-row {
+  width: min(800px, 100%);
+  display: flex;
+  align-items: center;
+}
+
+.tool-activity-label {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 2px;
+  color: #6f5d4c;
+  font-family: "JetBrains Mono", "SFMono-Regular", monospace;
+  font-size: 12px;
+  line-height: 1.4;
+  letter-spacing: -0.01em;
+}
+
+.tool-activity-row.status-completed .tool-activity-label {
+  color: rgba(111, 93, 76, 0.9);
+}
+
+.tool-activity-row.error .tool-activity-label {
+  color: #8f2d1f;
+}
+
+.tool-activity-row.thinking-only {
+  margin-top: -6px;
 }
 
 .message-bubble {
@@ -3271,7 +3321,7 @@ textarea {
 }
 
 .python-file-run-button:not(:disabled):hover {
-  background: #dee9ff;
+  background: #d1e3ff;
   border-color: #2457d1;
 }
 

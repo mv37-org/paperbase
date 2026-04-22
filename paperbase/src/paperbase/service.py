@@ -16,8 +16,8 @@ from typing import Any
 from fastapi import HTTPException
 
 from .browser_code import (
-    DaytonaExecutionError,
-    DaytonaPythonRunner,
+    ModalExecutionError,
+    ModalPythonRunner,
     GitHubProjectRepoManager,
     GitHubSyncConflictError,
     GitHubSyncError,
@@ -70,7 +70,7 @@ from .models import (
     ResultSetResponse,
     RunPythonFileResponse,
     SaveAnthropicKeyRequest,
-    SaveDaytonaKeyRequest,
+    SaveModalCredentialsRequest,
     SearchPaperResult,
     SearchRequest,
     SearchResponse,
@@ -759,7 +759,7 @@ class PaperbaseService:
         email_sender: EmailSender | None = None,
         chat_model: ChatModelClient | None = None,
         github_repo_manager: GitHubProjectRepoManager | None = None,
-        daytona_runner: DaytonaPythonRunner | None = None,
+        modal_runner: ModalPythonRunner | None = None,
     ) -> None:
         self.settings = settings
         self.repository = repository
@@ -770,7 +770,7 @@ class PaperbaseService:
         self.chat_model = chat_model or AnthropicChatModelClient(settings)
         self.secret_cipher = SecretCipher(settings)
         self.github_repo_manager = github_repo_manager or GitHubProjectRepoManager()
-        self.daytona_runner = daytona_runner or DaytonaPythonRunner()
+        self.modal_runner = modal_runner or ModalPythonRunner()
 
     def init(self) -> None:
         self.repository.init()
@@ -906,16 +906,21 @@ class PaperbaseService:
         self.repository.delete_anthropic_api_key(user.user_id)  # type: ignore[attr-defined]
         return self._browser_session_response(user)
 
-    def save_user_daytona_key(self, user: BrowserUser, request: SaveDaytonaKeyRequest) -> BrowserSessionResponse:
-        self.repository.save_daytona_api_key(  # type: ignore[attr-defined]
+    def save_user_modal_credentials(
+        self,
+        user: BrowserUser,
+        request: SaveModalCredentialsRequest,
+    ) -> BrowserSessionResponse:
+        self.repository.save_modal_credentials(  # type: ignore[attr-defined]
             user_id=user.user_id,
-            encrypted_api_key=self.secret_cipher.encrypt(request.api_key.strip()),
-            hint=api_key_hint(request.api_key),
+            encrypted_token_id=self.secret_cipher.encrypt(request.token_id.strip()),
+            encrypted_token_secret=self.secret_cipher.encrypt(request.token_secret.strip()),
+            token_id_hint=api_key_hint(request.token_id),
         )
         return self._browser_session_response(user)
 
-    def delete_user_daytona_key(self, user: BrowserUser) -> BrowserSessionResponse:
-        self.repository.delete_daytona_api_key(user.user_id)  # type: ignore[attr-defined]
+    def delete_user_modal_credentials(self, user: BrowserUser) -> BrowserSessionResponse:
+        self.repository.delete_modal_credentials(user.user_id)  # type: ignore[attr-defined]
         return self._browser_session_response(user)
 
     def update_user_notification_preferences(
@@ -951,11 +956,14 @@ class PaperbaseService:
         self.repository.delete_github_connection(user.user_id)  # type: ignore[attr-defined]
         return self._browser_session_response(user)
 
-    def _get_daytona_api_key(self, user: BrowserUser) -> str:
-        record = self.repository.get_daytona_api_key_record(user.user_id)  # type: ignore[attr-defined]
+    def _get_modal_credentials(self, user: BrowserUser) -> tuple[str, str]:
+        record = self.repository.get_modal_credentials_record(user.user_id)  # type: ignore[attr-defined]
         if record is None:
-            raise HTTPException(status_code=409, detail="Add a Daytona API key before running Python files")
-        return self.secret_cipher.decrypt(record["encrypted_api_key"])
+            raise HTTPException(status_code=409, detail="Add Modal credentials before running Python files")
+        return (
+            self.secret_cipher.decrypt(record["encrypted_token_id"]),
+            self.secret_cipher.decrypt(record["encrypted_token_secret"]),
+        )
 
     def _get_github_connection(self, user: BrowserUser) -> dict[str, str]:
         record = self.repository.get_github_connection_record(user.user_id)  # type: ignore[attr-defined]
@@ -1324,10 +1332,14 @@ class PaperbaseService:
 
     def run_python_file(self, user: BrowserUser, file_id: str) -> RunPythonFileResponse:
         python_file = self.get_python_file(user, file_id)
-        api_key = self._get_daytona_api_key(user)
+        token_id, token_secret = self._get_modal_credentials(user)
         try:
-            result = self.daytona_runner.run(api_key=api_key, code=python_file.content)
-        except DaytonaExecutionError as exc:
+            result = self.modal_runner.run(
+                token_id=token_id,
+                token_secret=token_secret,
+                code=python_file.content,
+            )
+        except ModalExecutionError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         return RunPythonFileResponse(
             file_id=python_file.file_id,
@@ -1966,6 +1978,77 @@ class PaperbaseService:
 
         raise ValueError(f"Unknown tool: {tool_name}")
 
+    def _chat_tool_activity_label(self, *, tool_name: str, tool_input: dict[str, Any]) -> str:
+        def detail(value: Any, *, limit: int = 56) -> str | None:
+            text = str(value or "").strip()
+            if not text:
+                return None
+            if len(text) > limit:
+                return f"{text[: limit - 1].rstrip()}…"
+            return text
+
+        query = detail(tool_input.get("query"))
+        path = detail(tool_input.get("path"))
+        pattern = detail(tool_input.get("pattern"))
+        figure_id = detail(tool_input.get("figure_id"))
+        table_id = detail(tool_input.get("table_id"))
+
+        if tool_name == "paperbase_search":
+            return f'paper search for "{query}"' if query else "paper search"
+        if tool_name == "paperbase_search_sections":
+            return f'section search for "{query}"' if query else "section search"
+        if tool_name == "paperbase_get_results":
+            return "result lookup"
+        if tool_name == "paperbase_grep_results":
+            return f'result filtering for "{pattern}"' if pattern else "result filtering"
+        if tool_name == "paperbase_get_paper":
+            return "paper lookup"
+        if tool_name == "paperbase_list_files":
+            return "file listing"
+        if tool_name == "paperbase_read_file":
+            return f'file read for "{path}"' if path else "file read"
+        if tool_name == "paperbase_get_figure":
+            return f'figure lookup for "{figure_id}"' if figure_id else "figure lookup"
+        if tool_name == "paperbase_get_table":
+            return f'table lookup for "{table_id}"' if table_id else "table lookup"
+        if tool_name == "paperbase_get_related_papers":
+            return "related-paper lookup"
+        if tool_name == "paperbase_get_references":
+            return "reference lookup"
+        if tool_name == "paperbase_list_uploaded_documents":
+            return "upload listing"
+        if tool_name == "paperbase_search_uploaded_sections":
+            return f'uploaded-note search for "{query}"' if query else "uploaded-note search"
+        return "tool call"
+
+    def _run_single_chat_tool(
+        self,
+        *,
+        index: int,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        user: BrowserUser,
+        citation_registry: ChatCitationRegistry,
+    ) -> tuple[dict[str, Any], bool]:
+        if index >= _CHAT_TOOL_MAX_CALLS_PER_ROUND:
+            return {"error": "Too many tool calls requested in one round"}, True
+        try:
+            payload = self._execute_chat_tool(
+                tool_name=tool_name,
+                tool_input=tool_input,
+                user=user,
+                citation_registry=citation_registry,
+            )
+            return payload, False
+        except HTTPException as exc:
+            return {"error": str(exc.detail)}, True
+        except Exception as exc:
+            logger.exception(
+                "Chat tool execution failed",
+                extra={"event": "chat.tool.failed", "tool_name": tool_name},
+            )
+            return {"error": str(exc) or "Tool execution failed"}, True
+
     def _tool_result_blocks(
         self,
         *,
@@ -1978,28 +2061,13 @@ class PaperbaseService:
             tool_use_id = str(tool_use.get("id") or "").strip()
             if not tool_use_id:
                 continue
-            if index >= _CHAT_TOOL_MAX_CALLS_PER_ROUND:
-                payload: dict[str, Any] = {"error": "Too many tool calls requested in one round"}
-                is_error = True
-            else:
-                try:
-                    payload = self._execute_chat_tool(
-                        tool_name=str(tool_use.get("name") or "").strip(),
-                        tool_input=tool_use.get("input") if isinstance(tool_use.get("input"), dict) else {},
-                        user=user,
-                        citation_registry=citation_registry,
-                    )
-                    is_error = False
-                except HTTPException as exc:
-                    payload = {"error": str(exc.detail)}
-                    is_error = True
-                except Exception as exc:
-                    logger.exception(
-                        "Chat tool execution failed",
-                        extra={"event": "chat.tool.failed", "tool_name": tool_use.get("name")},
-                    )
-                    payload = {"error": str(exc) or "Tool execution failed"}
-                    is_error = True
+            payload, is_error = self._run_single_chat_tool(
+                index=index,
+                tool_name=str(tool_use.get("name") or "").strip(),
+                tool_input=tool_use.get("input") if isinstance(tool_use.get("input"), dict) else {},
+                user=user,
+                citation_registry=citation_registry,
+            )
             block = {
                 "type": "tool_result",
                 "tool_use_id": tool_use_id,
@@ -2048,6 +2116,77 @@ class PaperbaseService:
                     ),
                 }
             )
+        return messages, citation_registry
+
+    def _run_chat_tool_rounds_stream(
+        self,
+        *,
+        prepared: PreparedChatGeneration,
+        user: BrowserUser,
+        request: SendChatMessageRequest,
+    ) -> Iterator[tuple[str, dict[str, Any]]]:
+        messages = self._chat_messages(prepared)
+        citation_registry = ChatCitationRegistry()
+        tools = self._chat_tool_definitions(request)
+        if not tools:
+            return messages, citation_registry
+
+        force_first_tool = _should_force_chat_tool_use(prepared.user_message.content_markdown, request)
+        for round_index in range(_CHAT_TOOL_MAX_ROUNDS):
+            tool_choice = {"type": "any"} if round_index == 0 and force_first_tool else {"type": "auto"}
+            response = self.chat_model.create_message(
+                api_key=prepared.api_key_value or "",
+                messages=messages,
+                system_prompt=self._chat_tool_system_prompt(prepared.thread),
+                tools=tools,
+                tool_choice=tool_choice,
+            )
+            assistant_content = [block for block in (response.get("content") or []) if isinstance(block, dict)]
+            tool_uses = [block for block in assistant_content if block.get("type") == "tool_use"]
+            if not tool_uses:
+                break
+            messages.append({"role": "assistant", "content": assistant_content})
+            blocks: list[dict[str, Any]] = []
+            for index, tool_use in enumerate(tool_uses):
+                tool_use_id = str(tool_use.get("id") or "").strip()
+                if not tool_use_id:
+                    continue
+                tool_name = str(tool_use.get("name") or "").strip()
+                tool_input = tool_use.get("input") if isinstance(tool_use.get("input"), dict) else {}
+                label = self._chat_tool_activity_label(tool_name=tool_name, tool_input=tool_input)
+                yield (
+                    "tool_start",
+                    {
+                        "tool_call_id": tool_use_id,
+                        "tool_name": tool_name,
+                        "label": label,
+                    },
+                )
+                payload, is_error = self._run_single_chat_tool(
+                    index=index,
+                    tool_name=tool_name,
+                    tool_input=tool_input,
+                    user=user,
+                    citation_registry=citation_registry,
+                )
+                yield (
+                    "tool_done",
+                    {
+                        "tool_call_id": tool_use_id,
+                        "tool_name": tool_name,
+                        "label": label,
+                        "is_error": is_error,
+                    },
+                )
+                block = {
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": json.dumps(payload, ensure_ascii=False),
+                }
+                if is_error:
+                    block["is_error"] = True
+                blocks.append(block)
+            messages.append({"role": "user", "content": blocks})
         return messages, citation_registry
 
     def _api_key_required_response(
@@ -2122,11 +2261,18 @@ class PaperbaseService:
             )
             return
 
-        conversation_messages, citation_registry = self._run_chat_tool_rounds(
+        tool_rounds = self._run_chat_tool_rounds_stream(
             prepared=prepared,
             user=user,
             request=request,
         )
+        while True:
+            try:
+                event_name, payload = next(tool_rounds)
+            except StopIteration as stop:
+                conversation_messages, citation_registry = stop.value
+                break
+            yield (event_name, payload)
         current_turn_citations = citation_registry.citations
         assistant_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
             thread_id=thread_id,

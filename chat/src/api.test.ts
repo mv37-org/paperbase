@@ -386,7 +386,9 @@ describe("chat api", () => {
             start(controller) {
               controller.enqueue(
                 encoder.encode(
-                  'event: assistant_start\ndata: {"assistant_message":{"message_id":"msg_1","role":"assistant","content_markdown":"","citations":[],"created_at":"2026-04-21T00:00:00Z","status":"streaming"}}\n\n' +
+                  'event: tool_start\ndata: {"tool_call_id":"tool_1","tool_name":"paperbase_search","label":"paper search"}\n\n' +
+                    'event: tool_done\ndata: {"tool_call_id":"tool_1","tool_name":"paperbase_search","label":"paper search","is_error":false}\n\n' +
+                    'event: assistant_start\ndata: {"assistant_message":{"message_id":"msg_1","role":"assistant","content_markdown":"","citations":[],"created_at":"2026-04-21T00:00:00Z","status":"streaming"}}\n\n' +
                     'event: delta\ndata: {"message_id":"msg_1","delta":"Ground',
                 ),
               );
@@ -417,6 +419,19 @@ describe("chat api", () => {
     );
 
     expect(events).toEqual([
+      [
+        "tool_start",
+        { tool_call_id: "tool_1", tool_name: "paperbase_search", label: "paper search" },
+      ],
+      [
+        "tool_done",
+        {
+          tool_call_id: "tool_1",
+          tool_name: "paperbase_search",
+          label: "paper search",
+          is_error: false,
+        },
+      ],
       [
         "assistant_start",
         {
@@ -476,5 +491,36 @@ describe("chat api", () => {
         () => undefined,
       ),
     ).rejects.toMatchObject({ canFallback: true, message: "stream blew up" });
+  });
+
+  it("raises a dedicated abort error when the stream request is cancelled", async () => {
+    const fetchMock = vi.fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>(
+      async (_path, init) => {
+        await new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("The operation was aborted.", "AbortError")),
+            { once: true },
+          );
+        });
+        throw new Error("unreachable");
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await loadApiModule();
+    const controller = new AbortController();
+    const streamPromise = api.sendThreadMessageStream(
+      "thread_1",
+      { content: "cancel me", include_papers: true, include_uploads: true },
+      () => undefined,
+      { signal: controller.signal },
+    );
+
+    controller.abort();
+
+    await expect(streamPromise).rejects.toMatchObject({
+      name: "StreamingChatAbortError",
+      message: "Streaming request aborted",
+    });
   });
 });

@@ -1,11 +1,13 @@
-"""GitHub sync and Daytona execution helpers for browser code files."""
+"""GitHub sync and Modal execution helpers for browser code files."""
 
 from __future__ import annotations
 
 import base64
+import os
 import shutil
 import subprocess
 import tempfile
+from threading import Lock
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,8 +24,8 @@ class GitHubSyncError(RuntimeError):
     """Raised when a Paperbase-managed GitHub sync cannot complete."""
 
 
-class DaytonaExecutionError(RuntimeError):
-    """Raised when Daytona execution cannot be started."""
+class ModalExecutionError(RuntimeError):
+    """Raised when Modal execution cannot be started."""
 
 
 @dataclass(slots=True)
@@ -51,7 +53,7 @@ class GitHubConflictFile:
 
 
 @dataclass(slots=True)
-class DaytonaRunResult:
+class ModalRunResult:
     status: str
     stdout: str
     stderr: str
@@ -86,6 +88,9 @@ def build_project_repo_name(project_name: str, project_id: str) -> str:
     stem = (stem[:32] or "project").strip("-") or "project"
     suffix = project_id.split("_", 1)[-1][:6]
     return f"paperbase-{stem}-{suffix}"
+
+
+_MODAL_ENV_LOCK = Lock()
 
 
 class GitHubProjectRepoManager:
@@ -471,35 +476,87 @@ class GitHubProjectRepoManager:
             )
 
 
-class DaytonaPythonRunner:
-    def run(self, *, api_key: str, code: str) -> DaytonaRunResult:
+class ModalPythonRunner:
+    def __init__(
+        self,
+        *,
+        app_name: str = "paperbase-browser-sandbox",
+        python_version: str = "3.11",
+        timeout_seconds: int = 300,
+        idle_timeout_seconds: int = 30,
+    ) -> None:
+        self.app_name = app_name
+        self.python_version = python_version
+        self.timeout_seconds = timeout_seconds
+        self.idle_timeout_seconds = idle_timeout_seconds
+
+    def run(self, *, token_id: str, token_secret: str, code: str) -> ModalRunResult:
         started_at = utcnow()
         try:
-            from daytona import Daytona, DaytonaConfig
+            import modal
         except ImportError as exc:
-            raise DaytonaExecutionError(
-                "Daytona SDK is not installed. Run setup again before using the sandbox."
-            ) from exc
+            raise ModalExecutionError("Modal SDK is not installed. Run setup again before using the sandbox.") from exc
 
         sandbox = None
+        client = None
         try:
-            daytona = Daytona(DaytonaConfig(api_key=api_key))
-            sandbox = daytona.create()
-            response = sandbox.process.code_run(code)
-            exit_code = int(getattr(response, "exit_code", 0) or 0)
-            result_text = str(getattr(response, "result", "") or "")
+            client_factory = getattr(getattr(modal, "Client", None), "from_credentials", None)
+            if client_factory is not None:
+                try:
+                    client = client_factory(token_id=token_id, token_secret=token_secret)
+                except TypeError:
+                    client = client_factory(token_id, token_secret)
+
+            image = modal.Image.debian_slim(python_version=self.python_version)
+            if client is not None:
+                app = modal.App.lookup(self.app_name, create_if_missing=True, client=client)
+                sandbox = modal.Sandbox.create(
+                    app=app,
+                    image=image,
+                    timeout=self.timeout_seconds,
+                    idle_timeout=self.idle_timeout_seconds,
+                    client=client,
+                )
+            else:
+                with _MODAL_ENV_LOCK:
+                    previous_token_id = os.environ.get("MODAL_TOKEN_ID")
+                    previous_token_secret = os.environ.get("MODAL_TOKEN_SECRET")
+                    os.environ["MODAL_TOKEN_ID"] = token_id
+                    os.environ["MODAL_TOKEN_SECRET"] = token_secret
+                    try:
+                        app = modal.App.lookup(self.app_name, create_if_missing=True)
+                        sandbox = modal.Sandbox.create(
+                            app=app,
+                            image=image,
+                            timeout=self.timeout_seconds,
+                            idle_timeout=self.idle_timeout_seconds,
+                        )
+                    finally:
+                        if previous_token_id is None:
+                            os.environ.pop("MODAL_TOKEN_ID", None)
+                        else:
+                            os.environ["MODAL_TOKEN_ID"] = previous_token_id
+                        if previous_token_secret is None:
+                            os.environ.pop("MODAL_TOKEN_SECRET", None)
+                        else:
+                            os.environ["MODAL_TOKEN_SECRET"] = previous_token_secret
+
+            process = sandbox.exec("python", "-c", code, timeout=self.timeout_seconds)
+            exit_code = int(process.wait() or 0)
+            stdout = str(process.stdout.read() or "")
+            stderr = str(process.stderr.read() or "")
             finished_at = utcnow()
-            return DaytonaRunResult(
+            return ModalRunResult(
                 status="completed" if exit_code == 0 else "failed",
-                stdout=result_text if exit_code == 0 else "",
-                stderr=result_text if exit_code != 0 else "",
+                stdout=stdout,
+                stderr=stderr,
                 exit_code=exit_code,
                 started_at=started_at,
                 finished_at=finished_at,
             )
         except Exception as exc:
             finished_at = utcnow()
-            return DaytonaRunResult(
+            return ModalRunResult(
                 status="failed",
                 stdout="",
                 stderr=str(exc),
@@ -510,6 +567,17 @@ class DaytonaPythonRunner:
         finally:
             if sandbox is not None:
                 try:
-                    sandbox.delete()
+                    sandbox.terminate()
                 except Exception:
                     pass
+                try:
+                    sandbox.detach()
+                except Exception:
+                    pass
+            if client is not None:
+                close = getattr(client, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:
+                        pass

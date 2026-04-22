@@ -51,6 +51,13 @@ export class StreamingChatError extends Error {
   }
 }
 
+export class StreamingChatAbortError extends Error {
+  constructor(message = "Streaming request aborted") {
+    super(message);
+    this.name = "StreamingChatAbortError";
+  }
+}
+
 export class ApiError extends Error {
   status: number;
   payload: unknown;
@@ -398,14 +405,24 @@ export async function sendThreadMessageStream(
   threadId: string,
   payload: SendThreadMessagePayload,
   onEvent: StreamEventHandler,
+  options: { signal?: AbortSignal } = {},
 ) {
-  const response = await fetch(`${API_BASE}/v1/browser/chats/${threadId}/messages/stream`, {
-    method: "POST",
-    body: chatRequestBody(payload),
-    credentials: "include",
-    cache: "no-store",
-    headers: buildHeaders({ method: "POST" }),
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE}/v1/browser/chats/${threadId}/messages/stream`, {
+      method: "POST",
+      body: chatRequestBody(payload),
+      credentials: "include",
+      cache: "no-store",
+      headers: buildHeaders({ method: "POST" }),
+      signal: options.signal,
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new StreamingChatAbortError();
+    }
+    throw error;
+  }
 
   if (!response.ok) {
     handleUnauthorized(response);
@@ -456,6 +473,9 @@ export async function sendThreadMessageStream(
       emitBlock(trailing);
     }
   } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new StreamingChatAbortError();
+    }
     throw new StreamingChatError(
       error instanceof Error ? error.message : "Streaming request failed",
       !sawEvent,

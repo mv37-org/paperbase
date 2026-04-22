@@ -262,8 +262,8 @@ class StubApiService:
             has_anthropic_api_key=False,
         )
 
-    def save_user_daytona_key(self, user: BrowserUser, request) -> BrowserSessionResponse:
-        self.calls.append(("save_user_daytona_key", (user.user_id, request.api_key)))
+    def save_user_modal_credentials(self, user: BrowserUser, request) -> BrowserSessionResponse:
+        self.calls.append(("save_user_modal_credentials", (user.user_id, request.token_id, request.token_secret)))
         return BrowserSessionResponse(
             authenticated=True,
             user=user,
@@ -272,9 +272,7 @@ class StubApiService:
         )
 
     def update_user_notification_preferences(self, user: BrowserUser, request) -> BrowserSessionResponse:
-        self.calls.append(
-            ("update_user_notification_preferences", (user.user_id, request.weekly_papers_review_email))
-        )
+        self.calls.append(("update_user_notification_preferences", (user.user_id, request.weekly_papers_review_email)))
         return BrowserSessionResponse(
             authenticated=True,
             user=user,
@@ -550,10 +548,7 @@ def _make_request(
     headers: dict[str, str] | None = None,
     session: dict[str, object] | None = None,
 ) -> Request:
-    header_items = [
-        (key.lower().encode("latin-1"), value.encode("latin-1"))
-        for key, value in (headers or {}).items()
-    ]
+    header_items = [(key.lower().encode("latin-1"), value.encode("latin-1")) for key, value in (headers or {}).items()]
     scope = {
         "type": "http",
         "method": "GET",
@@ -673,7 +668,7 @@ def test_browser_cookie_helpers_set_and_clear_expected_headers():
 
     set_cookie_headers = response.headers.getlist("set-cookie")
     assert any("paperbase_session=raw-token" in value for value in set_cookie_headers)
-    assert any("paperbase_session=\"\"" in value for value in set_cookie_headers)
+    assert any('paperbase_session=""' in value for value in set_cookie_headers)
     assert response.headers["Cache-Control"] == "no-store"
     assert response.headers["Pragma"] == "no-cache"
 
@@ -799,9 +794,9 @@ def test_browser_settings_routes_delegate_with_valid_csrf(api_client):
         "X-Paperbase-CSRF": csrf,
     }
 
-    daytona = client.put(
-        "/v1/browser/settings/daytona-key",
-        json={"api_key": "daytona-key-123"},
+    modal_credentials = client.put(
+        "/v1/browser/settings/modal-credentials",
+        json={"token_id": "modal-token-id-123", "token_secret": "modal-token-secret-456"},
         headers=headers,
     )
     notifications = client.put(
@@ -811,13 +806,16 @@ def test_browser_settings_routes_delegate_with_valid_csrf(api_client):
     )
     github = client.delete("/v1/browser/settings/github", headers=headers)
 
-    assert daytona.status_code == 200
+    assert modal_credentials.status_code == 200
     assert notifications.status_code == 200
     assert github.status_code == 200
-    assert daytona.json()["csrf_token"] == csrf
+    assert modal_credentials.json()["csrf_token"] == csrf
     assert notifications.json()["csrf_token"] == csrf
     assert github.json()["csrf_token"] == csrf
-    assert ("save_user_daytona_key", ("user_1", "daytona-key-123")) in service.calls
+    assert (
+        "save_user_modal_credentials",
+        ("user_1", "modal-token-id-123", "modal-token-secret-456"),
+    ) in service.calls
     assert ("update_user_notification_preferences", ("user_1", True)) in service.calls
     assert ("delete_github_connection", "user_1") in service.calls
 
@@ -985,10 +983,7 @@ def test_github_callback_success_connects_account_and_redirects_to_settings(api_
     response = client.get("/v1/browser/auth/github/callback", follow_redirects=False)
 
     assert response.status_code == 302
-    assert (
-        response.headers["location"]
-        == "https://paperbase.example/?auth=github_connected&settings=version-control"
-    )
+    assert response.headers["location"] == "https://paperbase.example/?auth=github_connected&settings=version-control"
     assert (
         "save_github_connection",
         ("user_1", "42", "octocat", "github-access-token", "repo,read:user"),

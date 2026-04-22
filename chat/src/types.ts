@@ -9,8 +9,8 @@ export interface BrowserUser {
 
 export interface BrowserUserSettingsResponse {
   anthropic_api_key_hint: string;
-  has_daytona_api_key: boolean;
-  daytona_api_key_hint: string;
+  has_modal_credentials: boolean;
+  modal_token_id_hint: string;
   has_github_connection: boolean;
   github_login: string;
   github_oauth_available: boolean;
@@ -269,7 +269,22 @@ export interface ChatStreamErrorEvent {
   detail: string;
 }
 
+export interface ChatStreamToolStartEvent {
+  tool_call_id: string;
+  tool_name: string;
+  label: string;
+}
+
+export interface ChatStreamToolDoneEvent {
+  tool_call_id: string;
+  tool_name: string;
+  label: string;
+  is_error: boolean;
+}
+
 export type ChatStreamEventMap = {
+  tool_start: ChatStreamToolStartEvent;
+  tool_done: ChatStreamToolDoneEvent;
   assistant_start: ChatStreamAssistantStartEvent;
   delta: ChatStreamDeltaEvent;
   done: ChatStreamDoneEvent;

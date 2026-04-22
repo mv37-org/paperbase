@@ -150,6 +150,7 @@ type Props = {
   formId?: string;
   inputId?: string;
   onAttach: () => void;
+  onStop?: () => void;
   value: string;
   onChange: (value: string) => void;
   searchPapers?: (query: string, limit?: number) => Promise<MentionSuggestionResult>;
@@ -159,6 +160,7 @@ type Props = {
   submitButtonId?: string;
   submitLabel?: string;
   submitLoading?: boolean;
+  submitMode?: "submit" | "stop";
   suggestionsPlacement?: "above" | "below";
   variant?: "landing" | "chat";
 };
@@ -169,6 +171,7 @@ export function LandingMentionEditor({
   formId,
   inputId,
   onAttach,
+  onStop,
   value: plainText,
   onChange,
   searchPapers,
@@ -178,6 +181,7 @@ export function LandingMentionEditor({
   submitButtonId,
   submitLabel = "Start",
   submitLoading = false,
+  submitMode = "submit",
   suggestionsPlacement = "below",
   variant = "landing",
 }: Props) {
@@ -406,9 +410,13 @@ export function LandingMentionEditor({
   const handleSubmit = useCallback(
     (event: FormEvent<HTMLFormElement>) => {
       event.preventDefault();
+      if (submitMode === "stop") {
+        onStop?.();
+        return;
+      }
       onSubmit();
     },
-    [onSubmit],
+    [onStop, onSubmit, submitMode],
   );
 
   const updatePopoverPosition = useCallback(() => {
@@ -515,15 +523,16 @@ export function LandingMentionEditor({
             </button>
             <button
               id={submitButtonId}
-              className={`prompt-button${submitLoading ? " loading" : ""}`}
-              type="submit"
-              disabled={disabled}
+              className={`prompt-button${submitLoading ? " loading" : ""}${submitMode === "stop" ? " stop" : ""}`}
+              type={submitMode === "stop" ? "button" : "submit"}
+              disabled={submitMode === "stop" ? false : disabled}
               aria-busy={submitLoading}
               title={submitOnEnter ? "Enter to send. Shift + Enter for new line." : undefined}
+              onClick={submitMode === "stop" ? onStop : undefined}
             >
               {submitLoading ? <span className="prompt-button-spinner" aria-hidden="true" /> : null}
               <span className="prompt-button-label">{submitLabel}</span>
-              {submitOnEnter && !submitLoading ? (
+              {submitMode === "submit" && submitOnEnter && !submitLoading ? (
                 <span
                   className="prompt-button-shortcut prompt-button-shortcut-enter"
                   aria-hidden="true"
