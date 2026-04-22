@@ -8,6 +8,7 @@ import type {
   MentionSuggestionResult,
   PaperResponse,
   ProjectItemPageResponse,
+  ProjectRepoConflictResolution,
   ProjectRepoSyncResponse,
   ProjectListResponse,
   ProjectResponse,
@@ -47,6 +48,18 @@ export class StreamingChatError extends Error {
     super(message);
     this.name = "StreamingChatError";
     this.canFallback = canFallback;
+  }
+}
+
+export class ApiError extends Error {
+  status: number;
+  payload: unknown;
+
+  constructor(message: string, status: number, payload: unknown) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.payload = payload;
   }
 }
 
@@ -214,7 +227,7 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const payload = await parsePayload(response);
   if (!response.ok) {
     handleUnauthorized(response);
-    throw new Error(normalizeErrorMessage(payload, "Request failed"));
+    throw new ApiError(normalizeErrorMessage(payload, "Request failed"), response.status, payload);
   }
   syncBrowserSession(payload);
   return payload as T;
@@ -334,10 +347,21 @@ export function getProjectRepoSync(projectId: string) {
   });
 }
 
-export function syncProjectRepo(projectId: string, commitMessage: string) {
+export function syncProjectRepo(
+  projectId: string,
+  payload: {
+    commitMessage: string;
+    expectedRemoteHeadSha?: string | null;
+    conflictResolutions?: ProjectRepoConflictResolution[];
+  },
+) {
   return api<ProjectRepoSyncResponse>(`/v1/browser/projects/${projectId}/repo-sync`, {
     method: "POST",
-    body: JSON.stringify({ commit_message: commitMessage }),
+    body: JSON.stringify({
+      commit_message: payload.commitMessage,
+      expected_remote_head_sha: payload.expectedRemoteHeadSha ?? null,
+      conflict_resolutions: payload.conflictResolutions ?? [],
+    }),
   });
 }
 

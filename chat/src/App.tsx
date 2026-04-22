@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ChangeEvent, UIEvent } from "react";
-import Editor from "@monaco-editor/react";
+import Editor, { DiffEditor } from "@monaco-editor/react";
 
 import {
+  ApiError,
   api,
   createPythonFile,
   createProject,
@@ -48,6 +49,9 @@ import type {
   FigureResponse,
   FileContentResponse,
   PaperResponse,
+  ProjectRepoConflictDetail,
+  ProjectRepoConflictFile,
+  ProjectRepoConflictResolution,
   ProjectItemSummary,
   ProjectRepoSyncResponse,
   ProjectSummary,
@@ -87,6 +91,7 @@ type PythonFileRunState = {
   result: RunPythonFileResponse | null;
   error: string;
 };
+type SaveIntent = "save" | "run";
 type SaveModalState = {
   fileId: string;
   commitMessage: string;
@@ -94,6 +99,22 @@ type SaveModalState = {
   error: string;
   repoSync: ProjectRepoSyncResponse | null;
   success: ProjectRepoSyncResponse | null;
+} | null;
+type SyncConflictState = {
+  fileId: string;
+  projectId: string;
+  commitMessage: string;
+  expectedRemoteHeadSha: string;
+  repoName: string;
+  repoUrl: string;
+  defaultBranch: string;
+  baseCommitSha: string;
+  conflicts: ProjectRepoConflictFile[];
+  selectedPath: string;
+  resolutions: Record<string, string>;
+  afterSaveAction: SaveIntent;
+  saving: boolean;
+  error: string;
 } | null;
 type ProjectModalState = { mode: "create" } | { mode: "edit"; projectId: string };
 type DeleteModalState =
@@ -175,6 +196,33 @@ const EXAMPLES = [
 
 function staticAssetPath(name: string) {
   return `${import.meta.env.BASE_URL}${name.replace(/^\/+/, "")}`;
+}
+
+function pythonRepoPathForFilename(filename: string) {
+  return `src/${filename}`;
+}
+
+function pythonFilenameFromRepoPath(path: string) {
+  return path.startsWith("src/") ? path.slice("src/".length) : null;
+}
+
+function projectRepoConflictFromError(error: unknown): ProjectRepoConflictDetail | null {
+  if (!(error instanceof ApiError)) {
+    return null;
+  }
+  const payload = error.payload;
+  if (!payload || typeof payload !== "object" || !("detail" in payload)) {
+    return null;
+  }
+  const detail = (payload as { detail?: unknown }).detail;
+  if (!detail || typeof detail !== "object") {
+    return null;
+  }
+  const conflict = detail as Partial<ProjectRepoConflictDetail>;
+  if (conflict.code !== "github_merge_conflict" || !Array.isArray(conflict.conflicts)) {
+    return null;
+  }
+  return conflict as ProjectRepoConflictDetail;
 }
 
 function createLocalMessage(
@@ -496,6 +544,7 @@ export default function App() {
   const [projectFormError, setProjectFormError] = useState("");
   const [deleteModalState, setDeleteModalState] = useState<DeleteModalState>(null);
   const [saveModalState, setSaveModalState] = useState<SaveModalState>(null);
+  const [syncConflictState, setSyncConflictState] = useState<SyncConflictState>(null);
   const [authView, setAuthView] = useState<AuthView>("login");
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [authReady, setAuthReady] = useState(false);
@@ -687,6 +736,17 @@ export default function App() {
     ? (pythonFileRuns[activePythonFileId] ?? { running: false, result: null, error: "" })
     : { running: false, result: null, error: "" };
   const activePythonContent = activePythonDraft?.content ?? activePythonFile?.content ?? "";
+  const selectedSyncConflict = syncConflictState
+    ? (syncConflictState.conflicts.find(
+        (conflict) => conflict.path === syncConflictState.selectedPath,
+      ) ??
+      syncConflictState.conflicts[0] ??
+      null)
+    : null;
+  const selectedSyncConflictResolution = selectedSyncConflict
+    ? (syncConflictState?.resolutions[selectedSyncConflict.path] ??
+      selectedSyncConflict.local_content)
+    : "";
   const isChatEmpty =
     activeTab == null ||
     (activeTab.kind === "thread" && (!activeThread || activeThread.messages.length === 0));
@@ -1688,6 +1748,7 @@ export default function App() {
     setProjectFormError("");
     setDeleteModalState(null);
     setSaveModalState(null);
+    setSyncConflictState(null);
     setLandingPrompt("");
     setComposerInput("");
     setComposerStatus("");
@@ -2036,6 +2097,123 @@ export default function App() {
     [refreshProjects, upsertPythonFileIntoProjectItems],
   );
 
+  const applyConflictResolutionsLocally = useCallback(
+    (projectId: string, resolutions: ProjectRepoConflictResolution[]) => {
+      if (resolutions.length === 0) {
+        return;
+      }
+      const resolutionsByPath = new Map(
+        resolutions.map((resolution) => [resolution.path, resolution.content]),
+      );
+      setPythonFileMap((current) => {
+        let changed = false;
+        const next = { ...current };
+        for (const pythonFile of Object.values(current)) {
+          if (pythonFile.project_id !== projectId) {
+            continue;
+          }
+          const resolvedContent = resolutionsByPath.get(
+            pythonRepoPathForFilename(pythonFile.filename),
+          );
+          if (resolvedContent == null || resolvedContent === pythonFile.content) {
+            continue;
+          }
+          changed = true;
+          next[pythonFile.file_id] = {
+            ...pythonFile,
+            content: resolvedContent,
+            updated_at: new Date().toISOString(),
+          };
+        }
+        return changed ? next : current;
+      });
+      setPythonFileDrafts((current) => {
+        let changed = false;
+        const next = { ...current };
+        for (const fileId of Object.keys(current)) {
+          const pythonFile = pythonFileMapRef.current[fileId];
+          if (!pythonFile || pythonFile.project_id !== projectId) {
+            continue;
+          }
+          const resolvedContent = resolutionsByPath.get(
+            pythonRepoPathForFilename(pythonFile.filename),
+          );
+          if (resolvedContent == null) {
+            continue;
+          }
+          changed = true;
+          next[fileId] = { content: resolvedContent, dirty: false };
+          if (pythonFileMapRef.current[fileId]) {
+            pythonFileMapRef.current[fileId] = {
+              ...pythonFileMapRef.current[fileId],
+              content: resolvedContent,
+            };
+          }
+        }
+        return changed ? next : current;
+      });
+    },
+    [],
+  );
+
+  const syncProjectToGitHub = useCallback(
+    async ({
+      fileId,
+      projectId,
+      commitMessage,
+      afterSaveAction,
+      expectedRemoteHeadSha,
+      conflictResolutions = [],
+    }: {
+      fileId: string;
+      projectId: string;
+      commitMessage: string;
+      afterSaveAction: SaveIntent;
+      expectedRemoteHeadSha?: string | null;
+      conflictResolutions?: ProjectRepoConflictResolution[];
+    }) => {
+      try {
+        const sync = await syncProjectRepo(projectId, {
+          commitMessage,
+          expectedRemoteHeadSha: expectedRemoteHeadSha ?? null,
+          conflictResolutions,
+        });
+        if (conflictResolutions.length > 0) {
+          applyConflictResolutionsLocally(projectId, conflictResolutions);
+        }
+        return { sync, conflict: null as ProjectRepoConflictDetail | null };
+      } catch (error) {
+        const conflict = projectRepoConflictFromError(error);
+        if (!conflict) {
+          throw error;
+        }
+        setSyncConflictState({
+          fileId,
+          projectId,
+          commitMessage,
+          expectedRemoteHeadSha: conflict.remote_head_sha,
+          repoName: conflict.github_repo_name,
+          repoUrl: conflict.github_repo_url,
+          defaultBranch: conflict.default_branch,
+          baseCommitSha: conflict.base_commit_sha,
+          conflicts: conflict.conflicts,
+          selectedPath: conflict.conflicts[0]?.path ?? "",
+          resolutions: Object.fromEntries(
+            conflict.conflicts.map((fileConflict) => [
+              fileConflict.path,
+              fileConflict.local_content,
+            ]),
+          ),
+          afterSaveAction,
+          saving: false,
+          error: "",
+        });
+        return { sync: null, conflict };
+      }
+    },
+    [applyConflictResolutionsLocally],
+  );
+
   const openSaveModal = useCallback(
     async (fileId: string) => {
       if (!sessionSettings.has_github_connection) {
@@ -2061,6 +2239,10 @@ export default function App() {
     setSaveModalState(null);
   }, []);
 
+  const closeSyncConflictModal = useCallback(() => {
+    setSyncConflictState(null);
+  }, []);
+
   const confirmSaveModal = useCallback(async () => {
     if (!saveModalState) {
       return;
@@ -2071,7 +2253,20 @@ export default function App() {
     setSaveModalState((current) => (current ? { ...current, saving: true, error: "" } : current));
     try {
       const savedFile = await persistPythonFile(fileId, nextContent);
-      const sync = await syncProjectRepo(savedFile.project_id, saveModalState.commitMessage);
+      const outcome = await syncProjectToGitHub({
+        fileId,
+        projectId: savedFile.project_id,
+        commitMessage: saveModalState.commitMessage,
+        afterSaveAction: "save",
+      });
+      if (outcome.conflict) {
+        setSaveModalState(null);
+        return;
+      }
+      const sync = outcome.sync;
+      if (!sync) {
+        return;
+      }
       setSaveModalState((current) =>
         current ? { ...current, saving: false, success: sync, repoSync: sync } : current,
       );
@@ -2086,7 +2281,84 @@ export default function App() {
           : current,
       );
     }
-  }, [fetchAndStorePythonFile, persistPythonFile, saveModalState]);
+  }, [fetchAndStorePythonFile, persistPythonFile, saveModalState, syncProjectToGitHub]);
+
+  const confirmSyncConflictResolution = useCallback(async () => {
+    if (!syncConflictState) {
+      return;
+    }
+    const conflictResolutions = syncConflictState.conflicts.map((conflict) => ({
+      path: conflict.path,
+      content: syncConflictState.resolutions[conflict.path] ?? conflict.local_content,
+    }));
+    setSyncConflictState((current) =>
+      current ? { ...current, saving: true, error: "" } : current,
+    );
+    try {
+      const outcome = await syncProjectToGitHub({
+        fileId: syncConflictState.fileId,
+        projectId: syncConflictState.projectId,
+        commitMessage: syncConflictState.commitMessage,
+        afterSaveAction: syncConflictState.afterSaveAction,
+        expectedRemoteHeadSha: syncConflictState.expectedRemoteHeadSha,
+        conflictResolutions,
+      });
+      if (outcome.conflict || !outcome.sync) {
+        return;
+      }
+      const sync = outcome.sync;
+      const fileId = syncConflictState.fileId;
+      const commitMessage = syncConflictState.commitMessage;
+      const afterSaveAction = syncConflictState.afterSaveAction;
+      setSyncConflictState(null);
+      if (afterSaveAction === "save") {
+        setSaveModalState({
+          fileId,
+          commitMessage,
+          saving: false,
+          error: "",
+          repoSync: sync,
+          success: sync,
+        });
+        return;
+      }
+      setPythonFileRuns((current) => ({
+        ...current,
+        [fileId]: { running: true, result: null, error: "" },
+      }));
+      try {
+        const result = await runPythonFile(fileId);
+        setPythonFileRuns((current) => ({
+          ...current,
+          [fileId]: { running: false, result, error: "" },
+        }));
+      } catch (error) {
+        setPythonFileRuns((current) => ({
+          ...current,
+          [fileId]: {
+            running: false,
+            result: null,
+            error: error instanceof Error ? error.message : "Python file could not be run.",
+          },
+        }));
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Project could not be saved.";
+      setSyncConflictState((current) =>
+        current ? { ...current, saving: false, error: message } : current,
+      );
+      if (syncConflictState.afterSaveAction === "run") {
+        setPythonFileRuns((current) => ({
+          ...current,
+          [syncConflictState.fileId]: {
+            running: false,
+            result: null,
+            error: message,
+          },
+        }));
+      }
+    }
+  }, [syncConflictState, syncProjectToGitHub]);
 
   const handleRenamePythonFile = useCallback(
     async (fileId: string) => {
@@ -2140,7 +2412,19 @@ export default function App() {
         [activePythonFileId]: { running: true, result: null, error: "" },
       }));
       const savedFile = await persistPythonFile(activePythonFileId, nextContent);
-      await syncProjectRepo(savedFile.project_id, `Run ${savedFile.filename}`);
+      const outcome = await syncProjectToGitHub({
+        fileId: activePythonFileId,
+        projectId: savedFile.project_id,
+        commitMessage: `Run ${savedFile.filename}`,
+        afterSaveAction: "run",
+      });
+      if (outcome.conflict) {
+        setPythonFileRuns((current) => ({
+          ...current,
+          [activePythonFileId]: { running: false, result: null, error: "" },
+        }));
+        return;
+      }
       const result = await runPythonFile(activePythonFileId);
       setPythonFileRuns((current) => ({
         ...current,
@@ -2164,6 +2448,7 @@ export default function App() {
     sessionSettings.has_github_connection,
     sessionSettings.has_daytona_api_key,
     showErrorFlash,
+    syncProjectToGitHub,
   ]);
 
   const handleReadDocs = useCallback(() => {
@@ -2816,8 +3101,8 @@ export default function App() {
                           fontSize: 14,
                           minimap: { enabled: false },
                           padding: {
-                            top: 52,
-                            bottom: activePythonRun.result || activePythonRun.error ? 200 : 24,
+                            top: 36,
+                            bottom: activePythonRun.result || activePythonRun.error ? 168 : 10,
                           },
                           scrollBeyondLastLine: false,
                           wordWrap: "on",
@@ -3283,6 +3568,172 @@ export default function App() {
                 </button>
               </form>
             )}
+          </div>
+        </div>
+      </div>
+
+      <div
+        id="python-conflict-modal"
+        className={`modal${syncConflictState ? "" : " hidden"}`}
+        role="dialog"
+        aria-modal="true"
+      >
+        <div className="modal-backdrop" onClick={closeSyncConflictModal} />
+        <div className="modal-panel python-conflict-modal-panel">
+          <button className="modal-close" type="button" onClick={closeSyncConflictModal}>
+            ×
+          </button>
+          <div className="modal-heading modal-heading-copy">
+            <h2 className="modal-title">Resolve GitHub conflicts</h2>
+            <p className="modal-caption">
+              Paperbase fetched a newer upstream commit in{" "}
+              <a href={syncConflictState?.repoUrl} target="_blank" rel="noreferrer">
+                {syncConflictState?.repoName || "the project repository"}
+              </a>
+              . Review each conflicting file, edit the merged result, then save again.
+            </p>
+          </div>
+          {syncConflictState?.error ? (
+            <div className="modal-flash warning" role="alert">
+              <span className="modal-flash-text">{syncConflictState.error}</span>
+            </div>
+          ) : null}
+          <div className="python-conflict-layout">
+            <div
+              className="python-conflict-file-list"
+              role="tablist"
+              aria-label="Conflicting files"
+            >
+              {syncConflictState?.conflicts.map((conflict) => (
+                <button
+                  key={conflict.path}
+                  type="button"
+                  role="tab"
+                  aria-selected={syncConflictState.selectedPath === conflict.path}
+                  className={`python-conflict-file-tab${syncConflictState.selectedPath === conflict.path ? " active" : ""}`}
+                  onClick={() =>
+                    setSyncConflictState((current) =>
+                      current ? { ...current, selectedPath: conflict.path } : current,
+                    )
+                  }
+                >
+                  {pythonFilenameFromRepoPath(conflict.path) ?? conflict.path}
+                </button>
+              ))}
+            </div>
+            {selectedSyncConflict ? (
+              <div className="python-conflict-panel">
+                <div className="python-conflict-summary">
+                  <strong>{selectedSyncConflict.path}</strong>
+                  <span>
+                    Base {syncConflictState?.baseCommitSha.slice(0, 7) || "unknown"} vs upstream{" "}
+                    {syncConflictState?.expectedRemoteHeadSha.slice(0, 7) || "latest"}
+                  </span>
+                </div>
+                <div className="python-conflict-diff-shell">
+                  <DiffEditor
+                    height="240px"
+                    language="python"
+                    theme="hc-black"
+                    original={selectedSyncConflict.remote_content}
+                    modified={selectedSyncConflict.local_content}
+                    options={{
+                      automaticLayout: true,
+                      minimap: { enabled: false },
+                      readOnly: true,
+                      renderSideBySide: true,
+                      wordWrap: "on",
+                    }}
+                  />
+                </div>
+                <div className="python-conflict-merge-toolbar">
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() =>
+                      setSyncConflictState((current) =>
+                        current
+                          ? {
+                              ...current,
+                              resolutions: {
+                                ...current.resolutions,
+                                [selectedSyncConflict.path]: selectedSyncConflict.local_content,
+                              },
+                            }
+                          : current,
+                      )
+                    }
+                  >
+                    Use local
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() =>
+                      setSyncConflictState((current) =>
+                        current
+                          ? {
+                              ...current,
+                              resolutions: {
+                                ...current.resolutions,
+                                [selectedSyncConflict.path]: selectedSyncConflict.remote_content,
+                              },
+                            }
+                          : current,
+                      )
+                    }
+                  >
+                    Use remote
+                  </button>
+                </div>
+                <div className="python-conflict-merge-shell">
+                  <Editor
+                    height="220px"
+                    language="python"
+                    theme="hc-black"
+                    value={selectedSyncConflictResolution}
+                    onChange={(value) =>
+                      setSyncConflictState((current) =>
+                        current
+                          ? {
+                              ...current,
+                              resolutions: {
+                                ...current.resolutions,
+                                [selectedSyncConflict.path]: value ?? "",
+                              },
+                            }
+                          : current,
+                      )
+                    }
+                    options={{
+                      automaticLayout: true,
+                      minimap: { enabled: false },
+                      scrollBeyondLastLine: false,
+                      wordWrap: "on",
+                    }}
+                  />
+                </div>
+              </div>
+            ) : null}
+          </div>
+          <div className="python-conflict-actions">
+            <button className="secondary-button" type="button" onClick={closeSyncConflictModal}>
+              Cancel
+            </button>
+            <button
+              className="primary-button"
+              type="button"
+              onClick={() => {
+                void confirmSyncConflictResolution();
+              }}
+              disabled={syncConflictState?.saving}
+            >
+              {syncConflictState?.saving
+                ? "Saving..."
+                : syncConflictState?.afterSaveAction === "run"
+                  ? "Save and run"
+                  : "Save merge"}
+            </button>
           </div>
         </div>
       </div>

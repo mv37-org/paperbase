@@ -15,10 +15,24 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from .browser_code import DaytonaExecutionError, DaytonaPythonRunner, GitHubProjectRepoManager, GitHubSyncError
+from .browser_code import (
+    DaytonaExecutionError,
+    DaytonaPythonRunner,
+    GitHubProjectRepoManager,
+    GitHubSyncConflictError,
+    GitHubSyncError,
+)
 from .config import Settings, get_settings
 from .emailer import EmailSender, ResendEmailSender
-from .extractors import build_manifest, extract_uploaded_document, figure_index_payload, index_paper_artifacts, table_csv_bytes, table_index_payload, table_json_bytes
+from .extractors import (
+    build_manifest,
+    extract_uploaded_document,
+    figure_index_payload,
+    index_paper_artifacts,
+    table_csv_bytes,
+    table_index_payload,
+    table_json_bytes,
+)
 from .llm import AnthropicChatModelClient, ChatModelClient
 from .models import (
     BrowserSessionResponse,
@@ -44,6 +58,8 @@ from .models import (
     PaperMetadata,
     PaperResponse,
     ProjectItemPageResponse,
+    ProjectRepoConflictDetail,
+    ProjectRepoConflictFile,
     ProjectRepoSyncRequest,
     ProjectRepoSyncResponse,
     ProjectListResponse,
@@ -71,7 +87,15 @@ from .models import (
     UploadedDocumentResponse,
 )
 from .repository import PaperRepository, build_repository
-from .security import SecretCipher, api_key_hint, hash_password, new_browser_token, password_needs_rehash, token_hash, verify_password
+from .security import (
+    SecretCipher,
+    api_key_hint,
+    hash_password,
+    new_browser_token,
+    password_needs_rehash,
+    token_hash,
+    verify_password,
+)
 from .summaries import build_paper_summaries
 from .storage import ObjectStore, build_object_store
 from . import sources
@@ -258,9 +282,11 @@ class _TransformersCLSEmbedder:
         """Single-sequence tokenization path. Used for chunks (section text,
         figure captions, etc.) where there is no natural ``(title, body)``
         pair to feed."""
-        return self._run([(text, None) for text in texts],
-                         normalize_embeddings=normalize_embeddings,
-                         convert_to_numpy=convert_to_numpy)
+        return self._run(
+            [(text, None) for text in texts],
+            normalize_embeddings=normalize_embeddings,
+            convert_to_numpy=convert_to_numpy,
+        )
 
     def encode_pairs(
         self,
@@ -276,9 +302,7 @@ class _TransformersCLSEmbedder:
         ``body`` may be None / empty — in that case the call degrades
         gracefully to the single-sequence path for that one example.
         """
-        return self._run(pairs,
-                         normalize_embeddings=normalize_embeddings,
-                         convert_to_numpy=convert_to_numpy)
+        return self._run(pairs, normalize_embeddings=normalize_embeddings, convert_to_numpy=convert_to_numpy)
 
     def _run(
         self,
@@ -477,10 +501,7 @@ class OptionalEmbeddingProvider:
             else:
                 # sentence-transformers models take a single string; match
                 # what BGE / MPNet / all-MiniLM were trained on.
-                joined = [
-                    "\n\n".join(part for part in (title, body) if part)
-                    for title, body in pairs
-                ]
+                joined = ["\n\n".join(part for part in (title, body) if part) for title, body in pairs]
                 vectors = model.encode(
                     joined,
                     normalize_embeddings=True,
@@ -493,10 +514,7 @@ class OptionalEmbeddingProvider:
                 extra={"event": "embed.encode_failed", "error": str(exc)},
             )
             return None
-        return [
-            [float(v) for v in (vector.tolist() if hasattr(vector, "tolist") else vector)]
-            for vector in vectors
-        ]
+        return [[float(v) for v in (vector.tolist() if hasattr(vector, "tolist") else vector)] for vector in vectors]
 
 
 class OptionalReranker:
@@ -770,9 +788,7 @@ class PaperbaseService:
         return settings.model_copy(
             update={
                 "anthropic_api_key_hint": anthropic_api_key_hint,
-                "github_oauth_available": bool(
-                    self.settings.github_client_id and self.settings.github_client_secret
-                ),
+                "github_oauth_available": bool(self.settings.github_client_id and self.settings.github_client_secret),
             }
         )
 
@@ -862,7 +878,9 @@ class PaperbaseService:
         self.repository.set_browser_user_password(user.user_id, hash_password(request.password))  # type: ignore[attr-defined]
         return {"status": "ok"}
 
-    def upsert_google_browser_user(self, *, google_subject: str, email: str, display_name: str) -> tuple[BrowserSessionResponse, str]:
+    def upsert_google_browser_user(
+        self, *, google_subject: str, email: str, display_name: str
+    ) -> tuple[BrowserSessionResponse, str]:
         email = _normalize_email(email)
         user = self.repository.get_browser_user_by_google_subject(google_subject)  # type: ignore[attr-defined]
         if user is None:
@@ -987,10 +1005,14 @@ class PaperbaseService:
         self.object_store.put_bytes(original_path, data, content_type=content_type)
         try:
             extraction = extract_uploaded_document(basename, data, content_type=content_type)
-            text_chunks: list[dict[str, str]] = [{"path": "text/full.md", "chunk_kind": "full_text", "content": extraction.text_markdown}]
+            text_chunks: list[dict[str, str]] = [
+                {"path": "text/full.md", "chunk_kind": "full_text", "content": extraction.text_markdown}
+            ]
             self.object_store.put_text(f"{prefix}/text/full.md", extraction.text_markdown, content_type="text/markdown")
             for section in extraction.sections:
-                self.object_store.put_text(f"{prefix}/sections/{section.slug}.md", section.markdown, content_type="text/markdown")
+                self.object_store.put_text(
+                    f"{prefix}/sections/{section.slug}.md", section.markdown, content_type="text/markdown"
+                )
                 text_chunks.append(
                     {
                         "path": f"sections/{section.slug}.md",
@@ -1155,6 +1177,11 @@ class PaperbaseService:
         commit_message = request.commit_message.strip()
         if not commit_message:
             raise HTTPException(status_code=422, detail="Commit message is required")
+        if request.conflict_resolutions and not request.expected_remote_head_sha:
+            raise HTTPException(
+                status_code=422,
+                detail="Conflict resolutions require the latest remote head reference",
+            )
         project = self.repository.get_project(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
         if project is None:
             raise HTTPException(status_code=404, detail="Project not found")
@@ -1167,6 +1194,38 @@ class PaperbaseService:
         sync = self.repository.get_project_repo_sync(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
         try:
             access_token = self.secret_cipher.decrypt(github["encrypted_access_token"])
+            python_files_by_name = {python_file.filename: python_file for python_file in python_files}
+            for resolution in request.conflict_resolutions:
+                path = resolution.path.strip()
+                if path in {".paperbase", "notes/.gitkeep"}:
+                    continue
+                if not path.startswith("src/"):
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"Conflict path '{path}' cannot be resolved by Paperbase.",
+                    )
+                filename = path.removeprefix("src/")
+                python_file = python_files_by_name.get(filename)
+                if python_file is None:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"Conflict path '{path}' does not map to a project Python file.",
+                    )
+                updated = self.repository.update_python_file(  # type: ignore[attr-defined]
+                    user_id=user.user_id,
+                    file_id=python_file.file_id,
+                    filename=None,
+                    content=resolution.content,
+                )
+                if updated is None:
+                    raise HTTPException(status_code=404, detail="Python file not found")
+                python_files_by_name.pop(filename, None)
+                python_files_by_name[updated.filename] = updated
+            python_files = sorted(
+                python_files_by_name.values(),
+                key=lambda item: (item.updated_at, item.created_at),
+                reverse=True,
+            )
             if sync is None or not sync.repo_exists:
                 repo_info = self.github_repo_manager.ensure_repo(
                     access_token=access_token,
@@ -1183,15 +1242,34 @@ class PaperbaseService:
                 repo_url = sync.github_repo_url
                 default_branch = sync.default_branch or "main"
             synced_at = utcnow()
+            author_name = (user.display_name or "").strip() or github["github_login"]
+            author_email = f"{github['github_login']}@users.noreply.github.com"
             manifest = {
+                "schema_version": 1,
                 "project_id": project.project_id,
                 "project_name": project.name,
-                "saved_at": synced_at.isoformat(),
-                "item_count": len(python_files),
+                "custom_instructions": project.description or "",
+                "project_description": project.description or "",
+                "created_at": project.created_at.isoformat(),
+                "updated_at": project.updated_at.isoformat(),
+                "last_pushed_at": synced_at.isoformat(),
+                "author_name": author_name,
+                "author_email": author_email,
+                "github_login": github["github_login"],
+                "github_repo_name": repo_name,
+                "default_branch": default_branch,
+                "python_file_count": len(python_files),
+                "notes_enabled": False,
+                "paths": {
+                    "src": "src",
+                    "notes": "notes",
+                    "metadata": ".paperbase",
+                },
             }
             files_to_sync = {
                 ".paperbase": json.dumps(manifest, indent=2, sort_keys=True),
-                **{python_file.filename: python_file.content for python_file in python_files},
+                "notes/.gitkeep": "",
+                **{f"src/{python_file.filename}": python_file.content for python_file in python_files},
             }
             commit_info = self.github_repo_manager.sync_project_files(
                 access_token=access_token,
@@ -1201,9 +1279,32 @@ class PaperbaseService:
                 default_branch=default_branch,
                 files=files_to_sync,
                 commit_message=commit_message,
-                author_name=github["github_login"],
-                author_email=f"{github['github_login']}@users.noreply.github.com",
+                author_name=author_name,
+                author_email=author_email,
+                base_commit_sha=sync.last_sync_commit_sha if sync and sync.last_sync_commit_sha else None,
+                expected_remote_head_sha=request.expected_remote_head_sha,
             )
+        except GitHubSyncConflictError as exc:
+            detail = ProjectRepoConflictDetail(
+                message=str(exc),
+                project_id=project_id,
+                repo_exists=True,
+                github_repo_name=exc.repo_name,
+                github_repo_url=exc.repo_url,
+                default_branch=exc.default_branch,
+                base_commit_sha=exc.base_commit_sha,
+                remote_head_sha=exc.remote_head_sha,
+                conflicts=[
+                    ProjectRepoConflictFile(
+                        path=conflict.path,
+                        base_content=conflict.base_content,
+                        local_content=conflict.local_content,
+                        remote_content=conflict.remote_content,
+                    )
+                    for conflict in exc.conflicts
+                ],
+            )
+            raise HTTPException(status_code=409, detail=detail.model_dump()) from exc
         except GitHubSyncError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -1932,11 +2033,7 @@ class PaperbaseService:
                 tools=tools,
                 tool_choice=tool_choice,
             )
-            assistant_content = [
-                block
-                for block in (response.get("content") or [])
-                if isinstance(block, dict)
-            ]
+            assistant_content = [block for block in (response.get("content") or []) if isinstance(block, dict)]
             tool_uses = [block for block in assistant_content if block.get("type") == "tool_use"]
             if not tool_uses:
                 break
@@ -1969,7 +2066,9 @@ class PaperbaseService:
             state="api_key_required",
         )
 
-    def send_chat_message(self, user: BrowserUser, thread_id: str, request: SendChatMessageRequest) -> SendChatMessageResponse:
+    def send_chat_message(
+        self, user: BrowserUser, thread_id: str, request: SendChatMessageRequest
+    ) -> SendChatMessageResponse:
         prepared = self._prepare_chat_generation(user=user, thread_id=thread_id, request=request)
         if not prepared.api_key_value:
             return self._api_key_required_response(user=user, thread_id=thread_id, resolved_user=prepared.resolved_user)
@@ -2015,7 +2114,12 @@ class PaperbaseService:
     ) -> Iterator[tuple[str, dict[str, Any]]]:
         prepared = self._prepare_chat_generation(user=user, thread_id=thread_id, request=request)
         if not prepared.api_key_value:
-            yield ("api_key_required", self._api_key_required_response(user=user, thread_id=thread_id, resolved_user=prepared.resolved_user).model_dump(mode="json"))
+            yield (
+                "api_key_required",
+                self._api_key_required_response(
+                    user=user, thread_id=thread_id, resolved_user=prepared.resolved_user
+                ).model_dump(mode="json"),
+            )
             return
 
         conversation_messages, citation_registry = self._run_chat_tool_rounds(
@@ -2055,7 +2159,11 @@ class PaperbaseService:
             )
             logger.exception(
                 "Streaming chat request failed",
-                extra={"event": "chat.model.stream.failed", "thread_id": thread_id, "message_id": assistant_message.message_id},
+                extra={
+                    "event": "chat.model.stream.failed",
+                    "thread_id": thread_id,
+                    "message_id": assistant_message.message_id,
+                },
             )
             yield (
                 "error",
@@ -2149,10 +2257,7 @@ class PaperbaseService:
             # (title, body) pair contract as index_arxiv_paper so the
             # reindex path produces vectors in the same space SPECTER2 was
             # trained on — summary_short is intentionally excluded.
-            pairs = [
-                (paper.title or "", paper.tldr or paper.abstract or "")
-                for paper in batch
-            ]
+            pairs = [(paper.title or "", paper.tldr or paper.abstract or "") for paper in batch]
             vectors = self.embeddings.encode_paper_batch(pairs)
             if vectors is not None and len(vectors) == len(batch):
                 for paper, vector in zip(batch, vectors):
@@ -2354,7 +2459,9 @@ class PaperbaseService:
                 self.sync_latest_papers(
                     days=int(job.payload.get("days", self.settings.latest_sync_days)),
                     categories=list(job.payload.get("categories", self.settings.arxiv_categories)),
-                    limit_per_category=int(job.payload.get("limit_per_category", self.settings.latest_sync_limit_per_category)),
+                    limit_per_category=int(
+                        job.payload.get("limit_per_category", self.settings.latest_sync_limit_per_category)
+                    ),
                 )
             elif job.job_type == "summarize_top_cited":
                 self.summarize_top_cited(limit=int(job.payload.get("limit", 500_000)))
@@ -2416,7 +2523,9 @@ class PaperbaseService:
         )
         return indexed
 
-    def index_arxiv_paper(self, arxiv_id: str, *, paper: PaperMetadata | None = None, force: bool = False) -> PaperResponse:
+    def index_arxiv_paper(
+        self, arxiv_id: str, *, paper: PaperMetadata | None = None, force: bool = False
+    ) -> PaperResponse:
         existing = self.repository.get_paper_by_arxiv_id(arxiv_id)
         if existing and existing.index_status == "indexed" and not force:
             logger.info(
@@ -2460,17 +2569,17 @@ class PaperbaseService:
         # search_document for lexical scoring and lives on chunks.
         paper_title = metadata.title or ""
         paper_body = metadata.tldr or metadata.abstract or ""
-        paper_embedding = (
-            self.embeddings.encode_paper(paper_title, paper_body)
-            if (paper_title or paper_body)
-            else None
-        )
+        paper_embedding = self.embeddings.encode_paper(paper_title, paper_body) if (paper_title or paper_body) else None
 
         stored = self.repository.upsert_paper(metadata, search_document=search_document, embedding=paper_embedding)
 
         prefix = f"papers/{stored.paper_id}"
         self.object_store.delete_prefix(prefix)
-        self.object_store.put_text(f"{prefix}/meta.json", json.dumps(metadata.model_dump(mode='json'), indent=2), content_type="application/json")
+        self.object_store.put_text(
+            f"{prefix}/meta.json",
+            json.dumps(metadata.model_dump(mode="json"), indent=2),
+            content_type="application/json",
+        )
         self.object_store.put_text(f"{prefix}/text/full.md", extraction.text_markdown, content_type="text/markdown")
 
         text_chunks: list[dict[str, Any]] = [
@@ -2558,7 +2667,11 @@ class PaperbaseService:
         # sections/tables stay focused.
         chunk_texts: list[str] = []
         for chunk in text_chunks:
-            cap = 4000 if chunk["chunk_kind"] == "full_text" else self.settings.chunk_max_chars + self.settings.chunk_overlap_chars
+            cap = (
+                4000
+                if chunk["chunk_kind"] == "full_text"
+                else self.settings.chunk_max_chars + self.settings.chunk_overlap_chars
+            )
             chunk_texts.append((chunk["content"] or "")[:cap])
         chunk_embeddings = self.embeddings.encode_batch(chunk_texts)
         if chunk_embeddings is not None and len(chunk_embeddings) == len(text_chunks):
@@ -2620,7 +2733,9 @@ class PaperbaseService:
         s2_results: list[PaperMetadata] = []
         if request.include_live_sources:
             try:
-                arxiv_results = sources.search_arxiv(request.query, max_results=request.limit, category=request.category)
+                arxiv_results = sources.search_arxiv(
+                    request.query, max_results=request.limit, category=request.category
+                )
             except Exception as exc:
                 logger.warning("arxiv live search failed", extra={"event": "search.arxiv_failed", "error": str(exc)})
             try:
@@ -2654,7 +2769,9 @@ class PaperbaseService:
         for rank, paper in enumerate(s2_results):
             stored = self.repository.upsert_paper_shallow(paper)
             pid = stored.paper_id
-            candidates.setdefault(pid, SearchPaperResult(**stored.model_dump(), source="live-s2", tldr=paper.tldr or None))
+            candidates.setdefault(
+                pid, SearchPaperResult(**stored.model_dump(), source="live-s2", tldr=paper.tldr or None)
+            )
             rrf[pid] = rrf.get(pid, 0.0) + live_weight / (k + rank)
 
         from math import log10
@@ -2690,9 +2807,7 @@ class PaperbaseService:
             ]
             rerank_scores = self.reranker.score(request.query, doc_texts)
             if rerank_scores is not None and len(rerank_scores) == len(rerank_head):
-                head_ranked = sorted(
-                    zip(rerank_head, rerank_scores), key=lambda pair: pair[1], reverse=True
-                )
+                head_ranked = sorted(zip(rerank_head, rerank_scores), key=lambda pair: pair[1], reverse=True)
                 for paper, score in head_ranked:
                     paper.score = float(score)
                 fused_papers = [paper for paper, _ in head_ranked] + rerank_tail
@@ -2800,7 +2915,7 @@ class PaperbaseService:
         prefix = f"papers/{paper_id}/"
         objects = self.object_store.list_prefix(prefix)
         files = [
-            FileObject(path=item.path[len(prefix):], size=item.size, content_type=item.content_type)
+            FileObject(path=item.path[len(prefix) :], size=item.size, content_type=item.content_type)
             for item in objects
         ]
         return FileListResponse(paper_id=paper_id, files=files)
@@ -2907,7 +3022,11 @@ class PaperbaseService:
     def probe_integrations(self) -> IntegrationProbeResponse:
         checked_at = utcnow()
         database_backend = "memory" if self.settings.database_url.startswith("memory://") else "sqlalchemy"
-        database_target = "memory://" if database_backend == "memory" else self.settings.database_url.split(":", 1)[0].split("+", 1)[0]
+        database_target = (
+            "memory://"
+            if database_backend == "memory"
+            else self.settings.database_url.split(":", 1)[0].split("+", 1)[0]
+        )
         try:
             database = self.repository.probe()
         except Exception as exc:

@@ -12,7 +12,20 @@ const apiMocks = vi.hoisted(() => {
     }
   }
 
+  class MockApiError extends Error {
+    status: number;
+    payload: unknown;
+
+    constructor(message: string, status: number, payload: unknown) {
+      super(message);
+      this.name = "ApiError";
+      this.status = status;
+      this.payload = payload;
+    }
+  }
+
   return {
+    ApiError: MockApiError,
     api: vi.fn(),
     createPythonFile: vi.fn(),
     createProject: vi.fn(),
@@ -50,6 +63,7 @@ const apiMocks = vi.hoisted(() => {
 });
 
 vi.mock("./api", () => ({
+  ApiError: apiMocks.ApiError,
   api: apiMocks.api,
   createPythonFile: apiMocks.createPythonFile,
   createProject: apiMocks.createProject,
@@ -105,6 +119,12 @@ vi.mock("@monaco-editor/react", () => ({
       value={value ?? ""}
       onChange={(event) => onChange?.(event.target.value)}
     />
+  ),
+  DiffEditor: ({ original, modified }: { original?: string; modified?: string }) => (
+    <div data-testid="monaco-diff-editor">
+      <span>{original ?? ""}</span>
+      <span>{modified ?? ""}</span>
+    </div>
   ),
 }));
 
@@ -266,6 +286,30 @@ function repoSyncResponse(projectId = "proj_1", repoExists = false) {
       : "",
     last_synced_at: repoExists ? "2026-04-21T00:00:00Z" : null,
   };
+}
+
+function repoConflictError(projectId = "proj_1") {
+  return new apiMocks.ApiError("Resolve GitHub conflicts", 409, {
+    detail: {
+      code: "github_merge_conflict",
+      message: "Resolve GitHub conflicts",
+      project_id: projectId,
+      repo_exists: true,
+      github_repo_name: "paperbase-general-123abc",
+      github_repo_url: "https://github.com/octocat/paperbase-general-123abc",
+      default_branch: "main",
+      base_commit_sha: "abc1234",
+      remote_head_sha: "def5678",
+      conflicts: [
+        {
+          path: "src/something.py",
+          base_content: "print('base')",
+          local_content: "print('local')",
+          remote_content: "print('remote')",
+        },
+      ],
+    },
+  });
 }
 
 function emptyThreadResponse(threadId: string, projectId = "proj_1", projectName = "General") {
@@ -672,9 +716,77 @@ describe("App", () => {
         content: "print('hello')",
       });
     });
-    expect(apiMocks.syncProjectRepo).toHaveBeenCalledWith("proj_1", "Save something.py");
+    expect(apiMocks.syncProjectRepo).toHaveBeenCalledWith("proj_1", {
+      commitMessage: "Save something.py",
+      expectedRemoteHeadSha: null,
+      conflictResolutions: [],
+    });
     await waitFor(() => {
       expect(screen.getByText(/Saved to/i)).toBeTruthy();
+    });
+  });
+
+  it("opens a Monaco merge flow when GitHub save hits a conflict", async () => {
+    apiMocks.loadSession.mockResolvedValue(
+      authenticatedSession({
+        settings: {
+          has_github_connection: true,
+          github_login: "octocat",
+        },
+      }),
+    );
+    apiMocks.createPythonFile.mockResolvedValue(
+      pythonFileResponse("file_1", "something.py", "", "proj_1"),
+    );
+    apiMocks.getProjectRepoSync.mockResolvedValue(repoSyncResponse("proj_1", true));
+    apiMocks.syncProjectRepo
+      .mockRejectedValueOnce(repoConflictError("proj_1"))
+      .mockResolvedValueOnce(repoSyncResponse("proj_1", true));
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Start new research in")).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Add python file" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Save" })).toBeTruthy();
+    });
+
+    fireEvent.change(screen.getByTestId("monaco-editor"), {
+      target: { value: "print('local')" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Save Python file")).toBeTruthy();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save to GitHub" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Resolve GitHub conflicts")).toBeTruthy();
+    });
+    expect(screen.getByTestId("monaco-diff-editor")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Use remote" }));
+    fireEvent.change(screen.getAllByTestId("monaco-editor")[1], {
+      target: { value: "print('merged')" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save merge" }));
+
+    await waitFor(() => {
+      expect(apiMocks.syncProjectRepo).toHaveBeenLastCalledWith("proj_1", {
+        commitMessage: "Save something.py",
+        expectedRemoteHeadSha: "def5678",
+        conflictResolutions: [
+          {
+            path: "src/something.py",
+            content: "print('merged')",
+          },
+        ],
+      });
     });
   });
 
@@ -714,7 +826,11 @@ describe("App", () => {
         content: "print('run')",
       });
     });
-    expect(apiMocks.syncProjectRepo).toHaveBeenCalledWith("proj_1", "Run something.py");
+    expect(apiMocks.syncProjectRepo).toHaveBeenCalledWith("proj_1", {
+      commitMessage: "Run something.py",
+      expectedRemoteHeadSha: null,
+      conflictResolutions: [],
+    });
     expect(apiMocks.runPythonFile).toHaveBeenCalledWith("file_1");
     await waitFor(() => {
       expect(screen.getByText("Latest run")).toBeTruthy();

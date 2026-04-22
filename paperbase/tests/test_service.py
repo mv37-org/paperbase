@@ -9,7 +9,13 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from paperbase.api import _resolve_bind_address, app
-from paperbase.browser_code import DaytonaRunResult, GitHubCommitInfo, GitHubRepoInfo
+from paperbase.browser_code import (
+    DaytonaRunResult,
+    GitHubCommitInfo,
+    GitHubConflictFile,
+    GitHubRepoInfo,
+    GitHubSyncConflictError,
+)
 from paperbase.config import Settings, get_settings
 from paperbase.extractors import ExtractionOutput, FigureArtifact, RawArtifact, SectionArtifact, TableArtifact
 from paperbase.models import (
@@ -78,9 +84,7 @@ class FakeChatModel:
                     "grounding",
                 )
                 query_words = [
-                    token.strip(".,!?():;").lower()
-                    for token in raw_query.split()
-                    if len(token.strip(".,!?():;")) > 3
+                    token.strip(".,!?():;").lower() for token in raw_query.split() if len(token.strip(".,!?():;")) > 3
                 ]
                 if any(word.startswith("ground") for word in query_words):
                     query = "grounding"
@@ -136,6 +140,7 @@ class FakeGitHubRepoManager:
     def __init__(self) -> None:
         self.ensure_repo_calls: list[dict[str, object]] = []
         self.sync_project_files_calls: list[dict[str, object]] = []
+        self.next_sync_conflict: GitHubSyncConflictError | None = None
 
     def ensure_repo(self, **kwargs) -> GitHubRepoInfo:
         self.ensure_repo_calls.append(kwargs)
@@ -147,6 +152,10 @@ class FakeGitHubRepoManager:
 
     def sync_project_files(self, **kwargs) -> GitHubCommitInfo:
         self.sync_project_files_calls.append(kwargs)
+        if self.next_sync_conflict is not None:
+            conflict = self.next_sync_conflict
+            self.next_sync_conflict = None
+            raise conflict
         return GitHubCommitInfo(
             repo_name="paperbase-general-123abc",
             repo_url="https://github.com/octocat/paperbase-general-123abc",
@@ -281,7 +290,9 @@ def _full_text_extraction(*, text: str) -> ExtractionOutput:
 def test_index_writes_manifest_and_artifacts(monkeypatch, service: PaperbaseService):
     paper = _sample_paper("2401.12345", title="Transformer Paper", abstract="Attention and transformers.")
     monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
-    monkeypatch.setattr("paperbase.service.index_paper_artifacts", lambda paper: _rich_extraction(text="Attention layers"))
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts", lambda paper: _rich_extraction(text="Attention layers")
+    )
 
     indexed = service.index_arxiv_paper(paper.arxiv_id, paper=paper)
 
@@ -311,10 +322,14 @@ def test_reindex_replaces_stale_artifacts(monkeypatch, service: PaperbaseService
     paper = _sample_paper("2401.33333", title="Transformer Paper", abstract="Attention and transformers.")
     monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
 
-    monkeypatch.setattr("paperbase.service.index_paper_artifacts", lambda paper: _full_text_extraction(text="Old extraction"))
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts", lambda paper: _full_text_extraction(text="Old extraction")
+    )
     service.index_arxiv_paper(paper.arxiv_id, paper=paper, force=True)
 
-    monkeypatch.setattr("paperbase.service.index_paper_artifacts", lambda paper: _rich_extraction(text="New extraction"))
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts", lambda paper: _rich_extraction(text="New extraction")
+    )
     service.index_arxiv_paper(paper.arxiv_id, paper=paper, force=True)
 
     files = {item.path for item in service.list_files("arxiv:2401.33333").files}
@@ -325,14 +340,23 @@ def test_reindex_replaces_stale_artifacts(monkeypatch, service: PaperbaseService
 
 def test_search_and_grep_return_result_handles(monkeypatch, service: PaperbaseService):
     monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
-    monkeypatch.setattr("paperbase.service.index_paper_artifacts", lambda paper: _rich_extraction(text=(
-        "Transformer Study mentions attention and transformers"
-        if "Transformer" in paper.title
-        else "Vision Study mentions diffusion only"
-    )))
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda paper: _rich_extraction(
+            text=(
+                "Transformer Study mentions attention and transformers"
+                if "Transformer" in paper.title
+                else "Vision Study mentions diffusion only"
+            )
+        ),
+    )
 
-    service.index_arxiv_paper("2401.10001", paper=_sample_paper("2401.10001", title="Transformer Study", abstract="Transformers"))
-    service.index_arxiv_paper("2401.10002", paper=_sample_paper("2401.10002", title="Vision Study", abstract="Diffusion"))
+    service.index_arxiv_paper(
+        "2401.10001", paper=_sample_paper("2401.10001", title="Transformer Study", abstract="Transformers")
+    )
+    service.index_arxiv_paper(
+        "2401.10002", paper=_sample_paper("2401.10002", title="Vision Study", abstract="Diffusion")
+    )
 
     results = service.search(SearchRequest(query="transformer", include_live_sources=False))
     assert results.result_set_id.startswith("rs_")
@@ -353,7 +377,9 @@ def test_search_and_grep_return_result_handles(monkeypatch, service: PaperbaseSe
 
 def test_search_can_shortlist_from_generated_summaries(monkeypatch, service: PaperbaseService):
     monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
-    monkeypatch.setattr("paperbase.service.index_paper_artifacts", lambda paper: _rich_extraction(text="General workflow discussion"))
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts", lambda paper: _rich_extraction(text="General workflow discussion")
+    )
 
     summaries = {
         "2401.20001": (
@@ -370,8 +396,12 @@ def test_search_can_shortlist_from_generated_summaries(monkeypatch, service: Pap
         lambda paper, extraction, settings=None: summaries[paper.arxiv_id],
     )
 
-    service.index_arxiv_paper("2401.20001", paper=_sample_paper("2401.20001", title="Tool Use Study", abstract="Planning systems"))
-    service.index_arxiv_paper("2401.20002", paper=_sample_paper("2401.20002", title="Image Study", abstract="Vision systems"))
+    service.index_arxiv_paper(
+        "2401.20001", paper=_sample_paper("2401.20001", title="Tool Use Study", abstract="Planning systems")
+    )
+    service.index_arxiv_paper(
+        "2401.20002", paper=_sample_paper("2401.20002", title="Image Study", abstract="Vision systems")
+    )
 
     results = service.search(SearchRequest(query="agent", include_live_sources=False))
 
@@ -422,7 +452,9 @@ def test_api_flow_for_jobs_and_results(monkeypatch, service: PaperbaseService):
 
     monkeypatch.setattr("paperbase.service.sources.get_paper_details", lambda arxiv_id: paper)
     monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
-    monkeypatch.setattr("paperbase.service.index_paper_artifacts", lambda paper: _rich_extraction(text="Queued attention result"))
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts", lambda paper: _rich_extraction(text="Queued attention result")
+    )
 
     job = client.post("/v1/index/papers/arxiv/2401.55555", headers=headers).json()
     assert job["status"] == "pending"
@@ -576,7 +608,14 @@ class _StubEmbeddings:
         return [[float(i), 0.0, 0.0] for i, _ in enumerate(pairs, start=1)]
 
 
-def _seed_indexed_paper(repo: MemoryPaperRepository, arxiv_id: str, *, with_paper_embedding: bool, chunks_with_embedding: int, chunks_without_embedding: int) -> str:
+def _seed_indexed_paper(
+    repo: MemoryPaperRepository,
+    arxiv_id: str,
+    *,
+    with_paper_embedding: bool,
+    chunks_with_embedding: int,
+    chunks_without_embedding: int,
+) -> str:
     paper = PaperMetadata(
         arxiv_id=arxiv_id,
         title=f"Paper {arxiv_id}",
@@ -614,11 +653,21 @@ def _seed_indexed_paper(repo: MemoryPaperRepository, arxiv_id: str, *, with_pape
 
 def test_reindex_visits_chunk_only_candidates(service: PaperbaseService):
     # Paper A: fully embedded — should be ignored.
-    _seed_indexed_paper(service.repository, "2401.00001", with_paper_embedding=True, chunks_with_embedding=2, chunks_without_embedding=0)
+    _seed_indexed_paper(
+        service.repository, "2401.00001", with_paper_embedding=True, chunks_with_embedding=2, chunks_without_embedding=0
+    )
     # Paper B: paper embedding present, chunks missing — the regression case.
-    paper_b = _seed_indexed_paper(service.repository, "2401.00002", with_paper_embedding=True, chunks_with_embedding=1, chunks_without_embedding=2)
+    paper_b = _seed_indexed_paper(
+        service.repository, "2401.00002", with_paper_embedding=True, chunks_with_embedding=1, chunks_without_embedding=2
+    )
     # Paper C: paper embedding missing — should also be picked up.
-    paper_c = _seed_indexed_paper(service.repository, "2401.00003", with_paper_embedding=False, chunks_with_embedding=0, chunks_without_embedding=1)
+    paper_c = _seed_indexed_paper(
+        service.repository,
+        "2401.00003",
+        with_paper_embedding=False,
+        chunks_with_embedding=0,
+        chunks_without_embedding=1,
+    )
 
     service.embeddings = _StubEmbeddings()
     result = service.reindex_missing_embeddings(limit=100, include_chunks=True)
@@ -659,7 +708,9 @@ def test_reindex_processes_all_pages_without_skipping(service: PaperbaseService)
 
 
 def test_suggest_and_stats_endpoints(service: PaperbaseService):
-    _seed_indexed_paper(service.repository, "2403.00001", with_paper_embedding=True, chunks_with_embedding=2, chunks_without_embedding=0)
+    _seed_indexed_paper(
+        service.repository, "2403.00001", with_paper_embedding=True, chunks_with_embedding=2, chunks_without_embedding=0
+    )
     response = service.suggest_papers("paper 2403", limit=5)
     assert response, "suggest should return at least the matching seed paper"
     assert response[0]["matched_field"] in {"title", "title_prefix", "authors", "summary"}
@@ -711,9 +762,7 @@ def test_reindex_continues_past_failed_frontier_page(service: PaperbaseService):
     # but the critical property is that we advanced past the failing set.
     assert result["chunks_updated"] >= 1
     resolved_ids = [
-        paper_id
-        for paper_id in paper_ids[10:]
-        if not service.repository.list_chunks_missing_embedding(paper_id)
+        paper_id for paper_id in paper_ids[10:] if not service.repository.list_chunks_missing_embedding(paper_id)
     ]
     assert resolved_ids, "reindex should advance past the failing frontier"
 
@@ -863,6 +912,7 @@ def test_specter2_embedder_uses_text_pair_tokenization():
     class _FakeBatch(dict):
         """Behaves like a tokenizer BatchEncoding: supports `.to()` and
         `**unpacking` into model call kwargs."""
+
         def to(self, device):
             return self
 
@@ -874,47 +924,62 @@ def test_specter2_embedder_uses_text_pair_tokenization():
     class _FakeHidden:
         def __init__(self, arr):
             self._arr = arr
+
         @property
         def last_hidden_state(self):
             return self
+
         def __getitem__(self, _idx):
             class _Tensor:
                 def __init__(self, arr):
                     self._arr = arr
+
                 def detach(self):
                     return self
+
                 def cpu(self):
                     return self
+
                 def numpy(self):
                     return self._arr
+
             return _Tensor(self._arr)
 
     class _FakeModel:
         def __call__(self, **_kwargs):
             class _Out:
                 pass
+
             import numpy as np
+
             out = _Out()
             out.last_hidden_state = _FakeHiddenState(np.array([[0.1, 0.2, 0.3]], dtype="float32"))
             return out
+
         def eval(self):
             return self
+
         def to(self, device):
             return self
 
     class _FakeHiddenState:
         def __init__(self, arr):
             self._arr = arr
+
         def __getitem__(self, _idx):
             class _Row:
                 def __init__(self, arr):
                     self._arr = arr
+
                 def detach(self):
                     return self
+
                 def cpu(self):
                     return self
+
                 def numpy(self):
                     return self._arr
+
             return _Row(self._arr)
 
     embedder = _TransformersCLSEmbedder.__new__(_TransformersCLSEmbedder)
@@ -931,9 +996,11 @@ def test_specter2_embedder_uses_text_pair_tokenization():
         embedder._device = "cpu"
 
         # Pair input → tokenizer must be called with text= and text_pair=.
-        embedder.encode_pairs([
-            ("Attention Is All You Need", "We propose a model based solely on attention."),
-        ])
+        embedder.encode_pairs(
+            [
+                ("Attention Is All You Need", "We propose a model based solely on attention."),
+            ]
+        )
         assert tokenizer_calls, "tokenizer should have been invoked"
         call = tokenizer_calls[-1]
         assert call.get("text") == ["Attention Is All You Need"]
@@ -982,9 +1049,7 @@ def test_encode_paper_drops_summary_short_from_paper_embedding_input(monkeypatch
         body="We propose a model based solely on attention mechanisms.",
     )
     assert vector is not None
-    assert received == [
-        ("Attention Is All You Need", "We propose a model based solely on attention mechanisms.")
-    ]
+    assert received == [("Attention Is All You Need", "We propose a model based solely on attention mechanisms.")]
     # Guard: caller builds the pair; heuristic summaries must not leak in.
     assert all("summary" not in (pair[0] or "").lower() for pair in received)
     assert all("summary" not in (pair[1] or "").lower() for pair in received)
@@ -1009,11 +1074,13 @@ def test_init_creates_trigram_indexes_for_summary_and_tldr():
     class _FakeBegin:
         def __enter__(self):
             return _FakeConn()
+
         def __exit__(self, *exc):
             return False
 
     class _FakeEngine:
         url = None
+
         def begin(self):
             return _FakeBegin()
 
@@ -1203,9 +1270,158 @@ def test_python_file_sync_project_repo_writes_metadata_and_files():
     assert len(repo_manager.ensure_repo_calls) == 1
     assert len(repo_manager.sync_project_files_calls) == 1
     synced_files = repo_manager.sync_project_files_calls[0]["files"]
-    assert synced_files["analysis.py"] == "print('sync')"
+    assert synced_files["src/analysis.py"] == "print('sync')"
+    assert "notes/.gitkeep" in synced_files
     assert ".paperbase" in synced_files
-    assert json.loads(synced_files[".paperbase"])["project_id"] == project.project_id
+    manifest = json.loads(synced_files[".paperbase"])
+    assert manifest["project_id"] == project.project_id
+    assert manifest["project_name"] == project.name
+    assert manifest["custom_instructions"] == project.description
+    assert manifest["paths"] == {"src": "src", "notes": "notes", "metadata": ".paperbase"}
+    assert repo_manager.sync_project_files_calls[0]["base_commit_sha"] is None
+    assert repo_manager.sync_project_files_calls[0]["expected_remote_head_sha"] is None
+
+
+def test_sync_project_repo_applies_conflict_resolutions_before_retry():
+    repo_manager = FakeGitHubRepoManager()
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        github_repo_manager=repo_manager,
+    )
+
+    session, _ = service.register_browser_user(
+        SignupRequest(email="resolve@example.com", password="topsecret123", display_name="Resolve User")
+    )
+    assert session.user is not None
+    service.save_github_connection(
+        session.user,
+        github_user_id="42",
+        github_login="octocat",
+        access_token="github-access-token",
+        scope="repo,read:user",
+    )
+
+    project = service.list_projects(session.user).projects[0]
+    python_file = service.create_python_file(session.user, project.project_id)
+    updated_file = service.update_python_file(
+        session.user,
+        python_file.file_id,
+        filename="analysis.py",
+        content="print('local')",
+    )
+    service.repository.save_project_repo_sync(  # type: ignore[attr-defined]
+        user_id=session.user.user_id,
+        project_id=project.project_id,
+        github_repo_name="paperbase-general-123abc",
+        github_repo_url="https://github.com/octocat/paperbase-general-123abc",
+        default_branch="main",
+        last_sync_commit_sha="abc123",
+        last_sync_commit_url="https://github.com/octocat/paperbase-general-123abc/commit/abc123",
+        last_synced_at=datetime(2026, 4, 21, tzinfo=timezone.utc),
+    )
+
+    synced = service.sync_project_repo(
+        session.user,
+        project.project_id,
+        ProjectRepoSyncRequest(
+            commit_message="Resolve analysis.py",
+            expected_remote_head_sha="def456",
+            conflict_resolutions=[
+                {
+                    "path": "src/analysis.py",
+                    "content": "print('merged')",
+                }
+            ],
+        ),
+    )
+
+    assert synced.last_sync_commit_sha == "abc123"
+    assert service.get_python_file(session.user, updated_file.file_id).content == "print('merged')"
+    assert repo_manager.sync_project_files_calls[0]["files"]["src/analysis.py"] == "print('merged')"
+    assert repo_manager.sync_project_files_calls[0]["base_commit_sha"] == "abc123"
+    assert repo_manager.sync_project_files_calls[0]["expected_remote_head_sha"] == "def456"
+
+
+def test_sync_project_repo_surfaces_merge_conflicts():
+    repo_manager = FakeGitHubRepoManager()
+    repo_manager.next_sync_conflict = GitHubSyncConflictError(
+        "The project repository changed on GitHub and needs conflict resolution.",
+        repo_name="paperbase-general-123abc",
+        repo_url="https://github.com/octocat/paperbase-general-123abc",
+        default_branch="main",
+        base_commit_sha="abc123",
+        remote_head_sha="def456",
+        conflicts=[
+            GitHubConflictFile(
+                path="src/analysis.py",
+                base_content="print('base')",
+                local_content="print('local')",
+                remote_content="print('remote')",
+            )
+        ],
+    )
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        github_repo_manager=repo_manager,
+    )
+
+    session, _ = service.register_browser_user(
+        SignupRequest(email="conflict@example.com", password="topsecret123", display_name="Conflict User")
+    )
+    assert session.user is not None
+    service.save_github_connection(
+        session.user,
+        github_user_id="42",
+        github_login="octocat",
+        access_token="github-access-token",
+        scope="repo,read:user",
+    )
+
+    project = service.list_projects(session.user).projects[0]
+    python_file = service.create_python_file(session.user, project.project_id)
+    service.update_python_file(
+        session.user,
+        python_file.file_id,
+        filename="analysis.py",
+        content="print('local')",
+    )
+    service.repository.save_project_repo_sync(  # type: ignore[attr-defined]
+        user_id=session.user.user_id,
+        project_id=project.project_id,
+        github_repo_name="paperbase-general-123abc",
+        github_repo_url="https://github.com/octocat/paperbase-general-123abc",
+        default_branch="main",
+        last_sync_commit_sha="abc123",
+        last_sync_commit_url="https://github.com/octocat/paperbase-general-123abc/commit/abc123",
+        last_synced_at=datetime(2026, 4, 21, tzinfo=timezone.utc),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        service.sync_project_repo(
+            session.user,
+            project.project_id,
+            ProjectRepoSyncRequest(commit_message="Save analysis.py"),
+        )
+
+    assert exc_info.value.status_code == 409
+    detail = exc_info.value.detail
+    assert detail["code"] == "github_merge_conflict"
+    assert detail["remote_head_sha"] == "def456"
+    assert detail["conflicts"][0]["path"] == "src/analysis.py"
 
 
 def test_run_python_file_requires_daytona_and_uses_saved_content():
@@ -1255,9 +1471,7 @@ def test_run_python_file_requires_daytona_and_uses_saved_content():
 
     assert result.status == "completed"
     assert result.stdout == "runner output"
-    assert daytona_runner.calls == [
-        {"api_key": "daytona-user-key-999", "code": "print('run')"}
-    ]
+    assert daytona_runner.calls == [{"api_key": "daytona-user-key-999", "code": "print('run')"}]
 
 
 def test_browser_uploads_and_chat_require_api_key_after_free_quota(monkeypatch, browser_service):
@@ -1285,7 +1499,9 @@ def test_browser_uploads_and_chat_require_api_key_after_free_quota(monkeypatch, 
     upload = client.post(
         "/v1/browser/uploads",
         data={"tags": "methods,notes"},
-        files={"file": ("notes.md", b"# Notes\n\nThese uploaded notes discuss methods and grounding.", "text/markdown")},
+        files={
+            "file": ("notes.md", b"# Notes\n\nThese uploaded notes discuss methods and grounding.", "text/markdown")
+        },
         headers=csrf_headers,
     )
     assert upload.status_code == 200
@@ -1313,7 +1529,9 @@ def test_browser_uploads_and_chat_require_api_key_after_free_quota(monkeypatch, 
     assert gated.status_code == 200
     assert gated.json()["state"] == "api_key_required"
 
-    save_key = client.put("/v1/browser/settings/anthropic-key", json={"api_key": "anthropic-user-key-999"}, headers=csrf_headers)
+    save_key = client.put(
+        "/v1/browser/settings/anthropic-key", json={"api_key": "anthropic-user-key-999"}, headers=csrf_headers
+    )
     assert save_key.status_code == 200
     assert save_key.json()["has_anthropic_api_key"] is True
     csrf_headers = {"X-Paperbase-CSRF": save_key.json()["csrf_token"]}

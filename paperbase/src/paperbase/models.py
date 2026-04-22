@@ -397,6 +397,33 @@ class RunPythonFileResponse(BaseModel):
 
 class ProjectRepoSyncRequest(BaseModel):
     commit_message: str = Field(min_length=1)
+    expected_remote_head_sha: str | None = None
+    conflict_resolutions: list["ProjectRepoConflictResolution"] = Field(default_factory=list)
+
+
+class ProjectRepoConflictResolution(BaseModel):
+    path: str = Field(min_length=1)
+    content: str = ""
+
+
+class ProjectRepoConflictFile(BaseModel):
+    path: str
+    base_content: str = ""
+    local_content: str = ""
+    remote_content: str = ""
+
+
+class ProjectRepoConflictDetail(BaseModel):
+    code: str = "github_merge_conflict"
+    message: str
+    project_id: str
+    repo_exists: bool = True
+    github_repo_name: str = ""
+    github_repo_url: str = ""
+    default_branch: str = "main"
+    base_commit_sha: str = ""
+    remote_head_sha: str = ""
+    conflicts: list[ProjectRepoConflictFile] = Field(default_factory=list)
 
 
 class ProjectRepoSyncResponse(BaseModel):

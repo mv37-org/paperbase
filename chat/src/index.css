@@ -1530,14 +1530,14 @@ textarea::placeholder,
 .chat-message-list.python-file-view {
   padding: 0;
   overflow: hidden;
-  background: #0c0c0c;
+  background: #0b0d10;
 }
 
 .python-file-stage {
   position: relative;
   min-height: 100%;
   height: 100%;
-  background: #0c0c0c;
+  background: #0b0d10;
 }
 
 .python-file-stage-loading {
@@ -1549,12 +1549,12 @@ textarea::placeholder,
 
 .python-file-toolbar {
   position: absolute;
-  top: 12px;
-  right: 12px;
+  top: 8px;
+  right: 8px;
   z-index: 4;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   pointer-events: none;
 }
 
@@ -1564,17 +1564,17 @@ textarea::placeholder,
 
 .python-file-save-button,
 .python-file-run-button {
-  height: 30px;
+  height: 28px;
   padding: 0;
   display: inline-flex;
   align-items: stretch;
   overflow: hidden;
   border-radius: 4px;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
   cursor: pointer;
-  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.22);
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.2);
 }
 
 .python-file-action-icon,
@@ -1586,12 +1586,12 @@ textarea::placeholder,
 }
 
 .python-file-action-icon {
-  width: 30px;
-  min-width: 30px;
+  width: 28px;
+  min-width: 28px;
 }
 
 .python-file-action-label {
-  padding: 0 10px;
+  padding: 0 8px;
   border-left: 1px solid currentColor;
 }
 
@@ -1611,8 +1611,8 @@ textarea::placeholder,
 }
 
 .python-file-dirty {
-  height: 30px;
-  padding: 0 10px;
+  height: 28px;
+  padding: 0 8px;
   border-radius: 4px;
   display: inline-flex;
   align-items: center;
@@ -1620,27 +1620,27 @@ textarea::placeholder,
   background: rgba(255, 255, 255, 0.12);
   color: rgba(255, 255, 255, 0.74);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 500;
 }
 
 .python-file-save-button {
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  background: rgba(255, 255, 255, 0.92);
-  color: var(--text);
+  border: 1px solid #a56e08;
+  background: #fff2c9;
+  color: #835400;
 }
 
 .python-file-run-button {
-  border: 1px solid #2f61e3;
-  background: #2f61e3;
-  color: #ffffff;
+  border: 1px solid #2d5fd7;
+  background: #dfe9ff;
+  color: #2d5fd7;
 }
 
 .python-file-run-button.disabled,
 .python-file-run-button:disabled {
-  background: rgba(47, 97, 227, 0.18);
-  border-color: rgba(114, 150, 255, 0.26);
-  color: rgba(255, 255, 255, 0.46);
+  background: rgba(71, 108, 202, 0.14);
+  border-color: rgba(73, 105, 186, 0.28);
+  color: rgba(94, 124, 197, 0.72);
   cursor: not-allowed;
 }
 
@@ -1663,7 +1663,7 @@ textarea::placeholder,
   position: relative;
   min-height: 100%;
   height: 100%;
-  background: #0c0c0c;
+  background: #0b0d10;
   overflow: hidden;
 }
 
@@ -2630,6 +2630,13 @@ textarea {
   width: min(420px, calc(100vw - 32px));
 }
 
+.python-conflict-modal-panel {
+  width: min(1120px, calc(100vw - 32px));
+  max-height: min(92vh, 920px);
+  overflow: auto;
+  padding: 16px;
+}
+
 .python-save-success {
   text-align: center;
 }
@@ -2657,6 +2664,12 @@ textarea {
 .modal-heading-copy {
   display: grid;
   gap: 4px;
+}
+
+.python-conflict-modal-panel .modal-heading {
+  margin-bottom: 0;
+  padding-right: 28px;
+  text-align: left;
 }
 
 .modal-heading-icon {
@@ -2808,6 +2821,84 @@ textarea {
   margin-bottom: 15px;
   border: 1px solid rgba(27, 22, 17, 0.18);
   background: #ffffff;
+}
+
+.python-conflict-layout {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 12px;
+  min-height: 0;
+}
+
+.python-conflict-file-list {
+  display: grid;
+  gap: 6px;
+  align-content: start;
+  max-height: 620px;
+  overflow: auto;
+}
+
+.python-conflict-file-tab {
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid rgba(27, 22, 17, 0.12);
+  border-radius: 4px;
+  background: #f7f4ed;
+  color: var(--muted);
+  cursor: pointer;
+  text-align: left;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.python-conflict-file-tab.active {
+  border-color: rgba(45, 95, 215, 0.24);
+  background: rgba(45, 95, 215, 0.08);
+  color: var(--text);
+}
+
+.python-conflict-panel {
+  min-width: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.python-conflict-summary {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.python-conflict-summary strong {
+  color: var(--text);
+}
+
+.python-conflict-summary span {
+  color: var(--muted);
+}
+
+.python-conflict-diff-shell,
+.python-conflict-merge-shell {
+  overflow: hidden;
+  border: 1px solid rgba(27, 22, 17, 0.12);
+  border-radius: 4px;
+  background: #0b0d10;
+}
+
+.python-conflict-merge-toolbar,
+.python-conflict-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.python-conflict-actions {
+  margin-top: 12px;
 }
 
 .settings-panel {
@@ -3175,12 +3266,13 @@ textarea {
 }
 
 .python-file-save-button:hover {
-  background: #ffffff;
+  background: #ffeeb8;
+  border-color: #956300;
 }
 
 .python-file-run-button:not(:disabled):hover {
-  background: #2556d8;
-  border-color: #2556d8;
+  background: #d3e2ff;
+  border-color: #2457d1;
 }
 
 .chat-tab:hover {
@@ -3411,6 +3503,16 @@ textarea:hover,
   @media (max-width: 820px) {
     .settings-tabs {
       flex-direction: column;
+    }
+
+    .python-conflict-layout {
+      grid-template-columns: 1fr;
+    }
+
+    .python-conflict-file-list {
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      display: grid;
+      max-height: none;
     }
   }
 

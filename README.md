@@ -80,6 +80,8 @@ The browser chat experience is project-based:
 - Python files are project-scoped tabs backed by Monaco in a high-contrast editor view
 - creating or saving a Python file requires a connected GitHub account with repo access
 - `Save` creates a single Paperbase-managed GitHub commit for the current project, and `Run` saves first, then executes the saved file through the user’s Daytona API key
+- project repos are written with `/src` for Python files, `/notes` reserved for notes, and a root `.paperbase` metadata file
+- if GitHub has moved ahead since the last project save, Paperbase opens a Monaco conflict-resolution flow before creating the next commit
 
 `make dev` runs all of these locally:
 

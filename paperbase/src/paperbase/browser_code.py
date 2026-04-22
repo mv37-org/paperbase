@@ -43,6 +43,14 @@ class GitHubCommitInfo:
 
 
 @dataclass(slots=True)
+class GitHubConflictFile:
+    path: str
+    base_content: str
+    local_content: str
+    remote_content: str
+
+
+@dataclass(slots=True)
 class DaytonaRunResult:
     status: str
     stdout: str
@@ -50,6 +58,27 @@ class DaytonaRunResult:
     exit_code: int
     started_at: object
     finished_at: object
+
+
+class GitHubSyncConflictError(GitHubSyncError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        repo_name: str,
+        repo_url: str,
+        default_branch: str,
+        base_commit_sha: str,
+        remote_head_sha: str,
+        conflicts: list[GitHubConflictFile],
+    ) -> None:
+        super().__init__(message)
+        self.repo_name = repo_name
+        self.repo_url = repo_url
+        self.default_branch = default_branch
+        self.base_commit_sha = base_commit_sha
+        self.remote_head_sha = remote_head_sha
+        self.conflicts = conflicts
 
 
 def build_project_repo_name(project_name: str, project_id: str) -> str:
@@ -191,6 +220,8 @@ class GitHubProjectRepoManager:
         commit_message: str,
         author_name: str,
         author_email: str,
+        base_commit_sha: str | None = None,
+        expected_remote_head_sha: str | None = None,
     ) -> GitHubCommitInfo:
         remote_url = f"https://github.com/{owner_login}/{repo_name}.git"
         auth = base64.b64encode(f"x-access-token:{access_token}".encode("utf-8")).decode("ascii")
@@ -217,12 +248,21 @@ class GitHubProjectRepoManager:
             )
             return completed
 
+        def git_show_file(cwd: str, revision: str, path: str) -> str:
+            if not revision:
+                return ""
+            result = run_git("show", f"{revision}:{path}", cwd=cwd, check=False)
+            if result.returncode != 0:
+                return ""
+            return result.stdout
+
         with tempfile.TemporaryDirectory(prefix="paperbase-sync-") as tempdir:
             worktree = Path(tempdir)
             run_git("init", "--initial-branch", default_branch, cwd=tempdir)
             run_git("remote", "add", "origin", remote_url, cwd=tempdir)
 
             remote_branch_exists = False
+            remote_head_sha = ""
             remote_probe = run_git(
                 "ls-remote",
                 "--exit-code",
@@ -236,15 +276,11 @@ class GitHubProjectRepoManager:
             if remote_probe.returncode == 0:
                 remote_branch_exists = True
             elif remote_probe.returncode not in {2}:
-                raise GitHubSyncError(
-                    remote_probe.stderr.strip() or "GitHub repository state could not be checked."
-                )
+                raise GitHubSyncError(remote_probe.stderr.strip() or "GitHub repository state could not be checked.")
 
             if remote_branch_exists:
                 fetch = run_git(
                     "fetch",
-                    "--depth",
-                    "1",
                     "origin",
                     default_branch,
                     cwd=tempdir,
@@ -253,11 +289,42 @@ class GitHubProjectRepoManager:
                 )
                 if fetch.returncode != 0:
                     raise GitHubSyncError(fetch.stderr.strip() or "GitHub repository could not be fetched.")
+                remote_head_sha = run_git("rev-parse", "FETCH_HEAD", cwd=tempdir).stdout.strip()
+                if expected_remote_head_sha and remote_head_sha != expected_remote_head_sha:
+                    raise GitHubSyncError(
+                        "The project repository changed again on GitHub. Refresh conflicts and try saving again."
+                    )
+                effective_base_commit = remote_head_sha
+                if base_commit_sha:
+                    base_exists = run_git(
+                        "rev-parse",
+                        "--verify",
+                        f"{base_commit_sha}^{{commit}}",
+                        cwd=tempdir,
+                        check=False,
+                    )
+                    if base_exists.returncode != 0:
+                        raise GitHubSyncError(
+                            "The project repository history changed on GitHub. Refresh and try saving again."
+                        )
+                    base_is_ancestor = run_git(
+                        "merge-base",
+                        "--is-ancestor",
+                        base_commit_sha,
+                        "FETCH_HEAD",
+                        cwd=tempdir,
+                        check=False,
+                    )
+                    if base_is_ancestor.returncode != 0 and base_commit_sha != remote_head_sha:
+                        raise GitHubSyncError(
+                            "The project repository history changed on GitHub. Refresh and try saving again."
+                        )
+                    effective_base_commit = base_commit_sha
                 checkout = run_git(
                     "checkout",
                     "-B",
-                    default_branch,
-                    "FETCH_HEAD",
+                    "paperbase-local",
+                    effective_base_commit,
                     cwd=tempdir,
                     check=False,
                 )
@@ -265,6 +332,9 @@ class GitHubProjectRepoManager:
                     raise GitHubSyncError(
                         checkout.stderr.strip() or "GitHub repository checkout could not be prepared."
                     )
+            else:
+                run_git("checkout", "-B", default_branch, cwd=tempdir)
+                effective_base_commit = base_commit_sha or ""
 
             for child in worktree.iterdir():
                 if child.name == ".git":
@@ -297,12 +367,97 @@ class GitHubProjectRepoManager:
             if commit.returncode != 0:
                 raise GitHubSyncError(commit.stderr.strip() or "GitHub commit could not be created.")
 
-            push = run_git("push", "-u", "origin", default_branch, cwd=tempdir, use_auth=True, check=False)
+            if remote_branch_exists and remote_head_sha and effective_base_commit != remote_head_sha:
+                checkout_remote = run_git(
+                    "checkout",
+                    "-B",
+                    default_branch,
+                    "FETCH_HEAD",
+                    cwd=tempdir,
+                    check=False,
+                )
+                if checkout_remote.returncode != 0:
+                    raise GitHubSyncError(
+                        checkout_remote.stderr.strip() or "GitHub repository checkout could not be prepared."
+                    )
+                merge = run_git(
+                    "merge",
+                    "--no-commit",
+                    "--no-ff",
+                    "paperbase-local",
+                    cwd=tempdir,
+                    check=False,
+                )
+                if merge.returncode != 0:
+                    conflict_paths = [
+                        line.strip()
+                        for line in run_git(
+                            "diff",
+                            "--name-only",
+                            "--diff-filter=U",
+                            cwd=tempdir,
+                        ).stdout.splitlines()
+                        if line.strip()
+                    ]
+                    auto_resolve_paths = {".paperbase", "notes/.gitkeep"}
+                    for path in conflict_paths:
+                        if path in auto_resolve_paths and path in files:
+                            target = worktree / path
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            target.write_text(files[path], encoding="utf-8")
+                            run_git("add", "--", path, cwd=tempdir)
+                    remaining_conflicts = [
+                        line.strip()
+                        for line in run_git(
+                            "diff",
+                            "--name-only",
+                            "--diff-filter=U",
+                            cwd=tempdir,
+                        ).stdout.splitlines()
+                        if line.strip()
+                    ]
+                    if remaining_conflicts:
+                        raise GitHubSyncConflictError(
+                            "The project repository changed on GitHub and needs conflict resolution.",
+                            repo_name=repo_name,
+                            repo_url=repo_url,
+                            default_branch=default_branch,
+                            base_commit_sha=effective_base_commit,
+                            remote_head_sha=remote_head_sha,
+                            conflicts=[
+                                GitHubConflictFile(
+                                    path=path,
+                                    base_content=git_show_file(tempdir, effective_base_commit, path),
+                                    local_content=files.get(path, ""),
+                                    remote_content=git_show_file(tempdir, remote_head_sha, path),
+                                )
+                                for path in remaining_conflicts
+                            ],
+                        )
+                merge_commit = run_git("commit", "-m", commit_message, cwd=tempdir, check=False)
+                if merge_commit.returncode != 0:
+                    raise GitHubSyncError(merge_commit.stderr.strip() or "GitHub merge commit could not be created.")
+            else:
+                checkout_local = run_git("checkout", "paperbase-local", cwd=tempdir, check=False)
+                if checkout_local.returncode != 0:
+                    raise GitHubSyncError(
+                        checkout_local.stderr.strip() or "GitHub repository checkout could not be prepared."
+                    )
+
+            push = run_git(
+                "push",
+                "-u",
+                "origin",
+                f"HEAD:{default_branch}",
+                cwd=tempdir,
+                use_auth=True,
+                check=False,
+            )
             if push.returncode != 0:
                 detail = push.stderr.strip() or push.stdout.strip()
                 if "non-fast-forward" in detail or "[rejected]" in detail:
                     raise GitHubSyncError(
-                        "The project repository changed on GitHub. Refresh and try saving again."
+                        "The project repository changed again on GitHub. Refresh conflicts and try again."
                     )
                 raise GitHubSyncError(detail or "The project repository could not be pushed to GitHub.")
 

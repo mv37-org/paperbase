@@ -330,6 +330,52 @@ describe("chat api", () => {
     expect(created.project_id).toBe("proj_2");
   });
 
+  it("sends structured GitHub sync payloads for project saves", async () => {
+    const fetchMock = vi
+      .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          project_id: "proj_1",
+          repo_exists: true,
+          github_repo_name: "paperbase-general-123abc",
+          github_repo_url: "https://github.com/octocat/paperbase-general-123abc",
+          default_branch: "main",
+          last_sync_commit_sha: "abc123",
+          last_sync_commit_url: "https://github.com/octocat/paperbase-general-123abc/commit/abc123",
+          last_synced_at: "2026-04-21T00:00:00Z",
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await loadApiModule();
+
+    await api.syncProjectRepo("proj_1", {
+      commitMessage: "Save something.py",
+      expectedRemoteHeadSha: "def5678",
+      conflictResolutions: [
+        {
+          path: "src/something.py",
+          content: "print('merged')",
+        },
+      ],
+    });
+
+    const [path, init] = fetchMock.mock.calls[0] as FetchCall;
+    expect(String(path)).toBe("/v1/browser/projects/proj_1/repo-sync");
+    expect(init?.method).toBe("POST");
+    expect(init?.body).toBe(
+      JSON.stringify({
+        commit_message: "Save something.py",
+        expected_remote_head_sha: "def5678",
+        conflict_resolutions: [
+          {
+            path: "src/something.py",
+            content: "print('merged')",
+          },
+        ],
+      }),
+    );
+  });
+
   it("parses streamed SSE events even when chunk boundaries split the payload", async () => {
     const encoder = new TextEncoder();
     const fetchMock = vi

@@ -204,6 +204,31 @@ export interface RunPythonFileResponse {
   finished_at: string;
 }
 
+export interface ProjectRepoConflictResolution {
+  path: string;
+  content: string;
+}
+
+export interface ProjectRepoConflictFile {
+  path: string;
+  base_content: string;
+  local_content: string;
+  remote_content: string;
+}
+
+export interface ProjectRepoConflictDetail {
+  code: "github_merge_conflict";
+  message: string;
+  project_id: string;
+  repo_exists: boolean;
+  github_repo_name: string;
+  github_repo_url: string;
+  default_branch: string;
+  base_commit_sha: string;
+  remote_head_sha: string;
+  conflicts: ProjectRepoConflictFile[];
+}
+
 export interface ProjectRepoSyncResponse {
   project_id: string;
   repo_exists: boolean;
