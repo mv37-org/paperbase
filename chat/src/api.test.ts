@@ -178,7 +178,10 @@ describe("chat api", () => {
     const result = await api.suggestBrowserPapers("benchmark paper", 7);
 
     const [path, init] = fetchMock.mock.calls[0] as FetchCall;
-    expect(path).toBe("/v1/browser/papers/suggest?q=benchmark+paper&limit=7");
+    const requestUrl = new URL(String(path), "http://localhost");
+    expect(`${requestUrl.pathname}${requestUrl.search}`).toBe(
+      "/v1/browser/papers/suggest?q=benchmark+paper&limit=7",
+    );
     expect(init?.method).toBe("GET");
     expect(result.fallback).toBe(false);
     expect(result.suggestions).toHaveLength(1);
