@@ -405,6 +405,7 @@ export default function App() {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [emptyStateProjectPickerOpen, setEmptyStateProjectPickerOpen] = useState(false);
+  const [emptyStateProjectSearch, setEmptyStateProjectSearch] = useState("");
   const [streamingThreadId, setStreamingThreadId] = useState<string | null>(null);
   const [paperDrawer, setPaperDrawer] = useState<PaperDrawerState>(() => drawerStateFromUrl());
   const [paperDrawerPaper, setPaperDrawerPaper] = useState<PaperResponse | null>(null);
@@ -424,6 +425,7 @@ export default function App() {
   const appUploadRef = useRef<HTMLInputElement | null>(null);
   const accountMenuRef = useRef<HTMLDivElement | null>(null);
   const emptyStateProjectPickerRef = useRef<HTMLDivElement | null>(null);
+  const emptyStateProjectSearchInputRef = useRef<HTMLInputElement | null>(null);
   const projectMenuRef = useRef<HTMLDivElement | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
 
@@ -529,8 +531,12 @@ export default function App() {
 
   useEffect(() => {
     if (!emptyStateProjectPickerOpen) {
+      setEmptyStateProjectSearch("");
       return;
     }
+    window.requestAnimationFrame(() => {
+      emptyStateProjectSearchInputRef.current?.focus();
+    });
     const handlePointerDown = (event: MouseEvent) => {
       if (
         emptyStateProjectPickerRef.current &&
@@ -559,6 +565,16 @@ export default function App() {
   const paperDrawerOpen = Boolean(paperDrawer);
   const emptyStateProject =
     projects.find((project) => project.project_id === selectedProjectId) ?? projects[0] ?? null;
+  const filteredEmptyStateProjects = useMemo(() => {
+    const query = emptyStateProjectSearch.trim().toLowerCase();
+    if (!query) {
+      return projects;
+    }
+    return projects.filter((project) => {
+      const searchableText = `${project.name} ${project.description}`.toLowerCase();
+      return searchableText.includes(query);
+    });
+  }, [emptyStateProjectSearch, projects]);
   const allProjectsExpanded = useMemo(
     () =>
       projects.length > 0 &&
@@ -1552,6 +1568,8 @@ export default function App() {
     setProjectFormDescription("");
     setProjectFormError("");
     setProjectMenuProjectId(null);
+    setEmptyStateProjectPickerOpen(false);
+    setEmptyStateProjectSearch("");
   }, []);
 
   const openEditProjectModal = useCallback(
@@ -2261,7 +2279,7 @@ export default function App() {
                             id="empty-state-project-select-trigger"
                             className="chat-empty-project-trigger"
                             aria-label="Open empty state project picker"
-                            aria-haspopup="listbox"
+                            aria-haspopup="dialog"
                             aria-expanded={emptyStateProjectPickerOpen}
                             onClick={() => setEmptyStateProjectPickerOpen((current) => !current)}
                           >
@@ -2270,26 +2288,58 @@ export default function App() {
                           {emptyStateProjectPickerOpen ? (
                             <div
                               className="chat-empty-project-menu"
-                              role="listbox"
+                              role="dialog"
                               aria-label="Choose project"
                             >
-                              {projects.map((project) => (
-                                <button
-                                  key={project.project_id}
-                                  type="button"
-                                  role="option"
-                                  aria-selected={
-                                    emptyStateProject?.project_id === project.project_id
+                              <div className="chat-empty-project-search-shell">
+                                <input
+                                  ref={emptyStateProjectSearchInputRef}
+                                  type="text"
+                                  className="chat-empty-project-search"
+                                  placeholder="Search projects"
+                                  aria-label="Search projects"
+                                  value={emptyStateProjectSearch}
+                                  onChange={(event) =>
+                                    setEmptyStateProjectSearch(event.target.value)
                                   }
-                                  className={`chat-empty-project-option${emptyStateProject?.project_id === project.project_id ? " active" : ""}`}
-                                  onClick={() => {
-                                    setSelectedProjectId(project.project_id);
-                                    setEmptyStateProjectPickerOpen(false);
-                                  }}
-                                >
-                                  {project.name}
-                                </button>
-                              ))}
+                                />
+                              </div>
+                              <div
+                                className="chat-empty-project-options"
+                                role="listbox"
+                                aria-label="Choose project"
+                              >
+                                {filteredEmptyStateProjects.length > 0 ? (
+                                  filteredEmptyStateProjects.map((project) => (
+                                    <button
+                                      key={project.project_id}
+                                      type="button"
+                                      role="option"
+                                      aria-selected={
+                                        emptyStateProject?.project_id === project.project_id
+                                      }
+                                      className={`chat-empty-project-option${emptyStateProject?.project_id === project.project_id ? " active" : ""}`}
+                                      onClick={() => {
+                                        setSelectedProjectId(project.project_id);
+                                        setEmptyStateProjectPickerOpen(false);
+                                      }}
+                                    >
+                                      {project.name}
+                                    </button>
+                                  ))
+                                ) : (
+                                  <div className="chat-empty-project-empty">
+                                    No projects match this search.
+                                  </div>
+                                )}
+                              </div>
+                              <button
+                                type="button"
+                                className="chat-empty-project-create"
+                                onClick={openCreateProjectModal}
+                              >
+                                Create new project
+                              </button>
                             </div>
                           ) : null}
                         </div>

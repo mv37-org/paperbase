@@ -350,10 +350,14 @@ describe("App", () => {
     });
   });
 
-  it("opens the custom empty-state project picker and switches projects", async () => {
+  it("searches the custom empty-state project picker and switches projects", async () => {
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());
     apiMocks.loadProjects.mockResolvedValue({
-      projects: [projectSummary("proj_1", "General"), projectSummary("proj_2", "Agents", 0)],
+      projects: [
+        projectSummary("proj_1", "General"),
+        projectSummary("proj_2", "Agents", 0),
+        projectSummary("proj_3", "Biology", 0),
+      ],
     });
 
     render(<App />);
@@ -368,11 +372,80 @@ describe("App", () => {
       expect(screen.getByRole("listbox", { name: "Choose project" })).toBeTruthy();
     });
 
+    fireEvent.change(screen.getByLabelText("Search projects"), {
+      target: { value: "Age" },
+    });
+
+    expect(screen.getByRole("option", { name: "Agents" })).toBeTruthy();
+    expect(screen.queryByRole("option", { name: "General" })).toBeNull();
+
     fireEvent.click(screen.getByRole("option", { name: "Agents" }));
 
     await waitFor(() => {
       expect(document.querySelector("#empty-state-project-select-trigger")?.textContent).toContain(
         "Agents",
+      );
+    });
+  });
+
+  it("opens the new project modal from the empty-state project picker", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.loadProjects
+      .mockResolvedValueOnce({
+        projects: [projectSummary("proj_1", "General"), projectSummary("proj_2", "Agents", 0)],
+      })
+      .mockResolvedValueOnce({
+        projects: [
+          projectSummary("proj_1", "General"),
+          projectSummary("proj_2", "Agents", 0),
+          projectSummary("proj_3", "Benchmarks", 0),
+        ],
+      });
+    apiMocks.loadProjectSessions.mockResolvedValue({
+      project_id: "proj_3",
+      threads: [],
+      offset: 0,
+      limit: 5,
+      total_count: 0,
+      has_more: false,
+    });
+    apiMocks.createProject.mockResolvedValue(projectSummary("proj_3", "Benchmarks", 0));
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Start new research in")).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByLabelText("Open empty state project picker"));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Create new project" })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Create new project" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("New project")).toBeTruthy();
+    });
+
+    fireEvent.change(screen.getByPlaceholderText("Project name"), {
+      target: { value: "Benchmarks" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("Description, goal, or custom instructions"), {
+      target: { value: "Track benchmark runs and profiling." },
+    });
+    fireEvent.submit(document.querySelector("#project-modal form")!);
+
+    await waitFor(() => {
+      expect(apiMocks.createProject).toHaveBeenCalledWith(
+        "Benchmarks",
+        "Track benchmark runs and profiling.",
+      );
+    });
+    await waitFor(() => {
+      expect(document.querySelector("#empty-state-project-select-trigger")?.textContent).toContain(
+        "Benchmarks",
       );
     });
   });

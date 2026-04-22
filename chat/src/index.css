@@ -1925,7 +1925,7 @@ textarea::placeholder,
   display: inline-flex;
   align-items: baseline;
   justify-content: center;
-  column-gap: 10px;
+  column-gap: 6px;
   row-gap: 8px;
   flex-wrap: wrap;
 }
@@ -1944,7 +1944,7 @@ textarea::placeholder,
   position: relative;
   display: inline-flex;
   align-items: baseline;
-  padding: 0 16px 0 0;
+  padding: 0 22px 0 0;
   border: 0;
   background: transparent;
   color: rgba(27, 22, 17, 0.56);
@@ -1959,7 +1959,7 @@ textarea::placeholder,
 .chat-empty-project-trigger::after {
   content: "";
   position: absolute;
-  right: 2px;
+  right: 3px;
   top: 50%;
   width: 7px;
   height: 7px;
@@ -1982,33 +1982,79 @@ textarea::placeholder,
   position: absolute;
   top: calc(100% + 10px);
   left: 50%;
-  min-width: 180px;
-  padding: 8px;
+  min-width: 220px;
+  padding: 6px;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--paper);
   box-shadow: 0 12px 24px rgba(16, 24, 40, 0.08);
   transform: translateX(-50%);
   display: grid;
-  gap: 4px;
+  gap: 6px;
   z-index: 6;
+}
+
+.chat-empty-project-search-shell {
+  padding-bottom: 2px;
+}
+
+.chat-empty-project-search {
+  width: 100%;
+  min-height: 32px;
+  padding: 7px 9px;
+  border: 1px solid rgba(27, 22, 17, 0.14);
+  border-radius: 6px;
+  background: #ffffff;
+  font-size: 12px;
+}
+
+.chat-empty-project-options {
+  display: grid;
+  gap: 2px;
+  max-height: 188px;
+  overflow-y: auto;
 }
 
 .chat-empty-project-option {
   width: 100%;
-  padding: 8px 10px;
+  padding: 6px 8px;
   border: 0;
-  border-radius: 8px;
+  border-radius: 6px;
   background: transparent;
   color: var(--text);
   text-align: left;
-  font-size: 13px;
+  font-size: 12px;
   cursor: pointer;
 }
 
 .chat-empty-project-option:hover,
 .chat-empty-project-option.active {
   background: rgba(27, 22, 17, 0.05);
+}
+
+.chat-empty-project-empty {
+  padding: 8px 8px 6px;
+  color: var(--muted);
+  text-align: left;
+  font-size: 12px;
+}
+
+.chat-empty-project-create {
+  width: 100%;
+  min-height: 30px;
+  padding: 6px 8px;
+  border: 1px solid rgba(27, 22, 17, 0.12);
+  border-radius: 6px;
+  background: rgba(27, 22, 17, 0.025);
+  color: var(--text);
+  text-align: left;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.chat-empty-project-create:hover {
+  background: rgba(27, 22, 17, 0.05);
+  border-color: rgba(27, 22, 17, 0.18);
 }
 
 .chat-empty-state .chat-composer {
@@ -2448,7 +2494,8 @@ textarea {
 
 .project-description-input {
   width: 100%;
-  border-color: rgba(27, 22, 17, 0.18);
+  margin-bottom: 15px;
+  border: 1px solid rgba(27, 22, 17, 0.18);
   background: #ffffff;
 }
 
