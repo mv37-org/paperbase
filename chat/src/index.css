@@ -2808,14 +2808,14 @@ textarea:hover,
 
   .app-shell.sidebar-collapsed .sidebar-brand-row {
     width: 100%;
-  justify-content: center;
-}
-
-@media (max-width: 820px) {
-  .settings-sections {
-    grid-template-columns: 1fr;
+    justify-content: center;
   }
-}
+
+  @media (max-width: 820px) {
+    .settings-sections {
+      grid-template-columns: 1fr;
+    }
+  }
 
   .app-shell.sidebar-collapsed .sidebar-top {
     gap: 8px;

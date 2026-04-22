@@ -644,6 +644,38 @@ def test_browser_delete_anthropic_key_requires_valid_csrf(api_client):
     assert ("delete_user_anthropic_key", "user_1") in service.calls
 
 
+def test_browser_settings_routes_delegate_with_valid_csrf(api_client):
+    client, service, settings = api_client
+    client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
+    csrf = csrf_token_for_session("browser-session-token", settings)
+    headers = {
+        "Origin": settings.browser_origin,
+        "X-Paperbase-CSRF": csrf,
+    }
+
+    daytona = client.put(
+        "/v1/browser/settings/daytona-key",
+        json={"api_key": "daytona-key-123"},
+        headers=headers,
+    )
+    notifications = client.put(
+        "/v1/browser/settings/notifications",
+        json={"weekly_papers_review_email": True},
+        headers=headers,
+    )
+    github = client.delete("/v1/browser/settings/github", headers=headers)
+
+    assert daytona.status_code == 200
+    assert notifications.status_code == 200
+    assert github.status_code == 200
+    assert daytona.json()["csrf_token"] == csrf
+    assert notifications.json()["csrf_token"] == csrf
+    assert github.json()["csrf_token"] == csrf
+    assert ("save_user_daytona_key", ("user_1", "daytona-key-123")) in service.calls
+    assert ("update_user_notification_preferences", ("user_1", True)) in service.calls
+    assert ("delete_github_connection", "user_1") in service.calls
+
+
 def test_browser_project_and_chat_write_routes_delegate_with_valid_csrf(api_client):
     client, service, settings = api_client
     client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
@@ -725,6 +757,57 @@ def test_google_callback_success_sets_cookie_and_redirects_to_saved_return_to(ap
         "upsert_google_browser_user",
         ("google-user-1", "google@example.com", "Google User"),
     ) in service.calls
+
+
+def test_github_callback_success_connects_account_and_redirects_to_settings(api_client, monkeypatch):
+    client, service, settings = api_client
+    client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
+
+    class FakeGitHubResponse:
+        def json(self):
+            return {"id": 42, "login": "octocat"}
+
+    class FakeGitHubClient:
+        async def authorize_access_token(self, request):
+            return {"access_token": "github-access-token", "scope": "repo,read:user"}
+
+        async def get(self, path, token):
+            assert path == "user"
+            assert token["access_token"] == "github-access-token"
+            return FakeGitHubResponse()
+
+    monkeypatch.setattr(api_module, "get_github_oauth_client", lambda: FakeGitHubClient())
+
+    response = client.get("/v1/browser/auth/github/callback", follow_redirects=False)
+
+    assert response.status_code == 302
+    assert (
+        response.headers["location"]
+        == "https://paperbase.example/?auth=github_connected&settings=version-control"
+    )
+    assert (
+        "save_github_connection",
+        ("user_1", "42", "octocat", "github-access-token", "repo,read:user"),
+    ) in service.calls
+
+
+def test_github_callback_failure_redirects_with_error(api_client, monkeypatch):
+    client, _, settings = api_client
+    client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
+
+    class FailingGitHubClient:
+        async def authorize_access_token(self, request):
+            raise RuntimeError("no token")
+
+    monkeypatch.setattr(api_module, "get_github_oauth_client", lambda: FailingGitHubClient())
+
+    response = client.get("/v1/browser/auth/github/callback", follow_redirects=False)
+
+    assert response.status_code == 302
+    assert (
+        response.headers["location"]
+        == f"{settings.chat_public_url}/?auth_error=github_callback_failed&settings=version-control"
+    )
 
 
 def test_google_callback_failure_redirects_with_error(api_client, monkeypatch):

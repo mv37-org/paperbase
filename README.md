@@ -36,6 +36,12 @@ The sections in that file map to deployment like this:
 | `paperbase-worker` | `Shared`, `Worker`, `Cloud / Optional` |
 | local chat + MCP bridge | `Shared`, `Chat` |
 
+Optional browser-account settings now hang off the same API env surface:
+
+- `PAPERBASE_GOOGLE_*` powers Google sign-in
+- `PAPERBASE_GITHUB_*` powers the in-app GitHub connection flow
+- logged-in users can store Anthropic and Daytona keys plus a weekly papers review email preference
+
 ## Commands
 
 `make help` shows the supported local interface:

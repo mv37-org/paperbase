@@ -14,10 +14,13 @@ from paperbase.models import (
     CreateChatThreadRequest,
     CreateProjectRequest,
     PaperMetadata,
+    SaveAnthropicKeyRequest,
+    SaveDaytonaKeyRequest,
     SearchRequest,
     SearchSectionRequest,
     SendChatMessageRequest,
     SignupRequest,
+    UpdateNotificationsRequest,
     UpdateProjectRequest,
 )
 from paperbase.repository import MemoryPaperRepository
@@ -1027,6 +1030,48 @@ def test_browser_auth_and_password_reset_flow(browser_service):
     assert login.json()["csrf_token"]
 
     app.dependency_overrides.clear()
+
+
+def test_browser_settings_round_trip(browser_service):
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="settings@example.com", password="topsecret123", display_name="Settings User")
+    )
+    assert session.user is not None
+
+    anthropic = service.save_user_anthropic_key(
+        session.user,
+        SaveAnthropicKeyRequest(api_key="anthropic-user-key-999"),
+    )
+    daytona = service.save_user_daytona_key(
+        session.user,
+        SaveDaytonaKeyRequest(api_key="daytona-user-key-999"),
+    )
+    notifications = service.update_user_notification_preferences(
+        session.user,
+        UpdateNotificationsRequest(weekly_papers_review_email=True),
+    )
+    github = service.save_github_connection(
+        session.user,
+        github_user_id="42",
+        github_login="octocat",
+        access_token="github-access-token",
+        scope="repo,read:user",
+    )
+
+    assert anthropic.has_anthropic_api_key is True
+    assert anthropic.settings.anthropic_api_key_hint.startswith("anth")
+    assert daytona.settings.has_daytona_api_key is True
+    assert daytona.settings.daytona_api_key_hint.startswith("dayt")
+    assert notifications.settings.weekly_papers_review_email is True
+    assert github.settings.has_github_connection is True
+    assert github.settings.github_login == "octocat"
+
+    cleared = service.delete_user_daytona_key(session.user)
+    disconnected = service.delete_github_connection(session.user)
+
+    assert cleared.settings.has_daytona_api_key is False
+    assert disconnected.settings.has_github_connection is False
 
 
 def test_browser_uploads_and_chat_require_api_key_after_free_quota(monkeypatch, browser_service):

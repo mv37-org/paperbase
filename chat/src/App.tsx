@@ -46,7 +46,6 @@ import type {
 const OPEN_TABS_KEY = "paperbase-open-tabs";
 const PENDING_PROMPT_KEY = "paperbase-pending-prompt";
 const SIDEBAR_COLLAPSED_KEY = "paperbase-sidebar-collapsed";
-const FREE_RESPONSE_LIMIT = 3;
 const MAX_OPEN_TABS = 8;
 const MESSAGE_LIST_BOTTOM_THRESHOLD = 40;
 type ModalFlashKind = "error" | "note";
@@ -79,6 +78,16 @@ const AUTH_VIEW_COPY: Record<AuthView, { title: string; caption: string }> = {
     title: "Settings",
     caption: "Manage inference, sandbox, version control, and notifications.",
   },
+};
+
+const DEFAULT_BROWSER_SETTINGS = {
+  anthropic_api_key_hint: "",
+  has_daytona_api_key: false,
+  daytona_api_key_hint: "",
+  has_github_connection: false,
+  github_login: "",
+  github_oauth_available: false,
+  weekly_papers_review_email: false,
 };
 
 const EXAMPLES = [
@@ -358,6 +367,7 @@ export default function App() {
   const [landingPrompt, setLandingPrompt] = useState("");
   const [composerInput, setComposerInput] = useState("");
   const [composerStatus, setComposerStatus] = useState("");
+  const [weeklyPapersReviewEmail, setWeeklyPapersReviewEmail] = useState(false);
   const [includeUploads] = useState(true);
   const [includePapers] = useState(true);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -386,6 +396,13 @@ export default function App() {
 
   useEffect(() => {
     sessionRef.current = session;
+  }, [session]);
+
+  useEffect(() => {
+    setWeeklyPapersReviewEmail(
+      session?.settings?.weekly_papers_review_email ??
+        DEFAULT_BROWSER_SETTINGS.weekly_papers_review_email,
+    );
   }, [session]);
 
   useEffect(() => {
@@ -2762,7 +2779,9 @@ export default function App() {
                             showNoteFlash("Daytona API key removed.");
                           } catch (error) {
                             showErrorFlash(
-                              error instanceof Error ? error.message : "Deleting Daytona key failed",
+                              error instanceof Error
+                                ? error.message
+                                : "Deleting Daytona key failed",
                             );
                           }
                         }}
@@ -2824,8 +2843,8 @@ export default function App() {
                     ) : null}
                   </div>
                   <p className="settings-section-copy">
-                    Connect GitHub so Paperbase can create repositories, pull repositories, and
-                    push commits on your behalf.
+                    Connect GitHub so Paperbase can create repositories, pull repositories, and push
+                    commits on your behalf.
                   </p>
                   {sessionSettings.has_github_connection ? (
                     <div className="settings-connected-card">
@@ -2848,7 +2867,9 @@ export default function App() {
                             showNoteFlash("GitHub disconnected.");
                           } catch (error) {
                             showErrorFlash(
-                              error instanceof Error ? error.message : "Disconnecting GitHub failed",
+                              error instanceof Error
+                                ? error.message
+                                : "Disconnecting GitHub failed",
                             );
                           }
                         }}

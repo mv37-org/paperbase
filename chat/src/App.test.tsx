@@ -413,7 +413,7 @@ describe("App", () => {
     render(<App />);
 
     await waitFor(() => {
-      expect(screen.getByText("General")).toBeTruthy();
+      expect(document.querySelector("#account-menu-button")).toBeTruthy();
     });
 
     fireEvent.click(document.querySelector("#account-menu-button") as HTMLElement);
