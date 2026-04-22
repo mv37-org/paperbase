@@ -97,7 +97,7 @@ test:
 	@"$(PAPERBASE_DEV)" verify-run --mode test
 	@"$(RUFF)" check paperbase/src paperbase/tests paperbase-plugin/src paperbase-plugin/tests paperbase-plugin/scripts
 	@(cd "$(CHAT_DIR)" && set -a && source ../.env && set +a && vp check)
-	@(cd "$(CHAT_DIR)" && set -a && source ../.env && set +a && ./node_modules/.bin/vitest run --reporter=json --outputFile="../$(CHAT_TEST_JSON)")
+	@(cd "$(CHAT_DIR)" && set -a && source ../.env && set +a && ./node_modules/.bin/vitest run --no-file-parallelism --maxWorkers=1 --reporter=default --reporter=json --outputFile.json="../$(CHAT_TEST_JSON)")
 	@(cd "$(CHAT_DIR)" && set -a && source ../.env && set +a && vp build)
 	@"$(PYTEST)" --junitxml="$(BACKEND_JUNIT)" paperbase/tests
 	@"$(PYTEST)" --junitxml="$(PLUGIN_JUNIT)" paperbase-plugin/tests

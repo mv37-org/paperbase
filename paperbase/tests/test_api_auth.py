@@ -105,6 +105,8 @@ class StubApiService:
 
     def suggest_papers(self, q: str, *, limit: int = 10) -> list[dict[str, object]]:
         self.calls.append(("suggest_papers", (q, limit)))
+        if q == "nomatch":
+            return []
         paper = _paper()
         return [
             {
@@ -118,6 +120,24 @@ class StubApiService:
                 "score": 0.9,
                 "matched_field": "title",
                 "highlight_snippet": paper.title,
+            }
+        ]
+
+    def suggest_fallback_papers(self, *, limit: int = 6) -> list[dict[str, object]]:
+        self.calls.append(("suggest_fallback_papers", limit))
+        paper = _paper("2409.99999")
+        return [
+            {
+                "paper_id": paper.paper_id,
+                "arxiv_id": paper.arxiv_id,
+                "title": paper.title,
+                "authors": paper.authors,
+                "summary_short": paper.summary_short,
+                "citation_count": paper.citation_count,
+                "published": paper.published,
+                "score": 0.0,
+                "matched_field": "fallback",
+                "highlight_snippet": paper.summary_short,
             }
         ]
 
@@ -395,6 +415,7 @@ def test_bearer_routes_delegate_to_service(api_client):
     assert summarize.json()["payload"]["limit"] == 42
     assert reindex.json()["payload"] == {"limit": 11, "include_chunks": False}
     assert expanded.json() == {"queries": ["grounding", "grounding variant"]}
+    assert suggested.json()["fallback"] is False
     assert suggested.json()["suggestions"][0]["matched_field"] == "title"
     assert stats.json()["paper_count"] == 1
     assert paper.json()["paper_id"] == "arxiv:2401.54321"
@@ -405,6 +426,29 @@ def test_bearer_routes_delegate_to_service(api_client):
     assert job.json()["payload"]["job_id"] == "job_123"
     assert ("sync_latest", None) in service.calls
     assert ("get_job", "job_123") in service.calls
+
+
+def test_browser_suggest_route_is_public(api_client):
+    client, service, _ = api_client
+
+    suggested = client.get("/v1/browser/papers/suggest?q=ground&limit=5")
+
+    assert suggested.status_code == 200
+    assert suggested.json()["fallback"] is False
+    assert suggested.json()["suggestions"][0]["matched_field"] == "title"
+    assert ("suggest_papers", ("ground", 5)) in service.calls
+
+
+def test_browser_suggest_route_returns_fallback_suggestions_when_no_matches(api_client):
+    client, service, _ = api_client
+
+    suggested = client.get("/v1/browser/papers/suggest?q=nomatch&limit=6")
+
+    assert suggested.status_code == 200
+    assert suggested.json()["fallback"] is True
+    assert suggested.json()["suggestions"][0]["matched_field"] == "fallback"
+    assert ("suggest_papers", ("nomatch", 6)) in service.calls
+    assert ("suggest_fallback_papers", 6) in service.calls
 
 
 def test_browser_get_routes_accept_session_cookie_without_csrf(api_client):

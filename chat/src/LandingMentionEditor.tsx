@@ -13,30 +13,7 @@ import {
 import type { BaseRange, Descendant } from "slate";
 import { Editable, ReactEditor, Slate, withReact } from "slate-react";
 
-import type { MentionTag } from "./types";
-
-const MOCK_PAPERS = [
-  { id: "paper-1", title: "Self-Reflective Language Agents", venue: "arXiv" },
-  { id: "paper-2", title: "AgentBench: Evaluating LLMs as Agents", venue: "ICLR" },
-  { id: "paper-3", title: "Voyager: An Open-Ended Embodied Agent", venue: "arXiv" },
-  { id: "paper-4", title: "Generative Agents: Interactive Simulacra", venue: "UIST" },
-  { id: "paper-5", title: "MemGPT: Towards LLMs as Operating Systems", venue: "arXiv" },
-  {
-    id: "paper-6",
-    title: "Reflexion: Language Agents with Verbal Reinforcement Learning",
-    venue: "NeurIPS",
-  },
-  {
-    id: "paper-7",
-    title: "A Survey of Large Language Model Based Autonomous Agents",
-    venue: "TMLR",
-  },
-  {
-    id: "paper-8",
-    title: "Toolformer: Language Models Can Teach Themselves to Use Tools",
-    venue: "NeurIPS",
-  },
-];
+import type { MentionSuggestion, MentionSuggestionResult, MentionTag } from "./types";
 
 type MentionElement = {
   type: "mention";
@@ -118,17 +95,6 @@ function extractMentionTags(nodes: Descendant[]): MentionTag[] {
   return tags;
 }
 
-function mockSearchPapers(query: string) {
-  return new Promise<typeof MOCK_PAPERS>((resolve) => {
-    const normalized = query.trim().toLowerCase();
-    window.setTimeout(() => {
-      resolve(
-        MOCK_PAPERS.filter((paper) => paper.title.toLowerCase().includes(normalized)).slice(0, 5),
-      );
-    }, 140);
-  });
-}
-
 function plainTextToValue(text: string): Descendant[] {
   if (!text.trim()) {
     return createInitialValue();
@@ -141,14 +107,35 @@ function plainTextToValue(text: string): Descendant[] {
   ];
 }
 
-function insertMention(
-  editor: Editor & ReactEditor,
-  target: BaseRange,
-  paper: (typeof MOCK_PAPERS)[number],
-) {
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function renderHighlightedText(text: string, query: string) {
+  const trimmedQuery = query.trim();
+  if (!text || !trimmedQuery) {
+    return text;
+  }
+  const pattern = new RegExp(`(${escapeRegExp(trimmedQuery)})`, "ig");
+  const parts = text.split(pattern);
+  if (parts.length === 1) {
+    return text;
+  }
+  return parts.map((part, index) =>
+    part.toLowerCase() === trimmedQuery.toLowerCase() ? (
+      <mark key={`${part}-${index}`} className="mention-suggestion-highlight">
+        {part}
+      </mark>
+    ) : (
+      part
+    ),
+  );
+}
+
+function insertMention(editor: Editor & ReactEditor, target: BaseRange, paper: MentionSuggestion) {
   const mention: MentionElement = {
     type: "mention",
-    paperId: paper.id,
+    paperId: paper.paper_id,
     title: paper.title,
     children: [{ text: "" }],
   };
@@ -165,6 +152,7 @@ type Props = {
   onAttach: () => void;
   value: string;
   onChange: (value: string) => void;
+  searchPapers?: (query: string, limit?: number) => Promise<MentionSuggestionResult>;
   onSubmit: () => void;
   placeholder?: string;
   submitOnEnter?: boolean;
@@ -183,6 +171,7 @@ export function LandingMentionEditor({
   onAttach,
   value: plainText,
   onChange,
+  searchPapers,
   onSubmit,
   placeholder = "Ask about agents, evals, or inference. Type @ to tag a paper.",
   submitOnEnter = false,
@@ -197,7 +186,8 @@ export function LandingMentionEditor({
   const [target, setTarget] = useState<BaseRange | null>(null);
   const [search, setSearch] = useState("");
   const [index, setIndex] = useState(0);
-  const [suggestions, setSuggestions] = useState<typeof MOCK_PAPERS>([]);
+  const [suggestions, setSuggestions] = useState<MentionSuggestion[]>([]);
+  const [fallbackSuggestions, setFallbackSuggestions] = useState(false);
   const [popoverStyle, setPopoverStyle] = useState<CSSProperties | null>(null);
   const shellRef = useRef<HTMLFormElement | null>(null);
 
@@ -224,21 +214,33 @@ export function LandingMentionEditor({
   }, [editor, plainText, value]);
 
   useEffect(() => {
-    if (!target || search.length < 2) {
+    if (!target || search.length < 2 || !searchPapers) {
       setSuggestions([]);
+      setFallbackSuggestions(false);
       return;
     }
     let stale = false;
-    mockSearchPapers(search).then((results) => {
-      if (!stale) {
-        setSuggestions(results);
-        setIndex(0);
-      }
-    });
+    const timeoutId = window.setTimeout(() => {
+      searchPapers(search, 6)
+        .then((result) => {
+          if (!stale) {
+            setSuggestions(result.suggestions);
+            setFallbackSuggestions(result.fallback);
+            setIndex(0);
+          }
+        })
+        .catch(() => {
+          if (!stale) {
+            setSuggestions([]);
+            setFallbackSuggestions(false);
+          }
+        });
+    }, 120);
     return () => {
       stale = true;
+      window.clearTimeout(timeoutId);
     };
-  }, [search, target]);
+  }, [search, searchPapers, target]);
 
   const handleChange = useCallback(
     (nextValue: Descendant[]) => {
@@ -287,18 +289,33 @@ export function LandingMentionEditor({
   );
 
   const chooseSuggestion = useCallback(
-    (paper: (typeof MOCK_PAPERS)[number]) => {
+    (paper: MentionSuggestion) => {
       if (!target) {
         return;
       }
       insertMention(editor, target, paper);
       setTarget(null);
       setSuggestions([]);
+      setFallbackSuggestions(false);
       setSearch("");
       ReactEditor.focus(editor);
     },
     [editor, target],
   );
+
+  const suggestionMeta = useCallback((paper: MentionSuggestion) => {
+    const parts = [];
+    if (paper.authors.trim()) {
+      parts.push(paper.authors);
+    }
+    if (paper.published) {
+      parts.push(paper.published.slice(0, 4));
+    }
+    if (paper.citation_count > 0) {
+      parts.push(`${paper.citation_count} cites`);
+    }
+    return parts.join(" · ");
+  }, []);
 
   const renderElement = useCallback(
     (props: Parameters<NonNullable<ComponentProps<typeof Editable>["renderElement"]>>[0]) => {
@@ -528,9 +545,14 @@ export function LandingMentionEditor({
       {showSuggestions && popoverStyle && typeof document !== "undefined"
         ? createPortal(
             <div className="mention-suggestions mention-suggestions-popover" style={popoverStyle}>
+              {fallbackSuggestions ? (
+                <div className="mention-suggestions-banner">
+                  No matches found, some suggestions...
+                </div>
+              ) : null}
               {suggestions.map((paper, suggestionIndex) => (
                 <button
-                  key={paper.id}
+                  key={paper.paper_id}
                   type="button"
                   className={`mention-suggestion${suggestionIndex === index ? " active" : ""}`}
                   onMouseDown={(event) => {
@@ -538,8 +560,19 @@ export function LandingMentionEditor({
                     chooseSuggestion(paper);
                   }}
                 >
-                  <div className="mention-suggestion-title">{paper.title}</div>
-                  <div className="mention-suggestion-meta">{paper.venue} research paper</div>
+                  <div className="mention-suggestion-title">
+                    {renderHighlightedText(paper.title, search)}
+                  </div>
+                  {suggestionMeta(paper) ? (
+                    <div className="mention-suggestion-meta">
+                      {renderHighlightedText(suggestionMeta(paper), search)}
+                    </div>
+                  ) : null}
+                  {paper.highlight_snippet ? (
+                    <div className="mention-suggestion-snippet">
+                      {renderHighlightedText(paper.highlight_snippet, search)}
+                    </div>
+                  ) : null}
                 </button>
               ))}
             </div>,

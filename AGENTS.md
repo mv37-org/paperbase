@@ -31,6 +31,7 @@ Before tests or profiling, the repo now expects explicit readiness checks:
   - `paperbase-dev doctor --mode test`
   - `paperbase-dev init-local`
   - `paperbase-dev verify-run --mode test`
+  - chat Vitest in single-worker mode with both console and JSON reporting so CI surfaces frontend failures clearly
 - `make profile` runs:
   - `paperbase-dev doctor --mode profile`
   - `paperbase-dev init-local`

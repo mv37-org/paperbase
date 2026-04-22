@@ -106,6 +106,119 @@ describe("chat api", () => {
     window.removeEventListener("paperbase:auth-expired", authExpired);
   });
 
+  it("formats structured validation errors into readable text", async () => {
+    const fetchMock = vi
+      .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            detail: [
+              { loc: ["body", "email"], msg: "Field required" },
+              { loc: ["body", "password"], msg: "Field required" },
+            ],
+          },
+          { status: 422 },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await loadApiModule();
+    const form = document.createElement("form");
+    const email = document.createElement("input");
+    email.name = "email";
+    email.value = "";
+    const password = document.createElement("input");
+    password.name = "password";
+    password.value = "";
+    form.append(email, password);
+
+    await expect(api.postForm("/v1/browser/auth/login", form)).rejects.toThrow(
+      "email: Field required; password: Field required",
+    );
+  });
+
+  it("upgrades insecure configured API bases when the page is HTTPS", async () => {
+    const api = await loadApiModule();
+
+    expect(
+      api.resolveApiBase(
+        "http://paperbase-api.example.test/",
+        "https://paperbase-api.example.test/login",
+      ),
+    ).toBe("https://paperbase-api.example.test");
+    expect(api.resolveApiBase("/api/", "https://paperbase-api.example.test/login")).toBe(
+      "https://paperbase-api.example.test/api",
+    );
+  });
+
+  it("loads paper mention suggestions from the browser endpoint", async () => {
+    const fetchMock = vi
+      .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          fallback: false,
+          suggestions: [
+            {
+              paper_id: "arxiv:2401.12345",
+              arxiv_id: "2401.12345",
+              title: "Benchmark Paper",
+              authors: "Ada Lovelace",
+              summary_short: "Grounded benchmark paper.",
+              citation_count: 12,
+              published: "2026-04-01",
+              score: 0.9,
+              matched_field: "title",
+              highlight_snippet: "Benchmark Paper",
+            },
+          ],
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await loadApiModule();
+
+    const result = await api.suggestBrowserPapers("benchmark paper", 7);
+
+    const [path, init] = fetchMock.mock.calls[0] as FetchCall;
+    const requestUrl = new URL(String(path), "http://localhost");
+    expect(`${requestUrl.pathname}${requestUrl.search}`).toBe(
+      "/v1/browser/papers/suggest?q=benchmark+paper&limit=7",
+    );
+    expect(init?.method).toBe("GET");
+    expect(result.fallback).toBe(false);
+    expect(result.suggestions).toHaveLength(1);
+    expect(result.suggestions[0]?.paper_id).toBe("arxiv:2401.12345");
+  });
+
+  it("returns fallback mention suggestions when the backend reports no direct matches", async () => {
+    const fetchMock = vi
+      .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          fallback: true,
+          suggestions: [
+            {
+              paper_id: "arxiv:2409.99999",
+              arxiv_id: "2409.99999",
+              title: "Fallback Paper",
+              authors: "Ada Lovelace",
+              summary_short: "Suggested fallback paper.",
+              citation_count: 30,
+              published: "2026-04-01",
+              score: 0,
+              matched_field: "fallback",
+              highlight_snippet: "Suggested fallback paper.",
+            },
+          ],
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await loadApiModule();
+
+    const result = await api.suggestBrowserPapers("nomatch", 6);
+
+    expect(result.fallback).toBe(true);
+    expect(result.suggestions[0]?.matched_field).toBe("fallback");
+  });
+
   it("parses streamed SSE events even when chunk boundaries split the payload", async () => {
     const encoder = new TextEncoder();
     const fetchMock = vi

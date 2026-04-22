@@ -2484,6 +2484,9 @@ class PaperbaseService:
     def suggest_papers(self, q: str, *, limit: int = 10) -> list[dict[str, Any]]:
         return self.repository.suggest_papers(q, limit=limit)
 
+    def suggest_fallback_papers(self, *, limit: int = 6) -> list[dict[str, Any]]:
+        return self.repository.suggest_fallback_papers(limit=limit)
+
     def get_stats(self) -> dict[str, Any]:
         return self.repository.stats()
 

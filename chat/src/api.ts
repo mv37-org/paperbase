@@ -5,6 +5,7 @@ import type {
   ChatThreadResponse,
   FigureResponse,
   FileContentResponse,
+  MentionSuggestionResult,
   PaperResponse,
   SendChatMessageResponse,
   TableResponse,
@@ -13,10 +14,11 @@ import type {
 
 const RAW_API_BASE =
   (window as typeof window & { PAPERBASE_BASE_URL?: string }).PAPERBASE_BASE_URL ?? "";
-const API_BASE =
+const CONFIGURED_API_BASE =
   RAW_API_BASE && !RAW_API_BASE.startsWith("__")
     ? RAW_API_BASE
     : ((import.meta.env.VITE_PAPERBASE_BASE_URL as string | undefined) ?? "");
+const API_BASE = resolveApiBase(CONFIGURED_API_BASE);
 
 let browserCsrfToken: string | null = null;
 
@@ -38,6 +40,29 @@ export class StreamingChatError extends Error {
     super(message);
     this.name = "StreamingChatError";
     this.canFallback = canFallback;
+  }
+}
+
+export function resolveApiBase(rawBase: string, currentPageUrl = window.location.href) {
+  if (!rawBase) {
+    return "";
+  }
+
+  try {
+    const currentPage = new URL(currentPageUrl);
+    const resolved = new URL(rawBase, currentPage.origin);
+    if (currentPage.protocol === "https:" && resolved.protocol === "http:") {
+      resolved.protocol = "https:";
+      if (resolved.port === "80") {
+        resolved.port = "";
+      }
+    }
+    return resolved.toString().replace(/\/+$/, "");
+  } catch {
+    if (currentPageUrl.startsWith("https://") && rawBase.startsWith("http://")) {
+      return `https://${rawBase.slice("http://".length)}`.replace(/\/+$/, "");
+    }
+    return rawBase.replace(/\/+$/, "");
   }
 }
 
@@ -119,6 +144,58 @@ function parseSseEvent(block: string) {
   };
 }
 
+function normalizeErrorMessage(payload: unknown, fallback: string): string {
+  if (typeof payload === "string") {
+    const trimmed = payload.trim();
+    return trimmed || fallback;
+  }
+
+  if (payload == null) {
+    return fallback;
+  }
+
+  if (Array.isArray(payload)) {
+    const messages = payload
+      .map((item) => normalizeErrorMessage(item, ""))
+      .filter((message) => message.trim().length > 0);
+    return messages.length > 0 ? messages.join("; ") : fallback;
+  }
+
+  if (typeof payload === "object") {
+    if ("detail" in payload) {
+      return normalizeErrorMessage((payload as { detail?: unknown }).detail, fallback);
+    }
+    if ("message" in payload) {
+      return normalizeErrorMessage((payload as { message?: unknown }).message, fallback);
+    }
+    if ("error" in payload) {
+      return normalizeErrorMessage((payload as { error?: unknown }).error, fallback);
+    }
+    if ("msg" in payload) {
+      const detail = payload as { msg?: unknown; loc?: unknown };
+      const message = normalizeErrorMessage(detail.msg, fallback);
+      const location = Array.isArray(detail.loc)
+        ? detail.loc
+            .map((part) =>
+              typeof part === "string" || typeof part === "number" ? String(part) : "",
+            )
+            .filter(Boolean)
+            .filter((part, index) => !(index === 0 && ["body", "query", "path"].includes(part)))
+            .join(".")
+        : "";
+      return location ? `${location}: ${message}` : message;
+    }
+    try {
+      const encoded = JSON.stringify(payload);
+      return encoded && encoded !== "{}" ? encoded : fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
+  return String(payload);
+}
+
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = buildHeaders(init);
   const response = await fetch(`${API_BASE}${path}`, {
@@ -130,11 +207,7 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const payload = await parsePayload(response);
   if (!response.ok) {
     handleUnauthorized(response);
-    const detail =
-      payload && typeof payload === "object" && "detail" in payload
-        ? String((payload as { detail?: string }).detail ?? "Request failed")
-        : String(payload ?? "Request failed");
-    throw new Error(detail);
+    throw new Error(normalizeErrorMessage(payload, "Request failed"));
   }
   syncBrowserSession(payload);
   return payload as T;
@@ -157,6 +230,16 @@ export function logoutBrowserSession() {
 
 export function loadUploads() {
   return api<UploadListResponse>("/v1/browser/uploads", { method: "GET" });
+}
+
+export async function suggestBrowserPapers(query: string, limit = 5) {
+  const params = new URLSearchParams({
+    q: query,
+    limit: String(limit),
+  });
+  return api<MentionSuggestionResult>(`/v1/browser/papers/suggest?${params.toString()}`, {
+    method: "GET",
+  });
 }
 
 export function loadThreads() {
@@ -197,11 +280,7 @@ export async function sendThreadMessageStream(
   if (!response.ok) {
     handleUnauthorized(response);
     const body = await parsePayload(response);
-    const detail =
-      body && typeof body === "object" && "detail" in body
-        ? String((body as { detail?: string }).detail ?? "Streaming request failed")
-        : String(body ?? "Streaming request failed");
-    throw new StreamingChatError(detail, true);
+    throw new StreamingChatError(normalizeErrorMessage(body, "Streaming request failed"), true);
   }
 
   if (!response.body) {

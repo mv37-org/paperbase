@@ -161,3 +161,21 @@ export interface MentionTag {
   id: string;
   title: string;
 }
+
+export interface MentionSuggestion {
+  paper_id: string;
+  arxiv_id: string;
+  title: string;
+  authors: string;
+  summary_short: string;
+  citation_count: number;
+  published: string;
+  score: number;
+  matched_field: string;
+  highlight_snippet: string;
+}
+
+export interface MentionSuggestionResult {
+  suggestions: MentionSuggestion[];
+  fallback: boolean;
+}

@@ -24,10 +24,12 @@ const apiMocks = vi.hoisted(() => {
     loadSession: vi.fn(),
     loadThreads: vi.fn(),
     loadUploads: vi.fn(),
+    landingMentionEditor: vi.fn(() => <div data-testid="mention-editor" />),
     logoutBrowserSession: vi.fn(),
     postForm: vi.fn(),
     sendThreadMessage: vi.fn(),
     sendThreadMessageStream: vi.fn(),
+    suggestBrowserPapers: vi.fn(),
     StreamingChatError: MockStreamingChatError,
     uploadDocument: vi.fn(),
   };
@@ -49,12 +51,13 @@ vi.mock("./api", () => ({
   postForm: apiMocks.postForm,
   sendThreadMessage: apiMocks.sendThreadMessage,
   sendThreadMessageStream: apiMocks.sendThreadMessageStream,
+  suggestBrowserPapers: apiMocks.suggestBrowserPapers,
   StreamingChatError: apiMocks.StreamingChatError,
   uploadDocument: apiMocks.uploadDocument,
 }));
 
 vi.mock("./LandingMentionEditor", () => ({
-  LandingMentionEditor: () => <div data-testid="mention-editor" />,
+  LandingMentionEditor: apiMocks.landingMentionEditor,
 }));
 
 vi.mock("./MarkdownRenderer", () => ({
@@ -193,6 +196,10 @@ describe("App", () => {
       expect(document.querySelector("#landing-login-button")).toBeTruthy();
     });
     expect(document.querySelector("#app-shell")).toBeNull();
+    expect(apiMocks.landingMentionEditor).toHaveBeenCalled();
+    expect(apiMocks.landingMentionEditor.mock.calls[0]?.[0]?.searchPapers).toBe(
+      apiMocks.suggestBrowserPapers,
+    );
   });
 
   it("restores previously open tabs for an authenticated session", async () => {
@@ -211,6 +218,11 @@ describe("App", () => {
     await waitFor(() => {
       expect(apiMocks.getThread).toHaveBeenCalledWith("thread_1");
     });
+
+    const composerCall = apiMocks.landingMentionEditor.mock.calls.find(
+      ([props]) => props?.variant === "chat",
+    );
+    expect(composerCall?.[0]?.searchPapers).toBe(apiMocks.suggestBrowserPapers);
   });
 
   it("opens the cited-paper drawer from the URL state", async () => {
@@ -272,5 +284,45 @@ describe("App", () => {
       expect(screen.getByText("Fallback grounded answer")).toBeTruthy();
     });
     expect(apiMocks.sendThreadMessageStream).toHaveBeenCalledTimes(1);
+  });
+
+  it("sets explicit autocomplete hints on auth and API key inputs", async () => {
+    apiMocks.loadSession.mockResolvedValue({
+      authenticated: false,
+      user: null,
+      remaining_free_responses: 3,
+      has_anthropic_api_key: false,
+      csrf_token: null,
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(apiMocks.loadSession).toHaveBeenCalledTimes(1);
+    });
+
+    expect(
+      document.querySelector("#login-form input[name='email']")?.getAttribute("autocomplete"),
+    ).toBe("email");
+    expect(
+      document.querySelector("#login-form input[name='password']")?.getAttribute("autocomplete"),
+    ).toBe("current-password");
+    expect(
+      document
+        .querySelector("#signup-form input[name='display_name']")
+        ?.getAttribute("autocomplete"),
+    ).toBe("name");
+    expect(
+      document.querySelector("#signup-form input[name='password']")?.getAttribute("autocomplete"),
+    ).toBe("new-password");
+    expect(
+      document.querySelector("#reset-form input[name='token']")?.getAttribute("autocomplete"),
+    ).toBe("one-time-code");
+    expect(
+      document.querySelector("#reset-form input[name='password']")?.getAttribute("autocomplete"),
+    ).toBe("new-password");
+    expect(
+      document.querySelector("#api-key-form input[name='api_key']")?.getAttribute("autocomplete"),
+    ).toBe("new-password");
   });
 });

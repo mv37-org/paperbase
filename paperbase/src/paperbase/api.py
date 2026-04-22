@@ -114,6 +114,44 @@ def _browser_session_token(request: Request) -> str | None:
     return request.cookies.get(settings.browser_session_cookie_name)
 
 
+def _forwarded_header_value(value: str | None) -> str | None:
+    if not value:
+        return None
+    first = value.split(",", 1)[0].strip().strip('"')
+    return first or None
+
+
+def _forwarded_header_param(value: str | None, key: str) -> str | None:
+    if not value:
+        return None
+    first = value.split(",", 1)[0]
+    for item in first.split(";"):
+        name, sep, raw_value = item.partition("=")
+        if sep and name.strip().lower() == key:
+            parsed = raw_value.strip().strip('"')
+            return parsed or None
+    return None
+
+
+def _public_base_url(request: Request) -> str:
+    forwarded = request.headers.get("forwarded")
+    proto = _forwarded_header_param(forwarded, "proto") or _forwarded_header_value(
+        request.headers.get("x-forwarded-proto")
+    )
+    host = (
+        _forwarded_header_param(forwarded, "host")
+        or _forwarded_header_value(request.headers.get("x-forwarded-host"))
+        or request.headers.get("host")
+        or urlsplit(str(request.base_url)).netloc
+    )
+    if not proto or not host:
+        return str(request.base_url).rstrip("/")
+    port = _forwarded_header_value(request.headers.get("x-forwarded-port"))
+    if port and ":" not in host and port not in {"80", "443"}:
+        host = f"{host}:{port}"
+    return f"{proto.lower()}://{host}".rstrip("/")
+
+
 def _is_safe_return_to(value: str | None) -> bool:
     if not value:
         return False
@@ -136,6 +174,15 @@ def _chat_redirect_base(request: Request, settings, *, return_to: str | None = N
 
 def _sse_event(event_name: str, payload: object) -> str:
     return f"event: {event_name}\ndata: {json.dumps(jsonable_encoder(payload), ensure_ascii=False)}\n\n"
+
+
+def _suggestion_response(service: PaperbaseService, q: str, *, limit: int) -> dict[str, object]:
+    suggestions = service.suggest_papers(q, limit=limit)
+    fallback = False
+    if not suggestions:
+        suggestions = service.suggest_fallback_papers(limit=min(limit, 6))
+        fallback = True
+    return {"suggestions": suggestions, "fallback": fallback}
 
 
 @lru_cache(maxsize=1)
@@ -164,7 +211,7 @@ def home(request: Request) -> HTMLResponse:
     if not _STATIC_DIR.exists():
         return HTMLResponse("Chat frontend not built. Run `cd chat && vp build`.", status_code=503)
     html = (_STATIC_DIR / "index.html").read_text(encoding="utf-8")
-    api_base_url = str(request.base_url).rstrip("/")
+    api_base_url = _public_base_url(request)
     html = html.replace("__PAPERBASE_BASE_URL__", api_base_url)
     return HTMLResponse(html)
 
@@ -214,8 +261,8 @@ def suggest_papers(
     q: str = Query(..., min_length=1, max_length=128),
     limit: int = Query(default=10, ge=1, le=50),
     service: PaperbaseService = Depends(get_service),
-) -> dict[str, list[dict]]:
-    return {"suggestions": service.suggest_papers(q, limit=limit)}
+) -> dict[str, object]:
+    return _suggestion_response(service, q, limit=limit)
 
 
 @app.get("/v1/stats", dependencies=[Depends(require_bearer_token)])
@@ -289,6 +336,15 @@ def references(
     service: PaperbaseService = Depends(get_service),
 ) -> list[dict]:
     return service.get_paper_references(paper_id, refresh=refresh)
+
+
+@app.get("/v1/browser/papers/suggest")
+def browser_suggest_papers(
+    q: str = Query(..., min_length=1, max_length=128),
+    limit: int = Query(default=10, ge=1, le=50),
+    service: PaperbaseService = Depends(get_service),
+) -> dict[str, object]:
+    return _suggestion_response(service, q, limit=limit)
 
 
 @app.get("/v1/browser/papers/{paper_id}", response_model=PaperResponse)

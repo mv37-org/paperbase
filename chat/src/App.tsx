@@ -17,6 +17,7 @@ import {
   postForm,
   sendThreadMessage,
   sendThreadMessageStream,
+  suggestBrowserPapers,
   StreamingChatError,
   uploadDocument,
 } from "./api";
@@ -1149,6 +1150,7 @@ export default function App() {
               onAttach={() => openAuthModal("login")}
               onChange={setLandingPrompt}
               onSubmit={() => void handleLandingSubmit()}
+              searchPapers={suggestBrowserPapers}
               submitButtonId="landing-start-button"
               submitLabel="Start"
               value={landingPrompt}
@@ -1551,6 +1553,7 @@ export default function App() {
               onChange={setComposerInput}
               onSubmit={() => void handleComposerSubmit()}
               placeholder="Ask about the latest agent and AI systems research. Type @ to tag a paper."
+              searchPapers={suggestBrowserPapers}
               submitButtonId="composer-send"
               submitLabel={streamingThreadId ? "Thinking..." : "Send"}
               submitLoading={Boolean(streamingThreadId)}
@@ -1729,8 +1732,14 @@ export default function App() {
                 }
               }}
             >
-              <input name="email" type="email" placeholder="Email" required />
-              <input name="password" type="password" placeholder="Password" required />
+              <input name="email" type="email" placeholder="Email" autoComplete="email" required />
+              <input
+                name="password"
+                type="password"
+                placeholder="Password"
+                autoComplete="current-password"
+                required
+              />
               <button className="primary-button" type="submit">
                 Log in
               </button>
@@ -1770,9 +1779,15 @@ export default function App() {
                 }
               }}
             >
-              <input name="display_name" type="text" placeholder="Name" />
-              <input name="email" type="email" placeholder="Email" required />
-              <input name="password" type="password" placeholder="Password" required />
+              <input name="display_name" type="text" placeholder="Name" autoComplete="name" />
+              <input name="email" type="email" placeholder="Email" autoComplete="email" required />
+              <input
+                name="password"
+                type="password"
+                placeholder="Password"
+                autoComplete="new-password"
+                required
+              />
               <button className="primary-button" type="submit">
                 Create account
               </button>
@@ -1802,7 +1817,7 @@ export default function App() {
                 }
               }}
             >
-              <input name="email" type="email" placeholder="Email" required />
+              <input name="email" type="email" placeholder="Email" autoComplete="email" required />
               <button className="primary-button" type="submit">
                 Send reset link
               </button>
@@ -1837,9 +1852,16 @@ export default function App() {
                 type="text"
                 placeholder="Reset token"
                 defaultValue={new URLSearchParams(window.location.search).get("reset_token") ?? ""}
+                autoComplete="one-time-code"
                 required
               />
-              <input name="password" type="password" placeholder="New password" required />
+              <input
+                name="password"
+                type="password"
+                placeholder="New password"
+                autoComplete="new-password"
+                required
+              />
               <button className="primary-button" type="submit">
                 Reset password
               </button>
@@ -1934,7 +1956,13 @@ export default function App() {
                     }
                   }}
                 >
-                  <input name="api_key" type="password" placeholder="Anthropic API key" required />
+                  <input
+                    name="api_key"
+                    type="password"
+                    placeholder="Anthropic API key"
+                    autoComplete="new-password"
+                    required
+                  />
                   <button className="primary-button api-key-save-button" type="submit">
                     Save key
                   </button>
