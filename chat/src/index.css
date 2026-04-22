@@ -994,6 +994,8 @@ textarea::placeholder,
   flex-direction: column;
   justify-content: flex-start;
   gap: 6px;
+  overflow-y: auto;
+  overflow-x: visible;
 }
 
 .sidebar-section-label {
@@ -1040,6 +1042,7 @@ textarea::placeholder,
 
 .project-list {
   gap: 6px;
+  overflow: visible;
 }
 
 .project-group {
@@ -1162,17 +1165,17 @@ textarea::placeholder,
 
 .project-menu-popover {
   position: absolute;
-  top: calc(100% + 4px);
+  top: calc(100% + 2px);
   right: 0;
   z-index: 6;
-  min-width: 150px;
-  padding: 6px;
-  border-radius: 12px;
+  min-width: 132px;
+  padding: 4px;
+  border-radius: 4px;
   border: 1px solid rgba(27, 22, 17, 0.08);
   background: #fffdfa;
-  box-shadow: 0 14px 30px rgba(27, 22, 17, 0.12);
+  box-shadow: 0 8px 18px rgba(27, 22, 17, 0.12);
   display: grid;
-  gap: 4px;
+  gap: 2px;
 }
 
 .project-menu-item {
@@ -1180,9 +1183,9 @@ textarea::placeholder,
   background: transparent;
   color: var(--text);
   text-align: left;
-  font-size: 13px;
-  padding: 8px 10px;
-  border-radius: 8px;
+  font-size: 12px;
+  padding: 6px 8px;
+  border-radius: 3px;
   cursor: pointer;
 }
 
@@ -2081,6 +2084,7 @@ textarea {
   background: #ffffff;
 }
 
+.history-section,
 .project-list,
 .thread-list,
 .chat-message-list,
@@ -2090,6 +2094,7 @@ textarea {
   scrollbar-color: rgba(27, 22, 17, 0.18) transparent;
 }
 
+.history-section::-webkit-scrollbar,
 .project-list::-webkit-scrollbar,
 .thread-list::-webkit-scrollbar,
 .chat-message-list::-webkit-scrollbar,
@@ -2099,6 +2104,7 @@ textarea {
   height: 8px;
 }
 
+.history-section::-webkit-scrollbar-track,
 .project-list::-webkit-scrollbar-track,
 .thread-list::-webkit-scrollbar-track,
 .chat-message-list::-webkit-scrollbar-track,
@@ -2107,6 +2113,7 @@ textarea {
   background: transparent;
 }
 
+.history-section::-webkit-scrollbar-thumb,
 .project-list::-webkit-scrollbar-thumb,
 .thread-list::-webkit-scrollbar-thumb,
 .chat-message-list::-webkit-scrollbar-thumb,
@@ -2118,6 +2125,7 @@ textarea {
   background-clip: padding-box;
 }
 
+.history-section:hover::-webkit-scrollbar-thumb,
 .project-list:hover::-webkit-scrollbar-thumb,
 .thread-list:hover::-webkit-scrollbar-thumb,
 .chat-message-list:hover::-webkit-scrollbar-thumb,
@@ -2338,6 +2346,8 @@ textarea {
 
 .project-description-input {
   width: 100%;
+  border-color: rgba(27, 22, 17, 0.18);
+  background: #ffffff;
 }
 
 .settings-panel {
@@ -2805,11 +2815,21 @@ textarea {
 }
 
 .example-pill:hover,
-.project-card:hover,
-.thread-card:hover,
 .citation-card:hover {
   border-color: rgba(27, 22, 17, 0.2);
   box-shadow: none;
+}
+
+.project-card:hover,
+.thread-card:hover {
+  background: rgba(27, 22, 17, 0.04);
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.project-card.active:hover,
+.thread-card.active:hover {
+  background: var(--accent-soft);
 }
 
 .assistant-copy-button:hover {
