@@ -2013,7 +2013,12 @@ textarea::placeholder,
 
 .chat-empty-state .chat-composer {
   display: block;
-  width: min(var(--chat-fixed-composer-width), 100%);
+  width: min(
+    calc(var(--chat-fixed-composer-width) + 120px),
+    calc(100vw - var(--chat-sidebar-width) - var(--chat-drawer-width) - 48px)
+  );
+  max-width: 100%;
+  margin-top: 18px;
 }
 
 .chat-empty-state .composer-form {
