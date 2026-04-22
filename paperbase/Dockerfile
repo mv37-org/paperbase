@@ -6,13 +6,20 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# Pre-install heavy dependencies in their own layer so iterating on src
+# doesn't invalidate the ML libraries (torch, transformers, docling) which
+# take the longest to download. This file is a best-effort cache seed; the
+# authoritative dependency list is pyproject.toml, resolved in the next step.
 COPY requirements.docker.txt ./
 RUN python -m pip install -r requirements.docker.txt
 
 COPY pyproject.toml README.md ./
 COPY src ./src
 
-RUN python -m pip install --no-deps .
+# Resolve the full dependency closure from pyproject.toml (no --no-deps!) so
+# new entries don't silently fall off the image. pip is a no-op for anything
+# already satisfied by the requirements layer above.
+RUN python -m pip install .
 
 ENV PORT=8080
 
