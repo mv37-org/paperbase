@@ -218,6 +218,11 @@ describe("App", () => {
     await waitFor(() => {
       expect(apiMocks.getThread).toHaveBeenCalledWith("thread_1");
     });
+
+    const composerCall = apiMocks.landingMentionEditor.mock.calls.find(
+      ([props]) => props?.variant === "chat",
+    );
+    expect(composerCall?.[0]?.searchPapers).toBe(apiMocks.suggestBrowserPapers);
   });
 
   it("opens the cited-paper drawer from the URL state", async () => {
