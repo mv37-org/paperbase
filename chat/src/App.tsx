@@ -1896,10 +1896,10 @@ export default function App() {
       }
       const nextSession = await loadSession();
       setSession(nextSession);
+      setAuthReady(true);
       if (nextSession.authenticated) {
         await bootstrapAuthenticatedUi();
       }
-      setAuthReady(true);
     })().catch((error: unknown) => {
       console.error(error);
       setComposerStatus("The chat app could not reach paperbase.");

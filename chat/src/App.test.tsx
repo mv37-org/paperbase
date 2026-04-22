@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const apiMocks = vi.hoisted(() => {
@@ -55,6 +55,13 @@ const apiMocks = vi.hoisted(() => {
     loadUploads: vi.fn(),
     landingMentionEditor: vi.fn((props: Record<string, unknown>) => (
       <div data-testid={`mention-editor-${String(props.variant ?? "landing")}`}>
+        <input
+          aria-label={`mention-input-${String(props.variant ?? "landing")}`}
+          value={String(props.value ?? "")}
+          onChange={(event) =>
+            (props.onChange as ((value: string) => void) | undefined)?.(event.target.value)
+          }
+        />
         {props.submitButtonId ? (
           <button
             id={String(props.submitButtonId)}
@@ -952,9 +959,8 @@ describe("App", () => {
 
   it("shows tool activity rows, uses a thinking label, and aborts on stop", async () => {
     const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
-    sessionStorage.setItem(PENDING_PROMPT_KEY, "Find the grounding methods");
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());
-    apiMocks.createThread.mockResolvedValue(threadResponse("thread_2", "New chat"));
+    apiMocks.createThread.mockResolvedValue(emptyThreadResponse("thread_2"));
 
     let streamSignal: AbortSignal | undefined;
     let releaseStream: (() => void) | null = null;
@@ -998,6 +1004,14 @@ describe("App", () => {
     render(<App />);
 
     await waitFor(() => {
+      expect(screen.getByText("Start new research in")).toBeTruthy();
+    });
+    fireEvent.change(screen.getByLabelText("mention-input-chat"), {
+      target: { value: "Find the grounding methods" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
       expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
     });
     await waitFor(() => {
@@ -1008,13 +1022,18 @@ describe("App", () => {
     });
     expect(screen.queryByText("Streaming")).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+    });
 
     await waitFor(() => {
       expect(streamSignal?.aborted).toBe(true);
     });
 
-    releaseStream?.();
+    await act(async () => {
+      releaseStream?.();
+      await streamDone;
+    });
     randomSpy.mockRestore();
   });
 
