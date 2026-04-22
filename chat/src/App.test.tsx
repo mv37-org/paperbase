@@ -365,6 +365,8 @@ describe("App", () => {
     await waitFor(() => {
       expect(screen.getByText("Start new research in")).toBeTruthy();
     });
+    expect(screen.getByRole("button", { name: "Add python file" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Add notes" })).toBeTruthy();
 
     fireEvent.click(screen.getByLabelText("Open empty state project picker"));
 
@@ -463,7 +465,7 @@ describe("App", () => {
     fireEvent.click(screen.getByText("New chat"));
 
     await waitFor(() => {
-      expect(screen.getByText("Ask the first research question")).toBeTruthy();
+      expect(screen.getByText("Start new research in")).toBeTruthy();
     });
 
     fireEvent.click(screen.getByLabelText("Start chat in General"));
@@ -491,7 +493,7 @@ describe("App", () => {
     fireEvent.click(screen.getByText("New chat"));
 
     await waitFor(() => {
-      expect(screen.getByText("Ask the first research question")).toBeTruthy();
+      expect(screen.getByText("Start new research in")).toBeTruthy();
     });
 
     fireEvent.click(screen.getByLabelText("Start chat in Agents"));

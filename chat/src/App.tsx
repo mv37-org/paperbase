@@ -375,6 +375,56 @@ function AppIcon({ src, className = "" }: { src: string; className?: string }) {
   );
 }
 
+function EmptyStateTagIcon({ kind }: { kind: "python" | "notes" }) {
+  if (kind === "python") {
+    return (
+      <svg viewBox="0 0 18 18" aria-hidden="true">
+        <path
+          d="M5.5 2.75h5.25l3 3v9.5H5.5Z"
+          fill="none"
+          stroke="currentColor"
+          strokeLinejoin="round"
+          strokeWidth="1.35"
+        />
+        <path
+          d="M10.75 2.75v3h3"
+          fill="none"
+          stroke="currentColor"
+          strokeLinejoin="round"
+          strokeWidth="1.35"
+        />
+        <path
+          d="M7.1 11.75h1.35l.75-1.15.75 1.15h1.35"
+          fill="none"
+          stroke="currentColor"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          strokeWidth="1.2"
+        />
+      </svg>
+    );
+  }
+
+  return (
+    <svg viewBox="0 0 18 18" aria-hidden="true">
+      <path
+        d="M4.5 3.25h9a1 1 0 0 1 1 1v9.5l-2.35-1.55H4.5a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1Z"
+        fill="none"
+        stroke="currentColor"
+        strokeLinejoin="round"
+        strokeWidth="1.35"
+      />
+      <path
+        d="M6.6 6.8h4.9M6.6 9.2h4.2"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeWidth="1.2"
+      />
+    </svg>
+  );
+}
+
 export default function App() {
   const [session, setSession] = useState<BrowserSessionResponse | null>(null);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
@@ -2268,87 +2318,95 @@ export default function App() {
                     >
                       MV37
                     </a>
-                    {activeThread ? (
-                      <strong>Ask the first research question</strong>
-                    ) : (
-                      <div className="chat-empty-project-row">
-                        <strong>Start new research in</strong>
-                        <div ref={emptyStateProjectPickerRef} className="chat-empty-project-picker">
-                          <button
-                            type="button"
-                            id="empty-state-project-select-trigger"
-                            className="chat-empty-project-trigger"
-                            aria-label="Open empty state project picker"
-                            aria-haspopup="dialog"
-                            aria-expanded={emptyStateProjectPickerOpen}
-                            onClick={() => setEmptyStateProjectPickerOpen((current) => !current)}
+                    <div className="chat-empty-project-row">
+                      <strong>Start new research in</strong>
+                      <div ref={emptyStateProjectPickerRef} className="chat-empty-project-picker">
+                        <button
+                          type="button"
+                          id="empty-state-project-select-trigger"
+                          className="chat-empty-project-trigger"
+                          aria-label="Open empty state project picker"
+                          aria-haspopup="dialog"
+                          aria-expanded={emptyStateProjectPickerOpen}
+                          onClick={() => setEmptyStateProjectPickerOpen((current) => !current)}
+                        >
+                          <span>{emptyStateProject?.name ?? "Project"}</span>
+                        </button>
+                        {emptyStateProjectPickerOpen ? (
+                          <div
+                            className="chat-empty-project-menu"
+                            role="dialog"
+                            aria-label="Choose project"
                           >
-                            <span>{emptyStateProject?.name ?? "Project"}</span>
-                          </button>
-                          {emptyStateProjectPickerOpen ? (
+                            <div className="chat-empty-project-search-shell">
+                              <input
+                                ref={emptyStateProjectSearchInputRef}
+                                type="text"
+                                className="chat-empty-project-search"
+                                placeholder="Search projects"
+                                aria-label="Search projects"
+                                value={emptyStateProjectSearch}
+                                onChange={(event) => setEmptyStateProjectSearch(event.target.value)}
+                              />
+                            </div>
                             <div
-                              className="chat-empty-project-menu"
-                              role="dialog"
+                              className="chat-empty-project-options"
+                              role="listbox"
                               aria-label="Choose project"
                             >
-                              <div className="chat-empty-project-search-shell">
-                                <input
-                                  ref={emptyStateProjectSearchInputRef}
-                                  type="text"
-                                  className="chat-empty-project-search"
-                                  placeholder="Search projects"
-                                  aria-label="Search projects"
-                                  value={emptyStateProjectSearch}
-                                  onChange={(event) =>
-                                    setEmptyStateProjectSearch(event.target.value)
-                                  }
-                                />
-                              </div>
-                              <div
-                                className="chat-empty-project-options"
-                                role="listbox"
-                                aria-label="Choose project"
-                              >
-                                {filteredEmptyStateProjects.length > 0 ? (
-                                  filteredEmptyStateProjects.map((project) => (
-                                    <button
-                                      key={project.project_id}
-                                      type="button"
-                                      role="option"
-                                      aria-selected={
-                                        emptyStateProject?.project_id === project.project_id
-                                      }
-                                      className={`chat-empty-project-option${emptyStateProject?.project_id === project.project_id ? " active" : ""}`}
-                                      onClick={() => {
-                                        setSelectedProjectId(project.project_id);
-                                        setEmptyStateProjectPickerOpen(false);
-                                      }}
-                                    >
-                                      {project.name}
-                                    </button>
-                                  ))
-                                ) : (
-                                  <div className="chat-empty-project-empty">
-                                    No projects match this search.
-                                  </div>
-                                )}
-                              </div>
-                              <button
-                                type="button"
-                                className="chat-empty-project-create"
-                                onClick={openCreateProjectModal}
-                              >
-                                Create new project
-                              </button>
+                              {filteredEmptyStateProjects.length > 0 ? (
+                                filteredEmptyStateProjects.map((project) => (
+                                  <button
+                                    key={project.project_id}
+                                    type="button"
+                                    role="option"
+                                    aria-selected={
+                                      emptyStateProject?.project_id === project.project_id
+                                    }
+                                    className={`chat-empty-project-option${emptyStateProject?.project_id === project.project_id ? " active" : ""}`}
+                                    onClick={() => {
+                                      setSelectedProjectId(project.project_id);
+                                      setEmptyStateProjectPickerOpen(false);
+                                    }}
+                                  >
+                                    {project.name}
+                                  </button>
+                                ))
+                              ) : (
+                                <div className="chat-empty-project-empty">
+                                  No projects match this search.
+                                </div>
+                              )}
                             </div>
-                          ) : null}
-                        </div>
+                            <button
+                              type="button"
+                              className="chat-empty-project-create"
+                              onClick={openCreateProjectModal}
+                            >
+                              Create new project
+                            </button>
+                          </div>
+                        ) : null}
                       </div>
-                    )}
+                    </div>
                     {composerStatus ? (
                       <div className="composer-status inline">{composerStatus}</div>
                     ) : null}
                     {composerEditor}
+                    <div className="chat-empty-actions">
+                      <button type="button" className="chat-empty-action-tag python">
+                        <span className="chat-empty-action-icon" aria-hidden="true">
+                          <EmptyStateTagIcon kind="python" />
+                        </span>
+                        <span className="chat-empty-action-label">Add python file</span>
+                      </button>
+                      <button type="button" className="chat-empty-action-tag notes">
+                        <span className="chat-empty-action-icon" aria-hidden="true">
+                          <EmptyStateTagIcon kind="notes" />
+                        </span>
+                        <span className="chat-empty-action-label">Add notes</span>
+                      </button>
+                    </div>
                   </div>
                 </div>
               ) : (

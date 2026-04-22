@@ -2067,6 +2067,73 @@ textarea::placeholder,
   margin-top: 18px;
 }
 
+.chat-empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  width: min(
+    calc((var(--chat-fixed-composer-width) + 120px) * 0.75),
+    calc((100vw - var(--chat-sidebar-width) - var(--chat-drawer-width) - 48px) * 0.75)
+  );
+  max-width: 100%;
+  justify-content: flex-start;
+}
+
+.chat-empty-action-tag {
+  display: inline-flex;
+  align-items: stretch;
+  min-height: 30px;
+  padding: 0;
+  border-radius: 6px;
+  overflow: hidden;
+  cursor: pointer;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease,
+    box-shadow 120ms ease,
+    transform 120ms ease;
+}
+
+.chat-empty-action-tag.python {
+  border: 1px solid #2b62e4;
+  background: rgba(43, 98, 228, 0.1);
+  color: #2b62e4;
+}
+
+.chat-empty-action-tag.notes {
+  border: 1px solid #c99212;
+  background: rgba(227, 183, 73, 0.18);
+  color: #9a6500;
+}
+
+.chat-empty-action-icon,
+.chat-empty-action-label {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100%;
+}
+
+.chat-empty-action-icon {
+  width: 32px;
+  min-width: 32px;
+}
+
+.chat-empty-action-icon svg {
+  width: 15px;
+  height: 15px;
+}
+
+.chat-empty-action-label {
+  padding: 0 12px;
+  border-left: 1px solid currentColor;
+}
+
 .chat-empty-state .composer-form {
   position: static;
   left: auto;
@@ -2853,6 +2920,16 @@ textarea {
   box-shadow: 0 3px 10px rgba(43, 98, 228, 0.08);
 }
 
+.chat-empty-action-tag.python:hover {
+  background: rgba(43, 98, 228, 0.14);
+  box-shadow: 0 3px 10px rgba(43, 98, 228, 0.08);
+}
+
+.chat-empty-action-tag.notes:hover {
+  background: rgba(227, 183, 73, 0.26);
+  box-shadow: 0 3px 10px rgba(201, 146, 18, 0.1);
+}
+
 .chat-tab:hover {
   background: #f3f0ea;
 }
@@ -2876,8 +2953,20 @@ textarea {
   transform: translateY(1px);
 }
 
+.chat-empty-action-tag:active {
+  transform: translateY(1px);
+}
+
 .landing-login-button:focus-visible {
   box-shadow: 0 0 0 3px rgba(43, 98, 228, 0.12);
+}
+
+.chat-empty-action-tag.python:focus-visible {
+  box-shadow: 0 0 0 3px rgba(43, 98, 228, 0.12);
+}
+
+.chat-empty-action-tag.notes:focus-visible {
+  box-shadow: 0 0 0 3px rgba(201, 146, 18, 0.12);
 }
 
 .sidebar-link:hover {
