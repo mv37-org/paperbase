@@ -30,6 +30,7 @@ from .models import (
     BrowserSessionResponse,
     ChatThreadListResponse,
     ChatThreadResponse,
+    CreateProjectRequest,
     CreateChatThreadRequest,
     FileContentResponse,
     FileListResponse,
@@ -41,9 +42,13 @@ from .models import (
     LoginRequest,
     ManifestResponse,
     PaperResponse,
+    ProjectListResponse,
+    ProjectResponse,
+    ProjectSessionPageResponse,
     ResetPasswordRequest,
     ResultSetResponse,
     SaveAnthropicKeyRequest,
+    SaveDaytonaKeyRequest,
     SearchPaperResult,
     SearchRequest,
     SearchResponse,
@@ -53,6 +58,8 @@ from .models import (
     SendChatMessageResponse,
     SignupRequest,
     TableResponse,
+    UpdateNotificationsRequest,
+    UpdateProjectRequest,
     FigureResponse,
     UploadListResponse,
     UploadedDocumentResponse,
@@ -162,9 +169,10 @@ def _is_safe_return_to(value: str | None) -> bool:
 def _chat_redirect_base(request: Request, settings, *, return_to: str | None = None) -> str:
     if _is_safe_return_to(return_to):
         return return_to.rstrip("/")
-    session_return_to = request.session.pop("browser_google_return_to", None)
-    if _is_safe_return_to(session_return_to):
-        return session_return_to.rstrip("/")
+    for session_key in ("browser_google_return_to", "browser_github_return_to"):
+        session_return_to = request.session.pop(session_key, None)
+        if _is_safe_return_to(session_return_to):
+            return session_return_to.rstrip("/")
     referer = request.headers.get("referer")
     if _is_safe_return_to(referer):
         parts = urlsplit(referer)
@@ -199,6 +207,37 @@ def get_google_oauth_client():
         client_kwargs={"scope": "openid email profile"},
     )
     return oauth.create_client("google")
+
+
+@lru_cache(maxsize=1)
+def get_github_oauth_client():
+    settings = get_settings()
+    if not settings.github_client_id or not settings.github_client_secret:
+        return None
+    oauth = OAuth()
+    oauth.register(
+        name="github",
+        access_token_url="https://github.com/login/oauth/access_token",
+        authorize_url="https://github.com/login/oauth/authorize",
+        api_base_url="https://api.github.com/",
+        client_id=settings.github_client_id,
+        client_secret=settings.github_client_secret,
+        client_kwargs={"scope": "repo read:user user:email"},
+    )
+    return oauth.create_client("github")
+
+
+def _browser_session_response_with_csrf(
+    session_response: BrowserSessionResponse,
+    *,
+    request: Request,
+    response: Response,
+) -> BrowserSessionResponse:
+    raw_token = _browser_session_token(request)
+    if session_response.authenticated and raw_token:
+        session_response.csrf_token = csrf_token_for_session(raw_token, get_settings())
+    set_no_store_headers(response)
+    return session_response
 
 
 @app.get("/health")
@@ -509,6 +548,76 @@ async def browser_google_callback(
         return RedirectResponse(f"{redirect_base}/?auth_error=google_callback_failed", status_code=302)
 
 
+@app.get("/v1/browser/auth/github/start")
+async def browser_github_start(
+    request: Request,
+    return_to: str | None = Query(default=None),
+    user=Depends(require_browser_user),
+):
+    del user
+    client = get_github_oauth_client()
+    settings = get_settings()
+    redirect_base = _chat_redirect_base(request, settings, return_to=return_to)
+    if _is_safe_return_to(return_to):
+        request.session["browser_github_return_to"] = return_to
+    if client is None:
+        return RedirectResponse(
+            f"{redirect_base}/?auth_error=github_not_configured&settings=version-control",
+            status_code=302,
+        )
+    redirect_uri = settings.github_oauth_redirect_url or str(request.url_for("browser_github_callback"))
+    return await client.authorize_redirect(request, redirect_uri)
+
+
+@app.get("/v1/browser/auth/github/callback", name="browser_github_callback")
+async def browser_github_callback(
+    request: Request,
+    service: PaperbaseService = Depends(get_service),
+):
+    settings = get_settings()
+    client = get_github_oauth_client()
+    redirect_base = _chat_redirect_base(request, settings)
+    raw_token = _browser_session_token(request)
+    user = service.get_current_browser_user(raw_token)
+    if client is None:
+        return RedirectResponse(
+            f"{redirect_base}/?auth_error=github_not_configured&settings=version-control",
+            status_code=302,
+        )
+    if user is None:
+        return RedirectResponse(
+            f"{redirect_base}/?auth_error=github_auth_required&settings=version-control",
+            status_code=302,
+        )
+    try:
+        token = await client.authorize_access_token(request)
+        access_token = str(token.get("access_token") or "").strip()
+        if not access_token:
+            raise RuntimeError("GitHub did not return an access token")
+        userinfo_response = await client.get("user", token=token)
+        userinfo = userinfo_response.json()
+        github_user_id = str(userinfo.get("id") or "").strip()
+        github_login = str(userinfo.get("login") or "").strip()
+        if not github_user_id or not github_login:
+            raise RuntimeError("GitHub response was missing user id or login")
+        service.save_github_connection(
+            user,
+            github_user_id=github_user_id,
+            github_login=github_login,
+            access_token=access_token,
+            scope=str(token.get("scope") or ""),
+        )
+        return RedirectResponse(
+            f"{redirect_base}/?auth=github_connected&settings=version-control",
+            status_code=302,
+        )
+    except Exception:
+        return RedirectResponse(
+            f"{redirect_base}/?auth_error=github_callback_failed&settings=version-control",
+            status_code=302,
+        )
+
+
 @app.put("/v1/browser/settings/anthropic-key", response_model=BrowserSessionResponse)
 def browser_save_anthropic_key(
     request: SaveAnthropicKeyRequest,
@@ -518,11 +627,11 @@ def browser_save_anthropic_key(
     service: PaperbaseService = Depends(get_service),
 ) -> BrowserSessionResponse:
     session_response = service.save_user_anthropic_key(user, request)
-    raw_token = _browser_session_token(http_request)
-    if session_response.authenticated and raw_token:
-        session_response.csrf_token = csrf_token_for_session(raw_token, get_settings())
-    set_no_store_headers(response)
-    return session_response
+    return _browser_session_response_with_csrf(
+        session_response,
+        request=http_request,
+        response=response,
+    )
 
 
 @app.delete("/v1/browser/settings/anthropic-key", response_model=BrowserSessionResponse)
@@ -533,11 +642,73 @@ def browser_delete_anthropic_key(
     service: PaperbaseService = Depends(get_service),
 ) -> BrowserSessionResponse:
     session_response = service.delete_user_anthropic_key(user)
-    raw_token = _browser_session_token(request)
-    if session_response.authenticated and raw_token:
-        session_response.csrf_token = csrf_token_for_session(raw_token, get_settings())
-    set_no_store_headers(response)
-    return session_response
+    return _browser_session_response_with_csrf(
+        session_response,
+        request=request,
+        response=response,
+    )
+
+
+@app.put("/v1/browser/settings/daytona-key", response_model=BrowserSessionResponse)
+def browser_save_daytona_key(
+    request: SaveDaytonaKeyRequest,
+    http_request: Request,
+    response: Response,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> BrowserSessionResponse:
+    session_response = service.save_user_daytona_key(user, request)
+    return _browser_session_response_with_csrf(
+        session_response,
+        request=http_request,
+        response=response,
+    )
+
+
+@app.delete("/v1/browser/settings/daytona-key", response_model=BrowserSessionResponse)
+def browser_delete_daytona_key(
+    request: Request,
+    response: Response,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> BrowserSessionResponse:
+    session_response = service.delete_user_daytona_key(user)
+    return _browser_session_response_with_csrf(
+        session_response,
+        request=request,
+        response=response,
+    )
+
+
+@app.put("/v1/browser/settings/notifications", response_model=BrowserSessionResponse)
+def browser_update_notifications(
+    request: UpdateNotificationsRequest,
+    http_request: Request,
+    response: Response,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> BrowserSessionResponse:
+    session_response = service.update_user_notification_preferences(user, request)
+    return _browser_session_response_with_csrf(
+        session_response,
+        request=http_request,
+        response=response,
+    )
+
+
+@app.delete("/v1/browser/settings/github", response_model=BrowserSessionResponse)
+def browser_delete_github_connection(
+    request: Request,
+    response: Response,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> BrowserSessionResponse:
+    session_response = service.delete_github_connection(user)
+    return _browser_session_response_with_csrf(
+        session_response,
+        request=request,
+        response=response,
+    )
 
 
 @app.get("/v1/browser/uploads", response_model=UploadListResponse)
@@ -573,6 +744,54 @@ def browser_list_chats(
     return service.list_chat_threads(user)
 
 
+@app.get("/v1/browser/projects", response_model=ProjectListResponse)
+def browser_list_projects(
+    user=Depends(require_browser_user),
+    service: PaperbaseService = Depends(get_service),
+) -> ProjectListResponse:
+    return service.list_projects(user)
+
+
+@app.post("/v1/browser/projects", response_model=ProjectResponse)
+def browser_create_project(
+    request: CreateProjectRequest,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> ProjectResponse:
+    return service.create_project(user, request)
+
+
+@app.patch("/v1/browser/projects/{project_id}", response_model=ProjectResponse)
+def browser_update_project(
+    project_id: str,
+    request: UpdateProjectRequest,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> ProjectResponse:
+    return service.update_project(user, project_id, request)
+
+
+@app.delete("/v1/browser/projects/{project_id}", response_model=dict[str, str])
+def browser_delete_project(
+    project_id: str,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> dict[str, str]:
+    service.delete_project(user, project_id)
+    return {"status": "deleted"}
+
+
+@app.get("/v1/browser/projects/{project_id}/sessions", response_model=ProjectSessionPageResponse)
+def browser_list_project_sessions(
+    project_id: str,
+    limit: int = Query(5, ge=1, le=25),
+    offset: int = Query(0, ge=0),
+    user=Depends(require_browser_user),
+    service: PaperbaseService = Depends(get_service),
+) -> ProjectSessionPageResponse:
+    return service.list_project_chat_threads(user, project_id, limit=limit, offset=offset)
+
+
 @app.post("/v1/browser/chats", response_model=ChatThreadResponse)
 def browser_create_chat(
     request: CreateChatThreadRequest,
@@ -589,6 +808,16 @@ def browser_get_chat(
     service: PaperbaseService = Depends(get_service),
 ) -> ChatThreadResponse:
     return service.get_chat_thread(user, thread_id)
+
+
+@app.delete("/v1/browser/chats/{thread_id}", response_model=dict[str, str])
+def browser_delete_chat(
+    thread_id: str,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> dict[str, str]:
+    service.delete_chat_thread(user, thread_id)
+    return {"status": "deleted"}
 
 
 @app.post("/v1/browser/chats/{thread_id}/messages", response_model=SendChatMessageResponse)

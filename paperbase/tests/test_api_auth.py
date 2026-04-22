@@ -31,6 +31,9 @@ from paperbase.models import (
     FileObject,
     JobResponse,
     PaperResponse,
+    ProjectListResponse,
+    ProjectResponse,
+    ProjectSessionPageResponse,
     ResultSetResponse,
     SearchPaperResult,
     UploadListResponse,
@@ -72,6 +75,25 @@ def _paper(arxiv_id: str = "2401.12345") -> PaperResponse:
         citation_count=12,
         influential_citation_count=3,
         index_status="indexed",
+    )
+
+
+def _project(
+    project_id: str = "proj_1",
+    *,
+    name: str = "General",
+    description: str = "",
+    is_default: bool = False,
+    session_count: int = 1,
+) -> ProjectResponse:
+    return ProjectResponse(
+        project_id=project_id,
+        name=name,
+        description=description,
+        is_default=is_default,
+        session_count=session_count,
+        created_at=NOW,
+        updated_at=NOW,
     )
 
 
@@ -194,6 +216,57 @@ class StubApiService:
             has_anthropic_api_key=False,
         )
 
+    def save_user_daytona_key(self, user: BrowserUser, request) -> BrowserSessionResponse:
+        self.calls.append(("save_user_daytona_key", (user.user_id, request.api_key)))
+        return BrowserSessionResponse(
+            authenticated=True,
+            user=user,
+            remaining_free_responses=2,
+            has_anthropic_api_key=False,
+        )
+
+    def update_user_notification_preferences(self, user: BrowserUser, request) -> BrowserSessionResponse:
+        self.calls.append(
+            ("update_user_notification_preferences", (user.user_id, request.weekly_papers_review_email))
+        )
+        return BrowserSessionResponse(
+            authenticated=True,
+            user=user,
+            remaining_free_responses=2,
+            has_anthropic_api_key=False,
+        )
+
+    def save_github_connection(
+        self,
+        user: BrowserUser,
+        *,
+        github_user_id: str,
+        github_login: str,
+        access_token: str,
+        scope: str,
+    ) -> BrowserSessionResponse:
+        self.calls.append(
+            (
+                "save_github_connection",
+                (user.user_id, github_user_id, github_login, access_token, scope),
+            )
+        )
+        return BrowserSessionResponse(
+            authenticated=True,
+            user=user,
+            remaining_free_responses=2,
+            has_anthropic_api_key=False,
+        )
+
+    def delete_github_connection(self, user: BrowserUser) -> BrowserSessionResponse:
+        self.calls.append(("delete_github_connection", user.user_id))
+        return BrowserSessionResponse(
+            authenticated=True,
+            user=user,
+            remaining_free_responses=2,
+            has_anthropic_api_key=False,
+        )
+
     def list_uploaded_documents(self, user: BrowserUser) -> UploadListResponse:
         self.calls.append(("list_uploaded_documents", user.user_id))
         return UploadListResponse(documents=[], available_tags=["benchmark"])
@@ -204,6 +277,7 @@ class StubApiService:
             threads=[
                 ChatThreadSummary(
                     thread_id="thread_1",
+                    project_id="proj_1",
                     title="Open Thread",
                     created_at=NOW,
                     updated_at=NOW,
@@ -212,10 +286,84 @@ class StubApiService:
             ]
         )
 
+    def list_projects(self, user: BrowserUser) -> ProjectListResponse:
+        self.calls.append(("list_projects", user.user_id))
+        return ProjectListResponse(
+            projects=[
+                _project("proj_1", name="General", is_default=True, session_count=1),
+                _project("proj_2", name="Agents", description="Study agent systems", session_count=1),
+            ]
+        )
+
+    def create_project(self, user: BrowserUser, request) -> ProjectResponse:
+        self.calls.append(("create_project", (user.user_id, request.name, request.description)))
+        return _project(
+            "proj_3",
+            name=request.name,
+            description=request.description,
+            session_count=0,
+        )
+
+    def update_project(self, user: BrowserUser, project_id: str, request) -> ProjectResponse:
+        self.calls.append(("update_project", (user.user_id, project_id, request.name, request.description)))
+        return _project(
+            project_id,
+            name=request.name,
+            description=request.description,
+            is_default=(project_id == "proj_1"),
+            session_count=1,
+        )
+
+    def delete_project(self, user: BrowserUser, project_id: str) -> None:
+        self.calls.append(("delete_project", (user.user_id, project_id)))
+
+    def list_project_chat_threads(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        *,
+        limit: int = 5,
+        offset: int = 0,
+    ) -> ProjectSessionPageResponse:
+        self.calls.append(("list_project_chat_threads", (user.user_id, project_id, limit, offset)))
+        return ProjectSessionPageResponse(
+            project_id=project_id,
+            threads=[
+                ChatThreadSummary(
+                    thread_id="thread_1",
+                    project_id=project_id,
+                    title="Open Thread",
+                    created_at=NOW,
+                    updated_at=NOW,
+                    last_message_preview="Recent message",
+                )
+            ],
+            offset=offset,
+            limit=limit,
+            total_count=1,
+            has_more=False,
+        )
+
+    def create_chat_thread(self, user: BrowserUser, request) -> ChatThreadResponse:
+        self.calls.append(("create_chat_thread", (user.user_id, request.title, request.project_id)))
+        return ChatThreadResponse(
+            thread_id="thread_2",
+            project_id=request.project_id or "proj_1",
+            project_name="Agents" if request.project_id == "proj_2" else "General",
+            project_instructions="Study agent systems" if request.project_id == "proj_2" else "",
+            title=request.title or "New chat",
+            created_at=NOW,
+            updated_at=NOW,
+            messages=[],
+        )
+
     def get_chat_thread(self, user: BrowserUser, thread_id: str) -> ChatThreadResponse:
         self.calls.append(("get_chat_thread", (user.user_id, thread_id)))
         return ChatThreadResponse(
             thread_id=thread_id,
+            project_id="proj_1",
+            project_name="General",
+            project_instructions="",
             title="Open Thread",
             created_at=NOW,
             updated_at=NOW,
@@ -228,6 +376,9 @@ class StubApiService:
                 )
             ],
         )
+
+    def delete_chat_thread(self, user: BrowserUser, thread_id: str) -> None:
+        self.calls.append(("delete_chat_thread", (user.user_id, thread_id)))
 
     def upsert_google_browser_user(
         self,
@@ -458,12 +609,18 @@ def test_browser_get_routes_accept_session_cookie_without_csrf(api_client):
     uploads = client.get("/v1/browser/uploads")
     chats = client.get("/v1/browser/chats")
     thread = client.get("/v1/browser/chats/thread_1")
+    projects = client.get("/v1/browser/projects")
+    project_sessions = client.get("/v1/browser/projects/proj_1/sessions?limit=5&offset=0")
 
     assert uploads.status_code == 200
     assert uploads.json()["available_tags"] == ["benchmark"]
     assert chats.json()["threads"][0]["thread_id"] == "thread_1"
     assert thread.json()["messages"][0]["content_markdown"] == "Grounded answer"
+    assert projects.json()["projects"][0]["name"] == "General"
+    assert project_sessions.json()["threads"][0]["project_id"] == "proj_1"
     assert ("list_uploaded_documents", "user_1") in service.calls
+    assert ("list_projects", "user_1") in service.calls
+    assert ("list_project_chat_threads", ("user_1", "proj_1", 5, 0)) in service.calls
     assert ("get_chat_thread", ("user_1", "thread_1")) in service.calls
 
 
@@ -485,6 +642,48 @@ def test_browser_delete_anthropic_key_requires_valid_csrf(api_client):
     assert response.json()["has_anthropic_api_key"] is False
     assert response.json()["csrf_token"] == csrf
     assert ("delete_user_anthropic_key", "user_1") in service.calls
+
+
+def test_browser_project_and_chat_write_routes_delegate_with_valid_csrf(api_client):
+    client, service, settings = api_client
+    client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
+    csrf = csrf_token_for_session("browser-session-token", settings)
+    headers = {
+        "Origin": settings.browser_origin,
+        "X-Paperbase-CSRF": csrf,
+    }
+
+    created_project = client.post(
+        "/v1/browser/projects",
+        json={"name": "Agents", "description": "Study agent systems"},
+        headers=headers,
+    )
+    updated_project = client.patch(
+        "/v1/browser/projects/proj_2",
+        json={"name": "Agents v2", "description": "Updated instructions"},
+        headers=headers,
+    )
+    created_chat = client.post(
+        "/v1/browser/chats",
+        json={"title": "Project chat", "project_id": "proj_2"},
+        headers=headers,
+    )
+    deleted_chat = client.delete("/v1/browser/chats/thread_1", headers=headers)
+    deleted_project = client.delete("/v1/browser/projects/proj_2", headers=headers)
+
+    assert created_project.status_code == 200
+    assert created_project.json()["project_id"] == "proj_3"
+    assert updated_project.status_code == 200
+    assert updated_project.json()["name"] == "Agents v2"
+    assert created_chat.status_code == 200
+    assert created_chat.json()["project_id"] == "proj_2"
+    assert deleted_chat.json() == {"status": "deleted"}
+    assert deleted_project.json() == {"status": "deleted"}
+    assert ("create_project", ("user_1", "Agents", "Study agent systems")) in service.calls
+    assert ("update_project", ("user_1", "proj_2", "Agents v2", "Updated instructions")) in service.calls
+    assert ("create_chat_thread", ("user_1", "Project chat", "proj_2")) in service.calls
+    assert ("delete_chat_thread", ("user_1", "thread_1")) in service.calls
+    assert ("delete_project", ("user_1", "proj_2")) in service.calls
 
 
 def test_google_callback_success_sets_cookie_and_redirects_to_saved_return_to(api_client, monkeypatch):

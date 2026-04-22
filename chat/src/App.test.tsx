@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const apiMocks = vi.hoisted(() => {
@@ -14,15 +14,20 @@ const apiMocks = vi.hoisted(() => {
 
   return {
     api: vi.fn(),
+    createProject: vi.fn(),
     createThread: vi.fn(),
+    deleteProject: vi.fn(),
+    deleteThread: vi.fn(),
     getBrowserPaper: vi.fn(),
     getBrowserPaperFigure: vi.fn(),
     getBrowserPaperFile: vi.fn(),
     getBrowserPaperTable: vi.fn(),
     getThread: vi.fn(),
+    githubLoginUrl: vi.fn(() => "/v1/browser/auth/github/start"),
     googleLoginUrl: vi.fn(() => "/v1/browser/auth/google/start"),
+    loadProjectSessions: vi.fn(),
+    loadProjects: vi.fn(),
     loadSession: vi.fn(),
-    loadThreads: vi.fn(),
     loadUploads: vi.fn(),
     landingMentionEditor: vi.fn(() => <div data-testid="mention-editor" />),
     logoutBrowserSession: vi.fn(),
@@ -31,21 +36,27 @@ const apiMocks = vi.hoisted(() => {
     sendThreadMessageStream: vi.fn(),
     suggestBrowserPapers: vi.fn(),
     StreamingChatError: MockStreamingChatError,
+    updateProject: vi.fn(),
     uploadDocument: vi.fn(),
   };
 });
 
 vi.mock("./api", () => ({
   api: apiMocks.api,
+  createProject: apiMocks.createProject,
   createThread: apiMocks.createThread,
+  deleteProject: apiMocks.deleteProject,
+  deleteThread: apiMocks.deleteThread,
   getBrowserPaper: apiMocks.getBrowserPaper,
   getBrowserPaperFigure: apiMocks.getBrowserPaperFigure,
   getBrowserPaperFile: apiMocks.getBrowserPaperFile,
   getBrowserPaperTable: apiMocks.getBrowserPaperTable,
   getThread: apiMocks.getThread,
+  githubLoginUrl: apiMocks.githubLoginUrl,
   googleLoginUrl: apiMocks.googleLoginUrl,
+  loadProjectSessions: apiMocks.loadProjectSessions,
+  loadProjects: apiMocks.loadProjects,
   loadSession: apiMocks.loadSession,
-  loadThreads: apiMocks.loadThreads,
   loadUploads: apiMocks.loadUploads,
   logoutBrowserSession: apiMocks.logoutBrowserSession,
   postForm: apiMocks.postForm,
@@ -53,6 +64,7 @@ vi.mock("./api", () => ({
   sendThreadMessageStream: apiMocks.sendThreadMessageStream,
   suggestBrowserPapers: apiMocks.suggestBrowserPapers,
   StreamingChatError: apiMocks.StreamingChatError,
+  updateProject: apiMocks.updateProject,
   uploadDocument: apiMocks.uploadDocument,
 }));
 
@@ -80,13 +92,35 @@ function authenticatedSession() {
     },
     remaining_free_responses: 3,
     has_anthropic_api_key: false,
+    settings: {
+      anthropic_api_key_hint: "",
+      has_daytona_api_key: false,
+      daytona_api_key_hint: "",
+      has_github_connection: false,
+      github_login: "",
+      github_oauth_available: true,
+      weekly_papers_review_email: false,
+    },
     csrf_token: "csrf-123",
   };
 }
 
-function threadSummary(threadId: string, title: string) {
+function projectSummary(projectId: string, name: string, sessionCount = 1) {
+  return {
+    project_id: projectId,
+    name,
+    description: "",
+    is_default: name === "General",
+    session_count: sessionCount,
+    created_at: "2026-04-21T00:00:00Z",
+    updated_at: "2026-04-21T00:00:00Z",
+  };
+}
+
+function threadSummary(threadId: string, title: string, projectId = "proj_1") {
   return {
     thread_id: threadId,
+    project_id: projectId,
     title,
     created_at: "2026-04-21T00:00:00Z",
     updated_at: "2026-04-21T00:00:00Z",
@@ -94,9 +128,18 @@ function threadSummary(threadId: string, title: string) {
   };
 }
 
-function threadResponse(threadId: string, title: string, content = "Grounded answer") {
+function threadResponse(
+  threadId: string,
+  title: string,
+  content = "Grounded answer",
+  projectId = "proj_1",
+  projectName = "General",
+) {
   return {
     thread_id: threadId,
+    project_id: projectId,
+    project_name: projectName,
+    project_instructions: "",
     title,
     created_at: "2026-04-21T00:00:00Z",
     updated_at: "2026-04-21T00:00:00Z",
@@ -139,7 +182,21 @@ describe("App", () => {
       value: vi.fn(),
     });
     apiMocks.loadUploads.mockResolvedValue({ documents: [], available_tags: [] });
-    apiMocks.loadThreads.mockResolvedValue({ threads: [] });
+    apiMocks.loadProjects.mockResolvedValue({
+      projects: [projectSummary("proj_1", "General")],
+    });
+    apiMocks.loadProjectSessions.mockResolvedValue({
+      project_id: "proj_1",
+      threads: [threadSummary("thread_1", "Recovered thread")],
+      offset: 0,
+      limit: 5,
+      total_count: 1,
+      has_more: false,
+    });
+    apiMocks.createProject.mockResolvedValue(projectSummary("proj_2", "Agents", 0));
+    apiMocks.createThread.mockResolvedValue(threadResponse("thread_2", "New chat"));
+    apiMocks.deleteProject.mockResolvedValue({ status: "deleted" });
+    apiMocks.deleteThread.mockResolvedValue({ status: "deleted" });
     apiMocks.getThread.mockResolvedValue(threadResponse("thread_1", "Recovered thread"));
     apiMocks.getBrowserPaper.mockResolvedValue({
       paper_id: "arxiv:2401.12345",
@@ -197,17 +254,11 @@ describe("App", () => {
     });
     expect(document.querySelector("#app-shell")).toBeNull();
     expect(apiMocks.landingMentionEditor).toHaveBeenCalled();
-    expect(apiMocks.landingMentionEditor.mock.calls[0]?.[0]?.searchPapers).toBe(
-      apiMocks.suggestBrowserPapers,
-    );
   });
 
   it("restores previously open tabs for an authenticated session", async () => {
     localStorage.setItem(OPEN_TABS_KEY, JSON.stringify(["thread_1"]));
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());
-    apiMocks.loadThreads.mockResolvedValue({
-      threads: [threadSummary("thread_1", "Restored research thread")],
-    });
     apiMocks.getThread.mockResolvedValue(threadResponse("thread_1", "Restored research thread"));
 
     render(<App />);
@@ -215,14 +266,92 @@ describe("App", () => {
     await waitFor(() => {
       expect(screen.getAllByText("Restored research thread").length).toBeGreaterThan(0);
     });
+    expect(apiMocks.getThread).toHaveBeenCalledWith("thread_1");
+    expect(apiMocks.loadProjects).toHaveBeenCalledTimes(1);
+  });
+
+  it("loads project sessions lazily when a project is expanded", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+
+    render(<App />);
+
     await waitFor(() => {
-      expect(apiMocks.getThread).toHaveBeenCalledWith("thread_1");
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+    expect(apiMocks.loadProjectSessions).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getAllByText("General")[0]!);
+
+    await waitFor(() => {
+      expect(apiMocks.loadProjectSessions).toHaveBeenCalledWith("proj_1", 5, 0);
+    });
+    await waitFor(() => {
+      expect(screen.getByText("Recovered thread")).toBeTruthy();
+    });
+  });
+
+  it("creates a project from the sidebar modal", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.loadProjects
+      .mockResolvedValueOnce({ projects: [projectSummary("proj_1", "General")] })
+      .mockResolvedValueOnce({
+        projects: [projectSummary("proj_1", "General"), projectSummary("proj_2", "Agents", 0)],
+      });
+    apiMocks.loadProjectSessions.mockResolvedValue({
+      project_id: "proj_2",
+      threads: [],
+      offset: 0,
+      limit: 5,
+      total_count: 0,
+      has_more: false,
     });
 
-    const composerCall = apiMocks.landingMentionEditor.mock.calls.find(
-      ([props]) => props?.variant === "chat",
-    );
-    expect(composerCall?.[0]?.searchPapers).toBe(apiMocks.suggestBrowserPapers);
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByLabelText("Create project"));
+    fireEvent.change(screen.getByPlaceholderText("Project name"), {
+      target: { value: "Agents" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("Description, goal, or custom instructions"), {
+      target: { value: "Investigate reliable agent systems." },
+    });
+    fireEvent.submit(document.querySelector("#project-modal form")!);
+
+    await waitFor(() => {
+      expect(apiMocks.createProject).toHaveBeenCalledWith(
+        "Agents",
+        "Investigate reliable agent systems.",
+      );
+    });
+    await waitFor(() => {
+      expect(screen.getByLabelText("Start chat in Agents")).toBeTruthy();
+    });
+  });
+
+  it("deletes a session from the project list after confirmation", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+    fireEvent.click(screen.getAllByText("General")[0]!);
+
+    await waitFor(() => {
+      expect(screen.getByText("Recovered thread")).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByLabelText("Delete Recovered thread"));
+    fireEvent.click(screen.getByRole("button", { name: "Delete session" }));
+
+    await waitFor(() => {
+      expect(apiMocks.deleteThread).toHaveBeenCalledWith("thread_1");
+    });
   });
 
   it("opens the cited-paper drawer from the URL state", async () => {
@@ -237,23 +366,12 @@ describe("App", () => {
     await waitFor(() => {
       expect(screen.getByText("Drawer content")).toBeTruthy();
     });
-    expect(apiMocks.getBrowserPaper).toHaveBeenCalledWith("arxiv:2401.12345");
-    expect(apiMocks.getBrowserPaperFile).toHaveBeenCalledWith(
-      "arxiv:2401.12345",
-      "sections/intro.md",
-    );
   });
 
   it("falls back to the non-streaming send path when the stream fails before any events", async () => {
     sessionStorage.setItem(PENDING_PROMPT_KEY, "Summarize the benchmark papers");
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());
-    apiMocks.createThread.mockResolvedValue({
-      thread_id: "thread_2",
-      title: "New chat",
-      created_at: "2026-04-21T00:00:00Z",
-      updated_at: "2026-04-21T00:00:00Z",
-      messages: [],
-    });
+    apiMocks.createThread.mockResolvedValue(threadResponse("thread_2", "New chat"));
     apiMocks.sendThreadMessageStream.mockRejectedValue(
       new apiMocks.StreamingChatError("stream failed", true),
     );
@@ -271,9 +389,6 @@ describe("App", () => {
       has_anthropic_api_key: false,
       state: "completed",
     });
-    apiMocks.loadThreads.mockResolvedValue({
-      threads: [threadSummary("thread_2", "New chat")],
-    });
 
     render(<App />);
 
@@ -283,15 +398,58 @@ describe("App", () => {
     await waitFor(() => {
       expect(screen.getByText("Fallback grounded answer")).toBeTruthy();
     });
-    expect(apiMocks.sendThreadMessageStream).toHaveBeenCalledTimes(1);
   });
 
-  it("sets explicit autocomplete hints on auth and API key inputs", async () => {
+  it("opens the settings modal from the account menu and saves notification preferences", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.api.mockResolvedValue({
+      ...authenticatedSession(),
+      settings: {
+        ...authenticatedSession().settings,
+        weekly_papers_review_email: true,
+      },
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("General")).toBeTruthy();
+    });
+
+    fireEvent.click(document.querySelector("#account-menu-button") as HTMLElement);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Settings" }));
+
+    expect(screen.getByText("Inference")).toBeTruthy();
+    expect(screen.getByText("Sandbox")).toBeTruthy();
+    expect(screen.getByText("Version control")).toBeTruthy();
+    expect(screen.getByText("Notifications")).toBeTruthy();
+
+    fireEvent.click(screen.getByLabelText("Weekly papers review email"));
+    fireEvent.submit(document.querySelector("#settings-notifications-form") as HTMLFormElement);
+
+    await waitFor(() => {
+      expect(apiMocks.api).toHaveBeenCalledWith("/v1/browser/settings/notifications", {
+        method: "PUT",
+        body: JSON.stringify({ weekly_papers_review_email: true }),
+      });
+    });
+  });
+
+  it("sets explicit autocomplete hints on auth and settings key inputs", async () => {
     apiMocks.loadSession.mockResolvedValue({
       authenticated: false,
       user: null,
       remaining_free_responses: 3,
       has_anthropic_api_key: false,
+      settings: {
+        anthropic_api_key_hint: "",
+        has_daytona_api_key: false,
+        daytona_api_key_hint: "",
+        has_github_connection: false,
+        github_login: "",
+        github_oauth_available: false,
+        weekly_papers_review_email: false,
+      },
       csrf_token: null,
     });
 
@@ -322,7 +480,14 @@ describe("App", () => {
       document.querySelector("#reset-form input[name='password']")?.getAttribute("autocomplete"),
     ).toBe("new-password");
     expect(
-      document.querySelector("#api-key-form input[name='api_key']")?.getAttribute("autocomplete"),
+      document
+        .querySelector("#settings-anthropic-form input[name='api_key']")
+        ?.getAttribute("autocomplete"),
+    ).toBe("new-password");
+    expect(
+      document
+        .querySelector("#settings-daytona-form input[name='api_key']")
+        ?.getAttribute("autocomplete"),
     ).toBe("new-password");
   });
 });

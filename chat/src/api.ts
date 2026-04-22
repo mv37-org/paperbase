@@ -7,6 +7,9 @@ import type {
   FileContentResponse,
   MentionSuggestionResult,
   PaperResponse,
+  ProjectListResponse,
+  ProjectResponse,
+  ProjectSessionPageResponse,
   SendChatMessageResponse,
   TableResponse,
   UploadListResponse,
@@ -218,6 +221,11 @@ export function googleLoginUrl() {
   return `${API_BASE}/v1/browser/auth/google/start?return_to=${returnTo}`;
 }
 
+export function githubLoginUrl() {
+  const returnTo = encodeURIComponent(`${window.location.origin}${window.location.pathname}`);
+  return `${API_BASE}/v1/browser/auth/github/start?return_to=${returnTo}`;
+}
+
 export function loadSession() {
   return api<BrowserSessionResponse>("/v1/browser/session", { method: "GET" });
 }
@@ -246,15 +254,52 @@ export function loadThreads() {
   return api<ChatThreadListResponse>("/v1/browser/chats", { method: "GET" });
 }
 
+export function loadProjects() {
+  return api<ProjectListResponse>("/v1/browser/projects", { method: "GET" });
+}
+
+export function createProject(name: string, description = "") {
+  return api<ProjectResponse>("/v1/browser/projects", {
+    method: "POST",
+    body: JSON.stringify({ name, description }),
+  });
+}
+
+export function updateProject(projectId: string, name: string, description = "") {
+  return api<ProjectResponse>(`/v1/browser/projects/${projectId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ name, description }),
+  });
+}
+
+export function deleteProject(projectId: string) {
+  return api<{ status: string }>(`/v1/browser/projects/${projectId}`, { method: "DELETE" });
+}
+
+export function loadProjectSessions(projectId: string, limit = 5, offset = 0) {
+  const params = new URLSearchParams({
+    limit: String(limit),
+    offset: String(offset),
+  });
+  return api<ProjectSessionPageResponse>(
+    `/v1/browser/projects/${projectId}/sessions?${params.toString()}`,
+    { method: "GET" },
+  );
+}
+
 export function getThread(threadId: string) {
   return api<ChatThreadResponse>(`/v1/browser/chats/${threadId}`, { method: "GET" });
 }
 
-export function createThread(title = "") {
+export function createThread(title = "", projectId?: string) {
   return api<ChatThreadResponse>("/v1/browser/chats", {
     method: "POST",
-    body: JSON.stringify({ title }),
+    body: JSON.stringify({ title, project_id: projectId ?? null }),
   });
+}
+
+export function deleteThread(threadId: string) {
+  return api<{ status: string }>(`/v1/browser/chats/${threadId}`, { method: "DELETE" });
 }
 
 export function sendThreadMessage(threadId: string, payload: SendThreadMessagePayload) {

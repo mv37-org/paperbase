@@ -3,15 +3,19 @@ import type { CSSProperties, ChangeEvent, UIEvent } from "react";
 
 import {
   api,
+  createProject,
   createThread,
+  deleteProject,
+  deleteThread,
   getBrowserPaper,
   getBrowserPaperFigure,
   getBrowserPaperFile,
   getBrowserPaperTable,
   getThread,
   googleLoginUrl,
+  loadProjectSessions,
+  loadProjects,
   loadSession,
-  loadThreads,
   loadUploads,
   logoutBrowserSession,
   postForm,
@@ -19,6 +23,7 @@ import {
   sendThreadMessageStream,
   suggestBrowserPapers,
   StreamingChatError,
+  updateProject,
   uploadDocument,
 } from "./api";
 import { LandingMentionEditor } from "./LandingMentionEditor";
@@ -34,6 +39,7 @@ import type {
   FigureResponse,
   FileContentResponse,
   PaperResponse,
+  ProjectSummary,
   TableResponse,
 } from "./types";
 
@@ -49,13 +55,30 @@ type PaperDrawerContent =
   | { kind: "markdown"; path: string; file: FileContentResponse }
   | { kind: "figure"; path: string; figure: FigureResponse }
   | { kind: "table"; path: string; table: TableResponse };
+type ProjectSessionState = {
+  threads: ChatThreadSummary[];
+  totalCount: number;
+  hasMore: boolean;
+  loaded: boolean;
+  loading: boolean;
+  loadingMore: boolean;
+  error: string;
+};
+type ProjectModalState = { mode: "create" } | { mode: "edit"; projectId: string };
+type DeleteModalState =
+  | { kind: "project"; projectId: string; name: string }
+  | { kind: "thread"; projectId: string; threadId: string; title: string }
+  | null;
 
 const AUTH_VIEW_COPY: Record<AuthView, { title: string; caption: string }> = {
   login: { title: "Log in", caption: "Use your account to continue." },
   signup: { title: "Create account", caption: "Create your account." },
   "reset-request": { title: "Forgot password", caption: "Get reset link." },
   "reset-password": { title: "Reset password", caption: "Choose a new password for your account." },
-  "api-key": { title: "Anthropic API key", caption: "Use your own key." },
+  settings: {
+    title: "Settings",
+    caption: "Manage inference, sandbox, version control, and notifications.",
+  },
 };
 
 const EXAMPLES = [
@@ -248,6 +271,27 @@ function formatThreadAge(value: string) {
   return `${Math.floor(deltaMs / year)}y`;
 }
 
+function threadSummaryFromThread(thread: ChatThreadResponse): ChatThreadSummary {
+  const lastMessage = thread.messages[thread.messages.length - 1];
+  return {
+    thread_id: thread.thread_id,
+    project_id: thread.project_id,
+    title: thread.title,
+    created_at: thread.created_at,
+    updated_at: thread.updated_at,
+    last_message_preview: lastMessage?.content_markdown.slice(0, 120) ?? "",
+  };
+}
+
+function upsertThreadSummary(
+  current: ChatThreadSummary[],
+  summary: ChatThreadSummary,
+): ChatThreadSummary[] {
+  return [summary, ...current.filter((item) => item.thread_id !== summary.thread_id)].sort(
+    (left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at),
+  );
+}
+
 function GoogleButton() {
   return (
     <button
@@ -292,10 +336,20 @@ function AppIcon({ src, className = "" }: { src: string; className?: string }) {
 
 export default function App() {
   const [session, setSession] = useState<BrowserSessionResponse | null>(null);
-  const [threads, setThreads] = useState<ChatThreadSummary[]>([]);
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [projectSessions, setProjectSessions] = useState<Record<string, ProjectSessionState>>({});
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [expandedProjectIds, setExpandedProjectIds] = useState<string[]>([]);
   const [threadMap, setThreadMap] = useState<Record<string, ChatThreadResponse>>({});
   const [openTabs, setOpenTabs] = useState<string[]>([]);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
+  const [projectMenuProjectId, setProjectMenuProjectId] = useState<string | null>(null);
+  const [projectModalState, setProjectModalState] = useState<ProjectModalState | null>(null);
+  const [projectFormName, setProjectFormName] = useState("");
+  const [projectFormDescription, setProjectFormDescription] = useState("");
+  const [projectFormError, setProjectFormError] = useState("");
+  const [deleteModalState, setDeleteModalState] = useState<DeleteModalState>(null);
+  const [projectIconKeys, setProjectIconKeys] = useState<Record<string, number>>({});
   const [authView, setAuthView] = useState<AuthView>("login");
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [authReady, setAuthReady] = useState(false);
@@ -320,11 +374,14 @@ export default function App() {
   const [messageListAtBottom, setMessageListAtBottom] = useState(true);
 
   const sessionRef = useRef<BrowserSessionResponse | null>(null);
+  const projectsRef = useRef<ProjectSummary[]>([]);
+  const selectedProjectIdRef = useRef<string | null>(null);
+  const projectSessionsRef = useRef<Record<string, ProjectSessionState>>({});
   const threadMapRef = useRef<Record<string, ChatThreadResponse>>({});
-  const openTabsRef = useRef<string[]>([]);
   const tabsStorageHydratedRef = useRef(false);
   const appUploadRef = useRef<HTMLInputElement | null>(null);
   const accountMenuRef = useRef<HTMLDivElement | null>(null);
+  const projectMenuRef = useRef<HTMLDivElement | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -336,7 +393,18 @@ export default function App() {
   }, [threadMap]);
 
   useEffect(() => {
-    openTabsRef.current = openTabs;
+    projectsRef.current = projects;
+  }, [projects]);
+
+  useEffect(() => {
+    selectedProjectIdRef.current = selectedProjectId;
+  }, [selectedProjectId]);
+
+  useEffect(() => {
+    projectSessionsRef.current = projectSessions;
+  }, [projectSessions]);
+
+  useEffect(() => {
     if (!tabsStorageHydratedRef.current) {
       tabsStorageHydratedRef.current = true;
       if (openTabs.length === 0) {
@@ -394,25 +462,51 @@ export default function App() {
     };
   }, [accountMenuOpen]);
 
+  useEffect(() => {
+    if (!projectMenuProjectId) {
+      return;
+    }
+    const handlePointerDown = (event: MouseEvent) => {
+      if (projectMenuRef.current && !projectMenuRef.current.contains(event.target as Node)) {
+        setProjectMenuProjectId(null);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setProjectMenuProjectId(null);
+      }
+    };
+    window.addEventListener("mousedown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("mousedown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [projectMenuProjectId]);
+
   const authCopy = AUTH_VIEW_COPY[authView];
   const authenticated = Boolean(session?.authenticated);
-  const sidebarThreads = useMemo(() => threads.filter(shouldShowThreadInSidebar), [threads]);
   const activeThread = activeThreadId ? (threadMap[activeThreadId] ?? null) : null;
   const isChatEmpty = !activeThread || activeThread.messages.length === 0;
   const paperDrawerOpen = Boolean(paperDrawer);
+  const allProjectsExpanded = useMemo(
+    () =>
+      projects.length > 0 &&
+      projects.every((project) => expandedProjectIds.includes(project.project_id)),
+    [expandedProjectIds, projects],
+  );
   const openTabItems = useMemo(
     () =>
       openTabs.map((threadId) => {
         const loadedThread = threadMap[threadId];
-        const summary = threads.find((thread) => thread.thread_id === threadId);
-        const title = loadedThread?.title ?? summary?.title ?? "New chat";
+        const title = loadedThread?.title ?? "New chat";
         return {
           threadId,
           title: displayThreadTitle(title),
           tabTitle: truncateTabTitle(title),
         };
       }),
-    [openTabs, threadMap, threads],
+    [openTabs, threadMap],
   );
   const hasOpenTabs = openTabItems.length > 0;
   const tabStripStyle = useMemo(
@@ -533,25 +627,12 @@ export default function App() {
       return null;
     }
     return {
-      displayName: session.user.display_name || session.user.email,
       email: session.user.email,
-      remainingFreeResponses: session.remaining_free_responses,
       hasAnthropicApiKey: session.has_anthropic_api_key,
+      settings: session.settings ?? DEFAULT_BROWSER_SETTINGS,
     };
   }, [session]);
-
-  const freeResponseSegments = useMemo(() => {
-    const remaining = Math.max(
-      0,
-      Math.min(FREE_RESPONSE_LIMIT, sessionSummary?.remainingFreeResponses ?? FREE_RESPONSE_LIMIT),
-    );
-    return Array.from({ length: FREE_RESPONSE_LIMIT }, (_, index) => ({
-      key: index,
-      active: index < remaining,
-    }));
-  }, [sessionSummary]);
-
-  const maskedApiKey = "sk-ant-••••••••••••••";
+  const sessionSettings = sessionSummary?.settings ?? DEFAULT_BROWSER_SETTINGS;
 
   const clearFlash = useCallback(() => {
     setFlash("");
@@ -609,12 +690,6 @@ export default function App() {
     [openPaperDrawer],
   );
 
-  const refreshThreads = useCallback(async () => {
-    const payload = await loadThreads();
-    setThreads(payload.threads);
-    return payload.threads;
-  }, []);
-
   const refreshUploads = useCallback(async () => {
     if (!sessionRef.current?.authenticated) {
       return;
@@ -622,33 +697,192 @@ export default function App() {
     await loadUploads();
   }, []);
 
-  const fetchAndStoreThread = useCallback(async (threadId: string) => {
-    const thread = await getThread(threadId);
-    setThreadMap((current) => ({ ...current, [thread.thread_id]: thread }));
-    return thread;
+  const refreshProjects = useCallback(async () => {
+    const payload = await loadProjects();
+    setProjects(payload.projects);
+    setSelectedProjectId((current) => {
+      if (current && payload.projects.some((project) => project.project_id === current)) {
+        return current;
+      }
+      return payload.projects[0]?.project_id ?? null;
+    });
+    return payload.projects;
   }, []);
+
+  const updateProjectSessionCache = useCallback(
+    (
+      projectId: string,
+      updater: (current: ProjectSessionState | null) => ProjectSessionState | null,
+    ) => {
+      setProjectSessions((current) => {
+        const nextValue = updater(current[projectId] ?? null);
+        if (nextValue === null) {
+          const nextState = { ...current };
+          delete nextState[projectId];
+          return nextState;
+        }
+        return {
+          ...current,
+          [projectId]: nextValue,
+        };
+      });
+    },
+    [],
+  );
+
+  const removeThreadIdsLocally = useCallback(
+    (threadIds: string[], projectId?: string) => {
+      const ids = new Set(threadIds);
+      if (ids.size === 0) {
+        return;
+      }
+      setThreadMap((current) => {
+        const next = { ...current };
+        for (const threadId of ids) {
+          delete next[threadId];
+        }
+        return next;
+      });
+      setOpenTabs((current) => {
+        const nextTabs = current.filter((value) => !ids.has(value));
+        setActiveThreadId((currentActive) => {
+          if (!currentActive || !ids.has(currentActive)) {
+            return currentActive;
+          }
+          return nextTabs[nextTabs.length - 1] ?? null;
+        });
+        return nextTabs;
+      });
+      if (projectId) {
+        updateProjectSessionCache(projectId, (current) => {
+          if (!current) {
+            return current;
+          }
+          const nextThreads = current.threads.filter((thread) => !ids.has(thread.thread_id));
+          const removedCount = current.threads.length - nextThreads.length;
+          return {
+            ...current,
+            threads: nextThreads,
+            totalCount: Math.max(0, current.totalCount - removedCount),
+            hasMore:
+              current.hasMore ||
+              nextThreads.length < Math.max(0, current.totalCount - removedCount),
+          };
+        });
+      }
+    },
+    [updateProjectSessionCache],
+  );
+
+  const fetchProjectSessions = useCallback(
+    async (projectId: string, append = false) => {
+      const existing = projectSessionsRef.current[projectId];
+      const offset = append ? (existing?.threads.length ?? 0) : 0;
+      updateProjectSessionCache(projectId, (current) => ({
+        threads: current?.threads ?? [],
+        totalCount: current?.totalCount ?? 0,
+        hasMore: current?.hasMore ?? false,
+        loaded: current?.loaded ?? false,
+        loading: append ? false : true,
+        loadingMore: append,
+        error: "",
+      }));
+      try {
+        const page = await loadProjectSessions(projectId, 5, offset);
+        updateProjectSessionCache(projectId, (current) => {
+          const threads = append
+            ? [
+                ...(current?.threads ?? []),
+                ...page.threads.filter(
+                  (thread) =>
+                    !(current?.threads ?? []).some((item) => item.thread_id === thread.thread_id),
+                ),
+              ]
+            : page.threads;
+          return {
+            threads,
+            totalCount: page.total_count,
+            hasMore: page.has_more,
+            loaded: true,
+            loading: false,
+            loadingMore: false,
+            error: "",
+          };
+        });
+        return page;
+      } catch (error) {
+        updateProjectSessionCache(projectId, (current) => ({
+          threads: current?.threads ?? [],
+          totalCount: current?.totalCount ?? 0,
+          hasMore: current?.hasMore ?? false,
+          loaded: current?.loaded ?? false,
+          loading: false,
+          loadingMore: false,
+          error: error instanceof Error ? error.message : "Sessions could not be loaded.",
+        }));
+        throw error;
+      }
+    },
+    [updateProjectSessionCache],
+  );
+
+  const upsertThreadIntoProjectSessions = useCallback(
+    (thread: ChatThreadResponse) => {
+      updateProjectSessionCache(thread.project_id, (current) => {
+        if (!current?.loaded) {
+          return current;
+        }
+        const summary = threadSummaryFromThread(thread);
+        const threads = upsertThreadSummary(current.threads, summary);
+        return {
+          ...current,
+          threads,
+          totalCount: Math.max(current.totalCount, threads.length),
+          hasMore: Math.max(current.totalCount, threads.length) > threads.length || current.hasMore,
+        };
+      });
+    },
+    [updateProjectSessionCache],
+  );
+
+  const fetchAndStoreThread = useCallback(
+    async (threadId: string) => {
+      const thread = await getThread(threadId);
+      setThreadMap((current) => ({ ...current, [thread.thread_id]: thread }));
+      setSelectedProjectId(thread.project_id);
+      upsertThreadIntoProjectSessions(thread);
+      return thread;
+    },
+    [upsertThreadIntoProjectSessions],
+  );
 
   const openThread = useCallback(
     async (threadId: string) => {
-      if (!threadMapRef.current[threadId]) {
-        await fetchAndStoreThread(threadId);
-      }
+      const thread = threadMapRef.current[threadId] ?? (await fetchAndStoreThread(threadId));
       setOpenTabs((current) => appendOpenTab(current, threadId));
       setActiveThreadId(threadId);
+      setSelectedProjectId(thread.project_id);
     },
     [fetchAndStoreThread],
   );
 
   const createNewThread = useCallback(
-    async (title = "") => {
-      const thread = await createThread(title);
+    async (title = "", explicitProjectId?: string) => {
+      const projectId =
+        explicitProjectId ?? selectedProjectIdRef.current ?? projectsRef.current[0]?.project_id;
+      if (!projectId) {
+        throw new Error("Create a project before starting a chat.");
+      }
+      const thread = await createThread(title, projectId);
       setThreadMap((current) => ({ ...current, [thread.thread_id]: thread }));
       setOpenTabs((current) => appendOpenTab(current, thread.thread_id));
       setActiveThreadId(thread.thread_id);
-      await refreshThreads();
+      setSelectedProjectId(thread.project_id);
+      upsertThreadIntoProjectSessions(thread);
+      await refreshProjects();
       return thread;
     },
-    [refreshThreads],
+    [refreshProjects, upsertThreadIntoProjectSessions],
   );
 
   const closeThreadTab = useCallback((threadId: string) => {
@@ -679,6 +913,17 @@ export default function App() {
     async (threadId: string, content: string) => {
       const optimisticUserMessage = createLocalMessage("user", content);
       const now = new Date().toISOString();
+      const fallbackThread = threadMapRef.current[threadId];
+      const fallbackProjectId =
+        fallbackThread?.project_id ??
+        selectedProjectIdRef.current ??
+        projectsRef.current[0]?.project_id ??
+        "";
+      const fallbackProjectName =
+        fallbackThread?.project_name ??
+        projectsRef.current.find((project) => project.project_id === fallbackProjectId)?.name ??
+        "";
+      const fallbackProjectInstructions = fallbackThread?.project_instructions ?? "";
       let assistantStarted = false;
       let donePayload: ChatStreamDoneEvent | null = null;
       let gatingPayload: SendChatMessageResponse | null = null;
@@ -687,6 +932,9 @@ export default function App() {
 
       updateThread(threadId, (thread) => ({
         thread_id: thread?.thread_id ?? threadId,
+        project_id: thread?.project_id ?? fallbackProjectId,
+        project_name: thread?.project_name ?? fallbackProjectName,
+        project_instructions: thread?.project_instructions ?? fallbackProjectInstructions,
         title:
           (thread?.title ?? "New chat") === "New chat"
             ? content.slice(0, 60)
@@ -714,6 +962,9 @@ export default function App() {
               updateThread(threadId, (thread) => ({
                 ...(thread ?? {
                   thread_id: threadId,
+                  project_id: fallbackProjectId,
+                  project_name: fallbackProjectName,
+                  project_instructions: fallbackProjectInstructions,
                   title: content.slice(0, 60),
                   created_at: now,
                   updated_at: now,
@@ -729,6 +980,9 @@ export default function App() {
               updateThread(threadId, (thread) => ({
                 ...(thread ?? {
                   thread_id: threadId,
+                  project_id: fallbackProjectId,
+                  project_name: fallbackProjectName,
+                  project_instructions: fallbackProjectInstructions,
                   title: content.slice(0, 60),
                   created_at: now,
                   updated_at: now,
@@ -752,6 +1006,9 @@ export default function App() {
               updateThread(threadId, (thread) => ({
                 ...(thread ?? {
                   thread_id: threadId,
+                  project_id: fallbackProjectId,
+                  project_name: fallbackProjectName,
+                  project_instructions: fallbackProjectInstructions,
                   title: content.slice(0, 60),
                   created_at: now,
                   updated_at: now,
@@ -785,6 +1042,8 @@ export default function App() {
             include_papers: includePapers,
           });
           setThreadMap((current) => ({ ...current, [threadId]: payload.thread }));
+          setSelectedProjectId(payload.thread.project_id);
+          upsertThreadIntoProjectSessions(payload.thread);
           setSession((current) =>
             current
               ? {
@@ -795,12 +1054,12 @@ export default function App() {
               : current,
           );
           setComposerStatus("");
-          await refreshThreads();
+          await refreshProjects();
           if (payload.state === "api_key_required") {
             showErrorFlash(
               "You have used your 3 free responses. Add an Anthropic API key to continue.",
             );
-            setAuthView("api-key");
+            setAuthView("settings");
             setAuthModalOpen(true);
           }
           return payload;
@@ -811,6 +1070,9 @@ export default function App() {
           updateThread(threadId, (thread) => ({
             ...(thread ?? {
               thread_id: threadId,
+              project_id: fallbackProjectId,
+              project_name: fallbackProjectName,
+              project_instructions: fallbackProjectInstructions,
               title: content.slice(0, 60),
               created_at: now,
               updated_at: now,
@@ -831,6 +1093,8 @@ export default function App() {
 
       if (gatingPayload) {
         setThreadMap((current) => ({ ...current, [threadId]: gatingPayload.thread }));
+        setSelectedProjectId(gatingPayload.thread.project_id);
+        upsertThreadIntoProjectSessions(gatingPayload.thread);
         setSession((current) =>
           current
             ? {
@@ -841,19 +1105,20 @@ export default function App() {
             : current,
         );
         setComposerStatus("");
-        await refreshThreads();
+        await refreshProjects();
         showErrorFlash(
           "You have used your 3 free responses. Add an Anthropic API key to continue.",
         );
-        setAuthView("api-key");
+        setAuthView("settings");
         setAuthModalOpen(true);
         return gatingPayload;
       }
 
       if (streamError) {
         setComposerStatus(streamError);
-        await fetchAndStoreThread(threadId);
-        await refreshThreads();
+        const refreshedThread = await fetchAndStoreThread(threadId);
+        upsertThreadIntoProjectSessions(refreshedThread);
+        await refreshProjects();
         return null;
       }
 
@@ -868,8 +1133,9 @@ export default function App() {
             : current,
         );
         setComposerStatus("");
-        await fetchAndStoreThread(threadId);
-        await refreshThreads();
+        const refreshedThread = await fetchAndStoreThread(threadId);
+        upsertThreadIntoProjectSessions(refreshedThread);
+        await refreshProjects();
         return donePayload;
       }
 
@@ -880,28 +1146,31 @@ export default function App() {
       fetchAndStoreThread,
       includePapers,
       includeUploads,
-      refreshThreads,
+      refreshProjects,
       showErrorFlash,
+      upsertThreadIntoProjectSessions,
       updateThread,
     ],
   );
 
   const bootstrapAuthenticatedUi = useCallback(async () => {
     await refreshUploads();
+    const loadedProjects = await refreshProjects();
     const restoredTabs = restoreTabs();
-    const loadedThreads = await refreshThreads();
-    const availableIds = new Set(loadedThreads.map((thread) => thread.thread_id));
-    const validRestoredTabs = restoredTabs.filter((threadId) => availableIds.has(threadId));
-    setOpenTabs(validRestoredTabs);
-    for (const threadId of validRestoredTabs) {
-      if (availableIds.has(threadId) && !threadMapRef.current[threadId]) {
+    const validRestoredTabs: string[] = [];
+    for (const threadId of restoredTabs) {
+      try {
         await fetchAndStoreThread(threadId);
+        validRestoredTabs.push(threadId);
+      } catch (error) {
+        console.error(error);
       }
     }
+    setOpenTabs(validRestoredTabs);
 
     const pendingPrompt = consumePendingPrompt().trim();
     if (pendingPrompt) {
-      const thread = await createNewThread();
+      const thread = await createNewThread("", loadedProjects[0]?.project_id);
       setLandingPrompt("");
       await sendMessage(thread.thread_id, pendingPrompt);
       return;
@@ -909,16 +1178,14 @@ export default function App() {
 
     const firstOpen = validRestoredTabs[0];
     if (firstOpen) {
-      await openThread(firstOpen);
+      setActiveThreadId(firstOpen);
+      setSelectedProjectId(
+        threadMapRef.current[firstOpen]?.project_id ?? loadedProjects[0]?.project_id ?? null,
+      );
+    } else if (loadedProjects[0]) {
+      setSelectedProjectId(loadedProjects[0].project_id);
     }
-  }, [
-    createNewThread,
-    fetchAndStoreThread,
-    openThread,
-    refreshThreads,
-    refreshUploads,
-    sendMessage,
-  ]);
+  }, [createNewThread, fetchAndStoreThread, refreshProjects, refreshUploads, sendMessage]);
 
   useEffect(() => {
     void (async () => {
@@ -927,10 +1194,40 @@ export default function App() {
         setAuthView("reset-password");
         setAuthModalOpen(true);
       }
-      if (params.get("auth_error")) {
+      const authStatus = params.get("auth");
+      const authError = params.get("auth_error");
+      const settingsSection = params.get("settings");
+      if (authStatus === "github_connected") {
+        showNoteFlash("GitHub connected.");
+        setAuthView("settings");
+        setAuthModalOpen(true);
+      } else if (authError === "github_not_configured") {
+        showErrorFlash("GitHub OAuth is not configured yet.");
+        setAuthView("settings");
+        setAuthModalOpen(true);
+      } else if (authError === "github_auth_required") {
+        showErrorFlash("Log in again before connecting GitHub.");
+        setAuthView("settings");
+        setAuthModalOpen(true);
+      } else if (authError === "github_callback_failed") {
+        showErrorFlash("GitHub connection failed. Try again.");
+        setAuthView("settings");
+        setAuthModalOpen(true);
+      } else if (authError) {
         showErrorFlash("Google login failed. Try email/password instead.");
         setAuthView("login");
         setAuthModalOpen(true);
+      } else if (settingsSection === "version-control") {
+        setAuthView("settings");
+        setAuthModalOpen(true);
+      }
+      if (authStatus || authError || settingsSection) {
+        params.delete("auth");
+        params.delete("auth_error");
+        params.delete("settings");
+        const query = params.toString();
+        const nextUrl = `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`;
+        window.history.replaceState({}, "", nextUrl);
       }
       const nextSession = await loadSession();
       setSession(nextSession);
@@ -943,7 +1240,7 @@ export default function App() {
       setComposerStatus("The chat app could not reach paperbase.");
       setAuthReady(true);
     });
-  }, [bootstrapAuthenticatedUi, showErrorFlash]);
+  }, [bootstrapAuthenticatedUi, showErrorFlash, showNoteFlash]);
 
   const openAuthModal = useCallback(
     (view: AuthView) => {
@@ -951,6 +1248,7 @@ export default function App() {
       setAuthView(view);
       setAuthModalOpen(true);
       setAccountMenuOpen(false);
+      setProjectMenuProjectId(null);
     },
     [clearFlash],
   );
@@ -1039,13 +1337,23 @@ export default function App() {
 
   const resetAuthenticatedState = useCallback(() => {
     setSession(null);
-    setThreads([]);
+    setProjects([]);
+    setProjectSessions({});
+    setSelectedProjectId(null);
+    setExpandedProjectIds([]);
     setThreadMap({});
     setOpenTabs([]);
     setActiveThreadId(null);
+    setProjectMenuProjectId(null);
+    setProjectModalState(null);
+    setProjectFormName("");
+    setProjectFormDescription("");
+    setProjectFormError("");
+    setDeleteModalState(null);
     setLandingPrompt("");
     setComposerInput("");
     setComposerStatus("");
+    setWeeklyPapersReviewEmail(false);
     setMobileSidebarOpen(false);
     setAccountMenuOpen(false);
     setStreamingThreadId(null);
@@ -1059,6 +1367,7 @@ export default function App() {
 
   const handleSidebarToggle = useCallback(() => {
     setAccountMenuOpen(false);
+    setProjectMenuProjectId(null);
     if (window.matchMedia("(max-width: 980px)").matches) {
       setMobileSidebarOpen((current) => !current);
       return;
@@ -1071,6 +1380,7 @@ export default function App() {
       await openThread(threadId);
       setMobileSidebarOpen(false);
       setAccountMenuOpen(false);
+      setProjectMenuProjectId(null);
     },
     [openThread],
   );
@@ -1078,8 +1388,177 @@ export default function App() {
   const handleNewChat = useCallback(async () => {
     setMobileSidebarOpen(false);
     setAccountMenuOpen(false);
+    setProjectMenuProjectId(null);
     return createNewThread();
   }, [createNewThread]);
+
+  const handleProjectSelection = useCallback(
+    async (projectId: string) => {
+      setSelectedProjectId(projectId);
+      setProjectIconKeys((current) => ({
+        ...current,
+        [projectId]: (current[projectId] ?? 0) + 1,
+      }));
+      const expanded = expandedProjectIds.includes(projectId);
+      if (expanded) {
+        setExpandedProjectIds((current) => current.filter((value) => value !== projectId));
+        return;
+      }
+      setExpandedProjectIds((current) => [...current, projectId]);
+      if (
+        !projectSessionsRef.current[projectId]?.loaded &&
+        !projectSessionsRef.current[projectId]?.loading
+      ) {
+        await fetchProjectSessions(projectId);
+      }
+    },
+    [expandedProjectIds, fetchProjectSessions],
+  );
+
+  const handleToggleAllProjects = useCallback(async () => {
+    if (allProjectsExpanded) {
+      setExpandedProjectIds([]);
+      return;
+    }
+    const nextExpanded = projects.map((project) => project.project_id);
+    setExpandedProjectIds(nextExpanded);
+    await Promise.all(
+      nextExpanded
+        .filter((projectId) => !projectSessionsRef.current[projectId]?.loaded)
+        .map((projectId) => fetchProjectSessions(projectId)),
+    );
+  }, [allProjectsExpanded, fetchProjectSessions, projects]);
+
+  const openCreateProjectModal = useCallback(() => {
+    setProjectModalState({ mode: "create" });
+    setProjectFormName("");
+    setProjectFormDescription("");
+    setProjectFormError("");
+    setProjectMenuProjectId(null);
+  }, []);
+
+  const openEditProjectModal = useCallback(
+    (projectId: string) => {
+      const project = projects.find((item) => item.project_id === projectId);
+      if (!project) {
+        return;
+      }
+      setProjectModalState({ mode: "edit", projectId });
+      setProjectFormName(project.name);
+      setProjectFormDescription(project.description);
+      setProjectFormError("");
+      setProjectMenuProjectId(null);
+    },
+    [projects],
+  );
+
+  const closeProjectModal = useCallback(() => {
+    setProjectModalState(null);
+    setProjectFormName("");
+    setProjectFormDescription("");
+    setProjectFormError("");
+  }, []);
+
+  const submitProjectModal = useCallback(async () => {
+    const name = projectFormName.trim();
+    if (!name) {
+      setProjectFormError("Project name is required.");
+      return;
+    }
+    if (!projectModalState) {
+      return;
+    }
+    try {
+      if (projectModalState.mode === "create") {
+        const project = await createProject(name, projectFormDescription.trim());
+        await refreshProjects();
+        setSelectedProjectId(project.project_id);
+        setExpandedProjectIds((current) =>
+          current.includes(project.project_id) ? current : [...current, project.project_id],
+        );
+        await fetchProjectSessions(project.project_id);
+      } else {
+        await updateProject(projectModalState.projectId, name, projectFormDescription.trim());
+        await refreshProjects();
+      }
+      closeProjectModal();
+    } catch (error) {
+      setProjectFormError(error instanceof Error ? error.message : "Project could not be saved.");
+    }
+  }, [
+    closeProjectModal,
+    fetchProjectSessions,
+    projectFormDescription,
+    projectFormName,
+    projectModalState,
+    refreshProjects,
+  ]);
+
+  const openDeleteProjectModal = useCallback((projectId: string, name: string) => {
+    setDeleteModalState({ kind: "project", projectId, name });
+    setProjectMenuProjectId(null);
+  }, []);
+
+  const openDeleteThreadModal = useCallback(
+    (projectId: string, threadId: string, title: string) => {
+      setDeleteModalState({ kind: "thread", projectId, threadId, title });
+    },
+    [],
+  );
+
+  const closeDeleteModal = useCallback(() => {
+    setDeleteModalState(null);
+  }, []);
+
+  const confirmDeleteModal = useCallback(async () => {
+    if (!deleteModalState) {
+      return;
+    }
+    try {
+      if (deleteModalState.kind === "project") {
+        const projectId = deleteModalState.projectId;
+        const deletedThreadIds = Object.values(threadMapRef.current)
+          .filter((thread) => thread.project_id === projectId)
+          .map((thread) => thread.thread_id);
+        const cachedThreadIds =
+          projectSessionsRef.current[projectId]?.threads.map((thread) => thread.thread_id) ?? [];
+        await deleteProject(projectId);
+        removeThreadIdsLocally([...new Set([...deletedThreadIds, ...cachedThreadIds])], projectId);
+        setProjectSessions((current) => {
+          const next = { ...current };
+          delete next[projectId];
+          return next;
+        });
+        setExpandedProjectIds((current) => current.filter((value) => value !== projectId));
+        await refreshProjects();
+      } else {
+        await deleteThread(deleteModalState.threadId);
+        removeThreadIdsLocally([deleteModalState.threadId], deleteModalState.projectId);
+        await refreshProjects();
+      }
+      closeDeleteModal();
+    } catch (error) {
+      setComposerStatus(error instanceof Error ? error.message : "Delete failed.");
+    }
+  }, [closeDeleteModal, deleteModalState, refreshProjects, removeThreadIdsLocally]);
+
+  const handleProjectStartChat = useCallback(
+    async (projectId: string) => {
+      setSelectedProjectId(projectId);
+      setMobileSidebarOpen(false);
+      setAccountMenuOpen(false);
+      setProjectMenuProjectId(null);
+      await createNewThread("", projectId);
+    },
+    [createNewThread],
+  );
+
+  const handleLoadMoreSessions = useCallback(
+    async (projectId: string) => {
+      await fetchProjectSessions(projectId, true);
+    },
+    [fetchProjectSessions],
+  );
 
   const handleReadDocs = useCallback(() => {
     window.open(
@@ -1232,30 +1711,214 @@ export default function App() {
             </div>
 
             <section className="sidebar-section sidebar-card history-section">
-              <div className="section-label sidebar-section-label">Previous sessions</div>
-              {sidebarThreads.length > 0 ? (
-                <div id="thread-list" className="thread-list">
-                  {sidebarThreads.map((thread) => {
-                    const title = displayThreadTitle(thread.title);
-                    return (
-                      <button
-                        key={thread.thread_id}
-                        type="button"
-                        className={`thread-card${activeThreadId === thread.thread_id ? " active" : ""}`}
-                        title={title}
-                        onClick={() => void handleThreadSelection(thread.thread_id)}
-                      >
-                        <div className="thread-card-copy">
-                          <strong className="thread-card-title">{title}</strong>
-                        </div>
-                        <span className="thread-card-age">
-                          {formatThreadAge(thread.updated_at)}
-                        </span>
-                      </button>
-                    );
-                  })}
+              <div className="sidebar-section-header">
+                <div className="section-label sidebar-section-label">Projects</div>
+                <div className="sidebar-section-actions">
+                  <button
+                    type="button"
+                    id="toggle-projects-button"
+                    className="sidebar-icon-button"
+                    aria-label={
+                      allProjectsExpanded ? "Collapse all projects" : "Expand all projects"
+                    }
+                    onClick={() => void handleToggleAllProjects()}
+                  >
+                    <AppIcon
+                      src={staticAssetPath(
+                        allProjectsExpanded ? "collapse-projects.svg" : "expand-projects.svg",
+                      )}
+                      className="sidebar-section-action-icon"
+                    />
+                  </button>
+                  <button
+                    type="button"
+                    id="new-project-button"
+                    className="sidebar-icon-button"
+                    aria-label="Create project"
+                    onClick={openCreateProjectModal}
+                  >
+                    <AppIcon
+                      src={staticAssetPath("new-project.svg")}
+                      className="sidebar-section-action-icon"
+                    />
+                  </button>
                 </div>
-              ) : null}
+              </div>
+              <div id="project-list" className="project-list">
+                {projects.map((project) => {
+                  const expanded = expandedProjectIds.includes(project.project_id);
+                  const sessionState = projectSessions[project.project_id];
+                  return (
+                    <div
+                      key={project.project_id}
+                      className={`project-group${expanded ? " expanded" : ""}`}
+                    >
+                      <div
+                        role="button"
+                        tabIndex={0}
+                        className={`project-card${selectedProjectId === project.project_id ? " active" : ""}`}
+                        onClick={() => void handleProjectSelection(project.project_id)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" || event.key === " ") {
+                            event.preventDefault();
+                            void handleProjectSelection(project.project_id);
+                          }
+                        }}
+                        title={project.name}
+                      >
+                        <div className="project-card-main">
+                          <AppIcon
+                            key={`${project.project_id}-${projectIconKeys[project.project_id] ?? 0}`}
+                            src={staticAssetPath("project.apng.png")}
+                            className="project-card-icon"
+                          />
+                          <strong className="project-card-title">{project.name}</strong>
+                        </div>
+                        <div
+                          className="project-card-actions"
+                          onClick={(event) => event.stopPropagation()}
+                        >
+                          <button
+                            type="button"
+                            className="sidebar-icon-button project-action-button"
+                            aria-label={`Start chat in ${project.name}`}
+                            onClick={() => void handleProjectStartChat(project.project_id)}
+                          >
+                            <AppIcon
+                              src={staticAssetPath("edit.svg")}
+                              className="project-action-icon"
+                            />
+                          </button>
+                          <div
+                            ref={
+                              projectMenuProjectId === project.project_id ? projectMenuRef : null
+                            }
+                            className="project-menu-wrap"
+                          >
+                            <button
+                              type="button"
+                              className="sidebar-icon-button project-action-button"
+                              aria-label={`Open project menu for ${project.name}`}
+                              onClick={() => {
+                                setSelectedProjectId(project.project_id);
+                                setProjectMenuProjectId((current) =>
+                                  current === project.project_id ? null : project.project_id,
+                                );
+                              }}
+                            >
+                              <AppIcon
+                                src={staticAssetPath("menu.svg")}
+                                className="project-action-icon"
+                              />
+                            </button>
+                            {projectMenuProjectId === project.project_id ? (
+                              <div className="project-menu-popover" role="menu">
+                                <button
+                                  type="button"
+                                  className="project-menu-item"
+                                  role="menuitem"
+                                  onClick={() => openEditProjectModal(project.project_id)}
+                                >
+                                  Rename project
+                                </button>
+                                <button
+                                  type="button"
+                                  className="project-menu-item danger"
+                                  role="menuitem"
+                                  disabled={project.is_default}
+                                  onClick={() =>
+                                    openDeleteProjectModal(project.project_id, project.name)
+                                  }
+                                >
+                                  Delete project
+                                </button>
+                              </div>
+                            ) : null}
+                          </div>
+                        </div>
+                      </div>
+                      {expanded ? (
+                        <div className="project-session-section">
+                          {sessionState?.loading ? (
+                            <div className="project-session-state">Loading sessions…</div>
+                          ) : null}
+                          {sessionState?.error ? (
+                            <div className="project-session-state error">{sessionState.error}</div>
+                          ) : null}
+                          {sessionState?.loaded ? (
+                            <>
+                              {sessionState.threads.length > 0 ? (
+                                <div className="thread-list project-thread-list">
+                                  {sessionState.threads
+                                    .filter(shouldShowThreadInSidebar)
+                                    .map((thread) => {
+                                      const title = displayThreadTitle(thread.title);
+                                      return (
+                                        <div
+                                          key={thread.thread_id}
+                                          role="button"
+                                          tabIndex={0}
+                                          className={`thread-card${activeThreadId === thread.thread_id ? " active" : ""}`}
+                                          title={title}
+                                          onClick={() =>
+                                            void handleThreadSelection(thread.thread_id)
+                                          }
+                                          onKeyDown={(event) => {
+                                            if (event.key === "Enter" || event.key === " ") {
+                                              event.preventDefault();
+                                              void handleThreadSelection(thread.thread_id);
+                                            }
+                                          }}
+                                        >
+                                          <div className="thread-card-copy">
+                                            <strong className="thread-card-title">{title}</strong>
+                                          </div>
+                                          <span className="thread-card-age">
+                                            {formatThreadAge(thread.updated_at)}
+                                          </span>
+                                          <button
+                                            type="button"
+                                            className="thread-card-delete"
+                                            aria-label={`Delete ${title}`}
+                                            onClick={(event) => {
+                                              event.stopPropagation();
+                                              openDeleteThreadModal(
+                                                project.project_id,
+                                                thread.thread_id,
+                                                title,
+                                              );
+                                            }}
+                                          >
+                                            <AppIcon
+                                              src={staticAssetPath("delete-session.svg")}
+                                              className="thread-card-delete-icon"
+                                            />
+                                          </button>
+                                        </div>
+                                      );
+                                    })}
+                                </div>
+                              ) : (
+                                <div className="project-session-state">No sessions yet.</div>
+                              )}
+                              {sessionState.hasMore ? (
+                                <button
+                                  type="button"
+                                  className="project-show-more"
+                                  disabled={sessionState.loadingMore}
+                                  onClick={() => void handleLoadMoreSessions(project.project_id)}
+                                >
+                                  {sessionState.loadingMore ? "Loading…" : "Show more"}
+                                </button>
+                              ) : null}
+                            </>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
             </section>
 
             {sessionSummary ? (
@@ -1278,37 +1941,28 @@ export default function App() {
                   </button>
                   {accountMenuOpen ? (
                     <div className="account-menu" role="menu" aria-label="Account actions">
-                      <div className="account-menu-progress">
-                        <div className="account-menu-label-row">
-                          <span>Free responses</span>
-                          <span>
-                            {sessionSummary.remainingFreeResponses}/{FREE_RESPONSE_LIMIT} left
-                          </span>
-                        </div>
-                        <div
-                          className="usage-meter"
-                          aria-label={`${sessionSummary.remainingFreeResponses} of ${FREE_RESPONSE_LIMIT} free responses left`}
-                        >
-                          {freeResponseSegments.map((segment) => (
-                            <span
-                              key={segment.key}
-                              className={`usage-meter-segment${segment.active ? " active" : ""}`}
-                            />
-                          ))}
-                        </div>
+                      <div className="account-menu-user">
+                        <span className="account-menu-user-icon" aria-hidden="true">
+                          <svg viewBox="0 0 24 24">
+                            <path d="M12 12a4 4 0 1 0-4-4 4 4 0 0 0 4 4Z" />
+                            <path d="M4.5 19a7.5 7.5 0 0 1 15 0" />
+                          </svg>
+                        </span>
+                        <span className="account-menu-user-email">{sessionSummary.email}</span>
                       </div>
+                      <div className="account-menu-divider" />
                       <button
                         type="button"
-                        id="manage-key-button"
+                        id="settings-menu-item"
                         className="account-menu-item"
                         role="menuitem"
-                        onClick={() => openAuthModal("api-key")}
+                        onClick={() => openAuthModal("settings")}
                       >
                         <AppIcon
-                          src={staticAssetPath("claude.svg")}
-                          className="account-menu-item-icon account-menu-item-icon-claude"
+                          src={staticAssetPath("settings.svg")}
+                          className="account-menu-item-icon"
                         />
-                        {sessionSummary.hasAnthropicApiKey ? "Manage API key" : "Add API key"}
+                        Settings
                       </button>
                       <button
                         type="button"
@@ -1417,11 +2071,29 @@ export default function App() {
                   ) : null}
                   <div className="chat-empty-state">
                     <div className="chat-empty-eyebrow">Empty chat</div>
-                    <strong>{activeThread ? "Start the conversation" : "Open a chat tab"}</strong>
+                    {activeThread ? (
+                      <strong>Start the conversation</strong>
+                    ) : (
+                      <div className="chat-empty-project-row">
+                        <strong>Start new research in</strong>
+                        <select
+                          id="empty-state-project-select"
+                          className="chat-empty-project-select"
+                          value={selectedProjectId ?? ""}
+                          onChange={(event) => setSelectedProjectId(event.target.value)}
+                        >
+                          {projects.map((project) => (
+                            <option key={project.project_id} value={project.project_id}>
+                              {project.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
                     <p>
                       {activeThread
                         ? "Ask about papers, compare ideas, or pull out patterns for the system you are building."
-                        : "Choose a previous session or start a new chat to begin."}
+                        : "Choose a project, start a new chat in it, or open an existing session to begin."}
                     </p>
                   </div>
                 </div>
@@ -1663,13 +2335,109 @@ export default function App() {
       ) : null}
 
       <div
+        id="project-modal"
+        className={`modal${projectModalState ? "" : " hidden"}`}
+        role="dialog"
+        aria-modal="true"
+      >
+        <div className="modal-backdrop" onClick={closeProjectModal} />
+        <div className="modal-panel">
+          <button className="modal-close" type="button" onClick={closeProjectModal}>
+            ×
+          </button>
+          <div className="modal-heading">
+            <h2 className="modal-title">
+              {projectModalState?.mode === "edit" ? "Rename project" : "New project"}
+            </h2>
+            <p className="modal-caption">
+              Add a project name and optional goal or custom instructions for new chats.
+            </p>
+          </div>
+          {projectFormError ? (
+            <div className="modal-flash warning" role="alert">
+              <span className="modal-flash-text">{projectFormError}</span>
+            </div>
+          ) : null}
+          <div className="modal-view visible">
+            <form
+              className="stack"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void submitProjectModal();
+              }}
+            >
+              <input
+                id="project-name-input"
+                name="name"
+                type="text"
+                placeholder="Project name"
+                value={projectFormName}
+                onChange={(event) => setProjectFormName(event.target.value)}
+                required
+              />
+              <textarea
+                id="project-description-input"
+                name="description"
+                className="project-description-input"
+                placeholder="Description, goal, or custom instructions"
+                value={projectFormDescription}
+                onChange={(event) => setProjectFormDescription(event.target.value)}
+                rows={4}
+              />
+              <button className="primary-button" type="submit">
+                {projectModalState?.mode === "edit" ? "Save project" : "Create project"}
+              </button>
+            </form>
+          </div>
+        </div>
+      </div>
+
+      <div
+        id="delete-modal"
+        className={`modal${deleteModalState ? "" : " hidden"}`}
+        role="dialog"
+        aria-modal="true"
+      >
+        <div className="modal-backdrop" onClick={closeDeleteModal} />
+        <div className="modal-panel">
+          <button className="modal-close" type="button" onClick={closeDeleteModal}>
+            ×
+          </button>
+          <div className="modal-heading">
+            <h2 className="modal-title">
+              {deleteModalState?.kind === "project" ? "Delete project" : "Delete session"}
+            </h2>
+            <p className="modal-caption">
+              {deleteModalState?.kind === "project"
+                ? `Delete ${deleteModalState.name} and all of its sessions?`
+                : `Delete ${deleteModalState?.title ?? "this session"}?`}
+            </p>
+          </div>
+          <div className="modal-view visible">
+            <div className="stack">
+              <button
+                className="primary-button danger-button"
+                type="button"
+                onClick={() => void confirmDeleteModal()}
+              >
+                {deleteModalState?.kind === "project" ? "Delete project" : "Delete session"}
+              </button>
+              <button className="secondary-button" type="button" onClick={closeDeleteModal}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div
         id="auth-modal"
         className={`modal${authModalOpen ? "" : " hidden"}`}
         role="dialog"
         aria-modal="true"
       >
         <div className="modal-backdrop" data-close-modal="true" onClick={closeAuthModal} />
-        <div className="modal-panel">
+        <div className={`modal-panel${authView === "settings" ? " settings-modal-panel" : ""}`}>
           <button
             className="modal-close"
             type="button"
@@ -1679,11 +2447,8 @@ export default function App() {
             ×
           </button>
           <div className="modal-heading">
-            {authView === "api-key" ? (
-              <AppIcon
-                src={staticAssetPath("claude.svg")}
-                className="modal-heading-icon modal-heading-icon-claude"
-              />
+            {authView === "settings" ? (
+              <AppIcon src={staticAssetPath("settings.svg")} className="modal-heading-icon" />
             ) : null}
             <h2 id="auth-modal-title" className="modal-title">
               {authCopy.title}
@@ -1869,105 +2634,298 @@ export default function App() {
           </div>
 
           <div
-            className={`modal-view${authView === "api-key" ? " visible" : ""}`}
-            data-auth-view="api-key"
+            className={`modal-view${authView === "settings" ? " visible" : ""}`}
+            data-auth-view="settings"
           >
-            <div className="api-key-panel">
-              <div className="api-key-meter">
-                <div className="api-key-meter-header">
-                  <span>Free responses</span>
-                  <span>
-                    {sessionSummary?.remainingFreeResponses ?? FREE_RESPONSE_LIMIT}/
-                    {FREE_RESPONSE_LIMIT} left
-                  </span>
-                </div>
-                <div
-                  className="usage-meter api-key-usage-meter"
-                  aria-label={`${sessionSummary?.remainingFreeResponses ?? FREE_RESPONSE_LIMIT} of ${FREE_RESPONSE_LIMIT} free responses left`}
-                >
-                  {freeResponseSegments.map((segment) => (
-                    <span
-                      key={segment.key}
-                      className={`usage-meter-segment${segment.active ? " active" : ""}`}
-                    />
-                  ))}
-                </div>
-              </div>
-
-              {sessionSummary?.hasAnthropicApiKey ? (
-                <div className="api-key-saved-row">
-                  <div className="api-key-saved-copy">
-                    <div className="api-key-saved-label">Saved key</div>
-                    <div className="api-key-saved-value">{maskedApiKey}</div>
+            <div className="settings-panel">
+              <div className="settings-sections">
+                <section className="settings-section">
+                  <div className="settings-section-header">
+                    <h3>Inference</h3>
+                    {sessionSummary?.hasAnthropicApiKey ? (
+                      <span className="settings-status-pill">Connected</span>
+                    ) : null}
                   </div>
-                  <button
-                    id="delete-api-key-button"
-                    className="api-key-delete-button"
-                    type="button"
-                    aria-label="Delete saved key"
-                    title="Delete saved key"
-                    onClick={async () => {
+                  <p className="settings-section-copy">
+                    Add the Anthropic key Paperbase should use for model inference after the free
+                    responses run out.
+                  </p>
+                  {sessionSummary?.hasAnthropicApiKey ? (
+                    <div className="settings-secret-row">
+                      <div className="settings-secret-copy">
+                        <div className="settings-secret-label">Anthropic API key</div>
+                        <div className="settings-secret-value">
+                          {sessionSettings.anthropic_api_key_hint || "Saved"}
+                        </div>
+                      </div>
+                      <button
+                        id="delete-anthropic-key-button"
+                        className="api-key-delete-button"
+                        type="button"
+                        aria-label="Delete saved Anthropic API key"
+                        title="Delete saved Anthropic API key"
+                        onClick={async () => {
+                          try {
+                            const nextSession = await api<BrowserSessionResponse>(
+                              "/v1/browser/settings/anthropic-key",
+                              { method: "DELETE" },
+                            );
+                            setSession(nextSession);
+                            showNoteFlash("Anthropic API key removed.");
+                          } catch (error) {
+                            showErrorFlash(
+                              error instanceof Error ? error.message : "Deleting API key failed",
+                            );
+                          }
+                        }}
+                      >
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                          <path d="M4 7h16" />
+                          <path d="M9 7V4h6v3" />
+                          <path d="M8 7l1 13h6l1-13" />
+                          <path d="M10.5 11v5" />
+                          <path d="M13.5 11v5" />
+                        </svg>
+                      </button>
+                    </div>
+                  ) : (
+                    <form
+                      id="settings-anthropic-form"
+                      className="settings-form"
+                      onSubmit={async (event) => {
+                        event.preventDefault();
+                        try {
+                          const payload = Object.fromEntries(
+                            new FormData(event.currentTarget).entries(),
+                          );
+                          const nextSession = await api<BrowserSessionResponse>(
+                            "/v1/browser/settings/anthropic-key",
+                            {
+                              method: "PUT",
+                              body: JSON.stringify(payload),
+                            },
+                          );
+                          setSession(nextSession);
+                          showNoteFlash("Anthropic API key saved.");
+                        } catch (error) {
+                          showErrorFlash(
+                            error instanceof Error ? error.message : "Saving API key failed",
+                          );
+                        }
+                      }}
+                    >
+                      <input
+                        name="api_key"
+                        type="password"
+                        placeholder="Anthropic API key"
+                        autoComplete="new-password"
+                        required
+                      />
+                      <button className="primary-button settings-submit-button" type="submit">
+                        Save key
+                      </button>
+                    </form>
+                  )}
+                </section>
+
+                <section className="settings-section">
+                  <div className="settings-section-header">
+                    <h3>Sandbox</h3>
+                    {sessionSettings.has_daytona_api_key ? (
+                      <span className="settings-status-pill">Connected</span>
+                    ) : null}
+                  </div>
+                  <p className="settings-section-copy">
+                    Add the Daytona API key Paperbase should use for sandbox execution.
+                  </p>
+                  {sessionSettings.has_daytona_api_key ? (
+                    <div className="settings-secret-row">
+                      <div className="settings-secret-copy">
+                        <div className="settings-secret-label">Daytona API key</div>
+                        <div className="settings-secret-value">
+                          {sessionSettings.daytona_api_key_hint || "Saved"}
+                        </div>
+                      </div>
+                      <button
+                        id="delete-daytona-key-button"
+                        className="api-key-delete-button"
+                        type="button"
+                        aria-label="Delete saved Daytona API key"
+                        title="Delete saved Daytona API key"
+                        onClick={async () => {
+                          try {
+                            const nextSession = await api<BrowserSessionResponse>(
+                              "/v1/browser/settings/daytona-key",
+                              { method: "DELETE" },
+                            );
+                            setSession(nextSession);
+                            showNoteFlash("Daytona API key removed.");
+                          } catch (error) {
+                            showErrorFlash(
+                              error instanceof Error ? error.message : "Deleting Daytona key failed",
+                            );
+                          }
+                        }}
+                      >
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                          <path d="M4 7h16" />
+                          <path d="M9 7V4h6v3" />
+                          <path d="M8 7l1 13h6l1-13" />
+                          <path d="M10.5 11v5" />
+                          <path d="M13.5 11v5" />
+                        </svg>
+                      </button>
+                    </div>
+                  ) : (
+                    <form
+                      id="settings-daytona-form"
+                      className="settings-form"
+                      onSubmit={async (event) => {
+                        event.preventDefault();
+                        try {
+                          const payload = Object.fromEntries(
+                            new FormData(event.currentTarget).entries(),
+                          );
+                          const nextSession = await api<BrowserSessionResponse>(
+                            "/v1/browser/settings/daytona-key",
+                            {
+                              method: "PUT",
+                              body: JSON.stringify(payload),
+                            },
+                          );
+                          setSession(nextSession);
+                          showNoteFlash("Daytona API key saved.");
+                        } catch (error) {
+                          showErrorFlash(
+                            error instanceof Error ? error.message : "Saving Daytona key failed",
+                          );
+                        }
+                      }}
+                    >
+                      <input
+                        name="api_key"
+                        type="password"
+                        placeholder="Daytona API key"
+                        autoComplete="new-password"
+                        required
+                      />
+                      <button className="primary-button settings-submit-button" type="submit">
+                        Save key
+                      </button>
+                    </form>
+                  )}
+                </section>
+
+                <section className="settings-section">
+                  <div className="settings-section-header">
+                    <h3>Version control</h3>
+                    {sessionSettings.has_github_connection ? (
+                      <span className="settings-status-pill">Connected</span>
+                    ) : null}
+                  </div>
+                  <p className="settings-section-copy">
+                    Connect GitHub so Paperbase can create repositories, pull repositories, and
+                    push commits on your behalf.
+                  </p>
+                  {sessionSettings.has_github_connection ? (
+                    <div className="settings-connected-card">
+                      <div>
+                        <div className="settings-secret-label">GitHub account</div>
+                        <div className="settings-secret-value">
+                          {sessionSettings.github_login || "Connected"}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        className="secondary-button"
+                        onClick={async () => {
+                          try {
+                            const nextSession = await api<BrowserSessionResponse>(
+                              "/v1/browser/settings/github",
+                              { method: "DELETE" },
+                            );
+                            setSession(nextSession);
+                            showNoteFlash("GitHub disconnected.");
+                          } catch (error) {
+                            showErrorFlash(
+                              error instanceof Error ? error.message : "Disconnecting GitHub failed",
+                            );
+                          }
+                        }}
+                      >
+                        Disconnect
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="settings-actions">
+                      <button
+                        type="button"
+                        className="secondary-button settings-connect-button"
+                        disabled={!sessionSettings.github_oauth_available}
+                        onClick={() => {
+                          window.location.href = githubLoginUrl();
+                        }}
+                      >
+                        Connect GitHub account
+                      </button>
+                      {!sessionSettings.github_oauth_available ? (
+                        <p className="settings-inline-note">
+                          GitHub OAuth is not configured in this environment yet.
+                        </p>
+                      ) : null}
+                    </div>
+                  )}
+                </section>
+
+                <section className="settings-section">
+                  <div className="settings-section-header">
+                    <h3>Notifications</h3>
+                  </div>
+                  <p className="settings-section-copy">
+                    Choose whether you want the weekly papers review email.
+                  </p>
+                  <form
+                    id="settings-notifications-form"
+                    className="settings-form notifications-form"
+                    onSubmit={async (event) => {
+                      event.preventDefault();
                       try {
                         const nextSession = await api<BrowserSessionResponse>(
-                          "/v1/browser/settings/anthropic-key",
-                          { method: "DELETE" },
+                          "/v1/browser/settings/notifications",
+                          {
+                            method: "PUT",
+                            body: JSON.stringify({
+                              weekly_papers_review_email: weeklyPapersReviewEmail,
+                            }),
+                          },
                         );
                         setSession(nextSession);
-                        showNoteFlash("Anthropic API key removed.");
+                        showNoteFlash("Notification preferences saved.");
                       } catch (error) {
                         showErrorFlash(
-                          error instanceof Error ? error.message : "Deleting API key failed",
+                          error instanceof Error
+                            ? error.message
+                            : "Saving notification preferences failed",
                         );
                       }
                     }}
                   >
-                    <svg viewBox="0 0 24 24" aria-hidden="true">
-                      <path d="M4 7h16" />
-                      <path d="M9 7V4h6v3" />
-                      <path d="M8 7l1 13h6l1-13" />
-                      <path d="M10.5 11v5" />
-                      <path d="M13.5 11v5" />
-                    </svg>
-                  </button>
-                </div>
-              ) : (
-                <form
-                  id="api-key-form"
-                  className="api-key-form"
-                  onSubmit={async (event) => {
-                    event.preventDefault();
-                    try {
-                      const payload = Object.fromEntries(
-                        new FormData(event.currentTarget).entries(),
-                      );
-                      const nextSession = await api<BrowserSessionResponse>(
-                        "/v1/browser/settings/anthropic-key",
-                        {
-                          method: "PUT",
-                          body: JSON.stringify(payload),
-                        },
-                      );
-                      setSession(nextSession);
-                      showNoteFlash("Anthropic API key saved.");
-                    } catch (error) {
-                      showErrorFlash(
-                        error instanceof Error ? error.message : "Saving API key failed",
-                      );
-                    }
-                  }}
-                >
-                  <input
-                    name="api_key"
-                    type="password"
-                    placeholder="Anthropic API key"
-                    autoComplete="new-password"
-                    required
-                  />
-                  <button className="primary-button api-key-save-button" type="submit">
-                    Save key
-                  </button>
-                </form>
-              )}
+                    <label className="settings-checkbox-row">
+                      <input
+                        id="weekly-papers-review-email"
+                        name="weekly_papers_review_email"
+                        type="checkbox"
+                        checked={weeklyPapersReviewEmail}
+                        onChange={(event) => setWeeklyPapersReviewEmail(event.target.checked)}
+                      />
+                      <span>Weekly papers review email</span>
+                    </label>
+                    <button className="primary-button settings-submit-button" type="submit">
+                      Save notifications
+                    </button>
+                  </form>
+                </section>
+              </div>
             </div>
           </div>
         </div>

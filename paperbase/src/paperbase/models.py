@@ -182,11 +182,22 @@ class BrowserUser(BaseModel):
     free_responses_used: int = 0
 
 
+class BrowserUserSettingsResponse(BaseModel):
+    anthropic_api_key_hint: str = ""
+    has_daytona_api_key: bool = False
+    daytona_api_key_hint: str = ""
+    has_github_connection: bool = False
+    github_login: str = ""
+    github_oauth_available: bool = False
+    weekly_papers_review_email: bool = False
+
+
 class BrowserSessionResponse(BaseModel):
     authenticated: bool
     user: BrowserUser | None = None
     remaining_free_responses: int = 0
     has_anthropic_api_key: bool = False
+    settings: BrowserUserSettingsResponse = Field(default_factory=BrowserUserSettingsResponse)
     csrf_token: str | None = None
 
 
@@ -212,6 +223,14 @@ class ResetPasswordRequest(BaseModel):
 
 class SaveAnthropicKeyRequest(BaseModel):
     api_key: str = Field(min_length=8)
+
+
+class SaveDaytonaKeyRequest(BaseModel):
+    api_key: str = Field(min_length=8)
+
+
+class UpdateNotificationsRequest(BaseModel):
+    weekly_papers_review_email: bool
 
 
 class UploadedDocumentResponse(BaseModel):
@@ -263,6 +282,7 @@ class ChatMessageResponse(BaseModel):
 
 class ChatThreadSummary(BaseModel):
     thread_id: str
+    project_id: str
     title: str
     created_at: datetime
     updated_at: datetime
@@ -271,6 +291,9 @@ class ChatThreadSummary(BaseModel):
 
 class ChatThreadResponse(BaseModel):
     thread_id: str
+    project_id: str
+    project_name: str = ""
+    project_instructions: str = ""
     title: str
     created_at: datetime
     updated_at: datetime
@@ -279,6 +302,44 @@ class ChatThreadResponse(BaseModel):
 
 class CreateChatThreadRequest(BaseModel):
     title: str = ""
+    project_id: str | None = None
+
+
+class ProjectSummary(BaseModel):
+    project_id: str
+    name: str
+    description: str = ""
+    is_default: bool = False
+    session_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProjectResponse(ProjectSummary):
+    pass
+
+
+class CreateProjectRequest(BaseModel):
+    name: str = Field(min_length=1)
+    description: str = ""
+
+
+class UpdateProjectRequest(BaseModel):
+    name: str = Field(min_length=1)
+    description: str = ""
+
+
+class ProjectListResponse(BaseModel):
+    projects: list[ProjectSummary] = Field(default_factory=list)
+
+
+class ProjectSessionPageResponse(BaseModel):
+    project_id: str
+    threads: list[ChatThreadSummary] = Field(default_factory=list)
+    offset: int = 0
+    limit: int = 0
+    total_count: int = 0
+    has_more: bool = False
 
 
 class SendChatMessageRequest(BaseModel):

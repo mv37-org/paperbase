@@ -66,6 +66,12 @@ The repo has four moving pieces:
 - `paperbase-api` serves the FastAPI application
 - `paperbase-worker` runs the background job loop
 
+The browser chat experience is project-based:
+
+- projects are persisted in the backend and own chat sessions
+- the sidebar lazily loads session summaries per project in pages of five
+- project descriptions are snapped onto new sessions as per-session prompt context, so later project edits do not rewrite existing chats
+
 `make dev` runs all of these locally:
 
 - API at `http://127.0.0.1:8080`

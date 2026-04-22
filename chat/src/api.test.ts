@@ -47,6 +47,9 @@ describe("chat api", () => {
       .mockResolvedValueOnce(
         jsonResponse({
           thread_id: "thread_1",
+          project_id: "proj_1",
+          project_name: "General",
+          project_instructions: "",
           title: "New chat",
           created_at: "2026-04-21T00:00:00Z",
           updated_at: "2026-04-21T00:00:00Z",
@@ -87,6 +90,9 @@ describe("chat api", () => {
       .mockResolvedValueOnce(
         jsonResponse({
           thread_id: "thread_2",
+          project_id: "proj_1",
+          project_name: "General",
+          project_instructions: "",
           title: "Recovered",
           created_at: "2026-04-21T00:00:00Z",
           updated_at: "2026-04-21T00:00:00Z",
@@ -217,6 +223,95 @@ describe("chat api", () => {
 
     expect(result.fallback).toBe(true);
     expect(result.suggestions[0]?.matched_field).toBe("fallback");
+  });
+
+  it("creates chats inside the selected project and deletes sessions with CSRF", async () => {
+    const fetchMock = vi
+      .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          authenticated: true,
+          user: {
+            user_id: "user_1",
+            email: "user@example.com",
+            display_name: "User",
+            free_responses_used: 0,
+          },
+          remaining_free_responses: 3,
+          has_anthropic_api_key: false,
+          csrf_token: "csrf-123",
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          thread_id: "thread_3",
+          project_id: "proj_9",
+          project_name: "Agents",
+          project_instructions: "",
+          title: "Project chat",
+          created_at: "2026-04-21T00:00:00Z",
+          updated_at: "2026-04-21T00:00:00Z",
+          messages: [],
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ status: "deleted" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await loadApiModule();
+
+    await api.loadSession();
+    await api.createThread("Project chat", "proj_9");
+    await api.deleteThread("thread_3");
+
+    const [, createInit] = fetchMock.mock.calls[1] as FetchCall;
+    const [, deleteInit] = fetchMock.mock.calls[2] as FetchCall;
+    expect(createInit?.body).toBe(JSON.stringify({ title: "Project chat", project_id: "proj_9" }));
+    expect(new Headers(deleteInit?.headers).get("X-Paperbase-CSRF")).toBe("csrf-123");
+  });
+
+  it("loads and mutates projects through the browser endpoints", async () => {
+    const fetchMock = vi
+      .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          projects: [
+            {
+              project_id: "proj_1",
+              name: "General",
+              description: "",
+              is_default: true,
+              session_count: 1,
+              created_at: "2026-04-21T00:00:00Z",
+              updated_at: "2026-04-21T00:00:00Z",
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          project_id: "proj_2",
+          name: "Agents",
+          description: "Agent eval work",
+          is_default: false,
+          session_count: 0,
+          created_at: "2026-04-21T00:00:00Z",
+          updated_at: "2026-04-21T00:00:00Z",
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ status: "deleted" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await loadApiModule();
+
+    const projects = await api.loadProjects();
+    const created = await api.createProject("Agents", "Agent eval work");
+    await api.deleteProject("proj_2");
+
+    const [loadPath] = fetchMock.mock.calls[0] as FetchCall;
+    const [createPath, createInit] = fetchMock.mock.calls[1] as FetchCall;
+    expect(String(loadPath)).toBe("/v1/browser/projects");
+    expect(String(createPath)).toBe("/v1/browser/projects");
+    expect(createInit?.method).toBe("POST");
+    expect(projects.projects[0]?.project_id).toBe("proj_1");
+    expect(created.project_id).toBe("proj_2");
   });
 
   it("parses streamed SSE events even when chunk boundaries split the payload", async () => {

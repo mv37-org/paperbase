@@ -22,6 +22,7 @@ from .llm import AnthropicChatModelClient, ChatModelClient
 from .models import (
     BrowserSessionResponse,
     BrowserUser,
+    BrowserUserSettingsResponse,
     ChatCitation,
     ChatMessageResponse,
     ChatThreadListResponse,
@@ -40,9 +41,13 @@ from .models import (
     ManifestResponse,
     PaperMetadata,
     PaperResponse,
+    ProjectListResponse,
+    ProjectResponse,
+    ProjectSessionPageResponse,
     ResetPasswordRequest,
     ResultSetResponse,
     SaveAnthropicKeyRequest,
+    SaveDaytonaKeyRequest,
     SearchPaperResult,
     SearchRequest,
     SearchResponse,
@@ -52,6 +57,9 @@ from .models import (
     SendChatMessageResponse,
     SignupRequest,
     TableResponse,
+    UpdateNotificationsRequest,
+    UpdateProjectRequest,
+    CreateProjectRequest,
     UploadListResponse,
     UploadedDocumentResponse,
 )
@@ -718,6 +726,22 @@ class PaperbaseService:
     def _remaining_free_responses(self, user: BrowserUser) -> int:
         return max(self.settings.free_chat_response_limit - user.free_responses_used, 0)
 
+    def _browser_user_settings_response(
+        self,
+        user: BrowserUser,
+        *,
+        anthropic_api_key_hint: str = "",
+    ) -> BrowserUserSettingsResponse:
+        settings = self.repository.get_browser_user_settings(user.user_id)  # type: ignore[attr-defined]
+        return settings.model_copy(
+            update={
+                "anthropic_api_key_hint": anthropic_api_key_hint,
+                "github_oauth_available": bool(
+                    self.settings.github_client_id and self.settings.github_client_secret
+                ),
+            }
+        )
+
     def _browser_session_response(self, user: BrowserUser | None) -> BrowserSessionResponse:
         if user is None:
             return BrowserSessionResponse(authenticated=False)
@@ -727,6 +751,10 @@ class PaperbaseService:
             user=user,
             remaining_free_responses=self._remaining_free_responses(user),
             has_anthropic_api_key=api_key_record is not None,
+            settings=self._browser_user_settings_response(
+                user,
+                anthropic_api_key_hint=(api_key_record or {}).get("api_key_hint", ""),
+            ),
         )
 
     def register_browser_user(self, request: SignupRequest) -> tuple[BrowserSessionResponse, str]:
@@ -826,6 +854,51 @@ class PaperbaseService:
         self.repository.delete_anthropic_api_key(user.user_id)  # type: ignore[attr-defined]
         return self._browser_session_response(user)
 
+    def save_user_daytona_key(self, user: BrowserUser, request: SaveDaytonaKeyRequest) -> BrowserSessionResponse:
+        self.repository.save_daytona_api_key(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            encrypted_api_key=self.secret_cipher.encrypt(request.api_key.strip()),
+            hint=api_key_hint(request.api_key),
+        )
+        return self._browser_session_response(user)
+
+    def delete_user_daytona_key(self, user: BrowserUser) -> BrowserSessionResponse:
+        self.repository.delete_daytona_api_key(user.user_id)  # type: ignore[attr-defined]
+        return self._browser_session_response(user)
+
+    def update_user_notification_preferences(
+        self,
+        user: BrowserUser,
+        request: UpdateNotificationsRequest,
+    ) -> BrowserSessionResponse:
+        self.repository.set_weekly_papers_review_email(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            enabled=request.weekly_papers_review_email,
+        )
+        return self._browser_session_response(user)
+
+    def save_github_connection(
+        self,
+        user: BrowserUser,
+        *,
+        github_user_id: str,
+        github_login: str,
+        access_token: str,
+        scope: str,
+    ) -> BrowserSessionResponse:
+        self.repository.save_github_connection(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            github_user_id=github_user_id,
+            github_login=github_login,
+            encrypted_access_token=self.secret_cipher.encrypt(access_token.strip()),
+            scope=scope.strip(),
+        )
+        return self._browser_session_response(user)
+
+    def delete_github_connection(self, user: BrowserUser) -> BrowserSessionResponse:
+        self.repository.delete_github_connection(user.user_id)  # type: ignore[attr-defined]
+        return self._browser_session_response(user)
+
     def list_uploaded_documents(self, user: BrowserUser) -> UploadListResponse:
         documents = self.repository.list_uploaded_documents(user.user_id)  # type: ignore[attr-defined]
         tag_set = sorted({tag for document in documents for tag in document.tags})
@@ -897,8 +970,79 @@ class PaperbaseService:
     def list_chat_threads(self, user: BrowserUser) -> ChatThreadListResponse:
         return ChatThreadListResponse(threads=self.repository.list_chat_threads(user.user_id))  # type: ignore[attr-defined]
 
+    def list_projects(self, user: BrowserUser) -> ProjectListResponse:
+        self.repository.ensure_default_project(user.user_id)  # type: ignore[attr-defined]
+        return ProjectListResponse(projects=self.repository.list_projects(user.user_id))  # type: ignore[attr-defined]
+
+    def create_project(self, user: BrowserUser, request: CreateProjectRequest) -> ProjectResponse:
+        name = request.name.strip()
+        if not name:
+            raise HTTPException(status_code=422, detail="Project name is required")
+        return self.repository.create_project(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            name=name,
+            description=request.description.strip(),
+        )
+
+    def update_project(self, user: BrowserUser, project_id: str, request: UpdateProjectRequest) -> ProjectResponse:
+        name = request.name.strip()
+        if not name:
+            raise HTTPException(status_code=422, detail="Project name is required")
+        project = self.repository.update_project(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+            name=name,
+            description=request.description.strip(),
+        )
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        return project
+
+    def delete_project(self, user: BrowserUser, project_id: str) -> None:
+        project = self.repository.get_project(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        if project.is_default:
+            raise HTTPException(status_code=400, detail="Default project cannot be deleted")
+        deleted = self.repository.delete_project(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+    def list_project_chat_threads(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        *,
+        limit: int = 5,
+        offset: int = 0,
+    ) -> ProjectSessionPageResponse:
+        page = self.repository.list_project_chat_threads(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+            limit=limit,
+            offset=offset,
+        )
+        if page is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        return page
+
     def create_chat_thread(self, user: BrowserUser, request: CreateChatThreadRequest) -> ChatThreadResponse:
-        summary = self.repository.create_chat_thread(user_id=user.user_id, title=request.title.strip() or "New chat")  # type: ignore[attr-defined]
+        project: ProjectResponse | None = None
+        if request.project_id:
+            project = self.repository.get_project(user_id=user.user_id, project_id=request.project_id)  # type: ignore[attr-defined]
+            if project is None:
+                raise HTTPException(status_code=404, detail="Project not found")
+        else:
+            project = self.repository.get_default_project(user.user_id)  # type: ignore[attr-defined]
+            if project is None:
+                project = self.repository.ensure_default_project(user.user_id)  # type: ignore[attr-defined]
+        summary = self.repository.create_chat_thread(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            title=request.title.strip() or "New chat",
+            project_id=project.project_id,
+            project_name=project.name,
+            project_instructions=project.description.strip(),
+        )
         thread = self.repository.get_chat_thread(user_id=user.user_id, thread_id=summary.thread_id)  # type: ignore[attr-defined]
         if thread is None:
             raise HTTPException(status_code=500, detail="Chat thread could not be created")
@@ -909,6 +1053,11 @@ class PaperbaseService:
         if thread is None:
             raise HTTPException(status_code=404, detail="Chat thread not found")
         return thread
+
+    def delete_chat_thread(self, user: BrowserUser, thread_id: str) -> None:
+        deleted = self.repository.delete_chat_thread(user_id=user.user_id, thread_id=thread_id)  # type: ignore[attr-defined]
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Chat thread not found")
 
     def _choose_anthropic_api_key(self, user: BrowserUser) -> tuple[str | None, bool]:
         user_key_record = self.repository.get_anthropic_api_key_record(user.user_id)  # type: ignore[attr-defined]
@@ -944,7 +1093,19 @@ class PaperbaseService:
             using_free_tier=using_free_tier,
         )
 
-    def _chat_tool_system_prompt(self) -> str:
+    def _project_prompt_suffix(self, thread: ChatThreadResponse) -> str:
+        instructions = thread.project_instructions.strip()
+        if not instructions:
+            return ""
+        project_name = thread.project_name.strip()
+        label = f" for the project '{project_name}'" if project_name else ""
+        return (
+            f"\n\nAdditional instructions{label}:\n"
+            f"{instructions}\n"
+            "Treat these instructions as active context for this session."
+        )
+
+    def _chat_tool_system_prompt(self, thread: ChatThreadResponse) -> str:
         return (
             "You are Paperbase Chat. You have access to Paperbase research tools that can search papers, sections, files, figures, tables, references, related papers, and the user's uploaded documents. "
             "Use tools aggressively for research-oriented turns. If the user asks about papers, references, findings, comparisons, methods, figures, tables, benchmarks, uploaded notes, or asks for links, do not rely on parametric memory when Paperbase tools can answer. "
@@ -954,9 +1115,10 @@ class PaperbaseService:
             "When a final answer should mention papers, recommendations, or reading lists, gather metadata rich enough to include direct paper links such as html_url or pdf_url when available. "
             "On turns where you still need tools, emit tool calls only and do not write any user-facing narrative text. "
             "Once the tool results are sufficient, stop calling tools. The final answer will be generated in a separate step."
+            + self._project_prompt_suffix(thread)
         )
 
-    def _chat_answer_system_prompt(self, *, has_evidence_sources: bool) -> str:
+    def _chat_answer_system_prompt(self, *, thread: ChatThreadResponse, has_evidence_sources: bool) -> str:
         if not has_evidence_sources:
             return (
                 "You are Paperbase Chat. Respond naturally and helpfully in GitHub-flavored markdown. "
@@ -964,6 +1126,7 @@ class PaperbaseService:
                 "and do not bring up papers or research context unless the user explicitly asks for them. "
                 "Treat any citations that appeared in earlier turns as historical context only, not as active sources for this reply. "
                 "For casual turns such as greetings or small talk, answer briefly and conversationally."
+                + self._project_prompt_suffix(thread)
             )
         return (
             "You are Paperbase Chat. Answer using the gathered Paperbase tool results when possible. "
@@ -972,6 +1135,7 @@ class PaperbaseService:
             "If the user asked for related reading, recommendations, or references, prefer a compact bullet list with paper title plus link before any longer discussion. "
             "Only cite source ids inline like [S1] when those ids came from evidence-bearing tool results such as section hits, file reads, figure captions, tables, or uploaded-document excerpts. "
             "Do not cite broad search results or metadata-only results. If the gathered sources are insufficient, say so plainly."
+            + self._project_prompt_suffix(thread)
         )
 
     def _chat_messages(self, prepared: PreparedChatGeneration) -> list[dict[str, Any]]:
@@ -1529,7 +1693,7 @@ class PaperbaseService:
             response = self.chat_model.create_message(
                 api_key=prepared.api_key_value or "",
                 messages=messages,
-                system_prompt=self._chat_tool_system_prompt(),
+                system_prompt=self._chat_tool_system_prompt(prepared.thread),
                 tools=tools,
                 tool_choice=tool_choice,
             )
@@ -1584,7 +1748,10 @@ class PaperbaseService:
         answer_payload = self.chat_model.create_message(
             api_key=prepared.api_key_value,
             messages=conversation_messages,
-            system_prompt=self._chat_answer_system_prompt(has_evidence_sources=bool(current_turn_citations)),
+            system_prompt=self._chat_answer_system_prompt(
+                thread=prepared.thread,
+                has_evidence_sources=bool(current_turn_citations),
+            ),
         )
         answer = _sanitize_inline_citations(_extract_message_text(answer_payload), current_turn_citations)
         assistant_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
@@ -1636,7 +1803,10 @@ class PaperbaseService:
             for delta in self.chat_model.stream_message(
                 api_key=prepared.api_key_value,
                 messages=conversation_messages,
-                system_prompt=self._chat_answer_system_prompt(has_evidence_sources=bool(current_turn_citations)),
+                system_prompt=self._chat_answer_system_prompt(
+                    thread=prepared.thread,
+                    has_evidence_sources=bool(current_turn_citations),
+                ),
             ):
                 if not delta:
                     continue

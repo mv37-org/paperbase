@@ -1,4 +1,4 @@
-export type AuthView = "login" | "signup" | "reset-request" | "reset-password" | "api-key";
+export type AuthView = "login" | "signup" | "reset-request" | "reset-password" | "settings";
 
 export interface BrowserUser {
   user_id: string;
@@ -7,11 +7,22 @@ export interface BrowserUser {
   free_responses_used: number;
 }
 
+export interface BrowserUserSettingsResponse {
+  anthropic_api_key_hint: string;
+  has_daytona_api_key: boolean;
+  daytona_api_key_hint: string;
+  has_github_connection: boolean;
+  github_login: string;
+  github_oauth_available: boolean;
+  weekly_papers_review_email: boolean;
+}
+
 export interface BrowserSessionResponse {
   authenticated: boolean;
   user: BrowserUser | null;
   remaining_free_responses: number;
   has_anthropic_api_key: boolean;
+  settings?: BrowserUserSettingsResponse;
   csrf_token: string | null;
 }
 
@@ -102,6 +113,7 @@ export interface ChatMessageResponse {
 
 export interface ChatThreadSummary {
   thread_id: string;
+  project_id: string;
   title: string;
   created_at: string;
   updated_at: string;
@@ -110,6 +122,9 @@ export interface ChatThreadSummary {
 
 export interface ChatThreadResponse {
   thread_id: string;
+  project_id: string;
+  project_name: string;
+  project_instructions: string;
   title: string;
   created_at: string;
   updated_at: string;
@@ -118,6 +133,31 @@ export interface ChatThreadResponse {
 
 export interface ChatThreadListResponse {
   threads: ChatThreadSummary[];
+}
+
+export interface ProjectSummary {
+  project_id: string;
+  name: string;
+  description: string;
+  is_default: boolean;
+  session_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProjectResponse extends ProjectSummary {}
+
+export interface ProjectListResponse {
+  projects: ProjectSummary[];
+}
+
+export interface ProjectSessionPageResponse {
+  project_id: string;
+  threads: ChatThreadSummary[];
+  offset: number;
+  limit: number;
+  total_count: number;
+  has_more: boolean;
 }
 
 export interface SendChatMessageResponse {

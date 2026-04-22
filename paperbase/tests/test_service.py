@@ -4,6 +4,7 @@ import json
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from paperbase.api import _resolve_bind_address, app
@@ -11,11 +12,13 @@ from paperbase.config import Settings, get_settings
 from paperbase.extractors import ExtractionOutput, FigureArtifact, RawArtifact, SectionArtifact, TableArtifact
 from paperbase.models import (
     CreateChatThreadRequest,
+    CreateProjectRequest,
     PaperMetadata,
     SearchRequest,
     SearchSectionRequest,
     SendChatMessageRequest,
     SignupRequest,
+    UpdateProjectRequest,
 )
 from paperbase.repository import MemoryPaperRepository
 from paperbase.service import PaperbaseService, get_service
@@ -969,6 +972,7 @@ def test_init_creates_trigram_indexes_for_summary_and_tldr():
     repo._embedding_dim = 768
     repo._engine = _FakeEngine()
     repo._session_factory = None  # type: ignore[assignment]
+    repo._backfill_projects = lambda: None  # type: ignore[method-assign]
 
     original_create_all = Base.metadata.create_all
     Base.metadata.create_all = lambda engine: None
@@ -1228,6 +1232,124 @@ def test_link_requests_force_tool_use_and_prompt_for_paper_links(monkeypatch, br
     assert chat_model.create_calls[0]["tool_choice"] == {"type": "any"}
     assert "html_url or pdf_url" in str(chat_model.create_calls[0]["system_prompt"])
     assert "markdown links to the paper pages or PDFs" in str(chat_model.create_calls[-1]["system_prompt"])
+
+
+def test_project_defaults_and_thread_snapshots(browser_service):
+    service, _, chat_model = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="projects@example.com", password="topsecret123", display_name="Project User")
+    )
+    assert session.user is not None
+
+    initial_projects = service.list_projects(session.user).projects
+    assert len(initial_projects) == 1
+    assert initial_projects[0].name == "General"
+    assert initial_projects[0].is_default is True
+    assert initial_projects[0].session_count == 0
+
+    project = service.create_project(
+        session.user,
+        CreateProjectRequest(name="Agents", description="Use grounded citations only."),
+    )
+    thread = service.create_chat_thread(
+        session.user,
+        CreateChatThreadRequest(title="Agent chat", project_id=project.project_id),
+    )
+
+    assert thread.project_id == project.project_id
+    assert thread.project_name == "Agents"
+    assert thread.project_instructions == "Use grounded citations only."
+
+    projects_after_thread = service.list_projects(session.user).projects
+    agents_project = next(item for item in projects_after_thread if item.project_id == project.project_id)
+    assert agents_project.session_count == 1
+
+    service.update_project(
+        session.user,
+        project.project_id,
+        UpdateProjectRequest(name="Agents", description="Use different instructions now."),
+    )
+
+    response = service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="Help me brainstorm a short product name"),
+    )
+
+    assert response.thread.project_instructions == "Use grounded citations only."
+    assert chat_model.create_calls
+    assert "Use grounded citations only." in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "Use different instructions now." not in str(chat_model.create_calls[-1]["system_prompt"])
+
+
+def test_project_session_paging_and_thread_deletion(browser_service):
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="paging@example.com", password="topsecret123", display_name="Paging User")
+    )
+    assert session.user is not None
+
+    project = service.create_project(
+        session.user,
+        CreateProjectRequest(name="Benchmarks", description="Track benchmark sessions"),
+    )
+    threads = [
+        service.create_chat_thread(
+            session.user,
+            CreateChatThreadRequest(title=f"Thread {index}", project_id=project.project_id),
+        )
+        for index in range(6)
+    ]
+
+    first_page = service.list_project_chat_threads(session.user, project.project_id, limit=5, offset=0)
+    second_page = service.list_project_chat_threads(session.user, project.project_id, limit=5, offset=5)
+
+    assert len(first_page.threads) == 5
+    assert first_page.total_count == 6
+    assert first_page.has_more is True
+    assert all(item.project_id == project.project_id for item in first_page.threads)
+    assert len(second_page.threads) == 1
+    assert second_page.has_more is False
+
+    service.delete_chat_thread(session.user, threads[0].thread_id)
+
+    remaining_page = service.list_project_chat_threads(session.user, project.project_id, limit=10, offset=0)
+    assert remaining_page.total_count == 5
+    assert threads[0].thread_id not in {item.thread_id for item in remaining_page.threads}
+    remaining_project = next(
+        item for item in service.list_projects(session.user).projects if item.project_id == project.project_id
+    )
+    assert remaining_project.session_count == 5
+
+
+def test_delete_project_cascades_threads_and_protects_default(browser_service):
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="cascade@example.com", password="topsecret123", display_name="Cascade User")
+    )
+    assert session.user is not None
+
+    default_project = service.list_projects(session.user).projects[0]
+    with pytest.raises(HTTPException) as default_exc:
+        service.delete_project(session.user, default_project.project_id)
+    assert default_exc.value.status_code == 400
+
+    project = service.create_project(
+        session.user,
+        CreateProjectRequest(name="Archive", description="Delete me"),
+    )
+    thread = service.create_chat_thread(
+        session.user,
+        CreateChatThreadRequest(title="Disposable thread", project_id=project.project_id),
+    )
+
+    service.delete_project(session.user, project.project_id)
+
+    remaining_project_ids = {item.project_id for item in service.list_projects(session.user).projects}
+    assert project.project_id not in remaining_project_ids
+    with pytest.raises(HTTPException) as thread_exc:
+        service.get_chat_thread(session.user, thread.thread_id)
+    assert thread_exc.value.status_code == 404
 
 
 def test_browser_chat_stream_emits_citations_and_completion(monkeypatch, browser_service):

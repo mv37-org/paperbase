@@ -11,13 +11,14 @@ from datetime import timedelta
 from typing import Any
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text, create_engine, delete, func, or_, select, text
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, create_engine, delete, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
 from .config import Settings
 from .models import (
     BrowserUser,
+    BrowserUserSettingsResponse,
     ChatCitation,
     ChatMessageResponse,
     ChatThreadResponse,
@@ -27,6 +28,9 @@ from .models import (
     JobResponse,
     PaperMetadata,
     PaperResponse,
+    ProjectResponse,
+    ProjectSessionPageResponse,
+    ProjectSummary,
     ResultSetResponse,
     UploadedDocumentResponse,
     UploadedDocumentSectionResult,
@@ -264,6 +268,22 @@ class AnthropicAPIKeyORM(Base):
     updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class BrowserUserSettingsORM(Base):
+    __tablename__ = "browser_user_settings"
+
+    browser_user_settings_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("browser_users.user_id", ondelete="CASCADE"), unique=True, index=True)
+    encrypted_daytona_api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    daytona_api_key_hint: Mapped[str] = mapped_column(String(32), default="")
+    weekly_papers_review_email: Mapped[bool] = mapped_column(Boolean, default=False)
+    github_user_id: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
+    github_login: Mapped[str] = mapped_column(String(255), default="")
+    encrypted_github_access_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    github_scope: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class UploadedDocumentORM(Base):
     __tablename__ = "uploaded_documents"
 
@@ -291,11 +311,30 @@ class UploadedDocumentChunkORM(Base):
     created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class ProjectORM(Base):
+    __tablename__ = "projects"
+
+    project_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("browser_users.user_id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(Text, default="General")
+    description: Mapped[str] = mapped_column(Text, default="")
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class ChatThreadORM(Base):
     __tablename__ = "chat_threads"
 
     thread_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[str] = mapped_column(ForeignKey("browser_users.user_id", ondelete="CASCADE"), index=True)
+    project_id: Mapped[str | None] = mapped_column(
+        ForeignKey("projects.project_id", ondelete="CASCADE"),
+        index=True,
+        nullable=True,
+    )
+    project_name: Mapped[str] = mapped_column(Text, default="")
+    project_instructions: Mapped[str] = mapped_column(Text, default="")
     title: Mapped[str] = mapped_column(Text, default="New chat")
     created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
@@ -361,6 +400,18 @@ def _browser_user_from_orm(row: BrowserUserORM) -> BrowserUser:
     )
 
 
+def _browser_user_settings_from_orm(row: BrowserUserSettingsORM | None) -> BrowserUserSettingsResponse:
+    if row is None:
+        return BrowserUserSettingsResponse()
+    return BrowserUserSettingsResponse(
+        has_daytona_api_key=bool(row.encrypted_daytona_api_key),
+        daytona_api_key_hint=row.daytona_api_key_hint or "",
+        has_github_connection=bool(row.encrypted_github_access_token and row.github_login),
+        github_login=row.github_login or "",
+        weekly_papers_review_email=bool(row.weekly_papers_review_email),
+    )
+
+
 def _uploaded_document_from_orm(row: UploadedDocumentORM) -> UploadedDocumentResponse:
     return UploadedDocumentResponse(
         document_id=row.document_id,
@@ -375,9 +426,22 @@ def _uploaded_document_from_orm(row: UploadedDocumentORM) -> UploadedDocumentRes
     )
 
 
+def _project_from_orm(row: ProjectORM, *, session_count: int = 0) -> ProjectSummary:
+    return ProjectSummary(
+        project_id=row.project_id,
+        name=row.name,
+        description=row.description or "",
+        is_default=bool(row.is_default),
+        session_count=session_count,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
 def _chat_thread_summary_from_orm(row: ChatThreadORM, *, last_message_preview: str = "") -> ChatThreadSummary:
     return ChatThreadSummary(
         thread_id=row.thread_id,
+        project_id=row.project_id or "",
         title=row.title,
         created_at=row.created_at,
         updated_at=row.updated_at,
@@ -605,6 +669,58 @@ class SqlAlchemyPaperRepository(PaperRepository):
         finally:
             session.close()
 
+    def _ensure_default_project_row(self, session: Session, user_id: str) -> ProjectORM:
+        project = session.scalar(
+            select(ProjectORM).where(ProjectORM.user_id == user_id, ProjectORM.is_default.is_(True))
+        )
+        if project is not None:
+            return project
+        project = ProjectORM(
+            project_id=new_id("proj"),
+            user_id=user_id,
+            name="General",
+            description="",
+            is_default=True,
+        )
+        session.add(project)
+        session.flush()
+        return project
+
+    def _get_or_create_browser_user_settings_row(
+        self,
+        session: Session,
+        user_id: str,
+    ) -> BrowserUserSettingsORM:
+        row = session.scalar(
+            select(BrowserUserSettingsORM).where(BrowserUserSettingsORM.user_id == user_id)
+        )
+        if row is not None:
+            return row
+        row = BrowserUserSettingsORM(
+            browser_user_settings_id=new_id("uset"),
+            user_id=user_id,
+        )
+        session.add(row)
+        session.flush()
+        return row
+
+    def _backfill_projects(self) -> None:
+        with self._session() as session:
+            users = session.scalars(select(BrowserUserORM)).all()
+            default_projects = {
+                user.user_id: self._ensure_default_project_row(session, user.user_id) for user in users
+            }
+            threads = session.scalars(
+                select(ChatThreadORM).where((ChatThreadORM.project_id.is_(None)) | (ChatThreadORM.project_id == ""))
+            ).all()
+            for thread in threads:
+                project = default_projects.get(thread.user_id) or self._ensure_default_project_row(session, thread.user_id)
+                thread.project_id = project.project_id
+                if not thread.project_name:
+                    thread.project_name = project.name
+                if not thread.project_instructions:
+                    thread.project_instructions = project.description or ""
+
     def init(self) -> None:
         vector_type = f"VECTOR({self._embedding_dim})"
         with self._engine.begin() as connection:
@@ -618,8 +734,23 @@ class SqlAlchemyPaperRepository(PaperRepository):
             connection.execute(text("ALTER TABLE IF EXISTS text_chunks ADD COLUMN IF NOT EXISTS chunk_index INTEGER DEFAULT 0"))
             connection.execute(text("ALTER TABLE IF EXISTS text_chunks ADD COLUMN IF NOT EXISTS section_depth INTEGER DEFAULT 1"))
             connection.execute(text("ALTER TABLE IF EXISTS text_chunks ADD COLUMN IF NOT EXISTS section_order INTEGER DEFAULT 0"))
+            connection.execute(text("ALTER TABLE IF EXISTS chat_threads ADD COLUMN IF NOT EXISTS project_id VARCHAR(64)"))
+            connection.execute(text("ALTER TABLE IF EXISTS chat_threads ADD COLUMN IF NOT EXISTS project_name TEXT DEFAULT ''"))
+            connection.execute(text("ALTER TABLE IF EXISTS chat_threads ADD COLUMN IF NOT EXISTS project_instructions TEXT DEFAULT ''"))
         Base.metadata.create_all(self._engine)
         with self._engine.begin() as connection:
+            connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS projects_default_per_user "
+                    "ON projects (user_id) WHERE is_default"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS chat_threads_project_id_idx "
+                    "ON chat_threads (project_id)"
+                )
+            )
             connection.execute(
                 text(
                     "CREATE INDEX IF NOT EXISTS papers_embedding_hnsw "
@@ -685,6 +816,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     "ON papers USING gin (tldr gin_trgm_ops)"
                 )
             )
+        self._backfill_projects()
 
     def probe(self) -> IntegrationProbeComponent:
         result = 0
@@ -1538,6 +1670,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
         )
         with self._session() as session:
             session.add(row)
+            self._ensure_default_project_row(session, row.user_id)
         return _browser_user_from_orm(row)
 
     def get_browser_user_by_email(self, email: str) -> BrowserUser | None:
@@ -1674,6 +1807,79 @@ class SqlAlchemyPaperRepository(PaperRepository):
         with self._session() as session:
             session.execute(delete(AnthropicAPIKeyORM).where(AnthropicAPIKeyORM.user_id == user_id))
 
+    def get_browser_user_settings(self, user_id: str) -> BrowserUserSettingsResponse:
+        with self._session() as session:
+            row = session.scalar(
+                select(BrowserUserSettingsORM).where(BrowserUserSettingsORM.user_id == user_id)
+            )
+            return _browser_user_settings_from_orm(row)
+
+    def save_daytona_api_key(self, *, user_id: str, encrypted_api_key: str, hint: str) -> None:
+        with self._session() as session:
+            row = self._get_or_create_browser_user_settings_row(session, user_id)
+            row.encrypted_daytona_api_key = encrypted_api_key
+            row.daytona_api_key_hint = hint
+            row.updated_at = utcnow()
+
+    def delete_daytona_api_key(self, user_id: str) -> None:
+        with self._session() as session:
+            row = session.scalar(
+                select(BrowserUserSettingsORM).where(BrowserUserSettingsORM.user_id == user_id)
+            )
+            if row is None:
+                return
+            row.encrypted_daytona_api_key = None
+            row.daytona_api_key_hint = ""
+            row.updated_at = utcnow()
+
+    def set_weekly_papers_review_email(self, *, user_id: str, enabled: bool) -> None:
+        with self._session() as session:
+            row = self._get_or_create_browser_user_settings_row(session, user_id)
+            row.weekly_papers_review_email = enabled
+            row.updated_at = utcnow()
+
+    def save_github_connection(
+        self,
+        *,
+        user_id: str,
+        github_user_id: str,
+        github_login: str,
+        encrypted_access_token: str,
+        scope: str,
+    ) -> None:
+        with self._session() as session:
+            existing = session.scalar(
+                select(BrowserUserSettingsORM).where(
+                    BrowserUserSettingsORM.github_user_id == github_user_id,
+                    BrowserUserSettingsORM.user_id != user_id,
+                )
+            )
+            if existing is not None:
+                existing.github_user_id = None
+                existing.github_login = ""
+                existing.encrypted_github_access_token = None
+                existing.github_scope = ""
+                existing.updated_at = utcnow()
+            row = self._get_or_create_browser_user_settings_row(session, user_id)
+            row.github_user_id = github_user_id
+            row.github_login = github_login
+            row.encrypted_github_access_token = encrypted_access_token
+            row.github_scope = scope
+            row.updated_at = utcnow()
+
+    def delete_github_connection(self, user_id: str) -> None:
+        with self._session() as session:
+            row = session.scalar(
+                select(BrowserUserSettingsORM).where(BrowserUserSettingsORM.user_id == user_id)
+            )
+            if row is None:
+                return
+            row.github_user_id = None
+            row.github_login = ""
+            row.encrypted_github_access_token = None
+            row.github_scope = ""
+            row.updated_at = utcnow()
+
     def create_uploaded_document(
         self,
         *,
@@ -1793,10 +1999,163 @@ class SqlAlchemyPaperRepository(PaperRepository):
         results.sort(key=lambda item: item.score or 0, reverse=True)
         return results[:limit]
 
-    def create_chat_thread(self, *, user_id: str, title: str) -> ChatThreadSummary:
-        row = ChatThreadORM(thread_id=new_id("thread"), user_id=user_id, title=title or "New chat")
+    def ensure_default_project(self, user_id: str) -> ProjectResponse:
+        with self._session() as session:
+            project = self._ensure_default_project_row(session, user_id)
+            return ProjectResponse(**_project_from_orm(project).model_dump())
+
+    def get_default_project(self, user_id: str) -> ProjectResponse | None:
+        with self._session() as session:
+            project = session.scalar(
+                select(ProjectORM).where(ProjectORM.user_id == user_id, ProjectORM.is_default.is_(True))
+            )
+            if project is None:
+                return None
+            session_count = int(
+                session.scalar(select(func.count()).select_from(ChatThreadORM).where(ChatThreadORM.project_id == project.project_id))
+                or 0
+            )
+            return ProjectResponse(**_project_from_orm(project, session_count=session_count).model_dump())
+
+    def list_projects(self, user_id: str) -> list[ProjectSummary]:
+        with self._session() as session:
+            self._ensure_default_project_row(session, user_id)
+            projects = session.scalars(
+                select(ProjectORM)
+                .where(ProjectORM.user_id == user_id)
+                .order_by(ProjectORM.is_default.desc(), ProjectORM.updated_at.desc(), ProjectORM.created_at.asc())
+            ).all()
+            counts = {
+                project_id: count
+                for project_id, count in session.execute(
+                    select(ChatThreadORM.project_id, func.count())
+                    .where(ChatThreadORM.user_id == user_id, ChatThreadORM.project_id.is_not(None))
+                    .group_by(ChatThreadORM.project_id)
+                ).all()
+            }
+        return [_project_from_orm(project, session_count=int(counts.get(project.project_id, 0))) for project in projects]
+
+    def get_project(self, *, user_id: str, project_id: str) -> ProjectResponse | None:
+        with self._session() as session:
+            project = session.scalar(
+                select(ProjectORM).where(ProjectORM.project_id == project_id, ProjectORM.user_id == user_id)
+            )
+            if project is None:
+                return None
+            session_count = int(
+                session.scalar(select(func.count()).select_from(ChatThreadORM).where(ChatThreadORM.project_id == project_id))
+                or 0
+            )
+        return ProjectResponse(**_project_from_orm(project, session_count=session_count).model_dump())
+
+    def create_project(self, *, user_id: str, name: str, description: str) -> ProjectResponse:
+        row = ProjectORM(
+            project_id=new_id("proj"),
+            user_id=user_id,
+            name=name,
+            description=description,
+            is_default=False,
+        )
+        with self._session() as session:
+            self._ensure_default_project_row(session, user_id)
+            session.add(row)
+        return ProjectResponse(**_project_from_orm(row).model_dump())
+
+    def update_project(self, *, user_id: str, project_id: str, name: str, description: str) -> ProjectResponse | None:
+        with self._session() as session:
+            row = session.scalar(
+                select(ProjectORM).where(ProjectORM.project_id == project_id, ProjectORM.user_id == user_id)
+            )
+            if row is None:
+                return None
+            row.name = name
+            row.description = description
+            row.updated_at = utcnow()
+        return self.get_project(user_id=user_id, project_id=project_id)
+
+    def delete_project(self, *, user_id: str, project_id: str) -> bool:
+        with self._session() as session:
+            project = session.scalar(
+                select(ProjectORM).where(ProjectORM.project_id == project_id, ProjectORM.user_id == user_id)
+            )
+            if project is None or project.is_default:
+                return False
+            session.execute(
+                delete(ChatThreadORM).where(ChatThreadORM.user_id == user_id, ChatThreadORM.project_id == project_id)
+            )
+            session.execute(delete(ProjectORM).where(ProjectORM.project_id == project_id, ProjectORM.user_id == user_id))
+        return True
+
+    def list_project_chat_threads(
+        self,
+        *,
+        user_id: str,
+        project_id: str,
+        limit: int,
+        offset: int,
+    ) -> ProjectSessionPageResponse | None:
+        with self._session() as session:
+            project = session.scalar(
+                select(ProjectORM).where(ProjectORM.project_id == project_id, ProjectORM.user_id == user_id)
+            )
+            if project is None:
+                return None
+            total_count = int(
+                session.scalar(
+                    select(func.count())
+                    .select_from(ChatThreadORM)
+                    .where(ChatThreadORM.user_id == user_id, ChatThreadORM.project_id == project_id)
+                )
+                or 0
+            )
+            threads = session.scalars(
+                select(ChatThreadORM)
+                .where(ChatThreadORM.user_id == user_id, ChatThreadORM.project_id == project_id)
+                .order_by(ChatThreadORM.updated_at.desc())
+                .offset(offset)
+                .limit(limit)
+            ).all()
+            results: list[ChatThreadSummary] = []
+            for thread in threads:
+                last_message = session.scalar(
+                    select(ChatMessageORM)
+                    .where(ChatMessageORM.thread_id == thread.thread_id)
+                    .order_by(ChatMessageORM.created_at.desc())
+                    .limit(1)
+                )
+                preview = (last_message.content_markdown[:120] if last_message else "").strip()
+                results.append(_chat_thread_summary_from_orm(thread, last_message_preview=preview))
+        return ProjectSessionPageResponse(
+            project_id=project_id,
+            threads=results,
+            offset=offset,
+            limit=limit,
+            total_count=total_count,
+            has_more=offset + len(results) < total_count,
+        )
+
+    def create_chat_thread(
+        self,
+        *,
+        user_id: str,
+        title: str,
+        project_id: str,
+        project_name: str,
+        project_instructions: str,
+    ) -> ChatThreadSummary:
+        row = ChatThreadORM(
+            thread_id=new_id("thread"),
+            user_id=user_id,
+            project_id=project_id,
+            project_name=project_name,
+            project_instructions=project_instructions,
+            title=title or "New chat",
+        )
         with self._session() as session:
             session.add(row)
+            project = session.get(ProjectORM, project_id)
+            if project is not None:
+                project.updated_at = utcnow()
         return _chat_thread_summary_from_orm(row)
 
     def rename_chat_thread(self, *, thread_id: str, title: str) -> None:
@@ -1805,6 +2164,9 @@ class SqlAlchemyPaperRepository(PaperRepository):
             if row:
                 row.title = title
                 row.updated_at = utcnow()
+                project = session.get(ProjectORM, row.project_id) if row.project_id else None
+                if project is not None:
+                    project.updated_at = row.updated_at
 
     def list_chat_threads(self, user_id: str) -> list[ChatThreadSummary]:
         with self._session() as session:
@@ -1839,6 +2201,9 @@ class SqlAlchemyPaperRepository(PaperRepository):
             ).all()
         return ChatThreadResponse(
             thread_id=thread.thread_id,
+            project_id=thread.project_id or "",
+            project_name=thread.project_name or "",
+            project_instructions=thread.project_instructions or "",
             title=thread.title,
             created_at=thread.created_at,
             updated_at=thread.updated_at,
@@ -1867,6 +2232,9 @@ class SqlAlchemyPaperRepository(PaperRepository):
             thread = session.get(ChatThreadORM, thread_id)
             if thread:
                 thread.updated_at = utcnow()
+                project = session.get(ProjectORM, thread.project_id) if thread.project_id else None
+                if project is not None:
+                    project.updated_at = thread.updated_at
         return _chat_message_from_orm(row)
 
     def update_chat_message(
@@ -1890,7 +2258,25 @@ class SqlAlchemyPaperRepository(PaperRepository):
             thread = session.get(ChatThreadORM, row.thread_id)
             if thread:
                 thread.updated_at = utcnow()
+                project = session.get(ProjectORM, thread.project_id) if thread.project_id else None
+                if project is not None:
+                    project.updated_at = thread.updated_at
         return _chat_message_from_orm(row)
+
+    def delete_chat_thread(self, *, user_id: str, thread_id: str) -> bool:
+        with self._session() as session:
+            thread = session.scalar(
+                select(ChatThreadORM).where(ChatThreadORM.thread_id == thread_id, ChatThreadORM.user_id == user_id)
+            )
+            if thread is None:
+                return False
+            project_id = thread.project_id
+            session.execute(delete(ChatThreadORM).where(ChatThreadORM.thread_id == thread_id))
+            if project_id:
+                project = session.get(ProjectORM, project_id)
+                if project is not None:
+                    project.updated_at = utcnow()
+        return True
 
     def save_result_set(
         self,
@@ -2114,8 +2500,12 @@ class MemoryPaperRepository(PaperRepository):
         self.browser_sessions: dict[str, dict[str, Any]] = {}
         self.password_reset_tokens: dict[str, dict[str, Any]] = {}
         self.user_api_keys: dict[str, dict[str, str]] = {}
+        self.browser_user_settings: dict[str, BrowserUserSettingsResponse] = {}
         self.uploaded_documents: dict[str, UploadedDocumentResponse] = {}
         self.uploaded_document_chunks: dict[str, list[dict[str, str]]] = defaultdict(list)
+        self.projects: dict[str, ProjectResponse] = {}
+        self.project_users: dict[str, str] = {}
+        self.default_projects_by_user: dict[str, str] = {}
         self.chat_threads: dict[str, ChatThreadResponse] = {}
         self.chat_thread_users: dict[str, str] = {}
 
@@ -2129,6 +2519,35 @@ class MemoryPaperRepository(PaperRepository):
             detail="In-memory repository is reachable",
             target="memory://",
         )
+
+    def _ensure_default_project(self, user_id: str) -> ProjectResponse:
+        default_project_id = self.default_projects_by_user.get(user_id)
+        if default_project_id:
+            project = self.projects.get(default_project_id)
+            if project is not None:
+                return project
+        now = utcnow()
+        project = ProjectResponse(
+            project_id=new_id("proj"),
+            name="General",
+            description="",
+            is_default=True,
+            session_count=0,
+            created_at=now,
+            updated_at=now,
+        )
+        self.projects[project.project_id] = project
+        self.project_users[project.project_id] = user_id
+        self.default_projects_by_user[user_id] = project.project_id
+        return project
+
+    def _get_or_create_browser_user_settings(self, user_id: str) -> BrowserUserSettingsResponse:
+        settings = self.browser_user_settings.get(user_id)
+        if settings is not None:
+            return settings
+        settings = BrowserUserSettingsResponse()
+        self.browser_user_settings[user_id] = settings
+        return settings
 
     def upsert_paper(
         self,
@@ -2543,6 +2962,7 @@ class MemoryPaperRepository(PaperRepository):
         self.browser_users[user.user_id] = user
         self.browser_users_by_email[email] = user.user_id
         self.browser_user_passwords[user.user_id] = password_hash
+        self._ensure_default_project(user.user_id)
         return user
 
     def get_browser_user_by_email(self, email: str) -> BrowserUser | None:
@@ -2609,6 +3029,69 @@ class MemoryPaperRepository(PaperRepository):
 
     def delete_anthropic_api_key(self, user_id: str) -> None:
         self.user_api_keys.pop(user_id, None)
+
+    def get_browser_user_settings(self, user_id: str) -> BrowserUserSettingsResponse:
+        return self.browser_user_settings.get(user_id, BrowserUserSettingsResponse())
+
+    def save_daytona_api_key(self, *, user_id: str, encrypted_api_key: str, hint: str) -> None:
+        current = self._get_or_create_browser_user_settings(user_id)
+        self.browser_user_settings[user_id] = current.model_copy(
+            update={
+                "has_daytona_api_key": True,
+                "daytona_api_key_hint": hint,
+            }
+        )
+
+    def delete_daytona_api_key(self, user_id: str) -> None:
+        current = self._get_or_create_browser_user_settings(user_id)
+        self.browser_user_settings[user_id] = current.model_copy(
+            update={
+                "has_daytona_api_key": False,
+                "daytona_api_key_hint": "",
+            }
+        )
+
+    def set_weekly_papers_review_email(self, *, user_id: str, enabled: bool) -> None:
+        current = self._get_or_create_browser_user_settings(user_id)
+        self.browser_user_settings[user_id] = current.model_copy(
+            update={"weekly_papers_review_email": enabled}
+        )
+
+    def save_github_connection(
+        self,
+        *,
+        user_id: str,
+        github_user_id: str,
+        github_login: str,
+        encrypted_access_token: str,
+        scope: str,
+    ) -> None:
+        for candidate_user_id, settings in list(self.browser_user_settings.items()):
+            if candidate_user_id == user_id:
+                continue
+            if settings.github_login == github_login:
+                self.browser_user_settings[candidate_user_id] = settings.model_copy(
+                    update={
+                        "has_github_connection": False,
+                        "github_login": "",
+                    }
+                )
+        current = self._get_or_create_browser_user_settings(user_id)
+        self.browser_user_settings[user_id] = current.model_copy(
+            update={
+                "has_github_connection": True,
+                "github_login": github_login,
+            }
+        )
+
+    def delete_github_connection(self, user_id: str) -> None:
+        current = self._get_or_create_browser_user_settings(user_id)
+        self.browser_user_settings[user_id] = current.model_copy(
+            update={
+                "has_github_connection": False,
+                "github_login": "",
+            }
+        )
 
     def create_uploaded_document(
         self,
@@ -2700,10 +3183,126 @@ class MemoryPaperRepository(PaperRepository):
         results.sort(key=lambda item: item.score or 0, reverse=True)
         return results[:limit]
 
-    def create_chat_thread(self, *, user_id: str, title: str) -> ChatThreadSummary:
+    def ensure_default_project(self, user_id: str) -> ProjectResponse:
+        return self._ensure_default_project(user_id)
+
+    def get_default_project(self, user_id: str) -> ProjectResponse | None:
+        return self.projects.get(self.default_projects_by_user.get(user_id, ""))
+
+    def list_projects(self, user_id: str) -> list[ProjectSummary]:
+        self._ensure_default_project(user_id)
+        summaries: list[ProjectSummary] = []
+        for project in self.projects.values():
+            if self.project_users.get(project.project_id) != user_id:
+                continue
+            session_count = sum(
+                1
+                for thread in self.chat_threads.values()
+                if self.chat_thread_users.get(thread.thread_id) == user_id and thread.project_id == project.project_id
+            )
+            summaries.append(ProjectSummary(**project.model_copy(update={"session_count": session_count}).model_dump()))
+        summaries.sort(key=lambda item: (not item.is_default, -item.updated_at.timestamp(), item.created_at.timestamp()))
+        return summaries
+
+    def get_project(self, *, user_id: str, project_id: str) -> ProjectResponse | None:
+        project = self.projects.get(project_id)
+        if project is None:
+            return None
+        if self.project_users.get(project_id) != user_id:
+            return None
+        session_count = sum(
+            1
+            for thread in self.chat_threads.values()
+            if self.chat_thread_users.get(thread.thread_id) == user_id and thread.project_id == project_id
+        )
+        return project.model_copy(update={"session_count": session_count})
+
+    def create_project(self, *, user_id: str, name: str, description: str) -> ProjectResponse:
+        self._ensure_default_project(user_id)
+        now = utcnow()
+        project = ProjectResponse(
+            project_id=new_id("proj"),
+            name=name,
+            description=description,
+            is_default=False,
+            session_count=0,
+            created_at=now,
+            updated_at=now,
+        )
+        self.projects[project.project_id] = project
+        self.project_users[project.project_id] = user_id
+        return project
+
+    def update_project(self, *, user_id: str, project_id: str, name: str, description: str) -> ProjectResponse | None:
+        project = self.get_project(user_id=user_id, project_id=project_id)
+        if project is None:
+            return None
+        updated = project.model_copy(update={"name": name, "description": description, "updated_at": utcnow()})
+        self.projects[project_id] = updated
+        return updated
+
+    def delete_project(self, *, user_id: str, project_id: str) -> bool:
+        project = self.get_project(user_id=user_id, project_id=project_id)
+        if project is None or project.is_default:
+            return False
+        for thread_id, thread in list(self.chat_threads.items()):
+            if self.chat_thread_users.get(thread_id) == user_id and thread.project_id == project_id:
+                self.chat_threads.pop(thread_id, None)
+                self.chat_thread_users.pop(thread_id, None)
+        self.projects.pop(project_id, None)
+        self.project_users.pop(project_id, None)
+        return True
+
+    def list_project_chat_threads(
+        self,
+        *,
+        user_id: str,
+        project_id: str,
+        limit: int,
+        offset: int,
+    ) -> ProjectSessionPageResponse | None:
+        project = self.get_project(user_id=user_id, project_id=project_id)
+        if project is None:
+            return None
+        summaries = [
+            ChatThreadSummary(
+                thread_id=thread.thread_id,
+                project_id=thread.project_id,
+                title=thread.title,
+                created_at=thread.created_at,
+                updated_at=thread.updated_at,
+                last_message_preview=thread.messages[-1].content_markdown[:120] if thread.messages else "",
+            )
+            for thread in self.chat_threads.values()
+            if self.chat_thread_users.get(thread.thread_id) == user_id and thread.project_id == project_id
+        ]
+        summaries.sort(key=lambda item: item.updated_at, reverse=True)
+        total_count = len(summaries)
+        page = summaries[offset : offset + limit]
+        return ProjectSessionPageResponse(
+            project_id=project_id,
+            threads=page,
+            offset=offset,
+            limit=limit,
+            total_count=total_count,
+            has_more=offset + len(page) < total_count,
+        )
+
+    def create_chat_thread(
+        self,
+        *,
+        user_id: str,
+        title: str,
+        project_id: str,
+        project_name: str,
+        project_instructions: str,
+    ) -> ChatThreadSummary:
         now = utcnow()
         thread = ChatThreadResponse(
             thread_id=new_id("thread"),
+            project_id=project_id,
+            project_name=project_name,
+            project_instructions=project_instructions,
             title=title or "New chat",
             created_at=now,
             updated_at=now,
@@ -2711,8 +3310,12 @@ class MemoryPaperRepository(PaperRepository):
         )
         self.chat_threads[thread.thread_id] = thread
         self.chat_thread_users[thread.thread_id] = user_id
+        project = self.projects.get(project_id)
+        if project is not None:
+            self.projects[project_id] = project.model_copy(update={"updated_at": now})
         return ChatThreadSummary(
             thread_id=thread.thread_id,
+            project_id=thread.project_id,
             title=thread.title,
             created_at=thread.created_at,
             updated_at=thread.updated_at,
@@ -2722,7 +3325,11 @@ class MemoryPaperRepository(PaperRepository):
     def rename_chat_thread(self, *, thread_id: str, title: str) -> None:
         thread = self.chat_threads.get(thread_id)
         if thread:
-            self.chat_threads[thread_id] = thread.model_copy(update={"title": title, "updated_at": utcnow()})
+            updated_at = utcnow()
+            self.chat_threads[thread_id] = thread.model_copy(update={"title": title, "updated_at": updated_at})
+            project = self.projects.get(thread.project_id)
+            if project is not None:
+                self.projects[thread.project_id] = project.model_copy(update={"updated_at": updated_at})
 
     def list_chat_threads(self, user_id: str) -> list[ChatThreadSummary]:
         summaries: list[ChatThreadSummary] = []
@@ -2733,6 +3340,7 @@ class MemoryPaperRepository(PaperRepository):
             summaries.append(
                 ChatThreadSummary(
                     thread_id=thread.thread_id,
+                    project_id=thread.project_id,
                     title=thread.title,
                     created_at=thread.created_at,
                     updated_at=thread.updated_at,
@@ -2765,8 +3373,12 @@ class MemoryPaperRepository(PaperRepository):
             status=status,
         )
         thread = self.chat_threads[thread_id]
-        updated = thread.model_copy(update={"messages": [*thread.messages, message], "updated_at": utcnow()})
+        updated_at = utcnow()
+        updated = thread.model_copy(update={"messages": [*thread.messages, message], "updated_at": updated_at})
         self.chat_threads[thread_id] = updated
+        project = self.projects.get(thread.project_id)
+        if project is not None:
+            self.projects[thread.project_id] = project.model_copy(update={"updated_at": updated_at})
         return message
 
     def update_chat_message(
@@ -2790,9 +3402,25 @@ class MemoryPaperRepository(PaperRepository):
                 )
                 messages = list(thread.messages)
                 messages[index] = updated_message
-                self.chat_threads[thread_id] = thread.model_copy(update={"messages": messages, "updated_at": utcnow()})
+                updated_at = utcnow()
+                self.chat_threads[thread_id] = thread.model_copy(update={"messages": messages, "updated_at": updated_at})
+                project = self.projects.get(thread.project_id)
+                if project is not None:
+                    self.projects[thread.project_id] = project.model_copy(update={"updated_at": updated_at})
                 return updated_message
         return None
+
+    def delete_chat_thread(self, *, user_id: str, thread_id: str) -> bool:
+        if self.chat_thread_users.get(thread_id) != user_id:
+            return False
+        thread = self.chat_threads.pop(thread_id, None)
+        self.chat_thread_users.pop(thread_id, None)
+        if thread is None:
+            return False
+        project = self.projects.get(thread.project_id)
+        if project is not None:
+            self.projects[thread.project_id] = project.model_copy(update={"updated_at": utcnow()})
+        return True
 
     def create_job(self, job_type: str, payload: dict[str, Any]) -> JobResponse:
         job = JobResponse(
