@@ -2134,17 +2134,19 @@ textarea::placeholder,
   min-width: 26px;
 }
 
-.chat-empty-action-icon-image {
+.chat-empty-action-icon-glyph {
   width: 13px;
   height: 13px;
-}
-
-.chat-empty-action-tag.python .chat-empty-action-icon-image {
-  filter: invert(36%) sepia(79%) saturate(2182%) hue-rotate(216deg) brightness(94%) contrast(92%);
-}
-
-.chat-empty-action-tag.notes .chat-empty-action-icon-image {
-  filter: invert(49%) sepia(84%) saturate(611%) hue-rotate(4deg) brightness(98%) contrast(96%);
+  display: block;
+  background-color: currentColor;
+  -webkit-mask-image: var(--icon-url);
+  mask-image: var(--icon-url);
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-size: contain;
+  mask-size: contain;
 }
 
 .chat-empty-action-label {

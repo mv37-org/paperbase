@@ -375,6 +375,20 @@ function AppIcon({ src, className = "" }: { src: string; className?: string }) {
   );
 }
 
+function EmptyStateActionIcon({ asset }: { asset: string }) {
+  return (
+    <span
+      className="chat-empty-action-icon-glyph"
+      aria-hidden="true"
+      style={
+        {
+          "--icon-url": `url("${staticAssetPath(asset)}")`,
+        } as CSSProperties
+      }
+    />
+  );
+}
+
 export default function App() {
   const [session, setSession] = useState<BrowserSessionResponse | null>(null);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
@@ -2350,19 +2364,13 @@ export default function App() {
                     <div className="chat-empty-actions">
                       <button type="button" className="chat-empty-action-tag python">
                         <span className="chat-empty-action-icon" aria-hidden="true">
-                          <AppIcon
-                            src={staticAssetPath("python.svg")}
-                            className="chat-empty-action-icon-image"
-                          />
+                          <EmptyStateActionIcon asset="python.svg" />
                         </span>
                         <span className="chat-empty-action-label">Add python file</span>
                       </button>
                       <button type="button" className="chat-empty-action-tag notes">
                         <span className="chat-empty-action-icon" aria-hidden="true">
-                          <AppIcon
-                            src={staticAssetPath("note.svg")}
-                            className="chat-empty-action-icon-image"
-                          />
+                          <EmptyStateActionIcon asset="note.svg" />
                         </span>
                         <span className="chat-empty-action-label">Add notes</span>
                       </button>
