@@ -350,6 +350,33 @@ describe("App", () => {
     });
   });
 
+  it("opens the custom empty-state project picker and switches projects", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.loadProjects.mockResolvedValue({
+      projects: [projectSummary("proj_1", "General"), projectSummary("proj_2", "Agents", 0)],
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Start new research in")).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByLabelText("Open empty state project picker"));
+
+    await waitFor(() => {
+      expect(screen.getByRole("listbox", { name: "Choose project" })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("option", { name: "Agents" }));
+
+    await waitFor(() => {
+      expect(document.querySelector("#empty-state-project-select-trigger")?.textContent).toContain(
+        "Agents",
+      );
+    });
+  });
+
   it("does not create a duplicate empty chat for the same project", async () => {
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());
     apiMocks.createThread.mockResolvedValue(emptyThreadResponse("thread_2"));

@@ -404,6 +404,7 @@ export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const [emptyStateProjectPickerOpen, setEmptyStateProjectPickerOpen] = useState(false);
   const [streamingThreadId, setStreamingThreadId] = useState<string | null>(null);
   const [paperDrawer, setPaperDrawer] = useState<PaperDrawerState>(() => drawerStateFromUrl());
   const [paperDrawerPaper, setPaperDrawerPaper] = useState<PaperResponse | null>(null);
@@ -422,6 +423,7 @@ export default function App() {
   const tabsStorageHydratedRef = useRef(false);
   const appUploadRef = useRef<HTMLInputElement | null>(null);
   const accountMenuRef = useRef<HTMLDivElement | null>(null);
+  const emptyStateProjectPickerRef = useRef<HTMLDivElement | null>(null);
   const projectMenuRef = useRef<HTMLDivElement | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
 
@@ -525,11 +527,38 @@ export default function App() {
     };
   }, [projectMenuProjectId]);
 
+  useEffect(() => {
+    if (!emptyStateProjectPickerOpen) {
+      return;
+    }
+    const handlePointerDown = (event: MouseEvent) => {
+      if (
+        emptyStateProjectPickerRef.current &&
+        !emptyStateProjectPickerRef.current.contains(event.target as Node)
+      ) {
+        setEmptyStateProjectPickerOpen(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setEmptyStateProjectPickerOpen(false);
+      }
+    };
+    window.addEventListener("mousedown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("mousedown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [emptyStateProjectPickerOpen]);
+
   const authCopy = AUTH_VIEW_COPY[authView];
   const authenticated = Boolean(session?.authenticated);
   const activeThread = activeThreadId ? (threadMap[activeThreadId] ?? null) : null;
   const isChatEmpty = !activeThread || activeThread.messages.length === 0;
   const paperDrawerOpen = Boolean(paperDrawer);
+  const emptyStateProject =
+    projects.find((project) => project.project_id === selectedProjectId) ?? projects[0] ?? null;
   const allProjectsExpanded = useMemo(
     () =>
       projects.length > 0 &&
@@ -2226,20 +2255,44 @@ export default function App() {
                     ) : (
                       <div className="chat-empty-project-row">
                         <strong>Start new research in</strong>
-                        <span className="chat-empty-project-select-wrap">
-                          <select
-                            id="empty-state-project-select"
-                            className="chat-empty-project-select"
-                            value={selectedProjectId ?? ""}
-                            onChange={(event) => setSelectedProjectId(event.target.value)}
+                        <div ref={emptyStateProjectPickerRef} className="chat-empty-project-picker">
+                          <button
+                            type="button"
+                            id="empty-state-project-select-trigger"
+                            className="chat-empty-project-trigger"
+                            aria-label="Open empty state project picker"
+                            aria-haspopup="listbox"
+                            aria-expanded={emptyStateProjectPickerOpen}
+                            onClick={() => setEmptyStateProjectPickerOpen((current) => !current)}
                           >
-                            {projects.map((project) => (
-                              <option key={project.project_id} value={project.project_id}>
-                                {project.name}
-                              </option>
-                            ))}
-                          </select>
-                        </span>
+                            <span>{emptyStateProject?.name ?? "Project"}</span>
+                          </button>
+                          {emptyStateProjectPickerOpen ? (
+                            <div
+                              className="chat-empty-project-menu"
+                              role="listbox"
+                              aria-label="Choose project"
+                            >
+                              {projects.map((project) => (
+                                <button
+                                  key={project.project_id}
+                                  type="button"
+                                  role="option"
+                                  aria-selected={
+                                    emptyStateProject?.project_id === project.project_id
+                                  }
+                                  className={`chat-empty-project-option${emptyStateProject?.project_id === project.project_id ? " active" : ""}`}
+                                  onClick={() => {
+                                    setSelectedProjectId(project.project_id);
+                                    setEmptyStateProjectPickerOpen(false);
+                                  }}
+                                >
+                                  {project.name}
+                                </button>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
                       </div>
                     )}
                     {composerStatus ? (

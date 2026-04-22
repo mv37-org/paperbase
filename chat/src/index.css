@@ -1902,7 +1902,7 @@ textarea::placeholder,
 }
 
 .chat-empty-state {
-  max-width: 620px;
+  max-width: 760px;
   display: grid;
   justify-items: center;
   gap: 10px;
@@ -1934,15 +1934,29 @@ textarea::placeholder,
   display: inline;
 }
 
-.chat-empty-project-select-wrap {
+.chat-empty-project-picker {
   position: relative;
   display: inline-flex;
   align-items: baseline;
+}
+
+.chat-empty-project-trigger {
+  position: relative;
+  display: inline-flex;
+  align-items: baseline;
+  padding: 0 16px 0 0;
+  border: 0;
+  background: transparent;
   color: rgba(27, 22, 17, 0.56);
+  font-size: 22px;
+  font-weight: 500;
+  line-height: 1.05;
+  letter-spacing: -0.03em;
+  cursor: pointer;
   transition: color 120ms ease;
 }
 
-.chat-empty-project-select-wrap::after {
+.chat-empty-project-trigger::after {
   content: "";
   position: absolute;
   right: 2px;
@@ -1955,30 +1969,51 @@ textarea::placeholder,
   pointer-events: none;
 }
 
-.chat-empty-project-select-wrap:hover,
-.chat-empty-project-select-wrap:focus-within {
+.chat-empty-project-trigger:hover,
+.chat-empty-project-picker:focus-within .chat-empty-project-trigger {
   color: rgba(27, 22, 17, 0.78);
 }
 
-.chat-empty-project-select {
-  min-width: 0;
-  padding: 0 18px 0 0;
+.chat-empty-project-trigger:focus-visible {
+  outline: none;
+}
+
+.chat-empty-project-menu {
+  position: absolute;
+  top: calc(100% + 10px);
+  left: 50%;
+  min-width: 180px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--paper);
+  box-shadow: 0 12px 24px rgba(16, 24, 40, 0.08);
+  transform: translateX(-50%);
+  display: grid;
+  gap: 4px;
+  z-index: 6;
+}
+
+.chat-empty-project-option {
+  width: 100%;
+  padding: 8px 10px;
   border: 0;
-  border-radius: 0;
+  border-radius: 8px;
   background: transparent;
-  appearance: none;
-  -webkit-appearance: none;
-  color: inherit;
-  font-size: 22px;
-  font-weight: 500;
-  line-height: 1.05;
-  letter-spacing: -0.03em;
+  color: var(--text);
+  text-align: left;
+  font-size: 13px;
   cursor: pointer;
+}
+
+.chat-empty-project-option:hover,
+.chat-empty-project-option.active {
+  background: rgba(27, 22, 17, 0.05);
 }
 
 .chat-empty-state .chat-composer {
   display: block;
-  width: min(720px, 100%);
+  width: min(var(--chat-fixed-composer-width), 100%);
 }
 
 .chat-empty-state .composer-form {
