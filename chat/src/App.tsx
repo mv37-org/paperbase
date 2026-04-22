@@ -1701,6 +1701,27 @@ export default function App() {
     return null;
   }
 
+  const composerEditor = (
+    <LandingMentionEditor
+      attachButtonId="composer-upload-trigger"
+      disabled={Boolean(streamingThreadId)}
+      formId="composer-form"
+      inputId="composer-input"
+      onAttach={() => appUploadRef.current?.click()}
+      onChange={setComposerInput}
+      onSubmit={() => void handleComposerSubmit()}
+      placeholder="Ask about the latest agent and AI systems research. Type @ to tag a paper."
+      searchPapers={suggestBrowserPapers}
+      submitButtonId="composer-send"
+      submitLabel={streamingThreadId ? "Thinking..." : "Send"}
+      submitLoading={Boolean(streamingThreadId)}
+      submitOnEnter
+      suggestionsPlacement="above"
+      value={composerInput}
+      variant="chat"
+    />
+  );
+
   return (
     <>
       {!authenticated ? (
@@ -2192,31 +2213,39 @@ export default function App() {
                     </button>
                   ) : null}
                   <div className="chat-empty-state">
-                    <div className="chat-empty-eyebrow">Empty chat</div>
+                    <a
+                      className="brandline brandline-link chat-empty-brandline"
+                      href="https://mv37.org"
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      MV37
+                    </a>
                     {activeThread ? (
                       <strong>Ask the first research question</strong>
                     ) : (
                       <div className="chat-empty-project-row">
                         <strong>Start new research in</strong>
-                        <select
-                          id="empty-state-project-select"
-                          className="chat-empty-project-select"
-                          value={selectedProjectId ?? ""}
-                          onChange={(event) => setSelectedProjectId(event.target.value)}
-                        >
-                          {projects.map((project) => (
-                            <option key={project.project_id} value={project.project_id}>
-                              {project.name}
-                            </option>
-                          ))}
-                        </select>
+                        <span className="chat-empty-project-select-wrap">
+                          <select
+                            id="empty-state-project-select"
+                            className="chat-empty-project-select"
+                            value={selectedProjectId ?? ""}
+                            onChange={(event) => setSelectedProjectId(event.target.value)}
+                          >
+                            {projects.map((project) => (
+                              <option key={project.project_id} value={project.project_id}>
+                                {project.name}
+                              </option>
+                            ))}
+                          </select>
+                        </span>
                       </div>
                     )}
-                    <p>
-                      {activeThread
-                        ? "Compare papers, trace a topic, or extract the ideas that matter for the system you are building."
-                        : "Pick a project to open a fresh thread, or jump back into an existing session to keep the work moving."}
-                    </p>
+                    {composerStatus ? (
+                      <div className="composer-status inline">{composerStatus}</div>
+                    ) : null}
+                    {composerEditor}
                   </div>
                 </div>
               ) : (
@@ -2323,7 +2352,7 @@ export default function App() {
               )}
             </div>
 
-            <div className="chat-composer-fade" aria-hidden="true" />
+            {!isChatEmpty ? <div className="chat-composer-fade" aria-hidden="true" /> : null}
             {showScrollToLatest ? (
               <button
                 type="button"
@@ -2337,25 +2366,12 @@ export default function App() {
                 </svg>
               </button>
             ) : null}
-            {composerStatus ? <div className="composer-status">{composerStatus}</div> : null}
-            <LandingMentionEditor
-              attachButtonId="composer-upload-trigger"
-              disabled={Boolean(streamingThreadId)}
-              formId="composer-form"
-              inputId="composer-input"
-              onAttach={() => appUploadRef.current?.click()}
-              onChange={setComposerInput}
-              onSubmit={() => void handleComposerSubmit()}
-              placeholder="Ask about the latest agent and AI systems research. Type @ to tag a paper."
-              searchPapers={suggestBrowserPapers}
-              submitButtonId="composer-send"
-              submitLabel={streamingThreadId ? "Thinking..." : "Send"}
-              submitLoading={Boolean(streamingThreadId)}
-              submitOnEnter
-              suggestionsPlacement="above"
-              value={composerInput}
-              variant="chat"
-            />
+            {!isChatEmpty ? (
+              <>
+                {composerStatus ? <div className="composer-status">{composerStatus}</div> : null}
+                {composerEditor}
+              </>
+            ) : null}
             <input
               ref={appUploadRef}
               id="app-upload-file"
