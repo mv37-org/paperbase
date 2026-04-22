@@ -504,16 +504,10 @@ describe("App", () => {
     expect(screen.getByRole("tab", { name: "Sandbox" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "Version control" })).toBeTruthy();
     expect(screen.queryByRole("tab", { name: "Notifications" })).toBeNull();
-    expect(
-      screen.getAllByText(
-        "Add the Anthropic key Paperbase should use for model inference after the free responses run out.",
-      ),
-    ).toHaveLength(1);
+    expect(screen.getAllByText("Manage Anthropic inference API key.")).toHaveLength(1);
 
     fireEvent.click(screen.getByRole("tab", { name: "Sandbox" }));
-    expect(
-      screen.getAllByText("Add the Daytona API key Paperbase should use for sandbox execution."),
-    ).toHaveLength(1);
+    expect(screen.getAllByText("Manage Daytona sandbox API key.")).toHaveLength(1);
   });
 
   it("sets explicit autocomplete hints on auth and settings key inputs", async () => {

@@ -77,7 +77,7 @@ const AUTH_VIEW_COPY: Record<AuthView, { title: string; caption: string }> = {
   "reset-password": { title: "Reset password", caption: "Choose a new password for your account." },
   settings: {
     title: "Settings",
-    caption: "Manage inference, sandbox, and version control.",
+    caption: "Manage inference, sandbox, and repos.",
   },
 };
 
@@ -97,19 +97,17 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; caption: string }> 
   {
     id: "inference",
     label: "Inference",
-    caption:
-      "Add the Anthropic key Paperbase should use for model inference after the free responses run out.",
+    caption: "Manage Anthropic inference API key.",
   },
   {
     id: "sandbox",
     label: "Sandbox",
-    caption: "Add the Daytona API key Paperbase should use for sandbox execution.",
+    caption: "Manage Daytona sandbox API key.",
   },
   {
     id: "version-control",
     label: "Version control",
-    caption:
-      "Connect GitHub so Paperbase can create repositories, pull repositories, and push commits on your behalf.",
+    caption: "Manage GitHub connection for repositories.",
   },
 ];
 
@@ -2571,9 +2569,6 @@ export default function App() {
             ×
           </button>
           <div className="modal-heading">
-            {authView === "settings" ? (
-              <AppIcon src={staticAssetPath("settings.svg")} className="modal-heading-icon" />
-            ) : null}
             <div className="modal-heading-copy">
               <h2 id="auth-modal-title" className="modal-title">
                 {authCopy.title}

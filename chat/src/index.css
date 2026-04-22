@@ -2174,7 +2174,7 @@ textarea {
 }
 
 .settings-modal-panel {
-  width: min(532px, calc(100vw - 32px));
+  width: min(456px, calc(100vw - 32px));
   max-height: min(88vh, 760px);
   overflow: auto;
   padding: 18px 18px 20px;
@@ -2358,17 +2358,6 @@ textarea {
 .settings-modal-panel .modal-heading {
   margin-bottom: 16px;
   text-align: left;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.settings-modal-panel .modal-heading-icon {
-  margin: 0;
-  width: 18px;
-  height: 18px;
-  flex: 0 0 auto;
-  opacity: 0.72;
 }
 
 .settings-modal-panel .modal-heading-copy {
