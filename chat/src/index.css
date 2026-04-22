@@ -2424,15 +2424,17 @@ textarea {
 }
 
 .settings-footer-actions {
-  display: flex;
-  justify-content: flex-end;
-  margin-top: 4px;
+  display: block;
+  width: 100%;
+  margin-top: 15px;
 }
 
 .settings-submit-button {
   margin-top: 0 !important;
-  min-height: 28px;
-  padding: 6px 12px;
+  width: 100%;
+  min-height: 32px;
+  height: 32px;
+  padding: 0 12px;
   border-radius: 8px;
   font-size: 12px;
   line-height: 1;
@@ -2483,8 +2485,10 @@ textarea {
 .settings-connect-button {
   justify-content: center;
   margin-top: 0 !important;
-  min-height: 28px;
-  padding: 6px 12px;
+  width: 100%;
+  min-height: 32px;
+  height: 32px;
+  padding: 0 12px;
   border-radius: 8px;
   font-size: 12px;
   line-height: 1;
