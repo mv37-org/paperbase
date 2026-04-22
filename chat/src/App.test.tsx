@@ -285,4 +285,44 @@ describe("App", () => {
     });
     expect(apiMocks.sendThreadMessageStream).toHaveBeenCalledTimes(1);
   });
+
+  it("sets explicit autocomplete hints on auth and API key inputs", async () => {
+    apiMocks.loadSession.mockResolvedValue({
+      authenticated: false,
+      user: null,
+      remaining_free_responses: 3,
+      has_anthropic_api_key: false,
+      csrf_token: null,
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(apiMocks.loadSession).toHaveBeenCalledTimes(1);
+    });
+
+    expect(
+      document.querySelector("#login-form input[name='email']")?.getAttribute("autocomplete"),
+    ).toBe("email");
+    expect(
+      document.querySelector("#login-form input[name='password']")?.getAttribute("autocomplete"),
+    ).toBe("current-password");
+    expect(
+      document
+        .querySelector("#signup-form input[name='display_name']")
+        ?.getAttribute("autocomplete"),
+    ).toBe("name");
+    expect(
+      document.querySelector("#signup-form input[name='password']")?.getAttribute("autocomplete"),
+    ).toBe("new-password");
+    expect(
+      document.querySelector("#reset-form input[name='token']")?.getAttribute("autocomplete"),
+    ).toBe("one-time-code");
+    expect(
+      document.querySelector("#reset-form input[name='password']")?.getAttribute("autocomplete"),
+    ).toBe("new-password");
+    expect(
+      document.querySelector("#api-key-form input[name='api_key']")?.getAttribute("autocomplete"),
+    ).toBe("new-password");
+  });
 });

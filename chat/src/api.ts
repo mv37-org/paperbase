@@ -14,10 +14,11 @@ import type {
 
 const RAW_API_BASE =
   (window as typeof window & { PAPERBASE_BASE_URL?: string }).PAPERBASE_BASE_URL ?? "";
-const API_BASE =
+const CONFIGURED_API_BASE =
   RAW_API_BASE && !RAW_API_BASE.startsWith("__")
     ? RAW_API_BASE
     : ((import.meta.env.VITE_PAPERBASE_BASE_URL as string | undefined) ?? "");
+const API_BASE = resolveApiBase(CONFIGURED_API_BASE);
 
 let browserCsrfToken: string | null = null;
 
@@ -39,6 +40,29 @@ export class StreamingChatError extends Error {
     super(message);
     this.name = "StreamingChatError";
     this.canFallback = canFallback;
+  }
+}
+
+export function resolveApiBase(rawBase: string, currentPageUrl = window.location.href) {
+  if (!rawBase) {
+    return "";
+  }
+
+  try {
+    const currentPage = new URL(currentPageUrl);
+    const resolved = new URL(rawBase, currentPage.origin);
+    if (currentPage.protocol === "https:" && resolved.protocol === "http:") {
+      resolved.protocol = "https:";
+      if (resolved.port === "80") {
+        resolved.port = "";
+      }
+    }
+    return resolved.toString().replace(/\/+$/, "");
+  } catch {
+    if (currentPageUrl.startsWith("https://") && rawBase.startsWith("http://")) {
+      return `https://${rawBase.slice("http://".length)}`.replace(/\/+$/, "");
+    }
+    return rawBase.replace(/\/+$/, "");
   }
 }
 

@@ -420,6 +420,21 @@ def test_root_serves_built_chat_shell():
     assert "__PAPERBASE_BASE_URL__" not in response.text
 
 
+def test_root_uses_forwarded_https_base_url():
+    client = TestClient(app)
+
+    response = client.get(
+        "/",
+        headers={
+            "x-forwarded-proto": "https",
+            "x-forwarded-host": "paperbase-api.example.test",
+        },
+    )
+
+    assert response.status_code == 200
+    assert 'window.PAPERBASE_BASE_URL = "https://paperbase-api.example.test";' in response.text
+
+
 def test_static_chat_assets_are_served():
     client = TestClient(app)
 

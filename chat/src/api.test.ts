@@ -136,6 +136,20 @@ describe("chat api", () => {
     );
   });
 
+  it("upgrades insecure configured API bases when the page is HTTPS", async () => {
+    const api = await loadApiModule();
+
+    expect(
+      api.resolveApiBase(
+        "http://paperbase-api.example.test/",
+        "https://paperbase-api.example.test/login",
+      ),
+    ).toBe("https://paperbase-api.example.test");
+    expect(api.resolveApiBase("/api/", "https://paperbase-api.example.test/login")).toBe(
+      "https://paperbase-api.example.test/api",
+    );
+  });
+
   it("loads paper mention suggestions from the browser endpoint", async () => {
     const fetchMock = vi
       .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()

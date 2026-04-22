@@ -114,6 +114,44 @@ def _browser_session_token(request: Request) -> str | None:
     return request.cookies.get(settings.browser_session_cookie_name)
 
 
+def _forwarded_header_value(value: str | None) -> str | None:
+    if not value:
+        return None
+    first = value.split(",", 1)[0].strip().strip('"')
+    return first or None
+
+
+def _forwarded_header_param(value: str | None, key: str) -> str | None:
+    if not value:
+        return None
+    first = value.split(",", 1)[0]
+    for item in first.split(";"):
+        name, sep, raw_value = item.partition("=")
+        if sep and name.strip().lower() == key:
+            parsed = raw_value.strip().strip('"')
+            return parsed or None
+    return None
+
+
+def _public_base_url(request: Request) -> str:
+    forwarded = request.headers.get("forwarded")
+    proto = _forwarded_header_param(forwarded, "proto") or _forwarded_header_value(
+        request.headers.get("x-forwarded-proto")
+    )
+    host = (
+        _forwarded_header_param(forwarded, "host")
+        or _forwarded_header_value(request.headers.get("x-forwarded-host"))
+        or request.headers.get("host")
+        or urlsplit(str(request.base_url)).netloc
+    )
+    if not proto or not host:
+        return str(request.base_url).rstrip("/")
+    port = _forwarded_header_value(request.headers.get("x-forwarded-port"))
+    if port and ":" not in host and port not in {"80", "443"}:
+        host = f"{host}:{port}"
+    return f"{proto.lower()}://{host}".rstrip("/")
+
+
 def _is_safe_return_to(value: str | None) -> bool:
     if not value:
         return False
@@ -173,7 +211,7 @@ def home(request: Request) -> HTMLResponse:
     if not _STATIC_DIR.exists():
         return HTMLResponse("Chat frontend not built. Run `cd chat && vp build`.", status_code=503)
     html = (_STATIC_DIR / "index.html").read_text(encoding="utf-8")
-    api_base_url = str(request.base_url).rstrip("/")
+    api_base_url = _public_base_url(request)
     html = html.replace("__PAPERBASE_BASE_URL__", api_base_url)
     return HTMLResponse(html)
 
