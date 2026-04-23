@@ -17,8 +17,11 @@ import {
   getProjectRepoSync,
   getPythonFile,
   githubLoginUrl,
+  importProjectNotebook,
   getThread,
   googleLoginUrl,
+  loadGitHubRepoImportCandidates,
+  loadGitHubRepoMetadata,
   loadProjectItems,
   loadProjects,
   loadSession,
@@ -50,7 +53,10 @@ import type {
   ChatThreadSummary,
   FigureResponse,
   FileContentResponse,
+  GitHubRepoImportCandidate,
+  GitHubRepoMetadataResponse,
   PaperResponse,
+  ProjectFileKind,
   ProjectRepoConflictDetail,
   ProjectRepoConflictFile,
   ProjectRepoConflictResolution,
@@ -65,6 +71,7 @@ import type {
 
 const OPEN_TABS_KEY = "paperbase-open-tabs";
 const PENDING_PROMPT_KEY = "paperbase-pending-prompt";
+const RESUME_PROJECT_MODAL_KEY = "paperbase-resume-new-project";
 const SIDEBAR_COLLAPSED_KEY = "paperbase-sidebar-collapsed";
 const MAX_OPEN_TABS = 8;
 const MESSAGE_LIST_BOTTOM_THRESHOLD = 40;
@@ -307,8 +314,8 @@ function staticAssetPath(name: string) {
   return `${import.meta.env.BASE_URL}${name.replace(/^\/+/, "")}`;
 }
 
-function pythonRepoPathForFilename(filename: string) {
-  return `src/${filename}`;
+function pythonRepoPathForFile(file: Pick<PythonFileResponse, "filename" | "repo_path">) {
+  return file.repo_path || `src/${file.filename}`;
 }
 
 function pythonFilenameFromRepoPath(path: string) {
@@ -625,6 +632,8 @@ function projectItemFromThread(thread: ChatThreadResponse): ProjectItemSummary {
     file_id: null,
     last_message_preview: summary.last_message_preview,
     filename: "",
+    file_kind: "python",
+    repo_path: "",
   };
 }
 
@@ -640,6 +649,8 @@ function projectItemFromPythonFile(file: PythonFileResponse): ProjectItemSummary
     file_id: file.file_id,
     last_message_preview: "",
     filename: file.filename,
+    file_kind: file.file_kind ?? "python",
+    repo_path: file.repo_path ?? `src/${file.filename}`,
   };
 }
 
@@ -654,6 +665,10 @@ function upsertProjectItem(
 
 function displayPythonFilename(filename: string) {
   return filename.trim() || "something.py";
+}
+
+function projectFileKindLabel(fileKind: ProjectFileKind | undefined) {
+  return fileKind === "notebook" ? "Notebook" : "Python";
 }
 
 function GoogleButton() {
@@ -733,6 +748,19 @@ export default function App() {
   const [projectFormName, setProjectFormName] = useState("");
   const [projectFormDescription, setProjectFormDescription] = useState("");
   const [projectFormError, setProjectFormError] = useState("");
+  const [projectRepoMode, setProjectRepoMode] = useState<"create" | "existing">("create");
+  const [projectRepoOwner, setProjectRepoOwner] = useState("");
+  const [projectRepoName, setProjectRepoName] = useState("");
+  const [projectRepoBranch, setProjectRepoBranch] = useState("main");
+  const [projectRepoMetadata, setProjectRepoMetadata] = useState<GitHubRepoMetadataResponse | null>(
+    null,
+  );
+  const [projectRepoCandidates, setProjectRepoCandidates] = useState<GitHubRepoImportCandidate[]>(
+    [],
+  );
+  const [projectRepoSelectedPaths, setProjectRepoSelectedPaths] = useState<string[]>([]);
+  const [projectRepoLoading, setProjectRepoLoading] = useState(false);
+  const [projectRepoStatus, setProjectRepoStatus] = useState("");
   const [deleteModalState, setDeleteModalState] = useState<DeleteModalState>(null);
   const [saveModalState, setSaveModalState] = useState<SaveModalState>(null);
   const [syncConflictState, setSyncConflictState] = useState<SyncConflictState>(null);
@@ -753,6 +781,7 @@ export default function App() {
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [emptyStateProjectPickerOpen, setEmptyStateProjectPickerOpen] = useState(false);
   const [emptyStateProjectSearch, setEmptyStateProjectSearch] = useState("");
+  const notebookUploadInputRef = useRef<HTMLInputElement | null>(null);
   const [streamingThreadId, setStreamingThreadId] = useState<string | null>(null);
   const [threadStreamStates, setThreadStreamStates] = useState<Record<string, ThreadStreamState>>(
     {},
@@ -2201,6 +2230,18 @@ export default function App() {
       const nextSession = await loadSession();
       setSession(nextSession);
       setAuthReady(true);
+      if (
+        authStatus === "github_connected" &&
+        sessionStorage.getItem(RESUME_PROJECT_MODAL_KEY) === "1" &&
+        nextSession.settings?.has_github_connection
+      ) {
+        sessionStorage.removeItem(RESUME_PROJECT_MODAL_KEY);
+        setAuthModalOpen(false);
+        setProjectModalState({ mode: "create" });
+        setProjectRepoMode("create");
+        setProjectRepoOwner(nextSession.settings.github_login || "");
+        setProjectRepoBranch("main");
+      }
       if (nextSession.authenticated) {
         await bootstrapAuthenticatedUi();
       }
@@ -2426,10 +2467,19 @@ export default function App() {
     setProjectFormName("");
     setProjectFormDescription("");
     setProjectFormError("");
+    setProjectRepoMode("create");
+    setProjectRepoOwner(sessionSettings.github_login || "");
+    setProjectRepoName("");
+    setProjectRepoBranch("main");
+    setProjectRepoMetadata(null);
+    setProjectRepoCandidates([]);
+    setProjectRepoSelectedPaths([]);
+    setProjectRepoLoading(false);
+    setProjectRepoStatus("");
     setProjectMenuProjectId(null);
     setEmptyStateProjectPickerOpen(false);
     setEmptyStateProjectSearch("");
-  }, []);
+  }, [sessionSettings.github_login]);
 
   const openEditProjectModal = useCallback(
     (projectId: string) => {
@@ -2441,6 +2491,7 @@ export default function App() {
       setProjectFormName(project.name);
       setProjectFormDescription(project.description);
       setProjectFormError("");
+      setProjectRepoStatus("");
       setProjectMenuProjectId(null);
     },
     [projects],
@@ -2451,7 +2502,58 @@ export default function App() {
     setProjectFormName("");
     setProjectFormDescription("");
     setProjectFormError("");
+    setProjectRepoMode("create");
+    setProjectRepoOwner("");
+    setProjectRepoName("");
+    setProjectRepoBranch("main");
+    setProjectRepoMetadata(null);
+    setProjectRepoCandidates([]);
+    setProjectRepoSelectedPaths([]);
+    setProjectRepoLoading(false);
+    setProjectRepoStatus("");
   }, []);
+
+  const loadExistingProjectRepo = useCallback(
+    async (branchOverride?: string) => {
+      const owner = projectRepoOwner.trim();
+      const repo = projectRepoName.trim();
+      if (!owner || !repo) {
+        setProjectRepoStatus("Enter an owner and repository name.");
+        return;
+      }
+      setProjectRepoLoading(true);
+      setProjectRepoStatus("");
+      try {
+        const metadata = await loadGitHubRepoMetadata(owner, repo);
+        const selectedBranch =
+          branchOverride?.trim() || metadata.default_branch || projectRepoBranch.trim() || "main";
+        setProjectRepoMetadata(metadata);
+        setProjectRepoBranch(selectedBranch);
+        const candidates = await loadGitHubRepoImportCandidates(owner, repo, selectedBranch);
+        setProjectRepoCandidates(candidates.candidates);
+        setProjectRepoSelectedPaths((current) =>
+          current.filter((path) =>
+            candidates.candidates.some((candidate) => candidate.path === path),
+          ),
+        );
+        setProjectRepoStatus(
+          candidates.candidates.length
+            ? `${candidates.candidates.length} importable files found.`
+            : "No importable Python or notebook files found.",
+        );
+      } catch (error) {
+        setProjectRepoMetadata(null);
+        setProjectRepoCandidates([]);
+        setProjectRepoSelectedPaths([]);
+        setProjectRepoStatus(
+          error instanceof Error ? error.message : "Repository could not be loaded.",
+        );
+      } finally {
+        setProjectRepoLoading(false);
+      }
+    },
+    [projectRepoBranch, projectRepoName, projectRepoOwner],
+  );
 
   const submitProjectModal = useCallback(async () => {
     const name = projectFormName.trim();
@@ -2464,7 +2566,35 @@ export default function App() {
     }
     try {
       if (projectModalState.mode === "create") {
-        const project = await createProject(name, projectFormDescription.trim());
+        if (!sessionSettings.has_github_connection) {
+          setProjectFormError("Connect GitHub before creating a project.");
+          return;
+        }
+        const repoName = projectRepoName.trim();
+        if (!repoName) {
+          setProjectFormError("GitHub repository name is required.");
+          return;
+        }
+        const githubRepo =
+          projectRepoMode === "create"
+            ? {
+                mode: "create" as const,
+                name: repoName,
+                base_branch: "main",
+                import_paths: [],
+              }
+            : {
+                mode: "existing" as const,
+                owner: projectRepoOwner.trim(),
+                name: repoName,
+                base_branch: projectRepoBranch.trim(),
+                import_paths: projectRepoSelectedPaths,
+              };
+        if (githubRepo.mode === "existing" && (!githubRepo.owner || !githubRepo.base_branch)) {
+          setProjectFormError("Existing repositories require an owner and base branch.");
+          return;
+        }
+        const project = await createProject(name, projectFormDescription.trim(), githubRepo);
         await refreshProjects();
         setSelectedProjectId(project.project_id);
         setExpandedProjectIds((current) =>
@@ -2485,7 +2615,13 @@ export default function App() {
     projectFormDescription,
     projectFormName,
     projectModalState,
+    projectRepoBranch,
+    projectRepoMode,
+    projectRepoName,
+    projectRepoOwner,
+    projectRepoSelectedPaths,
     refreshProjects,
+    sessionSettings.has_github_connection,
   ]);
 
   const openDeleteProjectModal = useCallback((projectId: string, name: string) => {
@@ -2670,6 +2806,56 @@ export default function App() {
     upsertPythonFileIntoProjectItems,
   ]);
 
+  const handleImportNotebookUpload = useCallback(
+    async (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0] ?? null;
+      event.target.value = "";
+      if (!file) {
+        return;
+      }
+      if (!sessionSettings.has_github_connection) {
+        showErrorFlash("Connect GitHub before importing notebooks.");
+        openAuthModal("settings", "version-control");
+        return;
+      }
+      const projectId = selectedProjectIdRef.current ?? projectsRef.current[0]?.project_id;
+      if (!projectId) {
+        setComposerStatus("Create a project before importing a notebook.");
+        return;
+      }
+      try {
+        const imported = await importProjectNotebook(projectId, file);
+        setPythonFileMap((current) => ({ ...current, [imported.file_id]: imported }));
+        setPythonFileDrafts((current) => ({
+          ...current,
+          [imported.file_id]: { content: imported.content, dirty: false },
+        }));
+        setPythonFileRuns((current) => ({
+          ...current,
+          [imported.file_id]: { running: false, result: null, error: "" },
+        }));
+        upsertPythonFileIntoProjectItems(imported);
+        setOpenTabs((current) =>
+          appendOpenTab(current, { kind: "python_file", id: imported.file_id }),
+        );
+        setActiveTab({ kind: "python_file", id: imported.file_id });
+        setSelectedProjectId(imported.project_id);
+        await refreshProjects();
+      } catch (error) {
+        setComposerStatus(
+          error instanceof Error ? error.message : "Notebook could not be imported.",
+        );
+      }
+    },
+    [
+      openAuthModal,
+      refreshProjects,
+      sessionSettings.has_github_connection,
+      showErrorFlash,
+      upsertPythonFileIntoProjectItems,
+    ],
+  );
+
   const persistPythonFile = useCallback(
     async (fileId: string, content: string) => {
       const updated = await updatePythonFile(fileId, { content });
@@ -2700,9 +2886,7 @@ export default function App() {
           if (pythonFile.project_id !== projectId) {
             continue;
           }
-          const resolvedContent = resolutionsByPath.get(
-            pythonRepoPathForFilename(pythonFile.filename),
-          );
+          const resolvedContent = resolutionsByPath.get(pythonRepoPathForFile(pythonFile));
           if (resolvedContent == null || resolvedContent === pythonFile.content) {
             continue;
           }
@@ -2723,9 +2907,7 @@ export default function App() {
           if (!pythonFile || pythonFile.project_id !== projectId) {
             continue;
           }
-          const resolvedContent = resolutionsByPath.get(
-            pythonRepoPathForFilename(pythonFile.filename),
-          );
+          const resolvedContent = resolutionsByPath.get(pythonRepoPathForFile(pythonFile));
           if (resolvedContent == null) {
             continue;
           }
@@ -3491,7 +3673,11 @@ export default function App() {
                                       >
                                         <div className="thread-card-copy python-file-card-copy">
                                           <AppIcon
-                                            src={staticAssetPath("python.svg")}
+                                            src={staticAssetPath(
+                                              item.file_kind === "notebook"
+                                                ? "note.svg"
+                                                : "python.svg",
+                                            )}
                                             className="python-file-card-icon"
                                           />
                                           <strong className="thread-card-title">{title}</strong>
@@ -3900,6 +4086,16 @@ export default function App() {
                         </span>
                         <span className="chat-empty-action-label">Add python file</span>
                       </button>
+                      <button
+                        type="button"
+                        className="chat-empty-action-tag notes"
+                        onClick={() => notebookUploadInputRef.current?.click()}
+                      >
+                        <span className="chat-empty-action-icon" aria-hidden="true">
+                          <EmptyStateActionIcon asset="note.svg" />
+                        </span>
+                        <span className="chat-empty-action-label">Import notebook</span>
+                      </button>
                       <button type="button" className="chat-empty-action-tag notes">
                         <span className="chat-empty-action-icon" aria-hidden="true">
                           <EmptyStateActionIcon asset="note.svg" />
@@ -4101,6 +4297,14 @@ export default function App() {
               className="hidden-file-input"
               type="file"
               onChange={onUploadChange}
+            />
+            <input
+              ref={notebookUploadInputRef}
+              id="project-notebook-upload-file"
+              className="hidden-file-input"
+              type="file"
+              accept=".ipynb,application/x-ipynb+json,application/json"
+              onChange={handleImportNotebookUpload}
             />
           </section>
 
@@ -4490,7 +4694,165 @@ export default function App() {
                 onChange={(event) => setProjectFormDescription(event.target.value)}
                 rows={4}
               />
-              <button className="primary-button" type="submit">
+              {projectModalState?.mode === "create" ? (
+                sessionSettings.has_github_connection ? (
+                  <div className="project-repo-section">
+                    <div className="project-repo-mode" role="radiogroup" aria-label="GitHub repo">
+                      <button
+                        type="button"
+                        role="radio"
+                        aria-checked={projectRepoMode === "create"}
+                        className={`project-repo-mode-button${projectRepoMode === "create" ? " active" : ""}`}
+                        onClick={() => {
+                          setProjectRepoMode("create");
+                          setProjectRepoBranch("main");
+                          setProjectRepoCandidates([]);
+                          setProjectRepoSelectedPaths([]);
+                          setProjectRepoStatus("");
+                        }}
+                      >
+                        Create repo
+                      </button>
+                      <button
+                        type="button"
+                        role="radio"
+                        aria-checked={projectRepoMode === "existing"}
+                        className={`project-repo-mode-button${projectRepoMode === "existing" ? " active" : ""}`}
+                        onClick={() => {
+                          setProjectRepoMode("existing");
+                          setProjectRepoOwner(
+                            (current) => current || sessionSettings.github_login || "",
+                          );
+                        }}
+                      >
+                        Existing repo
+                      </button>
+                    </div>
+                    {projectRepoMode === "create" ? (
+                      <input
+                        id="project-repo-name-input"
+                        name="repo_name"
+                        type="text"
+                        placeholder="New GitHub repo name"
+                        value={projectRepoName}
+                        onChange={(event) => setProjectRepoName(event.target.value)}
+                        required
+                      />
+                    ) : (
+                      <div className="project-repo-existing">
+                        <div className="project-repo-row">
+                          <input
+                            id="project-repo-owner-input"
+                            name="repo_owner"
+                            type="text"
+                            placeholder="Owner"
+                            value={projectRepoOwner}
+                            onChange={(event) => {
+                              setProjectRepoOwner(event.target.value);
+                              setProjectRepoMetadata(null);
+                              setProjectRepoCandidates([]);
+                            }}
+                            required
+                          />
+                          <input
+                            id="project-repo-existing-name-input"
+                            name="repo_name"
+                            type="text"
+                            placeholder="Repository"
+                            value={projectRepoName}
+                            onChange={(event) => {
+                              setProjectRepoName(event.target.value);
+                              setProjectRepoMetadata(null);
+                              setProjectRepoCandidates([]);
+                            }}
+                            required
+                          />
+                        </div>
+                        <button
+                          className="secondary-button"
+                          type="button"
+                          onClick={() => void loadExistingProjectRepo()}
+                          disabled={projectRepoLoading}
+                        >
+                          {projectRepoLoading ? "Loading..." : "Load repo"}
+                        </button>
+                        {projectRepoMetadata ? (
+                          <select
+                            className="project-repo-branch-select"
+                            aria-label="Base branch"
+                            value={projectRepoBranch}
+                            onChange={(event) => {
+                              const nextBranch = event.target.value;
+                              setProjectRepoBranch(nextBranch);
+                              void loadExistingProjectRepo(nextBranch);
+                            }}
+                          >
+                            {projectRepoMetadata.branches.map((branch) => (
+                              <option key={branch.name} value={branch.name}>
+                                {branch.name}
+                                {branch.is_default ? " (default)" : ""}
+                              </option>
+                            ))}
+                          </select>
+                        ) : null}
+                        {projectRepoStatus ? (
+                          <div className="project-repo-status">{projectRepoStatus}</div>
+                        ) : null}
+                        {projectRepoCandidates.length > 0 ? (
+                          <div className="project-repo-import-list">
+                            {projectRepoCandidates.map((candidate) => {
+                              const selected = projectRepoSelectedPaths.includes(candidate.path);
+                              return (
+                                <label key={candidate.path} className="project-repo-import-item">
+                                  <input
+                                    type="checkbox"
+                                    checked={selected}
+                                    onChange={(event) => {
+                                      setProjectRepoSelectedPaths((current) =>
+                                        event.target.checked
+                                          ? [...new Set([...current, candidate.path])]
+                                          : current.filter((path) => path !== candidate.path),
+                                      );
+                                    }}
+                                  />
+                                  <span>{candidate.path}</span>
+                                  <em>{projectFileKindLabel(candidate.file_kind)}</em>
+                                </label>
+                              );
+                            })}
+                          </div>
+                        ) : null}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="project-repo-section">
+                    <button
+                      className="primary-button"
+                      type="button"
+                      disabled={!sessionSettings.github_oauth_available}
+                      onClick={() => {
+                        sessionStorage.setItem(RESUME_PROJECT_MODAL_KEY, "1");
+                        window.location.href = githubLoginUrl();
+                      }}
+                    >
+                      Connect GitHub account
+                    </button>
+                    {!sessionSettings.github_oauth_available ? (
+                      <div className="project-repo-status">
+                        GitHub OAuth is not configured in this environment yet.
+                      </div>
+                    ) : null}
+                  </div>
+                )
+              ) : null}
+              <button
+                className="primary-button"
+                type="submit"
+                disabled={
+                  projectModalState?.mode === "create" && !sessionSettings.has_github_connection
+                }
+              >
                 {projectModalState?.mode === "edit" ? "Save project" : "Create project"}
               </button>
             </form>

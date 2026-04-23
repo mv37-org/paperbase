@@ -48,6 +48,9 @@ const apiMocks = vi.hoisted(() => {
     getThread: vi.fn(),
     githubLoginUrl: vi.fn(() => "/v1/browser/auth/github/start"),
     googleLoginUrl: vi.fn(() => "/v1/browser/auth/google/start"),
+    importProjectNotebook: vi.fn(),
+    loadGitHubRepoImportCandidates: vi.fn(),
+    loadGitHubRepoMetadata: vi.fn(),
     loadProjectItems: vi.fn(),
     loadProjectSessions: vi.fn(),
     loadProjects: vi.fn(),
@@ -116,6 +119,9 @@ vi.mock("./api", () => ({
   getThread: apiMocks.getThread,
   githubLoginUrl: apiMocks.githubLoginUrl,
   googleLoginUrl: apiMocks.googleLoginUrl,
+  importProjectNotebook: apiMocks.importProjectNotebook,
+  loadGitHubRepoImportCandidates: apiMocks.loadGitHubRepoImportCandidates,
+  loadGitHubRepoMetadata: apiMocks.loadGitHubRepoMetadata,
   loadProjectItems: apiMocks.loadProjectItems,
   loadProjectSessions: apiMocks.loadProjectSessions,
   loadProjects: apiMocks.loadProjects,
@@ -265,6 +271,8 @@ function projectItemThread(threadId: string, title: string, projectId = "proj_1"
     file_id: null,
     last_message_preview: "Latest note",
     filename: "",
+    file_kind: "python",
+    repo_path: "",
   };
 }
 
@@ -278,6 +286,8 @@ function pythonFileResponse(
     file_id: fileId,
     project_id: projectId,
     filename,
+    file_kind: filename.endsWith(".ipynb") ? "notebook" : "python",
+    repo_path: filename.endsWith(".ipynb") ? `notebooks/${filename}` : `src/${filename}`,
     content,
     created_at: "2026-04-21T00:00:00Z",
     updated_at: "2026-04-21T00:00:00Z",
@@ -296,6 +306,8 @@ function projectItemFile(fileId: string, filename = "something.py", projectId = 
     file_id: fileId,
     last_message_preview: "",
     filename,
+    file_kind: filename.endsWith(".ipynb") ? "notebook" : "python",
+    repo_path: filename.endsWith(".ipynb") ? `notebooks/${filename}` : `src/${filename}`,
   };
 }
 
@@ -317,8 +329,10 @@ function repoSyncResponse(projectId = "proj_1", repoExists = false) {
   return {
     project_id: projectId,
     repo_exists: repoExists,
+    github_owner_login: repoExists ? "octocat" : "",
     github_repo_name: repoExists ? "paperbase-general-123abc" : "",
     github_repo_url: repoExists ? "https://github.com/octocat/paperbase-general-123abc" : "",
+    base_branch: "main",
     default_branch: "main",
     last_sync_commit_sha: repoExists ? "abc123" : "",
     last_sync_commit_url: repoExists
@@ -335,14 +349,17 @@ function repoConflictError(projectId = "proj_1") {
       message: "Resolve GitHub conflicts",
       project_id: projectId,
       repo_exists: true,
+      github_owner_login: "octocat",
       github_repo_name: "paperbase-general-123abc",
       github_repo_url: "https://github.com/octocat/paperbase-general-123abc",
+      base_branch: "main",
       default_branch: "main",
       base_commit_sha: "abc1234",
       remote_head_sha: "def5678",
       conflicts: [
         {
           path: "src/something.py",
+          file_kind: "python",
           base_content: "print('base')",
           local_content: "print('local')",
           remote_content: "print('remote')",
@@ -402,6 +419,17 @@ describe("App", () => {
     apiMocks.createPythonFile.mockResolvedValue(pythonFileResponse("file_1"));
     apiMocks.deleteProject.mockResolvedValue({ status: "deleted" });
     apiMocks.deleteThread.mockResolvedValue({ status: "deleted" });
+    apiMocks.importProjectNotebook.mockResolvedValue(
+      pythonFileResponse("file_2", "notebook.ipynb", "# %%\nprint('notebook')\n"),
+    );
+    apiMocks.loadGitHubRepoImportCandidates.mockResolvedValue({ candidates: [] });
+    apiMocks.loadGitHubRepoMetadata.mockResolvedValue({
+      owner: "octocat",
+      name: "existing-repo",
+      html_url: "https://github.com/octocat/existing-repo",
+      default_branch: "main",
+      branches: [{ name: "main", commit_sha: "abc123", is_default: true }],
+    });
     apiMocks.getProjectRepoSync.mockResolvedValue(repoSyncResponse());
     apiMocks.getPythonFile.mockResolvedValue(pythonFileResponse("file_1"));
     apiMocks.getThread.mockResolvedValue(threadResponse("thread_1", "Recovered thread"));
@@ -517,7 +545,9 @@ describe("App", () => {
   });
 
   it("creates a project from the sidebar modal", async () => {
-    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.loadSession.mockResolvedValue(
+      authenticatedSession({ settings: { has_github_connection: true, github_login: "octocat" } }),
+    );
     apiMocks.loadProjects
       .mockResolvedValueOnce({ projects: [projectSummary("proj_1", "General")] })
       .mockResolvedValueOnce({
@@ -538,12 +568,21 @@ describe("App", () => {
     fireEvent.change(screen.getByPlaceholderText("Description, goal, or custom instructions"), {
       target: { value: "Investigate reliable agent systems." },
     });
+    fireEvent.change(screen.getByPlaceholderText("New GitHub repo name"), {
+      target: { value: "agent-lab" },
+    });
     fireEvent.submit(document.querySelector("#project-modal form")!);
 
     await waitFor(() => {
       expect(apiMocks.createProject).toHaveBeenCalledWith(
         "Agents",
         "Investigate reliable agent systems.",
+        {
+          mode: "create",
+          name: "agent-lab",
+          base_branch: "main",
+          import_paths: [],
+        },
       );
     });
     await waitFor(() => {
@@ -592,7 +631,9 @@ describe("App", () => {
   });
 
   it("opens the new project modal from the empty-state project picker", async () => {
-    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.loadSession.mockResolvedValue(
+      authenticatedSession({ settings: { has_github_connection: true, github_login: "octocat" } }),
+    );
     apiMocks.loadProjects
       .mockResolvedValueOnce({
         projects: [projectSummary("proj_1", "General"), projectSummary("proj_2", "Agents", 0)],
@@ -631,12 +672,21 @@ describe("App", () => {
     fireEvent.change(screen.getByPlaceholderText("Description, goal, or custom instructions"), {
       target: { value: "Track benchmark runs and profiling." },
     });
+    fireEvent.change(screen.getByPlaceholderText("New GitHub repo name"), {
+      target: { value: "benchmarks" },
+    });
     fireEvent.submit(document.querySelector("#project-modal form")!);
 
     await waitFor(() => {
       expect(apiMocks.createProject).toHaveBeenCalledWith(
         "Benchmarks",
         "Track benchmark runs and profiling.",
+        {
+          mode: "create",
+          name: "benchmarks",
+          base_branch: "main",
+          import_paths: [],
+        },
       );
     });
     await waitFor(() => {
@@ -644,6 +694,122 @@ describe("App", () => {
         "Benchmarks",
       );
     });
+  });
+
+  it("blocks new project creation until GitHub is connected", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByLabelText("Create project"));
+
+    await waitFor(() => {
+      expect(screen.getByText("Connect GitHub account")).toBeTruthy();
+    });
+    expect(
+      (document.querySelector("#project-modal button[type='submit']") as HTMLButtonElement | null)
+        ?.disabled,
+    ).toBe(true);
+    expect(apiMocks.createProject).not.toHaveBeenCalled();
+  });
+
+  it("creates a project from an existing repo with branch and import selection", async () => {
+    apiMocks.loadSession.mockResolvedValue(
+      authenticatedSession({ settings: { has_github_connection: true, github_login: "octocat" } }),
+    );
+    apiMocks.loadGitHubRepoMetadata.mockResolvedValue({
+      owner: "octocat",
+      name: "existing-repo",
+      html_url: "https://github.com/octocat/existing-repo",
+      default_branch: "main",
+      branches: [
+        { name: "main", commit_sha: "abc123", is_default: true },
+        { name: "dev", commit_sha: "def456", is_default: false },
+      ],
+    });
+    apiMocks.loadGitHubRepoImportCandidates.mockResolvedValue({
+      owner: "octocat",
+      name: "existing-repo",
+      base_branch: "dev",
+      candidates: [
+        { path: "src/analysis.py", file_kind: "python", size: 18 },
+        { path: "notebooks/demo.ipynb", file_kind: "notebook", size: 128 },
+      ],
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByLabelText("Create project"));
+    fireEvent.change(screen.getByPlaceholderText("Project name"), {
+      target: { value: "Repo Import" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("Description, goal, or custom instructions"), {
+      target: { value: "Import selected files." },
+    });
+    fireEvent.click(screen.getByRole("radio", { name: "Existing repo" }));
+    fireEvent.change(screen.getByPlaceholderText("Repository"), {
+      target: { value: "existing-repo" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Load repo" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("notebooks/demo.ipynb")).toBeTruthy();
+    });
+
+    fireEvent.change(screen.getByLabelText("Base branch"), {
+      target: { value: "dev" },
+    });
+    const notebookCheckbox = screen
+      .getByText("notebooks/demo.ipynb")
+      .closest("label")
+      ?.querySelector("input");
+    expect(notebookCheckbox).toBeTruthy();
+    fireEvent.click(notebookCheckbox!);
+    fireEvent.submit(document.querySelector("#project-modal form")!);
+
+    await waitFor(() => {
+      expect(apiMocks.createProject).toHaveBeenCalledWith("Repo Import", "Import selected files.", {
+        mode: "existing",
+        owner: "octocat",
+        name: "existing-repo",
+        base_branch: "dev",
+        import_paths: ["notebooks/demo.ipynb"],
+      });
+    });
+  });
+
+  it("imports uploaded notebooks into the selected project", async () => {
+    apiMocks.loadSession.mockResolvedValue(
+      authenticatedSession({ settings: { has_github_connection: true, github_login: "octocat" } }),
+    );
+    apiMocks.importProjectNotebook.mockResolvedValue(
+      pythonFileResponse("file_2", "colab_export.ipynb", "# %%\nprint('colab')\n"),
+    );
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Start new research in")).toBeTruthy();
+    });
+
+    const input = document.querySelector("#project-notebook-upload-file") as HTMLInputElement;
+    const file = new File(['{"nbformat":4,"cells":[]}'], "colab_export.ipynb", {
+      type: "application/x-ipynb+json",
+    });
+    fireEvent.change(input, { target: { files: [file] } });
+
+    await waitFor(() => {
+      expect(apiMocks.importProjectNotebook).toHaveBeenCalledWith("proj_1", file);
+    });
+    expect(screen.getByText("colab_export.ipynb")).toBeTruthy();
   });
 
   it("does not create a duplicate empty chat for the same project", async () => {

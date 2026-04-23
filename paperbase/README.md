@@ -8,7 +8,10 @@ paper/chunk embedding rewrite after an embedding-model change.
 The browser backend now persists first-class projects in addition to chat sessions:
 
 - each browser user gets a default `General` project during initialization
+- user-created projects must be backed by a connected GitHub repository; the backend can create a private repo on `main` or validate an existing repo and selected branch
 - sessions belong to a project, and project session lists are paginated for the sidebar
 - project descriptions are copied onto new chat threads as snapped prompt context so existing chats stay stable when a project is edited later
+- project files store their repo path and kind (`python` or `notebook`), with notebooks converted through Jupytext for Python-source editing and regenerated to `.ipynb` during repo sync
+- repo sync overlays only paths tracked in `.paperbase`, so unrelated existing-repo content is preserved
 
 Use the repo-root [README](../README.md) for setup, env, and supported commands.

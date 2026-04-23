@@ -11,6 +11,7 @@ fastapi>=0.115
 google-cloud-storage>=2.18
 google-genai>=0.3
 itsdangerous>=2.2
+jupytext>=1.17
 pgvector>=0.3
 psycopg[binary]>=3.2
 pydantic>=2.8

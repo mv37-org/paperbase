@@ -322,7 +322,13 @@ describe("chat api", () => {
     const api = await loadApiModule();
 
     const projects = await api.loadProjects();
-    const created = await api.createProject("Agents", "Agent eval work");
+    const githubRepo = {
+      mode: "create" as const,
+      name: "agent-evals",
+      base_branch: "main",
+      import_paths: [],
+    };
+    const created = await api.createProject("Agents", "Agent eval work", githubRepo);
     await api.deleteProject("proj_2");
 
     const [loadPath] = fetchMock.mock.calls[0] as FetchCall;
@@ -330,6 +336,9 @@ describe("chat api", () => {
     expect(requestPath(loadPath)).toBe("/v1/browser/projects");
     expect(requestPath(createPath)).toBe("/v1/browser/projects");
     expect(createInit?.method).toBe("POST");
+    expect(createInit?.body).toBe(
+      JSON.stringify({ name: "Agents", description: "Agent eval work", github_repo: githubRepo }),
+    );
     expect(projects.projects[0]?.project_id).toBe("proj_1");
     expect(created.project_id).toBe("proj_2");
   });

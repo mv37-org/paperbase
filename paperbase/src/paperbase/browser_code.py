@@ -10,6 +10,7 @@ import tempfile
 from threading import Lock
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import quote
 
 import requests
 
@@ -33,6 +34,20 @@ class GitHubRepoInfo:
     repo_name: str
     repo_url: str
     default_branch: str = "main"
+    owner_login: str = ""
+
+
+@dataclass(slots=True)
+class GitHubRepoBranch:
+    name: str
+    commit_sha: str = ""
+
+
+@dataclass(slots=True)
+class GitHubRepoFileCandidate:
+    path: str
+    file_kind: str
+    size: int = 0
 
 
 @dataclass(slots=True)
@@ -161,11 +176,148 @@ class GitHubProjectRepoManager:
                 detail = response.text.strip()
             raise GitHubSyncError(detail or "GitHub repository metadata could not be loaded.")
         payload = response.json()
+        owner = payload.get("owner") if isinstance(payload.get("owner"), dict) else {}
         return GitHubRepoInfo(
+            owner_login=str(owner.get("login") or owner_login),
             repo_name=str(payload.get("name") or repo_name),
             repo_url=str(payload.get("html_url") or ""),
             default_branch=str(payload.get("default_branch") or "main"),
         )
+
+    def list_branches(
+        self,
+        *,
+        access_token: str,
+        owner_login: str,
+        repo_name: str,
+    ) -> list[GitHubRepoBranch]:
+        response = self._request(
+            "GET",
+            f"/repos/{owner_login}/{repo_name}/branches?per_page=100",
+            access_token=access_token,
+            ok_statuses={200},
+        )
+        branches = []
+        for item in response.json() or []:
+            commit = item.get("commit") if isinstance(item.get("commit"), dict) else {}
+            branches.append(
+                GitHubRepoBranch(
+                    name=str(item.get("name") or ""),
+                    commit_sha=str(commit.get("sha") or ""),
+                )
+            )
+        return [branch for branch in branches if branch.name]
+
+    def get_branch_head(
+        self,
+        *,
+        access_token: str,
+        owner_login: str,
+        repo_name: str,
+        branch: str,
+    ) -> str:
+        encoded_branch = quote(branch, safe="")
+        response = self._request(
+            "GET",
+            f"/repos/{owner_login}/{repo_name}/branches/{encoded_branch}",
+            access_token=access_token,
+            ok_statuses={200},
+        )
+        payload = response.json() or {}
+        commit = payload.get("commit") if isinstance(payload.get("commit"), dict) else {}
+        return str(commit.get("sha") or "")
+
+    def list_importable_files(
+        self,
+        *,
+        access_token: str,
+        owner_login: str,
+        repo_name: str,
+        branch: str,
+    ) -> list[GitHubRepoFileCandidate]:
+        encoded_branch = quote(branch, safe="")
+        response = self._request(
+            "GET",
+            f"/repos/{owner_login}/{repo_name}/git/trees/{encoded_branch}?recursive=1",
+            access_token=access_token,
+            ok_statuses={200},
+        )
+        candidates: list[GitHubRepoFileCandidate] = []
+        for item in (response.json() or {}).get("tree") or []:
+            if item.get("type") != "blob":
+                continue
+            path = str(item.get("path") or "")
+            lower_path = path.lower()
+            if lower_path.endswith(".py"):
+                candidates.append(
+                    GitHubRepoFileCandidate(path=path, file_kind="python", size=int(item.get("size") or 0))
+                )
+            elif lower_path.endswith(".ipynb"):
+                candidates.append(
+                    GitHubRepoFileCandidate(path=path, file_kind="notebook", size=int(item.get("size") or 0))
+                )
+        return candidates
+
+    def get_file_text(
+        self,
+        *,
+        access_token: str,
+        owner_login: str,
+        repo_name: str,
+        path: str,
+        ref: str,
+    ) -> str:
+        encoded_path = quote(path, safe="/")
+        encoded_ref = quote(ref, safe="")
+        response = self._request(
+            "GET",
+            f"/repos/{owner_login}/{repo_name}/contents/{encoded_path}?ref={encoded_ref}",
+            access_token=access_token,
+            ok_statuses={200},
+        )
+        payload = response.json() or {}
+        if payload.get("type") != "file":
+            raise GitHubSyncError(f"GitHub path '{path}' is not a file.")
+        raw_content = str(payload.get("content") or "")
+        encoding = str(payload.get("encoding") or "")
+        if encoding != "base64":
+            raise GitHubSyncError(f"GitHub path '{path}' uses unsupported encoding.")
+        return base64.b64decode(raw_content.encode("ascii")).decode("utf-8")
+
+    def create_repo(
+        self,
+        *,
+        access_token: str,
+        owner_login: str,
+        repo_name: str,
+        description: str,
+    ) -> GitHubRepoInfo:
+        response = self._session.post(
+            f"{self.api_base_url}/user/repos",
+            headers=self._headers(access_token),
+            json={
+                "name": repo_name,
+                "description": description,
+                "private": True,
+                "auto_init": False,
+            },
+            timeout=self.timeout_seconds,
+        )
+        if response.status_code == 201:
+            payload = response.json()
+            owner = payload.get("owner") if isinstance(payload.get("owner"), dict) else {}
+            return GitHubRepoInfo(
+                owner_login=str(owner.get("login") or owner_login),
+                repo_name=str(payload.get("name") or repo_name),
+                repo_url=str(payload.get("html_url") or ""),
+                default_branch=str(payload.get("default_branch") or "main"),
+            )
+        detail = ""
+        try:
+            detail = str((response.json() or {}).get("message") or "").strip()
+        except Exception:
+            detail = response.text.strip()
+        raise GitHubSyncError(detail or "Paperbase could not create the project repository on GitHub.")
 
     def ensure_repo(
         self,
@@ -193,7 +345,9 @@ class GitHubProjectRepoManager:
         )
         if response.status_code == 201:
             payload = response.json()
+            owner = payload.get("owner") if isinstance(payload.get("owner"), dict) else {}
             return GitHubRepoInfo(
+                owner_login=str(owner.get("login") or owner_login),
                 repo_name=str(payload.get("name") or repo_name),
                 repo_url=str(payload.get("html_url") or ""),
                 default_branch="main",
@@ -227,6 +381,7 @@ class GitHubProjectRepoManager:
         author_email: str,
         base_commit_sha: str | None = None,
         expected_remote_head_sha: str | None = None,
+        previous_managed_paths: set[str] | None = None,
     ) -> GitHubCommitInfo:
         remote_url = f"https://github.com/{owner_login}/{repo_name}.git"
         auth = base64.b64encode(f"x-access-token:{access_token}".encode("utf-8")).decode("ascii")
@@ -338,16 +493,21 @@ class GitHubProjectRepoManager:
                         checkout.stderr.strip() or "GitHub repository checkout could not be prepared."
                     )
             else:
-                run_git("checkout", "-B", default_branch, cwd=tempdir)
+                run_git("checkout", "-B", "paperbase-local", cwd=tempdir)
                 effective_base_commit = base_commit_sha or ""
 
-            for child in worktree.iterdir():
-                if child.name == ".git":
+            previous_managed_paths = previous_managed_paths or set()
+            for relative_path in sorted(previous_managed_paths - set(files)):
+                if not relative_path or relative_path == ".git" or ".." in Path(relative_path).parts:
                     continue
-                if child.is_dir():
-                    shutil.rmtree(child)
-                else:
-                    child.unlink()
+                target = worktree / relative_path
+                try:
+                    if target.is_dir():
+                        shutil.rmtree(target)
+                    elif target.exists():
+                        target.unlink()
+                except FileNotFoundError:
+                    continue
 
             for relative_path, content in sorted(files.items()):
                 target = worktree / relative_path

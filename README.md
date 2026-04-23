@@ -91,13 +91,16 @@ The repo has four moving pieces:
 The browser chat experience is project-based:
 
 - projects are persisted in the backend and own chat sessions
-- the sidebar lazily loads mixed project items per project, so chats and Python files appear together
+- creating a new project requires a connected GitHub account and either an existing accessible repo/branch or a new private repo created under the connected user
+- existing repos expose a branch picker and optional import selection for `.py` and `.ipynb` files; new repos start on `main`
+- the sidebar lazily loads mixed project items per project, so chats, Python files, and imported notebooks appear together
 - project descriptions are snapped onto new sessions as per-session prompt context, so later project edits do not rewrite existing chats
-- Python files are project-scoped tabs backed by Monaco in a high-contrast editor view
+- Python and notebook files are project-scoped tabs backed by Monaco in a high-contrast Python editor view
+- notebooks are converted with Jupytext to `py:percent` source for editing/running, then regenerated back to `.ipynb` when saved to GitHub
 - signed-in pages support a persisted appearance setting, so the sidebar, chat shell, markdown surfaces, drawers, and modals can switch between light and dark mode without affecting the public landing page
-- creating or saving a Python file requires a connected GitHub account with repo access
+- creating, importing, or saving project files requires a connected GitHub account with repo access
 - `Save` creates a single Paperbase-managed GitHub commit for the current project, and `Run` saves first, then executes the saved file through the user’s Modal sandbox credentials
-- project repos are written with `/src` for Python files, `/notes` reserved for notes, and a root `.paperbase` metadata file
+- project sync writes only Paperbase-managed paths tracked in `.paperbase`, preserving unrelated files in existing repositories
 - if GitHub has moved ahead since the last project save, Paperbase opens a Monaco conflict-resolution flow before creating the next commit
 
 `make dev` runs all of these locally:

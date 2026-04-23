@@ -19,6 +19,7 @@ dependencies = [
     "google-cloud-storage>=2.18",
     "google-genai>=0.3",
     "itsdangerous>=2.2",
+    "jupytext>=1.17",
     "pgvector>=0.3",
     "pypdfium2>=4.30",
     "python-multipart>=0.0.20",

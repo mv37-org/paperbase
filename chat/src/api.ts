@@ -3,8 +3,11 @@ import type {
   ChatStreamEventMap,
   ChatThreadListResponse,
   ChatThreadResponse,
+  CreateProjectGitHubRepoPayload,
   FigureResponse,
   FileContentResponse,
+  GitHubRepoImportCandidateResponse,
+  GitHubRepoMetadataResponse,
   MentionSuggestionResult,
   PaperResponse,
   ProjectItemPageResponse,
@@ -282,10 +285,29 @@ export function loadProjects() {
   return api<ProjectListResponse>("/v1/browser/projects", { method: "GET" });
 }
 
-export function createProject(name: string, description = "") {
+export function loadGitHubRepoMetadata(owner: string, repo: string) {
+  return api<GitHubRepoMetadataResponse>(
+    `/v1/browser/github/repositories/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`,
+    { method: "GET" },
+  );
+}
+
+export function loadGitHubRepoImportCandidates(owner: string, repo: string, branch: string) {
+  const params = new URLSearchParams({ branch });
+  return api<GitHubRepoImportCandidateResponse>(
+    `/v1/browser/github/repositories/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/import-candidates?${params.toString()}`,
+    { method: "GET" },
+  );
+}
+
+export function createProject(
+  name: string,
+  description: string,
+  githubRepo: CreateProjectGitHubRepoPayload,
+) {
   return api<ProjectResponse>("/v1/browser/projects", {
     method: "POST",
-    body: JSON.stringify({ name, description }),
+    body: JSON.stringify({ name, description, github_repo: githubRepo }),
   });
 }
 
@@ -325,6 +347,15 @@ export function loadProjectItems(projectId: string, limit = 25, offset = 0) {
 export function createPythonFile(projectId: string) {
   return api<PythonFileResponse>(`/v1/browser/projects/${projectId}/python-files`, {
     method: "POST",
+  });
+}
+
+export function importProjectNotebook(projectId: string, file: File) {
+  const formData = new FormData();
+  formData.append("file", file);
+  return api<PythonFileResponse>(`/v1/browser/projects/${projectId}/notebooks`, {
+    method: "POST",
+    body: formData,
   });
 }
 

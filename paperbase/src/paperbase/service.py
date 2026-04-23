@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from dataclasses import field
 from datetime import timedelta
 from functools import lru_cache
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from fastapi import HTTPException
@@ -59,6 +59,10 @@ from .models import (
     PaperMetadata,
     PaperPreviewResponse,
     PaperResponse,
+    GitHubRepoBranchSummary,
+    GitHubRepoImportCandidate,
+    GitHubRepoImportCandidateResponse,
+    GitHubRepoMetadataResponse,
     ProjectItemPageResponse,
     ProjectRepoConflictDetail,
     ProjectRepoConflictFile,
@@ -137,6 +141,8 @@ _FORCE_TOOL_QUERY_RE = re.compile(
 
 _INLINE_SOURCE_ID_RE = re.compile(r"\[(S\d+)\]")
 _PYTHON_FILENAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_GITHUB_REPO_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+_MAX_REPO_IMPORT_BYTES = 1_000_000
 
 
 def _query_signals_recency(query: str) -> bool:
@@ -179,6 +185,85 @@ def _normalize_python_filename(raw_filename: str) -> str:
 def _github_scope_allows_repo_write(scope: str) -> bool:
     values = {part.strip() for part in (scope or "").split(",") if part.strip()}
     return "repo" in values or "public_repo" in values
+
+
+def _validate_repo_name(value: str) -> str:
+    repo_name = (value or "").strip()
+    if not repo_name or "/" in repo_name or "\\" in repo_name or repo_name in {".", ".."}:
+        raise HTTPException(status_code=422, detail="Use a valid GitHub repository name")
+    if not _GITHUB_REPO_NAME_RE.fullmatch(repo_name):
+        raise HTTPException(status_code=422, detail="Use a valid GitHub repository name")
+    return repo_name
+
+
+def _normalize_repo_path(value: str) -> str:
+    path = (value or "").strip()
+    if not path or "\\" in path:
+        raise HTTPException(status_code=422, detail="Use a valid repository path")
+    parsed = PurePosixPath(path)
+    if parsed.is_absolute() or any(part in {"", ".", "..", ".git"} for part in parsed.parts):
+        raise HTTPException(status_code=422, detail="Use a valid repository path")
+    return parsed.as_posix()
+
+
+def _file_kind_for_repo_path(path: str) -> str:
+    lower_path = path.lower()
+    if lower_path.endswith(".py"):
+        return "python"
+    if lower_path.endswith(".ipynb"):
+        return "notebook"
+    raise HTTPException(status_code=422, detail=f"Repository path '{path}' is not importable")
+
+
+def _notebook_to_python_source(raw_notebook: str) -> str:
+    try:
+        import jupytext
+
+        notebook = jupytext.reads(raw_notebook, fmt="ipynb")
+        return jupytext.writes(notebook, fmt="py:percent")
+    except ImportError as exc:
+        raise HTTPException(status_code=500, detail="Jupytext is not installed. Run setup again.") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="Notebook could not be converted to Python") from exc
+
+
+def _python_source_to_notebook(raw_python: str) -> str:
+    try:
+        import jupytext
+
+        notebook = jupytext.reads(raw_python, fmt="py:percent")
+        return jupytext.writes(notebook, fmt="ipynb")
+    except ImportError as exc:
+        raise HTTPException(status_code=500, detail="Jupytext is not installed. Run setup again.") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="Notebook could not be converted from Python") from exc
+
+
+def _notebook_to_python_source_or_raw(raw_notebook: str) -> str:
+    if not raw_notebook:
+        return ""
+    try:
+        return _notebook_to_python_source(raw_notebook)
+    except HTTPException:
+        return raw_notebook
+
+
+def _managed_paths_from_manifest_content(content: str) -> set[str]:
+    try:
+        payload = json.loads(content)
+    except Exception:
+        return set()
+    paths = payload.get("managed_paths") if isinstance(payload, dict) else None
+    if not isinstance(paths, list):
+        return set()
+    normalized = set()
+    for path in paths:
+        if isinstance(path, str):
+            try:
+                normalized.add(_normalize_repo_path(path))
+            except HTTPException:
+                continue
+    return normalized
 
 
 def _stride_chunks(text: str, *, max_chars: int, overlap: int) -> list[str]:
@@ -1025,12 +1110,12 @@ class PaperbaseService:
         if record is None:
             raise HTTPException(
                 status_code=409,
-                detail="Connect GitHub before creating or saving Python files",
+                detail="Connect GitHub before creating or saving project files",
             )
         if not _github_scope_allows_repo_write(record.get("scope", "")):
             raise HTTPException(
                 status_code=409,
-                detail="Reconnect GitHub with repo access before creating or saving Python files",
+                detail="Reconnect GitHub with repo access before creating or saving project files",
             )
         return record
 
@@ -1113,15 +1198,199 @@ class PaperbaseService:
         self.repository.ensure_default_project(user.user_id)  # type: ignore[attr-defined]
         return ProjectListResponse(projects=self.repository.list_projects(user.user_id))  # type: ignore[attr-defined]
 
+    def _github_access(self, user: BrowserUser) -> tuple[dict[str, str], str]:
+        github = self._get_github_connection(user)
+        return github, self.secret_cipher.decrypt(github["encrypted_access_token"])
+
+    def get_github_repo_metadata(
+        self,
+        user: BrowserUser,
+        *,
+        owner: str,
+        repo: str,
+    ) -> GitHubRepoMetadataResponse:
+        github, access_token = self._github_access(user)
+        owner_login = (owner or github["github_login"]).strip()
+        repo_name = _validate_repo_name(repo)
+        try:
+            repo_info = self.github_repo_manager.get_repo(
+                access_token=access_token,
+                owner_login=owner_login,
+                repo_name=repo_name,
+            )
+            if repo_info is None:
+                raise HTTPException(status_code=404, detail="GitHub repository not found")
+            branches = self.github_repo_manager.list_branches(
+                access_token=access_token,
+                owner_login=owner_login,
+                repo_name=repo_name,
+            )
+        except GitHubSyncError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return GitHubRepoMetadataResponse(
+            owner=repo_info.owner_login or owner_login,
+            name=repo_info.repo_name,
+            html_url=repo_info.repo_url,
+            default_branch=repo_info.default_branch or "main",
+            branches=[
+                GitHubRepoBranchSummary(
+                    name=branch.name,
+                    is_default=branch.name == (repo_info.default_branch or "main"),
+                )
+                for branch in branches
+            ],
+        )
+
+    def list_github_repo_import_candidates(
+        self,
+        user: BrowserUser,
+        *,
+        owner: str,
+        repo: str,
+        branch: str,
+    ) -> GitHubRepoImportCandidateResponse:
+        github, access_token = self._github_access(user)
+        owner_login = (owner or github["github_login"]).strip()
+        repo_name = _validate_repo_name(repo)
+        base_branch = (branch or "").strip()
+        if not base_branch:
+            raise HTTPException(status_code=422, detail="Base branch is required")
+        try:
+            candidates = self.github_repo_manager.list_importable_files(
+                access_token=access_token,
+                owner_login=owner_login,
+                repo_name=repo_name,
+                branch=base_branch,
+            )
+        except GitHubSyncError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return GitHubRepoImportCandidateResponse(
+            owner=owner_login,
+            name=repo_name,
+            base_branch=base_branch,
+            candidates=[
+                GitHubRepoImportCandidate(
+                    path=candidate.path,
+                    file_kind=candidate.file_kind,  # type: ignore[arg-type]
+                    size=candidate.size,
+                )
+                for candidate in candidates
+            ],
+        )
+
     def create_project(self, user: BrowserUser, request: CreateProjectRequest) -> ProjectResponse:
         name = request.name.strip()
         if not name:
             raise HTTPException(status_code=422, detail="Project name is required")
-        return self.repository.create_project(  # type: ignore[attr-defined]
+        if request.github_repo is None:
+            raise HTTPException(status_code=422, detail="GitHub repository information is required")
+        github, access_token = self._github_access(user)
+        repo_request = request.github_repo
+        import_rows: list[tuple[str, str, str, str]] = []
+        remote_head_sha = ""
+        base_branch = "main"
+        try:
+            if repo_request.mode == "create":
+                repo_name = _validate_repo_name(repo_request.name)
+                repo_info = self.github_repo_manager.create_repo(
+                    access_token=access_token,
+                    owner_login=github["github_login"],
+                    repo_name=repo_name,
+                    description=f"Paperbase project: {name}",
+                )
+                owner_login = repo_info.owner_login or github["github_login"]
+                default_branch = "main"
+                base_branch = "main"
+            else:
+                owner_login = (repo_request.owner or "").strip()
+                if not owner_login:
+                    raise HTTPException(status_code=422, detail="GitHub repository owner is required")
+                repo_name = _validate_repo_name(repo_request.name)
+                repo_info = self.github_repo_manager.get_repo(
+                    access_token=access_token,
+                    owner_login=owner_login,
+                    repo_name=repo_name,
+                )
+                if repo_info is None:
+                    raise HTTPException(status_code=404, detail="GitHub repository not found")
+                owner_login = repo_info.owner_login or owner_login
+                default_branch = repo_info.default_branch or "main"
+                base_branch = (repo_request.base_branch or default_branch).strip()
+                if not base_branch:
+                    raise HTTPException(status_code=422, detail="Base branch is required")
+                branches = self.github_repo_manager.list_branches(
+                    access_token=access_token,
+                    owner_login=owner_login,
+                    repo_name=repo_name,
+                )
+                if base_branch not in {branch.name for branch in branches}:
+                    raise HTTPException(status_code=422, detail="Selected base branch does not exist")
+                remote_head_sha = self.github_repo_manager.get_branch_head(
+                    access_token=access_token,
+                    owner_login=owner_login,
+                    repo_name=repo_name,
+                    branch=base_branch,
+                )
+                candidate_map = {
+                    candidate.path: candidate
+                    for candidate in self.github_repo_manager.list_importable_files(
+                        access_token=access_token,
+                        owner_login=owner_login,
+                        repo_name=repo_name,
+                        branch=base_branch,
+                    )
+                }
+                for raw_path in repo_request.import_paths:
+                    path = _normalize_repo_path(raw_path)
+                    candidate = candidate_map.get(path)
+                    if candidate is None:
+                        raise HTTPException(status_code=422, detail=f"Repository path '{path}' is not importable")
+                    if candidate.size > _MAX_REPO_IMPORT_BYTES:
+                        raise HTTPException(status_code=422, detail=f"Repository path '{path}' is too large to import")
+                    raw_content = self.github_repo_manager.get_file_text(
+                        access_token=access_token,
+                        owner_login=owner_login,
+                        repo_name=repo_name,
+                        path=path,
+                        ref=base_branch,
+                    )
+                    file_kind = _file_kind_for_repo_path(path)
+                    content = _notebook_to_python_source(raw_content) if file_kind == "notebook" else raw_content
+                    import_rows.append((Path(path).name, file_kind, path, content))
+        except GitHubSyncError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+        project = self.repository.create_project(  # type: ignore[attr-defined]
             user_id=user.user_id,
             name=name,
             description=request.description.strip(),
         )
+        saved = self.repository.save_project_repo_sync(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project.project_id,
+            github_owner_login=owner_login,
+            github_repo_name=repo_info.repo_name,
+            github_repo_url=repo_info.repo_url,
+            base_branch=base_branch,
+            default_branch=default_branch,
+            last_sync_commit_sha=remote_head_sha,
+            last_sync_commit_url=f"{repo_info.repo_url}/commit/{remote_head_sha}" if remote_head_sha else "",
+            last_synced_at=None,
+        )
+        if saved is None:
+            raise HTTPException(status_code=500, detail="Project repository metadata could not be saved")
+        for filename, file_kind, repo_path, content in import_rows:
+            imported = self.repository.create_python_file(  # type: ignore[attr-defined]
+                user_id=user.user_id,
+                project_id=project.project_id,
+                filename=filename,
+                file_kind=file_kind,
+                repo_path=repo_path,
+                content=content,
+            )
+            if imported is None:
+                raise HTTPException(status_code=500, detail=f"Repository path '{repo_path}' could not be imported")
+        return project
 
     def update_project(self, user: BrowserUser, project_id: str, request: UpdateProjectRequest) -> ProjectResponse:
         name = request.name.strip()
@@ -1198,6 +1467,40 @@ class PaperbaseService:
             raise HTTPException(status_code=500, detail="Python file could not be created")
         return created
 
+    def import_project_notebook_upload(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        *,
+        filename: str,
+        data: bytes,
+    ) -> PythonFileResponse:
+        self._get_github_connection(user)
+        project = self.repository.get_project(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        basename = Path(filename).name
+        if not basename.lower().endswith(".ipynb"):
+            raise HTTPException(status_code=422, detail="Upload an .ipynb notebook")
+        if len(data) > _MAX_REPO_IMPORT_BYTES:
+            raise HTTPException(status_code=422, detail="Notebook is too large to import")
+        try:
+            raw_notebook = data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise HTTPException(status_code=422, detail="Notebook must be UTF-8 encoded") from exc
+        content = _notebook_to_python_source(raw_notebook)
+        created = self.repository.create_python_file(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+            filename=basename,
+            file_kind="notebook",
+            repo_path=f"notebooks/{basename}",
+            content=content,
+        )
+        if created is None:
+            raise HTTPException(status_code=500, detail="Notebook could not be imported")
+        return created
+
     def get_python_file(self, user: BrowserUser, file_id: str) -> PythonFileResponse:
         python_file = self.repository.get_python_file(user_id=user.user_id, file_id=file_id)  # type: ignore[attr-defined]
         if python_file is None:
@@ -1248,44 +1551,42 @@ class PaperbaseService:
         project = self.repository.get_project(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
         if project is None:
             raise HTTPException(status_code=404, detail="Project not found")
-        python_files = self.repository.list_project_python_files(  # type: ignore[attr-defined]
+        project_files = self.repository.list_project_python_files(  # type: ignore[attr-defined]
             user_id=user.user_id,
             project_id=project_id,
         )
-        if python_files is None:
+        if project_files is None:
             raise HTTPException(status_code=404, detail="Project not found")
         sync = self.repository.get_project_repo_sync(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
         try:
             access_token = self.secret_cipher.decrypt(github["encrypted_access_token"])
-            python_files_by_name = {python_file.filename: python_file for python_file in python_files}
+            project_files_by_path = {
+                _normalize_repo_path(project_file.repo_path or f"src/{project_file.filename}"): project_file
+                for project_file in project_files
+            }
             for resolution in request.conflict_resolutions:
                 path = resolution.path.strip()
-                if path in {".paperbase", "notes/.gitkeep"}:
+                if path == ".paperbase":
                     continue
-                if not path.startswith("src/"):
+                path = _normalize_repo_path(path)
+                project_file = project_files_by_path.get(path)
+                if project_file is None:
                     raise HTTPException(
                         status_code=422,
-                        detail=f"Conflict path '{path}' cannot be resolved by Paperbase.",
-                    )
-                filename = path.removeprefix("src/")
-                python_file = python_files_by_name.get(filename)
-                if python_file is None:
-                    raise HTTPException(
-                        status_code=422,
-                        detail=f"Conflict path '{path}' does not map to a project Python file.",
+                        detail=f"Conflict path '{path}' does not map to a project file.",
                     )
                 updated = self.repository.update_python_file(  # type: ignore[attr-defined]
                     user_id=user.user_id,
-                    file_id=python_file.file_id,
+                    file_id=project_file.file_id,
                     filename=None,
                     content=resolution.content,
                 )
                 if updated is None:
-                    raise HTTPException(status_code=404, detail="Python file not found")
-                python_files_by_name.pop(filename, None)
-                python_files_by_name[updated.filename] = updated
-            python_files = sorted(
-                python_files_by_name.values(),
+                    raise HTTPException(status_code=404, detail="Project file not found")
+                project_files_by_path.pop(path, None)
+                project_files_by_path[_normalize_repo_path(updated.repo_path or f"src/{updated.filename}")] = updated
+            project_files = sorted(
+                project_files_by_path.values(),
                 key=lambda item: (item.updated_at, item.created_at),
                 reverse=True,
             )
@@ -1297,16 +1598,30 @@ class PaperbaseService:
                     project_id=project.project_id,
                     description=f"Paperbase project: {project.name}",
                 )
+                repo_owner_login = repo_info.owner_login or github["github_login"]
                 repo_name = repo_info.repo_name
                 repo_url = repo_info.repo_url
                 default_branch = repo_info.default_branch or "main"
+                base_branch = default_branch
             else:
+                repo_owner_login = sync.github_owner_login or github["github_login"]
                 repo_name = sync.github_repo_name
                 repo_url = sync.github_repo_url
-                default_branch = sync.default_branch or "main"
+                default_branch = sync.default_branch or sync.base_branch or "main"
+                base_branch = sync.base_branch or default_branch
             synced_at = utcnow()
             author_name = (user.display_name or "").strip() or github["github_login"]
             author_email = f"{github['github_login']}@users.noreply.github.com"
+            file_manifests = [
+                {
+                    "file_id": project_file.file_id,
+                    "filename": project_file.filename,
+                    "file_kind": project_file.file_kind,
+                    "repo_path": _normalize_repo_path(project_file.repo_path or f"src/{project_file.filename}"),
+                }
+                for project_file in project_files
+            ]
+            managed_paths = sorted({".paperbase", *(item["repo_path"] for item in file_manifests)})
             manifest = {
                 "schema_version": 1,
                 "project_id": project.project_id,
@@ -1319,53 +1634,102 @@ class PaperbaseService:
                 "author_name": author_name,
                 "author_email": author_email,
                 "github_login": github["github_login"],
+                "github_owner_login": repo_owner_login,
                 "github_repo_name": repo_name,
+                "base_branch": base_branch,
                 "default_branch": default_branch,
-                "python_file_count": len(python_files),
-                "notes_enabled": False,
-                "paths": {
-                    "src": "src",
-                    "notes": "notes",
-                    "metadata": ".paperbase",
-                },
+                "project_file_count": len(project_files),
+                "python_file_count": len([item for item in file_manifests if item["file_kind"] == "python"]),
+                "notebook_file_count": len([item for item in file_manifests if item["file_kind"] == "notebook"]),
+                "managed_paths": managed_paths,
+                "files": file_manifests,
             }
             files_to_sync = {
                 ".paperbase": json.dumps(manifest, indent=2, sort_keys=True),
-                "notes/.gitkeep": "",
-                **{f"src/{python_file.filename}": python_file.content for python_file in python_files},
             }
+            for project_file in project_files:
+                repo_path = _normalize_repo_path(project_file.repo_path or f"src/{project_file.filename}")
+                files_to_sync[repo_path] = (
+                    _python_source_to_notebook(project_file.content)
+                    if project_file.file_kind == "notebook"
+                    else project_file.content
+                )
+            previous_managed_paths: set[str] = set()
+            if sync and sync.repo_exists:
+                try:
+                    previous_manifest = self.github_repo_manager.get_file_text(
+                        access_token=access_token,
+                        owner_login=repo_owner_login,
+                        repo_name=repo_name,
+                        path=".paperbase",
+                        ref=base_branch,
+                    )
+                    previous_managed_paths = _managed_paths_from_manifest_content(previous_manifest)
+                except GitHubSyncError:
+                    previous_managed_paths = set()
             commit_info = self.github_repo_manager.sync_project_files(
                 access_token=access_token,
-                owner_login=github["github_login"],
+                owner_login=repo_owner_login,
                 repo_name=repo_name,
                 repo_url=repo_url,
-                default_branch=default_branch,
+                default_branch=base_branch,
                 files=files_to_sync,
                 commit_message=commit_message,
                 author_name=author_name,
                 author_email=author_email,
                 base_commit_sha=sync.last_sync_commit_sha if sync and sync.last_sync_commit_sha else None,
                 expected_remote_head_sha=request.expected_remote_head_sha,
+                previous_managed_paths=previous_managed_paths,
             )
         except GitHubSyncConflictError as exc:
+            project_file_by_path = {
+                _normalize_repo_path(project_file.repo_path or f"src/{project_file.filename}"): project_file
+                for project_file in project_files
+            }
+            conflict_files: list[ProjectRepoConflictFile] = []
+            for conflict in exc.conflicts:
+                project_file = project_file_by_path.get(_normalize_repo_path(conflict.path))
+                file_kind = project_file.file_kind if project_file is not None else "python"
+                is_notebook = file_kind == "notebook"
+                conflict_files.append(
+                    ProjectRepoConflictFile(
+                        path=conflict.path,
+                        file_kind=file_kind,  # type: ignore[arg-type]
+                        base_content=(
+                            _notebook_to_python_source_or_raw(conflict.base_content)
+                            if is_notebook
+                            else conflict.base_content
+                        ),
+                        local_content=(
+                            _notebook_to_python_source_or_raw(conflict.local_content)
+                            if is_notebook
+                            else conflict.local_content
+                        ),
+                        remote_content=(
+                            _notebook_to_python_source_or_raw(conflict.remote_content)
+                            if is_notebook
+                            else conflict.remote_content
+                        ),
+                    )
+                )
+            if sync is not None:
+                conflict_owner_login = sync.github_owner_login or github["github_login"]
+                conflict_base_branch = sync.base_branch or exc.default_branch
+            else:
+                conflict_owner_login = github["github_login"]
+                conflict_base_branch = exc.default_branch
             detail = ProjectRepoConflictDetail(
                 message=str(exc),
                 project_id=project_id,
                 repo_exists=True,
+                github_owner_login=conflict_owner_login,
                 github_repo_name=exc.repo_name,
                 github_repo_url=exc.repo_url,
+                base_branch=conflict_base_branch,
                 default_branch=exc.default_branch,
                 base_commit_sha=exc.base_commit_sha,
                 remote_head_sha=exc.remote_head_sha,
-                conflicts=[
-                    ProjectRepoConflictFile(
-                        path=conflict.path,
-                        base_content=conflict.base_content,
-                        local_content=conflict.local_content,
-                        remote_content=conflict.remote_content,
-                    )
-                    for conflict in exc.conflicts
-                ],
+                conflicts=conflict_files,
             )
             raise HTTPException(status_code=409, detail=detail.model_dump()) from exc
         except GitHubSyncError as exc:
@@ -1374,8 +1738,10 @@ class PaperbaseService:
         saved = self.repository.save_project_repo_sync(  # type: ignore[attr-defined]
             user_id=user.user_id,
             project_id=project_id,
+            github_owner_login=repo_owner_login,
             github_repo_name=commit_info.repo_name,
             github_repo_url=commit_info.repo_url,
+            base_branch=base_branch,
             default_branch=commit_info.default_branch,
             last_sync_commit_sha=commit_info.commit_sha,
             last_sync_commit_url=commit_info.commit_url,

@@ -12,7 +12,10 @@ from paperbase.api import _resolve_bind_address, app
 from paperbase.browser_code import (
     GitHubCommitInfo,
     GitHubConflictFile,
+    GitHubRepoBranch,
+    GitHubRepoFileCandidate,
     GitHubRepoInfo,
+    GitHubSyncError,
     GitHubSyncConflictError,
     ModalRunResult,
 )
@@ -22,6 +25,7 @@ from paperbase.llm import ChatModelStreamEvent, ChatModelUsage
 from paperbase.models import (
     ChatCitation,
     CreateChatThreadRequest,
+    CreateProjectGitHubRepoRequest,
     CreateProjectRequest,
     MoveChatThreadProjectRequest,
     PaperMetadata,
@@ -175,8 +179,32 @@ class FakeChatModel:
 class FakeGitHubRepoManager:
     def __init__(self) -> None:
         self.ensure_repo_calls: list[dict[str, object]] = []
+        self.create_repo_calls: list[dict[str, object]] = []
+        self.get_repo_calls: list[dict[str, object]] = []
+        self.list_branches_calls: list[dict[str, object]] = []
+        self.get_branch_head_calls: list[dict[str, object]] = []
+        self.list_importable_files_calls: list[dict[str, object]] = []
+        self.get_file_text_calls: list[dict[str, object]] = []
         self.sync_project_files_calls: list[dict[str, object]] = []
         self.next_sync_conflict: GitHubSyncConflictError | None = None
+        self.repo_info = GitHubRepoInfo(
+            repo_name="existing-repo",
+            repo_url="https://github.com/octocat/existing-repo",
+            default_branch="main",
+            owner_login="octocat",
+        )
+        self.branches = [
+            GitHubRepoBranch(name="main", commit_sha="main-sha"),
+            GitHubRepoBranch(name="dev", commit_sha="dev-sha"),
+        ]
+        self.branch_heads: dict[str, str] = {"main": "main-sha", "dev": "dev-sha"}
+        self.importable_files = [
+            GitHubRepoFileCandidate(path="src/analysis.py", file_kind="python", size=13),
+            GitHubRepoFileCandidate(path="notebooks/demo.ipynb", file_kind="notebook", size=320),
+        ]
+        self.file_texts: dict[tuple[str, str], str] = {
+            ("src/analysis.py", "main"): "print('remote')\n",
+        }
 
     def ensure_repo(self, **kwargs) -> GitHubRepoInfo:
         self.ensure_repo_calls.append(kwargs)
@@ -184,7 +212,52 @@ class FakeGitHubRepoManager:
             repo_name="paperbase-general-123abc",
             repo_url="https://github.com/octocat/paperbase-general-123abc",
             default_branch="main",
+            owner_login="octocat",
         )
+
+    def create_repo(self, **kwargs) -> GitHubRepoInfo:
+        self.create_repo_calls.append(kwargs)
+        repo_name = str(kwargs["repo_name"])
+        owner_login = str(kwargs.get("owner_login") or "octocat")
+        return GitHubRepoInfo(
+            repo_name=repo_name,
+            repo_url=f"https://github.com/{owner_login}/{repo_name}",
+            default_branch="main",
+            owner_login=owner_login,
+        )
+
+    def get_repo(self, **kwargs) -> GitHubRepoInfo:
+        self.get_repo_calls.append(kwargs)
+        owner_login = str(kwargs.get("owner_login") or self.repo_info.owner_login)
+        repo_name = str(kwargs.get("repo_name") or self.repo_info.repo_name)
+        return GitHubRepoInfo(
+            repo_name=repo_name,
+            repo_url=f"https://github.com/{owner_login}/{repo_name}",
+            default_branch=self.repo_info.default_branch,
+            owner_login=owner_login,
+        )
+
+    def list_branches(self, **kwargs) -> list[GitHubRepoBranch]:
+        self.list_branches_calls.append(kwargs)
+        return list(self.branches)
+
+    def get_branch_head(self, **kwargs) -> str:
+        self.get_branch_head_calls.append(kwargs)
+        branch = str(kwargs.get("branch") or "main")
+        return self.branch_heads[branch]
+
+    def list_importable_files(self, **kwargs) -> list[GitHubRepoFileCandidate]:
+        self.list_importable_files_calls.append(kwargs)
+        return list(self.importable_files)
+
+    def get_file_text(self, **kwargs) -> str:
+        self.get_file_text_calls.append(kwargs)
+        path = str(kwargs["path"])
+        ref = str(kwargs.get("ref") or "main")
+        try:
+            return self.file_texts[(path, ref)]
+        except KeyError as exc:
+            raise GitHubSyncError(f"{path} not found") from exc
 
     def sync_project_files(self, **kwargs) -> GitHubCommitInfo:
         self.sync_project_files_calls.append(kwargs)
@@ -238,6 +311,53 @@ def _auth_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {get_settings().api_key}"}
 
 
+def _connect_github(service: PaperbaseService, user) -> None:
+    service.save_github_connection(
+        user,
+        github_user_id="42",
+        github_login="octocat",
+        access_token="github-access-token",
+        scope="repo,read:user",
+    )
+
+
+def _create_repo_project_request(
+    name: str,
+    description: str,
+    *,
+    repo_name: str | None = None,
+) -> CreateProjectRequest:
+    return CreateProjectRequest(
+        name=name,
+        description=description,
+        github_repo=CreateProjectGitHubRepoRequest(
+            mode="create",
+            name=repo_name or name.lower().replace(" ", "-"),
+            base_branch="main",
+        ),
+    )
+
+
+def _notebook_json(source: str = "print('notebook')\n") -> str:
+    return json.dumps(
+        {
+            "cells": [
+                {
+                    "id": "cell-1",
+                    "cell_type": "code",
+                    "execution_count": None,
+                    "metadata": {},
+                    "outputs": [],
+                    "source": source.splitlines(keepends=True),
+                }
+            ],
+            "metadata": {"kernelspec": {"name": "python3", "display_name": "Python 3"}},
+            "nbformat": 4,
+            "nbformat_minor": 5,
+        }
+    )
+
+
 @pytest.fixture
 def service() -> PaperbaseService:
     settings = Settings(
@@ -269,6 +389,7 @@ def browser_service() -> tuple[PaperbaseService, FakeEmailSender, FakeChatModel]
         object_store=MemoryObjectStore(),
         email_sender=email_sender,
         chat_model=chat_model,
+        github_repo_manager=FakeGitHubRepoManager(),
     )
     return service, email_sender, chat_model
 
@@ -1454,15 +1575,351 @@ def test_python_file_sync_project_repo_writes_metadata_and_files():
     assert len(repo_manager.sync_project_files_calls) == 1
     synced_files = repo_manager.sync_project_files_calls[0]["files"]
     assert synced_files["src/analysis.py"] == "print('sync')"
-    assert "notes/.gitkeep" in synced_files
     assert ".paperbase" in synced_files
     manifest = json.loads(synced_files[".paperbase"])
     assert manifest["project_id"] == project.project_id
     assert manifest["project_name"] == project.name
     assert manifest["custom_instructions"] == project.description
-    assert manifest["paths"] == {"src": "src", "notes": "notes", "metadata": ".paperbase"}
+    assert manifest["github_owner_login"] == "octocat"
+    assert manifest["base_branch"] == "main"
+    assert manifest["managed_paths"] == [".paperbase", "src/analysis.py"]
+    assert manifest["files"][0]["file_kind"] == "python"
+    assert manifest["files"][0]["repo_path"] == "src/analysis.py"
     assert repo_manager.sync_project_files_calls[0]["base_commit_sha"] is None
     assert repo_manager.sync_project_files_calls[0]["expected_remote_head_sha"] is None
+    assert repo_manager.sync_project_files_calls[0]["previous_managed_paths"] == set()
+
+
+def test_create_project_requires_github_repo_info_and_connection():
+    repo_manager = FakeGitHubRepoManager()
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        github_repo_manager=repo_manager,
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="new-project@example.com", password="topsecret123", display_name="Project User")
+    )
+    assert session.user is not None
+
+    with pytest.raises(HTTPException) as missing_repo:
+        service.create_project(
+            session.user,
+            CreateProjectRequest(name="Agents", description="Study agent systems"),
+        )
+    assert missing_repo.value.status_code == 422
+
+    with pytest.raises(HTTPException) as disconnected:
+        service.create_project(
+            session.user,
+            _create_repo_project_request("Agents", "Study agent systems"),
+        )
+    assert disconnected.value.status_code == 409
+
+
+def test_create_project_creates_private_github_repo_on_main():
+    repo_manager = FakeGitHubRepoManager()
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        github_repo_manager=repo_manager,
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="repo-create@example.com", password="topsecret123", display_name="Project User")
+    )
+    assert session.user is not None
+    _connect_github(service, session.user)
+
+    project = service.create_project(
+        session.user,
+        _create_repo_project_request("Agents", "Study agent systems", repo_name="agent-lab"),
+    )
+    sync = service.get_project_repo_sync(session.user, project.project_id)
+
+    assert repo_manager.create_repo_calls[0]["repo_name"] == "agent-lab"
+    assert repo_manager.create_repo_calls[0]["owner_login"] == "octocat"
+    assert sync.github_owner_login == "octocat"
+    assert sync.github_repo_name == "agent-lab"
+    assert sync.base_branch == "main"
+    assert sync.default_branch == "main"
+
+
+def test_create_project_imports_existing_repo_python_and_notebook_files():
+    repo_manager = FakeGitHubRepoManager()
+    repo_manager.file_texts[("src/analysis.py", "dev")] = "print('analysis')\n"
+    repo_manager.file_texts[("notebooks/demo.ipynb", "dev")] = _notebook_json("print('demo')\n")
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        github_repo_manager=repo_manager,
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="repo-import@example.com", password="topsecret123", display_name="Project User")
+    )
+    assert session.user is not None
+    _connect_github(service, session.user)
+
+    project = service.create_project(
+        session.user,
+        CreateProjectRequest(
+            name="Repo Import",
+            description="Import selected files",
+            github_repo=CreateProjectGitHubRepoRequest(
+                mode="existing",
+                owner="octocat",
+                name="existing-repo",
+                base_branch="dev",
+                import_paths=["src/analysis.py", "notebooks/demo.ipynb"],
+            ),
+        ),
+    )
+    files = service.repository.list_project_python_files(  # type: ignore[attr-defined]
+        user_id=session.user.user_id,
+        project_id=project.project_id,
+    )
+    assert files is not None
+    files_by_path = {item.repo_path: item for item in files}
+
+    assert repo_manager.get_repo_calls[0]["owner_login"] == "octocat"
+    assert repo_manager.get_branch_head_calls[0]["branch"] == "dev"
+    assert service.get_project_repo_sync(session.user, project.project_id).base_branch == "dev"
+    assert files_by_path["src/analysis.py"].file_kind == "python"
+    assert files_by_path["src/analysis.py"].content == "print('analysis')\n"
+    assert files_by_path["notebooks/demo.ipynb"].file_kind == "notebook"
+    assert "# %%" in files_by_path["notebooks/demo.ipynb"].content
+    assert "print('demo')" in files_by_path["notebooks/demo.ipynb"].content
+
+
+def test_create_project_rejects_missing_existing_repo_branch():
+    repo_manager = FakeGitHubRepoManager()
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        github_repo_manager=repo_manager,
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="repo-branch@example.com", password="topsecret123", display_name="Project User")
+    )
+    assert session.user is not None
+    _connect_github(service, session.user)
+
+    with pytest.raises(HTTPException) as exc_info:
+        service.create_project(
+            session.user,
+            CreateProjectRequest(
+                name="Bad Branch",
+                description="Import selected files",
+                github_repo=CreateProjectGitHubRepoRequest(
+                    mode="existing",
+                    owner="octocat",
+                    name="existing-repo",
+                    base_branch="missing",
+                ),
+            ),
+        )
+    assert exc_info.value.status_code == 422
+
+
+def test_create_project_rejects_invalid_notebook_imports_and_unsafe_paths():
+    repo_manager = FakeGitHubRepoManager()
+    repo_manager.file_texts[("notebooks/demo.ipynb", "main")] = "{not-json"
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        github_repo_manager=repo_manager,
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="bad-notebook@example.com", password="topsecret123", display_name="Project User")
+    )
+    assert session.user is not None
+    _connect_github(service, session.user)
+
+    with pytest.raises(HTTPException) as unsafe_path:
+        service.create_project(
+            session.user,
+            CreateProjectRequest(
+                name="Unsafe",
+                description="Import selected files",
+                github_repo=CreateProjectGitHubRepoRequest(
+                    mode="existing",
+                    owner="octocat",
+                    name="existing-repo",
+                    base_branch="main",
+                    import_paths=["../analysis.py"],
+                ),
+            ),
+        )
+    assert unsafe_path.value.status_code == 422
+
+    with pytest.raises(HTTPException) as invalid_notebook:
+        service.create_project(
+            session.user,
+            CreateProjectRequest(
+                name="Bad Notebook",
+                description="Import selected files",
+                github_repo=CreateProjectGitHubRepoRequest(
+                    mode="existing",
+                    owner="octocat",
+                    name="existing-repo",
+                    base_branch="main",
+                    import_paths=["notebooks/demo.ipynb"],
+                ),
+            ),
+        )
+    assert invalid_notebook.value.status_code == 422
+
+    repo_manager.importable_files = [
+        GitHubRepoFileCandidate(path="src/huge.py", file_kind="python", size=2_000_000),
+    ]
+    with pytest.raises(HTTPException) as oversized:
+        service.create_project(
+            session.user,
+            CreateProjectRequest(
+                name="Huge",
+                description="Import selected files",
+                github_repo=CreateProjectGitHubRepoRequest(
+                    mode="existing",
+                    owner="octocat",
+                    name="existing-repo",
+                    base_branch="main",
+                    import_paths=["src/huge.py"],
+                ),
+            ),
+        )
+    assert oversized.value.status_code == 422
+
+
+def test_import_project_notebook_upload_converts_colab_export_to_python_source():
+    repo_manager = FakeGitHubRepoManager()
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        github_repo_manager=repo_manager,
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="colab@example.com", password="topsecret123", display_name="Project User")
+    )
+    assert session.user is not None
+    _connect_github(service, session.user)
+    project = service.create_project(
+        session.user,
+        _create_repo_project_request("Colab", "Import notebooks", repo_name="colab-lab"),
+    )
+
+    imported = service.import_project_notebook_upload(
+        session.user,
+        project.project_id,
+        filename="colab_export.ipynb",
+        data=_notebook_json("print('colab')\n").encode("utf-8"),
+    )
+
+    assert imported.file_kind == "notebook"
+    assert imported.repo_path == "notebooks/colab_export.ipynb"
+    assert "# %%" in imported.content
+    assert "print('colab')" in imported.content
+
+    service.sync_project_repo(
+        session.user,
+        project.project_id,
+        ProjectRepoSyncRequest(commit_message="Save notebook"),
+    )
+    synced_files = repo_manager.sync_project_files_calls[0]["files"]
+    regenerated_notebook = json.loads(synced_files["notebooks/colab_export.ipynb"])
+    assert regenerated_notebook["nbformat"] == 4
+    assert "print('colab')" in "".join(regenerated_notebook["cells"][0]["source"])
+
+
+def test_sync_project_repo_tracks_previous_managed_paths_for_existing_repo_subset():
+    repo_manager = FakeGitHubRepoManager()
+    repo_manager.file_texts[(".paperbase", "main")] = json.dumps(
+        {"managed_paths": [".paperbase", "src/old.py", "src/analysis.py"]}
+    )
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        github_repo_manager=repo_manager,
+    )
+
+    session, _ = service.register_browser_user(
+        SignupRequest(email="managed@example.com", password="topsecret123", display_name="Managed User")
+    )
+    assert session.user is not None
+    _connect_github(service, session.user)
+
+    project = service.list_projects(session.user).projects[0]
+    python_file = service.create_python_file(session.user, project.project_id)
+    service.update_python_file(
+        session.user,
+        python_file.file_id,
+        filename="analysis.py",
+        content="print('current')",
+    )
+    service.repository.save_project_repo_sync(  # type: ignore[attr-defined]
+        user_id=session.user.user_id,
+        project_id=project.project_id,
+        github_owner_login="octocat",
+        github_repo_name="paperbase-general-123abc",
+        github_repo_url="https://github.com/octocat/paperbase-general-123abc",
+        base_branch="main",
+        default_branch="main",
+        last_sync_commit_sha="abc123",
+        last_sync_commit_url="https://github.com/octocat/paperbase-general-123abc/commit/abc123",
+        last_synced_at=datetime(2026, 4, 21, tzinfo=timezone.utc),
+    )
+
+    service.sync_project_repo(
+        session.user,
+        project.project_id,
+        ProjectRepoSyncRequest(commit_message="Save managed subset"),
+    )
+
+    assert repo_manager.sync_project_files_calls[0]["previous_managed_paths"] == {
+        ".paperbase",
+        "src/old.py",
+        "src/analysis.py",
+    }
 
 
 def test_sync_project_repo_applies_conflict_resolutions_before_retry():
@@ -1960,6 +2417,7 @@ def test_project_defaults_and_thread_snapshots(browser_service):
         SignupRequest(email="projects@example.com", password="topsecret123", display_name="Project User")
     )
     assert session.user is not None
+    _connect_github(service, session.user)
 
     initial_projects = service.list_projects(session.user).projects
     assert len(initial_projects) == 1
@@ -1969,7 +2427,7 @@ def test_project_defaults_and_thread_snapshots(browser_service):
 
     project = service.create_project(
         session.user,
-        CreateProjectRequest(name="Agents", description="Use grounded citations only."),
+        _create_repo_project_request("Agents", "Use grounded citations only."),
     )
     thread = service.create_chat_thread(
         session.user,
@@ -2008,10 +2466,11 @@ def test_project_session_paging_and_thread_deletion(browser_service):
         SignupRequest(email="paging@example.com", password="topsecret123", display_name="Paging User")
     )
     assert session.user is not None
+    _connect_github(service, session.user)
 
     project = service.create_project(
         session.user,
-        CreateProjectRequest(name="Benchmarks", description="Track benchmark sessions"),
+        _create_repo_project_request("Benchmarks", "Track benchmark sessions"),
     )
     threads = [
         service.create_chat_thread(
@@ -2067,10 +2526,11 @@ def test_empty_chat_can_move_between_projects(browser_service):
         SignupRequest(email="move-empty@example.com", password="topsecret123", display_name="Move Empty")
     )
     assert session.user is not None
+    _connect_github(service, session.user)
 
     project = service.create_project(
         session.user,
-        CreateProjectRequest(name="Agents", description="Study agent systems"),
+        _create_repo_project_request("Agents", "Study agent systems"),
     )
     thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
 
@@ -2104,6 +2564,7 @@ def test_delete_project_cascades_threads_and_protects_default(browser_service):
         SignupRequest(email="cascade@example.com", password="topsecret123", display_name="Cascade User")
     )
     assert session.user is not None
+    _connect_github(service, session.user)
 
     default_project = service.list_projects(session.user).projects[0]
     with pytest.raises(HTTPException) as default_exc:
@@ -2112,7 +2573,7 @@ def test_delete_project_cascades_threads_and_protects_default(browser_service):
 
     project = service.create_project(
         session.user,
-        CreateProjectRequest(name="Archive", description="Delete me"),
+        _create_repo_project_request("Archive", "Delete me"),
     )
     thread = service.create_chat_thread(
         session.user,
