@@ -2467,3 +2467,97 @@ def test_list_papers_needing_enrichment_respects_min_age_floor():
     eligible = repo.list_papers_needing_enrichment(limit=10, min_age_seconds=3600)
 
     assert [p.arxiv_id for p in eligible] == ["stale/0001"]
+
+
+def test_list_papers_needing_enrichment_keyset_covers_rows_across_indexed_at_boundaries():
+    """Regression test for the keyset-pagination bug flagged in PR #28 review:
+    advancing by paper_id alone skips rows when later pages cross an
+    ``indexed_at`` boundary. A correct cursor must mirror the full
+    ``(indexed_at, paper_id)`` sort key.
+
+    Seed sets this up deliberately:
+      - earliest row: indexed_at=T-3h, paper_id="arxiv:zzz" (lexicographically large)
+      - later row:    indexed_at=T-2h, paper_id="arxiv:aaa" (lexicographically small)
+
+    With the broken cursor, page 1 returns the T-3h row and the cursor is
+    set to ``paper_id > "arxiv:zzz"``, which silently excludes "arxiv:aaa"
+    on page 2. The fix keeps both rows reachable."""
+    from datetime import UTC, datetime, timedelta
+
+    repo = MemoryPaperRepository()
+    now = datetime.now(UTC)
+
+    def _seed(arxiv: str, indexed_at):
+        meta = PaperMetadata(
+            arxiv_id=arxiv,
+            title="t",
+            authors="a",
+            abstract="b",
+            categories="cs.AI",
+            primary_category="cs.AI",
+            published="2024-01-01",
+            updated="2024-01-01",
+            pdf_url="p",
+            html_url="h",
+            citation_count=0,
+            semantic_scholar_id=None,
+            index_status="indexed",
+            indexed_at=indexed_at,
+        )
+        return repo.upsert_paper(meta, search_document="", embedding=None)
+
+    _seed("zzz/0001", indexed_at=now - timedelta(hours=3))
+    _seed("aaa/0001", indexed_at=now - timedelta(hours=2))
+
+    page1 = repo.list_papers_needing_enrichment(limit=1, min_age_seconds=3600)
+    assert [p.arxiv_id for p in page1] == ["zzz/0001"], (
+        "earliest indexed_at should come first under NULLS FIRST, ASC"
+    )
+    page2 = repo.list_papers_needing_enrichment(limit=1, min_age_seconds=3600, after=page1[-1])
+    assert [p.arxiv_id for p in page2] == ["aaa/0001"], (
+        "keyset must advance by (indexed_at, paper_id), not paper_id alone"
+    )
+    page3 = repo.list_papers_needing_enrichment(limit=1, min_age_seconds=3600, after=page2[-1])
+    assert page3 == []
+
+
+def test_enrichment_stats_counts_papers_with_s2_id_but_zero_citations_as_enriched():
+    """A freshly-published paper that was successfully enriched but
+    legitimately has zero citations must count as enriched. Using
+    citation_count > 0 alone would warn the operator on a healthy corpus.
+    Regression test for PR #28 review."""
+    from datetime import UTC, datetime
+
+    repo = MemoryPaperRepository()
+
+    def _seed(arxiv: str, *, s2_id: str | None, citations: int):
+        meta = PaperMetadata(
+            arxiv_id=arxiv,
+            title="t",
+            authors="a",
+            abstract="b",
+            categories="cs.AI",
+            primary_category="cs.AI",
+            published="2024-01-01",
+            updated="2024-01-01",
+            pdf_url="p",
+            html_url="h",
+            citation_count=citations,
+            semantic_scholar_id=s2_id,
+            index_status="indexed",
+            indexed_at=datetime.now(UTC),
+        )
+        repo.upsert_paper(meta, search_document="", embedding=None)
+
+    _seed("cited/0001", s2_id="s2-1", citations=42)
+    _seed("newly-enriched/0001", s2_id="s2-2", citations=0)
+    _seed("missing/0001", s2_id=None, citations=0)
+
+    stats = repo.enrichment_stats()
+
+    assert stats["total_indexed"] == 3
+    assert stats["with_citations"] == 1
+    assert stats["with_semantic_scholar_id"] == 2
+    # Both the cited paper AND the newly-enriched zero-citation paper count.
+    # Only the paper with no S2 id and no citations is missing.
+    assert stats["enriched"] == 2

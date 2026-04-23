@@ -299,39 +299,51 @@ def _workflow_database_checks(settings: Settings, *, mode: DoctorMode) -> Iterab
 def _enrichment_health_check(connection: psycopg.Connection) -> Iterable[CheckResult]:
     """Report S2 enrichment coverage so operators notice rate-limit fallout
     before citation-boosted ranking silently degrades at scale. A warning
-    rather than a failure: the corpus is still usable, just missing signal."""
+    rather than a failure: the corpus is still usable, just missing signal.
+
+    "Enriched" means the paper has a populated S2 id OR a non-zero citation
+    count. Using citation_count > 0 alone would misclassify freshly-published
+    papers that were successfully looked up but legitimately have no
+    citations yet, and warn on a fully-enriched recent corpus.
+    """
     try:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
                 SELECT
                   COUNT(*) FILTER (WHERE index_status = 'indexed'),
-                  COUNT(*) FILTER (WHERE index_status = 'indexed' AND citation_count > 0)
+                  COUNT(*) FILTER (
+                    WHERE index_status = 'indexed'
+                    AND (
+                      (semantic_scholar_id IS NOT NULL AND semantic_scholar_id <> '')
+                      OR citation_count > 0
+                    )
+                  )
                 FROM papers
                 """
             )
-            total, with_cites = cursor.fetchone() or (0, 0)
+            total, enriched = cursor.fetchone() or (0, 0)
     except psycopg.Error as exc:
         yield CheckResult("S2 enrichment", "warn", f"Could not inspect enrichment state: {exc}")
         return
     if not total:
         yield CheckResult("S2 enrichment", "ok", "No indexed papers yet")
         return
-    missing = total - with_cites
-    coverage = with_cites / total * 100
+    missing = total - enriched
+    coverage = enriched / total * 100
     if missing == 0:
-        yield CheckResult("S2 enrichment", "ok", f"{with_cites}/{total} papers enriched (100%)")
+        yield CheckResult("S2 enrichment", "ok", f"{enriched}/{total} papers enriched (100%)")
     elif coverage >= 90:
         yield CheckResult(
             "S2 enrichment",
             "ok",
-            f"{with_cites}/{total} papers enriched ({coverage:.1f}%); `paperbase-dev enrich-missing` backfills the rest",
+            f"{enriched}/{total} papers enriched ({coverage:.1f}%); `paperbase-dev enrich-missing` backfills the rest",
         )
     else:
         yield CheckResult(
             "S2 enrichment",
             "warn",
-            f"Only {with_cites}/{total} papers have citation data ({coverage:.1f}%); run `paperbase-dev enrich-missing`",
+            f"Only {enriched}/{total} papers enriched ({coverage:.1f}%); run `paperbase-dev enrich-missing`",
         )
 
 
@@ -577,14 +589,14 @@ def enrich_missing(*, limit: int, min_age_seconds: int, batch_size: int) -> int:
     stats_after = service.repository.enrichment_stats()
 
     total = stats_after.get("total_indexed", 0)
-    before_cov = (stats_before.get("with_citations", 0) / total * 100) if total else 0.0
-    after_cov = (stats_after.get("with_citations", 0) / total * 100) if total else 0.0
+    before_cov = (stats_before.get("enriched", 0) / total * 100) if total else 0.0
+    after_cov = (stats_after.get("enriched", 0) / total * 100) if total else 0.0
 
     print(f"Scanned:        {result['papers_scanned']}")
     print(f"Updated:        {result['papers_updated']}")
     print(f"Batches failed: {result['batches_failed']}")
     print(f"Coverage:       {before_cov:.1f}% -> {after_cov:.1f}% "
-          f"({stats_after.get('with_citations', 0)}/{total} papers have citation data)")
+          f"({stats_after.get('enriched', 0)}/{total} papers enriched)")
     return 0
 
 

@@ -123,3 +123,47 @@ def test_semantic_scholar_enrichment_gives_up_after_retries(monkeypatch):
     assert outcome.batches_failed == 1
     assert paper.citation_count == 0
     assert paper.semantic_scholar_id is None
+
+
+def test_fetch_references_bounds_retry_budget_on_interactive_rate_limit(monkeypatch):
+    """Interactive reference lookups must NOT inherit the full 1/4/16/64s
+    retry ladder. When the S2 lookup for an un-enriched paper rate-limits,
+    the user-facing path should give up quickly and return []."""
+    post_calls = {"n": 0}
+
+    def fake_post(*_args, **_kwargs):
+        post_calls["n"] += 1
+        return _FakeResponse(status_code=429, headers={"Retry-After": "0"})
+
+    monkeypatch.setattr(sources.SESSION, "post", fake_post)
+    # get() is never reached because the S2 id resolution fails first.
+    monkeypatch.setattr(sources.SESSION, "get", lambda *_a, **_k: _FakeResponse(status_code=500))
+    monkeypatch.setattr(sources.time, "sleep", lambda _s: None)
+
+    refs = sources.fetch_references("2401.33333", semantic_scholar_id=None)
+
+    assert refs == []
+    # max_retries=1 in interactive mode → 1 initial + 1 retry = 2 POST calls.
+    # The default max_retries=4 would be 5 calls and block on full backoff.
+    assert post_calls["n"] == 2, (
+        f"fetch_references must use a small retry budget; saw {post_calls['n']} calls"
+    )
+
+
+def test_get_related_papers_bounds_retry_budget_on_interactive_rate_limit(monkeypatch):
+    """Same as fetch_references: get_related_papers is an interactive path
+    and must not block on 1/4/16/64s backoff when S2 rate-limits."""
+    post_calls = {"n": 0}
+
+    def fake_post(*_args, **_kwargs):
+        post_calls["n"] += 1
+        return _FakeResponse(status_code=429, headers={"Retry-After": "0"})
+
+    monkeypatch.setattr(sources.SESSION, "post", fake_post)
+    monkeypatch.setattr(sources.SESSION, "get", lambda *_a, **_k: _FakeResponse(status_code=500))
+    monkeypatch.setattr(sources.time, "sleep", lambda _s: None)
+
+    related = sources.get_related_papers("2401.44444", semantic_scholar_id=None)
+
+    assert related == []
+    assert post_calls["n"] == 2

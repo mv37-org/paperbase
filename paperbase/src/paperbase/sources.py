@@ -333,8 +333,11 @@ def fetch_references(
     """
     resolved_s2_id = semantic_scholar_id
     if not resolved_s2_id:
+        # Interactive path: keep the retry budget tight so a rate-limited S2
+        # doesn't block the user on 1/4/16/64s backoff. The enrich_missing
+        # backfill job owns the aggressive retry ladder.
         stub = PaperMetadata(arxiv_id=arxiv_id)
-        enrich_with_semantic_scholar([stub])
+        enrich_with_semantic_scholar([stub], max_retries=1, base_backoff_seconds=0.5)
         resolved_s2_id = stub.semantic_scholar_id
     if not resolved_s2_id:
         return []
@@ -369,8 +372,11 @@ def fetch_references(
 def get_related_papers(arxiv_id: str, semantic_scholar_id: str | None, *, limit: int = 10) -> list[PaperMetadata]:
     resolved_s2_id = semantic_scholar_id
     if not resolved_s2_id:
+        # Interactive path: keep the retry budget tight so a rate-limited S2
+        # doesn't block the user on 1/4/16/64s backoff. The enrich_missing
+        # backfill job owns the aggressive retry ladder.
         stub = PaperMetadata(arxiv_id=arxiv_id)
-        enrich_with_semantic_scholar([stub])
+        enrich_with_semantic_scholar([stub], max_retries=1, base_backoff_seconds=0.5)
         resolved_s2_id = stub.semantic_scholar_id
     if not resolved_s2_id:
         return []

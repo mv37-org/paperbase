@@ -703,8 +703,15 @@ class PaperRepository(ABC):
 
     @abstractmethod
     def enrichment_stats(self) -> dict[str, int]:
-        """Return counts for observability / doctor: total indexed,
-        enriched (has S2 id OR non-zero citation_count), and missing."""
+        """Return counts for observability / doctor. Keys:
+
+        - ``total_indexed`` — indexed papers
+        - ``with_semantic_scholar_id`` — of those, how many have a populated S2 id
+        - ``with_citations`` — of those, how many have ``citation_count > 0``
+        - ``enriched`` — has S2 id OR non-zero citations. This is the metric
+          that represents "S2 enrichment succeeded"; a zero-citation recent
+          paper with a populated S2 id still counts as enriched.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -1359,15 +1366,39 @@ class SqlAlchemyPaperRepository(PaperRepository):
         """
         params: dict[str, Any] = {"limit": limit, "min_age": min_age_seconds}
         after_predicate = ""
+        # Keyset cursor must mirror the full ORDER BY tuple
+        # (indexed_at ASC NULLS FIRST, paper_id ASC). Advancing on paper_id alone
+        # skips rows whenever an earlier page ended on a lexicographically large
+        # id and newer eligible rows have smaller ids.
         if after is not None:
-            after_predicate = "AND papers.paper_id > :after_paper_id"
             params["after_paper_id"] = after.paper_id
+            if after.indexed_at is None:
+                # Still in the NULLS-first group: advance by paper_id within
+                # the NULL-indexed rows, then include every non-NULL row.
+                after_predicate = (
+                    "AND ((papers.indexed_at IS NULL AND papers.paper_id > :after_paper_id) "
+                    "OR papers.indexed_at IS NOT NULL)"
+                )
+            else:
+                # Past the NULL-indexed rows. Within non-NULL rows, order by
+                # (indexed_at, paper_id).
+                params["after_indexed_at"] = after.indexed_at
+                after_predicate = (
+                    "AND papers.indexed_at IS NOT NULL AND ("
+                    "papers.indexed_at > :after_indexed_at "
+                    "OR (papers.indexed_at = :after_indexed_at AND papers.paper_id > :after_paper_id)"
+                    ")"
+                )
         sql = text(base_sql.format(after_predicate=after_predicate))
         with self._session() as session:
             rows = session.scalars(select(PaperORM).from_statement(sql).params(**params)).all()
         return [_paper_from_orm(row) for row in rows]
 
     def enrichment_stats(self) -> dict[str, int]:
+        # "enriched" must include papers with a populated S2 id even if their
+        # citation_count is legitimately zero (e.g. freshly-published).
+        # Using citation_count > 0 alone would flag a healthy recent corpus
+        # as under-enriched and trigger false doctor warnings.
         sql = text(
             """
             SELECT
@@ -1378,7 +1409,14 @@ class SqlAlchemyPaperRepository(PaperRepository):
               ) AS with_semantic_scholar_id,
               COUNT(*) FILTER (
                 WHERE index_status = 'indexed' AND citation_count > 0
-              ) AS with_citations
+              ) AS with_citations,
+              COUNT(*) FILTER (
+                WHERE index_status = 'indexed'
+                AND (
+                  (semantic_scholar_id IS NOT NULL AND semantic_scholar_id <> '')
+                  OR citation_count > 0
+                )
+              ) AS enriched
             FROM papers
             """
         )
@@ -1388,6 +1426,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
             "total_indexed": int(row["total_indexed"] or 0),
             "with_semantic_scholar_id": int(row["with_semantic_scholar_id"] or 0),
             "with_citations": int(row["with_citations"] or 0),
+            "enriched": int(row["enriched"] or 0),
         }
 
     def update_paper_embedding(self, paper_id: str, embedding: list[float]) -> None:
@@ -3301,27 +3340,56 @@ class MemoryPaperRepository(PaperRepository):
                 if age < min_age_seconds:
                     continue
             candidates.append(paper)
-        candidates.sort(key=lambda p: (p.indexed_at or now, p.paper_id))
+        # Match the SqlAlchemy ordering: NULL indexed_at sorts first, then by
+        # (indexed_at, paper_id). Using utcnow() here would invert NULLS FIRST,
+        # so sort NULL as a distinct bucket that precedes any datetime.
+        def _sort_key(p: PaperResponse) -> tuple[int, Any, str]:
+            return (0, None, p.paper_id) if p.indexed_at is None else (1, p.indexed_at, p.paper_id)
+
+        candidates.sort(key=_sort_key)
         if after is not None:
-            candidates = [paper for paper in candidates if paper.paper_id > after.paper_id]
+            # Mirror the ORDER BY tuple: advance by (indexed_at, paper_id)
+            # with NULL-indexed rows forming a distinct leading bucket.
+            def _after(paper: PaperResponse) -> bool:
+                if after.indexed_at is None:
+                    if paper.indexed_at is None:
+                        return paper.paper_id > after.paper_id
+                    return True
+                if paper.indexed_at is None:
+                    return False
+                if paper.indexed_at > after.indexed_at:
+                    return True
+                if paper.indexed_at < after.indexed_at:
+                    return False
+                return paper.paper_id > after.paper_id
+
+            candidates = [paper for paper in candidates if _after(paper)]
         return candidates[:limit]
 
     def enrichment_stats(self) -> dict[str, int]:
         total_indexed = 0
         with_s2 = 0
         with_cites = 0
+        enriched = 0
         for paper in self.papers.values():
             if paper.index_status != "indexed":
                 continue
             total_indexed += 1
-            if paper.semantic_scholar_id:
+            has_s2 = bool(paper.semantic_scholar_id)
+            has_cites = bool(paper.citation_count and paper.citation_count > 0)
+            if has_s2:
                 with_s2 += 1
-            if paper.citation_count and paper.citation_count > 0:
+            if has_cites:
                 with_cites += 1
+            # enriched = has populated S2 id OR non-zero citations. See the
+            # SqlAlchemy docstring for why citation_count > 0 alone is wrong.
+            if has_s2 or has_cites:
+                enriched += 1
         return {
             "total_indexed": total_indexed,
             "with_semantic_scholar_id": with_s2,
             "with_citations": with_cites,
+            "enriched": enriched,
         }
 
     def update_paper_embedding(self, paper_id: str, embedding: list[float]) -> None:
