@@ -883,9 +883,15 @@ textarea::placeholder,
   text-align: left;
 }
 
+.sidebar-quick-action-icon {
+  width: 15px !important;
+  height: 15px !important;
+  flex: none;
+}
+
 .sidebar-quick-action .icon-image {
-  width: 12px;
-  height: 12px;
+  width: 15px;
+  height: 15px;
   opacity: 0.4;
   flex: none;
 }
@@ -2440,7 +2446,7 @@ textarea::placeholder,
   overflow: hidden;
   cursor: pointer;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 500;
   line-height: 1;
   transition:
@@ -2472,13 +2478,13 @@ textarea::placeholder,
 }
 
 .chat-empty-action-icon {
-  width: 26px;
-  min-width: 26px;
+  width: 22px;
+  min-width: 22px;
 }
 
 .chat-empty-action-icon-glyph {
-  width: 13px;
-  height: 13px;
+  width: 11px;
+  height: 11px;
   display: block;
   background-color: currentColor;
   -webkit-mask-image: var(--icon-url);
