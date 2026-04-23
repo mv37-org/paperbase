@@ -917,6 +917,24 @@ def test_browser_project_and_chat_write_routes_delegate_with_valid_csrf(api_clie
     assert ("delete_project", ("user_1", "proj_2")) in service.calls
 
 
+def test_browser_write_routes_allow_same_origin_api_host_with_valid_csrf(api_client):
+    client, service, settings = api_client
+    client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
+    csrf = csrf_token_for_session("browser-session-token", settings)
+
+    deleted_chat = client.delete(
+        "/v1/browser/chats/thread_1",
+        headers={
+          "Origin": "http://testserver",
+          "X-Paperbase-CSRF": csrf,
+        },
+    )
+
+    assert deleted_chat.status_code == 200
+    assert deleted_chat.json() == {"status": "deleted"}
+    assert ("delete_chat_thread", ("user_1", "thread_1")) in service.calls
+
+
 def test_browser_project_item_routes_delegate_to_service(api_client):
     client, service, settings = api_client
     client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
