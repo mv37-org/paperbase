@@ -1435,11 +1435,11 @@ textarea::placeholder,
   gap: 2px;
   padding: 0 6px 0 10px;
   border-right: 1px solid rgba(27, 22, 17, 0.08);
-  background: #f8f6f1;
+  background: #f6f2ea;
 }
 
 .chat-tab.active {
-  background: var(--paper);
+  background: #e8e1d4;
 }
 
 .chat-tab-trigger {
@@ -3668,7 +3668,6 @@ body.authenticated-theme-dark .sidebar,
 body.authenticated-theme-dark .paper-drawer,
 body.authenticated-theme-dark .project-menu-popover,
 body.authenticated-theme-dark .account-menu,
-body.authenticated-theme-dark .chat-tab.active,
 body.authenticated-theme-dark .chat-stage-header,
 body.authenticated-theme-dark .composer-form,
 body.authenticated-theme-dark .modal-panel,
@@ -3758,8 +3757,12 @@ body.authenticated-theme-dark .thread-card.active:hover {
 }
 
 body.authenticated-theme-dark .chat-tab {
-  background: #0d131b;
+  background: #131b26;
   border-right-color: var(--line);
+}
+
+body.authenticated-theme-dark .chat-tab.active {
+  background: #0b1016;
 }
 
 body.authenticated-theme-dark .chat-message-list {
