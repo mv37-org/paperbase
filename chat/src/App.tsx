@@ -45,6 +45,7 @@ import type {
   ChatCitation,
   ChatMessageResponse,
   ChatStreamDoneEvent,
+  ChatStreamUsageEvent,
   ChatThreadResponse,
   ChatThreadSummary,
   FigureResponse,
@@ -135,6 +136,7 @@ type ThreadStreamState = {
   turnIndex: number;
   thinkingWord: string;
   assistantStarted: boolean;
+  usage: ChatStreamUsageEvent | null;
 };
 
 const AUTH_VIEW_COPY: Record<AuthView, { title: string; caption: string }> = {
@@ -467,6 +469,35 @@ function formatThinkingLabel(word?: string | null) {
   const trimmed = word?.trim();
   const label = trimmed ? trimmed.replace(/\.+$/, "") : "Thinking";
   return `${label}...`;
+}
+
+function formatTokenCount(value: number) {
+  return new Intl.NumberFormat("en-US").format(Math.max(0, Math.round(value)));
+}
+
+function formatContextUsageLabel(usage: ChatStreamUsageEvent) {
+  return `${formatTokenCount(usage.total_tokens)} / ${formatTokenCount(usage.context_window_tokens)} context`;
+}
+
+function contextUsagePercent(usage: ChatStreamUsageEvent) {
+  if (usage.context_window_tokens <= 0) {
+    return 0;
+  }
+  return Math.min(100, (usage.total_tokens / usage.context_window_tokens) * 100);
+}
+
+function contextUsageDetailLabel(usage: ChatStreamUsageEvent) {
+  const details = [
+    `${formatTokenCount(usage.input_tokens)} in`,
+    `${formatTokenCount(usage.output_tokens)} out`,
+  ];
+  if (usage.cache_creation_input_tokens > 0) {
+    details.push(`${formatTokenCount(usage.cache_creation_input_tokens)} cache write`);
+  }
+  if (usage.cache_read_input_tokens > 0) {
+    details.push(`${formatTokenCount(usage.cache_read_input_tokens)} cache read`);
+  }
+  return `${formatContextUsageLabel(usage)} · ${details.join(" · ")}`;
 }
 
 function apiKeyStateMessage(state: string) {
@@ -926,6 +957,7 @@ export default function App() {
   const activeThreadStreamState = activeThreadId
     ? (threadStreamStates[activeThreadId] ?? null)
     : null;
+  const activeStreamUsage = activeThreadStreamState?.usage ?? null;
   const activeThreadToolActivities = useMemo(
     () =>
       activeThreadId
@@ -948,6 +980,34 @@ export default function App() {
   }, [activeThreadToolActivities]);
   const activeStreamInView = streamingThreadId !== null && streamingThreadId === activeThreadId;
   const showScrollToLatest = activeTab?.kind === "thread" && !isChatEmpty && !messageListAtBottom;
+  const renderContextWindowMeter = useCallback((usage: ChatStreamUsageEvent | null) => {
+    if (!usage) {
+      return null;
+    }
+    const usagePercent = contextUsagePercent(usage);
+    return (
+      <div className="context-usage-meter" title={contextUsageDetailLabel(usage)}>
+        <div className="context-usage-meter-header">
+          <span>{formatContextUsageLabel(usage)}</span>
+          <span>{usagePercent.toFixed(1)}%</span>
+        </div>
+        <div
+          className="context-usage-meter-track"
+          role="progressbar"
+          aria-label="Context window used"
+          aria-valuemin={0}
+          aria-valuemax={usage.context_window_tokens}
+          aria-valuenow={Math.min(usage.context_window_tokens, usage.total_tokens)}
+        >
+          <span
+            className="context-usage-meter-fill"
+            style={{ width: `${usagePercent}%` }}
+            aria-hidden="true"
+          />
+        </div>
+      </div>
+    );
+  }, []);
 
   const scrollMessageListToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
     if (!messageListRef.current) {
@@ -1135,6 +1195,7 @@ export default function App() {
         turnIndex,
         thinkingWord: pickThinkingWord(current[threadId]?.thinkingWord ?? null),
         assistantStarted: false,
+        usage: null,
       },
     }));
   }, []);
@@ -1150,6 +1211,22 @@ export default function App() {
         [threadId]: {
           ...existing,
           assistantStarted: true,
+        },
+      };
+    });
+  }, []);
+
+  const updateThreadStreamUsage = useCallback((threadId: string, usage: ChatStreamUsageEvent) => {
+    setThreadStreamStates((current) => {
+      const existing = current[threadId];
+      if (!existing) {
+        return current;
+      }
+      return {
+        ...current,
+        [threadId]: {
+          ...existing,
+          usage,
         },
       };
     });
@@ -1654,6 +1731,11 @@ export default function App() {
               return;
             }
 
+            if (eventName === "usage") {
+              updateThreadStreamUsage(threadId, payload);
+              return;
+            }
+
             if (eventName === "delta") {
               updateThread(threadId, (thread) => ({
                 ...(thread ?? {
@@ -1858,6 +1940,7 @@ export default function App() {
       refreshProjects,
       showErrorFlash,
       startThreadStreamState,
+      updateThreadStreamUsage,
       upsertToolActivity,
       upsertThreadIntoProjectItems,
       updateThread,
@@ -3654,6 +3737,11 @@ export default function App() {
                                     ? formatThinkingLabel(activeThreadStreamState?.thinkingWord)
                                     : "Failed"}
                                 </span>
+                                {message.status === "streaming" &&
+                                activeStreamInView &&
+                                activeThreadStreamState?.turnIndex === userTurnIndex
+                                  ? renderContextWindowMeter(activeStreamUsage)
+                                  : null}
                               </div>
                             ) : null}
                             <div
@@ -3753,9 +3841,12 @@ export default function App() {
                           ))}
                           {showThinkingPlaceholder ? (
                             <div className="tool-activity-row status-running thinking-only">
-                              <span className="tool-activity-label thinking-shimmer">
-                                {formatThinkingLabel(activeThreadStreamState?.thinkingWord)}
-                              </span>
+                              <div className="tool-activity-content">
+                                <span className="tool-activity-label thinking-shimmer">
+                                  {formatThinkingLabel(activeThreadStreamState?.thinkingWord)}
+                                </span>
+                                {renderContextWindowMeter(activeStreamUsage)}
+                              </div>
                             </div>
                           ) : null}
                         </Fragment>

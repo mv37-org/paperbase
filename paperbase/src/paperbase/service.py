@@ -34,7 +34,7 @@ from .extractors import (
     table_index_payload,
     table_json_bytes,
 )
-from .llm import AnthropicChatModelClient, ChatModelClient
+from .llm import AnthropicChatModelClient, ChatModelClient, ChatModelUsage
 from .models import (
     BrowserSessionResponse,
     BrowserUser,
@@ -693,6 +693,13 @@ def _truncate_tool_text(text: str, *, limit: int) -> tuple[str, bool]:
 def _extract_message_text(payload: dict[str, Any]) -> str:
     parts = [item.get("text", "") for item in payload.get("content", []) if item.get("type") == "text"]
     return "\n".join(part for part in parts if part).strip()
+
+
+def _anthropic_context_window_tokens(model_name: str) -> int:
+    normalized = model_name.strip().lower().replace(".", "-")
+    if any(token in normalized for token in ("opus-4-7", "opus-4-6", "sonnet-4-6")):
+        return 1_000_000
+    return 200_000
 
 
 _CHAT_TOOL_MAX_ROUNDS = 4
@@ -2228,6 +2235,23 @@ class PaperbaseService:
             state=state,
         )
 
+    def _chat_usage_payload(self, usage: ChatModelUsage) -> dict[str, Any]:
+        total_tokens = (
+            usage.input_tokens
+            + usage.output_tokens
+            + usage.cache_creation_input_tokens
+            + usage.cache_read_input_tokens
+        )
+        return {
+            "model": self.settings.anthropic_model,
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "cache_creation_input_tokens": usage.cache_creation_input_tokens,
+            "cache_read_input_tokens": usage.cache_read_input_tokens,
+            "total_tokens": total_tokens,
+            "context_window_tokens": _anthropic_context_window_tokens(self.settings.anthropic_model),
+        }
+
     def send_chat_message(
         self, user: BrowserUser, thread_id: str, request: SendChatMessageRequest
     ) -> SendChatMessageResponse:
@@ -2315,8 +2339,9 @@ class PaperbaseService:
         yield ("assistant_start", {"assistant_message": assistant_message.model_dump(mode="json")})
 
         chunks: list[str] = []
+        usage_payload: dict[str, Any] | None = None
         try:
-            for delta in self.chat_model.stream_message(
+            for stream_event in self.chat_model.stream_message(
                 api_key=prepared.api_key_value,
                 messages=conversation_messages,
                 system_prompt=self._chat_answer_system_prompt(
@@ -2324,10 +2349,13 @@ class PaperbaseService:
                     has_evidence_sources=bool(current_turn_citations),
                 ),
             ):
-                if not delta:
+                if stream_event.usage is not None:
+                    usage_payload = self._chat_usage_payload(stream_event.usage)
+                    yield ("usage", usage_payload)
+                if not stream_event.text:
                     continue
-                chunks.append(delta)
-                yield ("delta", {"message_id": assistant_message.message_id, "delta": delta})
+                chunks.append(stream_event.text)
+                yield ("delta", {"message_id": assistant_message.message_id, "delta": stream_event.text})
         except Exception as exc:
             failed_message = self.repository.update_chat_message(  # type: ignore[attr-defined]
                 assistant_message.message_id,
@@ -2371,6 +2399,7 @@ class PaperbaseService:
                 "remaining_free_responses": self._remaining_free_responses(resolved_user),
                 "has_anthropic_api_key": self.repository.get_anthropic_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
                 "state": "completed",
+                "usage": usage_payload,
             },
         )
 

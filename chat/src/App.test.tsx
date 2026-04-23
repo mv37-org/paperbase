@@ -1051,6 +1051,15 @@ describe("App", () => {
             status: "streaming",
           },
         });
+        onEvent("usage", {
+          model: "claude-opus-4-7",
+          input_tokens: 11234,
+          output_tokens: 1,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+          total_tokens: 11235,
+          context_window_tokens: 1000000,
+        });
         await streamDone;
       },
     );
@@ -1073,6 +1082,9 @@ describe("App", () => {
     });
     await waitFor(() => {
       expect(screen.getByText("Thinking...")).toBeTruthy();
+    });
+    await waitFor(() => {
+      expect(screen.getByText("11,235 / 1,000,000 context")).toBeTruthy();
     });
     expect(screen.queryByText("Streaming")).toBeNull();
 

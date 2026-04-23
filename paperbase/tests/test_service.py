@@ -18,6 +18,7 @@ from paperbase.browser_code import (
 )
 from paperbase.config import Settings, get_settings
 from paperbase.extractors import ExtractionOutput, FigureArtifact, RawArtifact, SectionArtifact, TableArtifact
+from paperbase.llm import ChatModelStreamEvent, ChatModelUsage
 from paperbase.models import (
     ChatCitation,
     CreateChatThreadRequest,
@@ -54,6 +55,8 @@ class FakeChatModel:
         self.stream_calls: list[dict[str, object]] = []
         self.stream_chunks: list[str] = ["Grounded ", "answer with citations [S1]"]
         self.fail_stream_after_chunks: int | None = None
+        self.initial_stream_usage = ChatModelUsage(input_tokens=11234, output_tokens=1)
+        self.final_stream_usage = ChatModelUsage(input_tokens=11234, output_tokens=27)
 
     def create_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
         self.create_calls.append(
@@ -132,10 +135,12 @@ class FakeChatModel:
                 "tool_choice": tool_choice,
             }
         )
+        yield ChatModelStreamEvent(usage=self.initial_stream_usage)
         for index, chunk in enumerate(self.stream_chunks):
             if self.fail_stream_after_chunks is not None and index >= self.fail_stream_after_chunks:
                 raise RuntimeError("stream blew up")
-            yield chunk
+            yield ChatModelStreamEvent(text=chunk)
+        yield ChatModelStreamEvent(usage=self.final_stream_usage)
 
 
 class FakeGitHubRepoManager:
@@ -1980,11 +1985,16 @@ def test_browser_chat_stream_emits_citations_and_completion(monkeypatch, browser
     assert event_names[:2] == ["tool_start", "tool_done"]
     assert events[0][1]["label"]
     assert "assistant_start" in event_names
+    assert "usage" in event_names
     assert "delta" in event_names
     assert event_names[-1] == "done"
     assistant_start_index = event_names.index("assistant_start")
+    usage_index = event_names.index("usage")
     assert events[assistant_start_index][1]["assistant_message"]["citations"]
+    assert events[usage_index][1]["input_tokens"] == 11234
+    assert events[usage_index][1]["context_window_tokens"] == 1_000_000
     assert events[-1][1]["assistant_message"]["status"] == "completed"
+    assert events[-1][1]["usage"]["output_tokens"] == 27
 
     refreshed = client.get(f"/v1/browser/chats/{thread_id}").json()
     assert refreshed["messages"][-1]["status"] == "completed"
