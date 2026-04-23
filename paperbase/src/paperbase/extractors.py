@@ -273,7 +273,16 @@ def _split_by_markdown_headers(markdown: str) -> list[SectionArtifact] | None:
     matches = list(_MARKDOWN_HEADER_RE.finditer(markdown))
     if not matches:
         return None
-    if len(matches[0].group(1)) == 1 and len(matches) > 1:
+    # Drop a leading H1 only when later headers are deeper (H2+), which is the
+    # "paper title + sections" pattern. If every header is an H1, treat them
+    # all as sections — some markdown exports (e.g. docling) use H1 for
+    # Abstract/Introduction/etc., and skipping the first one would silently
+    # discard that section's content.
+    if (
+        len(matches[0].group(1)) == 1
+        and len(matches) > 1
+        and any(len(m.group(1)) > 1 for m in matches[1:])
+    ):
         matches = matches[1:]
     if not matches:
         return None
@@ -505,20 +514,49 @@ def _extract_latex_figures(latex: str) -> list[FigureArtifact]:
 _LATEX_INPUT_RE = re.compile(r"\\(?:input|include|subfile)\{([^}]+)\}")
 
 
-def _resolve_latex_inputs(content: str, tex_by_name: dict[str, str], depth: int = 0) -> str:
+def _resolve_latex_inputs(
+    content: str,
+    tex_by_name: dict[str, str],
+    current_path: str = "",
+    depth: int = 0,
+) -> str:
     if depth > 8:
         return content
+    from posixpath import dirname as _posix_dirname, normpath as _posix_normpath
+
+    base_dir = _posix_dirname(current_path) if current_path else ""
+
+    def _candidates(ref: str) -> list[str]:
+        cands = [ref, f"{ref}.tex"]
+        # Resolve relative to the including file's directory (handles
+        # "../common/intro" from sections/nested/method.tex etc.).
+        if base_dir and not ref.startswith("/"):
+            joined = _posix_normpath(f"{base_dir}/{ref}")
+            cands.extend([joined, f"{joined}.tex"])
+        stripped = ref.lstrip("./")
+        cands.extend([stripped, f"{stripped}.tex"])
+        return cands
 
     def _replace(match: re.Match[str]) -> str:
         ref = match.group(1).strip()
-        candidate_keys = (ref, f"{ref}.tex", ref.lstrip("./"), f"{ref.lstrip('./')}.tex")
-        for key in candidate_keys:
+        for key in _candidates(ref):
             if key in tex_by_name:
-                return "\n" + _resolve_latex_inputs(tex_by_name[key], tex_by_name, depth + 1) + "\n"
+                return (
+                    "\n"
+                    + _resolve_latex_inputs(tex_by_name[key], tex_by_name, key, depth + 1)
+                    + "\n"
+                )
         for key, body in tex_by_name.items():
             if key.endswith("/" + ref) or key.endswith("/" + ref + ".tex"):
-                return "\n" + _resolve_latex_inputs(body, tex_by_name, depth + 1) + "\n"
-        return ""
+                return (
+                    "\n"
+                    + _resolve_latex_inputs(body, tex_by_name, key, depth + 1)
+                    + "\n"
+                )
+        # Don't silently delete unresolved includes — keep the original
+        # directive in place so downstream extraction at least sees something
+        # rather than a blank gap.
+        return match.group(0)
 
     return _LATEX_INPUT_RE.sub(_replace, content)
 
@@ -539,13 +577,14 @@ def _extract_latex_text(source_bytes: bytes) -> str | None:
                         tex_by_name[member.name] = handle.read().decode("utf-8", errors="replace")
                     if not tex_by_name:
                         return None
-                    entrypoint = next(
-                        (body for body in tex_by_name.values() if "\\begin{document}" in body),
+                    entrypoint_name = next(
+                        (name for name, body in tex_by_name.items() if "\\begin{document}" in body),
                         None,
                     )
-                    if entrypoint is None:
-                        entrypoint = max(tex_by_name.values(), key=len)
-                    resolved = _resolve_latex_inputs(entrypoint, tex_by_name)
+                    if entrypoint_name is None:
+                        entrypoint_name = max(tex_by_name, key=lambda n: len(tex_by_name[n]))
+                    entrypoint = tex_by_name[entrypoint_name]
+                    resolved = _resolve_latex_inputs(entrypoint, tex_by_name, entrypoint_name)
                     if "\\includepdf" in resolved and not re.search(r"\\section\b", resolved):
                         return None
                     return resolved

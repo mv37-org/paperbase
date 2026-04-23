@@ -1381,3 +1381,45 @@ def test_browser_google_start_redirects_back_to_return_to_when_not_configured(mo
     assert response.headers["location"] == "http://127.0.0.1:8080/?auth_error=google_not_configured"
 
     app.dependency_overrides.clear()
+
+
+def test_memory_repository_search_local_bakes_in_citation_and_recency_boosts():
+    """MemoryPaperRepository.search_local must apply citation + recency boosts
+    into the returned score, mirroring SqlAlchemyPaperRepository. service.search
+    skips re-applying citation_boost to local hits, so memory mode would lose
+    the boost entirely without this."""
+    repo = MemoryPaperRepository()
+    matched_query = "shared rare niche topic"
+
+    def _meta(arxiv_id: str, *, cites: int, year: str) -> PaperMetadata:
+        return PaperMetadata(
+            arxiv_id=arxiv_id,
+            title=f"Paper about {matched_query}",
+            authors="A",
+            abstract="abstract text",
+            categories="cs.AI",
+            primary_category="cs.AI",
+            published=year,
+            updated=year,
+            pdf_url=f"https://example.test/{arxiv_id}.pdf",
+            html_url=f"https://example.test/{arxiv_id}",
+            citation_count=cites,
+            index_status="indexed",
+        )
+
+    repo.upsert_paper(_meta("low/0001", cites=0, year="2018-01-01"), search_document="", embedding=None)
+    repo.upsert_paper(_meta("high/0001", cites=10_000, year="2018-01-01"), search_document="", embedding=None)
+
+    no_boost = repo.search_local(
+        matched_query, limit=5, query_embedding=None, citation_boost_max=0.0, recency_boost_max=0.0
+    )
+    with_boost = repo.search_local(matched_query, limit=5, query_embedding=None)
+
+    no_boost_by_id = {r.arxiv_id: r.score or 0 for r in no_boost}
+    with_boost_by_id = {r.arxiv_id: r.score or 0 for r in with_boost}
+
+    # With boosts disabled, both papers have the same lexical-only score.
+    assert no_boost_by_id["low/0001"] == no_boost_by_id["high/0001"]
+    # With boosts enabled, the highly-cited paper picks up additional score.
+    assert with_boost_by_id["high/0001"] > with_boost_by_id["low/0001"]
+    assert with_boost_by_id["high/0001"] > no_boost_by_id["high/0001"]

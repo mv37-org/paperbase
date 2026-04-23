@@ -226,6 +226,88 @@ def test_extract_latex_text_resolves_input_and_include_directives():
     assert "\\include{" not in resolved
 
 
+def test_extract_sections_keeps_first_h1_when_all_headers_are_h1():
+    """If every header is an H1 (some markdown exports do this for Abstract /
+    Introduction / etc.), do not silently drop the first one as a paper title."""
+    markdown = "\n".join(
+        [
+            "# Abstract",
+            "",
+            "We propose a model.",
+            "",
+            "# Introduction",
+            "",
+            "Background and motivation.",
+            "",
+            "# Method",
+            "",
+            "Architecture details.",
+        ]
+    )
+
+    sections = _extract_sections(markdown)
+
+    assert [section.slug for section in sections] == ["abstract", "introduction", "method"]
+    assert sections[0].markdown == "We propose a model."
+    assert sections[1].markdown == "Background and motivation."
+    assert sections[2].markdown == "Architecture details."
+
+
+def test_extract_latex_text_resolves_relative_input_paths():
+    """An \\input that uses .. or a directory-relative path must be resolved
+    against the *including* file's directory, not just by bare-name lookup."""
+    main = (
+        "\\documentclass{article}\n"
+        "\\begin{document}\n"
+        "\\input{sections/nested/method}\n"
+        "\\end{document}\n"
+    )
+    method = (
+        "\\section{Method}\n"
+        "We present details below.\n"
+        "\\input{../common/intro}\n"
+    )
+    intro = "\\section{Common Intro}\nShared introduction content.\n"
+
+    tarball = _build_tex_tarball(
+        {
+            "main.tex": main,
+            "sections/nested/method.tex": method,
+            "sections/common/intro.tex": intro,
+        }
+    )
+
+    resolved = _extract_latex_text(tarball)
+
+    assert resolved is not None
+    assert "\\section{Method}" in resolved
+    assert "\\section{Common Intro}" in resolved
+    assert "Shared introduction content." in resolved
+    assert "\\input{" not in resolved
+
+
+def test_extract_latex_text_preserves_unresolved_includes():
+    """An \\input target that doesn't exist in the tarball should leave the
+    original directive in place rather than silently deleting the reference."""
+    main = (
+        "\\documentclass{article}\n"
+        "\\begin{document}\n"
+        "Real prose comes first.\n"
+        "\\input{nonexistent}\n"
+        "More real prose.\n"
+        "\\end{document}\n"
+    )
+
+    tarball = _build_tex_tarball({"main.tex": main})
+
+    resolved = _extract_latex_text(tarball)
+
+    assert resolved is not None
+    assert "Real prose comes first." in resolved
+    assert "More real prose." in resolved
+    assert "\\input{nonexistent}" in resolved
+
+
 def test_extract_latex_text_skips_includepdf_wrapper():
     wrapper = (
         "\\documentclass{article}\n"

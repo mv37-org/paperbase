@@ -2382,7 +2382,10 @@ class MemoryPaperRepository(PaperRepository):
         recency_boost_max: float = 0.005,
         recency_half_life_years: int = 10,
     ) -> list[SearchPaperResult]:
+        from math import log10
+
         query_lower = query.lower()
+        current_year = utcnow().year
         results: list[SearchPaperResult] = []
         for paper_id, paper in self.papers.items():
             score = 0.0
@@ -2399,6 +2402,22 @@ class MemoryPaperRepository(PaperRepository):
             if query_lower in self.search_documents.get(paper_id, "").lower():
                 score += 1.0
             if score > 0:
+                # Bake citation + recency boosts into the score so the
+                # caller (service.search) can treat MemoryPaperRepository
+                # the same way as SqlAlchemyPaperRepository — that is, can
+                # safely skip applying citation_boost again to local hits.
+                citation_boost = min(
+                    citation_boost_scale * log10(1 + (paper.citation_count or 0)),
+                    citation_boost_max,
+                )
+                recency_boost = 0.0
+                published = (paper.published or "")[:4]
+                if published.isdigit() and recency_half_life_years > 0:
+                    age_years = max(0, current_year - int(published))
+                    recency_boost = recency_boost_max * max(
+                        0.0, 1.0 - age_years / recency_half_life_years
+                    )
+                score += citation_boost + recency_boost
                 results.append(SearchPaperResult(**paper.model_dump(), score=score, source="local"))
         results.sort(key=lambda item: ((item.score or 0), item.citation_count, item.published), reverse=True)
         return results[:limit]
