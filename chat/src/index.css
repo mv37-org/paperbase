@@ -3045,7 +3045,7 @@ textarea {
   display: grid;
   align-content: start;
   gap: 6px;
-  padding: 0;
+  padding: 0 16px 0 0;
   border-right: 1px solid rgba(27, 22, 17, 0.08);
 }
 
@@ -3084,9 +3084,15 @@ textarea {
 
 .settings-tab-panels {
   display: grid;
+  align-content: start;
+  gap: 12px;
   min-height: 0;
   overflow: auto;
   padding-right: 4px;
+}
+
+.settings-modal-flash {
+  margin-bottom: 0;
 }
 
 .settings-section {

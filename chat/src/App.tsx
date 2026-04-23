@@ -227,6 +227,35 @@ function SettingsSectionHeading({ title, caption }: { title: string; caption: st
   );
 }
 
+function ModalFlash({
+  message,
+  kind,
+  className = "",
+}: {
+  message: string;
+  kind: ModalFlashKind;
+  className?: string;
+}) {
+  return (
+    <div
+      id="modal-flash"
+      className={`modal-flash${kind === "error" ? " warning" : " note"}${className ? ` ${className}` : ""}`}
+      role={kind === "error" ? "alert" : "status"}
+    >
+      {kind === "error" ? (
+        <span className="modal-flash-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24">
+            <path d="M12 4 3.75 18h16.5L12 4Z" />
+            <path d="M12 9v4" />
+            <path d="M12 16.5h.01" />
+          </svg>
+        </span>
+      ) : null}
+      <span className="modal-flash-text">{message}</span>
+    </div>
+  );
+}
+
 const EXAMPLES = [
   {
     label: "Reliable multi-step agents",
@@ -4349,23 +4378,8 @@ export default function App() {
             </div>
           )}
 
-          {flash ? (
-            <div
-              id="modal-flash"
-              className={`modal-flash${flashKind === "error" ? " warning" : " note"}`}
-              role={flashKind === "error" ? "alert" : "status"}
-            >
-              {flashKind === "error" ? (
-                <span className="modal-flash-icon" aria-hidden="true">
-                  <svg viewBox="0 0 24 24">
-                    <path d="M12 4 3.75 18h16.5L12 4Z" />
-                    <path d="M12 9v4" />
-                    <path d="M12 16.5h.01" />
-                  </svg>
-                </span>
-              ) : null}
-              <span className="modal-flash-text">{flash}</span>
-            </div>
+          {flash && authView !== "settings" ? (
+            <ModalFlash message={flash} kind={flashKind} />
           ) : null}
 
           <div
@@ -4548,6 +4562,9 @@ export default function App() {
               </div>
 
               <div className="settings-tab-panels">
+                {flash ? (
+                  <ModalFlash message={flash} kind={flashKind} className="settings-modal-flash" />
+                ) : null}
                 {activeSettingsTab === "inference" ? (
                   <section
                     className="settings-section"
