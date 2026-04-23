@@ -164,11 +164,32 @@ _JOB_TYPE_MAX_ATTEMPTS: dict[str, int] = {
     "reindex_missing_embeddings": 2,
     "reindex_embeddings": 2,
     "summarize_top_cited": 2,
+    "harvest_range": 3,
+    "harvest_chunk": 5,
 }
 
 
 def default_max_attempts(job_type: str) -> int:
     return _JOB_TYPE_MAX_ATTEMPTS.get(job_type, 3)
+
+
+# Per-job-type priority for claim ordering. Lower values are claimed first,
+# so interactive/on-demand work never waits behind a long backfill run.
+# Jobs not in this map fall back to 0 — the same default encoded on the ORM.
+_JOB_TYPE_PRIORITY: dict[str, int] = {
+    "index_paper": -10,
+    "sync_latest": 0,
+    "enrich_missing_metadata": 0,
+    "reindex_missing_embeddings": 0,
+    "reindex_embeddings": 0,
+    "summarize_top_cited": 0,
+    "harvest_range": 5,
+    "harvest_chunk": 10,
+}
+
+
+def default_priority(job_type: str) -> int:
+    return _JOB_TYPE_PRIORITY.get(job_type, 0)
 
 
 class JobORM(Base):
@@ -188,6 +209,10 @@ class JobORM(Base):
     # schedule the next attempt after backoff.
     next_run_at: Mapped[Any | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     last_attempted_at: Mapped[Any | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Claim ordering: smaller = higher priority. Default 0 keeps legacy rows
+    # behaving like everything else; new bulk-harvest jobs set a higher value
+    # so they can't starve interactive on-demand work.
+    priority: Mapped[int] = mapped_column(Integer, default=0, index=True)
     created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
     started_at: Mapped[Any | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -869,6 +894,7 @@ class PaperRepository(ABC):
         payload: dict[str, Any],
         *,
         max_attempts: int | None = None,
+        priority: int | None = None,
     ) -> JobResponse:
         raise NotImplementedError
 
@@ -1044,10 +1070,14 @@ class SqlAlchemyPaperRepository(PaperRepository):
             connection.execute(
                 text("ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS last_attempted_at TIMESTAMPTZ")
             )
-            # Index on next_run_at goes in the post-create_all block below —
-            # on a fresh CI DB the `jobs` table doesn't exist yet when ALTERs
-            # run, and CREATE INDEX (unlike ALTER TABLE IF EXISTS) will error
-            # without the table present.
+            # Indexes on next_run_at (#32) and priority (#33) go in the
+            # post-create_all block below — on a fresh CI DB the `jobs` table
+            # doesn't exist yet when ALTERs run, and CREATE INDEX (unlike
+            # ALTER TABLE IF EXISTS) will error without the table present.
+            # #33: worker priority so backfill harvests cannot starve on-demand work
+            connection.execute(
+                text("ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS priority INTEGER NOT NULL DEFAULT 0")
+            )
             connection.execute(
                 text("ALTER TABLE IF EXISTS chat_threads ADD COLUMN IF NOT EXISTS project_id VARCHAR(64)")
             )
@@ -1159,11 +1189,14 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     "ON papers USING gin (search_tsv)"
                 )
             )
-            # #32: next_run_at index for claim ordering. Lives here (after
-            # create_all) so fresh CI DBs have `jobs` before the CREATE INDEX
-            # runs.
+            # #32 / #33: next_run_at + priority indexes for claim ordering.
+            # Live here (after create_all) so fresh CI DBs have `jobs` before
+            # the CREATE INDEX runs.
             connection.execute(
                 text("CREATE INDEX IF NOT EXISTS jobs_next_run_at ON jobs (next_run_at)")
+            )
+            connection.execute(
+                text("CREATE INDEX IF NOT EXISTS jobs_priority ON jobs (priority)")
             )
             connection.execute(
                 text(
@@ -3229,6 +3262,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
         payload: dict[str, Any],
         *,
         max_attempts: int | None = None,
+        priority: int | None = None,
     ) -> JobResponse:
         job = JobORM(
             job_id=new_id("job"),
@@ -3236,6 +3270,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
             status="pending",
             payload=payload,
             max_attempts=max_attempts if max_attempts is not None else default_max_attempts(job_type),
+            priority=priority if priority is not None else default_priority(job_type),
             created_at=utcnow(),
             updated_at=utcnow(),
         )
@@ -3258,6 +3293,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
             max_attempts=row.max_attempts or 3,
             next_run_at=row.next_run_at,
             last_attempted_at=row.last_attempted_at,
+            priority=row.priority or 0,
             created_at=row.created_at,
             updated_at=row.updated_at,
             started_at=row.started_at,
@@ -3267,16 +3303,14 @@ class SqlAlchemyPaperRepository(PaperRepository):
     def claim_pending_job(self) -> JobResponse | None:
         # Atomic lease via ``SELECT ... FOR UPDATE SKIP LOCKED``. Without the
         # row lock, two concurrent workers reading at the same instant could
-        # both match the same row, both set status='running', and both
-        # believe they had the claim — Cloud Run horizontal scaling would
-        # quickly double-process jobs. SKIP LOCKED makes each worker jump
-        # over a row that another worker has already locked inside this
-        # transaction, so at most one claims a given row per iteration.
+        # both match the same row, both set status='running', and both believe
+        # they had the claim. SKIP LOCKED makes each worker jump over a row
+        # another worker has already locked inside this transaction.
         #
-        # Claim ordering: next_run_at NULLS FIRST so fresh jobs (never
-        # scheduled for a future retry) win over retries that are coming
-        # back around, which keeps a failing job from cutting in front of
-        # real work every time its backoff expires.
+        # Claim ordering: priority first (lower wins), then next_run_at NULLS
+        # FIRST so fresh jobs win over retries coming back around, then
+        # created_at ASC for FIFO within a tier. Priority keeps long-running
+        # backfills from starving interactive on-demand work.
         now = utcnow()
         with self._session() as session:
             row = session.scalar(
@@ -3285,7 +3319,11 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     JobORM.status == "pending",
                     or_(JobORM.next_run_at.is_(None), JobORM.next_run_at <= now),
                 )
-                .order_by(JobORM.next_run_at.is_(None).desc(), JobORM.created_at.asc())
+                .order_by(
+                    JobORM.priority.asc(),
+                    JobORM.next_run_at.is_(None).desc(),
+                    JobORM.created_at.asc(),
+                )
                 .limit(1)
                 .with_for_update(skip_locked=True)
             )
@@ -4747,6 +4785,7 @@ class MemoryPaperRepository(PaperRepository):
         payload: dict[str, Any],
         *,
         max_attempts: int | None = None,
+        priority: int | None = None,
     ) -> JobResponse:
         job = JobResponse(
             job_id=new_id("job"),
@@ -4754,6 +4793,7 @@ class MemoryPaperRepository(PaperRepository):
             status="pending",
             payload=payload,
             max_attempts=max_attempts if max_attempts is not None else default_max_attempts(job_type),
+            priority=priority if priority is not None else default_priority(job_type),
             created_at=utcnow(),
             updated_at=utcnow(),
         )
@@ -4765,13 +4805,17 @@ class MemoryPaperRepository(PaperRepository):
 
     def claim_pending_job(self) -> JobResponse | None:
         now = utcnow()
-        # next_run_at NULLS FIRST, then created_at ASC — same ordering as SQL.
+        # priority ASC, next_run_at NULLS FIRST, created_at ASC — same
+        # ordering as SQL. Priority keeps bulk backfill from starving
+        # interactive on-demand work.
         candidates = [
             (job_id, job)
             for job_id, job in self.jobs.items()
             if job.status == "pending" and (job.next_run_at is None or job.next_run_at <= now)
         ]
-        candidates.sort(key=lambda item: (item[1].next_run_at is not None, item[1].created_at))
+        candidates.sort(
+            key=lambda item: (item[1].priority or 0, item[1].next_run_at is not None, item[1].created_at)
+        )
         if not candidates:
             return None
         job_id, job = candidates[0]

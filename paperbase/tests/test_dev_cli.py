@@ -11,6 +11,7 @@ from paperbase.dev_cli import (
     _assert_safe_storage_root,
     _missing_required_env_vars,
     doctor,
+    harvest,
     init_local,
     main,
     verify_run,
@@ -278,3 +279,24 @@ def test_main_dispatches_verify_run_mode(monkeypatch):
 
     assert exit_code == 0
     assert captured == [DoctorMode.TEST]
+
+
+def test_harvest_cli_reports_invalid_limit_from_service(monkeypatch, capsys):
+    from paperbase.errors import PermanentError
+
+    class FakeService:
+        def enqueue_harvest_range_job(self, **_kwargs):
+            raise PermanentError("limit_per_window must be >= 1 when provided")
+
+    monkeypatch.setattr("paperbase.service.get_service", lambda: FakeService())
+
+    exit_code = harvest(
+        categories=["cs.LG"],
+        start_date="2020-01-01",
+        end_date="2020-03-31",
+        limit_per_window=-1,
+        chunk_months=3,
+    )
+
+    assert exit_code == 1
+    assert "Invalid harvest request: limit_per_window must be >= 1" in capsys.readouterr().out

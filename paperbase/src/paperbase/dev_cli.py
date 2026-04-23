@@ -631,6 +631,48 @@ def enrich_missing(*, limit: int, min_age_seconds: int, batch_size: int) -> int:
     return 0
 
 
+def harvest(
+    *,
+    categories: list[str],
+    start_date: str,
+    end_date: str,
+    limit_per_window: int | None,
+    chunk_months: int,
+) -> int:
+    """Queue a historical arxiv backfill. Planner splits the range into
+    ``chunk_months``-wide windows per category and enqueues one
+    ``harvest_chunk`` per window; chunks run at lower priority than
+    interactive work so a 5-year backfill does not starve ``sync_latest``
+    or on-demand ``index_paper``.
+
+    ``limit_per_window`` is per-(category, window), NOT per-category
+    total. A 2-year range with ``chunk_months=3`` is 8 windows, so
+    ``limit_per_window=1000`` means each category can ingest up to
+    ``8 * 1000 = 8000`` papers over the full range.
+    """
+    from .errors import PermanentError
+    from .service import get_service
+
+    service = get_service()
+    try:
+        job = service.enqueue_harvest_range_job(
+            categories=categories,
+            start_date=start_date,
+            end_date=end_date,
+            limit_per_window=limit_per_window,
+            chunk_months=chunk_months,
+        )
+    except PermanentError as exc:
+        print(f"Invalid harvest request: {exc}")
+        return 1
+    print(
+        f"Queued harvest_range {job.job_id}: {len(categories)} categor"
+        f"{'y' if len(categories) == 1 else 'ies'} over {start_date} → {end_date}, "
+        f"chunk_months={chunk_months}, limit_per_window={limit_per_window}"
+    )
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Local developer helpers for paperbase.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -732,6 +774,39 @@ def _build_parser() -> argparse.ArgumentParser:
         default=20,
         help="Semantic Scholar /paper/batch size (max 500 per S2 docs).",
     )
+    harvest_parser = subparsers.add_parser(
+        "harvest",
+        help="Queue a historical arxiv backfill by date range (runs at backfill priority).",
+    )
+    harvest_parser.add_argument(
+        "--categories",
+        default=None,
+        help=(
+            "Comma-separated arxiv categories (e.g. cs.LG,cs.CL). "
+            "Defaults to the configured AI/ML category list."
+        ),
+    )
+    harvest_parser.add_argument("--start", dest="start_date", required=True, help="YYYY-MM-DD (inclusive).")
+    harvest_parser.add_argument("--end", dest="end_date", required=True, help="YYYY-MM-DD (inclusive).")
+    harvest_parser.add_argument(
+        "--limit-per-window",
+        "--limit-per-category",  # legacy alias; kept for scripts predating the rename
+        dest="limit_per_window",
+        type=int,
+        default=None,
+        help=(
+            "Cap each (category, window) at this many papers; omit for unlimited. "
+            "NOTE: this is per-window, not per-category. A 2-year range with "
+            "--chunk-months=3 is 8 windows, so --limit-per-window=1000 means "
+            "each category can ingest up to 8000 papers."
+        ),
+    )
+    harvest_parser.add_argument(
+        "--chunk-months",
+        type=int,
+        default=3,
+        help="Sub-job window size in months. Smaller = finer progress + more resume points.",
+    )
     return parser
 
 
@@ -772,6 +847,18 @@ def main(argv: list[str] | None = None) -> int:
             limit=args.limit,
             min_age_seconds=args.min_age_seconds,
             batch_size=args.batch_size,
+        )
+    if args.command == "harvest":
+        if args.categories:
+            categories = [cat.strip() for cat in args.categories.split(",") if cat.strip()]
+        else:
+            categories = list(_settings().arxiv_categories)
+        return harvest(
+            categories=categories,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            limit_per_window=args.limit_per_window,
+            chunk_months=args.chunk_months,
         )
 
     parser.error(f"Unsupported command: {args.command}")
