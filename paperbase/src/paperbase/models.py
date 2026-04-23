@@ -29,6 +29,13 @@ class PaperMetadata(BaseModel):
     influential_citation_count: int = 0
     semantic_scholar_id: str | None = None
     code_url: str | None = None
+    # Paper-code ingestion state (#5). See PaperORM.code_index_status /
+    # code_is_python / code_python_reason / code_manifest for the
+    # authoritative column docs.
+    code_index_status: str = "none"
+    code_is_python: bool | None = None
+    code_python_reason: str | None = None
+    code_manifest: dict[str, Any] | None = None
     source_type: str | None = None
     index_status: str = "discovered"
     indexed_at: datetime | None = None

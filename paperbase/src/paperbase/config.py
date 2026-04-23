@@ -163,6 +163,17 @@ class Settings(BaseSettings):
     # extra S2 call per indexed paper, so turn off for mass harvests and leave
     # on for featured-tier / on-demand indexing.
     fetch_references_at_index: bool = Field(default=False)
+    # Paper-code ingestion (#5). github_token is service-level (NOT the user
+    # OAuth connection used for project repo sync) and is only used to bump
+    # the anonymous 60 req/hr archive-fetch limit to 5000. The caps below
+    # bound worst-case disk + scan cost so a 10 GB data-weights repo cannot
+    # wedge the ingest_repo worker; any repo hitting a cap is recorded with
+    # a skip reason in code_manifest instead of being partially ingested.
+    github_token: str | None = None
+    code_repo_max_archive_bytes: int = Field(default=100 * 1024 * 1024)
+    code_repo_max_scanned_files: int = Field(default=50_000)
+    code_repo_max_stored_file_bytes: int = Field(default=1 * 1024 * 1024)
+    code_repo_max_indexed_file_bytes: int = Field(default=1 * 1024 * 1024)
 
     @property
     def effective_encryption_key(self) -> str:
