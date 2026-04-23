@@ -529,6 +529,14 @@ function contextUsageDetailLabel(usage: ChatStreamUsageEvent) {
   return `${formatContextUsageLabel(usage)} · ${details.join(" · ")}`;
 }
 
+function formatContextUsagePercentValue(usage: ChatStreamUsageEvent) {
+  const usagePercent = contextUsagePercent(usage);
+  if (usagePercent > 0 && usagePercent < 1) {
+    return "<1";
+  }
+  return String(Math.round(usagePercent));
+}
+
 function apiKeyStateMessage(state: string) {
   if (state === "api_key_invalid") {
     return "Your saved Anthropic API key could not be decrypted. Add it again in Settings.";
@@ -732,7 +740,11 @@ export default function App() {
   const [threadStreamStates, setThreadStreamStates] = useState<Record<string, ThreadStreamState>>(
     {},
   );
+  const [threadUsageSnapshots, setThreadUsageSnapshots] = useState<
+    Record<string, ChatStreamUsageEvent>
+  >({});
   const [toolActivities, setToolActivities] = useState<Record<string, ToolActivityEntry[]>>({});
+  const [contextUsagePopoverOpen, setContextUsagePopoverOpen] = useState(false);
   const [paperDrawer, setPaperDrawer] = useState<PaperDrawerState>(() => drawerStateFromUrl());
   const [paperDrawerPaper, setPaperDrawerPaper] = useState<PaperResponse | null>(null);
   const [paperDrawerContent, setPaperDrawerContent] = useState<PaperDrawerContent | null>(null);
@@ -752,6 +764,7 @@ export default function App() {
   const tabsStorageHydratedRef = useRef(false);
   const appUploadRef = useRef<HTMLInputElement | null>(null);
   const accountMenuRef = useRef<HTMLDivElement | null>(null);
+  const contextUsageMenuRef = useRef<HTMLDivElement | null>(null);
   const emptyStateProjectPickerRef = useRef<HTMLDivElement | null>(null);
   const emptyStateProjectSearchInputRef = useRef<HTMLInputElement | null>(null);
   const projectMenuRef = useRef<HTMLDivElement | null>(null);
@@ -987,6 +1000,10 @@ export default function App() {
     ? (threadStreamStates[activeThreadId] ?? null)
     : null;
   const activeStreamUsage = activeThreadStreamState?.usage ?? null;
+  const activePersistedUsage = activeThreadId
+    ? (threadUsageSnapshots[activeThreadId] ?? null)
+    : null;
+  const activeContextUsage = activeStreamUsage ?? activePersistedUsage;
   const activeThreadToolActivities = useMemo(
     () =>
       activeThreadId
@@ -1009,34 +1026,44 @@ export default function App() {
   }, [activeThreadToolActivities]);
   const activeStreamInView = streamingThreadId !== null && streamingThreadId === activeThreadId;
   const showScrollToLatest = activeTab?.kind === "thread" && !isChatEmpty && !messageListAtBottom;
-  const renderContextWindowMeter = useCallback((usage: ChatStreamUsageEvent | null) => {
-    if (!usage) {
-      return null;
+  const activeContextUsagePercent = activeContextUsage
+    ? contextUsagePercent(activeContextUsage)
+    : 0;
+
+  useEffect(() => {
+    if (!contextUsagePopoverOpen) {
+      return;
     }
-    const usagePercent = contextUsagePercent(usage);
-    return (
-      <div className="context-usage-meter" title={contextUsageDetailLabel(usage)}>
-        <div className="context-usage-meter-header">
-          <span>{formatContextUsageLabel(usage)}</span>
-          <span>{usagePercent.toFixed(1)}%</span>
-        </div>
-        <div
-          className="context-usage-meter-track"
-          role="progressbar"
-          aria-label="Context window used"
-          aria-valuemin={0}
-          aria-valuemax={usage.context_window_tokens}
-          aria-valuenow={Math.min(usage.context_window_tokens, usage.total_tokens)}
-        >
-          <span
-            className="context-usage-meter-fill"
-            style={{ width: `${usagePercent}%` }}
-            aria-hidden="true"
-          />
-        </div>
-      </div>
-    );
-  }, []);
+    const handlePointerDown = (event: MouseEvent) => {
+      if (
+        contextUsageMenuRef.current &&
+        !contextUsageMenuRef.current.contains(event.target as Node)
+      ) {
+        setContextUsagePopoverOpen(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setContextUsagePopoverOpen(false);
+      }
+    };
+    window.addEventListener("mousedown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("mousedown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [contextUsagePopoverOpen]);
+
+  useEffect(() => {
+    setContextUsagePopoverOpen(false);
+  }, [activeThreadId]);
+
+  useEffect(() => {
+    if (!activeContextUsage) {
+      setContextUsagePopoverOpen(false);
+    }
+  }, [activeContextUsage]);
 
   const scrollMessageListToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
     if (!messageListRef.current) {
@@ -1258,6 +1285,24 @@ export default function App() {
           usage,
         },
       };
+    });
+  }, []);
+
+  const setThreadUsageSnapshot = useCallback((threadId: string, usage: ChatStreamUsageEvent) => {
+    setThreadUsageSnapshots((current) => ({
+      ...current,
+      [threadId]: usage,
+    }));
+  }, []);
+
+  const clearThreadUsageSnapshot = useCallback((threadId: string) => {
+    setThreadUsageSnapshots((current) => {
+      if (!(threadId in current)) {
+        return current;
+      }
+      const next = { ...current };
+      delete next[threadId];
+      return next;
     });
   }, []);
 
@@ -1707,6 +1752,8 @@ export default function App() {
 
       streamAbortControllerRef.current = streamAbortController;
       setStreamingThreadId(threadId);
+      clearThreadUsageSnapshot(threadId);
+      setContextUsagePopoverOpen(false);
       startThreadStreamState(threadId, turnIndex);
       setComposerStatus("");
 
@@ -1762,6 +1809,7 @@ export default function App() {
 
             if (eventName === "usage") {
               updateThreadStreamUsage(threadId, payload);
+              setThreadUsageSnapshot(threadId, payload);
               return;
             }
 
@@ -1792,6 +1840,10 @@ export default function App() {
 
             if (eventName === "done") {
               donePayload = payload;
+              if (payload.usage) {
+                updateThreadStreamUsage(threadId, payload.usage);
+                setThreadUsageSnapshot(threadId, payload.usage);
+              }
               updateThread(threadId, (thread) => ({
                 ...(thread ?? {
                   thread_id: threadId,
@@ -1959,6 +2011,7 @@ export default function App() {
       return null;
     },
     [
+      clearThreadUsageSnapshot,
       clearThreadStreamState,
       completeRunningToolActivitiesForTurn,
       completeToolActivity,
@@ -1967,6 +2020,7 @@ export default function App() {
       includeUploads,
       markThreadAssistantStarted,
       refreshProjects,
+      setThreadUsageSnapshot,
       showErrorFlash,
       startThreadStreamState,
       updateThreadStreamUsage,
@@ -2214,6 +2268,8 @@ export default function App() {
     setAccountMenuOpen(false);
     setStreamingThreadId(null);
     setThreadStreamStates({});
+    setThreadUsageSnapshots({});
+    setContextUsagePopoverOpen(false);
     setToolActivities({});
     streamAbortControllerRef.current?.abort();
     streamAbortControllerRef.current = null;
@@ -2941,8 +2997,98 @@ export default function App() {
     return null;
   }
 
+  const contextUsagePopoverId = activeThreadId
+    ? `context-usage-popover-${activeThreadId}`
+    : "context-usage-popover";
+  const composerContextUsageAccessory =
+    activeTab?.kind === "thread" && activeContextUsage ? (
+      <div
+        ref={contextUsageMenuRef}
+        className={`context-usage-menu${contextUsagePopoverOpen ? " open" : ""}`}
+      >
+        <button
+          type="button"
+          className={`context-usage-button${activeStreamInView ? " live" : ""}`}
+          aria-label={`Context window usage: ${contextUsageDetailLabel(activeContextUsage)}`}
+          aria-haspopup="dialog"
+          aria-expanded={contextUsagePopoverOpen}
+          aria-controls={contextUsagePopoverOpen ? contextUsagePopoverId : undefined}
+          title={contextUsageDetailLabel(activeContextUsage)}
+          onClick={() => setContextUsagePopoverOpen((current) => !current)}
+        >
+          <span
+            className="context-usage-button-ring"
+            style={
+              {
+                "--context-usage-percent": `${activeContextUsagePercent}%`,
+              } as CSSProperties
+            }
+            aria-hidden="true"
+          >
+            <span className="context-usage-button-ring-core" />
+          </span>
+          <span className="context-usage-button-value">
+            {formatContextUsagePercentValue(activeContextUsage)}%
+          </span>
+        </button>
+        {contextUsagePopoverOpen ? (
+          <div
+            id={contextUsagePopoverId}
+            className="context-usage-popover"
+            role="dialog"
+            aria-label="Context window usage details"
+          >
+            <div className="context-usage-popover-header">
+              <span className="context-usage-popover-eyebrow">Context window</span>
+              <strong>{formatContextUsagePercentValue(activeContextUsage)}% used</strong>
+            </div>
+            <div className="context-usage-popover-summary">
+              <span>{formatContextUsageLabel(activeContextUsage)}</span>
+              <span>{activeContextUsage.model}</span>
+            </div>
+            <div
+              className="context-usage-popover-track"
+              role="progressbar"
+              aria-label="Context window used"
+              aria-valuemin={0}
+              aria-valuemax={activeContextUsage.context_window_tokens}
+              aria-valuenow={Math.min(
+                activeContextUsage.context_window_tokens,
+                activeContextUsage.total_tokens,
+              )}
+            >
+              <span
+                className="context-usage-popover-fill"
+                style={{ width: `${activeContextUsagePercent}%` }}
+                aria-hidden="true"
+              />
+            </div>
+            <dl className="context-usage-popover-details">
+              <div>
+                <dt>Input</dt>
+                <dd>{formatTokenCount(activeContextUsage.input_tokens)}</dd>
+              </div>
+              <div>
+                <dt>Output</dt>
+                <dd>{formatTokenCount(activeContextUsage.output_tokens)}</dd>
+              </div>
+              <div>
+                <dt>Cache write</dt>
+                <dd>{formatTokenCount(activeContextUsage.cache_creation_input_tokens)}</dd>
+              </div>
+              <div>
+                <dt>Cache read</dt>
+                <dd>{formatTokenCount(activeContextUsage.cache_read_input_tokens)}</dd>
+              </div>
+            </dl>
+          </div>
+        ) : null}
+      </div>
+    ) : null;
+
   const composerEditor = (
     <LandingMentionEditor
+      actionAccessory={composerContextUsageAccessory}
       attachButtonId="composer-upload-trigger"
       disabled={Boolean(streamingThreadId)}
       formId="composer-form"
@@ -3766,11 +3912,6 @@ export default function App() {
                                     ? formatThinkingLabel(activeThreadStreamState?.thinkingWord)
                                     : "Failed"}
                                 </span>
-                                {message.status === "streaming" &&
-                                activeStreamInView &&
-                                activeThreadStreamState?.turnIndex === userTurnIndex
-                                  ? renderContextWindowMeter(activeStreamUsage)
-                                  : null}
                               </div>
                             ) : null}
                             <div
@@ -3874,7 +4015,6 @@ export default function App() {
                                 <span className="tool-activity-label thinking-shimmer">
                                   {formatThinkingLabel(activeThreadStreamState?.thinkingWord)}
                                 </span>
-                                {renderContextWindowMeter(activeStreamUsage)}
                               </div>
                             </div>
                           ) : null}

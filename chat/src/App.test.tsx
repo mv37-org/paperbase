@@ -62,6 +62,9 @@ const apiMocks = vi.hoisted(() => {
             (props.onChange as ((value: string) => void) | undefined)?.(event.target.value)
           }
         />
+        {props.actionAccessory ? (
+          <div data-testid="mention-action-accessory">{props.actionAccessory as any}</div>
+        ) : null}
         {props.submitButtonId ? (
           <button
             id={String(props.submitButtonId)}
@@ -1084,9 +1087,21 @@ describe("App", () => {
       expect(screen.getByText("Thinking...")).toBeTruthy();
     });
     await waitFor(() => {
-      expect(screen.getByText("11,235 / 1,000,000 context")).toBeTruthy();
+      expect(
+        screen.getByRole("button", {
+          name: "Context window usage: 11,235 / 1,000,000 context · 11,234 in · 1 out",
+        }),
+      ).toBeTruthy();
     });
     expect(screen.queryByText("Streaming")).toBeNull();
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Context window usage: 11,235 / 1,000,000 context · 11,234 in · 1 out",
+      }),
+    );
+    expect(screen.getByText("Context window")).toBeTruthy();
+    expect(screen.getByText("11,235 / 1,000,000 context")).toBeTruthy();
 
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Stop" }));
@@ -1101,6 +1116,92 @@ describe("App", () => {
       await streamDone;
     });
     randomSpy.mockRestore();
+  });
+
+  it("keeps the context usage control in the composer after streaming completes", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.createThread.mockResolvedValue(emptyThreadResponse("thread_2"));
+    apiMocks.sendThreadMessageStream.mockImplementation(
+      async (
+        _threadId: string,
+        _payload: unknown,
+        onEvent: (eventName: string, payload: unknown) => void,
+      ) => {
+        onEvent("assistant_start", {
+          assistant_message: {
+            message_id: "msg_stream",
+            role: "assistant",
+            content_markdown: "",
+            citations: [],
+            created_at: "2026-04-21T00:00:00Z",
+            status: "streaming",
+          },
+        });
+        onEvent("usage", {
+          model: "claude-opus-4-7",
+          input_tokens: 48123,
+          output_tokens: 512,
+          cache_creation_input_tokens: 2048,
+          cache_read_input_tokens: 1024,
+          total_tokens: 51683,
+          context_window_tokens: 200000,
+        });
+        onEvent("done", {
+          assistant_message: {
+            message_id: "msg_stream",
+            role: "assistant",
+            content_markdown: "Grounded streamed answer",
+            citations: [],
+            created_at: "2026-04-21T00:00:00Z",
+            status: "completed",
+          },
+          remaining_free_responses: 2,
+          has_anthropic_api_key: false,
+          state: "completed",
+          usage: {
+            model: "claude-opus-4-7",
+            input_tokens: 48123,
+            output_tokens: 512,
+            cache_creation_input_tokens: 2048,
+            cache_read_input_tokens: 1024,
+            total_tokens: 51683,
+            context_window_tokens: 200000,
+          },
+        });
+      },
+    );
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Start new research in")).toBeTruthy();
+    });
+    fireEvent.change(screen.getByLabelText("mention-input-chat"), {
+      target: { value: "Summarize retrieval strategies" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Grounded streamed answer")).toBeTruthy();
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Send" })).toBeTruthy();
+    });
+
+    const usageButton = screen.getByRole("button", {
+      name: "Context window usage: 51,683 / 200,000 context · 48,123 in · 512 out · 2,048 cache write · 1,024 cache read",
+    });
+    expect(usageButton).toBeTruthy();
+
+    fireEvent.click(usageButton);
+
+    expect(screen.getByText("Context window")).toBeTruthy();
+    expect(screen.getByText("51,683 / 200,000 context")).toBeTruthy();
+    expect(screen.getByText("claude-opus-4-7")).toBeTruthy();
+    expect(screen.getByText("48,123")).toBeTruthy();
+    expect(screen.getByText("512")).toBeTruthy();
+    expect(screen.getByText("2,048")).toBeTruthy();
+    expect(screen.getByText("1,024")).toBeTruthy();
   });
 
   it("opens the settings modal with appearance controls and no notifications tab", async () => {
