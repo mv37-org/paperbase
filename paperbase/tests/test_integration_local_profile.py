@@ -336,3 +336,117 @@ def test_worker_processes_summarize_job_with_real_repository(integration_context
     assert stored.summary_short == f"{paper_response.paper_id} technical summary"
     assert stored.summary_eli5 == f"{paper_response.paper_id} plain summary"
     assert all(paper.paper_id != paper_response.paper_id for paper in pending_after)
+
+
+@pytest.mark.integration
+def test_sql_repository_reuses_duplicate_job_dedupe_key(integration_context):
+    _, repository, _, namespace = integration_context
+
+    dedupe_key = f"test:{namespace}:dedupe"
+    first = repository.create_job(
+        "index_paper",
+        {"arxiv_id": f"{namespace}/dedupe-first"},
+        dedupe_key=dedupe_key,
+    )
+    second = repository.create_job(
+        "index_paper",
+        {"arxiv_id": f"{namespace}/dedupe-second"},
+        dedupe_key=dedupe_key,
+    )
+
+    with _connect() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT count(*) FROM jobs WHERE dedupe_key = %s", (dedupe_key,))
+            count = cursor.fetchone()[0]
+
+    assert second.job_id == first.job_id
+    assert second.payload["arxiv_id"] == f"{namespace}/dedupe-first"
+    assert count == 1
+
+
+@pytest.mark.integration
+def test_claim_pending_job_is_atomic_across_concurrent_workers(integration_context):
+    """Two workers racing on the same pending row must not both claim it.
+
+    Regression test for the retry-policy review on #32: the original
+    ``claim_pending_job`` used select-then-mutate, which is a classic
+    lost-update race under horizontal scaling — both workers see the
+    same pending row, both set ``status='running'``, both proceed to
+    process the same job. The fix is ``SELECT ... FOR UPDATE SKIP
+    LOCKED`` inside the claim transaction so concurrent sessions jump
+    over a row another worker has already locked.
+
+    This exercises the real Postgres path by:
+
+    1. Enqueuing a single pending job.
+    2. Opening two separate repository sessions bound to the same DB.
+    3. Having one session take the row lock inside an open transaction,
+       then a second session attempts a claim before the first commits.
+    4. Asserting the second claim sees no pending row (``None``) rather
+       than re-claiming the row the first session already has.
+    """
+    import threading
+    from sqlalchemy import or_, select
+    from sqlalchemy.orm import Session
+    from paperbase.repository import JobORM, SqlAlchemyPaperRepository
+    from paperbase.utils import utcnow
+
+    _, repository, _, namespace = integration_context
+    assert isinstance(repository, SqlAlchemyPaperRepository), (
+        "concurrency test must run against the SQL repository"
+    )
+
+    created = repository.create_job("index_paper", {"arxiv_id": f"{namespace}/concurrent-claim"})
+    try:
+        # First worker: hold the row-lock open in a background thread
+        # without committing. While this transaction is alive, any other
+        # ``SELECT ... FOR UPDATE SKIP LOCKED`` against the same row
+        # MUST skip it — that's the entire guarantee.
+        first_claimed: dict[str, JobORM | None] = {"row": None}
+        lock_acquired = threading.Event()
+        release = threading.Event()
+
+        def hold_lock() -> None:
+            with Session(repository._engine) as session:
+                row = session.scalar(
+                    select(JobORM)
+                    .where(
+                        JobORM.status == "pending",
+                        or_(JobORM.next_run_at.is_(None), JobORM.next_run_at <= utcnow()),
+                    )
+                    .order_by(JobORM.next_run_at.is_(None).desc(), JobORM.created_at.asc())
+                    .limit(1)
+                    .with_for_update(skip_locked=True)
+                )
+                first_claimed["row"] = row
+                lock_acquired.set()
+                release.wait(timeout=10)
+
+        holder = threading.Thread(target=hold_lock, name="first-claimer", daemon=True)
+        holder.start()
+        assert lock_acquired.wait(timeout=10), "first worker never acquired the row lock"
+        assert first_claimed["row"] is not None
+        assert first_claimed["row"].job_id == created.job_id
+
+        # Second worker attempts to claim while the first holds the row.
+        # The only pending job is locked, so SKIP LOCKED must return None.
+        second_claim = repository.claim_pending_job()
+        assert second_claim is None, (
+            "second worker claimed a job that was already locked by the first — "
+            "the SELECT FOR UPDATE SKIP LOCKED guarantee is broken"
+        )
+
+        # Release the first worker's transaction; the job is still
+        # pending from the DB's perspective (the first holder never
+        # mutated), so a post-release claim should succeed.
+        release.set()
+        holder.join(timeout=10)
+
+        after_release = repository.claim_pending_job()
+        assert after_release is not None
+        assert after_release.job_id == created.job_id
+        assert after_release.status == "running"
+    finally:
+        with _connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("DELETE FROM jobs WHERE job_id = %s", (created.job_id,))

@@ -570,6 +570,37 @@ def reindex_embeddings(*, limit: int, include_chunks: bool, rewrite_existing: bo
     return 0
 
 
+def jobs_list_dead(*, limit: int) -> int:
+    """Print dead-letter jobs (exhausted retries). Intended as a triage
+    entry point — operator eyeballs the error text, then either retries or
+    leaves dead. Reads via the service so memory-mode tests can exercise it."""
+    from .service import get_service
+
+    service = get_service()
+    dead = service.list_dead_jobs(limit=limit)
+    if not dead:
+        print("No dead-letter jobs.")
+        return 0
+    print(f"{'job_id':<22} {'job_type':<28} {'attempts':>8} {'last_error':<60}")
+    print("-" * 120)
+    for job in dead:
+        err = (job.error or "")[:58].replace("\n", " ")
+        print(f"{job.job_id:<22} {job.job_type:<28} {job.attempts:>3}/{job.max_attempts:<4} {err}")
+    return 0
+
+
+def jobs_retry(*, job_id: str) -> int:
+    from .service import get_service
+
+    service = get_service()
+    result = service.retry_dead_job(job_id)
+    if result is None:
+        print(f"{job_id} is not in a dead-letter state (or does not exist).")
+        return 1
+    print(f"Requeued {result.job_id} ({result.job_type}): status={result.status} attempts={result.attempts}")
+    return 0
+
+
 def enrich_missing(*, limit: int, min_age_seconds: int, batch_size: int) -> int:
     """Synchronously run the enrich_missing_metadata pass in the current
     process. Intended for manual backfill from the CLI; routine operation
@@ -597,6 +628,51 @@ def enrich_missing(*, limit: int, min_age_seconds: int, batch_size: int) -> int:
     print(f"Batches failed: {result['batches_failed']}")
     print(f"Coverage:       {before_cov:.1f}% -> {after_cov:.1f}% "
           f"({stats_after.get('enriched', 0)}/{total} papers enriched)")
+    if result["batches_failed"] > 0:
+        print("Incomplete: rerun paperbase-dev enrich-missing after the upstream recovers.")
+        return 1
+    return 0
+
+
+def harvest(
+    *,
+    categories: list[str],
+    start_date: str,
+    end_date: str,
+    limit_per_window: int | None,
+    chunk_months: int,
+) -> int:
+    """Queue a historical arxiv backfill. Planner splits the range into
+    ``chunk_months``-wide windows per category and enqueues one
+    ``harvest_chunk`` per window; chunks run at lower priority than
+    interactive work so a 5-year backfill does not starve ``sync_latest``
+    or on-demand ``index_paper``.
+
+    ``limit_per_window`` is per-(category, window), NOT per-category
+    total. A 2-year range with ``chunk_months=3`` is 8 windows, so
+    ``limit_per_window=1000`` means each category can ingest up to
+    ``8 * 1000 = 8000`` papers over the full range.
+    """
+    from .errors import PermanentError
+    from .service import get_service
+
+    service = get_service()
+    try:
+        job = service.enqueue_harvest_range_job(
+            categories=categories,
+            start_date=start_date,
+            end_date=end_date,
+            limit_per_window=limit_per_window,
+            chunk_months=chunk_months,
+        )
+    except PermanentError as exc:
+        print(f"Invalid harvest request: {exc}")
+        return 1
+    print(
+        f"Queued harvest_range {job.job_id}: {len(categories)} categor"
+        f"{'y' if len(categories) == 1 else 'ies'} over {start_date} → {end_date}, "
+        f"chunk_months={chunk_months}, limit_per_window={limit_per_window}"
+    )
     return 0
 
 
@@ -655,6 +731,22 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Backfill NULL embeddings only instead of rewriting existing vectors.",
     )
 
+    jobs_parser = subparsers.add_parser(
+        "jobs",
+        help="Inspect and operate on the worker job queue (dead-letter, retry).",
+    )
+    jobs_sub = jobs_parser.add_subparsers(dest="jobs_command", required=True)
+    list_dead_parser = jobs_sub.add_parser(
+        "list-dead",
+        help="Print the most recent dead-letter jobs (exhausted retries).",
+    )
+    list_dead_parser.add_argument("--limit", type=int, default=50)
+    retry_parser = jobs_sub.add_parser(
+        "retry",
+        help="Promote a dead job back to pending with attempts reset.",
+    )
+    retry_parser.add_argument("job_id", help="Job id (e.g. job_abc123).")
+
     enrich_parser = subparsers.add_parser(
         "enrich-missing",
         help=(
@@ -684,6 +776,39 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=20,
         help="Semantic Scholar /paper/batch size (max 500 per S2 docs).",
+    )
+    harvest_parser = subparsers.add_parser(
+        "harvest",
+        help="Queue a historical arxiv backfill by date range (runs at backfill priority).",
+    )
+    harvest_parser.add_argument(
+        "--categories",
+        default=None,
+        help=(
+            "Comma-separated arxiv categories (e.g. cs.LG,cs.CL). "
+            "Defaults to the configured AI/ML category list."
+        ),
+    )
+    harvest_parser.add_argument("--start", dest="start_date", required=True, help="YYYY-MM-DD (inclusive).")
+    harvest_parser.add_argument("--end", dest="end_date", required=True, help="YYYY-MM-DD (inclusive).")
+    harvest_parser.add_argument(
+        "--limit-per-window",
+        "--limit-per-category",  # legacy alias; kept for scripts predating the rename
+        dest="limit_per_window",
+        type=int,
+        default=None,
+        help=(
+            "Cap each (category, window) at this many papers; omit for unlimited. "
+            "NOTE: this is per-window, not per-category. A 2-year range with "
+            "--chunk-months=3 is 8 windows, so --limit-per-window=1000 means "
+            "each category can ingest up to 8000 papers."
+        ),
+    )
+    harvest_parser.add_argument(
+        "--chunk-months",
+        type=int,
+        default=3,
+        help="Sub-job window size in months. Smaller = finer progress + more resume points.",
     )
     return parser
 
@@ -715,11 +840,28 @@ def main(argv: list[str] | None = None) -> int:
             include_chunks=not args.skip_chunks,
             rewrite_existing=not args.missing_only,
         )
+    if args.command == "jobs":
+        if args.jobs_command == "list-dead":
+            return jobs_list_dead(limit=args.limit)
+        if args.jobs_command == "retry":
+            return jobs_retry(job_id=args.job_id)
     if args.command == "enrich-missing":
         return enrich_missing(
             limit=args.limit,
             min_age_seconds=args.min_age_seconds,
             batch_size=args.batch_size,
+        )
+    if args.command == "harvest":
+        if args.categories:
+            categories = [cat.strip() for cat in args.categories.split(",") if cat.strip()]
+        else:
+            categories = list(_settings().arxiv_categories)
+        return harvest(
+            categories=categories,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            limit_per_window=args.limit_per_window,
+            chunk_months=args.chunk_months,
         )
 
     parser.error(f"Unsupported command: {args.command}")

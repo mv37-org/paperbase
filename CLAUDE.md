@@ -14,7 +14,7 @@ Primary commands:
 - `make profile`
 - `make clean`
 
-Lower-level workflow operations should go through `paperbase-dev`, not ad hoc scripts.
+Lower-level workflow operations should go through `paperbase-dev`, not ad hoc scripts. Operator-facing `paperbase-dev` commands include `jobs list-dead`, `jobs retry <job_id>`, and `harvest`; for harvests, `--limit-per-window` caps each category-window chunk, not the whole category across the requested range.
 
 ## Required Validation Flow
 

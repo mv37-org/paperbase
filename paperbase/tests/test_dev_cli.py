@@ -11,6 +11,8 @@ from paperbase.dev_cli import (
     _assert_safe_storage_root,
     _missing_required_env_vars,
     doctor,
+    enrich_missing,
+    harvest,
     init_local,
     main,
     verify_run,
@@ -278,3 +280,55 @@ def test_main_dispatches_verify_run_mode(monkeypatch):
 
     assert exit_code == 0
     assert captured == [DoctorMode.TEST]
+
+
+def test_harvest_cli_reports_invalid_limit_from_service(monkeypatch, capsys):
+    from paperbase.errors import PermanentError
+
+    class FakeService:
+        def enqueue_harvest_range_job(self, **_kwargs):
+            raise PermanentError("limit_per_window must be >= 1 when provided")
+
+    monkeypatch.setattr("paperbase.service.get_service", lambda: FakeService())
+
+    exit_code = harvest(
+        categories=["cs.LG"],
+        start_date="2020-01-01",
+        end_date="2020-03-31",
+        limit_per_window=-1,
+        chunk_months=3,
+    )
+
+    assert exit_code == 1
+    assert "Invalid harvest request: limit_per_window must be >= 1" in capsys.readouterr().out
+
+
+def test_enrich_missing_cli_reports_partial_failure_without_traceback(monkeypatch, capsys):
+    class FakeRepository:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def enrichment_stats(self):
+            self.calls += 1
+            if self.calls == 1:
+                return {"total_indexed": 10, "enriched": 2}
+            return {"total_indexed": 10, "enriched": 4}
+
+    class FakeService:
+        def __init__(self) -> None:
+            self.repository = FakeRepository()
+
+        def enrich_missing_metadata(self, **kwargs):
+            assert kwargs == {"limit": 10, "min_age_seconds": 3600, "batch_size": 20}
+            return {"papers_scanned": 10, "papers_updated": 2, "batches_failed": 1}
+
+    monkeypatch.setattr("paperbase.service.get_service", lambda: FakeService())
+
+    exit_code = enrich_missing(limit=10, min_age_seconds=3600, batch_size=20)
+
+    output = capsys.readouterr().out
+    assert exit_code == 1
+    assert "Scanned:        10" in output
+    assert "Updated:        2" in output
+    assert "Batches failed: 1" in output
+    assert "Incomplete: rerun paperbase-dev enrich-missing" in output

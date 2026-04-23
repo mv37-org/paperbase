@@ -14,6 +14,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel as _BaseModel, Field as _Field
 from starlette.middleware.sessions import SessionMiddleware
 
 from .auth import (
@@ -279,6 +280,49 @@ def sync_latest(service: PaperbaseService = Depends(get_service)) -> JobResponse
     return service.enqueue_latest_sync_job()
 
 
+class HarvestRangeRequest(_BaseModel):
+    # When omitted/empty, the API defaults to the configured AI/ML arxiv
+    # categories (per the product scope — see issue #33 comment). Callers
+    # can still pass an explicit subset to harvest a narrower slice.
+    categories: list[str] = _Field(default_factory=list)
+    start_date: str = _Field(min_length=10, max_length=10)
+    end_date: str = _Field(min_length=10, max_length=10)
+    # Per-(category, window) cap — NOT a per-category total across the
+    # whole date range. A 2-year range with ``chunk_months=3`` is 8
+    # windows, so ``limit_per_window=1000`` means each category can
+    # ingest up to ``8 * 1000 = 8000`` papers. The arg is named after
+    # the chunk so operators don't read it as a category-wide budget.
+    limit_per_window: int | None = _Field(default=None, ge=1, le=10_000_000)
+    chunk_months: int = _Field(default=3, ge=1, le=24)
+    source: str = "arxiv"
+
+
+@app.post("/v1/index/harvest", response_model=JobResponse, dependencies=[Depends(require_bearer_token)])
+def harvest_range(
+    request: HarvestRangeRequest,
+    service: PaperbaseService = Depends(get_service),
+) -> JobResponse:
+    """Queue a ``harvest_range`` planner job. The planner splits
+    ``[start_date, end_date]`` into ``chunk_months``-wide windows per
+    category and enqueues one ``harvest_chunk`` per window. Chunks run at
+    lower priority than interactive work so a large backfill does not
+    starve on-demand indexing."""
+    from .errors import PermanentError
+
+    categories = request.categories or list(get_settings().arxiv_categories)
+    try:
+        return service.enqueue_harvest_range_job(
+            categories=categories,
+            start_date=request.start_date,
+            end_date=request.end_date,
+            limit_per_window=request.limit_per_window,
+            chunk_months=request.chunk_months,
+            source=request.source,
+        )
+    except PermanentError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @app.post("/v1/index/summarize-top-cited", response_model=JobResponse, dependencies=[Depends(require_bearer_token)])
 def summarize_top_cited(
     limit: int = Query(default=500_000, ge=1, le=5_000_000),
@@ -493,6 +537,37 @@ def browser_get_paper_table(
 @app.get("/v1/jobs/{job_id}", response_model=JobResponse, dependencies=[Depends(require_bearer_token)])
 def get_job(job_id: str, service: PaperbaseService = Depends(get_service)) -> JobResponse:
     return service.get_job(job_id)
+
+
+@app.get(
+    "/v1/jobs",
+    response_model=list[JobResponse],
+    dependencies=[Depends(require_bearer_token)],
+)
+def list_jobs(
+    status: str = Query(default="dead", description="Job status to filter on (dead|failed|pending|running|completed)."),
+    limit: int = Query(default=50, ge=1, le=500),
+    service: PaperbaseService = Depends(get_service),
+) -> list[JobResponse]:
+    return service.list_jobs_by_status(status, limit=limit)
+
+
+@app.post(
+    "/v1/jobs/{job_id}/retry",
+    response_model=JobResponse,
+    dependencies=[Depends(require_bearer_token)],
+)
+def retry_job(
+    job_id: str,
+    service: PaperbaseService = Depends(get_service),
+) -> JobResponse:
+    """Promote a dead (or legacy-failed) job back to pending with its
+    attempt counter reset. Returns 404 if the id isn't in a dead-letter
+    state."""
+    result = service.retry_dead_job(job_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} is not in a retryable state")
+    return result
 
 
 @app.post(
