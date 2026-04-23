@@ -850,8 +850,10 @@ class PaperRepository(ABC):
     @abstractmethod
     def record_search_click(self, query_id: str, paper_id: str) -> bool:
         """Attach a clicked_paper_id + clicked_at to an existing search_logs
-        row. Returns False if the query_id is unknown so the API layer can
-        return 404."""
+        row. Returns False when the query_id is unknown OR when the paper_id
+        was not part of the logged top_paper_ids, so the API layer can
+        return 404. The membership check exists to keep the click-label
+        dataset trustworthy for retrieval evaluation."""
         raise NotImplementedError
 
 
@@ -3083,6 +3085,8 @@ class SqlAlchemyPaperRepository(PaperRepository):
             row = session.get(SearchLogORM, query_id)
             if row is None:
                 return False
+            if paper_id not in (row.top_paper_ids or []):
+                return False
             row.clicked_paper_id = paper_id
             row.clicked_at = utcnow()
             return True
@@ -4387,6 +4391,8 @@ class MemoryPaperRepository(PaperRepository):
     def record_search_click(self, query_id: str, paper_id: str) -> bool:
         row = self.search_logs.get(query_id)
         if row is None:
+            return False
+        if paper_id not in (row.get("top_paper_ids") or []):
             return False
         row["clicked_paper_id"] = paper_id
         row["clicked_at"] = utcnow()

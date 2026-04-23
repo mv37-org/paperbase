@@ -2487,6 +2487,55 @@ def test_record_search_click_updates_log_and_404s_on_unknown_query_id():
     assert service.record_search_click("qry_nonexistent", paper_id) is False
 
 
+def test_chat_search_tool_does_not_write_search_log_row():
+    """The paperbase_search chat tool runs LLM-generated reformulations, not
+    real user queries, so its searches must never land in search_logs — they
+    would pollute the #21 real-user-query benchmark. The tool path forces
+    log_query=False so the response carries query_id=None and no row is
+    persisted."""
+    from paperbase.service import ChatCitationRegistry
+
+    service, paper_id = _make_service_with_one_paper()
+    registry = ChatCitationRegistry()
+    fake_user = type("U", (), {"user_id": "u1"})()
+
+    result = service._execute_chat_tool(
+        tool_name="paperbase_search",
+        tool_input={"query": "attention"},
+        user=fake_user,
+        citation_registry=registry,
+    )
+
+    assert service.repository.search_logs == {}
+    # The tool result dict is the view the model sees — no query_id surfaces
+    # because click attribution is meaningless for a synthetic reformulation.
+    assert "query_id" not in result
+    assert any(p["paper_id"] == paper_id for p in result.get("papers", []))
+
+
+def test_record_search_click_rejects_paper_outside_logged_result_set():
+    """The click endpoint only accepts clicks for papers that were actually in
+    the logged top_paper_ids. A buggy or malicious caller that sends an
+    arbitrary paper_id must not be able to poison the click-label dataset —
+    the return is False so the API layer translates to 404."""
+    service, returned_paper_id = _make_service_with_one_paper()
+
+    response = service.search(SearchRequest(query="attention", limit=5, include_live_sources=False))
+    assert response.query_id is not None
+    assert [p.paper_id for p in response.papers] == [returned_paper_id]
+
+    # Attaching a paper that was never in the logged top_paper_ids must be rejected.
+    outsider_paper_id = "arxiv:9999.00000"
+    assert service.record_search_click(response.query_id, outsider_paper_id) is False
+    log = service.repository.search_logs[response.query_id]
+    assert log["clicked_paper_id"] is None
+    assert log["clicked_at"] is None
+
+    # And the legitimate click for a paper that was returned still works.
+    assert service.record_search_click(response.query_id, returned_paper_id) is True
+    assert service.repository.search_logs[response.query_id]["clicked_paper_id"] == returned_paper_id
+
+
 def test_search_log_does_not_persist_auth_tokens_or_secrets():
     """Belt-and-braces: even if a caller somehow passes a bearer token or
     API key as the query text, the SearchRequest schema has no field for

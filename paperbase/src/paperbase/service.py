@@ -1750,6 +1750,8 @@ class PaperbaseService:
     ) -> dict[str, Any]:
         if tool_name == "paperbase_search":
             query = str(tool_input.get("query") or "").strip()
+            # Chat-tool searches are synthetic LLM reformulations, not real user
+            # queries, so they must never pollute the search_logs benchmark dataset.
             request = SearchRequest(
                 query=query,
                 limit=_tool_int(tool_input.get("limit"), default=8, maximum=20),
@@ -1757,6 +1759,7 @@ class PaperbaseService:
                 year=(str(tool_input.get("year") or "").strip() or None),
                 include_live_sources=_tool_bool(tool_input.get("include_live_sources"), default=False),
                 rerank=_tool_bool(tool_input.get("rerank"), default=False),
+                log_query=False,
             )
             response = self.search(request)
             papers = []
