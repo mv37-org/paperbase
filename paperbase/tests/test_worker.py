@@ -112,44 +112,59 @@ def test_run_one_iteration_updates_state_for_completed_jobs():
 
     assert updated_last_sync == 25.0
     assert state.processed_count == 1
-    assert state.failed_count == 0
+    assert state.completed_count == 1
+    assert state.retry_scheduled_count == 0
+    assert state.dead_count == 0
     assert state.last_job_id == "job_done"
     assert state.last_job_type == "index_paper"
     assert state.last_job_status == "completed"
     assert state.last_error is None
+    assert state.last_terminal_error is None
     assert state.last_loop_at > 0
 
 
-def test_run_one_iteration_updates_failed_job_state():
+def test_run_one_iteration_counts_retry_scheduled_and_dead_separately():
+    """After the #32 retry policy, ``process_next_job`` returns a
+    ``JobResponse`` whose status is one of ``completed`` / ``pending``
+    (transient retry scheduled) / ``dead`` (terminal failure). The worker
+    must track those separately so /metrics can distinguish retry churn
+    from real dead-letter growth, and ``last_terminal_error`` only
+    surfaces errors that actually dead-lettered.
+    """
     settings = Settings(
         worker_auto_sync_latest=False,
         worker_initial_sync_latest=False,
         worker_poll_interval_seconds=0,
     )
     service = _StubService()
-    service.processed_jobs.append(
-        SimpleNamespace(
-            job_id="job_failed",
-            job_type="reindex_missing_embeddings",
-            status="failed",
-            error="boom",
-        )
+    service.processed_jobs.extend(
+        [
+            SimpleNamespace(job_id="j1", job_type="index_paper", status="pending", error="upstream 503"),
+            SimpleNamespace(job_id="j2", job_type="index_paper", status="dead", error="arxiv 404"),
+            SimpleNamespace(job_id="j3", job_type="index_paper", status="completed", error=None),
+        ]
     )
     state = WorkerState()
 
-    run_one_iteration(
-        settings=settings,
-        service=service,
-        last_sync=0.0,
-        now=100.0,
-        sleep_fn=lambda _: None,
-        state=state,
-    )
+    for _ in range(3):
+        run_one_iteration(
+            settings=settings,
+            service=service,
+            last_sync=0.0,
+            now=100.0,
+            sleep_fn=lambda _: None,
+            state=state,
+        )
 
-    assert state.processed_count == 1
-    assert state.failed_count == 1
-    assert state.last_job_status == "failed"
-    assert state.last_error == "boom"
+    assert state.processed_count == 3
+    assert state.retry_scheduled_count == 1
+    assert state.dead_count == 1
+    assert state.completed_count == 1
+    # last_terminal_error should only pick up dead-lettered errors, not
+    # transient ones that were requeued for retry.
+    assert state.last_terminal_error == "arxiv 404"
+    # last_error tracks the most recent job regardless of outcome.
+    assert state.last_error is None
 
 
 def test_run_one_iteration_marks_idle_and_sleeps():
@@ -194,12 +209,15 @@ def test_http_metrics_returns_worker_snapshot(monkeypatch):
         started_at=100.0,
         last_loop_at=125.0,
         processed_count=3,
-        failed_count=1,
+        completed_count=2,
+        retry_scheduled_count=0,
+        dead_count=1,
         idle_count=2,
         last_job_id="job_123",
         last_job_type="sync_latest",
-        last_job_status="completed",
-        last_error=None,
+        last_job_status="dead",
+        last_error="arxiv 404",
+        last_terminal_error="arxiv 404",
     )
     app = _build_http_app(state)
     client = TestClient(app)
@@ -212,12 +230,15 @@ def test_http_metrics_returns_worker_snapshot(monkeypatch):
         "uptime_seconds": 60.0,
         "last_loop_at": 125.0,
         "processed_count": 3,
-        "failed_count": 1,
+        "completed_count": 2,
+        "retry_scheduled_count": 0,
+        "dead_count": 1,
         "idle_count": 2,
         "last_job_id": "job_123",
         "last_job_type": "sync_latest",
-        "last_job_status": "completed",
-        "last_error": None,
+        "last_job_status": "dead",
+        "last_error": "arxiv 404",
+        "last_terminal_error": "arxiv 404",
     }
 
 

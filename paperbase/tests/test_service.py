@@ -2521,6 +2521,348 @@ def test_encode_prepends_query_prefix_for_bge_but_not_for_specter2(monkeypatch):
     assert specter_model.calls[-1] == ["vision transformer"]
 
 
+# -- worker retry policy (#32) -----------------------------------------------
+
+
+def _retry_service() -> PaperbaseService:
+    settings = Settings(storage_backend="memory", database_url="memory://", api_key="t")
+    service = PaperbaseService(
+        settings=settings,
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+    )
+    service.init()
+    return service
+
+
+def test_retryable_exception_requeues_with_future_next_run_at(monkeypatch):
+    """RetryableError on the first attempt should leave the job in
+    ``pending`` with ``next_run_at`` set to a future timestamp and
+    ``attempts=1``."""
+    from datetime import UTC, datetime, timedelta
+    from paperbase.errors import RetryableError
+
+    service = _retry_service()
+    service.repository.create_job("index_paper", {"arxiv_id": "test/1"})
+
+    def raise_retryable(arxiv_id, force=False):
+        raise RetryableError("upstream 503")
+
+    monkeypatch.setattr(service, "index_arxiv_paper", raise_retryable)
+
+    processed = service.process_next_job()
+    assert processed is not None
+    assert processed.status == "pending"
+    assert processed.attempts == 1
+    assert processed.next_run_at is not None
+    assert processed.next_run_at > datetime.now(UTC) + timedelta(seconds=10), (
+        "first retry should be scheduled at least ~10s out, got "
+        f"{processed.next_run_at}"
+    )
+    assert "upstream 503" in (processed.error or "")
+
+
+def test_permanent_exception_dead_letters_immediately(monkeypatch):
+    """PermanentError must promote the job to ``dead`` on first failure
+    regardless of attempts remaining."""
+    from paperbase.errors import PermanentError
+
+    service = _retry_service()
+    job = service.repository.create_job("index_paper", {"arxiv_id": "test/2"})
+    assert job.max_attempts >= 2
+
+    def raise_permanent(arxiv_id, force=False):
+        raise PermanentError("arxiv 404 — paper does not exist")
+
+    monkeypatch.setattr(service, "index_arxiv_paper", raise_permanent)
+
+    processed = service.process_next_job()
+    assert processed is not None
+    assert processed.status == "dead"
+    assert processed.attempts == 1
+    assert processed.next_run_at is None
+    assert "arxiv 404" in (processed.error or "")
+
+
+def test_attempts_exhaustion_promotes_to_dead(monkeypatch):
+    """A retryable failure on the final attempt must dead-letter, not loop
+    forever. Drives the job all the way through max_attempts."""
+    from datetime import UTC, datetime, timedelta
+    from paperbase.errors import RetryableError
+
+    service = _retry_service()
+    job = service.repository.create_job("index_paper", {"arxiv_id": "test/3"}, max_attempts=2)
+    assert job.max_attempts == 2
+
+    def raise_retryable(arxiv_id, force=False):
+        raise RetryableError("transient")
+
+    monkeypatch.setattr(service, "index_arxiv_paper", raise_retryable)
+
+    first = service.process_next_job()
+    assert first is not None and first.status == "pending" and first.attempts == 1
+    # Force any scheduled next_run_at into the past so the second claim picks
+    # the job back up immediately. Production waits for the backoff window.
+    service.repository.jobs[first.job_id] = service.repository.jobs[first.job_id].model_copy(
+        update={"next_run_at": datetime.now(UTC) - timedelta(seconds=1)}
+    )
+
+    second = service.process_next_job()
+    assert second is not None
+    assert second.status == "dead"
+    assert second.attempts == 2
+
+
+def test_uncaught_exception_defaults_to_retryable(monkeypatch):
+    """Per the errors-module docstring: an uncaught (non-Permanent) exception
+    is treated as retryable. Safer to retry a bug than to silently drop work."""
+    service = _retry_service()
+    service.repository.create_job("index_paper", {"arxiv_id": "test/4"})
+
+    def raise_random(arxiv_id, force=False):
+        raise RuntimeError("oops, programmer error")
+
+    monkeypatch.setattr(service, "index_arxiv_paper", raise_random)
+
+    processed = service.process_next_job()
+    assert processed is not None
+    assert processed.status == "pending"
+    assert processed.attempts == 1
+
+
+def test_claim_skips_jobs_whose_next_run_at_is_in_the_future():
+    """A job with a future ``next_run_at`` must not be claimable until the
+    backoff window elapses, even if it's the only pending job in the queue."""
+    from datetime import UTC, datetime, timedelta
+
+    service = _retry_service()
+    job = service.repository.create_job("index_paper", {"arxiv_id": "test/5"})
+    service.repository.jobs[job.job_id] = service.repository.jobs[job.job_id].model_copy(
+        update={"next_run_at": datetime.now(UTC) + timedelta(hours=1)}
+    )
+
+    assert service.repository.claim_pending_job() is None
+
+
+def test_retry_dead_job_resets_attempts_and_unblocks_claim():
+    """The admin retry path must reset attempts to 0, clear the error, and
+    re-make the job claimable. Confirms the round-trip from dead → pending →
+    running."""
+    from paperbase.errors import PermanentError
+
+    service = _retry_service()
+    service.repository.create_job("index_paper", {"arxiv_id": "test/6"})
+
+    def raise_permanent(arxiv_id, force=False):
+        raise PermanentError("nope")
+
+    import unittest.mock
+    with unittest.mock.patch.object(service, "index_arxiv_paper", raise_permanent):
+        dead = service.process_next_job()
+    assert dead is not None and dead.status == "dead"
+
+    requeued = service.retry_dead_job(dead.job_id)
+    assert requeued is not None
+    assert requeued.status == "pending"
+    assert requeued.attempts == 0
+    assert requeued.error is None
+
+    claimed = service.repository.claim_pending_job()
+    assert claimed is not None
+    assert claimed.job_id == dead.job_id
+    assert claimed.status == "running"
+    assert claimed.attempts == 1
+
+
+def test_retry_dead_job_returns_none_for_non_dead_job():
+    """The admin retry path must refuse to clobber a still-running or
+    completed job. Returning None lets the API translate to 404."""
+    service = _retry_service()
+    job = service.repository.create_job("index_paper", {"arxiv_id": "test/7"})
+    assert service.retry_dead_job(job.job_id) is None
+    assert service.retry_dead_job("job_nonexistent") is None
+
+
+def test_list_dead_jobs_includes_legacy_failed_rows():
+    """Rows written before the dead-letter state existed used terminal
+    ``failed``. Operators should still discover them through the new
+    dead-letter list instead of needing a separate status filter."""
+    service = _retry_service()
+    dead = service.repository.create_job("index_paper", {"arxiv_id": "test/dead"})
+    legacy_failed = service.repository.create_job("index_paper", {"arxiv_id": "test/failed"})
+    service.repository.jobs[dead.job_id] = dead.model_copy(update={"status": "dead", "error": "dead"})
+    service.repository.jobs[legacy_failed.job_id] = legacy_failed.model_copy(
+        update={"status": "failed", "error": "legacy failed"}
+    )
+
+    jobs = service.list_dead_jobs()
+
+    assert {job.job_id for job in jobs} == {dead.job_id, legacy_failed.job_id}
+    assert {job.status for job in jobs} == {"dead", "failed"}
+
+
+def test_mark_job_completed_clears_stale_retry_metadata(monkeypatch):
+    """Regression test for PR #36 review: a job that fails once, is
+    requeued, and then succeeds must not keep the old ``error`` /
+    ``next_run_at`` in its completed ``JobResponse``. Otherwise ``/jobs``,
+    ``service.get_job``, and the worker's ``last_error`` report a stale
+    transient failure long after the retry succeeded."""
+    from paperbase.errors import RetryableError
+
+    service = _retry_service()
+    service.repository.create_job("index_paper", {"arxiv_id": "test/8"})
+
+    # First attempt: fails transiently and gets requeued with next_run_at set.
+    def fail_once(arxiv_id, force=False):
+        raise RetryableError("upstream 503")
+
+    monkeypatch.setattr(service, "index_arxiv_paper", fail_once)
+    failed = service.process_next_job()
+    assert failed is not None
+    assert failed.status == "pending"
+    assert failed.error == "upstream 503"
+    assert failed.next_run_at is not None
+
+    # Move next_run_at into the past so the retry claim fires immediately.
+    from datetime import UTC, datetime, timedelta
+
+    service.repository.jobs[failed.job_id] = service.repository.jobs[failed.job_id].model_copy(
+        update={"next_run_at": datetime.now(UTC) - timedelta(seconds=1)}
+    )
+
+    # Second attempt succeeds.
+    monkeypatch.setattr(service, "index_arxiv_paper", lambda arxiv_id, force=False: None)
+    succeeded = service.process_next_job()
+    assert succeeded is not None
+    assert succeeded.status == "completed"
+    assert succeeded.error is None, (
+        f"completed job must not surface a stale transient error; got {succeeded.error!r}"
+    )
+    assert succeeded.next_run_at is None, (
+        "completed job must not surface a stale next_run_at from the prior failure"
+    )
+
+
+def test_enrich_missing_metadata_returns_stats_when_s2_batches_fail(monkeypatch):
+    """Direct operator calls must get a stats dict back even when some S2
+    batches fail, so the CLI can print scanned/updated/batches_failed instead
+    of ending with a RetryableError traceback."""
+    from datetime import UTC, datetime, timedelta
+
+    service = _retry_service()
+
+    # Seed one indexed paper that needs enrichment, aged past the min_age
+    # floor so the frontier picks it up.
+    meta = PaperMetadata(
+        arxiv_id="2401.99999",
+        title="needs-enrichment",
+        authors="A",
+        abstract="x",
+        categories="cs.AI",
+        primary_category="cs.AI",
+        published="2024-01-01",
+        updated="2024-01-01",
+        pdf_url="",
+        html_url="",
+        citation_count=0,
+        semantic_scholar_id=None,
+        index_status="indexed",
+        indexed_at=datetime.now(UTC) - timedelta(hours=2),
+    )
+    service.repository.upsert_paper(meta, search_document="x", embedding=None)
+
+    def fake_enrich(papers, *, batch_size=20, **_kwargs):
+        # Pretend S2 returned empty + recorded one failed batch (what the
+        # retry-aware client emits when the final attempt 429'd).
+        from paperbase.sources import EnrichmentOutcome
+
+        return EnrichmentOutcome(
+            attempted=len(papers),
+            enriched=0,
+            batches_succeeded=0,
+            batches_failed=1,
+        )
+
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", fake_enrich)
+
+    result = service.enrich_missing_metadata(limit=10, min_age_seconds=3600)
+
+    assert result == {"papers_scanned": 1, "papers_updated": 0, "batches_failed": 1}
+
+
+def test_worker_enrich_missing_metadata_requests_retry_when_s2_batches_fail(monkeypatch):
+    """Regression test for PR #36 review (P2): when Semantic Scholar exhausts
+    internal retries on some batches, the worker path must opt into
+    ``RetryableError`` so the job is requeued instead of marked completed."""
+    from datetime import UTC, datetime, timedelta
+
+    service = _retry_service()
+
+    meta = PaperMetadata(
+        arxiv_id="2401.99998",
+        title="needs-enrichment-worker",
+        authors="A",
+        abstract="x",
+        categories="cs.AI",
+        primary_category="cs.AI",
+        published="2024-01-01",
+        updated="2024-01-01",
+        pdf_url="",
+        html_url="",
+        citation_count=0,
+        semantic_scholar_id=None,
+        index_status="indexed",
+        indexed_at=datetime.now(UTC) - timedelta(hours=2),
+    )
+    service.repository.upsert_paper(meta, search_document="x", embedding=None)
+
+    def fake_enrich(papers, *, batch_size=20, **_kwargs):
+        from paperbase.sources import EnrichmentOutcome
+
+        return EnrichmentOutcome(
+            attempted=len(papers),
+            enriched=0,
+            batches_succeeded=0,
+            batches_failed=1,
+        )
+
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", fake_enrich)
+    service.repository.create_job("enrich_missing_metadata", {"limit": 10, "min_age_seconds": 3600})
+
+    processed = service.process_next_job()
+
+    assert processed is not None
+    assert processed.status == "pending"
+    assert processed.attempts == 1
+    assert "Semantic Scholar enrichment left 1 batch" in (processed.error or "")
+
+
+def test_default_max_attempts_per_job_type():
+    """Per-job-type defaults from the issue spec: index_paper=3,
+    sync_latest=5, etc. Locks the table in so a future change has to be
+    deliberate."""
+    from paperbase.repository import default_max_attempts
+
+    assert default_max_attempts("index_paper") == 3
+    assert default_max_attempts("sync_latest") == 5
+    assert default_max_attempts("enrich_missing_metadata") == 5
+    assert default_max_attempts("reindex_embeddings") == 2
+    assert default_max_attempts("summarize_top_cited") == 2
+    assert default_max_attempts("brand_new_job_type") == 3
+
+
+def test_create_job_records_per_type_max_attempts():
+    """create_job consults default_max_attempts() so a freshly-enqueued job
+    arrives with the right per-type budget. Caller can still override."""
+    service = _retry_service()
+    job_a = service.repository.create_job("sync_latest", {})
+    job_b = service.repository.create_job("index_paper", {"arxiv_id": "x"})
+    job_c = service.repository.create_job("index_paper", {"arxiv_id": "y"}, max_attempts=10)
+    assert job_a.max_attempts == 5
+    assert job_b.max_attempts == 3
+    assert job_c.max_attempts == 10
+
+
 def test_enrich_missing_metadata_backfills_papers_that_inline_enrichment_missed(monkeypatch):
     """An indexed paper with citation_count=0 and no S2 id (the shape left
     behind by a 429 during inline enrichment) gets picked up by

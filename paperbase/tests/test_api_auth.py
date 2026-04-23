@@ -263,6 +263,20 @@ class StubApiService:
         self.calls.append(("get_job", job_id))
         return _job("index_paper", payload={"job_id": job_id})
 
+    def list_jobs_by_status(self, status: str, *, limit: int = 50) -> list[JobResponse]:
+        self.calls.append(("list_jobs_by_status", (status, limit)))
+        return [_job("index_paper", payload={"job_id": f"dead_{status}"})]
+
+    def enqueue_harvest_range_job(self, **kwargs):
+        self.calls.append(("enqueue_harvest_range_job", kwargs))
+        return _job("harvest_range", payload=kwargs)
+
+    def retry_dead_job(self, job_id: str):
+        self.calls.append(("retry_dead_job", job_id))
+        if job_id == "job_nonexistent":
+            return None
+        return _job("index_paper", payload={"job_id": job_id, "retried": True})
+
     def record_search_click(self, query_id: str, paper_id: str) -> bool:
         self.calls.append(("record_search_click", (query_id, paper_id)))
         return query_id == "qry_known"
@@ -1119,6 +1133,59 @@ def test_google_callback_failure_redirects_with_error(api_client, monkeypatch):
     assert response.headers["location"] == f"{settings.chat_public_url}/?auth_error=google_callback_failed"
 
 
+def test_list_jobs_endpoint_delegates_to_service(api_client):
+    """GET /v1/jobs?status=dead routes through the bearer-auth gate and
+    forwards status + limit to the service, so an operator can triage
+    dead-letters without running the CLI."""
+    client, service, settings = api_client
+    headers = {"Authorization": f"Bearer {settings.api_key}"}
+
+    response = client.get("/v1/jobs?status=dead&limit=5", headers=headers)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload[0]["payload"]["job_id"] == "dead_dead"
+    assert ("list_jobs_by_status", ("dead", 5)) in service.calls
+
+
+def test_list_jobs_endpoint_requires_bearer_token(api_client):
+    """No auth → 401 / invalid auth → 403. The dead-letter view must not
+    be readable anonymously."""
+    client, _, _ = api_client
+
+    missing = client.get("/v1/jobs?status=dead")
+    invalid = client.get("/v1/jobs?status=dead", headers={"Authorization": "Bearer wrong"})
+
+    assert missing.status_code == 401
+    assert invalid.status_code == 403
+
+
+def test_retry_job_endpoint_promotes_dead_job(api_client):
+    """POST /v1/jobs/{id}/retry delegates to service.retry_dead_job; a
+    dead id returns the requeued JobResponse. This is the admin unblock
+    for exhausted jobs."""
+    client, service, settings = api_client
+    headers = {"Authorization": f"Bearer {settings.api_key}"}
+
+    response = client.post("/v1/jobs/job_dead_1/retry", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["payload"]["retried"] is True
+    assert ("retry_dead_job", "job_dead_1") in service.calls
+
+
+def test_retry_job_endpoint_returns_404_for_unknown_job(api_client):
+    """An id that isn't dead (already completed, never existed, etc.)
+    returns 404 so the caller doesn't silently assume success."""
+    client, service, settings = api_client
+    headers = {"Authorization": f"Bearer {settings.api_key}"}
+
+    response = client.post("/v1/jobs/job_nonexistent/retry", headers=headers)
+
+    assert response.status_code == 404
+    assert ("retry_dead_job", "job_nonexistent") in service.calls
+
+
 def test_browser_preview_route_returns_signed_url_and_no_store_cache(api_client):
     client, service, settings = api_client
     client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
@@ -1149,3 +1216,71 @@ def test_browser_preview_route_returns_404_when_preview_missing(api_client):
     response = client.get("/v1/browser/papers/missing/preview")
 
     assert response.status_code == 404
+
+
+def test_harvest_endpoint_delegates_to_service(api_client):
+    """POST /v1/index/harvest queues a planner job via the service. The
+    endpoint is bearer-auth'd and forwards the full payload shape."""
+    client, service, settings = api_client
+    headers = {"Authorization": f"Bearer {settings.api_key}"}
+
+    response = client.post(
+        "/v1/index/harvest",
+        headers=headers,
+        json={
+            "categories": ["cs.LG", "cs.CL"],
+            "start_date": "2020-01-01",
+            "end_date": "2020-06-30",
+            "chunk_months": 3,
+            "limit_per_window": 1000,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["job_type"] == "harvest_range"
+    enqueue_calls = [c for c in service.calls if c[0] == "enqueue_harvest_range_job"]
+    assert len(enqueue_calls) == 1
+    assert enqueue_calls[0][1]["categories"] == ["cs.LG", "cs.CL"]
+    assert enqueue_calls[0][1]["start_date"] == "2020-01-01"
+    assert enqueue_calls[0][1]["end_date"] == "2020-06-30"
+    assert enqueue_calls[0][1]["chunk_months"] == 3
+    assert enqueue_calls[0][1]["limit_per_window"] == 1000
+
+
+def test_harvest_endpoint_defaults_to_configured_ai_categories(api_client):
+    """When the caller omits ``categories`` the API fills in the configured
+    AI/ML arxiv list. The product scope is AI research — per issue #33, we
+    don't want an ergonomics slip to accidentally default to "everything on
+    arxiv"."""
+    client, service, settings = api_client
+    headers = {"Authorization": f"Bearer {settings.api_key}"}
+
+    response = client.post(
+        "/v1/index/harvest",
+        headers=headers,
+        json={"start_date": "2020-01-01", "end_date": "2020-03-31"},
+    )
+    assert response.status_code == 200
+    enqueue_calls = [c for c in service.calls if c[0] == "enqueue_harvest_range_job"]
+    assert len(enqueue_calls) == 1
+    used = enqueue_calls[0][1]["categories"]
+    assert used == list(settings.arxiv_categories)
+    assert "cs.LG" in used
+    assert "cs.AI" in used
+
+
+def test_harvest_endpoint_requires_bearer_token(api_client):
+    """Bulk harvest is admin-only. No auth → 401 / invalid auth → 403."""
+    client, _, _ = api_client
+
+    body = {
+        "categories": ["cs.LG"],
+        "start_date": "2020-01-01",
+        "end_date": "2020-03-31",
+    }
+    missing = client.post("/v1/index/harvest", json=body)
+    invalid = client.post("/v1/index/harvest", headers={"Authorization": "Bearer wrong"}, json=body)
+
+    assert missing.status_code == 401
+    assert invalid.status_code == 403

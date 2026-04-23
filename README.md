@@ -74,6 +74,21 @@ paper/chunk vector rewrite with:
 .venv/bin/paperbase-dev reindex-embeddings
 ```
 
+Worker job triage goes through the same admin CLI:
+
+```bash
+.venv/bin/paperbase-dev jobs list-dead
+.venv/bin/paperbase-dev jobs retry <job_id>
+```
+
+Historical arXiv backfills are queued with:
+
+```bash
+.venv/bin/paperbase-dev harvest --categories cs.LG,cs.CL --start 2015-01-01 --end 2020-12-31 --chunk-months 3 --limit-per-window 1000
+```
+
+`--limit-per-window` caps each category-window chunk, not the whole category across the full date range. Harvest chunks run below interactive indexing priority so on-demand `index_paper` jobs can still run during a backfill.
+
 ## Local Architecture
 
 The repo has four moving pieces:

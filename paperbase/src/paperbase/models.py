@@ -139,6 +139,13 @@ class JobResponse(BaseModel):
     status: str
     payload: dict[str, Any]
     error: str | None = None
+    attempts: int = 0
+    max_attempts: int = 3
+    next_run_at: datetime | None = None
+    last_attempted_at: datetime | None = None
+    # Smaller = claimed first. Interactive on-demand work sits at -10, hourly
+    # sync at 0, bulk backfill at 10.
+    priority: int = 0
     created_at: datetime
     updated_at: datetime
     started_at: datetime | None = None

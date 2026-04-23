@@ -105,10 +105,83 @@ from .security import (
 from .summaries import build_paper_summaries
 from .storage import ObjectStore, build_object_store
 from . import sources
+from .errors import PermanentError, RetryableError
 from .utils import new_id, slugify, utcnow
 
 
 logger = logging.getLogger(__name__)
+
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _validate_date(value: str, *, name: str) -> None:
+    """Raise PermanentError if ``value`` is not ``YYYY-MM-DD``.
+
+    Harvest payloads come from operators via the CLI/API; a bad date
+    should dead-letter the planner job, not loop through the retry ladder.
+    """
+    from datetime import date
+
+    if not value or not _DATE_RE.match(value):
+        raise PermanentError(f"{name} must be YYYY-MM-DD, got {value!r}")
+    try:
+        date.fromisoformat(value)
+    except ValueError as exc:
+        raise PermanentError(f"{name}={value!r} is not a valid calendar date: {exc}") from exc
+
+
+def _month_windows(start_date: str, end_date: str, *, chunk_months: int) -> list[tuple[str, str]]:
+    """Split the inclusive ``[start_date, end_date]`` range into
+    ``chunk_months``-wide windows. Each window is inclusive on both ends.
+
+    The last window is clamped to ``end_date`` so the planner never
+    enqueues chunks past the requested end.
+    """
+    from datetime import date, timedelta
+
+    start = date.fromisoformat(start_date)
+    end = date.fromisoformat(end_date)
+    windows: list[tuple[str, str]] = []
+    cursor = start
+    while cursor <= end:
+        year = cursor.year
+        month = cursor.month + chunk_months
+        year += (month - 1) // 12
+        month = ((month - 1) % 12) + 1
+        next_window_start = date(year, month, 1)
+        window_end = min(end, next_window_start - timedelta(days=1))
+        windows.append((cursor.isoformat(), window_end.isoformat()))
+        cursor = next_window_start
+    return windows
+
+
+def _harvest_chunk_dedupe_key(
+    *,
+    harvest_id: str,
+    source: str,
+    category: str,
+    start_date: str,
+    end_date: str,
+    cursor: int,
+) -> str:
+    return f"harvest_chunk:{harvest_id}:{source}:{category}:{start_date}:{end_date}:{cursor}"
+
+
+def _retry_delay_for(attempts: int):
+    """Exponential backoff with full jitter, capped at ~1 hour.
+
+    ``attempts`` is the number of attempts already used (including the one
+    that just failed). The first retry waits ~60s, the second ~120s, etc.,
+    doubling up to a 3600s ceiling. Jitter spreads a flood of retries so a
+    backend blip doesn't produce a thundering herd when the backoff window
+    expires.
+    """
+    import random
+    from datetime import timedelta
+    base = min(60 * (2 ** max(0, attempts - 1)), 3600)
+    jitter = random.uniform(0.5, 1.5)
+    return utcnow() + timedelta(seconds=base * jitter)
 
 
 _MODEL_CACHE: dict[str, Any] = {}
@@ -2848,6 +2921,7 @@ class PaperbaseService:
         limit: int,
         min_age_seconds: int = 3600,
         batch_size: int = 20,
+        raise_on_failed_batches: bool = False,
     ) -> dict[str, int]:
         """Re-run Semantic Scholar enrichment for any paper that inline
         enrichment left unfilled. Uses aggressive retry (default max_retries)
@@ -2921,11 +2995,20 @@ class PaperbaseService:
                 "batches_failed": total_batches_failed,
             },
         )
-        return {
+        result = {
             "papers_scanned": total_scanned,
             "papers_updated": total_updated,
             "batches_failed": total_batches_failed,
         }
+        # Worker jobs opt into retry signaling. Direct operator calls through
+        # `paperbase-dev enrich-missing` keep the stats return path so the CLI
+        # can print partial progress cleanly instead of surfacing a traceback.
+        if total_batches_failed > 0 and raise_on_failed_batches:
+            raise RetryableError(
+                f"Semantic Scholar enrichment left {total_batches_failed} "
+                f"batch(es) un-persisted after internal retries"
+            )
+        return result
 
     def enqueue_ingest_repo_job(self, paper_id: str, *, force: bool = False) -> JobResponse:
         """Queue an ``ingest_repo`` job for a single paper (#5).
@@ -3215,6 +3298,261 @@ class PaperbaseService:
         )
         return {"processed": processed, "updated": updated, "failed": failed}
 
+    def enqueue_harvest_range_job(
+        self,
+        *,
+        categories: list[str],
+        start_date: str,
+        end_date: str,
+        limit_per_window: int | None = None,
+        chunk_months: int = 3,
+        source: str = "arxiv",
+    ) -> JobResponse:
+        """Queue a ``harvest_range`` planner job. Planner splits the date
+        range into ``harvest_chunk`` sub-jobs, one per category per window.
+
+        ``limit_per_window`` caps papers per (category, window). Total
+        papers for a category across the whole range is
+        ``limit_per_window * number_of_windows`` — the arg is deliberately
+        named after the chunk so operators don't read it as a per-category
+        total across the whole date range.
+        """
+        _validate_date(start_date, name="start_date")
+        _validate_date(end_date, name="end_date")
+        if start_date > end_date:
+            raise PermanentError("start_date must be on or before end_date")
+        if chunk_months < 1:
+            raise PermanentError("chunk_months must be >= 1")
+        if limit_per_window is not None and limit_per_window < 1:
+            raise PermanentError("limit_per_window must be >= 1 when provided")
+        if not categories:
+            raise PermanentError("categories must not be empty")
+        harvest_id = new_id("harvest")
+        job = self.repository.create_job(
+            "harvest_range",
+            {
+                "harvest_id": harvest_id,
+                "source": source,
+                "categories": list(categories),
+                "start_date": start_date,
+                "end_date": end_date,
+                "limit_per_window": limit_per_window,
+                "chunk_months": chunk_months,
+            },
+        )
+        logger.info(
+            "Created harvest_range job",
+            extra={
+                "event": "jobs.harvest_range.created",
+                "job_id": job.job_id,
+                "harvest_id": harvest_id,
+                "source": source,
+                "categories": list(categories),
+                "start_date": start_date,
+                "end_date": end_date,
+                "chunk_months": chunk_months,
+                "limit_per_window": limit_per_window,
+            },
+        )
+        return job
+
+    def run_harvest_range(
+        self,
+        *,
+        source: str,
+        categories: list[str],
+        start_date: str,
+        end_date: str,
+        limit_per_window: int | None,
+        chunk_months: int,
+        harvest_id: str | None = None,
+    ) -> dict[str, int]:
+        """Planner: split ``[start_date, end_date]`` into ``chunk_months``
+        windows per category and enqueue a ``harvest_chunk`` per window.
+
+        v1 only supports ``source='arxiv'``. Raises PermanentError otherwise
+        so the job dead-letters instead of looping on a config mismatch.
+        """
+        if source != "arxiv":
+            raise PermanentError(f"harvest source {source!r} is not supported; v1 handles arxiv only")
+        _validate_date(start_date, name="start_date")
+        _validate_date(end_date, name="end_date")
+        if start_date > end_date:
+            raise PermanentError("start_date must be on or before end_date")
+        if chunk_months < 1:
+            raise PermanentError("chunk_months must be >= 1")
+        if limit_per_window is not None and limit_per_window < 1:
+            raise PermanentError("limit_per_window must be >= 1 when provided")
+        if not categories:
+            raise PermanentError("categories must not be empty")
+
+        run_harvest_id = harvest_id or new_id("harvest")
+        windows = _month_windows(start_date, end_date, chunk_months=chunk_months)
+        chunks_created = 0
+        for category in categories:
+            for win_start, win_end in windows:
+                self.repository.create_job(
+                    "harvest_chunk",
+                    {
+                        "harvest_id": run_harvest_id,
+                        "source": source,
+                        "category": category,
+                        "start_date": win_start,
+                        "end_date": win_end,
+                        "limit": limit_per_window,
+                        "cursor": 0,
+                        "fetched": 0,
+                    },
+                    dedupe_key=_harvest_chunk_dedupe_key(
+                        harvest_id=run_harvest_id,
+                        source=source,
+                        category=category,
+                        start_date=win_start,
+                        end_date=win_end,
+                        cursor=0,
+                    ),
+                )
+                chunks_created += 1
+        logger.info(
+            "harvest_range planner enqueued chunks",
+            extra={
+                "event": "harvest_range.planned",
+                "harvest_id": run_harvest_id,
+                "chunks_created": chunks_created,
+                "category_count": len(categories),
+                "window_count": len(windows),
+            },
+        )
+        return {"chunks_created": chunks_created}
+
+    def run_harvest_chunk(
+        self,
+        *,
+        source: str,
+        category: str,
+        start_date: str,
+        end_date: str,
+        limit: int | None,
+        cursor: int,
+        fetched: int = 0,
+        harvest_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Worker: fetch ONE page of one arxiv date window and index each
+        paper, then enqueue a continuation ``harvest_chunk`` if more pages
+        remain.
+
+        Processing a single page per claim does two things arslnb called
+        out on PR #37: it bounds worker time per claim (long windows no
+        longer monopolize the loop), and it re-enters the priority queue
+        between pages so a newly-arrived ``index_paper`` can cut in front.
+
+        Resume semantics: the ``cursor`` and ``fetched`` fields are carried
+        on the continuation's payload. If a chunk fails mid-page, the retry
+        policy requeues the SAME payload, so work resumes at the cursor
+        that was live when the failure happened — not at cursor=0.
+
+        Idempotent — ``index_arxiv_paper`` no-ops on re-ingest, so a double
+        claim (e.g. ``mark_job_completed`` crash between index and
+        continuation enqueue) replays only the current page; continuation
+        enqueue is deduped by the harvest run/window/cursor key.
+        """
+        if source != "arxiv":
+            raise PermanentError(f"harvest source {source!r} is not supported; v1 handles arxiv only")
+        _validate_date(start_date, name="start_date")
+        _validate_date(end_date, name="end_date")
+        if start_date > end_date:
+            raise PermanentError("start_date must be on or before end_date")
+        if not category:
+            raise PermanentError("category must not be empty")
+        if limit is not None and limit < 1:
+            raise PermanentError("harvest chunk limit must be >= 1 when provided")
+
+        run_harvest_id = harvest_id or new_id("harvest")
+        page_size = 100
+        offset = max(0, cursor or 0)
+        running_fetched = max(0, fetched or 0)
+        cap = limit
+
+        if cap is not None and running_fetched >= cap:
+            return {"fetched": 0, "indexed": 0, "enqueued_continuation": False}
+
+        page, next_cursor = sources.fetch_range(
+            category,
+            start_date=start_date,
+            end_date=end_date,
+            start_offset=offset,
+            page_size=page_size,
+        )
+        if not page:
+            return {"fetched": 0, "indexed": 0, "enqueued_continuation": False}
+
+        fetched_this_page = 0
+        indexed = 0
+        for paper in page:
+            if cap is not None and running_fetched + fetched_this_page >= cap:
+                break
+            fetched_this_page += 1
+            try:
+                self.index_arxiv_paper(paper.arxiv_id, paper=paper, force=False)
+                indexed += 1
+            except PermanentError:
+                # Individual paper can't be indexed (e.g. withdrawn) —
+                # swallow so the chunk keeps going.
+                continue
+
+        new_total = running_fetched + fetched_this_page
+        should_continue = (
+            next_cursor is not None
+            and (cap is None or new_total < cap)
+        )
+        enqueued_continuation = False
+        if should_continue:
+            # Persist cursor before returning success. The dedupe key keeps a
+            # retried parent from forking a second continuation chain.
+            self.repository.create_job(
+                "harvest_chunk",
+                {
+                    "harvest_id": run_harvest_id,
+                    "source": source,
+                    "category": category,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "limit": limit,
+                    "cursor": next_cursor,
+                    "fetched": new_total,
+                },
+                dedupe_key=_harvest_chunk_dedupe_key(
+                    harvest_id=run_harvest_id,
+                    source=source,
+                    category=category,
+                    start_date=start_date,
+                    end_date=end_date,
+                    cursor=next_cursor,
+                ),
+            )
+            enqueued_continuation = True
+
+        logger.info(
+            "harvest_chunk page completed",
+            extra={
+                "event": "harvest_chunk.page_completed",
+                "harvest_id": run_harvest_id,
+                "source": source,
+                "category": category,
+                "start_date": start_date,
+                "end_date": end_date,
+                "page_fetched": fetched_this_page,
+                "indexed": indexed,
+                "running_fetched": new_total,
+                "enqueued_continuation": enqueued_continuation,
+            },
+        )
+        return {
+            "fetched": fetched_this_page,
+            "indexed": indexed,
+            "enqueued_continuation": enqueued_continuation,
+        }
+
     def enqueue_latest_sync_job(self) -> JobResponse:
         job = self.repository.create_job(
             "sync_latest",
@@ -3261,6 +3599,33 @@ class PaperbaseService:
                 )
             elif job.job_type == "summarize_top_cited":
                 self.summarize_top_cited(limit=int(job.payload.get("limit", 500_000)))
+            elif job.job_type == "harvest_range":
+                # Accept legacy ``limit_per_category`` payloads written
+                # before the rename so in-flight planner jobs still run
+                # after deploy.
+                limit_per_window = job.payload.get("limit_per_window")
+                if limit_per_window is None:
+                    limit_per_window = job.payload.get("limit_per_category")
+                self.run_harvest_range(
+                    source=str(job.payload.get("source", "arxiv")),
+                    harvest_id=str(job.payload.get("harvest_id") or job.job_id),
+                    categories=list(job.payload.get("categories", [])),
+                    start_date=str(job.payload["start_date"]),
+                    end_date=str(job.payload["end_date"]),
+                    limit_per_window=limit_per_window,
+                    chunk_months=int(job.payload.get("chunk_months", 3)),
+                )
+            elif job.job_type == "harvest_chunk":
+                self.run_harvest_chunk(
+                    source=str(job.payload.get("source", "arxiv")),
+                    harvest_id=str(job.payload.get("harvest_id") or job.job_id),
+                    category=str(job.payload["category"]),
+                    start_date=str(job.payload["start_date"]),
+                    end_date=str(job.payload["end_date"]),
+                    limit=job.payload.get("limit"),
+                    cursor=int(job.payload.get("cursor", 0)),
+                    fetched=int(job.payload.get("fetched", 0)),
+                )
             elif job.job_type in {"reindex_embeddings", "reindex_missing_embeddings"}:
                 self.reindex_embeddings(
                     limit=int(job.payload.get("limit", 100_000)),
@@ -3273,6 +3638,7 @@ class PaperbaseService:
                 self.enrich_missing_metadata(
                     limit=int(job.payload.get("limit", 50_000)),
                     min_age_seconds=int(job.payload.get("min_age_seconds", 3600)),
+                    raise_on_failed_batches=True,
                 )
             elif job.job_type == "ingest_repo":
                 self.ingest_repo(
@@ -3291,16 +3657,58 @@ class PaperbaseService:
                 },
             )
         except Exception as exc:  # pragma: no cover - surfaced via job state and API
-            self.repository.mark_job_failed(job.job_id, str(exc))
-            logger.exception(
-                "Job failed",
-                extra={
-                    "event": "jobs.failed",
-                    "job_id": job.job_id,
-                    "job_type": job.job_type,
-                },
-            )
+            self._handle_job_failure(job, exc)
         return self.repository.get_job(job.job_id)
+
+    def _handle_job_failure(self, job: JobResponse, exc: Exception) -> None:
+        """Classify the exception, compute the next-attempt schedule, and
+        hand the decision to the repository. ``PermanentError`` dead-letters
+        immediately. ``RetryableError`` and uncaught exceptions back off
+        exponentially with jitter until ``max_attempts`` is reached; after
+        that they too dead-letter. Uncaught defaults to retryable — safer
+        to retry a bug than to silently drop work."""
+        permanent = isinstance(exc, PermanentError)
+        attempts = (job.attempts or 0) + 0  # claim already incremented
+        max_attempts = job.max_attempts or 3
+        will_retry = (not permanent) and attempts < max_attempts
+        next_run_at = _retry_delay_for(attempts) if will_retry else None
+        self.repository.mark_job_failed(
+            job.job_id,
+            str(exc),
+            permanent=permanent,
+            next_run_at=next_run_at,
+        )
+        logger.exception(
+            "Job failed",
+            extra={
+                "event": "jobs.failed",
+                "job_id": job.job_id,
+                "job_type": job.job_type,
+                "attempts": attempts,
+                "max_attempts": max_attempts,
+                "classification": "permanent" if permanent else "retryable",
+                "will_retry": will_retry,
+                "next_run_at": next_run_at.isoformat() if next_run_at else None,
+            },
+        )
+
+    def retry_dead_job(self, job_id: str) -> JobResponse | None:
+        """Promote a dead job back to pending with attempts reset. Returns
+        the updated job, or None if the id isn't dead/failed."""
+        return self.repository.requeue_dead_job(job_id)
+
+    def list_dead_jobs(self, *, limit: int = 50) -> list[JobResponse]:
+        return self.list_jobs_by_status("dead", limit=limit)
+
+    def list_jobs_by_status(self, status: str, *, limit: int = 50) -> list[JobResponse]:
+        if status == "dead":
+            jobs = [
+                *self.repository.list_jobs_by_status("dead", limit=limit),
+                *self.repository.list_jobs_by_status("failed", limit=limit),
+            ]
+            jobs.sort(key=lambda job: job.updated_at, reverse=True)
+            return jobs[:limit]
+        return self.repository.list_jobs_by_status(status, limit=limit)
 
     def sync_latest_papers(self, *, days: int, categories: list[str], limit_per_category: int) -> list[PaperResponse]:
         logger.info(
@@ -3357,7 +3765,9 @@ class PaperbaseService:
         )
         metadata = paper or sources.get_paper_details(arxiv_id)
         if metadata is None:
-            raise HTTPException(status_code=404, detail=f"Paper {arxiv_id} not found on arXiv")
+            # Worker context: a missing arxiv id will never resolve, so this
+            # must dead-letter rather than spin through the retry ladder.
+            raise PermanentError(f"Paper {arxiv_id} not found on arXiv")
         # Inline enrichment: single-shot (max_retries=0). A 429 or transient
         # failure here leaves citation_count=0 rather than blocking ingestion;
         # the enrich_missing_metadata backfill job will pick this paper up

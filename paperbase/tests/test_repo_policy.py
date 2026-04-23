@@ -51,6 +51,24 @@ def test_cloudbuild_uses_supported_substitutions_only():
     assert invalid == []
 
 
+def test_job_orm_carries_retry_policy_columns():
+    """Regression test for #32: the worker retry policy requires four new
+    columns on the jobs table plus a ``dead`` terminal state. This locks the
+    schema so a future migration can't accidentally drop the retry fields.
+    """
+    from paperbase.repository import JobORM, default_max_attempts
+
+    for column in ("attempts", "max_attempts", "next_run_at", "last_attempted_at", "dedupe_key"):
+        assert column in JobORM.__table__.columns, (
+            f"JobORM must carry '{column}' for the worker retry policy"
+        )
+
+    # Per-job-type attempt budgets per the #32 spec.
+    assert default_max_attempts("index_paper") == 3
+    assert default_max_attempts("sync_latest") == 5
+    assert default_max_attempts("reindex_embeddings") == 2
+
+
 def test_build_manifest_includes_preview_key_in_available_artifacts():
     paper = PaperMetadata(
         arxiv_id="2401.00001",
@@ -90,3 +108,22 @@ def test_paper_schema_carries_code_ingestion_fields():
     assert paper.code_is_python is None
     assert paper.code_python_reason is None
     assert paper.code_manifest is None
+
+
+def test_job_orm_carries_priority_for_backfill_starvation_guard():
+    """Regression test for #33: harvest jobs must run at lower priority than
+    interactive on-demand work so a multi-year backfill cannot starve
+    ``index_paper``. Locks the priority column + defaults in place."""
+    from paperbase.repository import JobORM, default_priority
+
+    assert "priority" in JobORM.__table__.columns, (
+        "JobORM must carry a 'priority' column so bulk backfill cannot starve "
+        "interactive on-demand work"
+    )
+    # Smaller = claimed first. Interactive on-demand work sits below zero so
+    # it always wins; backfill sits above zero so it always loses.
+    assert default_priority("index_paper") == -10
+    assert default_priority("sync_latest") == 0
+    assert default_priority("harvest_chunk") == 10
+    assert default_priority("harvest_range") == 5
+    assert default_priority("brand_new_job_type") == 0

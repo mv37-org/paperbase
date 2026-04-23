@@ -30,29 +30,45 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class WorkerState:
-    """Lightweight in-process counters exposed via ``/metrics``."""
+    """Lightweight in-process counters exposed via ``/metrics``.
+
+    The retry policy produces three meaningful terminal-ish states per
+    processed job — ``completed``, ``pending`` (retry scheduled after a
+    transient failure), and ``dead`` (permanent failure or exhausted
+    attempts). Each gets its own counter so ``/metrics`` can distinguish
+    transient retry churn from real dead-letter growth. ``last_terminal_error``
+    only tracks errors from dead-lettered jobs, since retry-scheduled
+    jobs will be retried and their error text would just be noise in a
+    dashboard alert.
+    """
 
     started_at: float = field(default_factory=time.time)
     last_loop_at: float = 0.0
     processed_count: int = 0
-    failed_count: int = 0
+    completed_count: int = 0
+    retry_scheduled_count: int = 0
+    dead_count: int = 0
     idle_count: int = 0
     last_job_id: str | None = None
     last_job_type: str | None = None
     last_job_status: str | None = None
     last_error: str | None = None
+    last_terminal_error: str | None = None
 
     def snapshot(self) -> dict[str, Any]:
         return {
             "uptime_seconds": round(time.time() - self.started_at, 2),
             "last_loop_at": self.last_loop_at,
             "processed_count": self.processed_count,
-            "failed_count": self.failed_count,
+            "completed_count": self.completed_count,
+            "retry_scheduled_count": self.retry_scheduled_count,
+            "dead_count": self.dead_count,
             "idle_count": self.idle_count,
             "last_job_id": self.last_job_id,
             "last_job_type": self.last_job_type,
             "last_job_status": self.last_job_status,
             "last_error": self.last_error,
+            "last_terminal_error": self.last_terminal_error,
         }
 
 
@@ -110,8 +126,17 @@ def run_one_iteration(
         state.last_job_type = processed.job_type
         state.last_job_status = processed.status
         state.last_error = processed.error
-        if processed.status == "failed":
-            state.failed_count += 1
+        # After process_next_job the JobResponse.status reflects the outcome:
+        #   completed → job succeeded
+        #   pending   → transient failure, requeued with backoff (next_run_at set)
+        #   dead      → permanent failure or exhausted attempts (terminal)
+        if processed.status == "completed":
+            state.completed_count += 1
+        elif processed.status == "pending":
+            state.retry_scheduled_count += 1
+        elif processed.status == "dead":
+            state.dead_count += 1
+            state.last_terminal_error = processed.error
 
     logger.info(
         "Processed job",
