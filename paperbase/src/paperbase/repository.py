@@ -29,6 +29,7 @@ from sqlalchemy import (
     true,
 )
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
 from .config import Settings
@@ -197,6 +198,7 @@ class JobORM(Base):
 
     job_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     job_type: Mapped[str] = mapped_column(String(64), index=True)
+    dedupe_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
     # `pending`, `running`, `completed`, or `dead`. The old `failed` terminal
     # status still shows up on rows written before #32; the retry loop
     # promotes such rows to `pending` on the next claim.
@@ -895,6 +897,7 @@ class PaperRepository(ABC):
         *,
         max_attempts: int | None = None,
         priority: int | None = None,
+        dedupe_key: str | None = None,
     ) -> JobResponse:
         raise NotImplementedError
 
@@ -1070,6 +1073,9 @@ class SqlAlchemyPaperRepository(PaperRepository):
             connection.execute(
                 text("ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS last_attempted_at TIMESTAMPTZ")
             )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS dedupe_key VARCHAR(512)")
+            )
             # Indexes on next_run_at (#32) and priority (#33) go in the
             # post-create_all block below — on a fresh CI DB the `jobs` table
             # doesn't exist yet when ALTERs run, and CREATE INDEX (unlike
@@ -1197,6 +1203,12 @@ class SqlAlchemyPaperRepository(PaperRepository):
             )
             connection.execute(
                 text("CREATE INDEX IF NOT EXISTS jobs_priority ON jobs (priority)")
+            )
+            connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS jobs_dedupe_key_unique "
+                    "ON jobs (dedupe_key) WHERE dedupe_key IS NOT NULL"
+                )
             )
             connection.execute(
                 text(
@@ -3263,10 +3275,16 @@ class SqlAlchemyPaperRepository(PaperRepository):
         *,
         max_attempts: int | None = None,
         priority: int | None = None,
+        dedupe_key: str | None = None,
     ) -> JobResponse:
+        if dedupe_key:
+            existing = self._get_job_by_dedupe_key(dedupe_key)
+            if existing is not None:
+                return existing
         job = JobORM(
             job_id=new_id("job"),
             job_type=job_type,
+            dedupe_key=dedupe_key,
             status="pending",
             payload=payload,
             max_attempts=max_attempts if max_attempts is not None else default_max_attempts(job_type),
@@ -3274,9 +3292,22 @@ class SqlAlchemyPaperRepository(PaperRepository):
             created_at=utcnow(),
             updated_at=utcnow(),
         )
-        with self._session() as session:
-            session.add(job)
+        try:
+            with self._session() as session:
+                session.add(job)
+        except IntegrityError:
+            if not dedupe_key:
+                raise
+            existing = self._get_job_by_dedupe_key(dedupe_key)
+            if existing is None:
+                raise
+            return existing
         return self.get_job(job.job_id)  # type: ignore[return-value]
+
+    def _get_job_by_dedupe_key(self, dedupe_key: str) -> JobResponse | None:
+        with self._session() as session:
+            job_id = session.scalar(select(JobORM.job_id).where(JobORM.dedupe_key == dedupe_key))
+        return self.get_job(job_id) if job_id is not None else None
 
     def get_job(self, job_id: str) -> JobResponse | None:
         with self._session() as session:
@@ -3494,6 +3525,7 @@ class MemoryPaperRepository(PaperRepository):
         self.python_file_users: dict[str, str] = {}
         self.project_repo_syncs: dict[str, ProjectRepoSyncResponse] = {}
         self.search_logs: dict[str, dict[str, Any]] = {}
+        self.job_dedupe_keys: dict[str, str] = {}
 
     def init(self) -> None:
         return None
@@ -4792,7 +4824,12 @@ class MemoryPaperRepository(PaperRepository):
         *,
         max_attempts: int | None = None,
         priority: int | None = None,
+        dedupe_key: str | None = None,
     ) -> JobResponse:
+        if dedupe_key:
+            existing_id = self.job_dedupe_keys.get(dedupe_key)
+            if existing_id is not None and existing_id in self.jobs:
+                return self.jobs[existing_id]
         job = JobResponse(
             job_id=new_id("job"),
             job_type=job_type,
@@ -4804,6 +4841,8 @@ class MemoryPaperRepository(PaperRepository):
             updated_at=utcnow(),
         )
         self.jobs[job.job_id] = job
+        if dedupe_key:
+            self.job_dedupe_keys[dedupe_key] = job.job_id
         return job
 
     def get_job(self, job_id: str) -> JobResponse | None:

@@ -628,6 +628,9 @@ def enrich_missing(*, limit: int, min_age_seconds: int, batch_size: int) -> int:
     print(f"Batches failed: {result['batches_failed']}")
     print(f"Coverage:       {before_cov:.1f}% -> {after_cov:.1f}% "
           f"({stats_after.get('enriched', 0)}/{total} papers enriched)")
+    if result["batches_failed"] > 0:
+        print("Incomplete: rerun paperbase-dev enrich-missing after the upstream recovers.")
+        return 1
     return 0
 
 

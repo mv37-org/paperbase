@@ -101,6 +101,53 @@ def test_run_harvest_range_planner_enqueues_one_chunk_per_category_per_window():
     assert windows == [("2020-01-01", "2020-03-31"), ("2020-04-01", "2020-06-30")]
 
 
+def test_memory_repository_reuses_duplicate_job_dedupe_key():
+    service = _service()
+
+    first = service.repository.create_job(
+        "harvest_chunk",
+        {"source": "arxiv", "category": "cs.LG", "cursor": 0},
+        dedupe_key="test-harvest-dedupe",
+    )
+    second = service.repository.create_job(
+        "harvest_chunk",
+        {"source": "arxiv", "category": "cs.LG", "cursor": 100},
+        dedupe_key="test-harvest-dedupe",
+    )
+
+    assert second.job_id == first.job_id
+    assert len(service.repository.jobs) == 1
+    assert service.repository.jobs[first.job_id].payload["cursor"] == 0
+
+
+def test_harvest_range_retry_does_not_duplicate_planned_chunks():
+    """A retry of the same planner job must not append duplicate cursor=0
+    chunks. The dedupe namespace is the stable harvest_id from the parent
+    payload, not the date range alone, so a brand-new top-level harvest can
+    still intentionally rerun the same range."""
+    service = _service()
+    harvest_id = "harvest_retry_planner"
+
+    for _ in range(2):
+        service.run_harvest_range(
+            source="arxiv",
+            harvest_id=harvest_id,
+            categories=["cs.LG", "cs.CL"],
+            start_date="2020-01-01",
+            end_date="2020-06-30",
+            limit_per_window=None,
+            chunk_months=3,
+        )
+
+    chunk_jobs = [job for job in service.repository.jobs.values() if job.job_type == "harvest_chunk"]
+    assert len(chunk_jobs) == 4
+    keys = {
+        (job.payload["harvest_id"], job.payload["category"], job.payload["start_date"], job.payload["cursor"])
+        for job in chunk_jobs
+    }
+    assert len(keys) == 4
+
+
 def test_run_harvest_range_rejects_non_arxiv_source():
     """v1 is arxiv-only. A planner job with a non-arxiv source raises
     PermanentError so it dead-letters cleanly rather than retrying."""
@@ -202,6 +249,7 @@ def _drain_harvest_chunks(service: PaperbaseService) -> int:
         next_job = pending[0]
         service.run_harvest_chunk(
             source=str(next_job.payload.get("source", "arxiv")),
+            harvest_id=next_job.payload.get("harvest_id"),
             category=str(next_job.payload["category"]),
             start_date=str(next_job.payload["start_date"]),
             end_date=str(next_job.payload["end_date"]),
@@ -368,6 +416,54 @@ def test_harvest_chunk_retry_resumes_from_saved_cursor(monkeypatch):
         "the running fetched total is persisted across pages so the cap holds "
         "across the continuation chain"
     )
+
+
+def test_harvest_chunk_retry_does_not_duplicate_continuation_chain(monkeypatch):
+    """If a chunk creates its continuation and then the parent retry runs, the
+    duplicate parent can replay its own page but must not fork the rest of the
+    chain."""
+    service = _service()
+    pages_by_offset = {
+        0: [_paper(f"2020.{i:05d}") for i in range(100)],
+        100: [_paper(f"2020.1{i:05d}") for i in range(100)],
+        200: [_paper(f"2020.2{i:05d}") for i in range(5)],
+    }
+    fetch_offsets: list[int] = []
+
+    def fetch_by_offset(category, *, start_date, end_date, start_offset=0, page_size=100):
+        del category, start_date, end_date
+        fetch_offsets.append(start_offset)
+        page = pages_by_offset.get(start_offset, [])
+        next_cursor = start_offset + len(page) if len(page) >= page_size else None
+        return page, next_cursor
+
+    monkeypatch.setattr("paperbase.service.sources.fetch_range", fetch_by_offset)
+    monkeypatch.setattr(service, "index_arxiv_paper", lambda *_a, **_k: None)
+
+    payload = {
+        "source": "arxiv",
+        "harvest_id": "harvest_retry_chunk",
+        "category": "cs.LG",
+        "start_date": "2020-01-01",
+        "end_date": "2020-03-31",
+        "limit": None,
+        "cursor": 0,
+        "fetched": 0,
+    }
+    service.run_harvest_chunk(**payload)
+    service.run_harvest_chunk(**payload)
+
+    cursor_100_jobs = [
+        job for job in service.repository.jobs.values()
+        if job.job_type == "harvest_chunk" and job.payload["cursor"] == 100
+    ]
+    assert len(cursor_100_jobs) == 1
+
+    _drain_harvest_chunks(service)
+
+    assert fetch_offsets.count(0) == 2
+    assert fetch_offsets.count(100) == 1
+    assert fetch_offsets.count(200) == 1
 
 
 # -- priority: backfill must not starve interactive work ---------------------

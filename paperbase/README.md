@@ -2,8 +2,14 @@
 
 `paperbase/` contains the backend package, the API entrypoint, the worker entrypoint, and the `paperbase-dev` local admin CLI.
 
-The admin CLI includes `paperbase-dev reindex-embeddings` for queuing a full
-paper/chunk embedding rewrite after an embedding-model change.
+The admin CLI includes:
+
+- `paperbase-dev reindex-embeddings` for queuing a full paper/chunk embedding rewrite after an embedding-model change
+- `paperbase-dev jobs list-dead` for dead-letter triage
+- `paperbase-dev jobs retry <job_id>` for promoting a dead job back to pending
+- `paperbase-dev harvest --categories cs.LG,cs.CL --start YYYY-MM-DD --end YYYY-MM-DD` for historical arXiv backfills
+
+For harvests, `--limit-per-window` is a per category-window cap, not a whole-category cap across the full date range. Harvest chunks run at backfill priority below interactive indexing.
 
 The browser backend now persists first-class projects in addition to chat sessions:
 

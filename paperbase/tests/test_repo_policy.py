@@ -58,7 +58,7 @@ def test_job_orm_carries_retry_policy_columns():
     """
     from paperbase.repository import JobORM, default_max_attempts
 
-    for column in ("attempts", "max_attempts", "next_run_at", "last_attempted_at"):
+    for column in ("attempts", "max_attempts", "next_run_at", "last_attempted_at", "dedupe_key"):
         assert column in JobORM.__table__.columns, (
             f"JobORM must carry '{column}' for the worker retry policy"
         )

@@ -153,6 +153,18 @@ def _month_windows(start_date: str, end_date: str, *, chunk_months: int) -> list
     return windows
 
 
+def _harvest_chunk_dedupe_key(
+    *,
+    harvest_id: str,
+    source: str,
+    category: str,
+    start_date: str,
+    end_date: str,
+    cursor: int,
+) -> str:
+    return f"harvest_chunk:{harvest_id}:{source}:{category}:{start_date}:{end_date}:{cursor}"
+
+
 def _retry_delay_for(attempts: int):
     """Exponential backoff with full jitter, capped at ~1 hour.
 
@@ -2906,6 +2918,7 @@ class PaperbaseService:
         limit: int,
         min_age_seconds: int = 3600,
         batch_size: int = 20,
+        raise_on_failed_batches: bool = False,
     ) -> dict[str, int]:
         """Re-run Semantic Scholar enrichment for any paper that inline
         enrichment left unfilled. Uses aggressive retry (default max_retries)
@@ -2979,24 +2992,20 @@ class PaperbaseService:
                 "batches_failed": total_batches_failed,
             },
         )
-        # Surface any S2 batches that exhausted their internal retries to
-        # the worker-level retry policy (#32). Without this, an
-        # ``enrich_missing_metadata`` run where half the batches 429'd
-        # would return normally → ``process_next_job`` would mark the
-        # job ``completed`` → those papers stay un-enriched until the
-        # next manual trigger. Raising RetryableError AFTER persisting
-        # the successful batches requeues the job with exponential
-        # backoff while keeping the progress we already made.
-        if total_batches_failed > 0:
-            raise RetryableError(
-                f"Semantic Scholar enrichment left {total_batches_failed} "
-                f"batch(es) un-persisted after internal retries"
-            )
-        return {
+        result = {
             "papers_scanned": total_scanned,
             "papers_updated": total_updated,
             "batches_failed": total_batches_failed,
         }
+        # Worker jobs opt into retry signaling. Direct operator calls through
+        # `paperbase-dev enrich-missing` keep the stats return path so the CLI
+        # can print partial progress cleanly instead of surfacing a traceback.
+        if total_batches_failed > 0 and raise_on_failed_batches:
+            raise RetryableError(
+                f"Semantic Scholar enrichment left {total_batches_failed} "
+                f"batch(es) un-persisted after internal retries"
+            )
+        return result
 
     def enqueue_summarize_top_cited_job(self, *, limit: int = 500_000) -> JobResponse:
         job = self.repository.create_job("summarize_top_cited", {"limit": limit})
@@ -3147,9 +3156,11 @@ class PaperbaseService:
             raise PermanentError("limit_per_window must be >= 1 when provided")
         if not categories:
             raise PermanentError("categories must not be empty")
+        harvest_id = new_id("harvest")
         job = self.repository.create_job(
             "harvest_range",
             {
+                "harvest_id": harvest_id,
                 "source": source,
                 "categories": list(categories),
                 "start_date": start_date,
@@ -3163,6 +3174,7 @@ class PaperbaseService:
             extra={
                 "event": "jobs.harvest_range.created",
                 "job_id": job.job_id,
+                "harvest_id": harvest_id,
                 "source": source,
                 "categories": list(categories),
                 "start_date": start_date,
@@ -3182,6 +3194,7 @@ class PaperbaseService:
         end_date: str,
         limit_per_window: int | None,
         chunk_months: int,
+        harvest_id: str | None = None,
     ) -> dict[str, int]:
         """Planner: split ``[start_date, end_date]`` into ``chunk_months``
         windows per category and enqueue a ``harvest_chunk`` per window.
@@ -3194,6 +3207,7 @@ class PaperbaseService:
         if limit_per_window is not None and limit_per_window < 1:
             raise PermanentError("limit_per_window must be >= 1 when provided")
 
+        run_harvest_id = harvest_id or new_id("harvest")
         windows = _month_windows(start_date, end_date, chunk_months=chunk_months)
         chunks_created = 0
         for category in categories:
@@ -3201,6 +3215,7 @@ class PaperbaseService:
                 self.repository.create_job(
                     "harvest_chunk",
                     {
+                        "harvest_id": run_harvest_id,
                         "source": source,
                         "category": category,
                         "start_date": win_start,
@@ -3209,12 +3224,21 @@ class PaperbaseService:
                         "cursor": 0,
                         "fetched": 0,
                     },
+                    dedupe_key=_harvest_chunk_dedupe_key(
+                        harvest_id=run_harvest_id,
+                        source=source,
+                        category=category,
+                        start_date=win_start,
+                        end_date=win_end,
+                        cursor=0,
+                    ),
                 )
                 chunks_created += 1
         logger.info(
             "harvest_range planner enqueued chunks",
             extra={
                 "event": "harvest_range.planned",
+                "harvest_id": run_harvest_id,
                 "chunks_created": chunks_created,
                 "category_count": len(categories),
                 "window_count": len(windows),
@@ -3232,6 +3256,7 @@ class PaperbaseService:
         limit: int | None,
         cursor: int,
         fetched: int = 0,
+        harvest_id: str | None = None,
     ) -> dict[str, Any]:
         """Worker: fetch ONE page of one arxiv date window and index each
         paper, then enqueue a continuation ``harvest_chunk`` if more pages
@@ -3249,13 +3274,15 @@ class PaperbaseService:
 
         Idempotent — ``index_arxiv_paper`` no-ops on re-ingest, so a double
         claim (e.g. ``mark_job_completed`` crash between index and
-        continuation enqueue) at worst re-fetches one page.
+        continuation enqueue) replays only the current page; continuation
+        enqueue is deduped by the harvest run/window/cursor key.
         """
         if source != "arxiv":
             raise PermanentError(f"harvest source {source!r} is not supported; v1 handles arxiv only")
         if limit is not None and limit < 1:
             raise PermanentError("harvest chunk limit must be >= 1 when provided")
 
+        run_harvest_id = harvest_id or new_id("harvest")
         page_size = 100
         offset = max(0, cursor or 0)
         running_fetched = max(0, fetched or 0)
@@ -3295,13 +3322,12 @@ class PaperbaseService:
         )
         enqueued_continuation = False
         if should_continue:
-            # Persist cursor by enqueuing a new harvest_chunk. We write
-            # this BEFORE returning success so the continuation lands
-            # even if mark_job_completed later hiccups; idempotent ingest
-            # means a duplicate continuation only costs one extra fetch.
+            # Persist cursor before returning success. The dedupe key keeps a
+            # retried parent from forking a second continuation chain.
             self.repository.create_job(
                 "harvest_chunk",
                 {
+                    "harvest_id": run_harvest_id,
                     "source": source,
                     "category": category,
                     "start_date": start_date,
@@ -3310,6 +3336,14 @@ class PaperbaseService:
                     "cursor": next_cursor,
                     "fetched": new_total,
                 },
+                dedupe_key=_harvest_chunk_dedupe_key(
+                    harvest_id=run_harvest_id,
+                    source=source,
+                    category=category,
+                    start_date=start_date,
+                    end_date=end_date,
+                    cursor=next_cursor,
+                ),
             )
             enqueued_continuation = True
 
@@ -3317,6 +3351,7 @@ class PaperbaseService:
             "harvest_chunk page completed",
             extra={
                 "event": "harvest_chunk.page_completed",
+                "harvest_id": run_harvest_id,
                 "source": source,
                 "category": category,
                 "start_date": start_date,
@@ -3388,6 +3423,7 @@ class PaperbaseService:
                     limit_per_window = job.payload.get("limit_per_category")
                 self.run_harvest_range(
                     source=str(job.payload.get("source", "arxiv")),
+                    harvest_id=str(job.payload.get("harvest_id") or job.job_id),
                     categories=list(job.payload.get("categories", [])),
                     start_date=str(job.payload["start_date"]),
                     end_date=str(job.payload["end_date"]),
@@ -3397,6 +3433,7 @@ class PaperbaseService:
             elif job.job_type == "harvest_chunk":
                 self.run_harvest_chunk(
                     source=str(job.payload.get("source", "arxiv")),
+                    harvest_id=str(job.payload.get("harvest_id") or job.job_id),
                     category=str(job.payload["category"]),
                     start_date=str(job.payload["start_date"]),
                     end_date=str(job.payload["end_date"]),
@@ -3416,6 +3453,7 @@ class PaperbaseService:
                 self.enrich_missing_metadata(
                     limit=int(job.payload.get("limit", 50_000)),
                     min_age_seconds=int(job.payload.get("min_age_seconds", 3600)),
+                    raise_on_failed_batches=True,
                 )
             else:
                 raise ValueError(f"Unsupported job type: {job.job_type}")

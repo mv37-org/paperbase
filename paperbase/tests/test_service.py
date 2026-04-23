@@ -2725,15 +2725,11 @@ def test_mark_job_completed_clears_stale_retry_metadata(monkeypatch):
     )
 
 
-def test_enrich_missing_metadata_requests_retry_when_s2_batches_fail(monkeypatch):
-    """Regression test for PR #36 review (P2): when Semantic Scholar
-    exhausts its internal retries on some batches, the service must raise
-    ``RetryableError`` AFTER persisting the successful batches so the
-    worker-level retry policy re-queues the job. Without this, the job
-    would complete normally and the missing papers would stay
-    un-enriched until the next manual trigger."""
+def test_enrich_missing_metadata_returns_stats_when_s2_batches_fail(monkeypatch):
+    """Direct operator calls must get a stats dict back even when some S2
+    batches fail, so the CLI can print scanned/updated/batches_failed instead
+    of ending with a RetryableError traceback."""
     from datetime import UTC, datetime, timedelta
-    from paperbase.errors import RetryableError
 
     service = _retry_service()
 
@@ -2771,8 +2767,56 @@ def test_enrich_missing_metadata_requests_retry_when_s2_batches_fail(monkeypatch
 
     monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", fake_enrich)
 
-    with pytest.raises(RetryableError):
-        service.enrich_missing_metadata(limit=10, min_age_seconds=3600)
+    result = service.enrich_missing_metadata(limit=10, min_age_seconds=3600)
+
+    assert result == {"papers_scanned": 1, "papers_updated": 0, "batches_failed": 1}
+
+
+def test_worker_enrich_missing_metadata_requests_retry_when_s2_batches_fail(monkeypatch):
+    """Regression test for PR #36 review (P2): when Semantic Scholar exhausts
+    internal retries on some batches, the worker path must opt into
+    ``RetryableError`` so the job is requeued instead of marked completed."""
+    from datetime import UTC, datetime, timedelta
+
+    service = _retry_service()
+
+    meta = PaperMetadata(
+        arxiv_id="2401.99998",
+        title="needs-enrichment-worker",
+        authors="A",
+        abstract="x",
+        categories="cs.AI",
+        primary_category="cs.AI",
+        published="2024-01-01",
+        updated="2024-01-01",
+        pdf_url="",
+        html_url="",
+        citation_count=0,
+        semantic_scholar_id=None,
+        index_status="indexed",
+        indexed_at=datetime.now(UTC) - timedelta(hours=2),
+    )
+    service.repository.upsert_paper(meta, search_document="x", embedding=None)
+
+    def fake_enrich(papers, *, batch_size=20, **_kwargs):
+        from paperbase.sources import EnrichmentOutcome
+
+        return EnrichmentOutcome(
+            attempted=len(papers),
+            enriched=0,
+            batches_succeeded=0,
+            batches_failed=1,
+        )
+
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", fake_enrich)
+    service.repository.create_job("enrich_missing_metadata", {"limit": 10, "min_age_seconds": 3600})
+
+    processed = service.process_next_job()
+
+    assert processed is not None
+    assert processed.status == "pending"
+    assert processed.attempts == 1
+    assert "Semantic Scholar enrichment left 1 batch" in (processed.error or "")
 
 
 def test_default_max_attempts_per_job_type():

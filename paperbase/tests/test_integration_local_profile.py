@@ -339,6 +339,32 @@ def test_worker_processes_summarize_job_with_real_repository(integration_context
 
 
 @pytest.mark.integration
+def test_sql_repository_reuses_duplicate_job_dedupe_key(integration_context):
+    _, repository, _, namespace = integration_context
+
+    dedupe_key = f"test:{namespace}:dedupe"
+    first = repository.create_job(
+        "index_paper",
+        {"arxiv_id": f"{namespace}/dedupe-first"},
+        dedupe_key=dedupe_key,
+    )
+    second = repository.create_job(
+        "index_paper",
+        {"arxiv_id": f"{namespace}/dedupe-second"},
+        dedupe_key=dedupe_key,
+    )
+
+    with _connect() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT count(*) FROM jobs WHERE dedupe_key = %s", (dedupe_key,))
+            count = cursor.fetchone()[0]
+
+    assert second.job_id == first.job_id
+    assert second.payload["arxiv_id"] == f"{namespace}/dedupe-first"
+    assert count == 1
+
+
+@pytest.mark.integration
 def test_claim_pending_job_is_atomic_across_concurrent_workers(integration_context):
     """Two workers racing on the same pending row must not both claim it.
 
