@@ -81,7 +81,7 @@ def test_run_harvest_range_planner_enqueues_one_chunk_per_category_per_window():
         categories=["cs.LG", "cs.CL"],
         start_date="2020-01-01",
         end_date="2020-06-30",
-        limit_per_category=None,
+        limit_per_window=None,
         chunk_months=3,
     )
 
@@ -105,9 +105,39 @@ def test_run_harvest_range_rejects_non_arxiv_source():
             categories=["cs.LG"],
             start_date="2020-01-01",
             end_date="2020-03-31",
-            limit_per_category=None,
+            limit_per_window=None,
             chunk_months=3,
         )
+
+
+def test_limit_per_window_is_per_chunk_not_per_category_total():
+    """Contract lock per the #37 review: ``limit_per_window`` is PER
+    (category, window), not a per-category total across the whole
+    requested date range. A 2-year range with chunk_months=3 and
+    limit_per_window=1000 is therefore 8 chunks × 1000 = potentially
+    8000 papers per category — and every chunk's ``limit`` payload must
+    carry exactly that 1000 cap without any across-window budget
+    rebalancing. Regression test: if someone rewires the planner to
+    spread the cap across windows (e.g. ``limit / len(windows)``), the
+    per-chunk limit would drop and this assertion would fire.
+    """
+    service = _service()
+
+    service.run_harvest_range(
+        source="arxiv",
+        categories=["cs.LG"],
+        start_date="2020-01-01",
+        end_date="2021-12-31",
+        limit_per_window=1000,
+        chunk_months=3,
+    )
+
+    chunk_jobs = [job for job in service.repository.jobs.values() if job.job_type == "harvest_chunk"]
+    assert len(chunk_jobs) == 8, "2-year range with 3-month chunks must plan 8 windows"
+    limits = {job.payload["limit"] for job in chunk_jobs}
+    assert limits == {1000}, (
+        f"every window must receive the same per-window cap (got {limits})"
+    )
 
 
 # -- chunk worker pagination + idempotency -----------------------------------
@@ -148,10 +178,41 @@ def _paper(arxiv_id: str) -> PaperMetadata:
     )
 
 
-def test_harvest_chunk_paginates_until_short_page(monkeypatch):
-    """The chunk worker must keep fetching until fetch_range returns either
-    an empty page or next_cursor=None. Here: 2 full pages of 100, then a
-    short page of 5 → 205 papers indexed, exactly 3 fetch_range calls."""
+def _drain_harvest_chunks(service: PaperbaseService) -> int:
+    """Pop every pending harvest_chunk in priority order and run it through
+    the public dispatcher, the way a real worker would. Returns the number
+    of chunk claims that executed."""
+    claims = 0
+    while True:
+        pending = [
+            job
+            for job in service.repository.jobs.values()
+            if job.status == "pending" and job.job_type == "harvest_chunk"
+        ]
+        if not pending:
+            return claims
+        pending.sort(key=lambda job: (job.priority, job.created_at))
+        next_job = pending[0]
+        service.run_harvest_chunk(
+            source=str(next_job.payload.get("source", "arxiv")),
+            category=str(next_job.payload["category"]),
+            start_date=str(next_job.payload["start_date"]),
+            end_date=str(next_job.payload["end_date"]),
+            limit=next_job.payload.get("limit"),
+            cursor=int(next_job.payload.get("cursor", 0)),
+            fetched=int(next_job.payload.get("fetched", 0)),
+        )
+        service.repository.mark_job_completed(next_job.job_id)
+        claims += 1
+
+
+def test_harvest_chunk_does_one_page_per_claim_and_enqueues_continuation(monkeypatch):
+    """Blocking-review fix (#37): each ``harvest_chunk`` claim must do
+    BOUNDED work — one page — and enqueue a continuation for the next
+    page. That way the worker re-enters the priority queue between
+    pages and a ``harvest_chunk`` cannot monopolize the loop while
+    interactive ``index_paper`` work waits. 2 full pages + 1 short page
+    is 3 claims total, 3 fetch_range calls, 205 papers indexed."""
     service = _service()
     full_page_1 = [_paper(f"2020.{i:05d}") for i in range(100)]
     full_page_2 = [_paper(f"2020.1{i:05d}") for i in range(100)]
@@ -167,42 +228,119 @@ def test_harvest_chunk_paginates_until_short_page(monkeypatch):
     monkeypatch.setattr("paperbase.service.sources.fetch_range", fetch_stub)
     monkeypatch.setattr(service, "index_arxiv_paper", fake_index)
 
-    result = service.run_harvest_chunk(
+    service.repository.create_job(
+        "harvest_chunk",
+        {
+            "source": "arxiv",
+            "category": "cs.LG",
+            "start_date": "2020-01-01",
+            "end_date": "2020-03-31",
+            "limit": None,
+            "cursor": 0,
+            "fetched": 0,
+        },
+    )
+
+    claims = _drain_harvest_chunks(service)
+
+    assert claims == 3, "3 pages → 3 separate chunk claims"
+    assert counters["cs.LG"] == 3
+    assert len(indexed_ids) == 205
+    pending = [j for j in service.repository.jobs.values() if j.status == "pending"]
+    assert pending == []
+
+
+def test_harvest_chunk_respects_limit_across_continuation(monkeypatch):
+    """``limit`` is a per-window cap that must hold across the entire
+    continuation chain — not be reset per page. A limit of 150 against
+    2 full pages of 100 must index 150 (100 from page 1 + 50 from page 2)
+    and enqueue no further continuation."""
+    service = _service()
+    full_page = [_paper(f"2020.{i:05d}") for i in range(100)]
+    page_2 = [_paper(f"2020.1{i:05d}") for i in range(100)]
+    page_3 = [_paper(f"2020.2{i:05d}") for i in range(100)]
+    fetch_stub, counters = _fake_fetch_range({"cs.LG": [full_page, page_2, page_3]})
+
+    monkeypatch.setattr("paperbase.service.sources.fetch_range", fetch_stub)
+    monkeypatch.setattr(service, "index_arxiv_paper", lambda *_a, **_k: None)
+
+    service.repository.create_job(
+        "harvest_chunk",
+        {
+            "source": "arxiv",
+            "category": "cs.LG",
+            "start_date": "2020-01-01",
+            "end_date": "2020-03-31",
+            "limit": 150,
+            "cursor": 0,
+            "fetched": 0,
+        },
+    )
+
+    _drain_harvest_chunks(service)
+
+    assert counters["cs.LG"] == 2, (
+        "limit=150 must stop after page 2 (100 + 50 = 150) and not fetch page 3"
+    )
+
+
+def test_harvest_chunk_retry_resumes_from_saved_cursor(monkeypatch):
+    """Regression test arslnb explicitly asked for in the #37 review:
+    when a chunk fails after two successful pages, the retry must
+    resume from the saved cursor (not restart from page 1). Because
+    the continuation's payload has ``cursor=200, fetched=200`` by the
+    time page 3 is next up, the retry policy (which re-queues the
+    failing payload verbatim) will replay page 3 — not page 1."""
+    service = _service()
+    full_page_1 = [_paper(f"2020.{i:05d}") for i in range(100)]
+    full_page_2 = [_paper(f"2020.1{i:05d}") for i in range(100)]
+    full_page_3 = [_paper(f"2020.2{i:05d}") for i in range(100)]
+    fetch_stub, _counters = _fake_fetch_range(
+        {"cs.LG": [full_page_1, full_page_2, full_page_3]}
+    )
+    monkeypatch.setattr("paperbase.service.sources.fetch_range", fetch_stub)
+    monkeypatch.setattr(service, "index_arxiv_paper", lambda *_a, **_k: None)
+
+    # Page 1 (cursor=0, fetched=0).
+    service.run_harvest_chunk(
         source="arxiv",
         category="cs.LG",
         start_date="2020-01-01",
         end_date="2020-03-31",
         limit=None,
         cursor=0,
+        fetched=0,
     )
+    continuation_1 = [
+        j for j in service.repository.jobs.values()
+        if j.job_type == "harvest_chunk" and j.payload["cursor"] == 100
+    ]
+    assert len(continuation_1) == 1
+    assert continuation_1[0].payload["fetched"] == 100
 
-    assert result["fetched"] == 205
-    assert result["indexed"] == 205
-    assert counters["cs.LG"] == 3
-    assert len(indexed_ids) == 205
-
-
-def test_harvest_chunk_respects_limit(monkeypatch):
-    """``limit`` caps total work per chunk. A limit of 50 against a 100-paper
-    page must stop mid-page and not fetch a second page."""
-    service = _service()
-    full_page = [_paper(f"2020.{i:05d}") for i in range(100)]
-    fetch_stub, counters = _fake_fetch_range({"cs.LG": [full_page, full_page]})
-
-    monkeypatch.setattr("paperbase.service.sources.fetch_range", fetch_stub)
-    monkeypatch.setattr(service, "index_arxiv_paper", lambda *_a, **_k: None)
-
-    result = service.run_harvest_chunk(
+    # Page 2 (cursor=100, fetched=100).
+    service.run_harvest_chunk(
         source="arxiv",
         category="cs.LG",
         start_date="2020-01-01",
         end_date="2020-03-31",
-        limit=50,
-        cursor=0,
+        limit=None,
+        cursor=100,
+        fetched=100,
     )
-
-    assert result["fetched"] == 50
-    assert counters["cs.LG"] == 1, "limit must stop the worker before a second fetch"
+    continuation_2 = [
+        j for j in service.repository.jobs.values()
+        if j.job_type == "harvest_chunk" and j.payload["cursor"] == 200
+    ]
+    assert len(continuation_2) == 1
+    page_3_payload = continuation_2[0].payload
+    assert page_3_payload["cursor"] == 200, (
+        "retry of a failed page-3 chunk must resume at cursor=200, not restart at 0"
+    )
+    assert page_3_payload["fetched"] == 200, (
+        "the running fetched total is persisted across pages so the cap holds "
+        "across the continuation chain"
+    )
 
 
 # -- priority: backfill must not starve interactive work ---------------------

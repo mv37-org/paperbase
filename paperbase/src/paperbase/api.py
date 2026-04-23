@@ -287,7 +287,12 @@ class HarvestRangeRequest(_BaseModel):
     categories: list[str] = _Field(default_factory=list)
     start_date: str = _Field(min_length=10, max_length=10)
     end_date: str = _Field(min_length=10, max_length=10)
-    limit_per_category: int | None = _Field(default=None, ge=1, le=10_000_000)
+    # Per-(category, window) cap — NOT a per-category total across the
+    # whole date range. A 2-year range with ``chunk_months=3`` is 8
+    # windows, so ``limit_per_window=1000`` means each category can
+    # ingest up to ``8 * 1000 = 8000`` papers. The arg is named after
+    # the chunk so operators don't read it as a category-wide budget.
+    limit_per_window: int | None = _Field(default=None, ge=1, le=10_000_000)
     chunk_months: int = _Field(default=3, ge=1, le=24)
     source: str = "arxiv"
 
@@ -310,7 +315,7 @@ def harvest_range(
             categories=categories,
             start_date=request.start_date,
             end_date=request.end_date,
-            limit_per_category=request.limit_per_category,
+            limit_per_window=request.limit_per_window,
             chunk_months=request.chunk_months,
             source=request.source,
         )

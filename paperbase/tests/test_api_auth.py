@@ -1232,7 +1232,7 @@ def test_harvest_endpoint_delegates_to_service(api_client):
             "start_date": "2020-01-01",
             "end_date": "2020-06-30",
             "chunk_months": 3,
-            "limit_per_category": 1000,
+            "limit_per_window": 1000,
         },
     )
 
@@ -1245,7 +1245,7 @@ def test_harvest_endpoint_delegates_to_service(api_client):
     assert enqueue_calls[0][1]["start_date"] == "2020-01-01"
     assert enqueue_calls[0][1]["end_date"] == "2020-06-30"
     assert enqueue_calls[0][1]["chunk_months"] == 3
-    assert enqueue_calls[0][1]["limit_per_category"] == 1000
+    assert enqueue_calls[0][1]["limit_per_window"] == 1000
 
 
 def test_harvest_endpoint_defaults_to_configured_ai_categories(api_client):

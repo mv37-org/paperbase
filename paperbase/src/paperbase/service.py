@@ -3111,12 +3111,19 @@ class PaperbaseService:
         categories: list[str],
         start_date: str,
         end_date: str,
-        limit_per_category: int | None = None,
+        limit_per_window: int | None = None,
         chunk_months: int = 3,
         source: str = "arxiv",
     ) -> JobResponse:
         """Queue a ``harvest_range`` planner job. Planner splits the date
-        range into ``harvest_chunk`` sub-jobs, one per category per window."""
+        range into ``harvest_chunk`` sub-jobs, one per category per window.
+
+        ``limit_per_window`` caps papers per (category, window). Total
+        papers for a category across the whole range is
+        ``limit_per_window * number_of_windows`` — the arg is deliberately
+        named after the chunk so operators don't read it as a per-category
+        total across the whole date range.
+        """
         _validate_date(start_date, name="start_date")
         _validate_date(end_date, name="end_date")
         if start_date > end_date:
@@ -3132,7 +3139,7 @@ class PaperbaseService:
                 "categories": list(categories),
                 "start_date": start_date,
                 "end_date": end_date,
-                "limit_per_category": limit_per_category,
+                "limit_per_window": limit_per_window,
                 "chunk_months": chunk_months,
             },
         )
@@ -3146,7 +3153,7 @@ class PaperbaseService:
                 "start_date": start_date,
                 "end_date": end_date,
                 "chunk_months": chunk_months,
-                "limit_per_category": limit_per_category,
+                "limit_per_window": limit_per_window,
             },
         )
         return job
@@ -3158,7 +3165,7 @@ class PaperbaseService:
         categories: list[str],
         start_date: str,
         end_date: str,
-        limit_per_category: int | None,
+        limit_per_window: int | None,
         chunk_months: int,
     ) -> dict[str, int]:
         """Planner: split ``[start_date, end_date]`` into ``chunk_months``
@@ -3181,8 +3188,9 @@ class PaperbaseService:
                         "category": category,
                         "start_date": win_start,
                         "end_date": win_end,
-                        "limit": limit_per_category,
+                        "limit": limit_per_window,
                         "cursor": 0,
+                        "fetched": 0,
                     },
                 )
                 chunks_created += 1
@@ -3206,60 +3214,105 @@ class PaperbaseService:
         end_date: str,
         limit: int | None,
         cursor: int,
-    ) -> dict[str, int]:
-        """Worker: fetch one arxiv date window for one category and index
-        each paper. Paginates until the page comes back short or we hit
-        ``limit``. Idempotent — ``index_arxiv_paper`` no-ops on re-ingest.
+        fetched: int = 0,
+    ) -> dict[str, Any]:
+        """Worker: fetch ONE page of one arxiv date window and index each
+        paper, then enqueue a continuation ``harvest_chunk`` if more pages
+        remain.
+
+        Processing a single page per claim does two things arslnb called
+        out on PR #37: it bounds worker time per claim (long windows no
+        longer monopolize the loop), and it re-enters the priority queue
+        between pages so a newly-arrived ``index_paper`` can cut in front.
+
+        Resume semantics: the ``cursor`` and ``fetched`` fields are carried
+        on the continuation's payload. If a chunk fails mid-page, the retry
+        policy requeues the SAME payload, so work resumes at the cursor
+        that was live when the failure happened — not at cursor=0.
+
+        Idempotent — ``index_arxiv_paper`` no-ops on re-ingest, so a double
+        claim (e.g. ``mark_job_completed`` crash between index and
+        continuation enqueue) at worst re-fetches one page.
         """
         if source != "arxiv":
             raise PermanentError(f"harvest source {source!r} is not supported; v1 handles arxiv only")
 
         page_size = 100
-        fetched = 0
-        indexed = 0
         offset = max(0, cursor or 0)
+        running_fetched = max(0, fetched or 0)
         cap = limit if (limit is not None and limit > 0) else None
 
-        while True:
-            if cap is not None and fetched >= cap:
+        if cap is not None and running_fetched >= cap:
+            return {"fetched": 0, "indexed": 0, "enqueued_continuation": False}
+
+        page, next_cursor = sources.fetch_range(
+            category,
+            start_date=start_date,
+            end_date=end_date,
+            start_offset=offset,
+            page_size=page_size,
+        )
+        if not page:
+            return {"fetched": 0, "indexed": 0, "enqueued_continuation": False}
+
+        fetched_this_page = 0
+        indexed = 0
+        for paper in page:
+            if cap is not None and running_fetched + fetched_this_page >= cap:
                 break
-            page, next_cursor = sources.fetch_range(
-                category,
-                start_date=start_date,
-                end_date=end_date,
-                start_offset=offset,
-                page_size=page_size,
+            fetched_this_page += 1
+            try:
+                self.index_arxiv_paper(paper.arxiv_id, paper=paper, force=False)
+                indexed += 1
+            except PermanentError:
+                # Individual paper can't be indexed (e.g. withdrawn) —
+                # swallow so the chunk keeps going.
+                continue
+
+        new_total = running_fetched + fetched_this_page
+        should_continue = (
+            next_cursor is not None
+            and (cap is None or new_total < cap)
+        )
+        enqueued_continuation = False
+        if should_continue:
+            # Persist cursor by enqueuing a new harvest_chunk. We write
+            # this BEFORE returning success so the continuation lands
+            # even if mark_job_completed later hiccups; idempotent ingest
+            # means a duplicate continuation only costs one extra fetch.
+            self.repository.create_job(
+                "harvest_chunk",
+                {
+                    "source": source,
+                    "category": category,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "limit": limit,
+                    "cursor": next_cursor,
+                    "fetched": new_total,
+                },
             )
-            if not page:
-                break
-            for paper in page:
-                if cap is not None and fetched >= cap:
-                    break
-                fetched += 1
-                try:
-                    self.index_arxiv_paper(paper.arxiv_id, paper=paper, force=False)
-                    indexed += 1
-                except PermanentError:
-                    # Individual paper can't be indexed (e.g. withdrawn) —
-                    # swallow so the chunk keeps going.
-                    continue
-            if next_cursor is None:
-                break
-            offset = next_cursor
+            enqueued_continuation = True
 
         logger.info(
-            "harvest_chunk completed",
+            "harvest_chunk page completed",
             extra={
-                "event": "harvest_chunk.completed",
+                "event": "harvest_chunk.page_completed",
                 "source": source,
                 "category": category,
                 "start_date": start_date,
                 "end_date": end_date,
-                "fetched": fetched,
+                "page_fetched": fetched_this_page,
                 "indexed": indexed,
+                "running_fetched": new_total,
+                "enqueued_continuation": enqueued_continuation,
             },
         )
-        return {"fetched": fetched, "indexed": indexed}
+        return {
+            "fetched": fetched_this_page,
+            "indexed": indexed,
+            "enqueued_continuation": enqueued_continuation,
+        }
 
     def enqueue_latest_sync_job(self) -> JobResponse:
         job = self.repository.create_job(
@@ -3308,12 +3361,18 @@ class PaperbaseService:
             elif job.job_type == "summarize_top_cited":
                 self.summarize_top_cited(limit=int(job.payload.get("limit", 500_000)))
             elif job.job_type == "harvest_range":
+                # Accept legacy ``limit_per_category`` payloads written
+                # before the rename so in-flight planner jobs still run
+                # after deploy.
+                limit_per_window = job.payload.get("limit_per_window")
+                if limit_per_window is None:
+                    limit_per_window = job.payload.get("limit_per_category")
                 self.run_harvest_range(
                     source=str(job.payload.get("source", "arxiv")),
                     categories=list(job.payload.get("categories", [])),
                     start_date=str(job.payload["start_date"]),
                     end_date=str(job.payload["end_date"]),
-                    limit_per_category=job.payload.get("limit_per_category"),
+                    limit_per_window=limit_per_window,
                     chunk_months=int(job.payload.get("chunk_months", 3)),
                 )
             elif job.job_type == "harvest_chunk":
@@ -3324,6 +3383,7 @@ class PaperbaseService:
                     end_date=str(job.payload["end_date"]),
                     limit=job.payload.get("limit"),
                     cursor=int(job.payload.get("cursor", 0)),
+                    fetched=int(job.payload.get("fetched", 0)),
                 )
             elif job.job_type in {"reindex_embeddings", "reindex_missing_embeddings"}:
                 self.reindex_embeddings(
