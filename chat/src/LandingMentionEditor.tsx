@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { ComponentProps, CSSProperties, FormEvent, KeyboardEvent } from "react";
+import type { ComponentProps, CSSProperties, FormEvent, KeyboardEvent, ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
   createEditor,
@@ -145,6 +145,7 @@ function insertMention(editor: Editor & ReactEditor, target: BaseRange, paper: M
 }
 
 type Props = {
+  actionAccessory?: ReactNode;
   attachButtonId?: string;
   disabled?: boolean;
   formId?: string;
@@ -166,6 +167,7 @@ type Props = {
 };
 
 export function LandingMentionEditor({
+  actionAccessory,
   attachButtonId,
   disabled = false,
   formId,
@@ -521,29 +523,34 @@ export function LandingMentionEditor({
                 <path d="M16.5 6.5 9 14a3 3 0 1 0 4.24 4.24l7.01-7.02a5 5 0 0 0-7.07-7.07L5.46 11.9a7 7 0 1 0 9.9 9.9l6.01-6.01" />
               </svg>
             </button>
-            <button
-              id={submitButtonId}
-              className={`prompt-button${submitLoading ? " loading" : ""}${submitMode === "stop" ? " stop" : ""}`}
-              type={submitMode === "stop" ? "button" : "submit"}
-              disabled={submitMode === "stop" ? false : disabled}
-              aria-busy={submitLoading}
-              title={submitOnEnter ? "Enter to send. Shift + Enter for new line." : undefined}
-              onClick={submitMode === "stop" ? onStop : undefined}
-            >
-              {submitLoading ? <span className="prompt-button-spinner" aria-hidden="true" /> : null}
-              <span className="prompt-button-label">{submitLabel}</span>
-              {submitMode === "submit" && submitOnEnter && !submitLoading ? (
-                <span
-                  className="prompt-button-shortcut prompt-button-shortcut-enter"
-                  aria-hidden="true"
-                >
-                  <svg viewBox="0 0 16 16">
-                    <path d="M12.5 3.5v6H4.5" />
-                    <path d="m7.5 6.5-3 3 3 3" />
-                  </svg>
-                </span>
-              ) : null}
-            </button>
+            <div className="chat-prompt-submit-group">
+              {actionAccessory}
+              <button
+                id={submitButtonId}
+                className={`prompt-button${submitLoading ? " loading" : ""}${submitMode === "stop" ? " stop" : ""}`}
+                type={submitMode === "stop" ? "button" : "submit"}
+                disabled={submitMode === "stop" ? false : disabled}
+                aria-busy={submitLoading}
+                title={submitOnEnter ? "Enter to send. Shift + Enter for new line." : undefined}
+                onClick={submitMode === "stop" ? onStop : undefined}
+              >
+                {submitLoading ? (
+                  <span className="prompt-button-spinner" aria-hidden="true" />
+                ) : null}
+                <span className="prompt-button-label">{submitLabel}</span>
+                {submitMode === "submit" && submitOnEnter && !submitLoading ? (
+                  <span
+                    className="prompt-button-shortcut prompt-button-shortcut-enter"
+                    aria-hidden="true"
+                  >
+                    <svg viewBox="0 0 16 16">
+                      <path d="M12.5 3.5v6H4.5" />
+                      <path d="m7.5 6.5-3 3 3 3" />
+                    </svg>
+                  </span>
+                ) : null}
+              </button>
+            </div>
           </div>
         ) : (
           <button id={submitButtonId} className="prompt-button" type="submit" disabled={disabled}>

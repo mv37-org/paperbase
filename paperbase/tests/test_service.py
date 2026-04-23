@@ -18,6 +18,7 @@ from paperbase.browser_code import (
 )
 from paperbase.config import Settings, get_settings
 from paperbase.extractors import ExtractionOutput, FigureArtifact, RawArtifact, SectionArtifact, TableArtifact
+from paperbase.llm import ChatModelStreamEvent, ChatModelUsage
 from paperbase.models import (
     ChatCitation,
     CreateChatThreadRequest,
@@ -54,6 +55,26 @@ class FakeChatModel:
         self.stream_calls: list[dict[str, object]] = []
         self.stream_chunks: list[str] = ["Grounded ", "answer with citations [S1]"]
         self.fail_stream_after_chunks: int | None = None
+        self.tool_round_usage = ChatModelUsage(input_tokens=84512, output_tokens=98)
+        self.initial_stream_usage = ChatModelUsage(input_tokens=11234, output_tokens=1)
+        self.final_stream_usage = ChatModelUsage(input_tokens=11234, output_tokens=27)
+        self.count_calls: list[dict[str, object]] = []
+        self.token_counts: list[int | None] = []
+        self.compaction_summary = "## Compacted Conversation\n\nContinue from this compacted context."
+
+    def count_message_tokens(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+        self.count_calls.append(
+            {
+                "api_key": api_key,
+                "messages": messages,
+                "system_prompt": system_prompt,
+                "tools": tools,
+                "tool_choice": tool_choice,
+            }
+        )
+        if self.token_counts:
+            return self.token_counts.pop(0)
+        return 1
 
     def create_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
         self.create_calls.append(
@@ -65,6 +86,11 @@ class FakeChatModel:
                 "tool_choice": tool_choice,
             }
         )
+        if system_prompt == "" and messages and "Compact the conversation transcript" in str(messages[-1]):
+            return {
+                "content": [{"type": "text", "text": self.compaction_summary}],
+                "stop_reason": "end_turn",
+            }
         if tools:
             tool_names = [tool.get("name") for tool in tools if isinstance(tool, dict)]
             has_tool_results = any(
@@ -110,6 +136,12 @@ class FakeChatModel:
                             "input": {"query": query, "limit": 3},
                         }
                     ],
+                    "usage": {
+                        "input_tokens": self.tool_round_usage.input_tokens,
+                        "output_tokens": self.tool_round_usage.output_tokens,
+                        "cache_creation_input_tokens": self.tool_round_usage.cache_creation_input_tokens,
+                        "cache_read_input_tokens": self.tool_round_usage.cache_read_input_tokens,
+                    },
                     "stop_reason": "tool_use",
                 }
         return {
@@ -132,10 +164,12 @@ class FakeChatModel:
                 "tool_choice": tool_choice,
             }
         )
+        yield ChatModelStreamEvent(usage=self.initial_stream_usage)
         for index, chunk in enumerate(self.stream_chunks):
             if self.fail_stream_after_chunks is not None and index >= self.fail_stream_after_chunks:
                 raise RuntimeError("stream blew up")
-            yield chunk
+            yield ChatModelStreamEvent(text=chunk)
+        yield ChatModelStreamEvent(usage=self.final_stream_usage)
 
 
 class FakeGitHubRepoManager:
@@ -1730,6 +1764,85 @@ def test_non_grounded_chat_skips_tools_and_citations(browser_service):
     assert "do not invent source ids" in str(chat_model.create_calls[0]["system_prompt"])
 
 
+def test_chat_context_uses_full_active_thread_history(browser_service):
+    service, _, chat_model = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="history@example.com", password="topsecret123", display_name="History User")
+    )
+    assert session.user is not None
+
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
+    for index in range(8):
+        service.repository.add_chat_message(  # type: ignore[attr-defined]
+            thread_id=thread.thread_id,
+            role="user" if index % 2 == 0 else "assistant",
+            content_markdown=f"Historical message {index}",
+        )
+
+    service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="Help me brainstorm a short product name"),
+    )
+
+    answer_call = chat_model.create_calls[-1]
+    sent_messages = answer_call["messages"]
+    assert isinstance(sent_messages, list)
+    assert len(sent_messages) == 9
+    assert sent_messages[0]["content"] == "Historical message 0"
+    assert sent_messages[-1]["content"] == "Help me brainstorm a short product name"
+
+
+def test_stream_chat_compacts_mid_turn_after_tool_results(monkeypatch, browser_service):
+    service, _, chat_model = browser_service
+    chat_model.token_counts = [1, 1, 950_000, 1]
+    session, _ = service.register_browser_user(
+        SignupRequest(email="compact@example.com", password="topsecret123", display_name="Compact User")
+    )
+    assert session.user is not None
+
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda paper: _rich_extraction(text="## Methods\n\nMethods section explains grounding and citations."),
+    )
+    service.index_arxiv_paper(
+        "2401.77777",
+        paper=_sample_paper("2401.77777", title="Compaction Paper", abstract="A paper about tool results"),
+    )
+
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
+    events = list(
+        service.stream_chat_message(
+            session.user,
+            thread.thread_id,
+            SendChatMessageRequest(content="Explain the methods grounding with citations", tag_filters=[]),
+        )
+    )
+
+    event_names = [event_name for event_name, _ in events]
+    assert "tool_done" in event_names
+    assert event_names.index("compaction_start") > event_names.index("tool_done")
+    assert event_names.index("compaction_done") < event_names.index("assistant_start")
+    compaction_done = dict(events)["compaction_done"]
+    assert compaction_done["compaction_message"]["kind"] == "compaction"
+    assert "Compacted Conversation" in compaction_done["compaction_message"]["content_markdown"]
+    assert [message["kind"] for message in compaction_done["messages"]] == ["compaction"]
+
+    compaction_call = next(call for call in chat_model.create_calls if call["system_prompt"] == "")
+    assert "Compact the conversation transcript" in str(compaction_call["messages"])
+    assert "tool_result" in str(compaction_call["messages"])
+    assert "Explain the methods grounding" in str(compaction_call["messages"])
+
+    final_stream_call = chat_model.stream_calls[-1]
+    assert final_stream_call["messages"][0]["role"] == "user"
+    assert "Conversation compaction checkpoint" in final_stream_call["messages"][0]["content"]
+
+    refreshed = service.get_chat_thread(session.user, thread.thread_id)
+    assert [message.kind for message in refreshed.messages] == ["compaction", "default"]
+    assert all("Explain the methods grounding" not in message.content_markdown for message in refreshed.messages)
+
+
 def test_search_only_tool_results_do_not_create_citations(monkeypatch):
     class SearchOnlyChatModel(FakeChatModel):
         def create_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
@@ -1929,6 +2042,25 @@ def test_project_session_paging_and_thread_deletion(browser_service):
     assert remaining_project.session_count == 5
 
 
+def test_chat_answer_prompt_requires_strict_markdown(browser_service):
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="markdown@example.com", password="topsecret123", display_name="Markdown User")
+    )
+    assert session.user is not None
+
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="Markdown prompt"))
+
+    with_evidence = service._chat_answer_system_prompt(thread=thread, has_evidence_sources=True)
+    without_evidence = service._chat_answer_system_prompt(thread=thread, has_evidence_sources=False)
+
+    assert "strict GitHub-flavored markdown" in with_evidence
+    assert "valid markdown that a standard parser can render directly" in with_evidence
+    assert "Do not put spaces just inside emphasis delimiters" in with_evidence
+    assert "strict GitHub-flavored markdown" in without_evidence
+    assert "valid markdown that a standard parser can render directly" in without_evidence
+
+
 def test_empty_chat_can_move_between_projects(browser_service):
     service, _, _ = browser_service
     session, _ = service.register_browser_user(
@@ -2031,14 +2163,22 @@ def test_browser_chat_stream_emits_citations_and_completion(monkeypatch, browser
         events = _parse_sse_events("".join(response.iter_text()))
 
     event_names = [event_name for event_name, _ in events]
-    assert event_names[:2] == ["tool_start", "tool_done"]
-    assert events[0][1]["label"]
+    assert event_names[:3] == ["usage", "tool_start", "tool_done"]
+    assert events[1][1]["label"]
     assert "assistant_start" in event_names
+    assert "usage" in event_names
     assert "delta" in event_names
     assert event_names[-1] == "done"
     assistant_start_index = event_names.index("assistant_start")
+    tool_usage_index = 0
+    stream_usage_index = event_names.index("usage", assistant_start_index)
     assert events[assistant_start_index][1]["assistant_message"]["citations"]
+    assert events[tool_usage_index][1]["input_tokens"] == 84512
+    assert events[tool_usage_index][1]["output_tokens"] == 98
+    assert events[tool_usage_index][1]["context_window_tokens"] == 1_000_000
+    assert events[stream_usage_index][1]["input_tokens"] == 11234
     assert events[-1][1]["assistant_message"]["status"] == "completed"
+    assert events[-1][1]["usage"]["output_tokens"] == 27
 
     refreshed = client.get(f"/v1/browser/chats/{thread_id}").json()
     assert refreshed["messages"][-1]["status"] == "completed"
@@ -2120,7 +2260,7 @@ def test_browser_chat_stream_marks_partial_failure(monkeypatch, browser_service)
         events = _parse_sse_events("".join(response.iter_text()))
 
     event_names = [event_name for event_name, _ in events]
-    assert event_names[:3] == ["tool_start", "tool_done", "assistant_start"]
+    assert event_names[:4] == ["usage", "tool_start", "tool_done", "assistant_start"]
     assert "delta" in event_names
     assert events[-1][0] == "error"
     refreshed = client.get(f"/v1/browser/chats/{thread_id}").json()

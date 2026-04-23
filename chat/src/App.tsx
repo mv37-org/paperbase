@@ -45,6 +45,7 @@ import type {
   ChatCitation,
   ChatMessageResponse,
   ChatStreamDoneEvent,
+  ChatStreamUsageEvent,
   ChatThreadResponse,
   ChatThreadSummary,
   FigureResponse,
@@ -135,6 +136,7 @@ type ThreadStreamState = {
   turnIndex: number;
   thinkingWord: string;
   assistantStarted: boolean;
+  usage: ChatStreamUsageEvent | null;
 };
 
 const AUTH_VIEW_COPY: Record<AuthView, { title: string; caption: string }> = {
@@ -221,6 +223,35 @@ function SettingsSectionHeading({ title, caption }: { title: string; caption: st
     <div className="settings-section-heading">
       <h3 className="settings-section-title">{title}</h3>
       <p className="settings-section-copy">{caption}</p>
+    </div>
+  );
+}
+
+function ModalFlash({
+  message,
+  kind,
+  className = "",
+}: {
+  message: string;
+  kind: ModalFlashKind;
+  className?: string;
+}) {
+  return (
+    <div
+      id="modal-flash"
+      className={`modal-flash${kind === "error" ? " warning" : " note"}${className ? ` ${className}` : ""}`}
+      role={kind === "error" ? "alert" : "status"}
+    >
+      {kind === "error" ? (
+        <span className="modal-flash-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24">
+            <path d="M12 4 3.75 18h16.5L12 4Z" />
+            <path d="M12 9v4" />
+            <path d="M12 16.5h.01" />
+          </svg>
+        </span>
+      ) : null}
+      <span className="modal-flash-text">{message}</span>
     </div>
   );
 }
@@ -469,6 +500,60 @@ function formatThinkingLabel(word?: string | null) {
   return `${label}...`;
 }
 
+function formatTokenCount(value: number) {
+  return new Intl.NumberFormat("en-US").format(Math.max(0, Math.round(value)));
+}
+
+function formatCompactTokenCount(value: number) {
+  const rounded = Math.max(0, Math.round(value));
+  if (rounded < 1000) {
+    return formatTokenCount(rounded);
+  }
+  return new Intl.NumberFormat("en-US", {
+    notation: "compact",
+    maximumFractionDigits: rounded < 100_000 ? 1 : 0,
+  })
+    .format(rounded)
+    .replace(/[A-Z]/g, (match) => match.toLowerCase());
+}
+
+function contextUsagePercent(usage: ChatStreamUsageEvent) {
+  if (usage.context_window_tokens <= 0) {
+    return 0;
+  }
+  return Math.min(100, (usage.total_tokens / usage.context_window_tokens) * 100);
+}
+
+function formatContextUsagePercentValue(usage: ChatStreamUsageEvent) {
+  const usagePercent = contextUsagePercent(usage);
+  if (usagePercent > 0 && usagePercent < 1) {
+    return "<1";
+  }
+  return String(Math.round(usagePercent));
+}
+
+function formatContextUsageRemainingPercentValue(usage: ChatStreamUsageEvent) {
+  const usagePercent = contextUsagePercent(usage);
+  const roundedUsed = Math.round(usagePercent);
+  const remaining = Math.max(0, 100 - roundedUsed);
+  if (remaining === 0 && usagePercent < 100) {
+    return "<1";
+  }
+  return String(remaining);
+}
+
+function formatContextUsageSummary(usage: ChatStreamUsageEvent) {
+  return `${formatContextUsagePercentValue(usage)}% used (${formatContextUsageRemainingPercentValue(usage)}% left)`;
+}
+
+function formatContextUsageTokenSummary(usage: ChatStreamUsageEvent) {
+  return `${formatCompactTokenCount(usage.total_tokens)} / ${formatCompactTokenCount(usage.context_window_tokens)} tokens used`;
+}
+
+function contextUsageButtonLabel(usage: ChatStreamUsageEvent) {
+  return `Context window: ${formatContextUsageSummary(usage)}, ${formatTokenCount(usage.total_tokens)} of ${formatTokenCount(usage.context_window_tokens)} tokens used`;
+}
+
 function apiKeyStateMessage(state: string) {
   if (state === "api_key_invalid") {
     return "Your saved Anthropic API key could not be decrypted. Add it again in Settings.";
@@ -672,7 +757,11 @@ export default function App() {
   const [threadStreamStates, setThreadStreamStates] = useState<Record<string, ThreadStreamState>>(
     {},
   );
+  const [threadUsageSnapshots, setThreadUsageSnapshots] = useState<
+    Record<string, ChatStreamUsageEvent>
+  >({});
   const [toolActivities, setToolActivities] = useState<Record<string, ToolActivityEntry[]>>({});
+  const [contextUsagePopoverOpen, setContextUsagePopoverOpen] = useState(false);
   const [paperDrawer, setPaperDrawer] = useState<PaperDrawerState>(() => drawerStateFromUrl());
   const [paperDrawerPaper, setPaperDrawerPaper] = useState<PaperResponse | null>(null);
   const [paperDrawerContent, setPaperDrawerContent] = useState<PaperDrawerContent | null>(null);
@@ -692,6 +781,7 @@ export default function App() {
   const tabsStorageHydratedRef = useRef(false);
   const appUploadRef = useRef<HTMLInputElement | null>(null);
   const accountMenuRef = useRef<HTMLDivElement | null>(null);
+  const contextUsageMenuRef = useRef<HTMLDivElement | null>(null);
   const emptyStateProjectPickerRef = useRef<HTMLDivElement | null>(null);
   const emptyStateProjectSearchInputRef = useRef<HTMLInputElement | null>(null);
   const projectMenuRef = useRef<HTMLDivElement | null>(null);
@@ -926,6 +1016,11 @@ export default function App() {
   const activeThreadStreamState = activeThreadId
     ? (threadStreamStates[activeThreadId] ?? null)
     : null;
+  const activeStreamUsage = activeThreadStreamState?.usage ?? null;
+  const activePersistedUsage = activeThreadId
+    ? (threadUsageSnapshots[activeThreadId] ?? null)
+    : null;
+  const activeContextUsage = activeStreamUsage ?? activePersistedUsage;
   const activeThreadToolActivities = useMemo(
     () =>
       activeThreadId
@@ -948,6 +1043,44 @@ export default function App() {
   }, [activeThreadToolActivities]);
   const activeStreamInView = streamingThreadId !== null && streamingThreadId === activeThreadId;
   const showScrollToLatest = activeTab?.kind === "thread" && !isChatEmpty && !messageListAtBottom;
+  const activeContextUsagePercent = activeContextUsage
+    ? contextUsagePercent(activeContextUsage)
+    : 0;
+
+  useEffect(() => {
+    if (!contextUsagePopoverOpen) {
+      return;
+    }
+    const handlePointerDown = (event: MouseEvent) => {
+      if (
+        contextUsageMenuRef.current &&
+        !contextUsageMenuRef.current.contains(event.target as Node)
+      ) {
+        setContextUsagePopoverOpen(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setContextUsagePopoverOpen(false);
+      }
+    };
+    window.addEventListener("mousedown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("mousedown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [contextUsagePopoverOpen]);
+
+  useEffect(() => {
+    setContextUsagePopoverOpen(false);
+  }, [activeThreadId]);
+
+  useEffect(() => {
+    if (!activeContextUsage) {
+      setContextUsagePopoverOpen(false);
+    }
+  }, [activeContextUsage]);
 
   const scrollMessageListToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
     if (!messageListRef.current) {
@@ -1135,6 +1268,7 @@ export default function App() {
         turnIndex,
         thinkingWord: pickThinkingWord(current[threadId]?.thinkingWord ?? null),
         assistantStarted: false,
+        usage: null,
       },
     }));
   }, []);
@@ -1152,6 +1286,40 @@ export default function App() {
           assistantStarted: true,
         },
       };
+    });
+  }, []);
+
+  const updateThreadStreamUsage = useCallback((threadId: string, usage: ChatStreamUsageEvent) => {
+    setThreadStreamStates((current) => {
+      const existing = current[threadId];
+      if (!existing) {
+        return current;
+      }
+      return {
+        ...current,
+        [threadId]: {
+          ...existing,
+          usage,
+        },
+      };
+    });
+  }, []);
+
+  const setThreadUsageSnapshot = useCallback((threadId: string, usage: ChatStreamUsageEvent) => {
+    setThreadUsageSnapshots((current) => ({
+      ...current,
+      [threadId]: usage,
+    }));
+  }, []);
+
+  const clearThreadUsageSnapshot = useCallback((threadId: string) => {
+    setThreadUsageSnapshots((current) => {
+      if (!(threadId in current)) {
+        return current;
+      }
+      const next = { ...current };
+      delete next[threadId];
+      return next;
     });
   }, []);
 
@@ -1260,14 +1428,23 @@ export default function App() {
 
   const refreshProjects = useCallback(async () => {
     const payload = await loadProjects();
-    setProjects(payload.projects);
+    const loadedProjects = payload.projects;
+    projectsRef.current = loadedProjects;
+    const fallbackProjectId = loadedProjects[0]?.project_id ?? null;
+    const immediateProjectId =
+      selectedProjectIdRef.current &&
+      loadedProjects.some((project) => project.project_id === selectedProjectIdRef.current)
+        ? selectedProjectIdRef.current
+        : fallbackProjectId;
+    selectedProjectIdRef.current = immediateProjectId;
+    setProjects(loadedProjects);
     setSelectedProjectId((current) => {
-      if (current && payload.projects.some((project) => project.project_id === current)) {
+      if (current && loadedProjects.some((project) => project.project_id === current)) {
         return current;
       }
-      return payload.projects[0]?.project_id ?? null;
+      return fallbackProjectId;
     });
-    return payload.projects;
+    return loadedProjects;
   }, []);
 
   const updateProjectItemCache = useCallback(
@@ -1601,6 +1778,8 @@ export default function App() {
 
       streamAbortControllerRef.current = streamAbortController;
       setStreamingThreadId(threadId);
+      clearThreadUsageSnapshot(threadId);
+      setContextUsagePopoverOpen(false);
       startThreadStreamState(threadId, turnIndex);
       setComposerStatus("");
 
@@ -1613,6 +1792,50 @@ export default function App() {
             include_papers: includePapers,
           },
           (eventName, payload) => {
+            if (eventName === "compaction_start") {
+              updateThread(threadId, (thread) => ({
+                ...(thread ?? {
+                  thread_id: threadId,
+                  project_id: fallbackProjectId,
+                  project_name: fallbackProjectName,
+                  project_instructions: fallbackProjectInstructions,
+                  title: content.slice(0, 60),
+                  created_at: now,
+                  updated_at: now,
+                  messages: [],
+                }),
+                updated_at: new Date().toISOString(),
+                messages: (thread?.messages ?? []).some(
+                  (message) => message.message_id === payload.compaction_message.message_id,
+                )
+                  ? (thread?.messages ?? []).map((message) =>
+                      message.message_id === payload.compaction_message.message_id
+                        ? payload.compaction_message
+                        : message,
+                    )
+                  : [...(thread?.messages ?? []), payload.compaction_message],
+              }));
+              return;
+            }
+
+            if (eventName === "compaction_done") {
+              updateThread(threadId, (thread) => ({
+                ...(thread ?? {
+                  thread_id: threadId,
+                  project_id: fallbackProjectId,
+                  project_name: fallbackProjectName,
+                  project_instructions: fallbackProjectInstructions,
+                  title: content.slice(0, 60),
+                  created_at: now,
+                  updated_at: now,
+                  messages: [],
+                }),
+                updated_at: new Date().toISOString(),
+                messages: payload.messages,
+              }));
+              return;
+            }
+
             if (eventName === "tool_start") {
               upsertToolActivity(threadId, {
                 id: payload.tool_call_id,
@@ -1654,6 +1877,12 @@ export default function App() {
               return;
             }
 
+            if (eventName === "usage") {
+              updateThreadStreamUsage(threadId, payload);
+              setThreadUsageSnapshot(threadId, payload);
+              return;
+            }
+
             if (eventName === "delta") {
               updateThread(threadId, (thread) => ({
                 ...(thread ?? {
@@ -1681,6 +1910,10 @@ export default function App() {
 
             if (eventName === "done") {
               donePayload = payload;
+              if (payload.usage) {
+                updateThreadStreamUsage(threadId, payload.usage);
+                setThreadUsageSnapshot(threadId, payload.usage);
+              }
               updateThread(threadId, (thread) => ({
                 ...(thread ?? {
                   thread_id: threadId,
@@ -1848,6 +2081,7 @@ export default function App() {
       return null;
     },
     [
+      clearThreadUsageSnapshot,
       clearThreadStreamState,
       completeRunningToolActivitiesForTurn,
       completeToolActivity,
@@ -1856,8 +2090,10 @@ export default function App() {
       includeUploads,
       markThreadAssistantStarted,
       refreshProjects,
+      setThreadUsageSnapshot,
       showErrorFlash,
       startThreadStreamState,
+      updateThreadStreamUsage,
       upsertToolActivity,
       upsertThreadIntoProjectItems,
       updateThread,
@@ -2102,6 +2338,8 @@ export default function App() {
     setAccountMenuOpen(false);
     setStreamingThreadId(null);
     setThreadStreamStates({});
+    setThreadUsageSnapshots({});
+    setContextUsagePopoverOpen(false);
     setToolActivities({});
     streamAbortControllerRef.current?.abort();
     streamAbortControllerRef.current = null;
@@ -2829,8 +3067,58 @@ export default function App() {
     return null;
   }
 
+  const contextUsagePopoverId = activeThreadId
+    ? `context-usage-popover-${activeThreadId}`
+    : "context-usage-popover";
+  const composerContextUsageAccessory =
+    activeTab?.kind === "thread" && activeContextUsage ? (
+      <div
+        ref={contextUsageMenuRef}
+        className={`context-usage-menu${contextUsagePopoverOpen ? " open" : ""}`}
+      >
+        <button
+          type="button"
+          className={`context-usage-button${activeStreamInView ? " live" : ""}`}
+          aria-label={contextUsageButtonLabel(activeContextUsage)}
+          aria-haspopup="dialog"
+          aria-expanded={contextUsagePopoverOpen}
+          aria-controls={contextUsagePopoverOpen ? contextUsagePopoverId : undefined}
+          title={contextUsageButtonLabel(activeContextUsage)}
+          onClick={() => setContextUsagePopoverOpen((current) => !current)}
+        >
+          <span
+            className="context-usage-button-ring"
+            style={
+              {
+                "--context-usage-percent": `${activeContextUsagePercent}%`,
+              } as CSSProperties
+            }
+            aria-hidden="true"
+          />
+        </button>
+        {contextUsagePopoverOpen ? (
+          <div
+            id={contextUsagePopoverId}
+            className="context-usage-popover"
+            role="dialog"
+            aria-label="Context window usage details"
+          >
+            <div className="context-usage-popover-header">
+              <span className="context-usage-popover-eyebrow">Context window:</span>
+              <strong>{formatContextUsageSummary(activeContextUsage)}</strong>
+            </div>
+            <div className="context-usage-popover-summary">
+              {formatContextUsageTokenSummary(activeContextUsage)}
+            </div>
+            <p className="context-usage-popover-note">Paperbase compacts context near the limit</p>
+          </div>
+        ) : null}
+      </div>
+    ) : null;
+
   const composerEditor = (
     <LandingMentionEditor
+      actionAccessory={composerContextUsageAccessory}
       attachButtonId="composer-upload-trigger"
       disabled={Boolean(streamingThreadId)}
       formId="composer-form"
@@ -3626,15 +3914,27 @@ export default function App() {
                   {(() => {
                     let userTurnIndex = 0;
                     return activeThread.messages.map((message) => {
-                      if (message.role === "user") {
+                      const isCompactionMessage = message.kind === "compaction";
+                      if (message.role === "user" && !isCompactionMessage) {
                         userTurnIndex += 1;
                       }
+                      const latestToolActivityTurnIndex =
+                        activeThreadToolActivitiesByTurn.size > 0
+                          ? Math.max(...activeThreadToolActivitiesByTurn.keys())
+                          : userTurnIndex;
+                      const activityTurnIndex =
+                        isCompactionMessage && activeThreadStreamState
+                          ? activeThreadStreamState.turnIndex
+                          : isCompactionMessage
+                            ? latestToolActivityTurnIndex
+                            : userTurnIndex;
                       const turnActivities =
-                        message.role === "user"
-                          ? (activeThreadToolActivitiesByTurn.get(userTurnIndex) ?? [])
+                        message.role === "user" || isCompactionMessage
+                          ? (activeThreadToolActivitiesByTurn.get(activityTurnIndex) ?? [])
                           : [];
                       const showThinkingPlaceholder =
                         message.role === "user" &&
+                        !isCompactionMessage &&
                         activeStreamInView &&
                         activeThreadStreamState?.turnIndex === userTurnIndex &&
                         !activeThreadStreamState.assistantStarted &&
@@ -3643,9 +3943,9 @@ export default function App() {
                       return (
                         <Fragment key={message.message_id}>
                           <article
-                            className={`message-row ${message.role === "assistant" ? "assistant" : "user"} status-${message.status}`}
+                            className={`message-row ${isCompactionMessage ? "compaction" : message.role === "assistant" ? "assistant" : "user"} status-${message.status}`}
                           >
-                            {message.status !== "completed" ? (
+                            {message.status !== "completed" && !isCompactionMessage ? (
                               <div className="message-meta-row">
                                 <span
                                   className={`message-status-label${message.status === "streaming" ? " thinking-shimmer" : ""}`}
@@ -3657,9 +3957,14 @@ export default function App() {
                               </div>
                             ) : null}
                             <div
-                              className={`message-bubble ${message.role === "assistant" ? "assistant" : "user"}`}
+                              className={`message-bubble ${isCompactionMessage ? "compaction" : message.role === "assistant" ? "assistant" : "user"}${isCompactionMessage && message.status === "streaming" ? " thinking-shimmer" : ""}`}
                             >
-                              {message.role === "assistant" ? (
+                              {isCompactionMessage ? (
+                                <MarkdownRenderer
+                                  markdown={message.content_markdown}
+                                  className="message-markdown compaction-markdown"
+                                />
+                              ) : message.role === "assistant" ? (
                                 <MarkdownRenderer
                                   markdown={message.content_markdown}
                                   className="message-markdown"
@@ -3677,7 +3982,7 @@ export default function App() {
                                 <div className="message-plain-text">{message.content_markdown}</div>
                               )}
                             </div>
-                            {message.role === "assistant" ? (
+                            {message.role === "assistant" && !isCompactionMessage ? (
                               <div className="assistant-hover-actions">
                                 {hoverTime ? (
                                   <span className="assistant-hover-time">{hoverTime}</span>
@@ -3753,9 +4058,11 @@ export default function App() {
                           ))}
                           {showThinkingPlaceholder ? (
                             <div className="tool-activity-row status-running thinking-only">
-                              <span className="tool-activity-label thinking-shimmer">
-                                {formatThinkingLabel(activeThreadStreamState?.thinkingWord)}
-                              </span>
+                              <div className="tool-activity-content">
+                                <span className="tool-activity-label thinking-shimmer">
+                                  {formatThinkingLabel(activeThreadStreamState?.thinkingWord)}
+                                </span>
+                              </div>
                             </div>
                           ) : null}
                         </Fragment>
@@ -4258,23 +4565,8 @@ export default function App() {
             </div>
           )}
 
-          {flash ? (
-            <div
-              id="modal-flash"
-              className={`modal-flash${flashKind === "error" ? " warning" : " note"}`}
-              role={flashKind === "error" ? "alert" : "status"}
-            >
-              {flashKind === "error" ? (
-                <span className="modal-flash-icon" aria-hidden="true">
-                  <svg viewBox="0 0 24 24">
-                    <path d="M12 4 3.75 18h16.5L12 4Z" />
-                    <path d="M12 9v4" />
-                    <path d="M12 16.5h.01" />
-                  </svg>
-                </span>
-              ) : null}
-              <span className="modal-flash-text">{flash}</span>
-            </div>
+          {flash && authView !== "settings" ? (
+            <ModalFlash message={flash} kind={flashKind} />
           ) : null}
 
           <div
@@ -4457,6 +4749,9 @@ export default function App() {
               </div>
 
               <div className="settings-tab-panels">
+                {flash ? (
+                  <ModalFlash message={flash} kind={flashKind} className="settings-modal-flash" />
+                ) : null}
                 {activeSettingsTab === "inference" ? (
                   <section
                     className="settings-section"

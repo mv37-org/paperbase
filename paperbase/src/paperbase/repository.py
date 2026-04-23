@@ -429,8 +429,11 @@ class ChatMessageORM(Base):
     role: Mapped[str] = mapped_column(String(32), index=True)
     content_markdown: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(32), default="completed")
+    kind: Mapped[str] = mapped_column(String(32), default="default")
     citations: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
+    archived_at: Mapped[Any | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    archived_by_message_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 def _paper_from_orm(row: PaperORM) -> PaperResponse:
@@ -605,6 +608,7 @@ def _chat_message_from_orm(row: ChatMessageORM) -> ChatMessageResponse:
         citations=[ChatCitation.model_validate(citation) for citation in (row.citations or [])],
         created_at=row.created_at,
         status=row.status,
+        kind=row.kind or "default",
     )
 
 
@@ -908,6 +912,18 @@ class SqlAlchemyPaperRepository(PaperRepository):
             )
             connection.execute(
                 text("ALTER TABLE IF EXISTS chat_threads ADD COLUMN IF NOT EXISTS project_instructions TEXT DEFAULT ''")
+            )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS chat_messages ADD COLUMN IF NOT EXISTS kind VARCHAR(32) DEFAULT 'default'")
+            )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS chat_messages ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ")
+            )
+            connection.execute(
+                text(
+                    "ALTER TABLE IF EXISTS chat_messages "
+                    "ADD COLUMN IF NOT EXISTS archived_by_message_id VARCHAR(64)"
+                )
             )
             connection.execute(
                 text(
@@ -2423,7 +2439,10 @@ class SqlAlchemyPaperRepository(PaperRepository):
             for thread in threads:
                 last_message = session.scalar(
                     select(ChatMessageORM)
-                    .where(ChatMessageORM.thread_id == thread.thread_id)
+                    .where(
+                        ChatMessageORM.thread_id == thread.thread_id,
+                        ChatMessageORM.archived_at.is_(None),
+                    )
                     .order_by(ChatMessageORM.created_at.desc())
                     .limit(1)
                 )
@@ -2460,7 +2479,10 @@ class SqlAlchemyPaperRepository(PaperRepository):
             for thread in thread_rows:
                 last_message = session.scalar(
                     select(ChatMessageORM)
-                    .where(ChatMessageORM.thread_id == thread.thread_id)
+                    .where(
+                        ChatMessageORM.thread_id == thread.thread_id,
+                        ChatMessageORM.archived_at.is_(None),
+                    )
                     .order_by(ChatMessageORM.created_at.desc())
                     .limit(1)
                 )
@@ -2704,7 +2726,10 @@ class SqlAlchemyPaperRepository(PaperRepository):
             for thread in threads:
                 last_message = session.scalar(
                     select(ChatMessageORM)
-                    .where(ChatMessageORM.thread_id == thread.thread_id)
+                    .where(
+                        ChatMessageORM.thread_id == thread.thread_id,
+                        ChatMessageORM.archived_at.is_(None),
+                    )
                     .order_by(ChatMessageORM.created_at.desc())
                     .limit(1)
                 )
@@ -2721,7 +2746,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 return None
             messages = session.scalars(
                 select(ChatMessageORM)
-                .where(ChatMessageORM.thread_id == thread_id)
+                .where(ChatMessageORM.thread_id == thread_id, ChatMessageORM.archived_at.is_(None))
                 .order_by(ChatMessageORM.created_at.asc())
             ).all()
         return ChatThreadResponse(
@@ -2743,6 +2768,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
         content_markdown: str,
         citations: list[dict[str, Any]] | None = None,
         status: str = "completed",
+        kind: str = "default",
     ) -> ChatMessageResponse:
         row = ChatMessageORM(
             message_id=new_id("msg"),
@@ -2751,6 +2777,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
             content_markdown=content_markdown,
             citations=citations or [],
             status=status,
+            kind=kind,
         )
         with self._session() as session:
             session.add(row)
@@ -2769,6 +2796,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
         content_markdown: str | None = None,
         citations: list[dict[str, Any]] | None = None,
         status: str | None = None,
+        kind: str | None = None,
     ) -> ChatMessageResponse | None:
         with self._session() as session:
             row = session.get(ChatMessageORM, message_id)
@@ -2780,6 +2808,8 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 row.citations = citations
             if status is not None:
                 row.status = status
+            if kind is not None:
+                row.kind = kind
             thread = session.get(ChatThreadORM, row.thread_id)
             if thread:
                 thread.updated_at = utcnow()
@@ -2787,6 +2817,35 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 if project is not None:
                     project.updated_at = thread.updated_at
         return _chat_message_from_orm(row)
+
+    def archive_chat_messages(
+        self,
+        *,
+        thread_id: str,
+        message_ids: list[str],
+        archived_by_message_id: str,
+    ) -> int:
+        if not message_ids:
+            return 0
+        archived_at = utcnow()
+        with self._session() as session:
+            rows = session.scalars(
+                select(ChatMessageORM).where(
+                    ChatMessageORM.thread_id == thread_id,
+                    ChatMessageORM.message_id.in_(message_ids),
+                    ChatMessageORM.archived_at.is_(None),
+                )
+            ).all()
+            for row in rows:
+                row.archived_at = archived_at
+                row.archived_by_message_id = archived_by_message_id
+            thread = session.get(ChatThreadORM, thread_id)
+            if thread:
+                thread.updated_at = archived_at
+                project = session.get(ProjectORM, thread.project_id) if thread.project_id else None
+                if project is not None:
+                    project.updated_at = archived_at
+        return len(rows)
 
     def delete_chat_thread(self, *, user_id: str, thread_id: str) -> bool:
         with self._session() as session:
@@ -4165,6 +4224,7 @@ class MemoryPaperRepository(PaperRepository):
         content_markdown: str,
         citations: list[dict[str, Any]] | None = None,
         status: str = "completed",
+        kind: str = "default",
     ) -> ChatMessageResponse:
         message = ChatMessageResponse(
             message_id=new_id("msg"),
@@ -4173,6 +4233,7 @@ class MemoryPaperRepository(PaperRepository):
             citations=[ChatCitation.model_validate(citation) for citation in (citations or [])],
             created_at=utcnow(),
             status=status,
+            kind=kind,
         )
         thread = self.chat_threads[thread_id]
         updated_at = utcnow()
@@ -4190,6 +4251,7 @@ class MemoryPaperRepository(PaperRepository):
         content_markdown: str | None = None,
         citations: list[dict[str, Any]] | None = None,
         status: str | None = None,
+        kind: str | None = None,
     ) -> ChatMessageResponse | None:
         for thread_id, thread in self.chat_threads.items():
             for index, message in enumerate(thread.messages):
@@ -4202,6 +4264,7 @@ class MemoryPaperRepository(PaperRepository):
                         if citations is None
                         else [ChatCitation.model_validate(citation) for citation in citations],
                         "status": message.status if status is None else status,
+                        "kind": message.kind if kind is None else kind,
                     }
                 )
                 messages = list(thread.messages)
@@ -4215,6 +4278,29 @@ class MemoryPaperRepository(PaperRepository):
                     self.projects[thread.project_id] = project.model_copy(update={"updated_at": updated_at})
                 return updated_message
         return None
+
+    def archive_chat_messages(
+        self,
+        *,
+        thread_id: str,
+        message_ids: list[str],
+        archived_by_message_id: str,
+    ) -> int:
+        del archived_by_message_id
+        thread = self.chat_threads.get(thread_id)
+        if thread is None or not message_ids:
+            return 0
+        archived_ids = set(message_ids)
+        messages = [message for message in thread.messages if message.message_id not in archived_ids]
+        archived_count = len(thread.messages) - len(messages)
+        if archived_count == 0:
+            return 0
+        updated_at = utcnow()
+        self.chat_threads[thread_id] = thread.model_copy(update={"messages": messages, "updated_at": updated_at})
+        project = self.projects.get(thread.project_id)
+        if project is not None:
+            self.projects[thread.project_id] = project.model_copy(update={"updated_at": updated_at})
+        return archived_count
 
     def delete_chat_thread(self, *, user_id: str, thread_id: str) -> bool:
         if self.chat_thread_users.get(thread_id) != user_id:
