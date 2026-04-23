@@ -291,8 +291,60 @@ def _workflow_database_checks(settings: Settings, *, mode: DoctorMode) -> Iterab
                     "ok",
                     "No shared seed data is required; pytest creates its own fixtures",
                 )
+            yield from _enrichment_health_check(connection)
     except psycopg.Error as exc:
         yield CheckResult("database schema", "fail", f"Could not inspect the target database: {exc}")
+
+
+def _enrichment_health_check(connection: psycopg.Connection) -> Iterable[CheckResult]:
+    """Report S2 enrichment coverage so operators notice rate-limit fallout
+    before citation-boosted ranking silently degrades at scale. A warning
+    rather than a failure: the corpus is still usable, just missing signal.
+
+    "Enriched" means the paper has a populated S2 id OR a non-zero citation
+    count. Using citation_count > 0 alone would misclassify freshly-published
+    papers that were successfully looked up but legitimately have no
+    citations yet, and warn on a fully-enriched recent corpus.
+    """
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                  COUNT(*) FILTER (WHERE index_status = 'indexed'),
+                  COUNT(*) FILTER (
+                    WHERE index_status = 'indexed'
+                    AND (
+                      (semantic_scholar_id IS NOT NULL AND semantic_scholar_id <> '')
+                      OR citation_count > 0
+                    )
+                  )
+                FROM papers
+                """
+            )
+            total, enriched = cursor.fetchone() or (0, 0)
+    except psycopg.Error as exc:
+        yield CheckResult("S2 enrichment", "warn", f"Could not inspect enrichment state: {exc}")
+        return
+    if not total:
+        yield CheckResult("S2 enrichment", "ok", "No indexed papers yet")
+        return
+    missing = total - enriched
+    coverage = enriched / total * 100
+    if missing == 0:
+        yield CheckResult("S2 enrichment", "ok", f"{enriched}/{total} papers enriched (100%)")
+    elif coverage >= 90:
+        yield CheckResult(
+            "S2 enrichment",
+            "ok",
+            f"{enriched}/{total} papers enriched ({coverage:.1f}%); `paperbase-dev enrich-missing` backfills the rest",
+        )
+    else:
+        yield CheckResult(
+            "S2 enrichment",
+            "warn",
+            f"Only {enriched}/{total} papers enriched ({coverage:.1f}%); run `paperbase-dev enrich-missing`",
+        )
 
 
 def _check_results(settings: Settings, *, mode: DoctorMode) -> Iterable[CheckResult]:
@@ -549,6 +601,36 @@ def jobs_retry(*, job_id: str) -> int:
     return 0
 
 
+def enrich_missing(*, limit: int, min_age_seconds: int, batch_size: int) -> int:
+    """Synchronously run the enrich_missing_metadata pass in the current
+    process. Intended for manual backfill from the CLI; routine operation
+    should go through ``enqueue_enrich_missing_metadata_job`` so the worker
+    does it asynchronously."""
+    # Imported lazily so `paperbase-dev --help` does not pull in the whole
+    # service graph (which loads heavy embedding/reranker model clients).
+    from .service import get_service
+
+    service = get_service()
+    stats_before = service.repository.enrichment_stats()
+    result = service.enrich_missing_metadata(
+        limit=limit,
+        min_age_seconds=min_age_seconds,
+        batch_size=batch_size,
+    )
+    stats_after = service.repository.enrichment_stats()
+
+    total = stats_after.get("total_indexed", 0)
+    before_cov = (stats_before.get("enriched", 0) / total * 100) if total else 0.0
+    after_cov = (stats_after.get("enriched", 0) / total * 100) if total else 0.0
+
+    print(f"Scanned:        {result['papers_scanned']}")
+    print(f"Updated:        {result['papers_updated']}")
+    print(f"Batches failed: {result['batches_failed']}")
+    print(f"Coverage:       {before_cov:.1f}% -> {after_cov:.1f}% "
+          f"({stats_after.get('enriched', 0)}/{total} papers enriched)")
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Local developer helpers for paperbase.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -619,6 +701,37 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Promote a dead job back to pending with attempts reset.",
     )
     retry_parser.add_argument("job_id", help="Job id (e.g. job_abc123).")
+
+    enrich_parser = subparsers.add_parser(
+        "enrich-missing",
+        help=(
+            "Backfill Semantic Scholar citation / TLDR data for any indexed paper "
+            "where inline enrichment failed (usually due to transient 429s). "
+            "Runs aggressively with exponential backoff; safe to re-run."
+        ),
+    )
+    enrich_parser.add_argument(
+        "--limit",
+        type=int,
+        default=50_000,
+        help="Maximum number of papers to enrich in this pass.",
+    )
+    enrich_parser.add_argument(
+        "--min-age-seconds",
+        type=int,
+        default=3600,
+        help=(
+            "Only enrich papers indexed more than this many seconds ago "
+            "(default 3600). Prevents racing with inline enrichment on "
+            "freshly-ingested papers."
+        ),
+    )
+    enrich_parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=20,
+        help="Semantic Scholar /paper/batch size (max 500 per S2 docs).",
+    )
     return parser
 
 
@@ -654,6 +767,12 @@ def main(argv: list[str] | None = None) -> int:
             return jobs_list_dead(limit=args.limit)
         if args.jobs_command == "retry":
             return jobs_retry(job_id=args.job_id)
+    if args.command == "enrich-missing":
+        return enrich_missing(
+            limit=args.limit,
+            min_age_seconds=args.min_age_seconds,
+            batch_size=args.batch_size,
+        )
 
     parser.error(f"Unsupported command: {args.command}")
     return 2

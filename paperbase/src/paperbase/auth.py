@@ -65,6 +65,13 @@ def _allowed_browser_origins(settings: Settings) -> set[str]:
     return {origin for origin in origins if origin}
 
 
+def _request_base_origin(request: Request) -> str | None:
+    parts = urlsplit(str(request.base_url))
+    if parts.scheme and parts.netloc:
+        return f"{parts.scheme}://{parts.netloc}"
+    return None
+
+
 def _request_origin(request: Request) -> str | None:
     origin = request.headers.get("origin")
     if origin:
@@ -108,7 +115,11 @@ def require_browser_write_user(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
 
     request_origin = _request_origin(request)
-    if request_origin and request_origin not in _allowed_browser_origins(settings):
+    allowed_origins = _allowed_browser_origins(settings)
+    request_base_origin = _request_base_origin(request)
+    if request_base_origin:
+        allowed_origins.add(request_base_origin.rstrip("/"))
+    if request_origin and request_origin not in allowed_origins:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cross-site browser requests are not allowed")
 
     csrf_header = request.headers.get("x-paperbase-csrf")

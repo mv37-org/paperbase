@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import timedelta
@@ -34,7 +34,7 @@ from .extractors import (
     table_index_payload,
     table_json_bytes,
 )
-from .llm import AnthropicChatModelClient, ChatModelClient
+from .llm import AnthropicChatModelClient, ChatModelClient, ChatModelUsage, response_usage
 from .models import (
     BrowserSessionResponse,
     BrowserUser,
@@ -738,11 +738,21 @@ def _extract_message_text(payload: dict[str, Any]) -> str:
     return "\n".join(part for part in parts if part).strip()
 
 
+def _anthropic_context_window_tokens(model_name: str) -> int:
+    normalized = model_name.strip().lower().replace(".", "-")
+    if any(token in normalized for token in ("opus-4-7", "opus-4-6", "sonnet-4-6")):
+        return 1_000_000
+    return 200_000
+
+
 _CHAT_TOOL_MAX_ROUNDS = 4
 _CHAT_TOOL_MAX_CALLS_PER_ROUND = 6
 _CHAT_TOOL_MAX_FILE_CHARS = 12_000
 _CHAT_TOOL_MAX_TABLE_ROWS = 40
 _CHAT_TOOL_MAX_FILE_LIST = 200
+_CHAT_COMPACTION_THRESHOLD_RATIO = 0.9
+_CHAT_COMPACTION_MAX_PER_TURN = 2
+_CHAT_COMPACTION_PLACEHOLDER = "Compacting conversation..."
 
 
 @dataclass
@@ -790,6 +800,13 @@ class PreparedChatGeneration:
     api_key_value: str | None
     using_free_tier: bool
     api_key_state: str = "completed"
+
+
+@dataclass
+class ChatTurnContext:
+    messages: list[dict[str, Any]]
+    active_message_ids: list[str]
+    compactions_used: int = 0
 
 
 class PaperbaseService:
@@ -1532,7 +1549,9 @@ class PaperbaseService:
     def _chat_answer_system_prompt(self, *, thread: ChatThreadResponse, has_evidence_sources: bool) -> str:
         if not has_evidence_sources:
             return (
-                "You are Paperbase Chat. Respond naturally and helpfully in GitHub-flavored markdown. "
+                "You are Paperbase Chat. Respond naturally and helpfully in strict GitHub-flavored markdown. "
+                "Output must be valid markdown that a standard parser can render directly, not markdown-like plain text. "
+                "Use markdown syntax exactly: write emphasis as **text** with no extra inner spaces, keep headings/lists/tables on their own lines, and preserve blank lines where block markdown needs them. "
                 "If no evidence sources were gathered for this turn, do not cite sources, do not invent source ids like [S1], "
                 "and do not bring up papers or research context unless the user explicitly asks for them. "
                 "Treat any citations that appeared in earlier turns as historical context only, not as active sources for this reply. "
@@ -1541,7 +1560,9 @@ class PaperbaseService:
             )
         return (
             "You are Paperbase Chat. Answer using the gathered Paperbase tool results when possible. "
-            "Respond in GitHub-flavored markdown. Use headings, bullets, tables, fenced code blocks, and normal markdown links when they clarify the answer. "
+            "Respond in strict GitHub-flavored markdown. Output must be valid markdown that a standard parser can render directly, not markdown-like plain text. "
+            "Use headings, bullets, tables, fenced code blocks, and normal markdown links when they clarify the answer, but only with correct markdown syntax. "
+            "Do not put spaces just inside emphasis delimiters, and do not run prose into list or table blocks. "
             "When you mention specific research papers, include markdown links to the paper pages or PDFs from the gathered tool results whenever those URLs are available. "
             "If the user asked for related reading, recommendations, or references, prefer a compact bullet list with paper title plus link before any longer discussion. "
             "Only cite source ids inline like [S1] when those ids came from evidence-bearing tool results such as section hits, file reads, figure captions, tables, or uploaded-document excerpts. "
@@ -1549,12 +1570,219 @@ class PaperbaseService:
             + self._project_prompt_suffix(thread)
         )
 
-    def _chat_messages(self, prepared: PreparedChatGeneration) -> list[dict[str, Any]]:
-        messages: list[dict[str, Any]] = []
-        for message in prepared.thread.messages[-6:]:
-            messages.append({"role": message.role, "content": message.content_markdown})
-        messages.append({"role": "user", "content": prepared.user_message.content_markdown})
-        return messages
+    def _chat_message_for_model(self, message: ChatMessageResponse) -> dict[str, Any]:
+        if message.kind == "compaction":
+            return {
+                "role": "user",
+                "content": f"Conversation compaction checkpoint:\n\n{message.content_markdown}",
+            }
+        return {"role": message.role, "content": message.content_markdown}
+
+    def _chat_turn_context(self, prepared: PreparedChatGeneration) -> ChatTurnContext:
+        active_messages = [*prepared.thread.messages, prepared.user_message]
+        return ChatTurnContext(
+            messages=[self._chat_message_for_model(message) for message in active_messages],
+            active_message_ids=[message.message_id for message in active_messages],
+        )
+
+    def _chat_context_token_count(
+        self,
+        *,
+        api_key: str,
+        messages: list[dict[str, Any]],
+        system_prompt: str,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: dict[str, Any] | None = None,
+    ) -> int | None:
+        count_message_tokens = getattr(self.chat_model, "count_message_tokens", None)
+        if count_message_tokens is None:
+            return None
+        return count_message_tokens(
+            api_key=api_key,
+            messages=messages,
+            system_prompt=system_prompt,
+            tools=tools,
+            tool_choice=tool_choice,
+        )
+
+    def _chat_context_needs_compaction(self, *, token_count: int | None) -> bool:
+        if token_count is None:
+            return False
+        context_window = _anthropic_context_window_tokens(self.settings.anthropic_model)
+        return token_count >= int(context_window * _CHAT_COMPACTION_THRESHOLD_RATIO)
+
+    def _render_compaction_source(self, messages: list[dict[str, Any]], citations: list[ChatCitation]) -> str:
+        parts: list[str] = []
+        for index, message in enumerate(messages, start=1):
+            role = str(message.get("role") or "unknown")
+            content = message.get("content")
+            if isinstance(content, str):
+                rendered = content
+            else:
+                rendered = json.dumps(content, ensure_ascii=False, indent=2)
+            parts.append(f"## Message {index}: {role}\n\n{rendered.strip()}")
+        if citations:
+            citation_lines = [
+                f"- [{citation.source_id}] {citation.title} ({citation.source_kind}, {citation.path}): {citation.excerpt}"
+                for citation in citations
+            ]
+            parts.append("## Active Source IDs\n\n" + "\n".join(citation_lines))
+        return "\n\n".join(parts).strip()
+
+    def _chat_compaction_prompt(self, messages: list[dict[str, Any]], citations: list[ChatCitation]) -> str:
+        source = self._render_compaction_source(messages, citations)
+        return (
+            "Compact the conversation transcript below into a strict GitHub-flavored markdown handoff summary. "
+            "Do not answer the user's request. Preserve the user goals, completed work, current turn state, "
+            "tool findings and results, source ids that still matter, decisions, constraints, and next steps. "
+            "The summary will replace the raw transcript as future context, so include enough detail to continue "
+            "the conversation faithfully. Do not mention this instruction.\n\n"
+            f"{source}"
+        )
+
+    def _create_compaction_placeholder(self, *, thread_id: str) -> ChatMessageResponse:
+        return self.repository.add_chat_message(  # type: ignore[attr-defined]
+            thread_id=thread_id,
+            role="user",
+            content_markdown=_CHAT_COMPACTION_PLACEHOLDER,
+            status="streaming",
+            kind="compaction",
+        )
+
+    def _finish_chat_compaction(
+        self,
+        *,
+        prepared: PreparedChatGeneration,
+        context: ChatTurnContext,
+        citation_registry: ChatCitationRegistry,
+        placeholder: ChatMessageResponse,
+    ) -> tuple[ChatTurnContext, ChatMessageResponse, ChatThreadResponse]:
+        try:
+            payload = self.chat_model.create_message(
+                api_key=prepared.api_key_value or "",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": self._chat_compaction_prompt(context.messages, citation_registry.citations),
+                    }
+                ],
+                system_prompt="",
+            )
+            summary = _extract_message_text(payload).strip()
+            if not summary:
+                summary = "Conversation compacted, but the compaction model returned an empty summary."
+            compaction_message = self.repository.update_chat_message(  # type: ignore[attr-defined]
+                placeholder.message_id,
+                content_markdown=summary,
+                citations=[citation.model_dump() for citation in citation_registry.citations],
+                status="completed",
+                kind="compaction",
+            )
+            if compaction_message is None:
+                raise RuntimeError("Compaction checkpoint vanished while updating")
+            self.repository.archive_chat_messages(  # type: ignore[attr-defined]
+                thread_id=prepared.thread.thread_id,
+                message_ids=context.active_message_ids,
+                archived_by_message_id=compaction_message.message_id,
+            )
+            refreshed = self.get_chat_thread(prepared.resolved_user, prepared.thread.thread_id)
+            return (
+                ChatTurnContext(
+                    messages=[self._chat_message_for_model(compaction_message)],
+                    active_message_ids=[compaction_message.message_id],
+                    compactions_used=context.compactions_used + 1,
+                ),
+                compaction_message,
+                refreshed,
+            )
+        except Exception:
+            self.repository.update_chat_message(  # type: ignore[attr-defined]
+                placeholder.message_id,
+                content_markdown="Conversation compaction failed.",
+                status="failed",
+                kind="compaction",
+            )
+            raise
+
+    def _ensure_chat_context_budget(
+        self,
+        *,
+        prepared: PreparedChatGeneration,
+        context: ChatTurnContext,
+        system_prompt: str,
+        citation_registry: ChatCitationRegistry,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: dict[str, Any] | None = None,
+    ) -> tuple[ChatTurnContext, list[tuple[str, dict[str, Any]]]]:
+        events: list[tuple[str, dict[str, Any]]] = []
+        while True:
+            token_count = self._chat_context_token_count(
+                api_key=prepared.api_key_value or "",
+                messages=context.messages,
+                system_prompt=system_prompt,
+                tools=tools,
+                tool_choice=tool_choice,
+            )
+            if not self._chat_context_needs_compaction(token_count=token_count):
+                return context, events
+            if context.compactions_used >= _CHAT_COMPACTION_MAX_PER_TURN:
+                raise RuntimeError("Conversation context is still too large after compaction")
+            placeholder = self._create_compaction_placeholder(thread_id=prepared.thread.thread_id)
+            events.append(("compaction_start", {"compaction_message": placeholder.model_dump(mode="json")}))
+            next_context, compaction_message, refreshed = self._finish_chat_compaction(
+                prepared=prepared,
+                context=context,
+                citation_registry=citation_registry,
+                placeholder=placeholder,
+            )
+            events.append(
+                (
+                    "compaction_done",
+                    {
+                        "compaction_message": compaction_message.model_dump(mode="json"),
+                        "messages": [message.model_dump(mode="json") for message in refreshed.messages],
+                    },
+                )
+            )
+            context = next_context
+
+    def _ensure_chat_context_budget_stream(
+        self,
+        *,
+        prepared: PreparedChatGeneration,
+        context: ChatTurnContext,
+        system_prompt: str,
+        citation_registry: ChatCitationRegistry,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: dict[str, Any] | None = None,
+    ) -> Generator[tuple[str, dict[str, Any]], None, ChatTurnContext]:
+        while True:
+            token_count = self._chat_context_token_count(
+                api_key=prepared.api_key_value or "",
+                messages=context.messages,
+                system_prompt=system_prompt,
+                tools=tools,
+                tool_choice=tool_choice,
+            )
+            if not self._chat_context_needs_compaction(token_count=token_count):
+                return context
+            if context.compactions_used >= _CHAT_COMPACTION_MAX_PER_TURN:
+                raise RuntimeError("Conversation context is still too large after compaction")
+            placeholder = self._create_compaction_placeholder(thread_id=prepared.thread.thread_id)
+            yield ("compaction_start", {"compaction_message": placeholder.model_dump(mode="json")})
+            context, compaction_message, refreshed = self._finish_chat_compaction(
+                prepared=prepared,
+                context=context,
+                citation_registry=citation_registry,
+                placeholder=placeholder,
+            )
+            yield (
+                "compaction_done",
+                {
+                    "compaction_message": compaction_message.model_dump(mode="json"),
+                    "messages": [message.model_dump(mode="json") for message in refreshed.messages],
+                },
+            )
 
     def _chat_tool_definitions(self, request: SendChatMessageRequest) -> list[dict[str, Any]]:
         tools: list[dict[str, Any]] = []
@@ -1767,6 +1995,8 @@ class PaperbaseService:
     ) -> dict[str, Any]:
         if tool_name == "paperbase_search":
             query = str(tool_input.get("query") or "").strip()
+            # Chat-tool searches are synthetic LLM reformulations, not real user
+            # queries, so they must never pollute the search_logs benchmark dataset.
             request = SearchRequest(
                 query=query,
                 limit=_tool_int(tool_input.get("limit"), default=8, maximum=20),
@@ -1774,6 +2004,7 @@ class PaperbaseService:
                 year=(str(tool_input.get("year") or "").strip() or None),
                 include_live_sources=_tool_bool(tool_input.get("include_live_sources"), default=False),
                 rerank=_tool_bool(tool_input.get("rerank"), default=False),
+                log_query=False,
             )
             response = self.search(request)
             papers = []
@@ -2149,20 +2380,29 @@ class PaperbaseService:
         prepared: PreparedChatGeneration,
         user: BrowserUser,
         request: SendChatMessageRequest,
-    ) -> tuple[list[dict[str, Any]], ChatCitationRegistry]:
-        messages = self._chat_messages(prepared)
+    ) -> tuple[ChatTurnContext, ChatCitationRegistry]:
+        context = self._chat_turn_context(prepared)
         citation_registry = ChatCitationRegistry()
         tools = self._chat_tool_definitions(request)
         if not tools:
-            return messages, citation_registry
+            return context, citation_registry
 
+        tool_system_prompt = self._chat_tool_system_prompt(prepared.thread)
         force_first_tool = _should_force_chat_tool_use(prepared.user_message.content_markdown, request)
         for round_index in range(_CHAT_TOOL_MAX_ROUNDS):
             tool_choice = {"type": "any"} if round_index == 0 and force_first_tool else {"type": "auto"}
+            context, _events = self._ensure_chat_context_budget(
+                prepared=prepared,
+                context=context,
+                system_prompt=tool_system_prompt,
+                citation_registry=citation_registry,
+                tools=tools,
+                tool_choice=tool_choice,
+            )
             response = self.chat_model.create_message(
                 api_key=prepared.api_key_value or "",
-                messages=messages,
-                system_prompt=self._chat_tool_system_prompt(prepared.thread),
+                messages=context.messages,
+                system_prompt=tool_system_prompt,
                 tools=tools,
                 tool_choice=tool_choice,
             )
@@ -2170,8 +2410,8 @@ class PaperbaseService:
             tool_uses = [block for block in assistant_content if block.get("type") == "tool_use"]
             if not tool_uses:
                 break
-            messages.append({"role": "assistant", "content": assistant_content})
-            messages.append(
+            context.messages.append({"role": "assistant", "content": assistant_content})
+            context.messages.append(
                 {
                     "role": "user",
                     "content": self._tool_result_blocks(
@@ -2181,7 +2421,7 @@ class PaperbaseService:
                     ),
                 }
             )
-        return messages, citation_registry
+        return context, citation_registry
 
     def _run_chat_tool_rounds_stream(
         self,
@@ -2189,20 +2429,29 @@ class PaperbaseService:
         prepared: PreparedChatGeneration,
         user: BrowserUser,
         request: SendChatMessageRequest,
-    ) -> Iterator[tuple[str, dict[str, Any]]]:
-        messages = self._chat_messages(prepared)
+    ) -> Generator[tuple[str, dict[str, Any]], None, tuple[ChatTurnContext, ChatCitationRegistry]]:
+        context = self._chat_turn_context(prepared)
         citation_registry = ChatCitationRegistry()
         tools = self._chat_tool_definitions(request)
         if not tools:
-            return messages, citation_registry
+            return context, citation_registry
 
+        tool_system_prompt = self._chat_tool_system_prompt(prepared.thread)
         force_first_tool = _should_force_chat_tool_use(prepared.user_message.content_markdown, request)
         for round_index in range(_CHAT_TOOL_MAX_ROUNDS):
             tool_choice = {"type": "any"} if round_index == 0 and force_first_tool else {"type": "auto"}
+            context = yield from self._ensure_chat_context_budget_stream(
+                prepared=prepared,
+                context=context,
+                system_prompt=tool_system_prompt,
+                citation_registry=citation_registry,
+                tools=tools,
+                tool_choice=tool_choice,
+            )
             response = self.chat_model.create_message(
                 api_key=prepared.api_key_value or "",
-                messages=messages,
-                system_prompt=self._chat_tool_system_prompt(prepared.thread),
+                messages=context.messages,
+                system_prompt=tool_system_prompt,
                 tools=tools,
                 tool_choice=tool_choice,
             )
@@ -2210,7 +2459,10 @@ class PaperbaseService:
             tool_uses = [block for block in assistant_content if block.get("type") == "tool_use"]
             if not tool_uses:
                 break
-            messages.append({"role": "assistant", "content": assistant_content})
+            usage = response_usage(response)
+            if usage is not None:
+                yield ("usage", self._chat_usage_payload(usage))
+            context.messages.append({"role": "assistant", "content": assistant_content})
             blocks: list[dict[str, Any]] = []
             for index, tool_use in enumerate(tool_uses):
                 tool_use_id = str(tool_use.get("id") or "").strip()
@@ -2251,8 +2503,8 @@ class PaperbaseService:
                 if is_error:
                     block["is_error"] = True
                 blocks.append(block)
-            messages.append({"role": "user", "content": blocks})
-        return messages, citation_registry
+            context.messages.append({"role": "user", "content": blocks})
+        return context, citation_registry
 
     def _api_key_required_response(
         self,
@@ -2271,6 +2523,23 @@ class PaperbaseService:
             state=state,
         )
 
+    def _chat_usage_payload(self, usage: ChatModelUsage) -> dict[str, Any]:
+        total_tokens = (
+            usage.input_tokens
+            + usage.output_tokens
+            + usage.cache_creation_input_tokens
+            + usage.cache_read_input_tokens
+        )
+        return {
+            "model": self.settings.anthropic_model,
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "cache_creation_input_tokens": usage.cache_creation_input_tokens,
+            "cache_read_input_tokens": usage.cache_read_input_tokens,
+            "total_tokens": total_tokens,
+            "context_window_tokens": _anthropic_context_window_tokens(self.settings.anthropic_model),
+        }
+
     def send_chat_message(
         self, user: BrowserUser, thread_id: str, request: SendChatMessageRequest
     ) -> SendChatMessageResponse:
@@ -2283,19 +2552,26 @@ class PaperbaseService:
                 state=prepared.api_key_state,
             )
 
-        conversation_messages, citation_registry = self._run_chat_tool_rounds(
+        conversation_context, citation_registry = self._run_chat_tool_rounds(
             prepared=prepared,
             user=user,
             request=request,
         )
         current_turn_citations = citation_registry.citations
+        answer_system_prompt = self._chat_answer_system_prompt(
+            thread=prepared.thread,
+            has_evidence_sources=bool(current_turn_citations),
+        )
+        conversation_context, _events = self._ensure_chat_context_budget(
+            prepared=prepared,
+            context=conversation_context,
+            system_prompt=answer_system_prompt,
+            citation_registry=citation_registry,
+        )
         answer_payload = self.chat_model.create_message(
             api_key=prepared.api_key_value,
-            messages=conversation_messages,
-            system_prompt=self._chat_answer_system_prompt(
-                thread=prepared.thread,
-                has_evidence_sources=bool(current_turn_citations),
-            ),
+            messages=conversation_context.messages,
+            system_prompt=answer_system_prompt,
         )
         answer = _sanitize_inline_citations(_extract_message_text(answer_payload), current_turn_citations)
         assistant_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
@@ -2344,10 +2620,20 @@ class PaperbaseService:
             try:
                 event_name, payload = next(tool_rounds)
             except StopIteration as stop:
-                conversation_messages, citation_registry = stop.value
+                conversation_context, citation_registry = stop.value
                 break
             yield (event_name, payload)
         current_turn_citations = citation_registry.citations
+        answer_system_prompt = self._chat_answer_system_prompt(
+            thread=prepared.thread,
+            has_evidence_sources=bool(current_turn_citations),
+        )
+        conversation_context = yield from self._ensure_chat_context_budget_stream(
+            prepared=prepared,
+            context=conversation_context,
+            system_prompt=answer_system_prompt,
+            citation_registry=citation_registry,
+        )
         assistant_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
             thread_id=thread_id,
             role="assistant",
@@ -2358,19 +2644,20 @@ class PaperbaseService:
         yield ("assistant_start", {"assistant_message": assistant_message.model_dump(mode="json")})
 
         chunks: list[str] = []
+        usage_payload: dict[str, Any] | None = None
         try:
-            for delta in self.chat_model.stream_message(
+            for stream_event in self.chat_model.stream_message(
                 api_key=prepared.api_key_value,
-                messages=conversation_messages,
-                system_prompt=self._chat_answer_system_prompt(
-                    thread=prepared.thread,
-                    has_evidence_sources=bool(current_turn_citations),
-                ),
+                messages=conversation_context.messages,
+                system_prompt=answer_system_prompt,
             ):
-                if not delta:
+                if stream_event.usage is not None:
+                    usage_payload = self._chat_usage_payload(stream_event.usage)
+                    yield ("usage", usage_payload)
+                if not stream_event.text:
                     continue
-                chunks.append(delta)
-                yield ("delta", {"message_id": assistant_message.message_id, "delta": delta})
+                chunks.append(stream_event.text)
+                yield ("delta", {"message_id": assistant_message.message_id, "delta": stream_event.text})
         except Exception as exc:
             failed_message = self.repository.update_chat_message(  # type: ignore[attr-defined]
                 assistant_message.message_id,
@@ -2414,6 +2701,7 @@ class PaperbaseService:
                 "remaining_free_responses": self._remaining_free_responses(resolved_user),
                 "has_anthropic_api_key": self.repository.get_anthropic_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
                 "state": "completed",
+                "usage": usage_payload,
             },
         )
 
@@ -2545,6 +2833,112 @@ class PaperbaseService:
             },
         )
         return {"papers_updated": papers_updated, "chunks_updated": chunks_updated}
+
+    def enqueue_enrich_missing_metadata_job(
+        self,
+        *,
+        limit: int = 50_000,
+        min_age_seconds: int = 3600,
+    ) -> JobResponse:
+        job = self.repository.create_job(
+            "enrich_missing_metadata",
+            {"limit": limit, "min_age_seconds": min_age_seconds},
+        )
+        logger.info(
+            "Created enrich_missing_metadata job",
+            extra={
+                "event": "jobs.enrich_missing_metadata.created",
+                "job_id": job.job_id,
+                "limit": limit,
+                "min_age_seconds": min_age_seconds,
+            },
+        )
+        return job
+
+    def enrich_missing_metadata(
+        self,
+        *,
+        limit: int,
+        min_age_seconds: int = 3600,
+        batch_size: int = 20,
+    ) -> dict[str, int]:
+        """Re-run Semantic Scholar enrichment for any paper that inline
+        enrichment left unfilled. Uses aggressive retry (default max_retries)
+        since this runs off the request path.
+
+        Returns a counts dict for observability: papers scanned, updated, and
+        batches that failed even after retries.
+        """
+        total_scanned = 0
+        total_updated = 0
+        total_batches_failed = 0
+        page_size = max(batch_size, min(limit, 256))
+        remaining = limit
+        after: PaperResponse | None = None
+
+        while remaining > 0:
+            batch = self.repository.list_papers_needing_enrichment(
+                limit=min(page_size, remaining),
+                min_age_seconds=min_age_seconds,
+                after=after,
+            )
+            if not batch:
+                break
+            total_scanned += len(batch)
+            # Make mutable PaperMetadata stand-ins so enrich_with_semantic_scholar
+            # can write back citation / tldr / s2_id in place.
+            metas = [
+                PaperMetadata(
+                    arxiv_id=paper.arxiv_id,
+                    title=paper.title or "",
+                    authors=paper.authors or "",
+                    abstract=paper.abstract or "",
+                    categories=paper.categories or "",
+                    primary_category=paper.primary_category or "",
+                    published=paper.published or "",
+                    updated=paper.updated or "",
+                    pdf_url=paper.pdf_url or "",
+                    html_url=paper.html_url or "",
+                )
+                for paper in batch
+            ]
+            outcome = sources.enrich_with_semantic_scholar(metas, batch_size=batch_size)
+            total_batches_failed += outcome.batches_failed
+            for paper, meta in zip(batch, metas):
+                if not (meta.semantic_scholar_id or (meta.citation_count and meta.citation_count > 0)):
+                    continue
+                # Re-use the shallow upsert path to persist enrichment —
+                # it writes citation_count / influential_citation_count /
+                # semantic_scholar_id / tldr without touching index artifacts.
+                self.repository.upsert_paper_shallow(meta)
+                total_updated += 1
+
+            after = batch[-1]
+            remaining -= len(batch)
+            logger.info(
+                "enrich_missing_metadata progress",
+                extra={
+                    "event": "enrich.progress",
+                    "scanned": total_scanned,
+                    "updated": total_updated,
+                    "batches_failed": total_batches_failed,
+                },
+            )
+
+        logger.info(
+            "Completed enrich_missing_metadata",
+            extra={
+                "event": "enrich.completed",
+                "scanned": total_scanned,
+                "updated": total_updated,
+                "batches_failed": total_batches_failed,
+            },
+        )
+        return {
+            "papers_scanned": total_scanned,
+            "papers_updated": total_updated,
+            "batches_failed": total_batches_failed,
+        }
 
     def enqueue_summarize_top_cited_job(self, *, limit: int = 500_000) -> JobResponse:
         job = self.repository.create_job("summarize_top_cited", {"limit": limit})
@@ -2720,6 +3114,11 @@ class PaperbaseService:
                         job.payload.get("rewrite_existing", job.job_type == "reindex_embeddings")
                     ),
                 )
+            elif job.job_type == "enrich_missing_metadata":
+                self.enrich_missing_metadata(
+                    limit=int(job.payload.get("limit", 50_000)),
+                    min_age_seconds=int(job.payload.get("min_age_seconds", 3600)),
+                )
             else:
                 raise ValueError(f"Unsupported job type: {job.job_type}")
             self.repository.mark_job_completed(job.job_id)
@@ -2835,10 +3234,12 @@ class PaperbaseService:
         if metadata is None:
             # Worker context: a missing arxiv id will never resolve, so this
             # must dead-letter rather than spin through the retry ladder.
-            # API-level callers still see a 404 because HTTPException is
-            # translated by FastAPI before the worker dispatcher sees it.
             raise PermanentError(f"Paper {arxiv_id} not found on arXiv")
-        sources.enrich_with_semantic_scholar([metadata])
+        # Inline enrichment: single-shot (max_retries=0). A 429 or transient
+        # failure here leaves citation_count=0 rather than blocking ingestion;
+        # the enrich_missing_metadata backfill job will pick this paper up
+        # later with aggressive retry.
+        sources.enrich_with_semantic_scholar([metadata], max_retries=0)
         metadata.index_status = "indexing"
         stored = self.repository.upsert_paper(metadata, search_document=metadata.abstract)
         extraction = index_paper_artifacts(metadata)
@@ -3004,7 +3405,9 @@ class PaperbaseService:
         )
         return stored
 
-    def search(self, request: SearchRequest) -> SearchResponse:
+    def search(self, request: SearchRequest, *, user_id: str | None = None) -> SearchResponse:
+        import time as _time
+        _search_started_at = _time.monotonic()
         k = self.settings.rrf_k
         pool_size = max(request.limit * 4, 50)
         query_embedding = self.embeddings.encode(request.query)
@@ -3125,12 +3528,43 @@ class PaperbaseService:
             papers=ordered,
             ttl_days=self.settings.result_ttl_days,
         )
+
+        query_id: str | None = None
+        if request.log_query:
+            query_id = new_id("qry")
+            latency_ms = int((_time.monotonic() - _search_started_at) * 1000)
+            try:
+                self.repository.record_search_log(
+                    query_id=query_id,
+                    user_id=user_id,
+                    query_text=request.query,
+                    request_rerank=bool(request.rerank),
+                    top_paper_ids=[p.paper_id for p in ordered],
+                    result_set_id=result_set.result_set_id,
+                    latency_ms=latency_ms,
+                )
+            except Exception as exc:
+                # Never fail the search on a logging failure — ranking quality
+                # matters more than observability in the hot path. Warn so the
+                # operator notices a DB-side regression.
+                logger.warning(
+                    "search_logs write failed",
+                    extra={"event": "search_log.write_failed", "error": str(exc)},
+                )
+                query_id = None
+
         return SearchResponse(
             result_set_id=result_set.result_set_id,
             query=request.query,
             papers=ordered,
             expires_at=result_set.expires_at,
+            query_id=query_id,
         )
+
+    def record_search_click(self, query_id: str, paper_id: str) -> bool:
+        """Attach a clicked_paper_id to a previously-logged search event.
+        Returns False when the query_id is unknown (caller translates to 404)."""
+        return self.repository.record_search_click(query_id, paper_id)
 
     def get_results(self, result_set_id: str) -> ResultSetResponse:
         result_set = self.repository.get_result_set(result_set_id)

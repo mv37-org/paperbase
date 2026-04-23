@@ -18,6 +18,7 @@ from paperbase.browser_code import (
 )
 from paperbase.config import Settings, get_settings
 from paperbase.extractors import ExtractionOutput, FigureArtifact, RawArtifact, SectionArtifact, TableArtifact
+from paperbase.llm import ChatModelStreamEvent, ChatModelUsage
 from paperbase.models import (
     ChatCitation,
     CreateChatThreadRequest,
@@ -54,6 +55,26 @@ class FakeChatModel:
         self.stream_calls: list[dict[str, object]] = []
         self.stream_chunks: list[str] = ["Grounded ", "answer with citations [S1]"]
         self.fail_stream_after_chunks: int | None = None
+        self.tool_round_usage = ChatModelUsage(input_tokens=84512, output_tokens=98)
+        self.initial_stream_usage = ChatModelUsage(input_tokens=11234, output_tokens=1)
+        self.final_stream_usage = ChatModelUsage(input_tokens=11234, output_tokens=27)
+        self.count_calls: list[dict[str, object]] = []
+        self.token_counts: list[int | None] = []
+        self.compaction_summary = "## Compacted Conversation\n\nContinue from this compacted context."
+
+    def count_message_tokens(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+        self.count_calls.append(
+            {
+                "api_key": api_key,
+                "messages": messages,
+                "system_prompt": system_prompt,
+                "tools": tools,
+                "tool_choice": tool_choice,
+            }
+        )
+        if self.token_counts:
+            return self.token_counts.pop(0)
+        return 1
 
     def create_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
         self.create_calls.append(
@@ -65,6 +86,11 @@ class FakeChatModel:
                 "tool_choice": tool_choice,
             }
         )
+        if system_prompt == "" and messages and "Compact the conversation transcript" in str(messages[-1]):
+            return {
+                "content": [{"type": "text", "text": self.compaction_summary}],
+                "stop_reason": "end_turn",
+            }
         if tools:
             tool_names = [tool.get("name") for tool in tools if isinstance(tool, dict)]
             has_tool_results = any(
@@ -110,6 +136,12 @@ class FakeChatModel:
                             "input": {"query": query, "limit": 3},
                         }
                     ],
+                    "usage": {
+                        "input_tokens": self.tool_round_usage.input_tokens,
+                        "output_tokens": self.tool_round_usage.output_tokens,
+                        "cache_creation_input_tokens": self.tool_round_usage.cache_creation_input_tokens,
+                        "cache_read_input_tokens": self.tool_round_usage.cache_read_input_tokens,
+                    },
                     "stop_reason": "tool_use",
                 }
         return {
@@ -132,10 +164,12 @@ class FakeChatModel:
                 "tool_choice": tool_choice,
             }
         )
+        yield ChatModelStreamEvent(usage=self.initial_stream_usage)
         for index, chunk in enumerate(self.stream_chunks):
             if self.fail_stream_after_chunks is not None and index >= self.fail_stream_after_chunks:
                 raise RuntimeError("stream blew up")
-            yield chunk
+            yield ChatModelStreamEvent(text=chunk)
+        yield ChatModelStreamEvent(usage=self.final_stream_usage)
 
 
 class FakeGitHubRepoManager:
@@ -291,7 +325,7 @@ def _full_text_extraction(*, text: str) -> ExtractionOutput:
 
 def test_index_writes_manifest_and_artifacts(monkeypatch, service: PaperbaseService):
     paper = _sample_paper("2401.12345", title="Transformer Paper", abstract="Attention and transformers.")
-    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
     monkeypatch.setattr(
         "paperbase.service.index_paper_artifacts", lambda paper: _rich_extraction(text="Attention layers")
     )
@@ -322,7 +356,7 @@ def test_index_writes_manifest_and_artifacts(monkeypatch, service: PaperbaseServ
 
 def test_reindex_replaces_stale_artifacts(monkeypatch, service: PaperbaseService):
     paper = _sample_paper("2401.33333", title="Transformer Paper", abstract="Attention and transformers.")
-    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
 
     monkeypatch.setattr(
         "paperbase.service.index_paper_artifacts", lambda paper: _full_text_extraction(text="Old extraction")
@@ -341,7 +375,7 @@ def test_reindex_replaces_stale_artifacts(monkeypatch, service: PaperbaseService
 
 
 def test_search_and_grep_return_result_handles(monkeypatch, service: PaperbaseService):
-    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
     monkeypatch.setattr(
         "paperbase.service.index_paper_artifacts",
         lambda paper: _rich_extraction(
@@ -378,7 +412,7 @@ def test_search_and_grep_return_result_handles(monkeypatch, service: PaperbaseSe
 
 
 def test_search_can_shortlist_from_generated_summaries(monkeypatch, service: PaperbaseService):
-    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
     monkeypatch.setattr(
         "paperbase.service.index_paper_artifacts", lambda paper: _rich_extraction(text="General workflow discussion")
     )
@@ -453,7 +487,7 @@ def test_api_flow_for_jobs_and_results(monkeypatch, service: PaperbaseService):
     paper = _sample_paper("2401.55555", title="Queued Paper", abstract="Queued indexing")
 
     monkeypatch.setattr("paperbase.service.sources.get_paper_details", lambda arxiv_id: paper)
-    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
     monkeypatch.setattr(
         "paperbase.service.index_paper_artifacts", lambda paper: _rich_extraction(text="Queued attention result")
     )
@@ -1644,7 +1678,7 @@ def test_browser_uploads_and_chat_require_api_key_after_free_quota(monkeypatch, 
     assert signup.status_code == 200
     csrf_headers = {"X-Paperbase-CSRF": signup.json()["csrf_token"]}
 
-    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
     monkeypatch.setattr(
         "paperbase.service.index_paper_artifacts",
         lambda paper: _rich_extraction(text="Methods section explains grounding and citations."),
@@ -1730,6 +1764,85 @@ def test_non_grounded_chat_skips_tools_and_citations(browser_service):
     assert "do not invent source ids" in str(chat_model.create_calls[0]["system_prompt"])
 
 
+def test_chat_context_uses_full_active_thread_history(browser_service):
+    service, _, chat_model = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="history@example.com", password="topsecret123", display_name="History User")
+    )
+    assert session.user is not None
+
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
+    for index in range(8):
+        service.repository.add_chat_message(  # type: ignore[attr-defined]
+            thread_id=thread.thread_id,
+            role="user" if index % 2 == 0 else "assistant",
+            content_markdown=f"Historical message {index}",
+        )
+
+    service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="Help me brainstorm a short product name"),
+    )
+
+    answer_call = chat_model.create_calls[-1]
+    sent_messages = answer_call["messages"]
+    assert isinstance(sent_messages, list)
+    assert len(sent_messages) == 9
+    assert sent_messages[0]["content"] == "Historical message 0"
+    assert sent_messages[-1]["content"] == "Help me brainstorm a short product name"
+
+
+def test_stream_chat_compacts_mid_turn_after_tool_results(monkeypatch, browser_service):
+    service, _, chat_model = browser_service
+    chat_model.token_counts = [1, 1, 950_000, 1]
+    session, _ = service.register_browser_user(
+        SignupRequest(email="compact@example.com", password="topsecret123", display_name="Compact User")
+    )
+    assert session.user is not None
+
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda paper: _rich_extraction(text="## Methods\n\nMethods section explains grounding and citations."),
+    )
+    service.index_arxiv_paper(
+        "2401.77777",
+        paper=_sample_paper("2401.77777", title="Compaction Paper", abstract="A paper about tool results"),
+    )
+
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
+    events = list(
+        service.stream_chat_message(
+            session.user,
+            thread.thread_id,
+            SendChatMessageRequest(content="Explain the methods grounding with citations", tag_filters=[]),
+        )
+    )
+
+    event_names = [event_name for event_name, _ in events]
+    assert "tool_done" in event_names
+    assert event_names.index("compaction_start") > event_names.index("tool_done")
+    assert event_names.index("compaction_done") < event_names.index("assistant_start")
+    compaction_done = dict(events)["compaction_done"]
+    assert compaction_done["compaction_message"]["kind"] == "compaction"
+    assert "Compacted Conversation" in compaction_done["compaction_message"]["content_markdown"]
+    assert [message["kind"] for message in compaction_done["messages"]] == ["compaction"]
+
+    compaction_call = next(call for call in chat_model.create_calls if call["system_prompt"] == "")
+    assert "Compact the conversation transcript" in str(compaction_call["messages"])
+    assert "tool_result" in str(compaction_call["messages"])
+    assert "Explain the methods grounding" in str(compaction_call["messages"])
+
+    final_stream_call = chat_model.stream_calls[-1]
+    assert final_stream_call["messages"][0]["role"] == "user"
+    assert "Conversation compaction checkpoint" in final_stream_call["messages"][0]["content"]
+
+    refreshed = service.get_chat_thread(session.user, thread.thread_id)
+    assert [message.kind for message in refreshed.messages] == ["compaction", "default"]
+    assert all("Explain the methods grounding" not in message.content_markdown for message in refreshed.messages)
+
+
 def test_search_only_tool_results_do_not_create_citations(monkeypatch):
     class SearchOnlyChatModel(FakeChatModel):
         def create_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
@@ -1790,7 +1903,7 @@ def test_search_only_tool_results_do_not_create_citations(monkeypatch):
     )
     assert session.user is not None
 
-    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
     monkeypatch.setattr(
         "paperbase.service.index_paper_artifacts",
         lambda paper: _rich_extraction(text="Methods section explains grounding and citations."),
@@ -1819,7 +1932,7 @@ def test_link_requests_force_tool_use_and_prompt_for_paper_links(monkeypatch, br
     )
     assert session.user is not None
 
-    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
     monkeypatch.setattr(
         "paperbase.service.index_paper_artifacts",
         lambda paper: _rich_extraction(text="## Methods\n\nGrounding methods and benchmark comparisons."),
@@ -1929,6 +2042,25 @@ def test_project_session_paging_and_thread_deletion(browser_service):
     assert remaining_project.session_count == 5
 
 
+def test_chat_answer_prompt_requires_strict_markdown(browser_service):
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="markdown@example.com", password="topsecret123", display_name="Markdown User")
+    )
+    assert session.user is not None
+
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="Markdown prompt"))
+
+    with_evidence = service._chat_answer_system_prompt(thread=thread, has_evidence_sources=True)
+    without_evidence = service._chat_answer_system_prompt(thread=thread, has_evidence_sources=False)
+
+    assert "strict GitHub-flavored markdown" in with_evidence
+    assert "valid markdown that a standard parser can render directly" in with_evidence
+    assert "Do not put spaces just inside emphasis delimiters" in with_evidence
+    assert "strict GitHub-flavored markdown" in without_evidence
+    assert "valid markdown that a standard parser can render directly" in without_evidence
+
+
 def test_empty_chat_can_move_between_projects(browser_service):
     service, _, _ = browser_service
     session, _ = service.register_browser_user(
@@ -2008,7 +2140,7 @@ def test_browser_chat_stream_emits_citations_and_completion(monkeypatch, browser
     assert signup.status_code == 200
     csrf_headers = {"X-Paperbase-CSRF": signup.json()["csrf_token"]}
 
-    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
     monkeypatch.setattr(
         "paperbase.service.index_paper_artifacts",
         lambda paper: _rich_extraction(text="## Methods\n\nMethods section explains grounding and citations."),
@@ -2031,14 +2163,22 @@ def test_browser_chat_stream_emits_citations_and_completion(monkeypatch, browser
         events = _parse_sse_events("".join(response.iter_text()))
 
     event_names = [event_name for event_name, _ in events]
-    assert event_names[:2] == ["tool_start", "tool_done"]
-    assert events[0][1]["label"]
+    assert event_names[:3] == ["usage", "tool_start", "tool_done"]
+    assert events[1][1]["label"]
     assert "assistant_start" in event_names
+    assert "usage" in event_names
     assert "delta" in event_names
     assert event_names[-1] == "done"
     assistant_start_index = event_names.index("assistant_start")
+    tool_usage_index = 0
+    stream_usage_index = event_names.index("usage", assistant_start_index)
     assert events[assistant_start_index][1]["assistant_message"]["citations"]
+    assert events[tool_usage_index][1]["input_tokens"] == 84512
+    assert events[tool_usage_index][1]["output_tokens"] == 98
+    assert events[tool_usage_index][1]["context_window_tokens"] == 1_000_000
+    assert events[stream_usage_index][1]["input_tokens"] == 11234
     assert events[-1][1]["assistant_message"]["status"] == "completed"
+    assert events[-1][1]["usage"]["output_tokens"] == 27
 
     refreshed = client.get(f"/v1/browser/chats/{thread_id}").json()
     assert refreshed["messages"][-1]["status"] == "completed"
@@ -2096,7 +2236,7 @@ def test_browser_chat_stream_marks_partial_failure(monkeypatch, browser_service)
     assert signup.status_code == 200
     csrf_headers = {"X-Paperbase-CSRF": signup.json()["csrf_token"]}
 
-    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
     monkeypatch.setattr(
         "paperbase.service.index_paper_artifacts",
         lambda paper: _rich_extraction(text="Methods section explains grounding and citations."),
@@ -2120,7 +2260,7 @@ def test_browser_chat_stream_marks_partial_failure(monkeypatch, browser_service)
         events = _parse_sse_events("".join(response.iter_text()))
 
     event_names = [event_name for event_name, _ in events]
-    assert event_names[:3] == ["tool_start", "tool_done", "assistant_start"]
+    assert event_names[:4] == ["usage", "tool_start", "tool_done", "assistant_start"]
     assert "delta" in event_names
     assert events[-1][0] == "error"
     refreshed = client.get(f"/v1/browser/chats/{thread_id}").json()
@@ -2141,7 +2281,7 @@ def test_browser_paper_read_endpoints(monkeypatch, browser_service):
     )
     assert signup.status_code == 200
 
-    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
     monkeypatch.setattr(
         "paperbase.service.index_paper_artifacts",
         lambda paper: _rich_extraction(text="## Introduction\n\nGrounded section content."),
@@ -2567,3 +2707,367 @@ def test_create_job_records_per_type_max_attempts():
     assert job_a.max_attempts == 5
     assert job_b.max_attempts == 3
     assert job_c.max_attempts == 10
+
+
+def test_enrich_missing_metadata_backfills_papers_that_inline_enrichment_missed(monkeypatch):
+    """An indexed paper with citation_count=0 and no S2 id (the shape left
+    behind by a 429 during inline enrichment) gets picked up by
+    enrich_missing_metadata, receives citations + S2 id, and is persisted."""
+    from datetime import UTC, datetime, timedelta
+
+    service = PaperbaseService(
+        settings=Settings(storage_backend="memory", database_url="memory://", api_key="t"),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+    )
+    service.init()
+
+    stale = PaperMetadata(
+        arxiv_id="2401.33333",
+        title="Stale Paper",
+        authors="Z",
+        abstract="abstract",
+        categories="cs.AI",
+        primary_category="cs.AI",
+        published="2024-01-01",
+        updated="2024-01-01",
+        pdf_url="https://example.test/s.pdf",
+        html_url="https://example.test/s",
+        citation_count=0,
+        semantic_scholar_id=None,
+        index_status="indexed",
+        indexed_at=datetime.now(UTC) - timedelta(hours=2),
+    )
+    service.repository.upsert_paper(stale, search_document="", embedding=None)
+
+    def fake_enrich(papers, **_kwargs):
+        from paperbase.sources import EnrichmentOutcome
+        for paper in papers:
+            paper.citation_count = 4242
+            paper.influential_citation_count = 12
+            paper.semantic_scholar_id = f"s2-{paper.arxiv_id}"
+        return EnrichmentOutcome(attempted=len(papers), enriched=len(papers), batches_succeeded=1)
+
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", fake_enrich)
+
+    result = service.enrich_missing_metadata(limit=10)
+
+    assert result["papers_scanned"] == 1
+    assert result["papers_updated"] == 1
+    stored = service.repository.get_paper_by_arxiv_id("2401.33333")
+    assert stored is not None
+    assert stored.citation_count == 4242
+    assert stored.semantic_scholar_id == "s2-2401.33333"
+    # Second pass: the paper is out of the queue now that it has citations.
+    assert service.repository.list_papers_needing_enrichment(limit=10) == []
+
+
+def test_list_papers_needing_enrichment_respects_min_age_floor():
+    """Fresh papers (indexed less than min_age_seconds ago) must not be
+    returned — inline enrichment may still be in flight for them, and the
+    backfill job should not race with the index path."""
+    from datetime import UTC, datetime, timedelta
+
+    repo = MemoryPaperRepository()
+
+    def _seed(arxiv: str, age_seconds: int) -> None:
+        meta = PaperMetadata(
+            arxiv_id=arxiv,
+            title="t",
+            authors="a",
+            abstract="b",
+            categories="cs.AI",
+            primary_category="cs.AI",
+            published="2024-01-01",
+            updated="2024-01-01",
+            pdf_url="p",
+            html_url="h",
+            citation_count=0,
+            semantic_scholar_id=None,
+            index_status="indexed",
+            indexed_at=datetime.now(UTC) - timedelta(seconds=age_seconds),
+        )
+        repo.upsert_paper(meta, search_document="", embedding=None)
+
+    _seed("fresh/0001", age_seconds=60)
+    _seed("stale/0001", age_seconds=7200)
+
+    eligible = repo.list_papers_needing_enrichment(limit=10, min_age_seconds=3600)
+
+    assert [p.arxiv_id for p in eligible] == ["stale/0001"]
+
+
+def test_list_papers_needing_enrichment_keyset_covers_rows_across_indexed_at_boundaries():
+    """Regression test for the keyset-pagination bug flagged in PR #28 review:
+    advancing by paper_id alone skips rows when later pages cross an
+    ``indexed_at`` boundary. A correct cursor must mirror the full
+    ``(indexed_at, paper_id)`` sort key.
+
+    Seed sets this up deliberately:
+      - earliest row: indexed_at=T-3h, paper_id="arxiv:zzz" (lexicographically large)
+      - later row:    indexed_at=T-2h, paper_id="arxiv:aaa" (lexicographically small)
+
+    With the broken cursor, page 1 returns the T-3h row and the cursor is
+    set to ``paper_id > "arxiv:zzz"``, which silently excludes "arxiv:aaa"
+    on page 2. The fix keeps both rows reachable."""
+    from datetime import UTC, datetime, timedelta
+
+    repo = MemoryPaperRepository()
+    now = datetime.now(UTC)
+
+    def _seed(arxiv: str, indexed_at):
+        meta = PaperMetadata(
+            arxiv_id=arxiv,
+            title="t",
+            authors="a",
+            abstract="b",
+            categories="cs.AI",
+            primary_category="cs.AI",
+            published="2024-01-01",
+            updated="2024-01-01",
+            pdf_url="p",
+            html_url="h",
+            citation_count=0,
+            semantic_scholar_id=None,
+            index_status="indexed",
+            indexed_at=indexed_at,
+        )
+        return repo.upsert_paper(meta, search_document="", embedding=None)
+
+    _seed("zzz/0001", indexed_at=now - timedelta(hours=3))
+    _seed("aaa/0001", indexed_at=now - timedelta(hours=2))
+
+    page1 = repo.list_papers_needing_enrichment(limit=1, min_age_seconds=3600)
+    assert [p.arxiv_id for p in page1] == ["zzz/0001"], (
+        "earliest indexed_at should come first under NULLS FIRST, ASC"
+    )
+    page2 = repo.list_papers_needing_enrichment(limit=1, min_age_seconds=3600, after=page1[-1])
+    assert [p.arxiv_id for p in page2] == ["aaa/0001"], (
+        "keyset must advance by (indexed_at, paper_id), not paper_id alone"
+    )
+    page3 = repo.list_papers_needing_enrichment(limit=1, min_age_seconds=3600, after=page2[-1])
+    assert page3 == []
+
+
+def test_enrichment_stats_counts_papers_with_s2_id_but_zero_citations_as_enriched():
+    """A freshly-published paper that was successfully enriched but
+    legitimately has zero citations must count as enriched. Using
+    citation_count > 0 alone would warn the operator on a healthy corpus.
+    Regression test for PR #28 review."""
+    from datetime import UTC, datetime
+
+    repo = MemoryPaperRepository()
+
+    def _seed(arxiv: str, *, s2_id: str | None, citations: int):
+        meta = PaperMetadata(
+            arxiv_id=arxiv,
+            title="t",
+            authors="a",
+            abstract="b",
+            categories="cs.AI",
+            primary_category="cs.AI",
+            published="2024-01-01",
+            updated="2024-01-01",
+            pdf_url="p",
+            html_url="h",
+            citation_count=citations,
+            semantic_scholar_id=s2_id,
+            index_status="indexed",
+            indexed_at=datetime.now(UTC),
+        )
+        repo.upsert_paper(meta, search_document="", embedding=None)
+
+    _seed("cited/0001", s2_id="s2-1", citations=42)
+    _seed("newly-enriched/0001", s2_id="s2-2", citations=0)
+    _seed("missing/0001", s2_id=None, citations=0)
+
+    stats = repo.enrichment_stats()
+
+    assert stats["total_indexed"] == 3
+    assert stats["with_citations"] == 1
+    assert stats["with_semantic_scholar_id"] == 2
+    # Both the cited paper AND the newly-enriched zero-citation paper count.
+    # Only the paper with no S2 id and no citations is missing.
+    assert stats["enriched"] == 2
+
+
+def _make_service_with_one_paper() -> tuple[PaperbaseService, str]:
+    service = PaperbaseService(
+        settings=Settings(storage_backend="memory", database_url="memory://", api_key="t"),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+    )
+    service.init()
+    meta = PaperMetadata(
+        arxiv_id="2401.99999",
+        title="Logging Test Paper",
+        authors="Z",
+        abstract="An abstract mentioning attention.",
+        categories="cs.AI",
+        primary_category="cs.AI",
+        published="2024-01-01",
+        updated="2024-01-01",
+        pdf_url="p",
+        html_url="h",
+        citation_count=5,
+        index_status="indexed",
+    )
+    paper = service.repository.upsert_paper(meta, search_document="attention", embedding=None)
+    return service, paper.paper_id
+
+
+def test_search_records_query_log_and_returns_query_id_by_default():
+    """A default SearchRequest (log_query omitted) persists a row in
+    search_logs and returns the row's query_id so the client can follow
+    up with a click event."""
+    service, paper_id = _make_service_with_one_paper()
+
+    response = service.search(SearchRequest(query="attention", limit=5, include_live_sources=False))
+
+    assert response.query_id is not None
+    assert response.query_id.startswith("qry_")
+    log = service.repository.search_logs[response.query_id]
+    assert log["query_text"] == "attention"
+    assert log["request_rerank"] is False
+    assert log["top_paper_ids"] == [paper_id]
+    assert log["result_set_id"] == response.result_set_id
+    assert log["latency_ms"] is not None and log["latency_ms"] >= 0
+    assert log["clicked_paper_id"] is None
+    assert log["user_id"] is None
+
+
+def test_search_skips_logging_when_log_query_false():
+    """log_query=False is the opt-out path. No row is written and the
+    response has query_id=None so clients know click tracking is off."""
+    service, _ = _make_service_with_one_paper()
+
+    response = service.search(
+        SearchRequest(query="attention", limit=5, include_live_sources=False, log_query=False)
+    )
+
+    assert response.query_id is None
+    assert service.repository.search_logs == {}
+
+
+def test_search_attaches_user_id_when_service_caller_provides_one():
+    """Callers that know the authenticated user can pass user_id so
+    downstream analysis can group queries by user without the search layer
+    needing to parse session cookies."""
+    service, _ = _make_service_with_one_paper()
+
+    response = service.search(
+        SearchRequest(query="attention", limit=5, include_live_sources=False),
+        user_id="usr_abc123",
+    )
+
+    assert response.query_id is not None
+    assert service.repository.search_logs[response.query_id]["user_id"] == "usr_abc123"
+
+
+def test_search_logging_failure_does_not_break_response(monkeypatch):
+    """A storage-side failure in record_search_log must not fail the
+    search — ranking quality matters more than observability in the hot
+    path. query_id is nulled so the client knows click tracking is
+    unavailable."""
+    service, paper_id = _make_service_with_one_paper()
+
+    def boom(**_kwargs):
+        raise RuntimeError("db went away")
+
+    monkeypatch.setattr(service.repository, "record_search_log", boom)
+
+    response = service.search(SearchRequest(query="attention", limit=5, include_live_sources=False))
+
+    assert [p.paper_id for p in response.papers] == [paper_id]
+    assert response.query_id is None
+
+
+def test_record_search_click_updates_log_and_404s_on_unknown_query_id():
+    """The click endpoint is idempotent on the last click. Unknown query_id
+    returns False so the API layer can translate to 404."""
+    service, paper_id = _make_service_with_one_paper()
+    response = service.search(SearchRequest(query="attention", limit=5, include_live_sources=False))
+    assert response.query_id is not None
+
+    assert service.record_search_click(response.query_id, paper_id) is True
+    log = service.repository.search_logs[response.query_id]
+    assert log["clicked_paper_id"] == paper_id
+    assert log["clicked_at"] is not None
+
+    assert service.record_search_click("qry_nonexistent", paper_id) is False
+
+
+def test_chat_search_tool_does_not_write_search_log_row():
+    """The paperbase_search chat tool runs LLM-generated reformulations, not
+    real user queries, so its searches must never land in search_logs — they
+    would pollute the #21 real-user-query benchmark. The tool path forces
+    log_query=False so the response carries query_id=None and no row is
+    persisted."""
+    from paperbase.service import ChatCitationRegistry
+
+    service, paper_id = _make_service_with_one_paper()
+    registry = ChatCitationRegistry()
+    fake_user = type("U", (), {"user_id": "u1"})()
+
+    result = service._execute_chat_tool(
+        tool_name="paperbase_search",
+        tool_input={"query": "attention"},
+        user=fake_user,
+        citation_registry=registry,
+    )
+
+    assert service.repository.search_logs == {}
+    # The tool result dict is the view the model sees — no query_id surfaces
+    # because click attribution is meaningless for a synthetic reformulation.
+    assert "query_id" not in result
+    assert any(p["paper_id"] == paper_id for p in result.get("papers", []))
+
+
+def test_record_search_click_rejects_paper_outside_logged_result_set():
+    """The click endpoint only accepts clicks for papers that were actually in
+    the logged top_paper_ids. A buggy or malicious caller that sends an
+    arbitrary paper_id must not be able to poison the click-label dataset —
+    the return is False so the API layer translates to 404."""
+    service, returned_paper_id = _make_service_with_one_paper()
+
+    response = service.search(SearchRequest(query="attention", limit=5, include_live_sources=False))
+    assert response.query_id is not None
+    assert [p.paper_id for p in response.papers] == [returned_paper_id]
+
+    # Attaching a paper that was never in the logged top_paper_ids must be rejected.
+    outsider_paper_id = "arxiv:9999.00000"
+    assert service.record_search_click(response.query_id, outsider_paper_id) is False
+    log = service.repository.search_logs[response.query_id]
+    assert log["clicked_paper_id"] is None
+    assert log["clicked_at"] is None
+
+    # And the legitimate click for a paper that was returned still works.
+    assert service.record_search_click(response.query_id, returned_paper_id) is True
+    assert service.repository.search_logs[response.query_id]["clicked_paper_id"] == returned_paper_id
+
+
+def test_search_log_does_not_persist_auth_tokens_or_secrets():
+    """Belt-and-braces: even if a caller somehow passes a bearer token or
+    API key as the query text, the SearchRequest schema has no field for
+    auth material, so nothing but `query` lands in the log. Lock the
+    persisted row's keys in place so a future migration can't silently
+    add a token-bearing column."""
+    service, _ = _make_service_with_one_paper()
+    response = service.search(SearchRequest(query="attention", limit=5, include_live_sources=False))
+    assert response.query_id is not None
+
+    persisted = service.repository.search_logs[response.query_id]
+    assert set(persisted.keys()) == {
+        "query_id",
+        "user_id",
+        "query_text",
+        "request_rerank",
+        "top_paper_ids",
+        "result_set_id",
+        "latency_ms",
+        "clicked_paper_id",
+        "clicked_at",
+        "created_at",
+    }
+    for forbidden in ("api_key", "token", "authorization", "bearer", "secret"):
+        assert forbidden not in persisted, f"{forbidden!r} must never appear in search_logs"

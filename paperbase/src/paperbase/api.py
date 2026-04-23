@@ -55,6 +55,7 @@ from .models import (
     RunPythonFileResponse,
     SaveAnthropicKeyRequest,
     SaveModalCredentialsRequest,
+    SearchClickRequest,
     SearchPaperResult,
     SearchRequest,
     SearchResponse,
@@ -376,6 +377,24 @@ def search_sections(
     request: SearchSectionRequest, service: PaperbaseService = Depends(get_service)
 ) -> SearchSectionResponse:
     return service.search_sections(request)
+
+
+@app.post(
+    "/v1/search/{query_id}/click",
+    status_code=204,
+    dependencies=[Depends(require_bearer_token)],
+)
+def record_search_click(
+    query_id: str,
+    request: SearchClickRequest,
+    service: PaperbaseService = Depends(get_service),
+) -> None:
+    """Attach a click event to a previously-logged search. Idempotent: the
+    last click wins. 404 if the query_id is unknown (e.g. the search was
+    made with log_query=False, or the row has already been aged out)."""
+    if not service.record_search_click(query_id, request.paper_id):
+        raise HTTPException(status_code=404, detail="Unknown query_id")
+    return None
 
 
 @app.get("/v1/results/{result_set_id}", response_model=ResultSetResponse, dependencies=[Depends(require_bearer_token)])
