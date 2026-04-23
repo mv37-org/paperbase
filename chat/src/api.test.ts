@@ -10,6 +10,10 @@ function jsonResponse(payload: unknown, init: ResponseInit = {}) {
   });
 }
 
+function requestPath(input: RequestInfo | URL) {
+  return new URL(String(input), "http://localhost").pathname;
+}
+
 async function loadApiModule() {
   vi.resetModules();
   (window as typeof window & { PAPERBASE_BASE_URL?: string }).PAPERBASE_BASE_URL = "";
@@ -279,7 +283,7 @@ describe("chat api", () => {
     const [movePath, moveInit] = fetchMock.mock.calls[2] as FetchCall;
     const [, deleteInit] = fetchMock.mock.calls[3] as FetchCall;
     expect(createInit?.body).toBe(JSON.stringify({ title: "Project chat", project_id: "proj_9" }));
-    expect(String(movePath)).toBe("/v1/browser/chats/thread_3/project");
+    expect(requestPath(movePath)).toBe("/v1/browser/chats/thread_3/project");
     expect(moveInit?.body).toBe(JSON.stringify({ project_id: "proj_2" }));
     expect(new Headers(deleteInit?.headers).get("X-Paperbase-CSRF")).toBe("csrf-123");
   });
@@ -323,8 +327,8 @@ describe("chat api", () => {
 
     const [loadPath] = fetchMock.mock.calls[0] as FetchCall;
     const [createPath, createInit] = fetchMock.mock.calls[1] as FetchCall;
-    expect(String(loadPath)).toBe("/v1/browser/projects");
-    expect(String(createPath)).toBe("/v1/browser/projects");
+    expect(requestPath(loadPath)).toBe("/v1/browser/projects");
+    expect(requestPath(createPath)).toBe("/v1/browser/projects");
     expect(createInit?.method).toBe("POST");
     expect(projects.projects[0]?.project_id).toBe("proj_1");
     expect(created.project_id).toBe("proj_2");
@@ -360,7 +364,7 @@ describe("chat api", () => {
     });
 
     const [path, init] = fetchMock.mock.calls[0] as FetchCall;
-    expect(String(path)).toBe("/v1/browser/projects/proj_1/repo-sync");
+    expect(requestPath(path)).toBe("/v1/browser/projects/proj_1/repo-sync");
     expect(init?.method).toBe("POST");
     expect(init?.body).toBe(
       JSON.stringify({
