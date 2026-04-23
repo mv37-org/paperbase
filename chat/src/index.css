@@ -742,6 +742,7 @@ textarea::placeholder,
   overflow: hidden;
   --chat-sidebar-width: 280px;
   --chat-drawer-width: 0px;
+  --chat-content-max-width: 800px;
   --chat-fixed-composer-bottom: 24px;
   --chat-fixed-composer-width: min(
     560px,
@@ -1507,6 +1508,7 @@ textarea::placeholder,
 .chat-message-list {
   min-height: 0;
   overflow: auto;
+  overflow-x: hidden;
   padding: 24px 24px 220px;
 }
 
@@ -1771,7 +1773,9 @@ textarea::placeholder,
 }
 
 .chat-message-column {
-  width: min(800px, 100%);
+  width: min(var(--chat-content-max-width), 100%);
+  max-width: 100%;
+  min-width: 0;
   margin: 0 auto;
   display: grid;
   gap: 18px;
@@ -1780,7 +1784,9 @@ textarea::placeholder,
 .message-row {
   display: grid;
   gap: 6px;
-  width: min(800px, 100%);
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
 }
 
 .message-row.user {
@@ -1812,7 +1818,9 @@ textarea::placeholder,
 }
 
 .tool-activity-row {
-  width: min(800px, 100%);
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   display: flex;
   align-items: center;
 }
@@ -1843,6 +1851,8 @@ textarea::placeholder,
 
 .message-bubble {
   width: 100%;
+  max-width: 100%;
+  min-width: 0;
 }
 
 .message-bubble.user {
@@ -1870,8 +1880,17 @@ textarea::placeholder,
   color: var(--text);
   font-size: 15px;
   line-height: 1.65;
+  max-width: 100%;
+  min-width: 0;
   overflow-wrap: break-word;
   word-break: normal;
+}
+
+.markdown-renderer,
+.message-citations,
+.citation-card {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .message-markdown > :first-child,
@@ -1993,6 +2012,7 @@ textarea::placeholder,
 .markdown-table-wrap {
   width: 100%;
   max-width: 100%;
+  min-width: 0;
   overflow-x: auto;
   margin: 0.9em 0;
   border: 1px solid rgba(27, 22, 17, 0.14);
