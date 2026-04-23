@@ -3549,8 +3549,38 @@ textarea {
 
 .project-advanced-panel {
   display: grid;
-  gap: 12px;
+  gap: 10px;
   margin-top: 10px;
+}
+
+.project-advanced-tabs {
+  display: inline-flex;
+  width: fit-content;
+  max-width: 100%;
+  padding: 2px;
+  border: 1px solid rgba(27, 22, 17, 0.1);
+  border-radius: 7px;
+  background: rgba(27, 22, 17, 0.03);
+}
+
+.modal-view .stack .project-advanced-tab {
+  min-height: auto;
+  height: 24px;
+  max-height: none;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.modal-view .stack .project-advanced-tab.active {
+  background: #ffffff;
+  box-shadow: 0 1px 4px rgba(16, 24, 40, 0.1);
+  color: var(--text);
 }
 
 .project-advanced-group {
@@ -4581,6 +4611,17 @@ body.authenticated-theme-dark .project-repo-info-icon {
 
 body.authenticated-theme-dark .project-advanced-section {
   border-top-color: rgba(223, 232, 244, 0.16);
+}
+
+body.authenticated-theme-dark .project-advanced-tabs {
+  border-color: rgba(223, 232, 244, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+body.authenticated-theme-dark .modal-view .stack .project-advanced-tab.active {
+  background: rgba(255, 255, 255, 0.1);
+  box-shadow: none;
+  color: var(--text);
 }
 
 body.authenticated-theme-dark .project-repo-import-list {

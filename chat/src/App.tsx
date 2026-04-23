@@ -751,7 +751,7 @@ export default function App() {
   const [projectFormName, setProjectFormName] = useState("");
   const [projectFormDescription, setProjectFormDescription] = useState("");
   const [projectFormError, setProjectFormError] = useState("");
-  const [projectRepoMode, setProjectRepoMode] = useState<"create" | "existing">("create");
+  const [projectRepoMode, setProjectRepoMode] = useState<"" | "create" | "existing">("");
   const [projectRepoOwner, setProjectRepoOwner] = useState("");
   const [projectRepoName, setProjectRepoName] = useState("");
   const [projectRepoBranch, setProjectRepoBranch] = useState("main");
@@ -769,6 +769,9 @@ export default function App() {
   const [projectRepoStatus, setProjectRepoStatus] = useState("");
   const [projectRepoDropdownOpen, setProjectRepoDropdownOpen] = useState(false);
   const [projectAdvancedOpen, setProjectAdvancedOpen] = useState(false);
+  const [projectAdvancedTab, setProjectAdvancedTab] = useState<"inference" | "sandbox">(
+    "inference",
+  );
   const [projectAdvancedStatus, setProjectAdvancedStatus] = useState("");
   const [projectAnthropicKey, setProjectAnthropicKey] = useState("");
   const [projectModalTokenId, setProjectModalTokenId] = useState("");
@@ -2253,9 +2256,21 @@ export default function App() {
         sessionStorage.removeItem(RESUME_PROJECT_MODAL_KEY);
         setAuthModalOpen(false);
         setProjectModalState({ mode: "create" });
-        setProjectRepoMode("create");
+        setProjectRepoMode("");
         setProjectRepoOwner(nextSession.settings.github_login || "");
-        setProjectRepoBranch("main");
+        setProjectRepoName("");
+        setProjectRepoBranch("");
+        setProjectRepoListLoading(true);
+        try {
+          const response = await loadGitHubRepositories();
+          setProjectRepoList(response.repos);
+        } catch (error) {
+          setProjectRepoStatus(
+            error instanceof Error ? error.message : "GitHub repositories could not be loaded.",
+          );
+        } finally {
+          setProjectRepoListLoading(false);
+        }
       }
       if (nextSession.authenticated) {
         await bootstrapAuthenticatedUi();
@@ -2511,9 +2526,7 @@ export default function App() {
               : candidatePaths,
         );
         setProjectRepoStatus(
-          candidates.candidates.length
-            ? `${candidates.candidates.length} importable files found.`
-            : "No importable Python or notebook files found.",
+          candidates.candidates.length ? "" : "No importable Python or notebook files found.",
         );
       } catch (error) {
         setProjectRepoMetadata(null);
@@ -2602,10 +2615,10 @@ export default function App() {
     setProjectFormName("");
     setProjectFormDescription("");
     setProjectFormError("");
-    setProjectRepoMode("create");
+    setProjectRepoMode("");
     setProjectRepoOwner(sessionSettings.github_login || "");
     setProjectRepoName("");
-    setProjectRepoBranch("main");
+    setProjectRepoBranch("");
     setProjectRepoMetadata(null);
     setProjectRepoCandidates([]);
     setProjectRepoSelectedPaths([]);
@@ -2613,6 +2626,7 @@ export default function App() {
     setProjectRepoLoading(false);
     setProjectRepoDropdownOpen(false);
     setProjectAdvancedOpen(false);
+    setProjectAdvancedTab("inference");
     setProjectAdvancedStatus("");
     setProjectAnthropicKey("");
     setProjectModalTokenId("");
@@ -2652,10 +2666,10 @@ export default function App() {
     setProjectFormName("");
     setProjectFormDescription("");
     setProjectFormError("");
-    setProjectRepoMode("create");
+    setProjectRepoMode("");
     setProjectRepoOwner("");
     setProjectRepoName("");
-    setProjectRepoBranch("main");
+    setProjectRepoBranch("");
     setProjectRepoMetadata(null);
     setProjectRepoCandidates([]);
     setProjectRepoSelectedPaths([]);
@@ -2663,6 +2677,7 @@ export default function App() {
     setProjectRepoLoading(false);
     setProjectRepoDropdownOpen(false);
     setProjectAdvancedOpen(false);
+    setProjectAdvancedTab("inference");
     setProjectAdvancedStatus("");
     setProjectAnthropicKey("");
     setProjectModalTokenId("");
@@ -2693,11 +2708,11 @@ export default function App() {
           setProjectFormError("Connect GitHub before creating a project.");
           return;
         }
-        const repoName = projectRepoName.trim();
-        if (!repoName) {
-          setProjectFormError("GitHub repository name is required.");
+        if (!projectRepoMode) {
+          setProjectFormError("Choose a GitHub repository.");
           return;
         }
+        const repoName = projectRepoName.trim();
         const existingRepoImportPaths = projectRepoImportAll
           ? projectRepoCandidates.map((candidate) => candidate.path)
           : projectRepoSelectedPaths;
@@ -2716,6 +2731,10 @@ export default function App() {
                 base_branch: projectRepoBranch.trim(),
                 import_paths: existingRepoImportPaths,
               };
+        if (!githubRepo.name) {
+          setProjectFormError("GitHub repository name is required.");
+          return;
+        }
         if (githubRepo.mode === "existing" && (!githubRepo.owner || !githubRepo.base_branch)) {
           setProjectFormError("Existing repositories require an owner and base branch.");
           return;
@@ -3514,9 +3533,9 @@ export default function App() {
   const projectRepoBranchOptions =
     projectRepoMode === "create"
       ? [{ name: "main", commit_sha: "", is_default: true }]
-      : projectRepoMetadata?.branches.length
+      : projectRepoMode === "existing" && projectRepoMetadata?.branches.length
         ? projectRepoMetadata.branches
-        : [{ name: projectRepoBranch || "main", commit_sha: "", is_default: true }];
+        : [{ name: "", commit_sha: "", is_default: false }];
 
   return (
     <>
@@ -4989,8 +5008,15 @@ export default function App() {
                           id="project-repo-branch-select"
                           className="project-repo-branch-select"
                           aria-label="Base branch"
-                          value={projectRepoMode === "create" ? "main" : projectRepoBranch}
+                          value={
+                            projectRepoMode === "create"
+                              ? "main"
+                              : projectRepoMode === "existing"
+                                ? projectRepoBranch
+                                : ""
+                          }
                           disabled={
+                            !projectRepoMode ||
                             projectRepoMode === "create" ||
                             projectRepoLoading ||
                             (projectRepoMode === "existing" && !projectRepoMetadata)
@@ -5003,7 +5029,7 @@ export default function App() {
                         >
                           {projectRepoBranchOptions.map((branch) => (
                             <option key={branch.name} value={branch.name}>
-                              {branch.name}
+                              {branch.name || "Select repo first"}
                               {branch.is_default ? " (default)" : ""}
                             </option>
                           ))}
@@ -5026,7 +5052,7 @@ export default function App() {
                           required
                         />
                       </label>
-                    ) : (
+                    ) : projectRepoMode === "existing" ? (
                       <div className="project-repo-existing">
                         {projectRepoStatus ? (
                           <div className="project-repo-status">{projectRepoStatus}</div>
@@ -5102,7 +5128,7 @@ export default function App() {
                           </div>
                         ) : null}
                       </div>
-                    )}
+                    ) : null}
                     {projectRepoMode === "create" && projectRepoStatus ? (
                       <div className="project-repo-status">{projectRepoStatus}</div>
                     ) : null}
@@ -5136,9 +5162,36 @@ export default function App() {
                       </button>
                       {projectAdvancedOpen ? (
                         <div className="project-advanced-panel">
-                          <section className="project-advanced-group">
-                            <div>
-                              <h3>Inference</h3>
+                          <div
+                            className="project-advanced-tabs"
+                            role="tablist"
+                            aria-label="Advanced project settings"
+                          >
+                            <button
+                              type="button"
+                              role="tab"
+                              aria-selected={projectAdvancedTab === "inference"}
+                              className={`project-advanced-tab${
+                                projectAdvancedTab === "inference" ? " active" : ""
+                              }`}
+                              onClick={() => setProjectAdvancedTab("inference")}
+                            >
+                              Inference
+                            </button>
+                            <button
+                              type="button"
+                              role="tab"
+                              aria-selected={projectAdvancedTab === "sandbox"}
+                              className={`project-advanced-tab${
+                                projectAdvancedTab === "sandbox" ? " active" : ""
+                              }`}
+                              onClick={() => setProjectAdvancedTab("sandbox")}
+                            >
+                              Sandbox
+                            </button>
+                          </div>
+                          {projectAdvancedTab === "inference" ? (
+                            <section className="project-advanced-group" role="tabpanel">
                               {sessionSummary?.hasAnthropicApiKey ? (
                                 <div className="settings-secret-row">
                                   <div className="settings-secret-copy">
@@ -5176,11 +5229,9 @@ export default function App() {
                                   </button>
                                 </div>
                               )}
-                            </div>
-                          </section>
-                          <section className="project-advanced-group">
-                            <div>
-                              <h3>Sandbox</h3>
+                            </section>
+                          ) : (
+                            <section className="project-advanced-group" role="tabpanel">
                               {sessionSettings.has_modal_credentials ? (
                                 <div className="settings-secret-row">
                                   <div className="settings-secret-copy">
@@ -5235,8 +5286,8 @@ export default function App() {
                                   </button>
                                 </div>
                               )}
-                            </div>
-                          </section>
+                            </section>
+                          )}
                           {projectAdvancedStatus ? (
                             <div className="project-repo-status" role="status">
                               {projectAdvancedStatus}

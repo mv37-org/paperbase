@@ -584,6 +584,12 @@ describe("App", () => {
     fireEvent.change(screen.getByPlaceholderText("Description, goal, or custom instructions"), {
       target: { value: "Investigate reliable agent systems." },
     });
+    expect(screen.queryByPlaceholderText("New GitHub repo name")).toBeNull();
+    fireEvent.submit(document.querySelector("#project-modal form")!);
+    expect(await screen.findByText("Choose a GitHub repository.")).toBeTruthy();
+    expect(apiMocks.createProject).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Repository" }));
+    fireEvent.click(screen.getByRole("option", { name: /Create new repo/ }));
     fireEvent.change(screen.getByPlaceholderText("New GitHub repo name"), {
       target: { value: "agent-lab" },
     });
@@ -688,6 +694,8 @@ describe("App", () => {
     fireEvent.change(screen.getByPlaceholderText("Description, goal, or custom instructions"), {
       target: { value: "Track benchmark runs and profiling." },
     });
+    fireEvent.click(screen.getByRole("button", { name: "Repository" }));
+    fireEvent.click(screen.getByRole("option", { name: /Create new repo/ }));
     fireEvent.change(screen.getByPlaceholderText("New GitHub repo name"), {
       target: { value: "benchmarks" },
     });
@@ -826,6 +834,7 @@ describe("App", () => {
     const importAllCheckbox = await screen.findByLabelText("Import all 2 relevant files");
     expect((importAllCheckbox as HTMLInputElement).checked).toBe(true);
     expect(screen.getByText(/Python scripts and Jupyter notebooks/)).toBeTruthy();
+    expect(screen.queryByText("2 importable files found.")).toBeNull();
     expect(screen.queryByText("notebooks/demo.ipynb")).toBeNull();
 
     fireEvent.submit(document.querySelector("#project-modal form")!);
