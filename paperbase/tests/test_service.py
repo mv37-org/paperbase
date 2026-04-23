@@ -1383,6 +1383,59 @@ def test_browser_google_start_redirects_back_to_return_to_when_not_configured(mo
     app.dependency_overrides.clear()
 
 
+def test_chat_search_tool_threads_rerank_flag_into_search_request():
+    """The paperbase_search tool must advertise a `rerank` input and pass it
+    through to SearchRequest so chat/MCP flows can use the deep-search path."""
+    from paperbase.service import ChatCitationRegistry
+
+    service = PaperbaseService(
+        settings=Settings(storage_backend="memory"),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+    )
+    service.init()
+
+    request = SendChatMessageRequest(content="find papers about attention", include_papers=True)
+    tools = service._chat_tool_definitions(request)
+    search_tool = next((t for t in tools if t["name"] == "paperbase_search"), None)
+    assert search_tool is not None, "paperbase_search tool should be defined"
+    assert "rerank" in search_tool["input_schema"]["properties"], (
+        "paperbase_search tool schema must advertise the rerank input"
+    )
+
+    captured: list[bool] = []
+
+    class RecordingService(type(service)):
+        pass
+
+    original_search = service.search
+
+    def recording_search(req):
+        captured.append(req.rerank)
+        return original_search(req)
+
+    service.search = recording_search  # type: ignore[method-assign]
+
+    registry = ChatCitationRegistry()
+    fake_user = type("U", (), {"user_id": "u1"})()
+
+    service._execute_chat_tool(
+        tool_name="paperbase_search",
+        tool_input={"query": "attention", "rerank": True},
+        user=fake_user,
+        citation_registry=registry,
+    )
+    assert captured == [True], "rerank=True from tool_input did not reach SearchRequest"
+
+    service._execute_chat_tool(
+        tool_name="paperbase_search",
+        tool_input={"query": "attention"},
+        user=fake_user,
+        citation_registry=registry,
+    )
+    assert captured == [True, False], "rerank default must be False when tool_input omits it"
+
+
 def test_memory_repository_search_local_bakes_in_citation_and_recency_boosts():
     """MemoryPaperRepository.search_local must apply citation + recency boosts
     into the returned score, mirroring SqlAlchemyPaperRepository. service.search

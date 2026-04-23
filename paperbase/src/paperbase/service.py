@@ -990,7 +990,7 @@ class PaperbaseService:
                 [
                     {
                         "name": "paperbase_search",
-                        "description": "Search Paperbase papers by topic, title, abstract, or author. Use this to find candidate papers and result-set ids before narrowing to sections or specific files.",
+                        "description": "Search Paperbase papers by topic, title, abstract, or author. Use this to find candidate papers and result-set ids before narrowing to sections or specific files. Set rerank=true for a slower, higher-recall deep-search pass that also surfaces body-content matches.",
                         "input_schema": {
                             "type": "object",
                             "properties": {
@@ -999,6 +999,7 @@ class PaperbaseService:
                                 "category": {"type": "string"},
                                 "year": {"type": "string"},
                                 "include_live_sources": {"type": "boolean"},
+                                "rerank": {"type": "boolean"},
                             },
                             "required": ["query"],
                         },
@@ -1197,6 +1198,7 @@ class PaperbaseService:
                 category=(str(tool_input.get("category") or "").strip() or None),
                 year=(str(tool_input.get("year") or "").strip() or None),
                 include_live_sources=_tool_bool(tool_input.get("include_live_sources"), default=False),
+                rerank=_tool_bool(tool_input.get("rerank"), default=False),
             )
             response = self.search(request)
             papers = []

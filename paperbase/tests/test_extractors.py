@@ -253,6 +253,61 @@ def test_extract_sections_keeps_first_h1_when_all_headers_are_h1():
     assert sections[2].markdown == "Architecture details."
 
 
+def test_extract_sections_keeps_first_h1_when_it_has_substantive_body_in_mixed_hierarchy():
+    """Mixed `# Abstract\\nbody\\n## Introduction` shape: the leading H1 has
+    real body content, so it is a section — not a paper title — even though
+    later headers are deeper. The old 'any H2+ means drop H1' heuristic lost
+    the Abstract content; body-content check keeps it."""
+    markdown = "\n".join(
+        [
+            "# Abstract",
+            "",
+            "We propose an attention-based model.",
+            "",
+            "## Introduction",
+            "",
+            "Sequence-to-sequence learning motivates this work.",
+            "",
+            "## Method",
+            "",
+            "Architecture details.",
+        ]
+    )
+
+    sections = _extract_sections(markdown)
+
+    assert [section.slug for section in sections] == ["abstract", "introduction", "method"]
+    assert sections[0].markdown == "We propose an attention-based model."
+    assert sections[1].markdown == "Sequence-to-sequence learning motivates this work."
+
+
+def test_extract_sections_preserves_lead_text_before_first_heading():
+    """Content that appears before the first header (an unheaded abstract or
+    opening paragraph) must be indexed rather than silently dropped. The
+    splitter emits a synthetic 'Preamble' section for it."""
+    markdown = "\n".join(
+        [
+            "We propose a novel approach to the problem. This is standalone",
+            "lead text with no heading above it.",
+            "",
+            "## Introduction",
+            "",
+            "Background material.",
+            "",
+            "## Method",
+            "",
+            "Approach details.",
+        ]
+    )
+
+    sections = _extract_sections(markdown)
+
+    assert [section.slug for section in sections] == ["preamble", "introduction", "method"]
+    assert "We propose a novel approach" in sections[0].markdown
+    assert "standalone" in sections[0].markdown
+    assert sections[1].markdown == "Background material."
+
+
 def test_extract_latex_text_resolves_relative_input_paths():
     """An \\input that uses .. or a directory-relative path must be resolved
     against the *including* file's directory, not just by bare-name lookup."""

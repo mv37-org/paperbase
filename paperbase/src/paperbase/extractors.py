@@ -273,24 +273,40 @@ def _split_by_markdown_headers(markdown: str) -> list[SectionArtifact] | None:
     matches = list(_MARKDOWN_HEADER_RE.finditer(markdown))
     if not matches:
         return None
-    # Drop a leading H1 only when later headers are deeper (H2+), which is the
-    # "paper title + sections" pattern. If every header is an H1, treat them
-    # all as sections — some markdown exports (e.g. docling) use H1 for
-    # Abstract/Introduction/etc., and skipping the first one would silently
-    # discard that section's content.
-    if (
-        len(matches[0].group(1)) == 1
-        and len(matches) > 1
-        and any(len(m.group(1)) > 1 for m in matches[1:])
-    ):
-        matches = matches[1:]
-    if not matches:
-        return None
     sections: list[SectionArtifact] = []
     seen: set[str] = set()
-    for index, match in enumerate(matches):
+
+    # Capture any text that appears before the first header (e.g. an unheaded
+    # abstract or opening paragraph) as a synthetic "Preamble" section, so
+    # that content is not silently dropped from indexing.
+    preamble = markdown[: matches[0].start()].strip()
+
+    # Drop a leading H1 only when its body is empty — i.e. the H1 is followed
+    # immediately by another header with no prose in between. That is the
+    # "paper title alone" shape (common in docling output). A mixed document
+    # like `# Abstract\nWe propose...\n## Introduction` keeps the H1 because
+    # its body has substantive content.
+    start_index = 0
+    if len(matches) > 1 and len(matches[0].group(1)) == 1:
+        body = markdown[matches[0].end(): matches[1].start()].strip()
+        if not body:
+            start_index = 1
+
+    if preamble:
+        sections.append(
+            SectionArtifact(
+                title="Preamble",
+                slug=make_slug("Preamble", seen),
+                markdown=preamble,
+            )
+        )
+
+    effective = matches[start_index:]
+    if not effective:
+        return sections or None
+    for index, match in enumerate(effective):
         start = match.end()
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(markdown)
+        end = effective[index + 1].start() if index + 1 < len(effective) else len(markdown)
         title = _normalize_section_title(match.group(2)).title()
         sections.append(
             SectionArtifact(
