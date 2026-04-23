@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 
 from paperbase.config import repo_root
+from paperbase.extractors import ExtractionOutput, build_manifest
+from paperbase.models import PaperMetadata
 
 
 def _read_repo_file(relative_path: str) -> str:
@@ -65,3 +67,22 @@ def test_job_orm_carries_retry_policy_columns():
     assert default_max_attempts("index_paper") == 3
     assert default_max_attempts("sync_latest") == 5
     assert default_max_attempts("reindex_embeddings") == 2
+
+
+def test_build_manifest_includes_preview_key_in_available_artifacts():
+    paper = PaperMetadata(
+        arxiv_id="2401.00001",
+        title="Policy Probe",
+        authors="Policy",
+        abstract="x",
+        categories="cs.AI",
+        primary_category="cs.AI",
+        published="2024-01-01",
+        updated="2024-01-02",
+    )
+    extraction = ExtractionOutput(source_type="abstract-only", text_markdown="# x\n")
+
+    manifest = build_manifest("paper_1", paper, extraction)
+
+    assert "preview" in manifest["available_artifacts"]
+    assert manifest["available_artifacts"]["preview"] is None
