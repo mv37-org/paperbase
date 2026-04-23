@@ -30,6 +30,7 @@ from paperbase.models import (
     FileListResponse,
     FileObject,
     JobResponse,
+    PaperPreviewResponse,
     PaperResponse,
     ProjectItemPageResponse,
     ProjectItemSummary,
@@ -220,6 +221,17 @@ class StubApiService:
     def get_paper(self, paper_id: str) -> PaperResponse:
         self.calls.append(("get_paper", paper_id))
         return _paper("2401.54321")
+
+    def get_paper_preview(self, paper_id: str) -> PaperPreviewResponse:
+        self.calls.append(("get_paper_preview", paper_id))
+        if paper_id == "missing":
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail="Preview not found")
+        return PaperPreviewResponse(
+            paper_id=paper_id,
+            image_url=f"https://signed.example/{paper_id}/preview?sig=abc",
+            content_type="image/webp",
+        )
 
     def list_files(self, paper_id: str) -> FileListResponse:
         self.calls.append(("list_files", paper_id))
@@ -1105,3 +1117,35 @@ def test_google_callback_failure_redirects_with_error(api_client, monkeypatch):
 
     assert response.status_code == 302
     assert response.headers["location"] == f"{settings.chat_public_url}/?auth_error=google_callback_failed"
+
+
+def test_browser_preview_route_returns_signed_url_and_no_store_cache(api_client):
+    client, service, settings = api_client
+    client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
+
+    response = client.get("/v1/browser/papers/arxiv:2401.54321/preview")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["paper_id"] == "arxiv:2401.54321"
+    assert payload["content_type"] == "image/webp"
+    assert payload["image_url"].startswith("https://signed.example/")
+    assert response.headers["Cache-Control"] == "no-store"
+    assert ("get_paper_preview", "arxiv:2401.54321") in service.calls
+
+
+def test_browser_preview_route_requires_browser_session(api_client):
+    client, _, _ = api_client
+
+    response = client.get("/v1/browser/papers/arxiv:2401.54321/preview")
+
+    assert response.status_code == 401
+
+
+def test_browser_preview_route_returns_404_when_preview_missing(api_client):
+    client, _, settings = api_client
+    client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
+
+    response = client.get("/v1/browser/papers/missing/preview")
+
+    assert response.status_code == 404
