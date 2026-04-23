@@ -3204,8 +3204,16 @@ class PaperbaseService:
         """
         if source != "arxiv":
             raise PermanentError(f"harvest source {source!r} is not supported; v1 handles arxiv only")
+        _validate_date(start_date, name="start_date")
+        _validate_date(end_date, name="end_date")
+        if start_date > end_date:
+            raise PermanentError("start_date must be on or before end_date")
+        if chunk_months < 1:
+            raise PermanentError("chunk_months must be >= 1")
         if limit_per_window is not None and limit_per_window < 1:
             raise PermanentError("limit_per_window must be >= 1 when provided")
+        if not categories:
+            raise PermanentError("categories must not be empty")
 
         run_harvest_id = harvest_id or new_id("harvest")
         windows = _month_windows(start_date, end_date, chunk_months=chunk_months)
@@ -3279,6 +3287,12 @@ class PaperbaseService:
         """
         if source != "arxiv":
             raise PermanentError(f"harvest source {source!r} is not supported; v1 handles arxiv only")
+        _validate_date(start_date, name="start_date")
+        _validate_date(end_date, name="end_date")
+        if start_date > end_date:
+            raise PermanentError("start_date must be on or before end_date")
+        if not category:
+            raise PermanentError("category must not be empty")
         if limit is not None and limit < 1:
             raise PermanentError("harvest chunk limit must be >= 1 when provided")
 

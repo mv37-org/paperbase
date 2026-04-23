@@ -164,6 +164,41 @@ def test_run_harvest_range_rejects_non_arxiv_source():
         )
 
 
+def test_run_harvest_range_rejects_malformed_worker_payloads():
+    """The worker handler validates persisted planner payloads too. Enqueue
+    validates operator input, but a bad in-flight/manual row must dead-letter
+    instead of hanging the worker in window generation."""
+    service = _service()
+
+    with pytest.raises(PermanentError, match="chunk_months"):
+        service.run_harvest_range(
+            source="arxiv",
+            categories=["cs.LG"],
+            start_date="2020-01-01",
+            end_date="2020-03-31",
+            limit_per_window=None,
+            chunk_months=0,
+        )
+    with pytest.raises(PermanentError, match="categories"):
+        service.run_harvest_range(
+            source="arxiv",
+            categories=[],
+            start_date="2020-01-01",
+            end_date="2020-03-31",
+            limit_per_window=None,
+            chunk_months=3,
+        )
+    with pytest.raises(PermanentError, match="start_date"):
+        service.run_harvest_range(
+            source="arxiv",
+            categories=["cs.LG"],
+            start_date="2020-04-01",
+            end_date="2020-03-31",
+            limit_per_window=None,
+            chunk_months=3,
+        )
+
+
 def test_limit_per_window_is_per_chunk_not_per_category_total():
     """Contract lock per the #37 review: ``limit_per_window`` is PER
     (category, window), not a per-category total across the whole
@@ -309,7 +344,7 @@ def test_harvest_chunk_rejects_non_positive_limit_before_fetch(monkeypatch):
     service = _service()
 
     def fail_fetch(*_args, **_kwargs):
-        raise AssertionError("invalid limits must be rejected before fetching arxiv")
+        raise AssertionError("invalid payloads must be rejected before fetching arxiv")
 
     monkeypatch.setattr("paperbase.service.sources.fetch_range", fail_fetch)
 
@@ -320,6 +355,26 @@ def test_harvest_chunk_rejects_non_positive_limit_before_fetch(monkeypatch):
             start_date="2020-01-01",
             end_date="2020-03-31",
             limit=0,
+            cursor=0,
+            fetched=0,
+        )
+    with pytest.raises(PermanentError, match="start_date"):
+        service.run_harvest_chunk(
+            source="arxiv",
+            category="cs.LG",
+            start_date="not-a-date",
+            end_date="2020-03-31",
+            limit=None,
+            cursor=0,
+            fetched=0,
+        )
+    with pytest.raises(PermanentError, match="category"):
+        service.run_harvest_chunk(
+            source="arxiv",
+            category="",
+            start_date="2020-01-01",
+            end_date="2020-03-31",
+            limit=None,
             cursor=0,
             fetched=0,
         )
