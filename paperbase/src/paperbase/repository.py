@@ -522,6 +522,8 @@ class PaperRepository(ABC):
         rrf_k: int = 60,
         citation_boost_scale: float = 0.003,
         citation_boost_max: float = 0.015,
+        recency_boost_max: float = 0.005,
+        recency_half_life_years: int = 10,
     ) -> list[SearchPaperResult]:
         raise NotImplementedError
 
@@ -620,6 +622,25 @@ class SqlAlchemyPaperRepository(PaperRepository):
             connection.execute(text("ALTER TABLE IF EXISTS text_chunks ADD COLUMN IF NOT EXISTS section_order INTEGER DEFAULT 0"))
         Base.metadata.create_all(self._engine)
         with self._engine.begin() as connection:
+            # search_tsv is added after create_all() so it works for both
+            # fresh installs (papers table just created by ORM) and existing
+            # databases (column added via IF NOT EXISTS).
+            connection.execute(
+                text(
+                    """
+                    ALTER TABLE papers ADD COLUMN IF NOT EXISTS search_tsv tsvector
+                    GENERATED ALWAYS AS (
+                        setweight(to_tsvector('english', coalesce(title, '')), 'A') ||
+                        setweight(to_tsvector('english', coalesce(tldr, '')), 'A') ||
+                        setweight(to_tsvector('english', coalesce(summary_short, '')), 'A') ||
+                        setweight(to_tsvector('english', coalesce(abstract, '')), 'B') ||
+                        setweight(to_tsvector('english', coalesce(summary_eli5, '')), 'B') ||
+                        setweight(to_tsvector('simple', coalesce(authors, '')), 'C') ||
+                        setweight(to_tsvector('english', coalesce(search_document, '')), 'C')
+                    ) STORED
+                    """
+                )
+            )
             connection.execute(
                 text(
                     "CREATE INDEX IF NOT EXISTS papers_embedding_hnsw "
@@ -638,6 +659,12 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 text(
                     "CREATE INDEX IF NOT EXISTS papers_search_document_trgm "
                     "ON papers USING gin (search_document gin_trgm_ops)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS papers_search_tsv_gin "
+                    "ON papers USING gin (search_tsv)"
                 )
             )
             connection.execute(
@@ -1293,32 +1320,32 @@ class SqlAlchemyPaperRepository(PaperRepository):
         rrf_k: int = 60,
         citation_boost_scale: float = 0.003,
         citation_boost_max: float = 0.015,
+        recency_boost_max: float = 0.005,
+        recency_half_life_years: int = 10,
     ) -> list[SearchPaperResult]:
         """Hybrid retrieval: lexical (websearch_to_tsquery + weighted tsvector) RRF-fused
-        with vector cosine similarity, plus a log-citation boost.
+        with vector cosine similarity, plus log-citation and capped recency boosts.
 
         Returns candidates already fused — the caller can RRF again against live sources.
         """
         candidate_pool = max(limit * 4, 50)
-        weighted_document_sql = """
-            setweight(to_tsvector('english', coalesce(title, '')), 'A') ||
-            setweight(to_tsvector('english', coalesce(tldr, '')), 'A') ||
-            setweight(to_tsvector('english', coalesce(summary_short, '')), 'A') ||
-            setweight(to_tsvector('english', coalesce(abstract, '')), 'B') ||
-            setweight(to_tsvector('english', coalesce(summary_eli5, '')), 'B') ||
-            setweight(to_tsvector('simple', coalesce(authors, '')), 'C') ||
-            setweight(to_tsvector('english', coalesce(search_document, '')), 'C')
-        """
         lexical_sql = text(
             f"""
-            SELECT
-                {self._SELECT_PAPER_COLUMNS},
-                ts_rank_cd({weighted_document_sql}, websearch_to_tsquery('english', :query)) AS lexical_score
-            FROM papers
-            WHERE
-                {weighted_document_sql} @@ websearch_to_tsquery('english', :query)
-                OR similarity(coalesce(title, '') || ' ' || coalesce(tldr, ''), :query) > 0.15
-            ORDER BY lexical_score DESC, citation_count DESC, published DESC
+            SELECT * FROM (
+                SELECT
+                    {self._SELECT_PAPER_COLUMNS},
+                    ts_rank_cd(search_tsv, websearch_to_tsquery('english', :query)) AS lexical_score,
+                    similarity(coalesce(title, '') || ' ' || coalesce(tldr, ''), :query) AS title_sim
+                FROM papers
+                WHERE
+                    search_tsv @@ websearch_to_tsquery('english', :query)
+                    OR similarity(coalesce(title, '') || ' ' || coalesce(tldr, ''), :query) > 0.15
+            ) scored
+            ORDER BY GREATEST(lexical_score * 5, title_sim) DESC,
+                     lexical_score DESC,
+                     title_sim DESC,
+                     citation_count DESC,
+                     published DESC
             LIMIT :candidate_pool
             """
         )
@@ -1370,9 +1397,11 @@ class SqlAlchemyPaperRepository(PaperRepository):
             )
             recency_boost = 0.0
             published = (row.get("published") or "")[:4]
-            if published.isdigit():
+            if published.isdigit() and recency_half_life_years > 0:
                 age_years = max(0, utcnow().year - int(published))
-                recency_boost = 0.02 * max(0.0, 1.0 - age_years / 10.0)
+                recency_boost = recency_boost_max * max(
+                    0.0, 1.0 - age_years / recency_half_life_years
+                )
             fused.append((score + citation_boost + recency_boost, row))
 
         fused.sort(key=lambda item: item[0], reverse=True)
@@ -2425,8 +2454,13 @@ class MemoryPaperRepository(PaperRepository):
         rrf_k: int = 60,
         citation_boost_scale: float = 0.003,
         citation_boost_max: float = 0.015,
+        recency_boost_max: float = 0.005,
+        recency_half_life_years: int = 10,
     ) -> list[SearchPaperResult]:
+        from math import log10
+
         query_lower = query.lower()
+        current_year = utcnow().year
         results: list[SearchPaperResult] = []
         for paper_id, paper in self.papers.items():
             score = 0.0
@@ -2443,6 +2477,22 @@ class MemoryPaperRepository(PaperRepository):
             if query_lower in self.search_documents.get(paper_id, "").lower():
                 score += 1.0
             if score > 0:
+                # Bake citation + recency boosts into the score so the
+                # caller (service.search) can treat MemoryPaperRepository
+                # the same way as SqlAlchemyPaperRepository — that is, can
+                # safely skip applying citation_boost again to local hits.
+                citation_boost = min(
+                    citation_boost_scale * log10(1 + (paper.citation_count or 0)),
+                    citation_boost_max,
+                )
+                recency_boost = 0.0
+                published = (paper.published or "")[:4]
+                if published.isdigit() and recency_half_life_years > 0:
+                    age_years = max(0, current_year - int(published))
+                    recency_boost = recency_boost_max * max(
+                        0.0, 1.0 - age_years / recency_half_life_years
+                    )
+                score += citation_boost + recency_boost
                 results.append(SearchPaperResult(**paper.model_dump(), score=score, source="local"))
         results.sort(key=lambda item: ((item.score or 0), item.citation_count, item.published), reverse=True)
         return results[:limit]

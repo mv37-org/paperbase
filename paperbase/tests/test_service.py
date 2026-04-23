@@ -1442,3 +1442,98 @@ def test_browser_google_start_redirects_back_to_return_to_when_not_configured(mo
     assert response.headers["location"] == "http://127.0.0.1:8080/?auth_error=google_not_configured"
 
     app.dependency_overrides.clear()
+
+
+def test_chat_search_tool_threads_rerank_flag_into_search_request():
+    """The paperbase_search tool must advertise a `rerank` input and pass it
+    through to SearchRequest so chat/MCP flows can use the deep-search path."""
+    from paperbase.service import ChatCitationRegistry
+
+    service = PaperbaseService(
+        settings=Settings(storage_backend="memory"),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+    )
+    service.init()
+
+    request = SendChatMessageRequest(content="find papers about attention", include_papers=True)
+    tools = service._chat_tool_definitions(request)
+    search_tool = next((t for t in tools if t["name"] == "paperbase_search"), None)
+    assert search_tool is not None, "paperbase_search tool should be defined"
+    assert "rerank" in search_tool["input_schema"]["properties"], (
+        "paperbase_search tool schema must advertise the rerank input"
+    )
+
+    captured: list[bool] = []
+
+    class RecordingService(type(service)):
+        pass
+
+    original_search = service.search
+
+    def recording_search(req):
+        captured.append(req.rerank)
+        return original_search(req)
+
+    service.search = recording_search  # type: ignore[method-assign]
+
+    registry = ChatCitationRegistry()
+    fake_user = type("U", (), {"user_id": "u1"})()
+
+    service._execute_chat_tool(
+        tool_name="paperbase_search",
+        tool_input={"query": "attention", "rerank": True},
+        user=fake_user,
+        citation_registry=registry,
+    )
+    assert captured == [True], "rerank=True from tool_input did not reach SearchRequest"
+
+    service._execute_chat_tool(
+        tool_name="paperbase_search",
+        tool_input={"query": "attention"},
+        user=fake_user,
+        citation_registry=registry,
+    )
+    assert captured == [True, False], "rerank default must be False when tool_input omits it"
+
+
+def test_memory_repository_search_local_bakes_in_citation_and_recency_boosts():
+    """MemoryPaperRepository.search_local must apply citation + recency boosts
+    into the returned score, mirroring SqlAlchemyPaperRepository. service.search
+    skips re-applying citation_boost to local hits, so memory mode would lose
+    the boost entirely without this."""
+    repo = MemoryPaperRepository()
+    matched_query = "shared rare niche topic"
+
+    def _meta(arxiv_id: str, *, cites: int, year: str) -> PaperMetadata:
+        return PaperMetadata(
+            arxiv_id=arxiv_id,
+            title=f"Paper about {matched_query}",
+            authors="A",
+            abstract="abstract text",
+            categories="cs.AI",
+            primary_category="cs.AI",
+            published=year,
+            updated=year,
+            pdf_url=f"https://example.test/{arxiv_id}.pdf",
+            html_url=f"https://example.test/{arxiv_id}",
+            citation_count=cites,
+            index_status="indexed",
+        )
+
+    repo.upsert_paper(_meta("low/0001", cites=0, year="2018-01-01"), search_document="", embedding=None)
+    repo.upsert_paper(_meta("high/0001", cites=10_000, year="2018-01-01"), search_document="", embedding=None)
+
+    no_boost = repo.search_local(
+        matched_query, limit=5, query_embedding=None, citation_boost_max=0.0, recency_boost_max=0.0
+    )
+    with_boost = repo.search_local(matched_query, limit=5, query_embedding=None)
+
+    no_boost_by_id = {r.arxiv_id: r.score or 0 for r in no_boost}
+    with_boost_by_id = {r.arxiv_id: r.score or 0 for r in with_boost}
+
+    # With boosts disabled, both papers have the same lexical-only score.
+    assert no_boost_by_id["low/0001"] == no_boost_by_id["high/0001"]
+    # With boosts enabled, the highly-cited paper picks up additional score.
+    assert with_boost_by_id["high/0001"] > with_boost_by_id["low/0001"]
+    assert with_boost_by_id["high/0001"] > no_boost_by_id["high/0001"]
