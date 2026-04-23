@@ -4968,7 +4968,10 @@ export default function App() {
                           ) : null}
                         </div>
                       </div>
-                      <label className="project-field" htmlFor="project-repo-branch-select">
+                      <label
+                        className="project-field project-branch-field"
+                        htmlFor="project-repo-branch-select"
+                      >
                         <span>Base branch</span>
                         <select
                           id="project-repo-branch-select"

@@ -3130,7 +3130,7 @@ textarea {
   display: grid;
   grid-template-columns: minmax(0, 7fr) minmax(140px, 3fr);
   gap: 10px;
-  align-items: end;
+  align-items: start;
 }
 
 .project-repo-selector-field {
@@ -3146,11 +3146,13 @@ textarea {
   width: 100%;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 12px;
   align-items: center;
   text-align: left;
   border: 1px solid rgba(27, 22, 17, 0.18);
   background: #ffffff;
   color: var(--text);
+  padding: 0 16px 0 10px;
 }
 
 .project-repo-trigger span {
@@ -3171,20 +3173,40 @@ textarea {
 }
 
 .project-repo-menu {
-  position: absolute;
-  z-index: 4;
-  top: calc(100% + 5px);
-  left: 0;
-  right: 0;
+  width: 100%;
+  margin-top: 5px;
   max-height: 220px;
   overflow: auto;
   display: grid;
   gap: 2px;
-  padding: 5px;
+  padding: 6px;
   border: 1px solid rgba(27, 22, 17, 0.14);
   border-radius: var(--radius);
-  background: var(--paper-strong);
-  box-shadow: 0 10px 30px rgba(16, 24, 40, 0.12);
+  background: #ffffff;
+  box-shadow: 0 16px 36px rgba(16, 24, 40, 0.16);
+  scrollbar-color: rgba(89, 105, 124, 0.36) transparent;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+}
+
+.project-repo-menu::-webkit-scrollbar {
+  width: 8px;
+}
+
+.project-repo-menu::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.project-repo-menu::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: rgba(89, 105, 124, 0.34);
+  background-clip: content-box;
+}
+
+.project-repo-menu::-webkit-scrollbar-thumb:hover {
+  background: rgba(89, 105, 124, 0.5);
+  background-clip: content-box;
 }
 
 .modal-view .stack .project-repo-option {
@@ -3204,7 +3226,7 @@ textarea {
 
 .project-repo-option:hover,
 .project-repo-option.active {
-  background: rgba(44, 106, 179, 0.1);
+  background: rgba(37, 99, 235, 0.08);
 }
 
 .project-repo-option span {
@@ -3237,7 +3259,26 @@ textarea {
   width: calc((100% - 10px) * 0.7);
 }
 
+.project-branch-field {
+  position: relative;
+}
+
+.project-branch-field::after {
+  content: "";
+  position: absolute;
+  right: 15px;
+  bottom: 12px;
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg);
+  color: var(--muted);
+  pointer-events: none;
+}
+
 .project-repo-branch-select {
+  appearance: none;
   min-height: 32px;
   height: 32px;
   width: 100%;
@@ -3245,7 +3286,7 @@ textarea {
   border: 1px solid rgba(27, 22, 17, 0.18);
   background: #ffffff;
   color: var(--text);
-  padding: 0 10px;
+  padding: 0 34px 0 10px;
   font-size: 13px;
 }
 
@@ -4316,7 +4357,7 @@ body.authenticated-theme-dark .stack input,
 body.authenticated-theme-dark textarea,
 body.authenticated-theme-dark .chat-empty-project-search,
 body.authenticated-theme-dark .project-description-input,
-body.authenticated-theme-dark .project-repo-trigger,
+body.authenticated-theme-dark .modal-view .stack .project-repo-trigger,
 body.authenticated-theme-dark .project-repo-branch-select,
 body.authenticated-theme-dark .modal-view .stack input,
 body.authenticated-theme-dark .modal-view .stack textarea {
@@ -4372,6 +4413,23 @@ body.authenticated-theme-dark .modal-flash.warning,
 body.authenticated-theme-dark .python-conflict-file-tab {
   border-color: rgba(223, 232, 244, 0.12);
   background: rgba(255, 255, 255, 0.04);
+}
+
+body.authenticated-theme-dark .project-repo-menu {
+  border-color: rgba(223, 232, 244, 0.16);
+  background: #121a24;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.42);
+  scrollbar-color: rgba(188, 202, 222, 0.34) transparent;
+}
+
+body.authenticated-theme-dark .project-repo-menu::-webkit-scrollbar-thumb {
+  background: rgba(188, 202, 222, 0.3);
+  background-clip: content-box;
+}
+
+body.authenticated-theme-dark .project-repo-menu::-webkit-scrollbar-thumb:hover {
+  background: rgba(188, 202, 222, 0.46);
+  background-clip: content-box;
 }
 
 body.authenticated-theme-dark .settings-appearance-option.selected {
