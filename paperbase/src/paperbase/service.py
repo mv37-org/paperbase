@@ -2814,6 +2814,112 @@ class PaperbaseService:
         )
         return {"papers_updated": papers_updated, "chunks_updated": chunks_updated}
 
+    def enqueue_enrich_missing_metadata_job(
+        self,
+        *,
+        limit: int = 50_000,
+        min_age_seconds: int = 3600,
+    ) -> JobResponse:
+        job = self.repository.create_job(
+            "enrich_missing_metadata",
+            {"limit": limit, "min_age_seconds": min_age_seconds},
+        )
+        logger.info(
+            "Created enrich_missing_metadata job",
+            extra={
+                "event": "jobs.enrich_missing_metadata.created",
+                "job_id": job.job_id,
+                "limit": limit,
+                "min_age_seconds": min_age_seconds,
+            },
+        )
+        return job
+
+    def enrich_missing_metadata(
+        self,
+        *,
+        limit: int,
+        min_age_seconds: int = 3600,
+        batch_size: int = 20,
+    ) -> dict[str, int]:
+        """Re-run Semantic Scholar enrichment for any paper that inline
+        enrichment left unfilled. Uses aggressive retry (default max_retries)
+        since this runs off the request path.
+
+        Returns a counts dict for observability: papers scanned, updated, and
+        batches that failed even after retries.
+        """
+        total_scanned = 0
+        total_updated = 0
+        total_batches_failed = 0
+        page_size = max(batch_size, min(limit, 256))
+        remaining = limit
+        after: PaperResponse | None = None
+
+        while remaining > 0:
+            batch = self.repository.list_papers_needing_enrichment(
+                limit=min(page_size, remaining),
+                min_age_seconds=min_age_seconds,
+                after=after,
+            )
+            if not batch:
+                break
+            total_scanned += len(batch)
+            # Make mutable PaperMetadata stand-ins so enrich_with_semantic_scholar
+            # can write back citation / tldr / s2_id in place.
+            metas = [
+                PaperMetadata(
+                    arxiv_id=paper.arxiv_id,
+                    title=paper.title or "",
+                    authors=paper.authors or "",
+                    abstract=paper.abstract or "",
+                    categories=paper.categories or "",
+                    primary_category=paper.primary_category or "",
+                    published=paper.published or "",
+                    updated=paper.updated or "",
+                    pdf_url=paper.pdf_url or "",
+                    html_url=paper.html_url or "",
+                )
+                for paper in batch
+            ]
+            outcome = sources.enrich_with_semantic_scholar(metas, batch_size=batch_size)
+            total_batches_failed += outcome.batches_failed
+            for paper, meta in zip(batch, metas):
+                if not (meta.semantic_scholar_id or (meta.citation_count and meta.citation_count > 0)):
+                    continue
+                # Re-use the shallow upsert path to persist enrichment —
+                # it writes citation_count / influential_citation_count /
+                # semantic_scholar_id / tldr without touching index artifacts.
+                self.repository.upsert_paper_shallow(meta)
+                total_updated += 1
+
+            after = batch[-1]
+            remaining -= len(batch)
+            logger.info(
+                "enrich_missing_metadata progress",
+                extra={
+                    "event": "enrich.progress",
+                    "scanned": total_scanned,
+                    "updated": total_updated,
+                    "batches_failed": total_batches_failed,
+                },
+            )
+
+        logger.info(
+            "Completed enrich_missing_metadata",
+            extra={
+                "event": "enrich.completed",
+                "scanned": total_scanned,
+                "updated": total_updated,
+                "batches_failed": total_batches_failed,
+            },
+        )
+        return {
+            "papers_scanned": total_scanned,
+            "papers_updated": total_updated,
+            "batches_failed": total_batches_failed,
+        }
+
     def enqueue_summarize_top_cited_job(self, *, limit: int = 500_000) -> JobResponse:
         job = self.repository.create_job("summarize_top_cited", {"limit": limit})
         logger.info(
@@ -2988,6 +3094,11 @@ class PaperbaseService:
                         job.payload.get("rewrite_existing", job.job_type == "reindex_embeddings")
                     ),
                 )
+            elif job.job_type == "enrich_missing_metadata":
+                self.enrich_missing_metadata(
+                    limit=int(job.payload.get("limit", 50_000)),
+                    min_age_seconds=int(job.payload.get("min_age_seconds", 3600)),
+                )
             else:
                 raise ValueError(f"Unsupported job type: {job.job_type}")
             self.repository.mark_job_completed(job.job_id)
@@ -3067,7 +3178,11 @@ class PaperbaseService:
         metadata = paper or sources.get_paper_details(arxiv_id)
         if metadata is None:
             raise HTTPException(status_code=404, detail=f"Paper {arxiv_id} not found on arXiv")
-        sources.enrich_with_semantic_scholar([metadata])
+        # Inline enrichment: single-shot (max_retries=0). A 429 or transient
+        # failure here leaves citation_count=0 rather than blocking ingestion;
+        # the enrich_missing_metadata backfill job will pick this paper up
+        # later with aggressive retry.
+        sources.enrich_with_semantic_scholar([metadata], max_retries=0)
         metadata.index_status = "indexing"
         stored = self.repository.upsert_paper(metadata, search_document=metadata.abstract)
         extraction = index_paper_artifacts(metadata)
