@@ -314,7 +314,7 @@ textarea {
 .chat-prompt-shell .mention-editor {
   display: flex;
   align-items: stretch;
-  min-height: 60px;
+  min-height: 80px;
   max-height: 450px;
   border-bottom: 1px solid rgba(27, 22, 17, 0.08);
   border-radius: 5px 5px 0 0;
@@ -325,7 +325,7 @@ textarea {
 .chat-prompt-shell .mention-editor-input {
   width: 100%;
   height: auto;
-  min-height: 60px;
+  min-height: 80px;
   max-height: 450px;
   box-sizing: border-box;
   overflow-x: hidden;
@@ -1509,7 +1509,7 @@ textarea::placeholder,
   min-height: 0;
   overflow: auto;
   overflow-x: hidden;
-  padding: 24px 24px 220px;
+  padding: 24px 24px 240px;
 }
 
 .chat-composer-fade {
@@ -2412,8 +2412,8 @@ textarea::placeholder,
 .chat-empty-state .chat-composer {
   display: block;
   width: min(
-    calc((var(--chat-fixed-composer-width) + 120px) * 0.75),
-    calc((100vw - var(--chat-sidebar-width) - var(--chat-drawer-width) - 48px) * 0.75)
+    calc((var(--chat-fixed-composer-width) + 120px) * 0.825),
+    calc((100vw - var(--chat-sidebar-width) - var(--chat-drawer-width) - 48px) * 0.825)
   );
   max-width: 100%;
   margin-top: 18px;
@@ -2424,8 +2424,8 @@ textarea::placeholder,
   flex-wrap: wrap;
   gap: 8px;
   width: min(
-    calc((var(--chat-fixed-composer-width) + 120px) * 0.75),
-    calc((100vw - var(--chat-sidebar-width) - var(--chat-drawer-width) - 48px) * 0.75)
+    calc((var(--chat-fixed-composer-width) + 120px) * 0.825),
+    calc((100vw - var(--chat-sidebar-width) - var(--chat-drawer-width) - 48px) * 0.825)
   );
   max-width: 100%;
   justify-content: center;
@@ -2518,6 +2518,11 @@ textarea::placeholder,
 .chat-empty-state .mention-editor-placeholder,
 .chat-empty-state .mention-editor-input [data-slate-placeholder="true"] {
   text-align: left;
+}
+
+.chat-empty-state .chat-prompt-shell .mention-editor,
+.chat-empty-state .chat-prompt-shell .mention-editor-input {
+  min-height: 85px;
 }
 
 .chat-empty-project-select:focus {
