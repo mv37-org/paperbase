@@ -301,6 +301,27 @@ def _needs_raw_transformers_path(model_name: str) -> bool:
     return any(token in lowered for token in _TRANSFORMERS_CLS_MODEL_TOKENS)
 
 
+# Model-aware query prefixes. Retrieval models often expect a model-specific
+# string prepended to the query (but not the document) at encode time — their
+# training recipe pairs the prefixed query against an un-prefixed passage.
+# Omitting the prefix leaves ~5–15 points of top-1 on the table for those
+# models. SPECTER2 and generic sentence-transformers models have no prefix.
+_QUERY_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("BAAI/bge-", "Represent this sentence for searching relevant passages: "),
+    ("intfloat/e5-", "query: "),
+    ("intfloat/multilingual-e5-", "query: "),
+)
+
+
+def _query_prefix_for_model(model_name: str | None) -> str:
+    if not model_name:
+        return ""
+    for prefix, query_prefix in _QUERY_PREFIXES:
+        if model_name.startswith(prefix):
+            return query_prefix
+    return ""
+
+
 class OptionalEmbeddingProvider:
     # Module-level flags so we log each distinct disabled-state exactly once,
     # rather than once per query.
@@ -311,6 +332,7 @@ class OptionalEmbeddingProvider:
     def __init__(self, settings: Settings) -> None:
         self._model_name = settings.embedding_model
         self._expected_dim = settings.embedding_dim
+        self._query_prefix = _query_prefix_for_model(self._model_name)
 
     def _model(self):
         if not self._model_name:
@@ -383,7 +405,11 @@ class OptionalEmbeddingProvider:
         return model
 
     def encode(self, text: str) -> list[float] | None:
-        batch = self.encode_batch([text])
+        # encode() is the query-side entry point (search_local passes the
+        # user's query here). Model-aware prefix is applied here, not in
+        # encode_batch, so document-side callers (encode_paper_batch) keep
+        # their un-prefixed input shape intact.
+        batch = self.encode_batch([self._query_prefix + text])
         if batch is None or not batch:
             return None
         return batch[0]

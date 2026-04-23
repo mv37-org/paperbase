@@ -111,7 +111,15 @@ class Settings(BaseSettings):
     latest_sync_days: int = 7
     latest_sync_limit_per_category: int = 100
     result_ttl_days: int = 7
-    embedding_model: str | None = Field(default="allenai/specter2_base")
+    # Default embedding model: BAAI/bge-base-en-v1.5. Swapped from SPECTER2
+    # after an end-to-end benchmark (see PR #19 follow-up eval + issue #22):
+    # SPECTER2 is trained for paper-to-paper similarity (citation prediction)
+    # and scores poorly on query-to-paper retrieval — pure vector-only top-1
+    # was 10/30 vs 27/30 for BGE-base on the same 30-paper benchmark.
+    # BGE-base matches SPECTER2's dim (768) and encoding throughput so the
+    # switch is a zero-cost quality lift. Existing deployments must run
+    # `paperbase-dev reindex-embeddings` after upgrading.
+    embedding_model: str | None = Field(default="BAAI/bge-base-en-v1.5")
     embedding_dim: int = 768
     rerank_model: str | None = None
     rerank_top_k: int = 50
