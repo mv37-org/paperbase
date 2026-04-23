@@ -14,19 +14,37 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import HTTPException
+from cryptography.fernet import InvalidToken
 
+from .browser_code import (
+    ModalExecutionError,
+    ModalPythonRunner,
+    GitHubProjectRepoManager,
+    GitHubSyncConflictError,
+    GitHubSyncError,
+)
 from .config import Settings, get_settings
 from .emailer import EmailSender, ResendEmailSender
-from .extractors import build_manifest, extract_uploaded_document, figure_index_payload, index_paper_artifacts, table_csv_bytes, table_index_payload, table_json_bytes
+from .extractors import (
+    build_manifest,
+    extract_uploaded_document,
+    figure_index_payload,
+    index_paper_artifacts,
+    table_csv_bytes,
+    table_index_payload,
+    table_json_bytes,
+)
 from .llm import AnthropicChatModelClient, ChatModelClient
 from .models import (
     BrowserSessionResponse,
     BrowserUser,
+    BrowserUserSettingsResponse,
     ChatCitation,
     ChatMessageResponse,
     ChatThreadListResponse,
     ChatThreadResponse,
     CreateChatThreadRequest,
+    MoveChatThreadProjectRequest,
     FileContentResponse,
     FileListResponse,
     FileObject,
@@ -40,9 +58,20 @@ from .models import (
     ManifestResponse,
     PaperMetadata,
     PaperResponse,
+    ProjectItemPageResponse,
+    ProjectRepoConflictDetail,
+    ProjectRepoConflictFile,
+    ProjectRepoSyncRequest,
+    ProjectRepoSyncResponse,
+    ProjectListResponse,
+    ProjectResponse,
+    ProjectSessionPageResponse,
+    PythonFileResponse,
     ResetPasswordRequest,
     ResultSetResponse,
+    RunPythonFileResponse,
     SaveAnthropicKeyRequest,
+    SaveModalCredentialsRequest,
     SearchPaperResult,
     SearchRequest,
     SearchResponse,
@@ -52,11 +81,22 @@ from .models import (
     SendChatMessageResponse,
     SignupRequest,
     TableResponse,
+    UpdateNotificationsRequest,
+    UpdateProjectRequest,
+    CreateProjectRequest,
     UploadListResponse,
     UploadedDocumentResponse,
 )
 from .repository import PaperRepository, build_repository
-from .security import SecretCipher, api_key_hint, hash_password, new_browser_token, password_needs_rehash, token_hash, verify_password
+from .security import (
+    SecretCipher,
+    api_key_hint,
+    hash_password,
+    new_browser_token,
+    password_needs_rehash,
+    token_hash,
+    verify_password,
+)
 from .summaries import build_paper_summaries
 from .storage import ObjectStore, build_object_store
 from . import sources
@@ -94,6 +134,7 @@ _FORCE_TOOL_QUERY_RE = re.compile(
 )
 
 _INLINE_SOURCE_ID_RE = re.compile(r"\[(S\d+)\]")
+_PYTHON_FILENAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _query_signals_recency(query: str) -> bool:
@@ -114,6 +155,28 @@ def _section_depth_for(section: Any) -> int:
     if _APPENDIX_TITLE_RE.search(title):
         return 3
     return 1
+
+
+def _normalize_python_filename(raw_filename: str) -> str:
+    value = (raw_filename or "").strip()
+    if not value:
+        raise HTTPException(status_code=422, detail="Python filename is required")
+    if "/" in value or "\\" in value or value.startswith(".") or " " in value:
+        raise HTTPException(status_code=422, detail="Use a valid Python filename")
+    if value.endswith(".py"):
+        stem = value[:-3]
+    elif "." in value:
+        raise HTTPException(status_code=422, detail="Only .py filenames are supported")
+    else:
+        stem = value
+    if not _PYTHON_FILENAME_RE.fullmatch(stem):
+        raise HTTPException(status_code=422, detail="Use a valid Python filename")
+    return f"{stem}.py"
+
+
+def _github_scope_allows_repo_write(scope: str) -> bool:
+    values = {part.strip() for part in (scope or "").split(",") if part.strip()}
+    return "repo" in values or "public_repo" in values
 
 
 def _stride_chunks(text: str, *, max_chars: int, overlap: int) -> list[str]:
@@ -220,9 +283,11 @@ class _TransformersCLSEmbedder:
         """Single-sequence tokenization path. Used for chunks (section text,
         figure captions, etc.) where there is no natural ``(title, body)``
         pair to feed."""
-        return self._run([(text, None) for text in texts],
-                         normalize_embeddings=normalize_embeddings,
-                         convert_to_numpy=convert_to_numpy)
+        return self._run(
+            [(text, None) for text in texts],
+            normalize_embeddings=normalize_embeddings,
+            convert_to_numpy=convert_to_numpy,
+        )
 
     def encode_pairs(
         self,
@@ -238,9 +303,7 @@ class _TransformersCLSEmbedder:
         ``body`` may be None / empty — in that case the call degrades
         gracefully to the single-sequence path for that one example.
         """
-        return self._run(pairs,
-                         normalize_embeddings=normalize_embeddings,
-                         convert_to_numpy=convert_to_numpy)
+        return self._run(pairs, normalize_embeddings=normalize_embeddings, convert_to_numpy=convert_to_numpy)
 
     def _run(
         self,
@@ -439,10 +502,7 @@ class OptionalEmbeddingProvider:
             else:
                 # sentence-transformers models take a single string; match
                 # what BGE / MPNet / all-MiniLM were trained on.
-                joined = [
-                    "\n\n".join(part for part in (title, body) if part)
-                    for title, body in pairs
-                ]
+                joined = ["\n\n".join(part for part in (title, body) if part) for title, body in pairs]
                 vectors = model.encode(
                     joined,
                     normalize_embeddings=True,
@@ -455,10 +515,7 @@ class OptionalEmbeddingProvider:
                 extra={"event": "embed.encode_failed", "error": str(exc)},
             )
             return None
-        return [
-            [float(v) for v in (vector.tolist() if hasattr(vector, "tolist") else vector)]
-            for vector in vectors
-        ]
+        return [[float(v) for v in (vector.tolist() if hasattr(vector, "tolist") else vector)] for vector in vectors]
 
 
 class OptionalReranker:
@@ -601,9 +658,6 @@ def _sanitize_inline_citations(answer: str, citations: list[ChatCitation]) -> st
         return match.group(0) if source_id in allowed_source_ids else ""
 
     sanitized = _INLINE_SOURCE_ID_RE.sub(_replace, answer)
-    sanitized = re.sub(r"\s{2,}", " ", sanitized)
-    sanitized = re.sub(r" +([,.;:!?])", r"\1", sanitized)
-    sanitized = re.sub(r"\n{3,}", "\n\n", sanitized)
     return sanitized.strip()
 
 
@@ -691,6 +745,7 @@ class PreparedChatGeneration:
     resolved_user: BrowserUser
     api_key_value: str | None
     using_free_tier: bool
+    api_key_state: str = "completed"
 
 
 class PaperbaseService:
@@ -702,6 +757,8 @@ class PaperbaseService:
         object_store: ObjectStore,
         email_sender: EmailSender | None = None,
         chat_model: ChatModelClient | None = None,
+        github_repo_manager: GitHubProjectRepoManager | None = None,
+        modal_runner: ModalPythonRunner | None = None,
     ) -> None:
         self.settings = settings
         self.repository = repository
@@ -711,12 +768,28 @@ class PaperbaseService:
         self.email_sender = email_sender or ResendEmailSender(settings)
         self.chat_model = chat_model or AnthropicChatModelClient(settings)
         self.secret_cipher = SecretCipher(settings)
+        self.github_repo_manager = github_repo_manager or GitHubProjectRepoManager()
+        self.modal_runner = modal_runner or ModalPythonRunner()
 
     def init(self) -> None:
         self.repository.init()
 
     def _remaining_free_responses(self, user: BrowserUser) -> int:
         return max(self.settings.free_chat_response_limit - user.free_responses_used, 0)
+
+    def _browser_user_settings_response(
+        self,
+        user: BrowserUser,
+        *,
+        anthropic_api_key_hint: str = "",
+    ) -> BrowserUserSettingsResponse:
+        settings = self.repository.get_browser_user_settings(user.user_id)  # type: ignore[attr-defined]
+        return settings.model_copy(
+            update={
+                "anthropic_api_key_hint": anthropic_api_key_hint,
+                "github_oauth_available": bool(self.settings.github_client_id and self.settings.github_client_secret),
+            }
+        )
 
     def _browser_session_response(self, user: BrowserUser | None) -> BrowserSessionResponse:
         if user is None:
@@ -727,6 +800,10 @@ class PaperbaseService:
             user=user,
             remaining_free_responses=self._remaining_free_responses(user),
             has_anthropic_api_key=api_key_record is not None,
+            settings=self._browser_user_settings_response(
+                user,
+                anthropic_api_key_hint=(api_key_record or {}).get("api_key_hint", ""),
+            ),
         )
 
     def register_browser_user(self, request: SignupRequest) -> tuple[BrowserSessionResponse, str]:
@@ -800,7 +877,9 @@ class PaperbaseService:
         self.repository.set_browser_user_password(user.user_id, hash_password(request.password))  # type: ignore[attr-defined]
         return {"status": "ok"}
 
-    def upsert_google_browser_user(self, *, google_subject: str, email: str, display_name: str) -> tuple[BrowserSessionResponse, str]:
+    def upsert_google_browser_user(
+        self, *, google_subject: str, email: str, display_name: str
+    ) -> tuple[BrowserSessionResponse, str]:
         email = _normalize_email(email)
         user = self.repository.get_browser_user_by_google_subject(google_subject)  # type: ignore[attr-defined]
         if user is None:
@@ -825,6 +904,79 @@ class PaperbaseService:
     def delete_user_anthropic_key(self, user: BrowserUser) -> BrowserSessionResponse:
         self.repository.delete_anthropic_api_key(user.user_id)  # type: ignore[attr-defined]
         return self._browser_session_response(user)
+
+    def save_user_modal_credentials(
+        self,
+        user: BrowserUser,
+        request: SaveModalCredentialsRequest,
+    ) -> BrowserSessionResponse:
+        self.repository.save_modal_credentials(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            encrypted_token_id=self.secret_cipher.encrypt(request.token_id.strip()),
+            encrypted_token_secret=self.secret_cipher.encrypt(request.token_secret.strip()),
+            token_id_hint=api_key_hint(request.token_id),
+        )
+        return self._browser_session_response(user)
+
+    def delete_user_modal_credentials(self, user: BrowserUser) -> BrowserSessionResponse:
+        self.repository.delete_modal_credentials(user.user_id)  # type: ignore[attr-defined]
+        return self._browser_session_response(user)
+
+    def update_user_notification_preferences(
+        self,
+        user: BrowserUser,
+        request: UpdateNotificationsRequest,
+    ) -> BrowserSessionResponse:
+        self.repository.set_weekly_papers_review_email(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            enabled=request.weekly_papers_review_email,
+        )
+        return self._browser_session_response(user)
+
+    def save_github_connection(
+        self,
+        user: BrowserUser,
+        *,
+        github_user_id: str,
+        github_login: str,
+        access_token: str,
+        scope: str,
+    ) -> BrowserSessionResponse:
+        self.repository.save_github_connection(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            github_user_id=github_user_id,
+            github_login=github_login,
+            encrypted_access_token=self.secret_cipher.encrypt(access_token.strip()),
+            scope=scope.strip(),
+        )
+        return self._browser_session_response(user)
+
+    def delete_github_connection(self, user: BrowserUser) -> BrowserSessionResponse:
+        self.repository.delete_github_connection(user.user_id)  # type: ignore[attr-defined]
+        return self._browser_session_response(user)
+
+    def _get_modal_credentials(self, user: BrowserUser) -> tuple[str, str]:
+        record = self.repository.get_modal_credentials_record(user.user_id)  # type: ignore[attr-defined]
+        if record is None:
+            raise HTTPException(status_code=409, detail="Add Modal credentials before running Python files")
+        return (
+            self.secret_cipher.decrypt(record["encrypted_token_id"]),
+            self.secret_cipher.decrypt(record["encrypted_token_secret"]),
+        )
+
+    def _get_github_connection(self, user: BrowserUser) -> dict[str, str]:
+        record = self.repository.get_github_connection_record(user.user_id)  # type: ignore[attr-defined]
+        if record is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Connect GitHub before creating or saving Python files",
+            )
+        if not _github_scope_allows_repo_write(record.get("scope", "")):
+            raise HTTPException(
+                status_code=409,
+                detail="Reconnect GitHub with repo access before creating or saving Python files",
+            )
+        return record
 
     def list_uploaded_documents(self, user: BrowserUser) -> UploadListResponse:
         documents = self.repository.list_uploaded_documents(user.user_id)  # type: ignore[attr-defined]
@@ -860,10 +1012,14 @@ class PaperbaseService:
         self.object_store.put_bytes(original_path, data, content_type=content_type)
         try:
             extraction = extract_uploaded_document(basename, data, content_type=content_type)
-            text_chunks: list[dict[str, str]] = [{"path": "text/full.md", "chunk_kind": "full_text", "content": extraction.text_markdown}]
+            text_chunks: list[dict[str, str]] = [
+                {"path": "text/full.md", "chunk_kind": "full_text", "content": extraction.text_markdown}
+            ]
             self.object_store.put_text(f"{prefix}/text/full.md", extraction.text_markdown, content_type="text/markdown")
             for section in extraction.sections:
-                self.object_store.put_text(f"{prefix}/sections/{section.slug}.md", section.markdown, content_type="text/markdown")
+                self.object_store.put_text(
+                    f"{prefix}/sections/{section.slug}.md", section.markdown, content_type="text/markdown"
+                )
                 text_chunks.append(
                     {
                         "path": f"sections/{section.slug}.md",
@@ -897,8 +1053,320 @@ class PaperbaseService:
     def list_chat_threads(self, user: BrowserUser) -> ChatThreadListResponse:
         return ChatThreadListResponse(threads=self.repository.list_chat_threads(user.user_id))  # type: ignore[attr-defined]
 
+    def list_projects(self, user: BrowserUser) -> ProjectListResponse:
+        self.repository.ensure_default_project(user.user_id)  # type: ignore[attr-defined]
+        return ProjectListResponse(projects=self.repository.list_projects(user.user_id))  # type: ignore[attr-defined]
+
+    def create_project(self, user: BrowserUser, request: CreateProjectRequest) -> ProjectResponse:
+        name = request.name.strip()
+        if not name:
+            raise HTTPException(status_code=422, detail="Project name is required")
+        return self.repository.create_project(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            name=name,
+            description=request.description.strip(),
+        )
+
+    def update_project(self, user: BrowserUser, project_id: str, request: UpdateProjectRequest) -> ProjectResponse:
+        name = request.name.strip()
+        if not name:
+            raise HTTPException(status_code=422, detail="Project name is required")
+        project = self.repository.update_project(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+            name=name,
+            description=request.description.strip(),
+        )
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        return project
+
+    def delete_project(self, user: BrowserUser, project_id: str) -> None:
+        project = self.repository.get_project(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        if project.is_default:
+            raise HTTPException(status_code=400, detail="Default project cannot be deleted")
+        deleted = self.repository.delete_project(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+    def list_project_chat_threads(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        *,
+        limit: int = 5,
+        offset: int = 0,
+    ) -> ProjectSessionPageResponse:
+        page = self.repository.list_project_chat_threads(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+            limit=limit,
+            offset=offset,
+        )
+        if page is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        return page
+
+    def list_project_items(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        *,
+        limit: int = 25,
+        offset: int = 0,
+    ) -> ProjectItemPageResponse:
+        page = self.repository.list_project_items(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+            limit=limit,
+            offset=offset,
+        )
+        if page is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        return page
+
+    def create_python_file(self, user: BrowserUser, project_id: str) -> PythonFileResponse:
+        self._get_github_connection(user)
+        project = self.repository.get_project(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        created = self.repository.create_python_file(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+            filename="something.py",
+            content="",
+        )
+        if created is None:
+            raise HTTPException(status_code=500, detail="Python file could not be created")
+        return created
+
+    def get_python_file(self, user: BrowserUser, file_id: str) -> PythonFileResponse:
+        python_file = self.repository.get_python_file(user_id=user.user_id, file_id=file_id)  # type: ignore[attr-defined]
+        if python_file is None:
+            raise HTTPException(status_code=404, detail="Python file not found")
+        return python_file
+
+    def update_python_file(
+        self,
+        user: BrowserUser,
+        file_id: str,
+        *,
+        filename: str | None,
+        content: str | None,
+    ) -> PythonFileResponse:
+        self._get_github_connection(user)
+        normalized_filename = _normalize_python_filename(filename) if filename is not None else None
+        python_file = self.repository.update_python_file(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            file_id=file_id,
+            filename=normalized_filename,
+            content=content,
+        )
+        if python_file is None:
+            raise HTTPException(status_code=404, detail="Python file not found")
+        return python_file
+
+    def get_project_repo_sync(self, user: BrowserUser, project_id: str) -> ProjectRepoSyncResponse:
+        sync = self.repository.get_project_repo_sync(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
+        if sync is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        return sync
+
+    def sync_project_repo(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        request: ProjectRepoSyncRequest,
+    ) -> ProjectRepoSyncResponse:
+        github = self._get_github_connection(user)
+        commit_message = request.commit_message.strip()
+        if not commit_message:
+            raise HTTPException(status_code=422, detail="Commit message is required")
+        if request.conflict_resolutions and not request.expected_remote_head_sha:
+            raise HTTPException(
+                status_code=422,
+                detail="Conflict resolutions require the latest remote head reference",
+            )
+        project = self.repository.get_project(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        python_files = self.repository.list_project_python_files(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+        )
+        if python_files is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        sync = self.repository.get_project_repo_sync(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
+        try:
+            access_token = self.secret_cipher.decrypt(github["encrypted_access_token"])
+            python_files_by_name = {python_file.filename: python_file for python_file in python_files}
+            for resolution in request.conflict_resolutions:
+                path = resolution.path.strip()
+                if path in {".paperbase", "notes/.gitkeep"}:
+                    continue
+                if not path.startswith("src/"):
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"Conflict path '{path}' cannot be resolved by Paperbase.",
+                    )
+                filename = path.removeprefix("src/")
+                python_file = python_files_by_name.get(filename)
+                if python_file is None:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"Conflict path '{path}' does not map to a project Python file.",
+                    )
+                updated = self.repository.update_python_file(  # type: ignore[attr-defined]
+                    user_id=user.user_id,
+                    file_id=python_file.file_id,
+                    filename=None,
+                    content=resolution.content,
+                )
+                if updated is None:
+                    raise HTTPException(status_code=404, detail="Python file not found")
+                python_files_by_name.pop(filename, None)
+                python_files_by_name[updated.filename] = updated
+            python_files = sorted(
+                python_files_by_name.values(),
+                key=lambda item: (item.updated_at, item.created_at),
+                reverse=True,
+            )
+            if sync is None or not sync.repo_exists:
+                repo_info = self.github_repo_manager.ensure_repo(
+                    access_token=access_token,
+                    owner_login=github["github_login"],
+                    project_name=project.name,
+                    project_id=project.project_id,
+                    description=f"Paperbase project: {project.name}",
+                )
+                repo_name = repo_info.repo_name
+                repo_url = repo_info.repo_url
+                default_branch = repo_info.default_branch or "main"
+            else:
+                repo_name = sync.github_repo_name
+                repo_url = sync.github_repo_url
+                default_branch = sync.default_branch or "main"
+            synced_at = utcnow()
+            author_name = (user.display_name or "").strip() or github["github_login"]
+            author_email = f"{github['github_login']}@users.noreply.github.com"
+            manifest = {
+                "schema_version": 1,
+                "project_id": project.project_id,
+                "project_name": project.name,
+                "custom_instructions": project.description or "",
+                "project_description": project.description or "",
+                "created_at": project.created_at.isoformat(),
+                "updated_at": project.updated_at.isoformat(),
+                "last_pushed_at": synced_at.isoformat(),
+                "author_name": author_name,
+                "author_email": author_email,
+                "github_login": github["github_login"],
+                "github_repo_name": repo_name,
+                "default_branch": default_branch,
+                "python_file_count": len(python_files),
+                "notes_enabled": False,
+                "paths": {
+                    "src": "src",
+                    "notes": "notes",
+                    "metadata": ".paperbase",
+                },
+            }
+            files_to_sync = {
+                ".paperbase": json.dumps(manifest, indent=2, sort_keys=True),
+                "notes/.gitkeep": "",
+                **{f"src/{python_file.filename}": python_file.content for python_file in python_files},
+            }
+            commit_info = self.github_repo_manager.sync_project_files(
+                access_token=access_token,
+                owner_login=github["github_login"],
+                repo_name=repo_name,
+                repo_url=repo_url,
+                default_branch=default_branch,
+                files=files_to_sync,
+                commit_message=commit_message,
+                author_name=author_name,
+                author_email=author_email,
+                base_commit_sha=sync.last_sync_commit_sha if sync and sync.last_sync_commit_sha else None,
+                expected_remote_head_sha=request.expected_remote_head_sha,
+            )
+        except GitHubSyncConflictError as exc:
+            detail = ProjectRepoConflictDetail(
+                message=str(exc),
+                project_id=project_id,
+                repo_exists=True,
+                github_repo_name=exc.repo_name,
+                github_repo_url=exc.repo_url,
+                default_branch=exc.default_branch,
+                base_commit_sha=exc.base_commit_sha,
+                remote_head_sha=exc.remote_head_sha,
+                conflicts=[
+                    ProjectRepoConflictFile(
+                        path=conflict.path,
+                        base_content=conflict.base_content,
+                        local_content=conflict.local_content,
+                        remote_content=conflict.remote_content,
+                    )
+                    for conflict in exc.conflicts
+                ],
+            )
+            raise HTTPException(status_code=409, detail=detail.model_dump()) from exc
+        except GitHubSyncError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+        saved = self.repository.save_project_repo_sync(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+            github_repo_name=commit_info.repo_name,
+            github_repo_url=commit_info.repo_url,
+            default_branch=commit_info.default_branch,
+            last_sync_commit_sha=commit_info.commit_sha,
+            last_sync_commit_url=commit_info.commit_url,
+            last_synced_at=synced_at,
+        )
+        if saved is None:
+            raise HTTPException(status_code=500, detail="Project repository metadata could not be saved")
+        return saved
+
+    def run_python_file(self, user: BrowserUser, file_id: str) -> RunPythonFileResponse:
+        python_file = self.get_python_file(user, file_id)
+        token_id, token_secret = self._get_modal_credentials(user)
+        try:
+            result = self.modal_runner.run(
+                token_id=token_id,
+                token_secret=token_secret,
+                code=python_file.content,
+            )
+        except ModalExecutionError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return RunPythonFileResponse(
+            file_id=python_file.file_id,
+            status=result.status,
+            stdout=result.stdout,
+            stderr=result.stderr,
+            exit_code=result.exit_code,
+            started_at=result.started_at,
+            finished_at=result.finished_at,
+        )
+
     def create_chat_thread(self, user: BrowserUser, request: CreateChatThreadRequest) -> ChatThreadResponse:
-        summary = self.repository.create_chat_thread(user_id=user.user_id, title=request.title.strip() or "New chat")  # type: ignore[attr-defined]
+        project: ProjectResponse | None = None
+        if request.project_id:
+            project = self.repository.get_project(user_id=user.user_id, project_id=request.project_id)  # type: ignore[attr-defined]
+            if project is None:
+                raise HTTPException(status_code=404, detail="Project not found")
+        else:
+            project = self.repository.get_default_project(user.user_id)  # type: ignore[attr-defined]
+            if project is None:
+                project = self.repository.ensure_default_project(user.user_id)  # type: ignore[attr-defined]
+        summary = self.repository.create_chat_thread(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            title=request.title.strip() or "New chat",
+            project_id=project.project_id,
+            project_name=project.name,
+            project_instructions=project.description.strip(),
+        )
         thread = self.repository.get_chat_thread(user_id=user.user_id, thread_id=summary.thread_id)  # type: ignore[attr-defined]
         if thread is None:
             raise HTTPException(status_code=500, detail="Chat thread could not be created")
@@ -910,13 +1378,49 @@ class PaperbaseService:
             raise HTTPException(status_code=404, detail="Chat thread not found")
         return thread
 
-    def _choose_anthropic_api_key(self, user: BrowserUser) -> tuple[str | None, bool]:
+    def move_chat_thread_to_project(
+        self,
+        user: BrowserUser,
+        thread_id: str,
+        request: MoveChatThreadProjectRequest,
+    ) -> ChatThreadResponse:
+        thread = self.get_chat_thread(user, thread_id)
+        if thread.messages:
+            raise HTTPException(status_code=409, detail="Only empty chats can be moved between projects")
+        project = self.repository.get_project(user_id=user.user_id, project_id=request.project_id)  # type: ignore[attr-defined]
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        moved = self.repository.move_chat_thread_to_project(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            thread_id=thread_id,
+            project_id=project.project_id,
+            project_name=project.name,
+            project_instructions=project.description.strip(),
+        )
+        if moved is None:
+            raise HTTPException(status_code=404, detail="Chat thread not found")
+        return moved
+
+    def delete_chat_thread(self, user: BrowserUser, thread_id: str) -> None:
+        deleted = self.repository.delete_chat_thread(user_id=user.user_id, thread_id=thread_id)  # type: ignore[attr-defined]
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Chat thread not found")
+
+    def _choose_anthropic_api_key(self, user: BrowserUser) -> tuple[str | None, bool, str]:
         user_key_record = self.repository.get_anthropic_api_key_record(user.user_id)  # type: ignore[attr-defined]
         if user.free_responses_used < self.settings.free_chat_response_limit and self.settings.anthropic_api_key:
-            return self.settings.anthropic_api_key, True
+            return self.settings.anthropic_api_key, True, "completed"
         if user_key_record:
-            return self.secret_cipher.decrypt(user_key_record["encrypted_api_key"]), False
-        return None, False
+            try:
+                return self.secret_cipher.decrypt(user_key_record["encrypted_api_key"]), False, "completed"
+            except InvalidToken:
+                logger.warning(
+                    "Saved Anthropic API key could not be decrypted; deleting stale record",
+                    extra={"event": "browser.auth.anthropic_key.invalid", "user_id": user.user_id},
+                )
+                self.repository.delete_anthropic_api_key(user.user_id)  # type: ignore[attr-defined]
+                return None, False, "api_key_invalid"
+        return None, False, "api_key_required"
 
     def _prepare_chat_generation(
         self,
@@ -935,16 +1439,29 @@ class PaperbaseService:
         if thread.title == "New chat":
             self.repository.rename_chat_thread(thread_id=thread_id, title=content[:60])  # type: ignore[attr-defined]
         resolved_user = self.repository.get_browser_user_by_id(user.user_id) or user  # type: ignore[attr-defined]
-        api_key_value, using_free_tier = self._choose_anthropic_api_key(resolved_user)
+        api_key_value, using_free_tier, api_key_state = self._choose_anthropic_api_key(resolved_user)
         return PreparedChatGeneration(
             thread=thread,
             user_message=user_message,
             resolved_user=resolved_user,
             api_key_value=api_key_value,
             using_free_tier=using_free_tier,
+            api_key_state=api_key_state,
         )
 
-    def _chat_tool_system_prompt(self) -> str:
+    def _project_prompt_suffix(self, thread: ChatThreadResponse) -> str:
+        instructions = thread.project_instructions.strip()
+        if not instructions:
+            return ""
+        project_name = thread.project_name.strip()
+        label = f" for the project '{project_name}'" if project_name else ""
+        return (
+            f"\n\nAdditional instructions{label}:\n"
+            f"{instructions}\n"
+            "Treat these instructions as active context for this session."
+        )
+
+    def _chat_tool_system_prompt(self, thread: ChatThreadResponse) -> str:
         return (
             "You are Paperbase Chat. You have access to Paperbase research tools that can search papers, sections, files, figures, tables, references, related papers, and the user's uploaded documents. "
             "Use tools aggressively for research-oriented turns. If the user asks about papers, references, findings, comparisons, methods, figures, tables, benchmarks, uploaded notes, or asks for links, do not rely on parametric memory when Paperbase tools can answer. "
@@ -954,9 +1471,10 @@ class PaperbaseService:
             "When a final answer should mention papers, recommendations, or reading lists, gather metadata rich enough to include direct paper links such as html_url or pdf_url when available. "
             "On turns where you still need tools, emit tool calls only and do not write any user-facing narrative text. "
             "Once the tool results are sufficient, stop calling tools. The final answer will be generated in a separate step."
+            + self._project_prompt_suffix(thread)
         )
 
-    def _chat_answer_system_prompt(self, *, has_evidence_sources: bool) -> str:
+    def _chat_answer_system_prompt(self, *, thread: ChatThreadResponse, has_evidence_sources: bool) -> str:
         if not has_evidence_sources:
             return (
                 "You are Paperbase Chat. Respond naturally and helpfully in GitHub-flavored markdown. "
@@ -964,6 +1482,7 @@ class PaperbaseService:
                 "and do not bring up papers or research context unless the user explicitly asks for them. "
                 "Treat any citations that appeared in earlier turns as historical context only, not as active sources for this reply. "
                 "For casual turns such as greetings or small talk, answer briefly and conversationally."
+                + self._project_prompt_suffix(thread)
             )
         return (
             "You are Paperbase Chat. Answer using the gathered Paperbase tool results when possible. "
@@ -972,6 +1491,7 @@ class PaperbaseService:
             "If the user asked for related reading, recommendations, or references, prefer a compact bullet list with paper title plus link before any longer discussion. "
             "Only cite source ids inline like [S1] when those ids came from evidence-bearing tool results such as section hits, file reads, figure captions, tables, or uploaded-document excerpts. "
             "Do not cite broad search results or metadata-only results. If the gathered sources are insufficient, say so plainly."
+            + self._project_prompt_suffix(thread)
         )
 
     def _chat_messages(self, prepared: PreparedChatGeneration) -> list[dict[str, Any]]:
@@ -1468,6 +1988,77 @@ class PaperbaseService:
 
         raise ValueError(f"Unknown tool: {tool_name}")
 
+    def _chat_tool_activity_label(self, *, tool_name: str, tool_input: dict[str, Any]) -> str:
+        def detail(value: Any, *, limit: int = 56) -> str | None:
+            text = str(value or "").strip()
+            if not text:
+                return None
+            if len(text) > limit:
+                return f"{text[: limit - 1].rstrip()}…"
+            return text
+
+        query = detail(tool_input.get("query"))
+        path = detail(tool_input.get("path"))
+        pattern = detail(tool_input.get("pattern"))
+        figure_id = detail(tool_input.get("figure_id"))
+        table_id = detail(tool_input.get("table_id"))
+
+        if tool_name == "paperbase_search":
+            return f'paper search for "{query}"' if query else "paper search"
+        if tool_name == "paperbase_search_sections":
+            return f'section search for "{query}"' if query else "section search"
+        if tool_name == "paperbase_get_results":
+            return "result lookup"
+        if tool_name == "paperbase_grep_results":
+            return f'result filtering for "{pattern}"' if pattern else "result filtering"
+        if tool_name == "paperbase_get_paper":
+            return "paper lookup"
+        if tool_name == "paperbase_list_files":
+            return "file listing"
+        if tool_name == "paperbase_read_file":
+            return f'file read for "{path}"' if path else "file read"
+        if tool_name == "paperbase_get_figure":
+            return f'figure lookup for "{figure_id}"' if figure_id else "figure lookup"
+        if tool_name == "paperbase_get_table":
+            return f'table lookup for "{table_id}"' if table_id else "table lookup"
+        if tool_name == "paperbase_get_related_papers":
+            return "related-paper lookup"
+        if tool_name == "paperbase_get_references":
+            return "reference lookup"
+        if tool_name == "paperbase_list_uploaded_documents":
+            return "upload listing"
+        if tool_name == "paperbase_search_uploaded_sections":
+            return f'uploaded-note search for "{query}"' if query else "uploaded-note search"
+        return "tool call"
+
+    def _run_single_chat_tool(
+        self,
+        *,
+        index: int,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        user: BrowserUser,
+        citation_registry: ChatCitationRegistry,
+    ) -> tuple[dict[str, Any], bool]:
+        if index >= _CHAT_TOOL_MAX_CALLS_PER_ROUND:
+            return {"error": "Too many tool calls requested in one round"}, True
+        try:
+            payload = self._execute_chat_tool(
+                tool_name=tool_name,
+                tool_input=tool_input,
+                user=user,
+                citation_registry=citation_registry,
+            )
+            return payload, False
+        except HTTPException as exc:
+            return {"error": str(exc.detail)}, True
+        except Exception as exc:
+            logger.exception(
+                "Chat tool execution failed",
+                extra={"event": "chat.tool.failed", "tool_name": tool_name},
+            )
+            return {"error": str(exc) or "Tool execution failed"}, True
+
     def _tool_result_blocks(
         self,
         *,
@@ -1480,28 +2071,13 @@ class PaperbaseService:
             tool_use_id = str(tool_use.get("id") or "").strip()
             if not tool_use_id:
                 continue
-            if index >= _CHAT_TOOL_MAX_CALLS_PER_ROUND:
-                payload: dict[str, Any] = {"error": "Too many tool calls requested in one round"}
-                is_error = True
-            else:
-                try:
-                    payload = self._execute_chat_tool(
-                        tool_name=str(tool_use.get("name") or "").strip(),
-                        tool_input=tool_use.get("input") if isinstance(tool_use.get("input"), dict) else {},
-                        user=user,
-                        citation_registry=citation_registry,
-                    )
-                    is_error = False
-                except HTTPException as exc:
-                    payload = {"error": str(exc.detail)}
-                    is_error = True
-                except Exception as exc:
-                    logger.exception(
-                        "Chat tool execution failed",
-                        extra={"event": "chat.tool.failed", "tool_name": tool_use.get("name")},
-                    )
-                    payload = {"error": str(exc) or "Tool execution failed"}
-                    is_error = True
+            payload, is_error = self._run_single_chat_tool(
+                index=index,
+                tool_name=str(tool_use.get("name") or "").strip(),
+                tool_input=tool_use.get("input") if isinstance(tool_use.get("input"), dict) else {},
+                user=user,
+                citation_registry=citation_registry,
+            )
             block = {
                 "type": "tool_result",
                 "tool_use_id": tool_use_id,
@@ -1531,15 +2107,11 @@ class PaperbaseService:
             response = self.chat_model.create_message(
                 api_key=prepared.api_key_value or "",
                 messages=messages,
-                system_prompt=self._chat_tool_system_prompt(),
+                system_prompt=self._chat_tool_system_prompt(prepared.thread),
                 tools=tools,
                 tool_choice=tool_choice,
             )
-            assistant_content = [
-                block
-                for block in (response.get("content") or [])
-                if isinstance(block, dict)
-            ]
+            assistant_content = [block for block in (response.get("content") or []) if isinstance(block, dict)]
             tool_uses = [block for block in assistant_content if block.get("type") == "tool_use"]
             if not tool_uses:
                 break
@@ -1556,12 +2128,84 @@ class PaperbaseService:
             )
         return messages, citation_registry
 
+    def _run_chat_tool_rounds_stream(
+        self,
+        *,
+        prepared: PreparedChatGeneration,
+        user: BrowserUser,
+        request: SendChatMessageRequest,
+    ) -> Iterator[tuple[str, dict[str, Any]]]:
+        messages = self._chat_messages(prepared)
+        citation_registry = ChatCitationRegistry()
+        tools = self._chat_tool_definitions(request)
+        if not tools:
+            return messages, citation_registry
+
+        force_first_tool = _should_force_chat_tool_use(prepared.user_message.content_markdown, request)
+        for round_index in range(_CHAT_TOOL_MAX_ROUNDS):
+            tool_choice = {"type": "any"} if round_index == 0 and force_first_tool else {"type": "auto"}
+            response = self.chat_model.create_message(
+                api_key=prepared.api_key_value or "",
+                messages=messages,
+                system_prompt=self._chat_tool_system_prompt(prepared.thread),
+                tools=tools,
+                tool_choice=tool_choice,
+            )
+            assistant_content = [block for block in (response.get("content") or []) if isinstance(block, dict)]
+            tool_uses = [block for block in assistant_content if block.get("type") == "tool_use"]
+            if not tool_uses:
+                break
+            messages.append({"role": "assistant", "content": assistant_content})
+            blocks: list[dict[str, Any]] = []
+            for index, tool_use in enumerate(tool_uses):
+                tool_use_id = str(tool_use.get("id") or "").strip()
+                if not tool_use_id:
+                    continue
+                tool_name = str(tool_use.get("name") or "").strip()
+                tool_input = tool_use.get("input") if isinstance(tool_use.get("input"), dict) else {}
+                label = self._chat_tool_activity_label(tool_name=tool_name, tool_input=tool_input)
+                yield (
+                    "tool_start",
+                    {
+                        "tool_call_id": tool_use_id,
+                        "tool_name": tool_name,
+                        "label": label,
+                    },
+                )
+                payload, is_error = self._run_single_chat_tool(
+                    index=index,
+                    tool_name=tool_name,
+                    tool_input=tool_input,
+                    user=user,
+                    citation_registry=citation_registry,
+                )
+                yield (
+                    "tool_done",
+                    {
+                        "tool_call_id": tool_use_id,
+                        "tool_name": tool_name,
+                        "label": label,
+                        "is_error": is_error,
+                    },
+                )
+                block = {
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": json.dumps(payload, ensure_ascii=False),
+                }
+                if is_error:
+                    block["is_error"] = True
+                blocks.append(block)
+            messages.append({"role": "user", "content": blocks})
+        return messages, citation_registry
+
     def _api_key_required_response(
         self,
         *,
         user: BrowserUser,
         thread_id: str,
         resolved_user: BrowserUser,
+        state: str = "api_key_required",
     ) -> SendChatMessageResponse:
         refreshed = self.get_chat_thread(user, thread_id)
         return SendChatMessageResponse(
@@ -1569,13 +2213,20 @@ class PaperbaseService:
             assistant_message=None,
             remaining_free_responses=self._remaining_free_responses(resolved_user),
             has_anthropic_api_key=self.repository.get_anthropic_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
-            state="api_key_required",
+            state=state,
         )
 
-    def send_chat_message(self, user: BrowserUser, thread_id: str, request: SendChatMessageRequest) -> SendChatMessageResponse:
+    def send_chat_message(
+        self, user: BrowserUser, thread_id: str, request: SendChatMessageRequest
+    ) -> SendChatMessageResponse:
         prepared = self._prepare_chat_generation(user=user, thread_id=thread_id, request=request)
         if not prepared.api_key_value:
-            return self._api_key_required_response(user=user, thread_id=thread_id, resolved_user=prepared.resolved_user)
+            return self._api_key_required_response(
+                user=user,
+                thread_id=thread_id,
+                resolved_user=prepared.resolved_user,
+                state=prepared.api_key_state,
+            )
 
         conversation_messages, citation_registry = self._run_chat_tool_rounds(
             prepared=prepared,
@@ -1586,7 +2237,10 @@ class PaperbaseService:
         answer_payload = self.chat_model.create_message(
             api_key=prepared.api_key_value,
             messages=conversation_messages,
-            system_prompt=self._chat_answer_system_prompt(has_evidence_sources=bool(current_turn_citations)),
+            system_prompt=self._chat_answer_system_prompt(
+                thread=prepared.thread,
+                has_evidence_sources=bool(current_turn_citations),
+            ),
         )
         answer = _sanitize_inline_citations(_extract_message_text(answer_payload), current_turn_citations)
         assistant_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
@@ -1615,14 +2269,29 @@ class PaperbaseService:
     ) -> Iterator[tuple[str, dict[str, Any]]]:
         prepared = self._prepare_chat_generation(user=user, thread_id=thread_id, request=request)
         if not prepared.api_key_value:
-            yield ("api_key_required", self._api_key_required_response(user=user, thread_id=thread_id, resolved_user=prepared.resolved_user).model_dump(mode="json"))
+            yield (
+                "api_key_required",
+                self._api_key_required_response(
+                    user=user,
+                    thread_id=thread_id,
+                    resolved_user=prepared.resolved_user,
+                    state=prepared.api_key_state,
+                ).model_dump(mode="json"),
+            )
             return
 
-        conversation_messages, citation_registry = self._run_chat_tool_rounds(
+        tool_rounds = self._run_chat_tool_rounds_stream(
             prepared=prepared,
             user=user,
             request=request,
         )
+        while True:
+            try:
+                event_name, payload = next(tool_rounds)
+            except StopIteration as stop:
+                conversation_messages, citation_registry = stop.value
+                break
+            yield (event_name, payload)
         current_turn_citations = citation_registry.citations
         assistant_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
             thread_id=thread_id,
@@ -1638,7 +2307,10 @@ class PaperbaseService:
             for delta in self.chat_model.stream_message(
                 api_key=prepared.api_key_value,
                 messages=conversation_messages,
-                system_prompt=self._chat_answer_system_prompt(has_evidence_sources=bool(current_turn_citations)),
+                system_prompt=self._chat_answer_system_prompt(
+                    thread=prepared.thread,
+                    has_evidence_sources=bool(current_turn_citations),
+                ),
             ):
                 if not delta:
                     continue
@@ -1652,7 +2324,11 @@ class PaperbaseService:
             )
             logger.exception(
                 "Streaming chat request failed",
-                extra={"event": "chat.model.stream.failed", "thread_id": thread_id, "message_id": assistant_message.message_id},
+                extra={
+                    "event": "chat.model.stream.failed",
+                    "thread_id": thread_id,
+                    "message_id": assistant_message.message_id,
+                },
             )
             yield (
                 "error",
@@ -1746,10 +2422,7 @@ class PaperbaseService:
             # (title, body) pair contract as index_arxiv_paper so the
             # reindex path produces vectors in the same space SPECTER2 was
             # trained on — summary_short is intentionally excluded.
-            pairs = [
-                (paper.title or "", paper.tldr or paper.abstract or "")
-                for paper in batch
-            ]
+            pairs = [(paper.title or "", paper.tldr or paper.abstract or "") for paper in batch]
             vectors = self.embeddings.encode_paper_batch(pairs)
             if vectors is not None and len(vectors) == len(batch):
                 for paper, vector in zip(batch, vectors):
@@ -1951,7 +2624,9 @@ class PaperbaseService:
                 self.sync_latest_papers(
                     days=int(job.payload.get("days", self.settings.latest_sync_days)),
                     categories=list(job.payload.get("categories", self.settings.arxiv_categories)),
-                    limit_per_category=int(job.payload.get("limit_per_category", self.settings.latest_sync_limit_per_category)),
+                    limit_per_category=int(
+                        job.payload.get("limit_per_category", self.settings.latest_sync_limit_per_category)
+                    ),
                 )
             elif job.job_type == "summarize_top_cited":
                 self.summarize_top_cited(limit=int(job.payload.get("limit", 500_000)))
@@ -2013,7 +2688,9 @@ class PaperbaseService:
         )
         return indexed
 
-    def index_arxiv_paper(self, arxiv_id: str, *, paper: PaperMetadata | None = None, force: bool = False) -> PaperResponse:
+    def index_arxiv_paper(
+        self, arxiv_id: str, *, paper: PaperMetadata | None = None, force: bool = False
+    ) -> PaperResponse:
         existing = self.repository.get_paper_by_arxiv_id(arxiv_id)
         if existing and existing.index_status == "indexed" and not force:
             logger.info(
@@ -2057,17 +2734,17 @@ class PaperbaseService:
         # search_document for lexical scoring and lives on chunks.
         paper_title = metadata.title or ""
         paper_body = metadata.tldr or metadata.abstract or ""
-        paper_embedding = (
-            self.embeddings.encode_paper(paper_title, paper_body)
-            if (paper_title or paper_body)
-            else None
-        )
+        paper_embedding = self.embeddings.encode_paper(paper_title, paper_body) if (paper_title or paper_body) else None
 
         stored = self.repository.upsert_paper(metadata, search_document=search_document, embedding=paper_embedding)
 
         prefix = f"papers/{stored.paper_id}"
         self.object_store.delete_prefix(prefix)
-        self.object_store.put_text(f"{prefix}/meta.json", json.dumps(metadata.model_dump(mode='json'), indent=2), content_type="application/json")
+        self.object_store.put_text(
+            f"{prefix}/meta.json",
+            json.dumps(metadata.model_dump(mode="json"), indent=2),
+            content_type="application/json",
+        )
         self.object_store.put_text(f"{prefix}/text/full.md", extraction.text_markdown, content_type="text/markdown")
 
         text_chunks: list[dict[str, Any]] = [
@@ -2155,7 +2832,11 @@ class PaperbaseService:
         # sections/tables stay focused.
         chunk_texts: list[str] = []
         for chunk in text_chunks:
-            cap = 4000 if chunk["chunk_kind"] == "full_text" else self.settings.chunk_max_chars + self.settings.chunk_overlap_chars
+            cap = (
+                4000
+                if chunk["chunk_kind"] == "full_text"
+                else self.settings.chunk_max_chars + self.settings.chunk_overlap_chars
+            )
             chunk_texts.append((chunk["content"] or "")[:cap])
         chunk_embeddings = self.embeddings.encode_batch(chunk_texts)
         if chunk_embeddings is not None and len(chunk_embeddings) == len(text_chunks):
@@ -2219,7 +2900,9 @@ class PaperbaseService:
         s2_results: list[PaperMetadata] = []
         if request.include_live_sources:
             try:
-                arxiv_results = sources.search_arxiv(request.query, max_results=request.limit, category=request.category)
+                arxiv_results = sources.search_arxiv(
+                    request.query, max_results=request.limit, category=request.category
+                )
             except Exception as exc:
                 logger.warning("arxiv live search failed", extra={"event": "search.arxiv_failed", "error": str(exc)})
             try:
@@ -2253,7 +2936,9 @@ class PaperbaseService:
         for rank, paper in enumerate(s2_results):
             stored = self.repository.upsert_paper_shallow(paper)
             pid = stored.paper_id
-            candidates.setdefault(pid, SearchPaperResult(**stored.model_dump(), source="live-s2", tldr=paper.tldr or None))
+            candidates.setdefault(
+                pid, SearchPaperResult(**stored.model_dump(), source="live-s2", tldr=paper.tldr or None)
+            )
             rrf[pid] = rrf.get(pid, 0.0) + live_weight / (k + rank)
 
         from math import log10
@@ -2407,7 +3092,7 @@ class PaperbaseService:
         prefix = f"papers/{paper_id}/"
         objects = self.object_store.list_prefix(prefix)
         files = [
-            FileObject(path=item.path[len(prefix):], size=item.size, content_type=item.content_type)
+            FileObject(path=item.path[len(prefix) :], size=item.size, content_type=item.content_type)
             for item in objects
         ]
         return FileListResponse(paper_id=paper_id, files=files)
@@ -2514,7 +3199,11 @@ class PaperbaseService:
     def probe_integrations(self) -> IntegrationProbeResponse:
         checked_at = utcnow()
         database_backend = "memory" if self.settings.database_url.startswith("memory://") else "sqlalchemy"
-        database_target = "memory://" if database_backend == "memory" else self.settings.database_url.split(":", 1)[0].split("+", 1)[0]
+        database_target = (
+            "memory://"
+            if database_backend == "memory"
+            else self.settings.database_url.split(":", 1)[0].split("+", 1)[0]
+        )
         try:
             database = self.repository.probe()
         except Exception as exc:

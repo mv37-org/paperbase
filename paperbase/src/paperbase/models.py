@@ -186,11 +186,22 @@ class BrowserUser(BaseModel):
     free_responses_used: int = 0
 
 
+class BrowserUserSettingsResponse(BaseModel):
+    anthropic_api_key_hint: str = ""
+    has_modal_credentials: bool = False
+    modal_token_id_hint: str = ""
+    has_github_connection: bool = False
+    github_login: str = ""
+    github_oauth_available: bool = False
+    weekly_papers_review_email: bool = False
+
+
 class BrowserSessionResponse(BaseModel):
     authenticated: bool
     user: BrowserUser | None = None
     remaining_free_responses: int = 0
     has_anthropic_api_key: bool = False
+    settings: BrowserUserSettingsResponse = Field(default_factory=BrowserUserSettingsResponse)
     csrf_token: str | None = None
 
 
@@ -216,6 +227,15 @@ class ResetPasswordRequest(BaseModel):
 
 class SaveAnthropicKeyRequest(BaseModel):
     api_key: str = Field(min_length=8)
+
+
+class SaveModalCredentialsRequest(BaseModel):
+    token_id: str = Field(min_length=4)
+    token_secret: str = Field(min_length=8)
+
+
+class UpdateNotificationsRequest(BaseModel):
+    weekly_papers_review_email: bool
 
 
 class UploadedDocumentResponse(BaseModel):
@@ -267,6 +287,7 @@ class ChatMessageResponse(BaseModel):
 
 class ChatThreadSummary(BaseModel):
     thread_id: str
+    project_id: str
     title: str
     created_at: datetime
     updated_at: datetime
@@ -275,6 +296,9 @@ class ChatThreadSummary(BaseModel):
 
 class ChatThreadResponse(BaseModel):
     thread_id: str
+    project_id: str
+    project_name: str = ""
+    project_instructions: str = ""
     title: str
     created_at: datetime
     updated_at: datetime
@@ -283,6 +307,139 @@ class ChatThreadResponse(BaseModel):
 
 class CreateChatThreadRequest(BaseModel):
     title: str = ""
+    project_id: str | None = None
+
+
+class MoveChatThreadProjectRequest(BaseModel):
+    project_id: str = Field(min_length=1)
+
+
+class ProjectSummary(BaseModel):
+    project_id: str
+    name: str
+    description: str = ""
+    is_default: bool = False
+    session_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProjectResponse(ProjectSummary):
+    pass
+
+
+class CreateProjectRequest(BaseModel):
+    name: str = Field(min_length=1)
+    description: str = ""
+
+
+class UpdateProjectRequest(BaseModel):
+    name: str = Field(min_length=1)
+    description: str = ""
+
+
+class ProjectListResponse(BaseModel):
+    projects: list[ProjectSummary] = Field(default_factory=list)
+
+
+class ProjectSessionPageResponse(BaseModel):
+    project_id: str
+    threads: list[ChatThreadSummary] = Field(default_factory=list)
+    offset: int = 0
+    limit: int = 0
+    total_count: int = 0
+    has_more: bool = False
+
+
+class PythonFileSummary(BaseModel):
+    file_id: str
+    project_id: str
+    filename: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class PythonFileResponse(PythonFileSummary):
+    content: str = ""
+
+
+class UpdatePythonFileRequest(BaseModel):
+    filename: str | None = None
+    content: str | None = None
+
+
+class ProjectItemSummary(BaseModel):
+    item_id: str
+    item_kind: str
+    project_id: str
+    title: str
+    created_at: datetime
+    updated_at: datetime
+    thread_id: str | None = None
+    file_id: str | None = None
+    last_message_preview: str = ""
+    filename: str = ""
+
+
+class ProjectItemPageResponse(BaseModel):
+    project_id: str
+    items: list[ProjectItemSummary] = Field(default_factory=list)
+    offset: int = 0
+    limit: int = 0
+    total_count: int = 0
+    has_more: bool = False
+
+
+class RunPythonFileResponse(BaseModel):
+    file_id: str
+    status: str
+    stdout: str = ""
+    stderr: str = ""
+    exit_code: int = 0
+    started_at: datetime
+    finished_at: datetime
+
+
+class ProjectRepoSyncRequest(BaseModel):
+    commit_message: str = Field(min_length=1)
+    expected_remote_head_sha: str | None = None
+    conflict_resolutions: list["ProjectRepoConflictResolution"] = Field(default_factory=list)
+
+
+class ProjectRepoConflictResolution(BaseModel):
+    path: str = Field(min_length=1)
+    content: str = ""
+
+
+class ProjectRepoConflictFile(BaseModel):
+    path: str
+    base_content: str = ""
+    local_content: str = ""
+    remote_content: str = ""
+
+
+class ProjectRepoConflictDetail(BaseModel):
+    code: str = "github_merge_conflict"
+    message: str
+    project_id: str
+    repo_exists: bool = True
+    github_repo_name: str = ""
+    github_repo_url: str = ""
+    default_branch: str = "main"
+    base_commit_sha: str = ""
+    remote_head_sha: str = ""
+    conflicts: list[ProjectRepoConflictFile] = Field(default_factory=list)
+
+
+class ProjectRepoSyncResponse(BaseModel):
+    project_id: str
+    repo_exists: bool = False
+    github_repo_name: str = ""
+    github_repo_url: str = ""
+    default_branch: str = "main"
+    last_sync_commit_sha: str = ""
+    last_sync_commit_url: str = ""
+    last_synced_at: datetime | None = None
 
 
 class SendChatMessageRequest(BaseModel):

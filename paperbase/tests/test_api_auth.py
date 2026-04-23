@@ -31,7 +31,15 @@ from paperbase.models import (
     FileObject,
     JobResponse,
     PaperResponse,
+    ProjectItemPageResponse,
+    ProjectItemSummary,
+    ProjectListResponse,
+    ProjectRepoSyncResponse,
+    ProjectResponse,
+    ProjectSessionPageResponse,
+    PythonFileResponse,
     ResultSetResponse,
+    RunPythonFileResponse,
     SearchPaperResult,
     UploadListResponse,
 )
@@ -72,6 +80,66 @@ def _paper(arxiv_id: str = "2401.12345") -> PaperResponse:
         citation_count=12,
         influential_citation_count=3,
         index_status="indexed",
+    )
+
+
+def _project(
+    project_id: str = "proj_1",
+    *,
+    name: str = "General",
+    description: str = "",
+    is_default: bool = False,
+    session_count: int = 1,
+) -> ProjectResponse:
+    return ProjectResponse(
+        project_id=project_id,
+        name=name,
+        description=description,
+        is_default=is_default,
+        session_count=session_count,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
+def _project_item(
+    item_id: str = "thread_1",
+    *,
+    item_kind: str = "thread",
+    project_id: str = "proj_1",
+    title: str = "Open Thread",
+    thread_id: str | None = "thread_1",
+    file_id: str | None = None,
+    filename: str = "",
+) -> ProjectItemSummary:
+    return ProjectItemSummary(
+        item_id=item_id,
+        item_kind=item_kind,
+        project_id=project_id,
+        title=title,
+        created_at=NOW,
+        updated_at=NOW,
+        thread_id=thread_id,
+        file_id=file_id,
+        last_message_preview="Recent message" if item_kind == "thread" else "",
+        filename=filename,
+    )
+
+
+def _python_file(
+    file_id: str = "file_1",
+    *,
+    project_id: str = "proj_1",
+    filename: str = "something.py",
+    content: str = "",
+) -> PythonFileResponse:
+    return PythonFileResponse(
+        file_id=file_id,
+        project_id=project_id,
+        filename=filename,
+        content=content,
+        created_at=NOW,
+        updated_at=NOW,
     )
 
 
@@ -194,6 +262,55 @@ class StubApiService:
             has_anthropic_api_key=False,
         )
 
+    def save_user_modal_credentials(self, user: BrowserUser, request) -> BrowserSessionResponse:
+        self.calls.append(("save_user_modal_credentials", (user.user_id, request.token_id, request.token_secret)))
+        return BrowserSessionResponse(
+            authenticated=True,
+            user=user,
+            remaining_free_responses=2,
+            has_anthropic_api_key=False,
+        )
+
+    def update_user_notification_preferences(self, user: BrowserUser, request) -> BrowserSessionResponse:
+        self.calls.append(("update_user_notification_preferences", (user.user_id, request.weekly_papers_review_email)))
+        return BrowserSessionResponse(
+            authenticated=True,
+            user=user,
+            remaining_free_responses=2,
+            has_anthropic_api_key=False,
+        )
+
+    def save_github_connection(
+        self,
+        user: BrowserUser,
+        *,
+        github_user_id: str,
+        github_login: str,
+        access_token: str,
+        scope: str,
+    ) -> BrowserSessionResponse:
+        self.calls.append(
+            (
+                "save_github_connection",
+                (user.user_id, github_user_id, github_login, access_token, scope),
+            )
+        )
+        return BrowserSessionResponse(
+            authenticated=True,
+            user=user,
+            remaining_free_responses=2,
+            has_anthropic_api_key=False,
+        )
+
+    def delete_github_connection(self, user: BrowserUser) -> BrowserSessionResponse:
+        self.calls.append(("delete_github_connection", user.user_id))
+        return BrowserSessionResponse(
+            authenticated=True,
+            user=user,
+            remaining_free_responses=2,
+            has_anthropic_api_key=False,
+        )
+
     def list_uploaded_documents(self, user: BrowserUser) -> UploadListResponse:
         self.calls.append(("list_uploaded_documents", user.user_id))
         return UploadListResponse(documents=[], available_tags=["benchmark"])
@@ -204,6 +321,7 @@ class StubApiService:
             threads=[
                 ChatThreadSummary(
                     thread_id="thread_1",
+                    project_id="proj_1",
                     title="Open Thread",
                     created_at=NOW,
                     updated_at=NOW,
@@ -212,10 +330,184 @@ class StubApiService:
             ]
         )
 
+    def list_projects(self, user: BrowserUser) -> ProjectListResponse:
+        self.calls.append(("list_projects", user.user_id))
+        return ProjectListResponse(
+            projects=[
+                _project("proj_1", name="General", is_default=True, session_count=1),
+                _project("proj_2", name="Agents", description="Study agent systems", session_count=1),
+            ]
+        )
+
+    def create_project(self, user: BrowserUser, request) -> ProjectResponse:
+        self.calls.append(("create_project", (user.user_id, request.name, request.description)))
+        return _project(
+            "proj_3",
+            name=request.name,
+            description=request.description,
+            session_count=0,
+        )
+
+    def update_project(self, user: BrowserUser, project_id: str, request) -> ProjectResponse:
+        self.calls.append(("update_project", (user.user_id, project_id, request.name, request.description)))
+        return _project(
+            project_id,
+            name=request.name,
+            description=request.description,
+            is_default=(project_id == "proj_1"),
+            session_count=1,
+        )
+
+    def delete_project(self, user: BrowserUser, project_id: str) -> None:
+        self.calls.append(("delete_project", (user.user_id, project_id)))
+
+    def list_project_chat_threads(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        *,
+        limit: int = 5,
+        offset: int = 0,
+    ) -> ProjectSessionPageResponse:
+        self.calls.append(("list_project_chat_threads", (user.user_id, project_id, limit, offset)))
+        return ProjectSessionPageResponse(
+            project_id=project_id,
+            threads=[
+                ChatThreadSummary(
+                    thread_id="thread_1",
+                    project_id=project_id,
+                    title="Open Thread",
+                    created_at=NOW,
+                    updated_at=NOW,
+                    last_message_preview="Recent message",
+                )
+            ],
+            offset=offset,
+            limit=limit,
+            total_count=1,
+            has_more=False,
+        )
+
+    def list_project_items(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        *,
+        limit: int = 25,
+        offset: int = 0,
+    ) -> ProjectItemPageResponse:
+        self.calls.append(("list_project_items", (user.user_id, project_id, limit, offset)))
+        return ProjectItemPageResponse(
+            project_id=project_id,
+            items=[
+                _project_item(
+                    "thread_1",
+                    item_kind="thread",
+                    project_id=project_id,
+                    title="Open Thread",
+                    thread_id="thread_1",
+                ),
+                _project_item(
+                    "file_1",
+                    item_kind="python_file",
+                    project_id=project_id,
+                    title="something.py",
+                    thread_id=None,
+                    file_id="file_1",
+                    filename="something.py",
+                ),
+            ],
+            offset=offset,
+            limit=limit,
+            total_count=2,
+            has_more=False,
+        )
+
+    def create_python_file(self, user: BrowserUser, project_id: str) -> PythonFileResponse:
+        self.calls.append(("create_python_file", (user.user_id, project_id)))
+        return _python_file("file_1", project_id=project_id, filename="something.py")
+
+    def get_python_file(self, user: BrowserUser, file_id: str) -> PythonFileResponse:
+        self.calls.append(("get_python_file", (user.user_id, file_id)))
+        return _python_file(file_id, filename="something.py", content="print('hello')")
+
+    def update_python_file(
+        self,
+        user: BrowserUser,
+        file_id: str,
+        *,
+        filename: str | None,
+        content: str | None,
+    ) -> PythonFileResponse:
+        self.calls.append(("update_python_file", (user.user_id, file_id, filename, content)))
+        return _python_file(
+            file_id,
+            filename=filename or "something.py",
+            content=content or "",
+        )
+
+    def run_python_file(self, user: BrowserUser, file_id: str) -> RunPythonFileResponse:
+        self.calls.append(("run_python_file", (user.user_id, file_id)))
+        return RunPythonFileResponse(
+            file_id=file_id,
+            status="completed",
+            stdout="runner output",
+            stderr="",
+            exit_code=0,
+            started_at=NOW,
+            finished_at=NOW,
+        )
+
+    def get_project_repo_sync(self, user: BrowserUser, project_id: str) -> ProjectRepoSyncResponse:
+        self.calls.append(("get_project_repo_sync", (user.user_id, project_id)))
+        return ProjectRepoSyncResponse(project_id=project_id, repo_exists=False)
+
+    def sync_project_repo(self, user: BrowserUser, project_id: str, request) -> ProjectRepoSyncResponse:
+        self.calls.append(("sync_project_repo", (user.user_id, project_id, request.commit_message)))
+        return ProjectRepoSyncResponse(
+            project_id=project_id,
+            repo_exists=True,
+            github_repo_name="paperbase-general-123abc",
+            github_repo_url="https://github.com/octocat/paperbase-general-123abc",
+            default_branch="main",
+            last_sync_commit_sha="abc123",
+            last_sync_commit_url="https://github.com/octocat/paperbase-general-123abc/commit/abc123",
+            last_synced_at=NOW,
+        )
+
+    def create_chat_thread(self, user: BrowserUser, request) -> ChatThreadResponse:
+        self.calls.append(("create_chat_thread", (user.user_id, request.title, request.project_id)))
+        return ChatThreadResponse(
+            thread_id="thread_2",
+            project_id=request.project_id or "proj_1",
+            project_name="Agents" if request.project_id == "proj_2" else "General",
+            project_instructions="Study agent systems" if request.project_id == "proj_2" else "",
+            title=request.title or "New chat",
+            created_at=NOW,
+            updated_at=NOW,
+            messages=[],
+        )
+
+    def move_chat_thread_to_project(self, user: BrowserUser, thread_id: str, request) -> ChatThreadResponse:
+        self.calls.append(("move_chat_thread_to_project", (user.user_id, thread_id, request.project_id)))
+        return ChatThreadResponse(
+            thread_id=thread_id,
+            project_id=request.project_id,
+            project_name="Agents" if request.project_id == "proj_2" else "General",
+            project_instructions="Study agent systems" if request.project_id == "proj_2" else "",
+            title="Open Thread",
+            created_at=NOW,
+            updated_at=NOW,
+            messages=[],
+        )
+
     def get_chat_thread(self, user: BrowserUser, thread_id: str) -> ChatThreadResponse:
         self.calls.append(("get_chat_thread", (user.user_id, thread_id)))
         return ChatThreadResponse(
             thread_id=thread_id,
+            project_id="proj_1",
+            project_name="General",
+            project_instructions="",
             title="Open Thread",
             created_at=NOW,
             updated_at=NOW,
@@ -228,6 +520,9 @@ class StubApiService:
                 )
             ],
         )
+
+    def delete_chat_thread(self, user: BrowserUser, thread_id: str) -> None:
+        self.calls.append(("delete_chat_thread", (user.user_id, thread_id)))
 
     def upsert_google_browser_user(
         self,
@@ -253,10 +548,7 @@ def _make_request(
     headers: dict[str, str] | None = None,
     session: dict[str, object] | None = None,
 ) -> Request:
-    header_items = [
-        (key.lower().encode("latin-1"), value.encode("latin-1"))
-        for key, value in (headers or {}).items()
-    ]
+    header_items = [(key.lower().encode("latin-1"), value.encode("latin-1")) for key, value in (headers or {}).items()]
     scope = {
         "type": "http",
         "method": "GET",
@@ -376,7 +668,7 @@ def test_browser_cookie_helpers_set_and_clear_expected_headers():
 
     set_cookie_headers = response.headers.getlist("set-cookie")
     assert any("paperbase_session=raw-token" in value for value in set_cookie_headers)
-    assert any("paperbase_session=\"\"" in value for value in set_cookie_headers)
+    assert any('paperbase_session=""' in value for value in set_cookie_headers)
     assert response.headers["Cache-Control"] == "no-store"
     assert response.headers["Pragma"] == "no-cache"
 
@@ -458,12 +750,18 @@ def test_browser_get_routes_accept_session_cookie_without_csrf(api_client):
     uploads = client.get("/v1/browser/uploads")
     chats = client.get("/v1/browser/chats")
     thread = client.get("/v1/browser/chats/thread_1")
+    projects = client.get("/v1/browser/projects")
+    project_sessions = client.get("/v1/browser/projects/proj_1/sessions?limit=5&offset=0")
 
     assert uploads.status_code == 200
     assert uploads.json()["available_tags"] == ["benchmark"]
     assert chats.json()["threads"][0]["thread_id"] == "thread_1"
     assert thread.json()["messages"][0]["content_markdown"] == "Grounded answer"
+    assert projects.json()["projects"][0]["name"] == "General"
+    assert project_sessions.json()["threads"][0]["project_id"] == "proj_1"
     assert ("list_uploaded_documents", "user_1") in service.calls
+    assert ("list_projects", "user_1") in service.calls
+    assert ("list_project_chat_threads", ("user_1", "proj_1", 5, 0)) in service.calls
     assert ("get_chat_thread", ("user_1", "thread_1")) in service.calls
 
 
@@ -485,6 +783,141 @@ def test_browser_delete_anthropic_key_requires_valid_csrf(api_client):
     assert response.json()["has_anthropic_api_key"] is False
     assert response.json()["csrf_token"] == csrf
     assert ("delete_user_anthropic_key", "user_1") in service.calls
+
+
+def test_browser_settings_routes_delegate_with_valid_csrf(api_client):
+    client, service, settings = api_client
+    client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
+    csrf = csrf_token_for_session("browser-session-token", settings)
+    headers = {
+        "Origin": settings.browser_origin,
+        "X-Paperbase-CSRF": csrf,
+    }
+
+    modal_credentials = client.put(
+        "/v1/browser/settings/modal-credentials",
+        json={"token_id": "modal-token-id-123", "token_secret": "modal-token-secret-456"},
+        headers=headers,
+    )
+    notifications = client.put(
+        "/v1/browser/settings/notifications",
+        json={"weekly_papers_review_email": True},
+        headers=headers,
+    )
+    github = client.delete("/v1/browser/settings/github", headers=headers)
+
+    assert modal_credentials.status_code == 200
+    assert notifications.status_code == 200
+    assert github.status_code == 200
+    assert modal_credentials.json()["csrf_token"] == csrf
+    assert notifications.json()["csrf_token"] == csrf
+    assert github.json()["csrf_token"] == csrf
+    assert (
+        "save_user_modal_credentials",
+        ("user_1", "modal-token-id-123", "modal-token-secret-456"),
+    ) in service.calls
+    assert ("update_user_notification_preferences", ("user_1", True)) in service.calls
+    assert ("delete_github_connection", "user_1") in service.calls
+
+
+def test_browser_project_and_chat_write_routes_delegate_with_valid_csrf(api_client):
+    client, service, settings = api_client
+    client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
+    csrf = csrf_token_for_session("browser-session-token", settings)
+    headers = {
+        "Origin": settings.browser_origin,
+        "X-Paperbase-CSRF": csrf,
+    }
+
+    created_project = client.post(
+        "/v1/browser/projects",
+        json={"name": "Agents", "description": "Study agent systems"},
+        headers=headers,
+    )
+    updated_project = client.patch(
+        "/v1/browser/projects/proj_2",
+        json={"name": "Agents v2", "description": "Updated instructions"},
+        headers=headers,
+    )
+    created_chat = client.post(
+        "/v1/browser/chats",
+        json={"title": "Project chat", "project_id": "proj_2"},
+        headers=headers,
+    )
+    moved_chat = client.patch(
+        "/v1/browser/chats/thread_2/project",
+        json={"project_id": "proj_2"},
+        headers=headers,
+    )
+    created_python_file = client.post(
+        "/v1/browser/projects/proj_2/python-files",
+        headers=headers,
+    )
+    updated_python_file = client.patch(
+        "/v1/browser/python-files/file_1",
+        json={"filename": "analysis.py", "content": "print('hello')"},
+        headers=headers,
+    )
+    ran_python_file = client.post(
+        "/v1/browser/python-files/file_1/run",
+        headers=headers,
+    )
+    synced_project_repo = client.post(
+        "/v1/browser/projects/proj_2/repo-sync",
+        json={"commit_message": "Save analysis.py"},
+        headers=headers,
+    )
+    deleted_chat = client.delete("/v1/browser/chats/thread_1", headers=headers)
+    deleted_project = client.delete("/v1/browser/projects/proj_2", headers=headers)
+
+    assert created_project.status_code == 200
+    assert created_project.json()["project_id"] == "proj_3"
+    assert updated_project.status_code == 200
+    assert updated_project.json()["name"] == "Agents v2"
+    assert created_chat.status_code == 200
+    assert created_chat.json()["project_id"] == "proj_2"
+    assert moved_chat.status_code == 200
+    assert moved_chat.json()["project_id"] == "proj_2"
+    assert created_python_file.status_code == 200
+    assert created_python_file.json()["filename"] == "something.py"
+    assert updated_python_file.status_code == 200
+    assert updated_python_file.json()["filename"] == "analysis.py"
+    assert ran_python_file.status_code == 200
+    assert ran_python_file.json()["stdout"] == "runner output"
+    assert synced_project_repo.status_code == 200
+    assert synced_project_repo.json()["github_repo_name"] == "paperbase-general-123abc"
+    assert deleted_chat.json() == {"status": "deleted"}
+    assert deleted_project.json() == {"status": "deleted"}
+    assert ("create_project", ("user_1", "Agents", "Study agent systems")) in service.calls
+    assert ("update_project", ("user_1", "proj_2", "Agents v2", "Updated instructions")) in service.calls
+    assert ("create_chat_thread", ("user_1", "Project chat", "proj_2")) in service.calls
+    assert ("move_chat_thread_to_project", ("user_1", "thread_2", "proj_2")) in service.calls
+    assert ("create_python_file", ("user_1", "proj_2")) in service.calls
+    assert ("update_python_file", ("user_1", "file_1", "analysis.py", "print('hello')")) in service.calls
+    assert ("run_python_file", ("user_1", "file_1")) in service.calls
+    assert ("sync_project_repo", ("user_1", "proj_2", "Save analysis.py")) in service.calls
+    assert ("delete_chat_thread", ("user_1", "thread_1")) in service.calls
+    assert ("delete_project", ("user_1", "proj_2")) in service.calls
+
+
+def test_browser_project_item_routes_delegate_to_service(api_client):
+    client, service, settings = api_client
+    client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
+
+    items = client.get("/v1/browser/projects/proj_1/items?limit=25&offset=0")
+    python_file = client.get("/v1/browser/python-files/file_1")
+    repo_sync = client.get("/v1/browser/projects/proj_1/repo-sync")
+
+    assert items.status_code == 200
+    assert items.json()["items"][0]["item_kind"] == "thread"
+    assert items.json()["items"][1]["item_kind"] == "python_file"
+    assert python_file.status_code == 200
+    assert python_file.json()["content"] == "print('hello')"
+    assert repo_sync.status_code == 200
+    assert repo_sync.json()["repo_exists"] is False
+    assert ("list_project_items", ("user_1", "proj_1", 25, 0)) in service.calls
+    assert ("get_python_file", ("user_1", "file_1")) in service.calls
+    assert ("get_project_repo_sync", ("user_1", "proj_1")) in service.calls
 
 
 def test_google_callback_success_sets_cookie_and_redirects_to_saved_return_to(api_client, monkeypatch):
@@ -526,6 +959,54 @@ def test_google_callback_success_sets_cookie_and_redirects_to_saved_return_to(ap
         "upsert_google_browser_user",
         ("google-user-1", "google@example.com", "Google User"),
     ) in service.calls
+
+
+def test_github_callback_success_connects_account_and_redirects_to_settings(api_client, monkeypatch):
+    client, service, settings = api_client
+    client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
+
+    class FakeGitHubResponse:
+        def json(self):
+            return {"id": 42, "login": "octocat"}
+
+    class FakeGitHubClient:
+        async def authorize_access_token(self, request):
+            return {"access_token": "github-access-token", "scope": "repo,read:user"}
+
+        async def get(self, path, token):
+            assert path == "user"
+            assert token["access_token"] == "github-access-token"
+            return FakeGitHubResponse()
+
+    monkeypatch.setattr(api_module, "get_github_oauth_client", lambda: FakeGitHubClient())
+
+    response = client.get("/v1/browser/auth/github/callback", follow_redirects=False)
+
+    assert response.status_code == 302
+    assert response.headers["location"] == "https://paperbase.example/?auth=github_connected&settings=version-control"
+    assert (
+        "save_github_connection",
+        ("user_1", "42", "octocat", "github-access-token", "repo,read:user"),
+    ) in service.calls
+
+
+def test_github_callback_failure_redirects_with_error(api_client, monkeypatch):
+    client, _, settings = api_client
+    client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
+
+    class FailingGitHubClient:
+        async def authorize_access_token(self, request):
+            raise RuntimeError("no token")
+
+    monkeypatch.setattr(api_module, "get_github_oauth_client", lambda: FailingGitHubClient())
+
+    response = client.get("/v1/browser/auth/github/callback", follow_redirects=False)
+
+    assert response.status_code == 302
+    assert (
+        response.headers["location"]
+        == f"{settings.chat_public_url}/?auth_error=github_callback_failed&settings=version-control"
+    )
 
 
 def test_google_callback_failure_redirects_with_error(api_client, monkeypatch):
