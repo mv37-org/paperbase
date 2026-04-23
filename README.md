@@ -91,8 +91,9 @@ The repo has four moving pieces:
 The browser chat experience is project-based:
 
 - projects are persisted in the backend and own chat sessions
-- creating a new project requires a connected GitHub account and either an existing accessible repo/branch or a new private repo created under the connected user
-- existing repos expose a branch picker and optional import selection for `.py` and `.ipynb` files; new repos start on `main`
+- creating a new project requires a connected GitHub account and either an existing accessible repo/branch selected from the GitHub-backed repo dropdown or a new private repo created under the connected user
+- the new-project modal can refresh the accessible repo list, link to GitHub's Paperbase access settings, and expose optional inference/sandbox credential fields
+- existing repos expose a branch picker and optional import selection for `.py` and `.ipynb` files; new repos start on a fixed `main` branch
 - the sidebar lazily loads mixed project items per project, so chats, Python files, and imported notebooks appear together
 - project descriptions are snapped onto new sessions as per-session prompt context, so later project edits do not rewrite existing chats
 - Python and notebook files are project-scoped tabs backed by Monaco in a high-contrast Python editor view

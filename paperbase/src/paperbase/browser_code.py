@@ -51,6 +51,16 @@ class GitHubRepoFileCandidate:
 
 
 @dataclass(slots=True)
+class GitHubAccessibleRepo:
+    owner_login: str
+    repo_name: str
+    full_name: str
+    repo_url: str
+    default_branch: str = "main"
+    private: bool = False
+
+
+@dataclass(slots=True)
 class GitHubCommitInfo:
     repo_name: str
     repo_url: str
@@ -183,6 +193,46 @@ class GitHubProjectRepoManager:
             repo_url=str(payload.get("html_url") or ""),
             default_branch=str(payload.get("default_branch") or "main"),
         )
+
+    def list_repositories(self, *, access_token: str) -> list[GitHubAccessibleRepo]:
+        repos: list[GitHubAccessibleRepo] = []
+        page = 1
+        while True:
+            response = self._request(
+                "GET",
+                f"/user/repos?type=all&sort=updated&per_page=100&page={page}",
+                access_token=access_token,
+                ok_statuses={200},
+            )
+            payload = response.json() or []
+            if not isinstance(payload, list):
+                raise GitHubSyncError("GitHub repository list response was not valid")
+            if not payload:
+                break
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                owner = item.get("owner") if isinstance(item.get("owner"), dict) else {}
+                repo_name = str(item.get("name") or "")
+                owner_login = str(owner.get("login") or "")
+                if not repo_name or not owner_login:
+                    continue
+                repos.append(
+                    GitHubAccessibleRepo(
+                        owner_login=owner_login,
+                        repo_name=repo_name,
+                        full_name=str(item.get("full_name") or f"{owner_login}/{repo_name}"),
+                        repo_url=str(item.get("html_url") or ""),
+                        default_branch=str(item.get("default_branch") or "main"),
+                        private=bool(item.get("private")),
+                    )
+                )
+            if len(payload) < 100:
+                break
+            page += 1
+            if page > 10:
+                break
+        return repos
 
     def list_branches(
         self,

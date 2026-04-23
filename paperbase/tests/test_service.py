@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from paperbase.api import _resolve_bind_address, app
 from paperbase.browser_code import (
+    GitHubAccessibleRepo,
     GitHubCommitInfo,
     GitHubConflictFile,
     GitHubRepoBranch,
@@ -181,6 +182,7 @@ class FakeGitHubRepoManager:
         self.ensure_repo_calls: list[dict[str, object]] = []
         self.create_repo_calls: list[dict[str, object]] = []
         self.get_repo_calls: list[dict[str, object]] = []
+        self.list_repositories_calls: list[dict[str, object]] = []
         self.list_branches_calls: list[dict[str, object]] = []
         self.get_branch_head_calls: list[dict[str, object]] = []
         self.list_importable_files_calls: list[dict[str, object]] = []
@@ -201,6 +203,24 @@ class FakeGitHubRepoManager:
         self.importable_files = [
             GitHubRepoFileCandidate(path="src/analysis.py", file_kind="python", size=13),
             GitHubRepoFileCandidate(path="notebooks/demo.ipynb", file_kind="notebook", size=320),
+        ]
+        self.accessible_repos = [
+            GitHubAccessibleRepo(
+                owner_login="octocat",
+                repo_name="existing-repo",
+                full_name="octocat/existing-repo",
+                repo_url="https://github.com/octocat/existing-repo",
+                default_branch="main",
+                private=True,
+            ),
+            GitHubAccessibleRepo(
+                owner_login="paperbase-labs",
+                repo_name="shared-analysis",
+                full_name="paperbase-labs/shared-analysis",
+                repo_url="https://github.com/paperbase-labs/shared-analysis",
+                default_branch="dev",
+                private=False,
+            ),
         ]
         self.file_texts: dict[tuple[str, str], str] = {
             ("src/analysis.py", "main"): "print('remote')\n",
@@ -236,6 +256,10 @@ class FakeGitHubRepoManager:
             default_branch=self.repo_info.default_branch,
             owner_login=owner_login,
         )
+
+    def list_repositories(self, **kwargs) -> list[GitHubAccessibleRepo]:
+        self.list_repositories_calls.append(kwargs)
+        return list(self.accessible_repos)
 
     def list_branches(self, **kwargs) -> list[GitHubRepoBranch]:
         self.list_branches_calls.append(kwargs)
@@ -1621,6 +1645,40 @@ def test_create_project_requires_github_repo_info_and_connection():
             _create_repo_project_request("Agents", "Study agent systems"),
         )
     assert disconnected.value.status_code == 409
+
+
+def test_list_github_repositories_requires_connection_and_returns_accessible_repos():
+    repo_manager = FakeGitHubRepoManager()
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        github_repo_manager=repo_manager,
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="repo-list@example.com", password="topsecret123", display_name="Project User")
+    )
+    assert session.user is not None
+
+    with pytest.raises(HTTPException) as disconnected:
+        service.list_github_repositories(session.user)
+    assert disconnected.value.status_code == 409
+
+    _connect_github(service, session.user)
+    repos = service.list_github_repositories(session.user)
+
+    assert [repo.full_name for repo in repos.repos] == [
+        "octocat/existing-repo",
+        "paperbase-labs/shared-analysis",
+    ]
+    assert repos.repos[0].private is True
+    assert repos.repos[1].default_branch == "dev"
+    assert repo_manager.list_repositories_calls == [{"access_token": "github-access-token"}]
 
 
 def test_create_project_creates_private_github_repo_on_main():

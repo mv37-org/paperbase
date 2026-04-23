@@ -14,6 +14,7 @@ export interface BrowserUserSettingsResponse {
   has_github_connection: boolean;
   github_login: string;
   github_oauth_available: boolean;
+  github_manage_access_url: string;
   weekly_papers_review_email: boolean;
   appearance_theme: "light" | "dark";
 }
@@ -263,7 +264,21 @@ export interface ProjectRepoSyncResponse {
 
 export interface GitHubRepoBranchSummary {
   name: string;
+  commit_sha: string;
   is_default: boolean;
+}
+
+export interface GitHubRepoSummary {
+  owner: string;
+  name: string;
+  full_name: string;
+  html_url: string;
+  default_branch: string;
+  private: boolean;
+}
+
+export interface GitHubRepoListResponse {
+  repos: GitHubRepoSummary[];
 }
 
 export interface GitHubRepoMetadataResponse {

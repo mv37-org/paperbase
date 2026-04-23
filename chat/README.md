@@ -10,7 +10,9 @@ The authenticated sidebar is project-first:
 
 - projects expand and collapse independently and lazily fetch mixed project items
 - each project can start new chats, be renamed, or be deleted from the sidebar, but new projects require a connected GitHub repo
-- the new-project modal can create a private repo on `main` or link an existing repo after the user picks a base branch and optional `.py`/`.ipynb` imports
+- the new-project modal lists accessible GitHub repos in a custom dropdown, with "Create new repo" as the first option and `main` fixed for newly created repos
+- existing repo selection includes a branch picker, repo/branch refresh, a GitHub access-management link, and optional `.py`/`.ipynb` imports
+- the modal's advanced section exposes inference and Modal sandbox credential entry points for users who have not configured them yet
 - chat rows expose delete-on-hover actions and only fetch full thread content when opened
 - signed-in pages can switch between light and dark mode from Settings → Appearance, and the theme covers the shell, markdown, drawers, icons, and modals without changing the public landing page
 - Python and imported notebook rows open Monaco-backed Python editor tabs with explicit `Save` and `Run` actions

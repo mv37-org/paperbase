@@ -49,6 +49,7 @@ const apiMocks = vi.hoisted(() => {
     githubLoginUrl: vi.fn(() => "/v1/browser/auth/github/start"),
     googleLoginUrl: vi.fn(() => "/v1/browser/auth/google/start"),
     importProjectNotebook: vi.fn(),
+    loadGitHubRepositories: vi.fn(),
     loadGitHubRepoImportCandidates: vi.fn(),
     loadGitHubRepoMetadata: vi.fn(),
     loadProjectItems: vi.fn(),
@@ -120,6 +121,7 @@ vi.mock("./api", () => ({
   githubLoginUrl: apiMocks.githubLoginUrl,
   googleLoginUrl: apiMocks.googleLoginUrl,
   importProjectNotebook: apiMocks.importProjectNotebook,
+  loadGitHubRepositories: apiMocks.loadGitHubRepositories,
   loadGitHubRepoImportCandidates: apiMocks.loadGitHubRepoImportCandidates,
   loadGitHubRepoMetadata: apiMocks.loadGitHubRepoMetadata,
   loadProjectItems: apiMocks.loadProjectItems,
@@ -189,6 +191,7 @@ function authenticatedSession(
       has_github_connection: boolean;
       github_login: string;
       github_oauth_available: boolean;
+      github_manage_access_url: string;
       weekly_papers_review_email: boolean;
       appearance_theme: "light" | "dark";
     }>;
@@ -211,6 +214,7 @@ function authenticatedSession(
       has_github_connection: false,
       github_login: "",
       github_oauth_available: true,
+      github_manage_access_url: "https://github.com/settings/connections/applications",
       weekly_papers_review_email: false,
       appearance_theme: "light",
       ...overrides.settings,
@@ -422,6 +426,18 @@ describe("App", () => {
     apiMocks.importProjectNotebook.mockResolvedValue(
       pythonFileResponse("file_2", "notebook.ipynb", "# %%\nprint('notebook')\n"),
     );
+    apiMocks.loadGitHubRepositories.mockResolvedValue({
+      repos: [
+        {
+          owner: "octocat",
+          name: "existing-repo",
+          full_name: "octocat/existing-repo",
+          html_url: "https://github.com/octocat/existing-repo",
+          default_branch: "main",
+          private: true,
+        },
+      ],
+    });
     apiMocks.loadGitHubRepoImportCandidates.mockResolvedValue({ candidates: [] });
     apiMocks.loadGitHubRepoMetadata.mockResolvedValue({
       owner: "octocat",
@@ -710,11 +726,64 @@ describe("App", () => {
     await waitFor(() => {
       expect(screen.getByText("Connect GitHub account")).toBeTruthy();
     });
+    expect((screen.getByLabelText("Project name") as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByLabelText("Description") as HTMLTextAreaElement).disabled).toBe(true);
+    expect(screen.getByText(/GitHub is the source of truth for project files/)).toBeTruthy();
     expect(
       (document.querySelector("#project-modal button[type='submit']") as HTMLButtonElement | null)
         ?.disabled,
     ).toBe(true);
     expect(apiMocks.createProject).not.toHaveBeenCalled();
+  });
+
+  it("refreshes the repository dropdown from GitHub", async () => {
+    apiMocks.loadSession.mockResolvedValue(
+      authenticatedSession({ settings: { has_github_connection: true, github_login: "octocat" } }),
+    );
+    apiMocks.loadGitHubRepositories.mockResolvedValueOnce({ repos: [] });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByLabelText("Create project"));
+    await waitFor(() => {
+      expect(apiMocks.loadGitHubRepositories).toHaveBeenCalledTimes(1);
+    });
+
+    const refreshedRepos = {
+      repos: [
+        {
+          owner: "octocat",
+          name: "newly-added",
+          full_name: "octocat/newly-added",
+          html_url: "https://github.com/octocat/newly-added",
+          default_branch: "main",
+          private: true,
+        },
+      ],
+    };
+    let resolveRefresh: (value: typeof refreshedRepos) => void = () => {};
+    apiMocks.loadGitHubRepositories.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveRefresh = resolve;
+        }),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "refresh" }));
+    expect(screen.getByRole("button", { name: "refreshing..." })).toBeTruthy();
+
+    await act(async () => {
+      resolveRefresh(refreshedRepos);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "refresh" })).toBeTruthy();
+    });
+    expect(apiMocks.loadGitHubRepositories).toHaveBeenCalledTimes(2);
   });
 
   it("creates a project from an existing repo with branch and import selection", async () => {
@@ -754,11 +823,11 @@ describe("App", () => {
     fireEvent.change(screen.getByPlaceholderText("Description, goal, or custom instructions"), {
       target: { value: "Import selected files." },
     });
-    fireEvent.click(screen.getByRole("radio", { name: "Existing repo" }));
-    fireEvent.change(screen.getByPlaceholderText("Repository"), {
-      target: { value: "existing-repo" },
+    fireEvent.click(screen.getByRole("button", { name: "Repository" }));
+    await waitFor(() => {
+      expect(screen.getByRole("option", { name: /octocat\/existing-repo/ })).toBeTruthy();
     });
-    fireEvent.click(screen.getByRole("button", { name: "Load repo" }));
+    fireEvent.click(screen.getByRole("option", { name: /octocat\/existing-repo/ }));
 
     await waitFor(() => {
       expect(screen.getByText("notebooks/demo.ipynb")).toBeTruthy();

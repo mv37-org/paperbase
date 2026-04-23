@@ -32,7 +32,9 @@ from paperbase.models import (
     GitHubRepoBranchSummary,
     GitHubRepoImportCandidate,
     GitHubRepoImportCandidateResponse,
+    GitHubRepoListResponse,
     GitHubRepoMetadataResponse,
+    GitHubRepoSummary,
     JobResponse,
     PaperPreviewResponse,
     PaperResponse,
@@ -391,6 +393,21 @@ class StubApiService:
                 GitHubRepoBranchSummary(name="main", commit_sha="abc123", is_default=True),
                 GitHubRepoBranchSummary(name="dev", commit_sha="def456", is_default=False),
             ],
+        )
+
+    def list_github_repositories(self, user: BrowserUser) -> GitHubRepoListResponse:
+        self.calls.append(("list_github_repositories", user.user_id))
+        return GitHubRepoListResponse(
+            repos=[
+                GitHubRepoSummary(
+                    owner="octocat",
+                    name="existing-repo",
+                    full_name="octocat/existing-repo",
+                    html_url="https://github.com/octocat/existing-repo",
+                    default_branch="main",
+                    private=True,
+                )
+            ]
         )
 
     def list_github_repo_import_candidates(
@@ -891,6 +908,7 @@ def test_browser_get_routes_accept_session_cookie_without_csrf(api_client):
     thread = client.get("/v1/browser/chats/thread_1")
     projects = client.get("/v1/browser/projects")
     project_sessions = client.get("/v1/browser/projects/proj_1/sessions?limit=5&offset=0")
+    repo_list = client.get("/v1/browser/github/repositories")
     repo_metadata = client.get("/v1/browser/github/repositories/octocat/existing-repo")
     import_candidates = client.get(
         "/v1/browser/github/repositories/octocat/existing-repo/import-candidates?branch=dev"
@@ -902,11 +920,15 @@ def test_browser_get_routes_accept_session_cookie_without_csrf(api_client):
     assert thread.json()["messages"][0]["content_markdown"] == "Grounded answer"
     assert projects.json()["projects"][0]["name"] == "General"
     assert project_sessions.json()["threads"][0]["project_id"] == "proj_1"
+    assert repo_list.json()["repos"][0]["full_name"] == "octocat/existing-repo"
+    assert repo_list.json()["repos"][0]["private"] is True
     assert repo_metadata.json()["branches"][0]["name"] == "main"
+    assert repo_metadata.json()["branches"][0]["commit_sha"] == "abc123"
     assert import_candidates.json()["candidates"][1]["file_kind"] == "notebook"
     assert ("list_uploaded_documents", "user_1") in service.calls
     assert ("list_projects", "user_1") in service.calls
     assert ("list_project_chat_threads", ("user_1", "proj_1", 5, 0)) in service.calls
+    assert ("list_github_repositories", "user_1") in service.calls
     assert ("get_github_repo_metadata", ("user_1", "octocat", "existing-repo")) in service.calls
     assert (
         "list_github_repo_import_candidates",

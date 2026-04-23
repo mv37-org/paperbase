@@ -7,6 +7,7 @@ import type {
   FigureResponse,
   FileContentResponse,
   GitHubRepoImportCandidateResponse,
+  GitHubRepoListResponse,
   GitHubRepoMetadataResponse,
   MentionSuggestionResult,
   PaperResponse,
@@ -283,6 +284,10 @@ export function loadThreads() {
 
 export function loadProjects() {
   return api<ProjectListResponse>("/v1/browser/projects", { method: "GET" });
+}
+
+export function loadGitHubRepositories() {
+  return api<GitHubRepoListResponse>("/v1/browser/github/repositories", { method: "GET" });
 }
 
 export function loadGitHubRepoMetadata(owner: string, repo: string) {

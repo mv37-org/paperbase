@@ -211,6 +211,7 @@ class BrowserUserSettingsResponse(BaseModel):
     has_github_connection: bool = False
     github_login: str = ""
     github_oauth_available: bool = False
+    github_manage_access_url: str = "https://github.com/settings/connections/applications"
     weekly_papers_review_email: bool = False
     appearance_theme: Literal["light", "dark"] = "light"
 
@@ -439,7 +440,21 @@ class RunPythonFileResponse(BaseModel):
 
 class GitHubRepoBranchSummary(BaseModel):
     name: str
+    commit_sha: str = ""
     is_default: bool = False
+
+
+class GitHubRepoSummary(BaseModel):
+    owner: str
+    name: str
+    full_name: str
+    html_url: str = ""
+    default_branch: str = "main"
+    private: bool = False
+
+
+class GitHubRepoListResponse(BaseModel):
+    repos: list[GitHubRepoSummary] = Field(default_factory=list)
 
 
 class GitHubRepoMetadataResponse(BaseModel):

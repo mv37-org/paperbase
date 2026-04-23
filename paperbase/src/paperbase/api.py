@@ -36,6 +36,7 @@ from .models import (
     FileListResponse,
     ForgotPasswordRequest,
     GitHubRepoImportCandidateResponse,
+    GitHubRepoListResponse,
     GitHubRepoMetadataResponse,
     GrepRequest,
     GrepResponse,
@@ -839,6 +840,14 @@ def browser_list_projects(
     service: PaperbaseService = Depends(get_service),
 ) -> ProjectListResponse:
     return service.list_projects(user)
+
+
+@app.get("/v1/browser/github/repositories", response_model=GitHubRepoListResponse)
+def browser_list_github_repositories(
+    user=Depends(require_browser_user),
+    service: PaperbaseService = Depends(get_service),
+) -> GitHubRepoListResponse:
+    return service.list_github_repositories(user)
 
 
 @app.get("/v1/browser/github/repositories/{owner}/{repo}", response_model=GitHubRepoMetadataResponse)

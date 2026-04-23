@@ -20,6 +20,7 @@ import {
   importProjectNotebook,
   getThread,
   googleLoginUrl,
+  loadGitHubRepositories,
   loadGitHubRepoImportCandidates,
   loadGitHubRepoMetadata,
   loadProjectItems,
@@ -55,6 +56,7 @@ import type {
   FileContentResponse,
   GitHubRepoImportCandidate,
   GitHubRepoMetadataResponse,
+  GitHubRepoSummary,
   PaperResponse,
   ProjectFileKind,
   ProjectRepoConflictDetail,
@@ -164,6 +166,7 @@ const DEFAULT_BROWSER_SETTINGS: NonNullable<BrowserSessionResponse["settings"]> 
   has_github_connection: false,
   github_login: "",
   github_oauth_available: false,
+  github_manage_access_url: "https://github.com/settings/connections/applications",
   weekly_papers_review_email: false,
   appearance_theme: "light",
 };
@@ -759,8 +762,19 @@ export default function App() {
     [],
   );
   const [projectRepoSelectedPaths, setProjectRepoSelectedPaths] = useState<string[]>([]);
+  const [projectRepoList, setProjectRepoList] = useState<GitHubRepoSummary[]>([]);
   const [projectRepoLoading, setProjectRepoLoading] = useState(false);
+  const [projectRepoListLoading, setProjectRepoListLoading] = useState(false);
   const [projectRepoStatus, setProjectRepoStatus] = useState("");
+  const [projectRepoDropdownOpen, setProjectRepoDropdownOpen] = useState(false);
+  const [projectAdvancedOpen, setProjectAdvancedOpen] = useState(false);
+  const [projectAdvancedStatus, setProjectAdvancedStatus] = useState("");
+  const [projectAnthropicKey, setProjectAnthropicKey] = useState("");
+  const [projectModalTokenId, setProjectModalTokenId] = useState("");
+  const [projectModalTokenSecret, setProjectModalTokenSecret] = useState("");
+  const [projectAdvancedSaving, setProjectAdvancedSaving] = useState<
+    "inference" | "sandbox" | null
+  >(null);
   const [deleteModalState, setDeleteModalState] = useState<DeleteModalState>(null);
   const [saveModalState, setSaveModalState] = useState<SaveModalState>(null);
   const [syncConflictState, setSyncConflictState] = useState<SyncConflictState>(null);
@@ -2462,6 +2476,122 @@ export default function App() {
     );
   }, [allProjectsExpanded, fetchProjectItems, projects]);
 
+  const loadProjectRepoDetails = useCallback(
+    async (owner: string, repo: string, branchOverride?: string) => {
+      const ownerLogin = owner.trim();
+      const repoName = repo.trim();
+      if (!ownerLogin || !repoName) {
+        setProjectRepoStatus("Choose a GitHub repository.");
+        return;
+      }
+      setProjectRepoLoading(true);
+      setProjectRepoStatus("");
+      try {
+        const metadata = await loadGitHubRepoMetadata(ownerLogin, repoName);
+        const desiredBranch =
+          branchOverride?.trim() || metadata.default_branch || projectRepoBranch.trim();
+        const selectedBranch = metadata.branches.some((branch) => branch.name === desiredBranch)
+          ? desiredBranch
+          : metadata.default_branch || metadata.branches[0]?.name || "main";
+        setProjectRepoMetadata(metadata);
+        setProjectRepoBranch(selectedBranch);
+        const candidates = await loadGitHubRepoImportCandidates(
+          ownerLogin,
+          repoName,
+          selectedBranch,
+        );
+        setProjectRepoCandidates(candidates.candidates);
+        setProjectRepoSelectedPaths((current) =>
+          current.filter((path) =>
+            candidates.candidates.some((candidate) => candidate.path === path),
+          ),
+        );
+        setProjectRepoStatus(
+          candidates.candidates.length
+            ? `${candidates.candidates.length} importable files found.`
+            : "No importable Python or notebook files found.",
+        );
+      } catch (error) {
+        setProjectRepoMetadata(null);
+        setProjectRepoCandidates([]);
+        setProjectRepoSelectedPaths([]);
+        setProjectRepoStatus(
+          error instanceof Error ? error.message : "Repository could not be loaded.",
+        );
+      } finally {
+        setProjectRepoLoading(false);
+      }
+    },
+    [projectRepoBranch],
+  );
+
+  const refreshProjectRepositories = useCallback(
+    async (refreshSelected = true) => {
+      if (!sessionSettings.has_github_connection) {
+        return;
+      }
+      setProjectRepoListLoading(true);
+      setProjectRepoStatus("Refreshing GitHub repositories...");
+      try {
+        const response = await loadGitHubRepositories();
+        setProjectRepoList(response.repos);
+        if (
+          refreshSelected &&
+          projectRepoMode === "existing" &&
+          projectRepoOwner.trim() &&
+          projectRepoName.trim()
+        ) {
+          await loadProjectRepoDetails(projectRepoOwner, projectRepoName, projectRepoBranch);
+        } else {
+          setProjectRepoStatus(
+            response.repos.length
+              ? `${response.repos.length} repositories available.`
+              : "No accessible repositories found. Create a new repo to continue.",
+          );
+        }
+      } catch (error) {
+        setProjectRepoStatus(
+          error instanceof Error ? error.message : "GitHub repositories could not be loaded.",
+        );
+      } finally {
+        setProjectRepoListLoading(false);
+      }
+    },
+    [
+      loadProjectRepoDetails,
+      projectRepoBranch,
+      projectRepoMode,
+      projectRepoName,
+      projectRepoOwner,
+      sessionSettings.has_github_connection,
+    ],
+  );
+
+  const selectProjectRepo = useCallback(
+    (repo: GitHubRepoSummary | null) => {
+      setProjectRepoDropdownOpen(false);
+      setProjectRepoSelectedPaths([]);
+      if (repo === null) {
+        setProjectRepoMode("create");
+        setProjectRepoOwner(sessionSettings.github_login || "");
+        if (projectRepoMode !== "create") {
+          setProjectRepoName("");
+        }
+        setProjectRepoBranch("main");
+        setProjectRepoMetadata(null);
+        setProjectRepoCandidates([]);
+        setProjectRepoStatus("");
+        return;
+      }
+      setProjectRepoMode("existing");
+      setProjectRepoOwner(repo.owner);
+      setProjectRepoName(repo.name);
+      setProjectRepoBranch(repo.default_branch || "main");
+      void loadProjectRepoDetails(repo.owner, repo.name, repo.default_branch || "main");
+    },
+    [loadProjectRepoDetails, projectRepoMode, sessionSettings.github_login],
+  );
+
   const openCreateProjectModal = useCallback(() => {
     setProjectModalState({ mode: "create" });
     setProjectFormName("");
@@ -2475,11 +2605,25 @@ export default function App() {
     setProjectRepoCandidates([]);
     setProjectRepoSelectedPaths([]);
     setProjectRepoLoading(false);
+    setProjectRepoDropdownOpen(false);
+    setProjectAdvancedOpen(false);
+    setProjectAdvancedStatus("");
+    setProjectAnthropicKey("");
+    setProjectModalTokenId("");
+    setProjectModalTokenSecret("");
+    setProjectAdvancedSaving(null);
     setProjectRepoStatus("");
     setProjectMenuProjectId(null);
     setEmptyStateProjectPickerOpen(false);
     setEmptyStateProjectSearch("");
-  }, [sessionSettings.github_login]);
+    if (sessionSettings.has_github_connection) {
+      void refreshProjectRepositories(false);
+    }
+  }, [
+    refreshProjectRepositories,
+    sessionSettings.github_login,
+    sessionSettings.has_github_connection,
+  ]);
 
   const openEditProjectModal = useCallback(
     (projectId: string) => {
@@ -2510,49 +2654,21 @@ export default function App() {
     setProjectRepoCandidates([]);
     setProjectRepoSelectedPaths([]);
     setProjectRepoLoading(false);
+    setProjectRepoDropdownOpen(false);
+    setProjectAdvancedOpen(false);
+    setProjectAdvancedStatus("");
+    setProjectAnthropicKey("");
+    setProjectModalTokenId("");
+    setProjectModalTokenSecret("");
+    setProjectAdvancedSaving(null);
     setProjectRepoStatus("");
   }, []);
 
   const loadExistingProjectRepo = useCallback(
     async (branchOverride?: string) => {
-      const owner = projectRepoOwner.trim();
-      const repo = projectRepoName.trim();
-      if (!owner || !repo) {
-        setProjectRepoStatus("Enter an owner and repository name.");
-        return;
-      }
-      setProjectRepoLoading(true);
-      setProjectRepoStatus("");
-      try {
-        const metadata = await loadGitHubRepoMetadata(owner, repo);
-        const selectedBranch =
-          branchOverride?.trim() || metadata.default_branch || projectRepoBranch.trim() || "main";
-        setProjectRepoMetadata(metadata);
-        setProjectRepoBranch(selectedBranch);
-        const candidates = await loadGitHubRepoImportCandidates(owner, repo, selectedBranch);
-        setProjectRepoCandidates(candidates.candidates);
-        setProjectRepoSelectedPaths((current) =>
-          current.filter((path) =>
-            candidates.candidates.some((candidate) => candidate.path === path),
-          ),
-        );
-        setProjectRepoStatus(
-          candidates.candidates.length
-            ? `${candidates.candidates.length} importable files found.`
-            : "No importable Python or notebook files found.",
-        );
-      } catch (error) {
-        setProjectRepoMetadata(null);
-        setProjectRepoCandidates([]);
-        setProjectRepoSelectedPaths([]);
-        setProjectRepoStatus(
-          error instanceof Error ? error.message : "Repository could not be loaded.",
-        );
-      } finally {
-        setProjectRepoLoading(false);
-      }
+      await loadProjectRepoDetails(projectRepoOwner, projectRepoName, branchOverride);
     },
-    [projectRepoBranch, projectRepoName, projectRepoOwner],
+    [loadProjectRepoDetails, projectRepoName, projectRepoOwner],
   );
 
   const submitProjectModal = useCallback(async () => {
@@ -2623,6 +2739,59 @@ export default function App() {
     refreshProjects,
     sessionSettings.has_github_connection,
   ]);
+
+  const saveProjectInferenceKey = useCallback(async () => {
+    const apiKey = projectAnthropicKey.trim();
+    if (!apiKey) {
+      setProjectAdvancedStatus("Enter an Anthropic API key.");
+      return;
+    }
+    setProjectAdvancedSaving("inference");
+    setProjectAdvancedStatus("");
+    try {
+      const nextSession = await api<BrowserSessionResponse>("/v1/browser/settings/anthropic-key", {
+        method: "PUT",
+        body: JSON.stringify({ api_key: apiKey }),
+      });
+      setSession(nextSession);
+      setProjectAnthropicKey("");
+      setProjectAdvancedStatus("Inference key saved.");
+    } catch (error) {
+      setProjectAdvancedStatus(error instanceof Error ? error.message : "Saving API key failed.");
+    } finally {
+      setProjectAdvancedSaving(null);
+    }
+  }, [projectAnthropicKey]);
+
+  const saveProjectModalCredentials = useCallback(async () => {
+    const tokenId = projectModalTokenId.trim();
+    const tokenSecret = projectModalTokenSecret.trim();
+    if (!tokenId || !tokenSecret) {
+      setProjectAdvancedStatus("Enter both Modal credential fields.");
+      return;
+    }
+    setProjectAdvancedSaving("sandbox");
+    setProjectAdvancedStatus("");
+    try {
+      const nextSession = await api<BrowserSessionResponse>(
+        "/v1/browser/settings/modal-credentials",
+        {
+          method: "PUT",
+          body: JSON.stringify({ token_id: tokenId, token_secret: tokenSecret }),
+        },
+      );
+      setSession(nextSession);
+      setProjectModalTokenId("");
+      setProjectModalTokenSecret("");
+      setProjectAdvancedStatus("Sandbox credentials saved.");
+    } catch (error) {
+      setProjectAdvancedStatus(
+        error instanceof Error ? error.message : "Saving Modal credentials failed.",
+      );
+    } finally {
+      setProjectAdvancedSaving(null);
+    }
+  }, [projectModalTokenId, projectModalTokenSecret]);
 
   const openDeleteProjectModal = useCallback((projectId: string, name: string) => {
     setDeleteModalState({ kind: "project", projectId, name });
@@ -3321,6 +3490,21 @@ export default function App() {
       variant="chat"
     />
   );
+
+  const projectCreateBlocked =
+    projectModalState?.mode === "create" && !sessionSettings.has_github_connection;
+  const selectedRepoFullName =
+    projectRepoMode === "existing" && projectRepoOwner && projectRepoName
+      ? `${projectRepoOwner}/${projectRepoName}`
+      : "";
+  const projectRepoSelectorLabel =
+    projectRepoMode === "create" ? "Create new repo" : selectedRepoFullName || "Select repository";
+  const projectRepoBranchOptions =
+    projectRepoMode === "create"
+      ? [{ name: "main", commit_sha: "", is_default: true }]
+      : projectRepoMetadata?.branches.length
+        ? projectRepoMetadata.branches
+        : [{ name: projectRepoBranch || "main", commit_sha: "", is_default: true }];
 
   return (
     <>
@@ -4651,7 +4835,7 @@ export default function App() {
         aria-modal="true"
       >
         <div className="modal-backdrop" onClick={closeProjectModal} />
-        <div className="modal-panel">
+        <div className="modal-panel project-modal-panel">
           <button className="modal-close" type="button" onClick={closeProjectModal}>
             ×
           </button>
@@ -4676,125 +4860,159 @@ export default function App() {
                 void submitProjectModal();
               }}
             >
-              <input
-                id="project-name-input"
-                name="name"
-                type="text"
-                placeholder="Project name"
-                value={projectFormName}
-                onChange={(event) => setProjectFormName(event.target.value)}
-                required
-              />
-              <textarea
-                id="project-description-input"
-                name="description"
-                className="project-description-input"
-                placeholder="Description, goal, or custom instructions"
-                value={projectFormDescription}
-                onChange={(event) => setProjectFormDescription(event.target.value)}
-                rows={4}
-              />
+              <label
+                className={`project-field${projectCreateBlocked ? " project-field-disabled" : ""}`}
+                htmlFor="project-name-input"
+              >
+                <span>Project name</span>
+                <input
+                  id="project-name-input"
+                  name="name"
+                  type="text"
+                  placeholder="Project name"
+                  value={projectFormName}
+                  onChange={(event) => setProjectFormName(event.target.value)}
+                  disabled={projectCreateBlocked}
+                  required
+                />
+              </label>
+              <label
+                className={`project-field${projectCreateBlocked ? " project-field-disabled" : ""}`}
+                htmlFor="project-description-input"
+              >
+                <span>Description</span>
+                <textarea
+                  id="project-description-input"
+                  name="description"
+                  className="project-description-input"
+                  placeholder="Description, goal, or custom instructions"
+                  value={projectFormDescription}
+                  onChange={(event) => setProjectFormDescription(event.target.value)}
+                  disabled={projectCreateBlocked}
+                  rows={4}
+                />
+              </label>
               {projectModalState?.mode === "create" ? (
                 sessionSettings.has_github_connection ? (
                   <div className="project-repo-section">
-                    <div className="project-repo-mode" role="radiogroup" aria-label="GitHub repo">
-                      <button
-                        type="button"
-                        role="radio"
-                        aria-checked={projectRepoMode === "create"}
-                        className={`project-repo-mode-button${projectRepoMode === "create" ? " active" : ""}`}
-                        onClick={() => {
-                          setProjectRepoMode("create");
-                          setProjectRepoBranch("main");
-                          setProjectRepoCandidates([]);
-                          setProjectRepoSelectedPaths([]);
-                          setProjectRepoStatus("");
-                        }}
-                      >
-                        Create repo
-                      </button>
-                      <button
-                        type="button"
-                        role="radio"
-                        aria-checked={projectRepoMode === "existing"}
-                        className={`project-repo-mode-button${projectRepoMode === "existing" ? " active" : ""}`}
-                        onClick={() => {
-                          setProjectRepoMode("existing");
-                          setProjectRepoOwner(
-                            (current) => current || sessionSettings.github_login || "",
-                          );
-                        }}
-                      >
-                        Existing repo
-                      </button>
+                    <div className="project-github-heading">
+                      <AppIcon
+                        src={staticAssetPath("github.svg")}
+                        className="project-github-icon"
+                      />
+                      <span>GitHub repository</span>
+                    </div>
+                    <div className="project-repo-grid">
+                      <div className="project-field project-repo-selector-field">
+                        <span>Repository</span>
+                        <div className="project-repo-dropdown">
+                          <button
+                            type="button"
+                            className="project-repo-trigger"
+                            aria-label="Repository"
+                            aria-haspopup="listbox"
+                            aria-expanded={projectRepoDropdownOpen}
+                            onClick={() => setProjectRepoDropdownOpen((open) => !open)}
+                          >
+                            <span>{projectRepoSelectorLabel}</span>
+                          </button>
+                          {projectRepoDropdownOpen ? (
+                            <div className="project-repo-menu" role="listbox">
+                              <button
+                                type="button"
+                                role="option"
+                                aria-selected={projectRepoMode === "create"}
+                                className={`project-repo-option${projectRepoMode === "create" ? " active" : ""}`}
+                                onClick={() => selectProjectRepo(null)}
+                              >
+                                <span>Create new repo</span>
+                                <small>
+                                  Private repository under {sessionSettings.github_login}
+                                </small>
+                              </button>
+                              {projectRepoList.map((repo) => (
+                                <button
+                                  key={repo.full_name}
+                                  type="button"
+                                  role="option"
+                                  aria-selected={
+                                    projectRepoMode === "existing" &&
+                                    selectedRepoFullName === repo.full_name
+                                  }
+                                  className={`project-repo-option${
+                                    projectRepoMode === "existing" &&
+                                    selectedRepoFullName === repo.full_name
+                                      ? " active"
+                                      : ""
+                                  }`}
+                                  onClick={() => selectProjectRepo(repo)}
+                                >
+                                  <span>{repo.full_name}</span>
+                                  <small>
+                                    {repo.private ? "Private" : "Public"} · default{" "}
+                                    {repo.default_branch || "main"}
+                                  </small>
+                                </button>
+                              ))}
+                              {projectRepoListLoading ? (
+                                <div className="project-repo-menu-note">
+                                  Loading repositories...
+                                </div>
+                              ) : null}
+                              {!projectRepoListLoading && projectRepoList.length === 0 ? (
+                                <div className="project-repo-menu-note">
+                                  No accessible repositories found.
+                                </div>
+                              ) : null}
+                            </div>
+                          ) : null}
+                        </div>
+                      </div>
+                      <label className="project-field" htmlFor="project-repo-branch-select">
+                        <span>Base branch</span>
+                        <select
+                          id="project-repo-branch-select"
+                          className="project-repo-branch-select"
+                          aria-label="Base branch"
+                          value={projectRepoMode === "create" ? "main" : projectRepoBranch}
+                          disabled={
+                            projectRepoMode === "create" ||
+                            projectRepoLoading ||
+                            (projectRepoMode === "existing" && !projectRepoMetadata)
+                          }
+                          onChange={(event) => {
+                            const nextBranch = event.target.value;
+                            setProjectRepoBranch(nextBranch);
+                            void loadExistingProjectRepo(nextBranch);
+                          }}
+                        >
+                          {projectRepoBranchOptions.map((branch) => (
+                            <option key={branch.name} value={branch.name}>
+                              {branch.name}
+                              {branch.is_default ? " (default)" : ""}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
                     </div>
                     {projectRepoMode === "create" ? (
-                      <input
-                        id="project-repo-name-input"
-                        name="repo_name"
-                        type="text"
-                        placeholder="New GitHub repo name"
-                        value={projectRepoName}
-                        onChange={(event) => setProjectRepoName(event.target.value)}
-                        required
-                      />
+                      <label
+                        className="project-field project-new-repo-field"
+                        htmlFor="project-repo-name-input"
+                      >
+                        <span>New repo name</span>
+                        <input
+                          id="project-repo-name-input"
+                          name="repo_name"
+                          type="text"
+                          placeholder="New GitHub repo name"
+                          value={projectRepoName}
+                          onChange={(event) => setProjectRepoName(event.target.value)}
+                          required
+                        />
+                      </label>
                     ) : (
                       <div className="project-repo-existing">
-                        <div className="project-repo-row">
-                          <input
-                            id="project-repo-owner-input"
-                            name="repo_owner"
-                            type="text"
-                            placeholder="Owner"
-                            value={projectRepoOwner}
-                            onChange={(event) => {
-                              setProjectRepoOwner(event.target.value);
-                              setProjectRepoMetadata(null);
-                              setProjectRepoCandidates([]);
-                            }}
-                            required
-                          />
-                          <input
-                            id="project-repo-existing-name-input"
-                            name="repo_name"
-                            type="text"
-                            placeholder="Repository"
-                            value={projectRepoName}
-                            onChange={(event) => {
-                              setProjectRepoName(event.target.value);
-                              setProjectRepoMetadata(null);
-                              setProjectRepoCandidates([]);
-                            }}
-                            required
-                          />
-                        </div>
-                        <button
-                          className="secondary-button"
-                          type="button"
-                          onClick={() => void loadExistingProjectRepo()}
-                          disabled={projectRepoLoading}
-                        >
-                          {projectRepoLoading ? "Loading..." : "Load repo"}
-                        </button>
-                        {projectRepoMetadata ? (
-                          <select
-                            className="project-repo-branch-select"
-                            aria-label="Base branch"
-                            value={projectRepoBranch}
-                            onChange={(event) => {
-                              const nextBranch = event.target.value;
-                              setProjectRepoBranch(nextBranch);
-                              void loadExistingProjectRepo(nextBranch);
-                            }}
-                          >
-                            {projectRepoMetadata.branches.map((branch) => (
-                              <option key={branch.name} value={branch.name}>
-                                {branch.name}
-                                {branch.is_default ? " (default)" : ""}
-                              </option>
-                            ))}
-                          </select>
-                        ) : null}
                         {projectRepoStatus ? (
                           <div className="project-repo-status">{projectRepoStatus}</div>
                         ) : null}
@@ -4824,11 +5042,152 @@ export default function App() {
                         ) : null}
                       </div>
                     )}
+                    {projectRepoMode === "create" && projectRepoStatus ? (
+                      <div className="project-repo-status">{projectRepoStatus}</div>
+                    ) : null}
+                    <div className="project-repo-links">
+                      <button
+                        type="button"
+                        className="project-repo-link"
+                        disabled={projectRepoListLoading}
+                        onClick={() => void refreshProjectRepositories()}
+                      >
+                        {projectRepoListLoading ? "refreshing..." : "refresh"}
+                      </button>
+                      <a
+                        className="project-repo-link"
+                        href={sessionSettings.github_manage_access_url}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        manage Paperbase access
+                      </a>
+                    </div>
+                    <div className="project-advanced-section">
+                      <button
+                        type="button"
+                        className="project-advanced-toggle"
+                        aria-expanded={projectAdvancedOpen}
+                        onClick={() => setProjectAdvancedOpen((open) => !open)}
+                      >
+                        Advanced
+                      </button>
+                      {projectAdvancedOpen ? (
+                        <div className="project-advanced-panel">
+                          <section className="project-advanced-group">
+                            <div>
+                              <h3>Inference</h3>
+                              {sessionSummary?.hasAnthropicApiKey ? (
+                                <div className="settings-secret-row">
+                                  <div className="settings-secret-copy">
+                                    <div className="settings-secret-label">Anthropic API key</div>
+                                    <div className="settings-secret-value">
+                                      {sessionSettings.anthropic_api_key_hint || "Saved"}
+                                    </div>
+                                  </div>
+                                </div>
+                              ) : (
+                                <div className="project-advanced-form">
+                                  <label className="project-field" htmlFor="project-anthropic-key">
+                                    <span>Anthropic API key</span>
+                                    <input
+                                      id="project-anthropic-key"
+                                      name="project_anthropic_key"
+                                      type="password"
+                                      autoComplete="new-password"
+                                      placeholder="Anthropic API key"
+                                      value={projectAnthropicKey}
+                                      onChange={(event) =>
+                                        setProjectAnthropicKey(event.target.value)
+                                      }
+                                    />
+                                  </label>
+                                  <button
+                                    type="button"
+                                    className="secondary-button project-advanced-save"
+                                    disabled={projectAdvancedSaving === "inference"}
+                                    onClick={() => void saveProjectInferenceKey()}
+                                  >
+                                    {projectAdvancedSaving === "inference"
+                                      ? "Saving..."
+                                      : "Save key"}
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          </section>
+                          <section className="project-advanced-group">
+                            <div>
+                              <h3>Sandbox</h3>
+                              {sessionSettings.has_modal_credentials ? (
+                                <div className="settings-secret-row">
+                                  <div className="settings-secret-copy">
+                                    <div className="settings-secret-label">Modal token ID</div>
+                                    <div className="settings-secret-value">
+                                      {sessionSettings.modal_token_id_hint || "Saved"}
+                                    </div>
+                                  </div>
+                                </div>
+                              ) : (
+                                <div className="project-advanced-form">
+                                  <label className="project-field" htmlFor="project-modal-token-id">
+                                    <span>Modal token ID</span>
+                                    <input
+                                      id="project-modal-token-id"
+                                      name="project_modal_token_id"
+                                      type="password"
+                                      autoComplete="new-password"
+                                      placeholder="Modal token ID"
+                                      value={projectModalTokenId}
+                                      onChange={(event) =>
+                                        setProjectModalTokenId(event.target.value)
+                                      }
+                                    />
+                                  </label>
+                                  <label
+                                    className="project-field"
+                                    htmlFor="project-modal-token-secret"
+                                  >
+                                    <span>Modal token secret</span>
+                                    <input
+                                      id="project-modal-token-secret"
+                                      name="project_modal_token_secret"
+                                      type="password"
+                                      autoComplete="new-password"
+                                      placeholder="Modal token secret"
+                                      value={projectModalTokenSecret}
+                                      onChange={(event) =>
+                                        setProjectModalTokenSecret(event.target.value)
+                                      }
+                                    />
+                                  </label>
+                                  <button
+                                    type="button"
+                                    className="secondary-button project-advanced-save"
+                                    disabled={projectAdvancedSaving === "sandbox"}
+                                    onClick={() => void saveProjectModalCredentials()}
+                                  >
+                                    {projectAdvancedSaving === "sandbox"
+                                      ? "Saving..."
+                                      : "Save credentials"}
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          </section>
+                          {projectAdvancedStatus ? (
+                            <div className="project-repo-status" role="status">
+                              {projectAdvancedStatus}
+                            </div>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </div>
                   </div>
                 ) : (
-                  <div className="project-repo-section">
+                  <div className="project-github-required">
                     <button
-                      className="primary-button"
+                      className="primary-button project-github-connect-button"
                       type="button"
                       disabled={!sessionSettings.github_oauth_available}
                       onClick={() => {
@@ -4836,8 +5195,16 @@ export default function App() {
                         window.location.href = githubLoginUrl();
                       }}
                     >
+                      <AppIcon
+                        src={staticAssetPath("github.svg")}
+                        className="project-github-icon"
+                      />
                       Connect GitHub account
                     </button>
+                    <p className="project-github-required-note">
+                      You need to connect GitHub before creating a project. GitHub is the source of
+                      truth for project files, and every change is committed there.
+                    </p>
                     {!sessionSettings.github_oauth_available ? (
                       <div className="project-repo-status">
                         GitHub OAuth is not configured in this environment yet.
@@ -4847,11 +5214,9 @@ export default function App() {
                 )
               ) : null}
               <button
-                className="primary-button"
+                className="primary-button project-submit-button"
                 type="submit"
-                disabled={
-                  projectModalState?.mode === "create" && !sessionSettings.has_github_connection
-                }
+                disabled={projectCreateBlocked}
               >
                 {projectModalState?.mode === "edit" ? "Save project" : "Create project"}
               </button>

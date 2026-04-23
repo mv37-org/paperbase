@@ -62,7 +62,9 @@ from .models import (
     GitHubRepoBranchSummary,
     GitHubRepoImportCandidate,
     GitHubRepoImportCandidateResponse,
+    GitHubRepoListResponse,
     GitHubRepoMetadataResponse,
+    GitHubRepoSummary,
     ProjectItemPageResponse,
     ProjectRepoConflictDetail,
     ProjectRepoConflictFile,
@@ -918,6 +920,11 @@ class PaperbaseService:
             update={
                 "anthropic_api_key_hint": anthropic_api_key_hint,
                 "github_oauth_available": bool(self.settings.github_client_id and self.settings.github_client_secret),
+                "github_manage_access_url": (
+                    f"https://github.com/settings/connections/applications/{self.settings.github_client_id}"
+                    if self.settings.github_client_id
+                    else "https://github.com/settings/connections/applications"
+                ),
             }
         )
 
@@ -1235,9 +1242,30 @@ class PaperbaseService:
             branches=[
                 GitHubRepoBranchSummary(
                     name=branch.name,
+                    commit_sha=branch.commit_sha,
                     is_default=branch.name == (repo_info.default_branch or "main"),
                 )
                 for branch in branches
+            ],
+        )
+
+    def list_github_repositories(self, user: BrowserUser) -> GitHubRepoListResponse:
+        _, access_token = self._github_access(user)
+        try:
+            repos = self.github_repo_manager.list_repositories(access_token=access_token)
+        except GitHubSyncError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return GitHubRepoListResponse(
+            repos=[
+                GitHubRepoSummary(
+                    owner=repo.owner_login,
+                    name=repo.repo_name,
+                    full_name=repo.full_name,
+                    html_url=repo.repo_url,
+                    default_branch=repo.default_branch or "main",
+                    private=repo.private,
+                )
+                for repo in repos
             ],
         )
 

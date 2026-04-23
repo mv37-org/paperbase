@@ -2887,6 +2887,12 @@ textarea {
   padding: 16px;
 }
 
+.project-modal-panel {
+  width: min(560px, calc(100vw - 32px));
+  max-height: min(92vh, 820px);
+  overflow: auto;
+}
+
 .python-save-success {
   text-align: center;
 }
@@ -3068,32 +3074,158 @@ textarea {
 
 .project-description-input {
   width: 100%;
-  margin-bottom: 15px;
+  margin-bottom: 0;
   border: 1px solid rgba(27, 22, 17, 0.18);
   background: #ffffff;
 }
 
+.project-field {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+.project-field > span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.project-field-disabled {
+  opacity: 0.54;
+}
+
+.project-field-disabled input,
+.project-field-disabled textarea {
+  cursor: not-allowed;
+}
+
 .project-repo-section {
   display: grid;
-  gap: 10px;
+  gap: 12px;
+  padding-top: 2px;
 }
 
-.project-repo-mode {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
+.project-github-heading {
+  display: inline-flex;
+  align-items: center;
   gap: 8px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 650;
 }
 
-.project-repo-mode-button {
+.project-github-icon {
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+}
+
+.project-repo-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 7fr) minmax(140px, 3fr);
+  gap: 10px;
+  align-items: end;
+}
+
+.project-repo-selector-field {
+  position: relative;
+}
+
+.project-repo-dropdown {
+  position: relative;
+  min-width: 0;
+}
+
+.modal-view .stack .project-repo-trigger {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  text-align: left;
+  border: 1px solid rgba(27, 22, 17, 0.18);
+  background: #ffffff;
+  color: var(--text);
+}
+
+.project-repo-trigger span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-repo-trigger::after {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg) translateY(-2px);
+  opacity: 0.72;
+}
+
+.project-repo-menu {
+  position: absolute;
+  z-index: 4;
+  top: calc(100% + 5px);
+  left: 0;
+  right: 0;
+  max-height: 220px;
+  overflow: auto;
+  display: grid;
+  gap: 2px;
+  padding: 5px;
   border: 1px solid rgba(27, 22, 17, 0.14);
-  background: #fffdfa;
-  color: var(--muted);
+  border-radius: var(--radius);
+  background: var(--paper-strong);
+  box-shadow: 0 10px 30px rgba(16, 24, 40, 0.12);
 }
 
-.project-repo-mode-button.active {
-  border-color: var(--blue-border);
+.modal-view .stack .project-repo-option {
+  min-height: 42px;
+  height: auto;
+  max-height: none;
+  display: grid;
+  gap: 2px;
+  justify-items: start;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+.project-repo-option:hover,
+.project-repo-option.active {
   background: rgba(44, 106, 179, 0.1);
-  color: var(--blue);
+}
+
+.project-repo-option span {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.project-repo-option small,
+.project-repo-menu-note {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.25;
+}
+
+.project-repo-menu-note {
+  padding: 7px 8px;
 }
 
 .project-repo-existing {
@@ -3101,20 +3233,25 @@ textarea {
   gap: 8px;
 }
 
-.project-repo-row {
-  display: grid;
-  grid-template-columns: minmax(0, 0.45fr) minmax(0, 0.55fr);
-  gap: 8px;
+.project-new-repo-field {
+  width: calc((100% - 10px) * 0.7);
 }
 
 .project-repo-branch-select {
   min-height: 32px;
+  height: 32px;
+  width: 100%;
   border-radius: var(--radius);
   border: 1px solid rgba(27, 22, 17, 0.18);
   background: #ffffff;
   color: var(--text);
   padding: 0 10px;
   font-size: 13px;
+}
+
+.project-repo-branch-select:disabled {
+  cursor: not-allowed;
+  opacity: 0.72;
 }
 
 .project-repo-status {
@@ -3153,6 +3290,114 @@ textarea {
 .project-repo-import-item em {
   color: var(--muted);
   font-style: normal;
+}
+
+.project-repo-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin-top: -2px;
+}
+
+.modal-view .stack .project-repo-link,
+.project-repo-link {
+  min-height: auto;
+  height: auto;
+  max-height: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.project-repo-link:hover {
+  color: var(--blue);
+}
+
+.project-repo-link:disabled {
+  cursor: wait;
+  opacity: 0.62;
+}
+
+.project-github-required {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(27, 22, 17, 0.1);
+  border-radius: var(--radius);
+  background: rgba(27, 22, 17, 0.02);
+}
+
+.modal-view .stack .project-github-connect-button {
+  margin-top: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.project-github-required-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.project-advanced-section {
+  border-top: 1px solid rgba(27, 22, 17, 0.1);
+  padding-top: 10px;
+}
+
+.modal-view .stack .project-advanced-toggle {
+  min-height: auto;
+  height: auto;
+  max-height: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.project-advanced-panel {
+  display: grid;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.project-advanced-group {
+  display: grid;
+  gap: 8px;
+}
+
+.project-advanced-group h3 {
+  margin: 0 0 7px;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.project-advanced-form {
+  display: grid;
+  gap: 8px;
+}
+
+.modal-view .stack .project-advanced-save {
+  margin-top: 0;
+  width: 100%;
+}
+
+.modal-view .stack .project-submit-button {
+  width: 100%;
 }
 
 .python-conflict-layout {
@@ -3975,6 +4220,10 @@ body.authenticated-theme-dark .paper-drawer-eyebrow,
 body.authenticated-theme-dark .citation-card-path,
 body.authenticated-theme-dark .project-repo-status,
 body.authenticated-theme-dark .project-repo-import-item em,
+body.authenticated-theme-dark .project-repo-option small,
+body.authenticated-theme-dark .project-repo-menu-note,
+body.authenticated-theme-dark .project-github-required-note,
+body.authenticated-theme-dark .project-field > span,
 body.authenticated-theme-dark .python-conflict-summary span {
   color: var(--muted);
 }
@@ -3993,7 +4242,11 @@ body.authenticated-theme-dark .citation-card-title,
 body.authenticated-theme-dark .citation-card-excerpt,
 body.authenticated-theme-dark .paper-drawer-title,
 body.authenticated-theme-dark .paper-drawer-body,
+body.authenticated-theme-dark .project-field,
+body.authenticated-theme-dark .project-github-heading,
+body.authenticated-theme-dark .project-repo-option,
 body.authenticated-theme-dark .project-repo-import-item,
+body.authenticated-theme-dark .project-advanced-group h3,
 body.authenticated-theme-dark .python-conflict-summary strong,
 body.authenticated-theme-dark .chat-tab.active .chat-tab-trigger,
 body.authenticated-theme-dark .chat-tab.active .chat-tab-close {
@@ -4063,6 +4316,7 @@ body.authenticated-theme-dark .stack input,
 body.authenticated-theme-dark textarea,
 body.authenticated-theme-dark .chat-empty-project-search,
 body.authenticated-theme-dark .project-description-input,
+body.authenticated-theme-dark .project-repo-trigger,
 body.authenticated-theme-dark .project-repo-branch-select,
 body.authenticated-theme-dark .modal-view .stack input,
 body.authenticated-theme-dark .modal-view .stack textarea {
@@ -4092,6 +4346,8 @@ body.authenticated-theme-dark .chat-empty-project-picker:focus-within .chat-empt
 body.authenticated-theme-dark .chat-empty-project-option:hover,
 body.authenticated-theme-dark .chat-empty-project-option.active,
 body.authenticated-theme-dark .chat-empty-project-create:hover,
+body.authenticated-theme-dark .project-repo-option:hover,
+body.authenticated-theme-dark .project-repo-option.active,
 body.authenticated-theme-dark .project-menu-item:hover,
 body.authenticated-theme-dark .sidebar-quick-action:hover,
 body.authenticated-theme-dark .project-card:hover,
@@ -4109,6 +4365,8 @@ body.authenticated-theme-dark .settings-appearance-option,
 body.authenticated-theme-dark .paper-drawer-placeholder,
 body.authenticated-theme-dark .paper-drawer-error,
 body.authenticated-theme-dark .citation-card,
+body.authenticated-theme-dark .project-github-required,
+body.authenticated-theme-dark .project-repo-menu,
 body.authenticated-theme-dark .project-repo-import-list,
 body.authenticated-theme-dark .modal-flash.warning,
 body.authenticated-theme-dark .python-conflict-file-tab {
@@ -4146,18 +4404,6 @@ body.authenticated-theme-dark .secondary-button {
   border-color: rgba(223, 232, 244, 0.14);
   background: rgba(255, 255, 255, 0.04);
   color: var(--text);
-}
-
-body.authenticated-theme-dark .project-repo-mode-button {
-  border-color: rgba(223, 232, 244, 0.14);
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--muted);
-}
-
-body.authenticated-theme-dark .project-repo-mode-button.active {
-  border-color: rgba(111, 164, 255, 0.44);
-  background: rgba(79, 140, 255, 0.14);
-  color: #91b9ff;
 }
 
 body.authenticated-theme-dark .modal-close,
@@ -4583,6 +4829,18 @@ body.authenticated-theme-dark .project-menu-item:disabled {
   .composer-status {
     left: 50vw;
     width: calc(100vw - 32px);
+  }
+
+  .project-modal-panel {
+    width: calc(100vw - 32px);
+  }
+
+  .project-repo-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .project-new-repo-field {
+    width: 100%;
   }
 
   .app-shell {

@@ -308,6 +308,20 @@ describe("chat api", () => {
       )
       .mockResolvedValueOnce(
         jsonResponse({
+          repos: [
+            {
+              owner: "octocat",
+              name: "existing-repo",
+              full_name: "octocat/existing-repo",
+              html_url: "https://github.com/octocat/existing-repo",
+              default_branch: "main",
+              private: true,
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
           project_id: "proj_2",
           name: "Agents",
           description: "Agent eval work",
@@ -322,6 +336,7 @@ describe("chat api", () => {
     const api = await loadApiModule();
 
     const projects = await api.loadProjects();
+    const repos = await api.loadGitHubRepositories();
     const githubRepo = {
       mode: "create" as const,
       name: "agent-evals",
@@ -332,14 +347,18 @@ describe("chat api", () => {
     await api.deleteProject("proj_2");
 
     const [loadPath] = fetchMock.mock.calls[0] as FetchCall;
-    const [createPath, createInit] = fetchMock.mock.calls[1] as FetchCall;
+    const [repoPath, repoInit] = fetchMock.mock.calls[1] as FetchCall;
+    const [createPath, createInit] = fetchMock.mock.calls[2] as FetchCall;
     expect(requestPath(loadPath)).toBe("/v1/browser/projects");
+    expect(requestPath(repoPath)).toBe("/v1/browser/github/repositories");
+    expect(repoInit?.method).toBe("GET");
     expect(requestPath(createPath)).toBe("/v1/browser/projects");
     expect(createInit?.method).toBe("POST");
     expect(createInit?.body).toBe(
       JSON.stringify({ name: "Agents", description: "Agent eval work", github_repo: githubRepo }),
     );
     expect(projects.projects[0]?.project_id).toBe("proj_1");
+    expect(repos.repos[0]?.full_name).toBe("octocat/existing-repo");
     expect(created.project_id).toBe("proj_2");
   });
 
