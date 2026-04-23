@@ -709,6 +709,60 @@ def test_reindex_processes_all_pages_without_skipping(service: PaperbaseService)
         assert service.repository.list_chunks_missing_embedding(paper_id) == []
 
 
+def test_reindex_rewrites_existing_embeddings_when_requested(service: PaperbaseService):
+    paper_id = _seed_indexed_paper(
+        service.repository,
+        "2402.99999",
+        with_paper_embedding=True,
+        chunks_with_embedding=2,
+        chunks_without_embedding=0,
+    )
+    original_paper_embedding = list(service.repository.paper_embeddings[paper_id])
+    original_chunk_embeddings = [
+        list(chunk["embedding"])
+        for chunk in service.repository.list_chunks_missing_embedding(paper_id, include_existing=True)
+    ]
+
+    service.embeddings = _StubEmbeddings()
+    result = service.reindex_embeddings(limit=10, include_chunks=True, rewrite_existing=True)
+
+    assert result == {"papers_updated": 1, "chunks_updated": 2}
+    assert service.repository.paper_embeddings[paper_id] != original_paper_embedding
+    updated_chunk_embeddings = [
+        list(chunk["embedding"])
+        for chunk in service.repository.list_chunks_missing_embedding(paper_id, include_existing=True)
+    ]
+    assert updated_chunk_embeddings != original_chunk_embeddings
+
+
+def test_reindex_batches_large_chunk_rewrites(service: PaperbaseService):
+    _seed_indexed_paper(
+        service.repository,
+        "2402.99998",
+        with_paper_embedding=True,
+        chunks_with_embedding=260,
+        chunks_without_embedding=0,
+    )
+    embeddings = _StubEmbeddings()
+    service.embeddings = embeddings
+
+    result = service.reindex_embeddings(limit=10, include_chunks=True, rewrite_existing=True)
+
+    assert result["chunks_updated"] == 260
+    assert [len(batch) for batch in embeddings.chunk_calls] == [128, 128, 4]
+
+
+def test_enqueue_reindex_embeddings_job_defaults_to_full_rewrite(service: PaperbaseService):
+    job = service.enqueue_reindex_embeddings_job(limit=11, include_chunks=False)
+
+    assert job.job_type == "reindex_embeddings"
+    assert job.payload == {
+        "limit": 11,
+        "include_chunks": False,
+        "rewrite_existing": True,
+    }
+
+
 def test_suggest_and_stats_endpoints(service: PaperbaseService):
     _seed_indexed_paper(
         service.repository, "2403.00001", with_paper_embedding=True, chunks_with_embedding=2, chunks_without_embedding=0
@@ -2254,3 +2308,74 @@ def test_memory_repository_search_local_bakes_in_citation_and_recency_boosts():
     # With boosts enabled, the highly-cited paper picks up additional score.
     assert with_boost_by_id["high/0001"] > with_boost_by_id["low/0001"]
     assert with_boost_by_id["high/0001"] > no_boost_by_id["high/0001"]
+
+
+def test_query_prefix_for_model_matches_bge_e5_and_leaves_others_unchanged():
+    """Retrieval models like BGE / E5 need a model-specific prefix prepended
+    to the query (but not the document) at encode time. SPECTER2 and generic
+    models get no prefix. Regressing this silently loses retrieval recall."""
+    from paperbase.service import _query_prefix_for_model
+
+    assert _query_prefix_for_model("BAAI/bge-base-en-v1.5") == (
+        "Represent this sentence for searching relevant passages: "
+    )
+    assert _query_prefix_for_model("BAAI/bge-large-en-v1.5") == (
+        "Represent this sentence for searching relevant passages: "
+    )
+    assert _query_prefix_for_model("intfloat/e5-large-v2") == "query: "
+    assert _query_prefix_for_model("intfloat/multilingual-e5-large") == "query: "
+    assert _query_prefix_for_model("allenai/specter2_base") == ""
+    assert _query_prefix_for_model("sentence-transformers/all-MiniLM-L6-v2") == ""
+    assert _query_prefix_for_model(None) == ""
+    assert _query_prefix_for_model("") == ""
+
+
+def test_encode_prepends_query_prefix_for_bge_but_not_for_specter2(monkeypatch):
+    """The model-aware prefix must be injected in encode() (query side) and
+    must not affect encode_batch() callers (document side) or encode_paper*."""
+    from paperbase.config import Settings
+    from paperbase.service import OptionalEmbeddingProvider
+
+    import numpy as np
+
+    class _FakeModel:
+        def __init__(self):
+            self.calls: list[list[str]] = []
+
+        def encode(self, texts, **_):
+            # Record what actually reached the underlying model, so we can
+            # verify the prefix arrived (or did not) exactly as intended.
+            self.calls.append(list(texts))
+            return np.zeros((len(texts), 768), dtype="float32")
+
+    # BGE-base -> prefix applied in encode(), not in encode_batch()
+    bge_settings = Settings(
+        storage_backend="memory", database_url="memory://", api_key="t",
+        summary_provider="none",
+        embedding_model="BAAI/bge-base-en-v1.5", embedding_dim=768,
+    )
+    bge_provider = OptionalEmbeddingProvider(bge_settings)
+    bge_model = _FakeModel()
+    monkeypatch.setattr(bge_provider, "_model", lambda: bge_model)
+
+    bge_provider.encode("vision transformer")
+    assert bge_model.calls[-1] == [
+        "Represent this sentence for searching relevant passages: vision transformer"
+    ]
+
+    bge_provider.encode_batch(["doc one", "doc two"])
+    assert bge_model.calls[-1] == ["doc one", "doc two"], (
+        "encode_batch is the document-side entry point and must not apply the query prefix"
+    )
+
+    # SPECTER2 -> no prefix
+    specter_settings = Settings(
+        storage_backend="memory", database_url="memory://", api_key="t",
+        summary_provider="none",
+        embedding_model="allenai/specter2_base", embedding_dim=768,
+    )
+    specter_provider = OptionalEmbeddingProvider(specter_settings)
+    specter_model = _FakeModel()
+    monkeypatch.setattr(specter_provider, "_model", lambda: specter_model)
+    specter_provider.encode("vision transformer")
+    assert specter_model.calls[-1] == ["vision transformer"]

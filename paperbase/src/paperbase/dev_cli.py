@@ -19,6 +19,8 @@ from sqlalchemy.engine import URL, make_url
 from .config import Settings, get_settings, repo_root, resolve_repo_path, settings_env_file
 from .dev_benchmarks import profile_hotpaths, record_test_times
 from .repository import Base, build_repository
+from .service import PaperbaseService
+from .storage import build_object_store
 
 
 LOCAL_HOSTS = {"", "localhost", "127.0.0.1", "::1"}
@@ -495,6 +497,27 @@ def flush_local() -> int:
     return 0
 
 
+def reindex_embeddings(*, limit: int, include_chunks: bool, rewrite_existing: bool) -> int:
+    settings = _settings()
+    service = PaperbaseService(
+        settings=settings,
+        repository=build_repository(settings),
+        object_store=build_object_store(settings),
+    )
+    service.init()
+    job = service.enqueue_reindex_embeddings_job(
+        limit=limit,
+        include_chunks=include_chunks,
+        rewrite_existing=rewrite_existing,
+    )
+    print(f"Queued job:            {job.job_id}")
+    print(f"Job type:              {job.job_type}")
+    print(f"Rewrite existing:      {'yes' if rewrite_existing else 'no'}")
+    print(f"Include chunks:        {'yes' if include_chunks else 'no'}")
+    print(f"Limit:                 {limit}")
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Local developer helpers for paperbase.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -533,6 +556,22 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Run deterministic hotpath profiling and compare the results to the committed baseline.",
     )
     profile_parser.add_argument("--update-baseline", action="store_true")
+
+    reindex_parser = subparsers.add_parser(
+        "reindex-embeddings",
+        help="Queue a paper/chunk embedding rewrite job using the current embedding model.",
+    )
+    reindex_parser.add_argument("--limit", type=int, default=100_000)
+    reindex_parser.add_argument(
+        "--skip-chunks",
+        action="store_true",
+        help="Rewrite paper vectors only.",
+    )
+    reindex_parser.add_argument(
+        "--missing-only",
+        action="store_true",
+        help="Backfill NULL embeddings only instead of rewriting existing vectors.",
+    )
     return parser
 
 
@@ -557,6 +596,12 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.command == "profile":
         return profile_hotpaths(settings=_settings(), update_baseline=args.update_baseline)
+    if args.command == "reindex-embeddings":
+        return reindex_embeddings(
+            limit=args.limit,
+            include_chunks=not args.skip_chunks,
+            rewrite_existing=not args.missing_only,
+        )
 
     parser.error(f"Unsupported command: {args.command}")
     return 2

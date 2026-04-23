@@ -26,6 +26,7 @@ from sqlalchemy import (
     or_,
     select,
     text,
+    true,
 )
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
@@ -666,11 +667,17 @@ class PaperRepository(ABC):
         *,
         limit: int,
         include_chunks: bool = True,
+        rewrite_existing: bool = False,
         after: PaperResponse | None = None,
     ) -> list[PaperResponse]:
-        """Return papers whose paper-level embedding is missing OR, when
+        """Return papers whose embeddings should be (re)written.
+
+        When ``rewrite_existing`` is false, this is the NULL-only backfill
+        frontier: papers whose paper-level embedding is missing OR, when
         ``include_chunks`` is true, papers that have at least one chunk with a
-        missing embedding.
+        missing embedding. When ``rewrite_existing`` is true, return the full
+        indexed-paper frontier so callers can rewrite every paper/chunk vector
+        into the current embedding space.
 
         Always returns the current frontier — callers should fetch without an
         offset and rely on the predicate to drop rows as they get repaired.
@@ -682,7 +689,7 @@ class PaperRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def list_chunks_missing_embedding(self, paper_id: str) -> list[dict[str, Any]]:
+    def list_chunks_missing_embedding(self, paper_id: str, *, include_existing: bool = False) -> list[dict[str, Any]]:
         raise NotImplementedError
 
     @abstractmethod
@@ -1238,6 +1245,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
         *,
         limit: int,
         include_chunks: bool = True,
+        rewrite_existing: bool = False,
         after: PaperResponse | None = None,
     ) -> list[PaperResponse]:
         """Keyset-paginated backfill frontier. Use the same ordering as
@@ -1250,10 +1258,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
             SELECT papers.*
             FROM papers
             WHERE papers.index_status = 'indexed'
-              AND (
-                papers.embedding IS NULL
-                {chunk_predicate}
-              )
+              {needs_embedding_predicate}
               {after_predicate}
             ORDER BY
               papers.influential_citation_count DESC NULLS LAST,
@@ -1262,12 +1267,19 @@ class SqlAlchemyPaperRepository(PaperRepository):
               papers.paper_id ASC
             LIMIT :limit
         """
-        chunk_predicate = (
-            "OR EXISTS (SELECT 1 FROM text_chunks WHERE text_chunks.paper_id = papers.paper_id "
-            "AND text_chunks.embedding IS NULL)"
-            if include_chunks
-            else ""
-        )
+        if rewrite_existing:
+            needs_embedding_predicate = ""
+        else:
+            chunk_predicate = (
+                "OR EXISTS (SELECT 1 FROM text_chunks WHERE text_chunks.paper_id = papers.paper_id "
+                "AND text_chunks.embedding IS NULL)"
+                if include_chunks
+                else ""
+            )
+            needs_embedding_predicate = f"""AND (
+                papers.embedding IS NULL
+                {chunk_predicate}
+              )"""
         params: dict[str, Any] = {"limit": limit}
         after_predicate = ""
         if after is not None:
@@ -1291,7 +1303,12 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     "after_paper_id": after.paper_id,
                 }
             )
-        sql = text(base_sql.format(chunk_predicate=chunk_predicate, after_predicate=after_predicate))
+        sql = text(
+            base_sql.format(
+                needs_embedding_predicate=needs_embedding_predicate,
+                after_predicate=after_predicate,
+            )
+        )
         with self._session() as session:
             rows = session.scalars(select(PaperORM).from_statement(sql).params(**params)).all()
         return [_paper_from_orm(row) for row in rows]
@@ -1303,14 +1320,18 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 row.embedding = embedding
                 row.updated_at = utcnow()
 
-    def list_chunks_missing_embedding(self, paper_id: str) -> list[dict[str, Any]]:
+    def list_chunks_missing_embedding(self, paper_id: str, *, include_existing: bool = False) -> list[dict[str, Any]]:
         with self._session() as session:
-            rows = (
-                session.execute(
-                    select(TextChunkORM).where(
-                        TextChunkORM.paper_id == paper_id,
-                        TextChunkORM.embedding.is_(None),
-                    )
+            rows = session.execute(
+                select(TextChunkORM)
+                .where(
+                    TextChunkORM.paper_id == paper_id,
+                    true() if include_existing else TextChunkORM.embedding.is_(None),
+                )
+                .order_by(
+                    TextChunkORM.chunk_index.asc(),
+                    TextChunkORM.created_at.asc(),
+                    TextChunkORM.chunk_id.asc(),
                 )
                 .scalars()
                 .all()
@@ -3155,11 +3176,14 @@ class MemoryPaperRepository(PaperRepository):
         *,
         limit: int,
         include_chunks: bool = True,
+        rewrite_existing: bool = False,
         after: PaperResponse | None = None,
     ) -> list[PaperResponse]:
         def needs_backfill(paper: PaperResponse) -> bool:
             if paper.index_status != "indexed":
                 return False
+            if rewrite_existing:
+                return True
             if self.paper_embeddings.get(paper.paper_id) is None:
                 return True
             if include_chunks:
@@ -3183,8 +3207,11 @@ class MemoryPaperRepository(PaperRepository):
         if paper_id in self.papers:
             self.paper_embeddings[paper_id] = embedding
 
-    def list_chunks_missing_embedding(self, paper_id: str) -> list[dict[str, Any]]:
-        return [chunk for chunk in self.text_chunks.get(paper_id, []) if not chunk.get("embedding")]
+    def list_chunks_missing_embedding(self, paper_id: str, *, include_existing: bool = False) -> list[dict[str, Any]]:
+        chunks = list(self.text_chunks.get(paper_id, []))
+        if include_existing:
+            return chunks
+        return [chunk for chunk in chunks if not chunk.get("embedding")]
 
     def update_chunk_embedding(self, chunk_id: str, embedding: list[float]) -> None:
         for chunks in self.text_chunks.values():

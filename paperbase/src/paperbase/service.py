@@ -365,6 +365,27 @@ def _needs_raw_transformers_path(model_name: str) -> bool:
     return any(token in lowered for token in _TRANSFORMERS_CLS_MODEL_TOKENS)
 
 
+# Model-aware query prefixes. Retrieval models often expect a model-specific
+# string prepended to the query (but not the document) at encode time — their
+# training recipe pairs the prefixed query against an un-prefixed passage.
+# Omitting the prefix leaves ~5–15 points of top-1 on the table for those
+# models. SPECTER2 and generic sentence-transformers models have no prefix.
+_QUERY_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("BAAI/bge-", "Represent this sentence for searching relevant passages: "),
+    ("intfloat/e5-", "query: "),
+    ("intfloat/multilingual-e5-", "query: "),
+)
+
+
+def _query_prefix_for_model(model_name: str | None) -> str:
+    if not model_name:
+        return ""
+    for prefix, query_prefix in _QUERY_PREFIXES:
+        if model_name.startswith(prefix):
+            return query_prefix
+    return ""
+
+
 class OptionalEmbeddingProvider:
     # Module-level flags so we log each distinct disabled-state exactly once,
     # rather than once per query.
@@ -375,6 +396,7 @@ class OptionalEmbeddingProvider:
     def __init__(self, settings: Settings) -> None:
         self._model_name = settings.embedding_model
         self._expected_dim = settings.embedding_dim
+        self._query_prefix = _query_prefix_for_model(self._model_name)
 
     def _model(self):
         if not self._model_name:
@@ -447,7 +469,11 @@ class OptionalEmbeddingProvider:
         return model
 
     def encode(self, text: str) -> list[float] | None:
-        batch = self.encode_batch([text])
+        # encode() is the query-side entry point (search_local passes the
+        # user's query here). Model-aware prefix is applied here, not in
+        # encode_batch, so document-side callers (encode_paper_batch) keep
+        # their un-prefixed input shape intact.
+        batch = self.encode_batch([self._query_prefix + text])
         if batch is None or not batch:
             return None
         return batch[0]
@@ -2387,33 +2413,52 @@ class PaperbaseService:
         )
         return job
 
-    def enqueue_reindex_embeddings_job(self, *, limit: int = 100_000, include_chunks: bool = True) -> JobResponse:
+    def enqueue_reindex_embeddings_job(
+        self,
+        *,
+        limit: int = 100_000,
+        include_chunks: bool = True,
+        rewrite_existing: bool = True,
+    ) -> JobResponse:
+        job_type = "reindex_embeddings" if rewrite_existing else "reindex_missing_embeddings"
         job = self.repository.create_job(
-            "reindex_missing_embeddings",
-            {"limit": limit, "include_chunks": include_chunks},
+            job_type,
+            {"limit": limit, "include_chunks": include_chunks, "rewrite_existing": rewrite_existing},
         )
         logger.info(
-            "Created reindex_missing_embeddings job",
+            "Created embedding reindex job",
             extra={
                 "event": "jobs.reindex.created",
                 "job_id": job.job_id,
+                "job_type": job_type,
                 "limit": limit,
                 "include_chunks": include_chunks,
+                "rewrite_existing": rewrite_existing,
             },
         )
         return job
 
     def reindex_missing_embeddings(self, *, limit: int, include_chunks: bool = True) -> dict[str, int]:
+        return self.reindex_embeddings(limit=limit, include_chunks=include_chunks, rewrite_existing=False)
+
+    def reindex_embeddings(
+        self,
+        *,
+        limit: int,
+        include_chunks: bool = True,
+        rewrite_existing: bool = True,
+    ) -> dict[str, int]:
         if self.embeddings is None:
             logger.warning(
-                "reindex_missing_embeddings invoked without an embedding provider",
-                extra={"event": "reindex.noop"},
+                "reindex_embeddings invoked without an embedding provider",
+                extra={"event": "reindex.noop", "rewrite_existing": rewrite_existing},
             )
             return {"papers_updated": 0, "chunks_updated": 0}
 
         papers_updated = 0
         chunks_updated = 0
         page = max(64, min(limit, 512))
+        chunk_page = 128
         remaining = limit
         # Keyset cursor over the same ordering used by the repo method. Advances
         # after every fetched page so a paper that failed to encode this round
@@ -2425,6 +2470,7 @@ class PaperbaseService:
             batch = self.repository.list_papers_needing_embedding_backfill(
                 limit=min(page, remaining),
                 include_chunks=include_chunks,
+                rewrite_existing=rewrite_existing,
                 after=after,
             )
             if not batch:
@@ -2432,8 +2478,8 @@ class PaperbaseService:
 
             # Paper-level embeddings in one batched encode. Use the same
             # (title, body) pair contract as index_arxiv_paper so the
-            # reindex path produces vectors in the same space SPECTER2 was
-            # trained on — summary_short is intentionally excluded.
+            # reindex path produces vectors in the same space as normal ingest
+            # — summary_short is intentionally excluded.
             pairs = [(paper.title or "", paper.tldr or paper.abstract or "") for paper in batch]
             vectors = self.embeddings.encode_paper_batch(pairs)
             if vectors is not None and len(vectors) == len(batch):
@@ -2443,35 +2489,42 @@ class PaperbaseService:
 
             if include_chunks:
                 for paper in batch:
-                    missing = self.repository.list_chunks_missing_embedding(paper.paper_id)
-                    if not missing:
+                    chunks = self.repository.list_chunks_missing_embedding(
+                        paper.paper_id,
+                        include_existing=rewrite_existing,
+                    )
+                    if not chunks:
                         continue
                     cap = self.settings.chunk_max_chars + self.settings.chunk_overlap_chars
-                    chunk_inputs = [(chunk.get("content") or "")[:cap] for chunk in missing]
-                    chunk_vectors = self.embeddings.encode_batch(chunk_inputs)
-                    if chunk_vectors is None or len(chunk_vectors) != len(missing):
-                        continue
-                    for chunk, vector in zip(missing, chunk_vectors):
-                        self.repository.update_chunk_embedding(chunk["chunk_id"], vector)
-                        chunks_updated += 1
+                    for start in range(0, len(chunks), chunk_page):
+                        chunk_batch = chunks[start : start + chunk_page]
+                        chunk_inputs = [(chunk.get("content") or "")[:cap] for chunk in chunk_batch]
+                        chunk_vectors = self.embeddings.encode_batch(chunk_inputs)
+                        if chunk_vectors is None or len(chunk_vectors) != len(chunk_batch):
+                            continue
+                        for chunk, vector in zip(chunk_batch, chunk_vectors):
+                            self.repository.update_chunk_embedding(chunk["chunk_id"], vector)
+                            chunks_updated += 1
 
             after = batch[-1]
             remaining -= len(batch)
             logger.info(
-                "reindex_missing_embeddings progress",
+                "Embedding reindex progress",
                 extra={
                     "event": "reindex.progress",
                     "papers_updated": papers_updated,
                     "chunks_updated": chunks_updated,
+                    "rewrite_existing": rewrite_existing,
                 },
             )
 
         logger.info(
-            "Completed reindex_missing_embeddings",
+            "Completed embedding reindex",
             extra={
                 "event": "reindex.completed",
                 "papers_updated": papers_updated,
                 "chunks_updated": chunks_updated,
+                "rewrite_existing": rewrite_existing,
             },
         )
         return {"papers_updated": papers_updated, "chunks_updated": chunks_updated}
@@ -2642,10 +2695,13 @@ class PaperbaseService:
                 )
             elif job.job_type == "summarize_top_cited":
                 self.summarize_top_cited(limit=int(job.payload.get("limit", 500_000)))
-            elif job.job_type == "reindex_missing_embeddings":
-                self.reindex_missing_embeddings(
+            elif job.job_type in {"reindex_embeddings", "reindex_missing_embeddings"}:
+                self.reindex_embeddings(
                     limit=int(job.payload.get("limit", 100_000)),
                     include_chunks=bool(job.payload.get("include_chunks", True)),
+                    rewrite_existing=bool(
+                        job.payload.get("rewrite_existing", job.job_type == "reindex_embeddings")
+                    ),
                 )
             else:
                 raise ValueError(f"Unsupported job type: {job.job_type}")
