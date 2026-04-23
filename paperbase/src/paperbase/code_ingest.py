@@ -270,6 +270,9 @@ def extract_archive_safely(
             if len(report.scanned_paths) >= max_scanned_files:
                 report.skipped_files["scan_cap"] = report.skipped_files.get("scan_cap", 0) + 1
                 continue
+            if _is_path_unsafe(member.name):
+                _bump(report.skipped_files, "path_traversal")
+                continue
             rel_path = _strip_archive_prefix(member.name)
             if rel_path is None or rel_path in {"", "."}:
                 continue
@@ -332,7 +335,7 @@ def _strip_archive_prefix(name: str) -> str | None:
     if not name:
         return None
     parts = PurePosixPath(name).parts
-    if not parts:
+    if len(parts) < 2:
         return None
     stripped = parts[1:] if len(parts) > 1 else ()
     return "/".join(stripped)

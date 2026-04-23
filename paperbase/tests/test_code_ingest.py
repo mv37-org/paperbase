@@ -138,6 +138,8 @@ def test_extract_archive_drops_symlinks_and_path_traversal(tmp_path: Path) -> No
             ("owner-repo-abc123/link", "/etc/passwd", "symlink"),
             ("owner-repo-abc123/../escape.py", "danger\n", "file"),
             ("owner-repo-abc123/nested/../../escape2.py", "danger\n", "file"),
+            ("/tmp/absolute.py", "danger\n", "file"),
+            ("../outside.py", "danger\n", "file"),
         ]
     )
     report = extract_archive_safely(
@@ -149,8 +151,10 @@ def test_extract_archive_drops_symlinks_and_path_traversal(tmp_path: Path) -> No
     # Neither escape attempt nor the symlink should land on disk.
     assert (tmp_path / "escape.py").exists() is False
     assert (tmp_path / "escape2.py").exists() is False
+    assert (tmp_path / "absolute.py").exists() is False
+    assert (tmp_path / "outside.py").exists() is False
     assert report.skipped_files.get("symlink") == 1
-    assert report.skipped_files.get("path_traversal", 0) >= 1
+    assert report.skipped_files.get("path_traversal", 0) >= 4
     assert "README.md" in report.stored_paths
 
 

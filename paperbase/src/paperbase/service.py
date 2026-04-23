@@ -2991,6 +2991,80 @@ class PaperbaseService:
                 token=self.settings.github_token,
                 max_bytes=self.settings.code_repo_max_archive_bytes,
             )
+            prev_manifest = paper.code_manifest or {}
+            if (
+                not force
+                and archive.resolved_sha
+                and prev_manifest.get("resolved_sha") == archive.resolved_sha
+                and prev_manifest.get("code_url") == code_url
+                and paper.code_index_status == "indexed"
+            ):
+                # Same commit as last time — restore the terminal state after
+                # the transient indexing marker and skip re-extracting.
+                return self.repository.update_code_ingest_state(
+                    paper_id,
+                    status="indexed",
+                    is_python=paper.code_is_python,
+                    python_reason=paper.code_python_reason,
+                    manifest=paper.code_manifest,
+                )
+            with tempfile.TemporaryDirectory() as tmp:
+                scratch = Path(tmp) / "repo"
+                report = code_ingest.extract_archive_safely(
+                    archive.data,
+                    scratch,
+                    max_stored_file_bytes=self.settings.code_repo_max_stored_file_bytes,
+                    max_scanned_files=self.settings.code_repo_max_scanned_files,
+                )
+                is_python, reason = code_ingest.classify_python(report)
+                manifest = code_ingest.build_manifest(
+                    code_url=code_url,
+                    ref=ref,
+                    resolved_sha=archive.resolved_sha,
+                    report=report,
+                    is_python=is_python,
+                    python_reason=reason,
+                )
+                code_prefix = f"papers/{paper_id}/code"
+                self.object_store.delete_prefix(f"{code_prefix}/")
+                self.object_store.put_bytes(
+                    f"{code_prefix}/raw/source.tar.gz",
+                    archive.data,
+                    content_type="application/gzip",
+                )
+                self.object_store.put_text(
+                    f"{code_prefix}/manifest.json",
+                    json.dumps(manifest, indent=2),
+                    content_type="application/json",
+                )
+                for rel in report.stored_paths:
+                    source = scratch / rel
+                    if not source.exists():
+                        continue
+                    self.object_store.put_bytes(f"{code_prefix}/files/{rel}", source.read_bytes())
+            logger.info(
+                "Completed code ingest",
+                extra={
+                    "event": "code_ingest.completed",
+                    "paper_id": paper_id,
+                    "owner": ref.owner,
+                    "repo": ref.repo,
+                    "resolved_sha": archive.resolved_sha,
+                    "python_file_count": report.python_file_count,
+                    "notebook_count": report.notebook_count,
+                    "is_python": is_python,
+                    "python_reason": reason,
+                    "stored_file_count": len(report.stored_paths),
+                    "scanned_file_count": len(report.scanned_paths),
+                },
+            )
+            return self.repository.update_code_ingest_state(
+                paper_id,
+                status="indexed",
+                is_python=is_python,
+                python_reason=reason,
+                manifest=manifest,
+            )
         except code_ingest.CodeIngestError as exc:
             reason = f"fetch_failed:{type(exc).__name__}"
             logger.warning(
@@ -3002,78 +3076,21 @@ class PaperbaseService:
                     "error": str(exc),
                 },
             )
-            manifest = code_ingest.skipped_manifest(code_url=code_url, reason=reason)
-            return self.repository.update_code_ingest_state(
-                paper_id,
-                status="failed",
-                is_python=None,
-                python_reason=reason,
-                manifest=manifest,
+        except Exception as exc:
+            reason = f"ingest_failed:{type(exc).__name__}"
+            logger.exception(
+                "Code ingest failed",
+                extra={
+                    "event": "code_ingest.failed",
+                    "paper_id": paper_id,
+                    "code_url": code_url,
+                },
             )
-        prev_manifest = paper.code_manifest or {}
-        if (
-            not force
-            and archive.resolved_sha
-            and prev_manifest.get("resolved_sha") == archive.resolved_sha
-            and prev_manifest.get("code_url") == code_url
-            and paper.code_index_status == "indexed"
-        ):
-            # Same commit as last time — skip re-extract to save disk/CPU.
-            return paper
-        with tempfile.TemporaryDirectory() as tmp:
-            scratch = Path(tmp) / "repo"
-            report = code_ingest.extract_archive_safely(
-                archive.data,
-                scratch,
-                max_stored_file_bytes=self.settings.code_repo_max_stored_file_bytes,
-                max_scanned_files=self.settings.code_repo_max_scanned_files,
-            )
-            is_python, reason = code_ingest.classify_python(report)
-            manifest = code_ingest.build_manifest(
-                code_url=code_url,
-                ref=ref,
-                resolved_sha=archive.resolved_sha,
-                report=report,
-                is_python=is_python,
-                python_reason=reason,
-            )
-            code_prefix = f"papers/{paper_id}/code"
-            self.object_store.delete_prefix(f"{code_prefix}/")
-            self.object_store.put_bytes(
-                f"{code_prefix}/raw/source.tar.gz",
-                archive.data,
-                content_type="application/gzip",
-            )
-            self.object_store.put_text(
-                f"{code_prefix}/manifest.json",
-                json.dumps(manifest, indent=2),
-                content_type="application/json",
-            )
-            for rel in report.stored_paths:
-                source = scratch / rel
-                if not source.exists():
-                    continue
-                self.object_store.put_bytes(f"{code_prefix}/files/{rel}", source.read_bytes())
-        logger.info(
-            "Completed code ingest",
-            extra={
-                "event": "code_ingest.completed",
-                "paper_id": paper_id,
-                "owner": ref.owner,
-                "repo": ref.repo,
-                "resolved_sha": archive.resolved_sha,
-                "python_file_count": report.python_file_count,
-                "notebook_count": report.notebook_count,
-                "is_python": is_python,
-                "python_reason": reason,
-                "stored_file_count": len(report.stored_paths),
-                "scanned_file_count": len(report.scanned_paths),
-            },
-        )
+        manifest = code_ingest.skipped_manifest(code_url=code_url, reason=reason)
         return self.repository.update_code_ingest_state(
             paper_id,
-            status="indexed",
-            is_python=is_python,
+            status="failed",
+            is_python=None,
             python_reason=reason,
             manifest=manifest,
         )

@@ -3011,8 +3011,12 @@ def test_ingest_repo_short_circuits_on_matching_sha(
     second = service.ingest_repo(paper_id)
     assert second is not None
     # No re-extract: same URL + same SHA + already indexed = no-op.
+    assert second.code_index_status == "indexed"
     assert calls["extract"] == 1
     assert calls["fetch"] == 2  # fetch still happens to learn the SHA
+    persisted = service.repository.get_paper(paper_id)
+    assert persisted is not None
+    assert persisted.code_index_status == "indexed"
 
 
 def test_ingest_repo_force_refreshes_even_when_sha_matches(
@@ -3040,6 +3044,34 @@ def test_ingest_repo_force_refreshes_even_when_sha_matches(
     service.ingest_repo(paper_id, force=True)
     # force=True must re-extract regardless of SHA match.
     assert calls["extract"] == 2
+
+
+def test_ingest_repo_records_failed_status_on_unexpected_error(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paper_id = _seed_paper_with_code_url(service, code_url="https://github.com/owner/repo")
+
+    from paperbase import code_ingest as ci
+
+    def fake_fetch(ref, *, token, max_bytes, **_kwargs):
+        return ci.FetchedArchive(data=_build_python_tarball(), resolved_sha="abc123" + "0" * 34, etag=None)
+
+    def broken_extract(*args, **kwargs):
+        raise RuntimeError("bad archive")
+
+    monkeypatch.setattr("paperbase.service.code_ingest.fetch_github_archive", fake_fetch)
+    monkeypatch.setattr("paperbase.service.code_ingest.extract_archive_safely", broken_extract)
+
+    result = service.ingest_repo(paper_id)
+    assert result is not None
+    assert result.code_index_status == "failed"
+    assert result.code_python_reason == "ingest_failed:RuntimeError"
+    assert result.code_manifest is not None
+    assert result.code_manifest["code_python_reason"] == "ingest_failed:RuntimeError"
+
+    persisted = service.repository.get_paper(paper_id)
+    assert persisted is not None
+    assert persisted.code_index_status == "failed"
 
 
 def test_process_next_job_dispatches_ingest_repo(
