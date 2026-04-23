@@ -321,6 +321,7 @@ class BrowserUserSettingsORM(Base):
     encrypted_modal_token_secret: Mapped[str | None] = mapped_column(Text, nullable=True)
     modal_token_id_hint: Mapped[str] = mapped_column(String(32), default="")
     weekly_papers_review_email: Mapped[bool] = mapped_column(Boolean, default=False)
+    appearance_theme: Mapped[str] = mapped_column(String(16), default="light")
     github_user_id: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
     github_login: Mapped[str] = mapped_column(String(255), default="")
     encrypted_github_access_token: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -488,6 +489,7 @@ def _browser_user_settings_from_orm(row: BrowserUserSettingsORM | None) -> Brows
         has_github_connection=bool(row.encrypted_github_access_token and row.github_login),
         github_login=row.github_login or "",
         weekly_papers_review_email=bool(row.weekly_papers_review_email),
+        appearance_theme=row.appearance_theme if row.appearance_theme in {"light", "dark"} else "light",
     )
 
 
@@ -915,6 +917,12 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 text(
                     "ALTER TABLE IF EXISTS browser_user_settings "
                     "ADD COLUMN IF NOT EXISTS modal_token_id_hint VARCHAR(32) DEFAULT ''"
+                )
+            )
+            connection.execute(
+                text(
+                    "ALTER TABLE IF EXISTS browser_user_settings "
+                    "ADD COLUMN IF NOT EXISTS appearance_theme VARCHAR(16) DEFAULT 'light'"
                 )
             )
         Base.metadata.create_all(self._engine)
@@ -2070,6 +2078,12 @@ class SqlAlchemyPaperRepository(PaperRepository):
         with self._session() as session:
             row = self._get_or_create_browser_user_settings_row(session, user_id)
             row.weekly_papers_review_email = enabled
+            row.updated_at = utcnow()
+
+    def set_appearance_theme(self, *, user_id: str, theme: str) -> None:
+        with self._session() as session:
+            row = self._get_or_create_browser_user_settings_row(session, user_id)
+            row.appearance_theme = theme if theme in {"light", "dark"} else "light"
             row.updated_at = utcnow()
 
     def save_github_connection(
@@ -3582,6 +3596,12 @@ class MemoryPaperRepository(PaperRepository):
     def set_weekly_papers_review_email(self, *, user_id: str, enabled: bool) -> None:
         current = self._get_or_create_browser_user_settings(user_id)
         self.browser_user_settings[user_id] = current.model_copy(update={"weekly_papers_review_email": enabled})
+
+    def set_appearance_theme(self, *, user_id: str, theme: str) -> None:
+        current = self._get_or_create_browser_user_settings(user_id)
+        self.browser_user_settings[user_id] = current.model_copy(
+            update={"appearance_theme": theme if theme in {"light", "dark"} else "light"}
+        )
 
     def save_github_connection(
         self,

@@ -15,6 +15,7 @@ export interface BrowserUserSettingsResponse {
   github_login: string;
   github_oauth_available: boolean;
   weekly_papers_review_email: boolean;
+  appearance_theme: "light" | "dark";
 }
 
 export interface BrowserSessionResponse {

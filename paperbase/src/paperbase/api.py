@@ -64,6 +64,7 @@ from .models import (
     SendChatMessageResponse,
     SignupRequest,
     TableResponse,
+    UpdateAppearanceRequest,
     UpdatePythonFileRequest,
     UpdateNotificationsRequest,
     UpdateProjectRequest,
@@ -722,6 +723,22 @@ def browser_update_notifications(
     service: PaperbaseService = Depends(get_service),
 ) -> BrowserSessionResponse:
     session_response = service.update_user_notification_preferences(user, request)
+    return _browser_session_response_with_csrf(
+        session_response,
+        request=http_request,
+        response=response,
+    )
+
+
+@app.put("/v1/browser/settings/appearance", response_model=BrowserSessionResponse)
+def browser_update_appearance(
+    request: UpdateAppearanceRequest,
+    http_request: Request,
+    response: Response,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> BrowserSessionResponse:
+    session_response = service.update_user_appearance(user, request)
     return _browser_session_response_with_csrf(
         session_response,
         request=http_request,

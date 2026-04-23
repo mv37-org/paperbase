@@ -181,6 +181,7 @@ function authenticatedSession(
       github_login: string;
       github_oauth_available: boolean;
       weekly_papers_review_email: boolean;
+      appearance_theme: "light" | "dark";
     }>;
   }> = {},
 ) {
@@ -202,6 +203,7 @@ function authenticatedSession(
       github_login: "",
       github_oauth_available: true,
       weekly_papers_review_email: false,
+      appearance_theme: "light",
       ...overrides.settings,
     },
     csrf_token: overrides.csrf_token ?? "csrf-123",
@@ -454,6 +456,8 @@ describe("App", () => {
   });
 
   afterEach(() => {
+    document.documentElement.classList.remove("authenticated-theme-dark");
+    document.body.classList.remove("authenticated-theme-dark");
     vi.unstubAllGlobals();
   });
 
@@ -1087,7 +1091,7 @@ describe("App", () => {
     randomSpy.mockRestore();
   });
 
-  it("opens the settings modal with tab-specific copy and no notifications tab", async () => {
+  it("opens the settings modal with appearance controls and no notifications tab", async () => {
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());
 
     render(<App />);
@@ -1104,11 +1108,67 @@ describe("App", () => {
     });
     expect(screen.getByRole("tab", { name: "Sandbox" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "Version control" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Appearance" })).toBeTruthy();
     expect(screen.queryByRole("tab", { name: "Notifications" })).toBeNull();
+    expect(document.querySelector("#auth-modal-title")).toBeNull();
+    expect(document.querySelector(".settings-section-title")?.textContent).toBe("Inference");
     expect(screen.getAllByText("Manage Anthropic inference API key.")).toHaveLength(1);
 
     fireEvent.click(screen.getByRole("tab", { name: "Sandbox" }));
+    expect(document.querySelector(".settings-section-title")?.textContent).toBe("Sandbox");
     expect(screen.getAllByText("Manage Modal sandbox credentials.")).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("tab", { name: "Appearance" }));
+    expect(document.querySelector(".settings-section-title")?.textContent).toBe("Appearance");
+    expect(screen.getAllByText("Choose the theme for signed-in pages.")).toHaveLength(1);
+    expect(screen.getByRole("radio", { name: /Light/i })).toBeTruthy();
+    expect(screen.getByRole("radio", { name: /Dark/i })).toBeTruthy();
+  });
+
+  it("applies dark mode only after saving the appearance setting", async () => {
+    apiMocks.loadSession.mockResolvedValue(
+      authenticatedSession({
+        settings: {
+          appearance_theme: "light",
+        },
+      }),
+    );
+    apiMocks.api.mockResolvedValueOnce(
+      authenticatedSession({
+        settings: {
+          appearance_theme: "dark",
+        },
+      }),
+    );
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(document.querySelector("#account-menu-button")).toBeTruthy();
+    });
+
+    expect(document.body.classList.contains("authenticated-theme-dark")).toBe(false);
+
+    fireEvent.click(document.querySelector("#account-menu-button") as HTMLElement);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Settings" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("tab", { name: "Appearance" })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("tab", { name: "Appearance" }));
+    fireEvent.click(screen.getByRole("radio", { name: /Dark/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Save appearance" }));
+
+    await waitFor(() => {
+      expect(apiMocks.api).toHaveBeenCalledWith("/v1/browser/settings/appearance", {
+        method: "PUT",
+        body: JSON.stringify({ theme: "dark" }),
+      });
+    });
+    await waitFor(() => {
+      expect(document.body.classList.contains("authenticated-theme-dark")).toBe(true);
+    });
   });
 
   it("sets explicit autocomplete hints on auth and settings key inputs", async () => {
@@ -1125,6 +1185,7 @@ describe("App", () => {
         github_login: "",
         github_oauth_available: false,
         weekly_papers_review_email: false,
+        appearance_theme: "light",
       },
       csrf_token: null,
     });

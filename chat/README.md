@@ -11,6 +11,7 @@ The authenticated sidebar is project-first:
 - projects expand and collapse independently and lazily fetch mixed project items
 - each project can start new chats, be renamed, or be deleted from the sidebar
 - chat rows expose delete-on-hover actions and only fetch full thread content when opened
+- signed-in pages can switch between light and dark mode from Settings → Appearance, and the theme covers the shell, markdown, drawers, icons, and modals without changing the public landing page
 - Python file rows open Monaco-backed editor tabs with explicit `Save` and `Run` actions
 - Python file creation and save flows require a connected GitHub account, and `Run` saves to GitHub before executing through Modal
 - project sync writes `/src`, `/notes`, and `.paperbase`, and GitHub conflicts reopen inside a Monaco diff-and-merge modal
