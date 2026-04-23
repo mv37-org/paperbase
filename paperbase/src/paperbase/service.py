@@ -3130,6 +3130,8 @@ class PaperbaseService:
             raise PermanentError("start_date must be on or before end_date")
         if chunk_months < 1:
             raise PermanentError("chunk_months must be >= 1")
+        if limit_per_window is not None and limit_per_window < 1:
+            raise PermanentError("limit_per_window must be >= 1 when provided")
         if not categories:
             raise PermanentError("categories must not be empty")
         job = self.repository.create_job(
@@ -3176,6 +3178,8 @@ class PaperbaseService:
         """
         if source != "arxiv":
             raise PermanentError(f"harvest source {source!r} is not supported; v1 handles arxiv only")
+        if limit_per_window is not None and limit_per_window < 1:
+            raise PermanentError("limit_per_window must be >= 1 when provided")
 
         windows = _month_windows(start_date, end_date, chunk_months=chunk_months)
         chunks_created = 0
@@ -3236,11 +3240,13 @@ class PaperbaseService:
         """
         if source != "arxiv":
             raise PermanentError(f"harvest source {source!r} is not supported; v1 handles arxiv only")
+        if limit is not None and limit < 1:
+            raise PermanentError("harvest chunk limit must be >= 1 when provided")
 
         page_size = 100
         offset = max(0, cursor or 0)
         running_fetched = max(0, fetched or 0)
-        cap = limit if (limit is not None and limit > 0) else None
+        cap = limit
 
         if cap is not None and running_fetched >= cap:
             return {"fetched": 0, "indexed": 0, "enqueued_continuation": False}

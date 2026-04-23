@@ -68,6 +68,13 @@ def test_enqueue_harvest_range_job_rejects_invalid_dates():
         )
     with pytest.raises(PermanentError):
         service.enqueue_harvest_range_job(categories=[], start_date="2020-01-01", end_date="2020-03-31")
+    with pytest.raises(PermanentError, match="limit_per_window"):
+        service.enqueue_harvest_range_job(
+            categories=["cs.LG"],
+            start_date="2020-01-01",
+            end_date="2020-03-31",
+            limit_per_window=-1,
+        )
 
 
 def test_run_harvest_range_planner_enqueues_one_chunk_per_category_per_window():
@@ -248,6 +255,26 @@ def test_harvest_chunk_does_one_page_per_claim_and_enqueues_continuation(monkeyp
     assert len(indexed_ids) == 205
     pending = [j for j in service.repository.jobs.values() if j.status == "pending"]
     assert pending == []
+
+
+def test_harvest_chunk_rejects_non_positive_limit_before_fetch(monkeypatch):
+    service = _service()
+
+    def fail_fetch(*_args, **_kwargs):
+        raise AssertionError("invalid limits must be rejected before fetching arxiv")
+
+    monkeypatch.setattr("paperbase.service.sources.fetch_range", fail_fetch)
+
+    with pytest.raises(PermanentError, match="limit"):
+        service.run_harvest_chunk(
+            source="arxiv",
+            category="cs.LG",
+            start_date="2020-01-01",
+            end_date="2020-03-31",
+            limit=0,
+            cursor=0,
+            fetched=0,
+        )
 
 
 def test_harvest_chunk_respects_limit_across_continuation(monkeypatch):
