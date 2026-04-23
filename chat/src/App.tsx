@@ -1783,6 +1783,50 @@ export default function App() {
             include_papers: includePapers,
           },
           (eventName, payload) => {
+            if (eventName === "compaction_start") {
+              updateThread(threadId, (thread) => ({
+                ...(thread ?? {
+                  thread_id: threadId,
+                  project_id: fallbackProjectId,
+                  project_name: fallbackProjectName,
+                  project_instructions: fallbackProjectInstructions,
+                  title: content.slice(0, 60),
+                  created_at: now,
+                  updated_at: now,
+                  messages: [],
+                }),
+                updated_at: new Date().toISOString(),
+                messages: (thread?.messages ?? []).some(
+                  (message) => message.message_id === payload.compaction_message.message_id,
+                )
+                  ? (thread?.messages ?? []).map((message) =>
+                      message.message_id === payload.compaction_message.message_id
+                        ? payload.compaction_message
+                        : message,
+                    )
+                  : [...(thread?.messages ?? []), payload.compaction_message],
+              }));
+              return;
+            }
+
+            if (eventName === "compaction_done") {
+              updateThread(threadId, (thread) => ({
+                ...(thread ?? {
+                  thread_id: threadId,
+                  project_id: fallbackProjectId,
+                  project_name: fallbackProjectName,
+                  project_instructions: fallbackProjectInstructions,
+                  title: content.slice(0, 60),
+                  created_at: now,
+                  updated_at: now,
+                  messages: [],
+                }),
+                updated_at: new Date().toISOString(),
+                messages: payload.messages,
+              }));
+              return;
+            }
+
             if (eventName === "tool_start") {
               upsertToolActivity(threadId, {
                 id: payload.tool_call_id,
@@ -3057,7 +3101,7 @@ export default function App() {
             <div className="context-usage-popover-summary">
               {formatContextUsageTokenSummary(activeContextUsage)}
             </div>
-            <p className="context-usage-popover-note">Paperbase automatically compacts context</p>
+            <p className="context-usage-popover-note">Paperbase compacts context near the limit</p>
           </div>
         ) : null}
       </div>
@@ -3861,15 +3905,27 @@ export default function App() {
                   {(() => {
                     let userTurnIndex = 0;
                     return activeThread.messages.map((message) => {
-                      if (message.role === "user") {
+                      const isCompactionMessage = message.kind === "compaction";
+                      if (message.role === "user" && !isCompactionMessage) {
                         userTurnIndex += 1;
                       }
+                      const latestToolActivityTurnIndex =
+                        activeThreadToolActivitiesByTurn.size > 0
+                          ? Math.max(...activeThreadToolActivitiesByTurn.keys())
+                          : userTurnIndex;
+                      const activityTurnIndex =
+                        isCompactionMessage && activeThreadStreamState
+                          ? activeThreadStreamState.turnIndex
+                          : isCompactionMessage
+                            ? latestToolActivityTurnIndex
+                            : userTurnIndex;
                       const turnActivities =
-                        message.role === "user"
-                          ? (activeThreadToolActivitiesByTurn.get(userTurnIndex) ?? [])
+                        message.role === "user" || isCompactionMessage
+                          ? (activeThreadToolActivitiesByTurn.get(activityTurnIndex) ?? [])
                           : [];
                       const showThinkingPlaceholder =
                         message.role === "user" &&
+                        !isCompactionMessage &&
                         activeStreamInView &&
                         activeThreadStreamState?.turnIndex === userTurnIndex &&
                         !activeThreadStreamState.assistantStarted &&
@@ -3878,9 +3934,9 @@ export default function App() {
                       return (
                         <Fragment key={message.message_id}>
                           <article
-                            className={`message-row ${message.role === "assistant" ? "assistant" : "user"} status-${message.status}`}
+                            className={`message-row ${isCompactionMessage ? "compaction" : message.role === "assistant" ? "assistant" : "user"} status-${message.status}`}
                           >
-                            {message.status !== "completed" ? (
+                            {message.status !== "completed" && !isCompactionMessage ? (
                               <div className="message-meta-row">
                                 <span
                                   className={`message-status-label${message.status === "streaming" ? " thinking-shimmer" : ""}`}
@@ -3892,9 +3948,14 @@ export default function App() {
                               </div>
                             ) : null}
                             <div
-                              className={`message-bubble ${message.role === "assistant" ? "assistant" : "user"}`}
+                              className={`message-bubble ${isCompactionMessage ? "compaction" : message.role === "assistant" ? "assistant" : "user"}${isCompactionMessage && message.status === "streaming" ? " thinking-shimmer" : ""}`}
                             >
-                              {message.role === "assistant" ? (
+                              {isCompactionMessage ? (
+                                <MarkdownRenderer
+                                  markdown={message.content_markdown}
+                                  className="message-markdown compaction-markdown"
+                                />
+                              ) : message.role === "assistant" ? (
                                 <MarkdownRenderer
                                   markdown={message.content_markdown}
                                   className="message-markdown"
@@ -3912,7 +3973,7 @@ export default function App() {
                                 <div className="message-plain-text">{message.content_markdown}</div>
                               )}
                             </div>
-                            {message.role === "assistant" ? (
+                            {message.role === "assistant" && !isCompactionMessage ? (
                               <div className="assistant-hover-actions">
                                 {hoverTime ? (
                                   <span className="assistant-hover-time">{hoverTime}</span>

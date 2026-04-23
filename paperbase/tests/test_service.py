@@ -58,6 +58,23 @@ class FakeChatModel:
         self.tool_round_usage = ChatModelUsage(input_tokens=84512, output_tokens=98)
         self.initial_stream_usage = ChatModelUsage(input_tokens=11234, output_tokens=1)
         self.final_stream_usage = ChatModelUsage(input_tokens=11234, output_tokens=27)
+        self.count_calls: list[dict[str, object]] = []
+        self.token_counts: list[int | None] = []
+        self.compaction_summary = "## Compacted Conversation\n\nContinue from this compacted context."
+
+    def count_message_tokens(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+        self.count_calls.append(
+            {
+                "api_key": api_key,
+                "messages": messages,
+                "system_prompt": system_prompt,
+                "tools": tools,
+                "tool_choice": tool_choice,
+            }
+        )
+        if self.token_counts:
+            return self.token_counts.pop(0)
+        return 1
 
     def create_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
         self.create_calls.append(
@@ -69,6 +86,11 @@ class FakeChatModel:
                 "tool_choice": tool_choice,
             }
         )
+        if system_prompt == "" and messages and "Compact the conversation transcript" in str(messages[-1]):
+            return {
+                "content": [{"type": "text", "text": self.compaction_summary}],
+                "stop_reason": "end_turn",
+            }
         if tools:
             tool_names = [tool.get("name") for tool in tools if isinstance(tool, dict)]
             has_tool_results = any(
@@ -1686,6 +1708,85 @@ def test_non_grounded_chat_skips_tools_and_citations(browser_service):
     assert len(chat_model.create_calls) == 1
     assert chat_model.create_calls[0]["tools"] is None
     assert "do not invent source ids" in str(chat_model.create_calls[0]["system_prompt"])
+
+
+def test_chat_context_uses_full_active_thread_history(browser_service):
+    service, _, chat_model = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="history@example.com", password="topsecret123", display_name="History User")
+    )
+    assert session.user is not None
+
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
+    for index in range(8):
+        service.repository.add_chat_message(  # type: ignore[attr-defined]
+            thread_id=thread.thread_id,
+            role="user" if index % 2 == 0 else "assistant",
+            content_markdown=f"Historical message {index}",
+        )
+
+    service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="Help me brainstorm a short product name"),
+    )
+
+    answer_call = chat_model.create_calls[-1]
+    sent_messages = answer_call["messages"]
+    assert isinstance(sent_messages, list)
+    assert len(sent_messages) == 9
+    assert sent_messages[0]["content"] == "Historical message 0"
+    assert sent_messages[-1]["content"] == "Help me brainstorm a short product name"
+
+
+def test_stream_chat_compacts_mid_turn_after_tool_results(monkeypatch, browser_service):
+    service, _, chat_model = browser_service
+    chat_model.token_counts = [1, 1, 950_000, 1]
+    session, _ = service.register_browser_user(
+        SignupRequest(email="compact@example.com", password="topsecret123", display_name="Compact User")
+    )
+    assert session.user is not None
+
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda paper: _rich_extraction(text="## Methods\n\nMethods section explains grounding and citations."),
+    )
+    service.index_arxiv_paper(
+        "2401.77777",
+        paper=_sample_paper("2401.77777", title="Compaction Paper", abstract="A paper about tool results"),
+    )
+
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
+    events = list(
+        service.stream_chat_message(
+            session.user,
+            thread.thread_id,
+            SendChatMessageRequest(content="Explain the methods grounding with citations", tag_filters=[]),
+        )
+    )
+
+    event_names = [event_name for event_name, _ in events]
+    assert "tool_done" in event_names
+    assert event_names.index("compaction_start") > event_names.index("tool_done")
+    assert event_names.index("compaction_done") < event_names.index("assistant_start")
+    compaction_done = dict(events)["compaction_done"]
+    assert compaction_done["compaction_message"]["kind"] == "compaction"
+    assert "Compacted Conversation" in compaction_done["compaction_message"]["content_markdown"]
+    assert [message["kind"] for message in compaction_done["messages"]] == ["compaction"]
+
+    compaction_call = next(call for call in chat_model.create_calls if call["system_prompt"] == "")
+    assert "Compact the conversation transcript" in str(compaction_call["messages"])
+    assert "tool_result" in str(compaction_call["messages"])
+    assert "Explain the methods grounding" in str(compaction_call["messages"])
+
+    final_stream_call = chat_model.stream_calls[-1]
+    assert final_stream_call["messages"][0]["role"] == "user"
+    assert "Conversation compaction checkpoint" in final_stream_call["messages"][0]["content"]
+
+    refreshed = service.get_chat_thread(session.user, thread.thread_id)
+    assert [message.kind for message in refreshed.messages] == ["compaction", "default"]
+    assert all("Explain the methods grounding" not in message.content_markdown for message in refreshed.messages)
 
 
 def test_search_only_tool_results_do_not_create_citations(monkeypatch):

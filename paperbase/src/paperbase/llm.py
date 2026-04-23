@@ -98,6 +98,18 @@ class ChatModelClient(ABC):
     ) -> Iterator[ChatModelStreamEvent]:
         raise NotImplementedError
 
+    def count_message_tokens(
+        self,
+        *,
+        api_key: str,
+        messages: list[dict[str, Any]],
+        system_prompt: str,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: dict[str, Any] | None = None,
+    ) -> int | None:
+        del api_key, messages, system_prompt, tools, tool_choice
+        return None
+
     def complete(self, *, api_key: str, prompt: str, system_prompt: str) -> str:
         payload = self.create_message(
             api_key=api_key,
@@ -142,6 +154,52 @@ class AnthropicChatModelClient(ChatModelClient):
         if stream:
             payload["stream"] = True
         return payload
+
+    def _token_count_body(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        system_prompt: str,
+        tools: list[dict[str, Any]] | None,
+        tool_choice: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "model": self._settings.anthropic_model,
+            "system": system_prompt,
+            "messages": messages,
+        }
+        if tools:
+            payload["tools"] = tools
+        if tool_choice:
+            payload["tool_choice"] = tool_choice
+        return payload
+
+    def count_message_tokens(
+        self,
+        *,
+        api_key: str,
+        messages: list[dict[str, Any]],
+        system_prompt: str,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: dict[str, Any] | None = None,
+    ) -> int | None:
+        response = requests.post(
+            f"{self._settings.anthropic_base_url.rstrip('/')}/v1/messages/count_tokens",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json=self._token_count_body(
+                messages=messages,
+                system_prompt=system_prompt,
+                tools=tools,
+                tool_choice=tool_choice,
+            ),
+            timeout=120,
+        )
+        response.raise_for_status()
+        return _coerce_usage_int(response.json().get("input_tokens"))
 
     def create_message(
         self,

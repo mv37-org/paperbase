@@ -1090,7 +1090,7 @@ describe("App", () => {
     expect(screen.getByText("Context window:")).toBeTruthy();
     expect(screen.getByText("46% used (54% left)")).toBeTruthy();
     expect(screen.getByText("118k / 258k tokens used")).toBeTruthy();
-    expect(screen.getByText("Paperbase automatically compacts context")).toBeTruthy();
+    expect(screen.getByText("Paperbase compacts context near the limit")).toBeTruthy();
 
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Stop" }));
@@ -1187,7 +1187,105 @@ describe("App", () => {
     expect(screen.getByText("Context window:")).toBeTruthy();
     expect(screen.getByText("46% used (54% left)")).toBeTruthy();
     expect(screen.getByText("118k / 258k tokens used")).toBeTruthy();
-    expect(screen.getByText("Paperbase automatically compacts context")).toBeTruthy();
+    expect(screen.getByText("Paperbase compacts context near the limit")).toBeTruthy();
+  });
+
+  it("renders compaction checkpoints during a stream and keeps the summary", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.createThread.mockResolvedValue(emptyThreadResponse("thread_compact"));
+    apiMocks.sendThreadMessageStream.mockImplementation(
+      async (
+        _threadId: string,
+        _payload: unknown,
+        onEvent: (eventName: string, payload: unknown) => void,
+      ) => {
+        onEvent("compaction_start", {
+          compaction_message: {
+            message_id: "msg_compact",
+            role: "user",
+            kind: "compaction",
+            content_markdown: "Compacting conversation...",
+            citations: [],
+            created_at: "2026-04-21T00:00:00Z",
+            status: "streaming",
+          },
+        });
+        onEvent("compaction_done", {
+          compaction_message: {
+            message_id: "msg_compact",
+            role: "user",
+            kind: "compaction",
+            content_markdown: "## Compacted Conversation\n\nPreserved the current task.",
+            citations: [],
+            created_at: "2026-04-21T00:00:00Z",
+            status: "completed",
+          },
+          messages: [
+            {
+              message_id: "msg_compact",
+              role: "user",
+              kind: "compaction",
+              content_markdown: "## Compacted Conversation\n\nPreserved the current task.",
+              citations: [],
+              created_at: "2026-04-21T00:00:00Z",
+              status: "completed",
+            },
+          ],
+        });
+        onEvent("tool_start", {
+          tool_call_id: "tool_after_compact",
+          tool_name: "paperbase_search",
+          label: 'paper search for "context"',
+        });
+        onEvent("tool_done", {
+          tool_call_id: "tool_after_compact",
+          tool_name: "paperbase_search",
+          label: 'paper search for "context"',
+          is_error: false,
+        });
+        onEvent("assistant_start", {
+          assistant_message: {
+            message_id: "msg_answer",
+            role: "assistant",
+            content_markdown: "",
+            citations: [],
+            created_at: "2026-04-21T00:00:01Z",
+            status: "streaming",
+          },
+        });
+        onEvent("done", {
+          assistant_message: {
+            message_id: "msg_answer",
+            role: "assistant",
+            content_markdown: "Answer after compaction",
+            citations: [],
+            created_at: "2026-04-21T00:00:01Z",
+            status: "completed",
+          },
+          remaining_free_responses: 2,
+          has_anthropic_api_key: false,
+          state: "completed",
+          usage: null,
+        });
+      },
+    );
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Start new research in")).toBeTruthy();
+    });
+    fireEvent.change(screen.getByLabelText("mention-input-chat"), {
+      target: { value: "Find context compaction papers" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Compacted Conversation/)).toBeTruthy();
+    });
+    expect(screen.queryByText("Compacting conversation...")).toBeNull();
+    expect(screen.getByText('Did paper search for "context"')).toBeTruthy();
+    expect(screen.getByText("Answer after compaction")).toBeTruthy();
   });
 
   it("opens the settings modal with appearance controls and no notifications tab", async () => {

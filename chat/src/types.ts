@@ -110,6 +110,7 @@ export interface ChatMessageResponse {
   citations: ChatCitation[];
   created_at: string;
   status: string;
+  kind?: "default" | "compaction" | string;
 }
 
 export interface ChatThreadSummary {
@@ -294,7 +295,18 @@ export interface ChatStreamToolDoneEvent {
   is_error: boolean;
 }
 
+export interface ChatStreamCompactionStartEvent {
+  compaction_message: ChatMessageResponse;
+}
+
+export interface ChatStreamCompactionDoneEvent {
+  compaction_message: ChatMessageResponse;
+  messages: ChatMessageResponse[];
+}
+
 export type ChatStreamEventMap = {
+  compaction_start: ChatStreamCompactionStartEvent;
+  compaction_done: ChatStreamCompactionDoneEvent;
   tool_start: ChatStreamToolStartEvent;
   tool_done: ChatStreamToolDoneEvent;
   assistant_start: ChatStreamAssistantStartEvent;

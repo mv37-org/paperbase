@@ -1808,6 +1808,10 @@ textarea::placeholder,
   max-width: min(420px, 100%);
 }
 
+.message-row.compaction {
+  justify-self: stretch;
+}
+
 .message-meta-row {
   display: inline-grid;
   justify-items: start;
@@ -2003,6 +2007,20 @@ textarea::placeholder,
   border: 0;
   border-radius: 0;
   background: transparent;
+}
+
+.message-bubble.compaction {
+  padding: 10px 12px;
+  border: 1px solid rgba(27, 22, 17, 0.1);
+  border-radius: 10px;
+  background: rgba(27, 22, 17, 0.035);
+  color: var(--muted);
+}
+
+.compaction-markdown {
+  color: inherit;
+  font-size: 13px;
+  line-height: 1.55;
 }
 
 .message-plain-text {
@@ -4058,6 +4076,11 @@ body.authenticated-theme-dark .modal-flash.warning {
 
 body.authenticated-theme-dark .message-bubble.user {
   background: rgba(255, 255, 255, 0.06);
+}
+
+body.authenticated-theme-dark .message-bubble.compaction {
+  border-color: rgba(223, 232, 244, 0.12);
+  background: rgba(255, 255, 255, 0.05);
 }
 
 body.authenticated-theme-dark .message-markdown blockquote,
