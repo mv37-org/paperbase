@@ -1887,6 +1887,25 @@ def test_project_session_paging_and_thread_deletion(browser_service):
     assert remaining_project.session_count == 5
 
 
+def test_chat_answer_prompt_requires_strict_markdown(browser_service):
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="markdown@example.com", password="topsecret123", display_name="Markdown User")
+    )
+    assert session.user is not None
+
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="Markdown prompt"))
+
+    with_evidence = service._chat_answer_system_prompt(thread=thread, has_evidence_sources=True)
+    without_evidence = service._chat_answer_system_prompt(thread=thread, has_evidence_sources=False)
+
+    assert "strict GitHub-flavored markdown" in with_evidence
+    assert "valid markdown that a standard parser can render directly" in with_evidence
+    assert "Do not put spaces just inside emphasis delimiters" in with_evidence
+    assert "strict GitHub-flavored markdown" in without_evidence
+    assert "valid markdown that a standard parser can render directly" in without_evidence
+
+
 def test_empty_chat_can_move_between_projects(browser_service):
     service, _, _ = browser_service
     session, _ = service.register_browser_user(
