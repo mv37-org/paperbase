@@ -14,6 +14,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel as _BaseModel, Field as _Field
 from starlette.middleware.sessions import SessionMiddleware
 
 from .auth import (
@@ -277,6 +278,44 @@ def index_paper(
 @app.post("/v1/index/sync/latest", response_model=JobResponse, dependencies=[Depends(require_bearer_token)])
 def sync_latest(service: PaperbaseService = Depends(get_service)) -> JobResponse:
     return service.enqueue_latest_sync_job()
+
+
+class HarvestRangeRequest(_BaseModel):
+    # When omitted/empty, the API defaults to the configured AI/ML arxiv
+    # categories (per the product scope — see issue #33 comment). Callers
+    # can still pass an explicit subset to harvest a narrower slice.
+    categories: list[str] = _Field(default_factory=list)
+    start_date: str = _Field(min_length=10, max_length=10)
+    end_date: str = _Field(min_length=10, max_length=10)
+    limit_per_category: int | None = _Field(default=None, ge=1, le=10_000_000)
+    chunk_months: int = _Field(default=3, ge=1, le=24)
+    source: str = "arxiv"
+
+
+@app.post("/v1/index/harvest", response_model=JobResponse, dependencies=[Depends(require_bearer_token)])
+def harvest_range(
+    request: HarvestRangeRequest,
+    service: PaperbaseService = Depends(get_service),
+) -> JobResponse:
+    """Queue a ``harvest_range`` planner job. The planner splits
+    ``[start_date, end_date]`` into ``chunk_months``-wide windows per
+    category and enqueues one ``harvest_chunk`` per window. Chunks run at
+    lower priority than interactive work so a large backfill does not
+    starve on-demand indexing."""
+    from .errors import PermanentError
+
+    categories = request.categories or list(get_settings().arxiv_categories)
+    try:
+        return service.enqueue_harvest_range_job(
+            categories=categories,
+            start_date=request.start_date,
+            end_date=request.end_date,
+            limit_per_category=request.limit_per_category,
+            chunk_months=request.chunk_months,
+            source=request.source,
+        )
+    except PermanentError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.post("/v1/index/summarize-top-cited", response_model=JobResponse, dependencies=[Depends(require_bearer_token)])

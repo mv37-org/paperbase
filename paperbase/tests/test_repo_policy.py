@@ -86,3 +86,22 @@ def test_build_manifest_includes_preview_key_in_available_artifacts():
 
     assert "preview" in manifest["available_artifacts"]
     assert manifest["available_artifacts"]["preview"] is None
+
+
+def test_job_orm_carries_priority_for_backfill_starvation_guard():
+    """Regression test for #33: harvest jobs must run at lower priority than
+    interactive on-demand work so a multi-year backfill cannot starve
+    ``index_paper``. Locks the priority column + defaults in place."""
+    from paperbase.repository import JobORM, default_priority
+
+    assert "priority" in JobORM.__table__.columns, (
+        "JobORM must carry a 'priority' column so bulk backfill cannot starve "
+        "interactive on-demand work"
+    )
+    # Smaller = claimed first. Interactive on-demand work sits below zero so
+    # it always wins; backfill sits above zero so it always loses.
+    assert default_priority("index_paper") == -10
+    assert default_priority("sync_latest") == 0
+    assert default_priority("harvest_chunk") == 10
+    assert default_priority("harvest_range") == 5
+    assert default_priority("brand_new_job_type") == 0

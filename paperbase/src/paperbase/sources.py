@@ -13,6 +13,7 @@ import requests
 
 from .config import DEFAULT_AI_CATEGORIES
 from .models import PaperMetadata
+from .rate_limit import ARXIV_LIMITER
 from .utils import canonical_arxiv_id
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,7 @@ def search_arxiv(
     else:
         search_query = query
     sort_map = {"relevance": "relevance", "date": "submittedDate", "citations": "relevance"}
+    ARXIV_LIMITER.acquire()
     response = SESSION.get(
         ARXIV_API,
         params={
@@ -89,6 +91,7 @@ def search_arxiv(
 
 
 def fetch_recent(category: str, *, days: int = 7, max_results: int = 100) -> list[PaperMetadata]:
+    ARXIV_LIMITER.acquire()
     response = SESSION.get(
         ARXIV_API,
         params={
@@ -111,7 +114,55 @@ def fetch_recent(category: str, *, days: int = 7, max_results: int = 100) -> lis
     return papers
 
 
+def fetch_range(
+    category: str,
+    *,
+    start_date: str,
+    end_date: str,
+    start_offset: int = 0,
+    page_size: int = 100,
+) -> tuple[list[PaperMetadata], int | None]:
+    """Fetch a page of papers in ``category`` submitted between ``start_date``
+    and ``end_date`` (inclusive, ``YYYY-MM-DD``).
+
+    Returns ``(papers, next_cursor)``. ``next_cursor`` is the ``start_offset``
+    to pass on the next call when the current page was full, or ``None`` when
+    the response was short (last page). Used by the ``harvest_chunk`` worker
+    to resume mid-chunk after a retry.
+    """
+    capped = max(1, min(page_size, 200))
+    start_param = _date_to_arxiv_timestamp(start_date, end_of_day=False)
+    end_param = _date_to_arxiv_timestamp(end_date, end_of_day=True)
+    ARXIV_LIMITER.acquire()
+    response = SESSION.get(
+        ARXIV_API,
+        params={
+            "search_query": f"cat:{category} AND submittedDate:[{start_param} TO {end_param}]",
+            "start": max(0, start_offset),
+            "max_results": capped,
+            "sortBy": "submittedDate",
+            "sortOrder": "ascending",
+        },
+        timeout=30,
+    )
+    response.raise_for_status()
+    root = ET.fromstring(response.text)
+    entries = root.findall("atom:entry", ARXIV_NS)
+    papers = [_parse_arxiv_entry(entry) for entry in entries]
+    next_cursor = start_offset + len(papers) if len(papers) >= capped else None
+    return papers, next_cursor
+
+
+def _date_to_arxiv_timestamp(value: str, *, end_of_day: bool) -> str:
+    """Convert ``YYYY-MM-DD`` to arXiv's ``YYYYMMDDhhmm`` query format."""
+    cleaned = (value or "").strip().replace("-", "")
+    if len(cleaned) != 8 or not cleaned.isdigit():
+        raise ValueError(f"date must be YYYY-MM-DD, got {value!r}")
+    return f"{cleaned}{'2359' if end_of_day else '0000'}"
+
+
 def get_paper_details(arxiv_id: str) -> PaperMetadata | None:
+    ARXIV_LIMITER.acquire()
     response = SESSION.get(
         ARXIV_API,
         params={"id_list": arxiv_id, "max_results": 1},

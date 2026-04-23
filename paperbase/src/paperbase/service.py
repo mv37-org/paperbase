@@ -109,6 +109,50 @@ from .utils import new_id, slugify, utcnow
 logger = logging.getLogger(__name__)
 
 
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _validate_date(value: str, *, name: str) -> None:
+    """Raise PermanentError if ``value`` is not ``YYYY-MM-DD``.
+
+    Harvest payloads come from operators via the CLI/API; a bad date
+    should dead-letter the planner job, not loop through the retry ladder.
+    """
+    from datetime import date
+
+    if not value or not _DATE_RE.match(value):
+        raise PermanentError(f"{name} must be YYYY-MM-DD, got {value!r}")
+    try:
+        date.fromisoformat(value)
+    except ValueError as exc:
+        raise PermanentError(f"{name}={value!r} is not a valid calendar date: {exc}") from exc
+
+
+def _month_windows(start_date: str, end_date: str, *, chunk_months: int) -> list[tuple[str, str]]:
+    """Split the inclusive ``[start_date, end_date]`` range into
+    ``chunk_months``-wide windows. Each window is inclusive on both ends.
+
+    The last window is clamped to ``end_date`` so the planner never
+    enqueues chunks past the requested end.
+    """
+    from datetime import date, timedelta
+
+    start = date.fromisoformat(start_date)
+    end = date.fromisoformat(end_date)
+    windows: list[tuple[str, str]] = []
+    cursor = start
+    while cursor <= end:
+        year = cursor.year
+        month = cursor.month + chunk_months
+        year += (month - 1) // 12
+        month = ((month - 1) % 12) + 1
+        next_window_start = date(year, month, 1)
+        window_end = min(end, next_window_start - timedelta(days=1))
+        windows.append((cursor.isoformat(), window_end.isoformat()))
+        cursor = next_window_start
+    return windows
+
+
 def _retry_delay_for(attempts: int):
     """Exponential backoff with full jitter, capped at ~1 hour.
 
@@ -3061,6 +3105,162 @@ class PaperbaseService:
         )
         return {"processed": processed, "updated": updated, "failed": failed}
 
+    def enqueue_harvest_range_job(
+        self,
+        *,
+        categories: list[str],
+        start_date: str,
+        end_date: str,
+        limit_per_category: int | None = None,
+        chunk_months: int = 3,
+        source: str = "arxiv",
+    ) -> JobResponse:
+        """Queue a ``harvest_range`` planner job. Planner splits the date
+        range into ``harvest_chunk`` sub-jobs, one per category per window."""
+        _validate_date(start_date, name="start_date")
+        _validate_date(end_date, name="end_date")
+        if start_date > end_date:
+            raise PermanentError("start_date must be on or before end_date")
+        if chunk_months < 1:
+            raise PermanentError("chunk_months must be >= 1")
+        if not categories:
+            raise PermanentError("categories must not be empty")
+        job = self.repository.create_job(
+            "harvest_range",
+            {
+                "source": source,
+                "categories": list(categories),
+                "start_date": start_date,
+                "end_date": end_date,
+                "limit_per_category": limit_per_category,
+                "chunk_months": chunk_months,
+            },
+        )
+        logger.info(
+            "Created harvest_range job",
+            extra={
+                "event": "jobs.harvest_range.created",
+                "job_id": job.job_id,
+                "source": source,
+                "categories": list(categories),
+                "start_date": start_date,
+                "end_date": end_date,
+                "chunk_months": chunk_months,
+                "limit_per_category": limit_per_category,
+            },
+        )
+        return job
+
+    def run_harvest_range(
+        self,
+        *,
+        source: str,
+        categories: list[str],
+        start_date: str,
+        end_date: str,
+        limit_per_category: int | None,
+        chunk_months: int,
+    ) -> dict[str, int]:
+        """Planner: split ``[start_date, end_date]`` into ``chunk_months``
+        windows per category and enqueue a ``harvest_chunk`` per window.
+
+        v1 only supports ``source='arxiv'``. Raises PermanentError otherwise
+        so the job dead-letters instead of looping on a config mismatch.
+        """
+        if source != "arxiv":
+            raise PermanentError(f"harvest source {source!r} is not supported; v1 handles arxiv only")
+
+        windows = _month_windows(start_date, end_date, chunk_months=chunk_months)
+        chunks_created = 0
+        for category in categories:
+            for win_start, win_end in windows:
+                self.repository.create_job(
+                    "harvest_chunk",
+                    {
+                        "source": source,
+                        "category": category,
+                        "start_date": win_start,
+                        "end_date": win_end,
+                        "limit": limit_per_category,
+                        "cursor": 0,
+                    },
+                )
+                chunks_created += 1
+        logger.info(
+            "harvest_range planner enqueued chunks",
+            extra={
+                "event": "harvest_range.planned",
+                "chunks_created": chunks_created,
+                "category_count": len(categories),
+                "window_count": len(windows),
+            },
+        )
+        return {"chunks_created": chunks_created}
+
+    def run_harvest_chunk(
+        self,
+        *,
+        source: str,
+        category: str,
+        start_date: str,
+        end_date: str,
+        limit: int | None,
+        cursor: int,
+    ) -> dict[str, int]:
+        """Worker: fetch one arxiv date window for one category and index
+        each paper. Paginates until the page comes back short or we hit
+        ``limit``. Idempotent — ``index_arxiv_paper`` no-ops on re-ingest.
+        """
+        if source != "arxiv":
+            raise PermanentError(f"harvest source {source!r} is not supported; v1 handles arxiv only")
+
+        page_size = 100
+        fetched = 0
+        indexed = 0
+        offset = max(0, cursor or 0)
+        cap = limit if (limit is not None and limit > 0) else None
+
+        while True:
+            if cap is not None and fetched >= cap:
+                break
+            page, next_cursor = sources.fetch_range(
+                category,
+                start_date=start_date,
+                end_date=end_date,
+                start_offset=offset,
+                page_size=page_size,
+            )
+            if not page:
+                break
+            for paper in page:
+                if cap is not None and fetched >= cap:
+                    break
+                fetched += 1
+                try:
+                    self.index_arxiv_paper(paper.arxiv_id, paper=paper, force=False)
+                    indexed += 1
+                except PermanentError:
+                    # Individual paper can't be indexed (e.g. withdrawn) —
+                    # swallow so the chunk keeps going.
+                    continue
+            if next_cursor is None:
+                break
+            offset = next_cursor
+
+        logger.info(
+            "harvest_chunk completed",
+            extra={
+                "event": "harvest_chunk.completed",
+                "source": source,
+                "category": category,
+                "start_date": start_date,
+                "end_date": end_date,
+                "fetched": fetched,
+                "indexed": indexed,
+            },
+        )
+        return {"fetched": fetched, "indexed": indexed}
+
     def enqueue_latest_sync_job(self) -> JobResponse:
         job = self.repository.create_job(
             "sync_latest",
@@ -3107,6 +3307,24 @@ class PaperbaseService:
                 )
             elif job.job_type == "summarize_top_cited":
                 self.summarize_top_cited(limit=int(job.payload.get("limit", 500_000)))
+            elif job.job_type == "harvest_range":
+                self.run_harvest_range(
+                    source=str(job.payload.get("source", "arxiv")),
+                    categories=list(job.payload.get("categories", [])),
+                    start_date=str(job.payload["start_date"]),
+                    end_date=str(job.payload["end_date"]),
+                    limit_per_category=job.payload.get("limit_per_category"),
+                    chunk_months=int(job.payload.get("chunk_months", 3)),
+                )
+            elif job.job_type == "harvest_chunk":
+                self.run_harvest_chunk(
+                    source=str(job.payload.get("source", "arxiv")),
+                    category=str(job.payload["category"]),
+                    start_date=str(job.payload["start_date"]),
+                    end_date=str(job.payload["end_date"]),
+                    limit=job.payload.get("limit"),
+                    cursor=int(job.payload.get("cursor", 0)),
+                )
             elif job.job_type in {"reindex_embeddings", "reindex_missing_embeddings"}:
                 self.reindex_embeddings(
                     limit=int(job.payload.get("limit", 100_000)),

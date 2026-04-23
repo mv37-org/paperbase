@@ -267,6 +267,10 @@ class StubApiService:
         self.calls.append(("list_jobs_by_status", (status, limit)))
         return [_job("index_paper", payload={"job_id": f"dead_{status}"})]
 
+    def enqueue_harvest_range_job(self, **kwargs):
+        self.calls.append(("enqueue_harvest_range_job", kwargs))
+        return _job("harvest_range", payload=kwargs)
+
     def retry_dead_job(self, job_id: str):
         self.calls.append(("retry_dead_job", job_id))
         if job_id == "job_nonexistent":
@@ -1212,3 +1216,71 @@ def test_browser_preview_route_returns_404_when_preview_missing(api_client):
     response = client.get("/v1/browser/papers/missing/preview")
 
     assert response.status_code == 404
+
+
+def test_harvest_endpoint_delegates_to_service(api_client):
+    """POST /v1/index/harvest queues a planner job via the service. The
+    endpoint is bearer-auth'd and forwards the full payload shape."""
+    client, service, settings = api_client
+    headers = {"Authorization": f"Bearer {settings.api_key}"}
+
+    response = client.post(
+        "/v1/index/harvest",
+        headers=headers,
+        json={
+            "categories": ["cs.LG", "cs.CL"],
+            "start_date": "2020-01-01",
+            "end_date": "2020-06-30",
+            "chunk_months": 3,
+            "limit_per_category": 1000,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["job_type"] == "harvest_range"
+    enqueue_calls = [c for c in service.calls if c[0] == "enqueue_harvest_range_job"]
+    assert len(enqueue_calls) == 1
+    assert enqueue_calls[0][1]["categories"] == ["cs.LG", "cs.CL"]
+    assert enqueue_calls[0][1]["start_date"] == "2020-01-01"
+    assert enqueue_calls[0][1]["end_date"] == "2020-06-30"
+    assert enqueue_calls[0][1]["chunk_months"] == 3
+    assert enqueue_calls[0][1]["limit_per_category"] == 1000
+
+
+def test_harvest_endpoint_defaults_to_configured_ai_categories(api_client):
+    """When the caller omits ``categories`` the API fills in the configured
+    AI/ML arxiv list. The product scope is AI research — per issue #33, we
+    don't want an ergonomics slip to accidentally default to "everything on
+    arxiv"."""
+    client, service, settings = api_client
+    headers = {"Authorization": f"Bearer {settings.api_key}"}
+
+    response = client.post(
+        "/v1/index/harvest",
+        headers=headers,
+        json={"start_date": "2020-01-01", "end_date": "2020-03-31"},
+    )
+    assert response.status_code == 200
+    enqueue_calls = [c for c in service.calls if c[0] == "enqueue_harvest_range_job"]
+    assert len(enqueue_calls) == 1
+    used = enqueue_calls[0][1]["categories"]
+    assert used == list(settings.arxiv_categories)
+    assert "cs.LG" in used
+    assert "cs.AI" in used
+
+
+def test_harvest_endpoint_requires_bearer_token(api_client):
+    """Bulk harvest is admin-only. No auth → 401 / invalid auth → 403."""
+    client, _, _ = api_client
+
+    body = {
+        "categories": ["cs.LG"],
+        "start_date": "2020-01-01",
+        "end_date": "2020-03-31",
+    }
+    missing = client.post("/v1/index/harvest", json=body)
+    invalid = client.post("/v1/index/harvest", headers={"Authorization": "Bearer wrong"}, json=body)
+
+    assert missing.status_code == 401
+    assert invalid.status_code == 403
