@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import HTTPException
+from cryptography.fernet import InvalidToken
 
 from .browser_code import (
     ModalExecutionError,
@@ -747,6 +748,7 @@ class PreparedChatGeneration:
     resolved_user: BrowserUser
     api_key_value: str | None
     using_free_tier: bool
+    api_key_state: str = "completed"
 
 
 class PaperbaseService:
@@ -1407,13 +1409,21 @@ class PaperbaseService:
         if not deleted:
             raise HTTPException(status_code=404, detail="Chat thread not found")
 
-    def _choose_anthropic_api_key(self, user: BrowserUser) -> tuple[str | None, bool]:
+    def _choose_anthropic_api_key(self, user: BrowserUser) -> tuple[str | None, bool, str]:
         user_key_record = self.repository.get_anthropic_api_key_record(user.user_id)  # type: ignore[attr-defined]
         if user.free_responses_used < self.settings.free_chat_response_limit and self.settings.anthropic_api_key:
-            return self.settings.anthropic_api_key, True
+            return self.settings.anthropic_api_key, True, "completed"
         if user_key_record:
-            return self.secret_cipher.decrypt(user_key_record["encrypted_api_key"]), False
-        return None, False
+            try:
+                return self.secret_cipher.decrypt(user_key_record["encrypted_api_key"]), False, "completed"
+            except InvalidToken:
+                logger.warning(
+                    "Saved Anthropic API key could not be decrypted; deleting stale record",
+                    extra={"event": "browser.auth.anthropic_key.invalid", "user_id": user.user_id},
+                )
+                self.repository.delete_anthropic_api_key(user.user_id)  # type: ignore[attr-defined]
+                return None, False, "api_key_invalid"
+        return None, False, "api_key_required"
 
     def _prepare_chat_generation(
         self,
@@ -1432,13 +1442,14 @@ class PaperbaseService:
         if thread.title == "New chat":
             self.repository.rename_chat_thread(thread_id=thread_id, title=content[:60])  # type: ignore[attr-defined]
         resolved_user = self.repository.get_browser_user_by_id(user.user_id) or user  # type: ignore[attr-defined]
-        api_key_value, using_free_tier = self._choose_anthropic_api_key(resolved_user)
+        api_key_value, using_free_tier, api_key_state = self._choose_anthropic_api_key(resolved_user)
         return PreparedChatGeneration(
             thread=thread,
             user_message=user_message,
             resolved_user=resolved_user,
             api_key_value=api_key_value,
             using_free_tier=using_free_tier,
+            api_key_state=api_key_state,
         )
 
     def _project_prompt_suffix(self, thread: ChatThreadResponse) -> str:
@@ -2195,6 +2206,7 @@ class PaperbaseService:
         user: BrowserUser,
         thread_id: str,
         resolved_user: BrowserUser,
+        state: str = "api_key_required",
     ) -> SendChatMessageResponse:
         refreshed = self.get_chat_thread(user, thread_id)
         return SendChatMessageResponse(
@@ -2202,7 +2214,7 @@ class PaperbaseService:
             assistant_message=None,
             remaining_free_responses=self._remaining_free_responses(resolved_user),
             has_anthropic_api_key=self.repository.get_anthropic_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
-            state="api_key_required",
+            state=state,
         )
 
     def send_chat_message(
@@ -2210,7 +2222,12 @@ class PaperbaseService:
     ) -> SendChatMessageResponse:
         prepared = self._prepare_chat_generation(user=user, thread_id=thread_id, request=request)
         if not prepared.api_key_value:
-            return self._api_key_required_response(user=user, thread_id=thread_id, resolved_user=prepared.resolved_user)
+            return self._api_key_required_response(
+                user=user,
+                thread_id=thread_id,
+                resolved_user=prepared.resolved_user,
+                state=prepared.api_key_state,
+            )
 
         conversation_messages, citation_registry = self._run_chat_tool_rounds(
             prepared=prepared,
@@ -2256,7 +2273,10 @@ class PaperbaseService:
             yield (
                 "api_key_required",
                 self._api_key_required_response(
-                    user=user, thread_id=thread_id, resolved_user=prepared.resolved_user
+                    user=user,
+                    thread_id=thread_id,
+                    resolved_user=prepared.resolved_user,
+                    state=prepared.api_key_state,
                 ).model_dump(mode="json"),
             )
             return

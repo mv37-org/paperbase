@@ -957,6 +957,56 @@ describe("App", () => {
     });
   });
 
+  it("shows a re-enter-key message when the saved Anthropic key is invalid", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.createThread.mockResolvedValue(emptyThreadResponse("thread_2"));
+    apiMocks.sendThreadMessageStream.mockImplementation(
+      async (
+        _threadId: string,
+        _payload: unknown,
+        onEvent: (eventName: string, payload: unknown) => void,
+      ) => {
+        onEvent("api_key_required", {
+          thread: {
+            ...emptyThreadResponse("thread_2"),
+            messages: [
+              {
+                message_id: "msg_user",
+                role: "user",
+                content_markdown: "Need help",
+                citations: [],
+                created_at: "2026-04-21T00:00:00Z",
+                status: "completed",
+              },
+            ],
+          },
+          assistant_message: null,
+          remaining_free_responses: 0,
+          has_anthropic_api_key: false,
+          state: "api_key_invalid",
+        });
+      },
+    );
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Start new research in")).toBeTruthy();
+    });
+    fireEvent.change(screen.getByLabelText("mention-input-chat"), {
+      target: { value: "Need help" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "Your saved Anthropic API key could not be decrypted. Add it again in Settings.",
+        ),
+      ).toBeTruthy();
+    });
+  });
+
   it("shows tool activity rows, uses a thinking label, and aborts on stop", async () => {
     const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());

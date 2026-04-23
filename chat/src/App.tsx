@@ -423,6 +423,13 @@ function pickThinkingWord(previous?: string | null) {
   return next;
 }
 
+function apiKeyStateMessage(state: string) {
+  if (state === "api_key_invalid") {
+    return "Your saved Anthropic API key could not be decrypted. Add it again in Settings.";
+  }
+  return "You have used your 3 free responses. Add an Anthropic API key to continue.";
+}
+
 function shouldShowThreadInSidebar(thread: ChatThreadSummary) {
   return thread.title.trim().length > 0 || thread.last_message_preview.trim().length > 0;
 }
@@ -1688,10 +1695,8 @@ export default function App() {
           );
           setComposerStatus("");
           await refreshProjects();
-          if (payload.state === "api_key_required") {
-            showErrorFlash(
-              "You have used your 3 free responses. Add an Anthropic API key to continue.",
-            );
+          if (payload.state === "api_key_required" || payload.state === "api_key_invalid") {
+            showErrorFlash(apiKeyStateMessage(payload.state));
             setAuthView("settings");
             setAuthModalOpen(true);
           }
@@ -1743,9 +1748,7 @@ export default function App() {
         );
         setComposerStatus("");
         await refreshProjects();
-        showErrorFlash(
-          "You have used your 3 free responses. Add an Anthropic API key to continue.",
-        );
+        showErrorFlash(apiKeyStateMessage(gatingPayload.state));
         setAuthView("settings");
         setAuthModalOpen(true);
         return gatingPayload;

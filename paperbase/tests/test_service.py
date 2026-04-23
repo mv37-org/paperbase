@@ -1190,6 +1190,55 @@ def test_browser_settings_round_trip(browser_service):
     assert disconnected.settings.has_github_connection is False
 
 
+def test_invalid_saved_anthropic_key_is_cleared_and_gates_chat(browser_service):
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="stale-key@example.com", password="topsecret123", display_name="Stale Key User")
+    )
+    assert session.user is not None
+
+    service.save_user_anthropic_key(
+        session.user,
+        SaveAnthropicKeyRequest(api_key="anthropic-user-key-999"),
+    )
+    service.repository.save_anthropic_api_key(  # type: ignore[attr-defined]
+        user_id=session.user.user_id,
+        encrypted_api_key="stale-invalid-token",
+        hint="anth...999",
+    )
+    for _ in range(service.settings.free_chat_response_limit):
+        service.repository.increment_free_responses_used(session.user.user_id)  # type: ignore[attr-defined]
+
+    thread = service.create_chat_thread(
+        session.user,
+        CreateChatThreadRequest(title="New chat"),
+    )
+
+    response = service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="Please continue", tag_filters=[]),
+    )
+    service.repository.save_anthropic_api_key(  # type: ignore[attr-defined]
+        user_id=session.user.user_id,
+        encrypted_api_key="stale-invalid-token",
+        hint="anth...999",
+    )
+    streamed = list(
+        service.stream_chat_message(
+            session.user,
+            thread.thread_id,
+            SendChatMessageRequest(content="Please continue again", tag_filters=[]),
+        )
+    )
+
+    assert response.state == "api_key_invalid"
+    assert response.has_anthropic_api_key is False
+    assert service.repository.get_anthropic_api_key_record(session.user.user_id) is None  # type: ignore[attr-defined]
+    assert [event_name for event_name, _ in streamed] == ["api_key_required"]
+    assert streamed[0][1]["state"] == "api_key_invalid"
+
+
 def test_python_file_creation_requires_github_and_normalizes_names(browser_service):
     service, _, _ = browser_service
     session, _ = service.register_browser_user(
