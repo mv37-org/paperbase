@@ -751,8 +751,8 @@ textarea::placeholder,
   --chat-content-max-width: 800px;
   --chat-fixed-composer-bottom: 24px;
   --chat-fixed-composer-width: min(
-    800px,
-    calc(100vw - var(--chat-sidebar-width) - var(--chat-drawer-width) - 48px)
+    808px,
+    calc(100vw - var(--chat-sidebar-width) - var(--chat-drawer-width) - 40px)
   );
   --chat-fixed-composer-left: calc(
     var(--chat-sidebar-width) + ((100vw - var(--chat-sidebar-width) - var(--chat-drawer-width)) / 2)
