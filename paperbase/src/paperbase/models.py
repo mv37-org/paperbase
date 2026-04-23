@@ -120,6 +120,10 @@ class JobResponse(BaseModel):
     status: str
     payload: dict[str, Any]
     error: str | None = None
+    attempts: int = 0
+    max_attempts: int = 3
+    next_run_at: datetime | None = None
+    last_attempted_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
     started_at: datetime | None = None

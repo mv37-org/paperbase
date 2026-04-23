@@ -154,14 +154,40 @@ class ResultItemORM(Base):
     tldr: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+# Per-job-type default max_attempts. Longer-running / more-expensive jobs
+# get fewer retries (manual re-run is cheaper than auto-spamming). Jobs not
+# in this map fall back to 3 — the same default encoded on the ORM column.
+_JOB_TYPE_MAX_ATTEMPTS: dict[str, int] = {
+    "index_paper": 3,
+    "sync_latest": 5,
+    "enrich_missing_metadata": 5,
+    "reindex_missing_embeddings": 2,
+    "reindex_embeddings": 2,
+    "summarize_top_cited": 2,
+}
+
+
+def default_max_attempts(job_type: str) -> int:
+    return _JOB_TYPE_MAX_ATTEMPTS.get(job_type, 3)
+
+
 class JobORM(Base):
     __tablename__ = "jobs"
 
     job_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     job_type: Mapped[str] = mapped_column(String(64), index=True)
+    # `pending`, `running`, `completed`, or `dead`. The old `failed` terminal
+    # status still shows up on rows written before #32; the retry loop
+    # promotes such rows to `pending` on the next claim.
     status: Mapped[str] = mapped_column(String(32), index=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    # When NULL, the job is claimable immediately. Set by the retry loop to
+    # schedule the next attempt after backoff.
+    next_run_at: Mapped[Any | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    last_attempted_at: Mapped[Any | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
     started_at: Mapped[Any | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -779,7 +805,13 @@ class PaperRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def create_job(self, job_type: str, payload: dict[str, Any]) -> JobResponse:
+    def create_job(
+        self,
+        job_type: str,
+        payload: dict[str, Any],
+        *,
+        max_attempts: int | None = None,
+    ) -> JobResponse:
         raise NotImplementedError
 
     @abstractmethod
@@ -799,7 +831,22 @@ class PaperRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def mark_job_failed(self, job_id: str, error: str) -> None:
+    def mark_job_failed(
+        self,
+        job_id: str,
+        error: str,
+        *,
+        permanent: bool = False,
+        next_run_at: Any | None = None,
+    ) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def requeue_dead_job(self, job_id: str) -> JobResponse | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_jobs_by_status(self, status: str, *, limit: int = 50) -> list[JobResponse]:
         raise NotImplementedError
 
     @abstractmethod
@@ -900,6 +947,23 @@ class SqlAlchemyPaperRepository(PaperRepository):
             connection.execute(
                 text("ALTER TABLE IF EXISTS text_chunks ADD COLUMN IF NOT EXISTS section_order INTEGER DEFAULT 0")
             )
+            # #32: worker retry policy + dead-letter
+            connection.execute(
+                text("ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0")
+            )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS max_attempts INTEGER NOT NULL DEFAULT 3")
+            )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS next_run_at TIMESTAMPTZ")
+            )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS last_attempted_at TIMESTAMPTZ")
+            )
+            # Index on next_run_at goes in the post-create_all block below —
+            # on a fresh CI DB the `jobs` table doesn't exist yet when ALTERs
+            # run, and CREATE INDEX (unlike ALTER TABLE IF EXISTS) will error
+            # without the table present.
             connection.execute(
                 text("ALTER TABLE IF EXISTS chat_threads ADD COLUMN IF NOT EXISTS project_id VARCHAR(64)")
             )
@@ -998,6 +1062,12 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     "CREATE INDEX IF NOT EXISTS papers_search_tsv_gin "
                     "ON papers USING gin (search_tsv)"
                 )
+            )
+            # #32: next_run_at index for claim ordering. Lives here (after
+            # create_all) so fresh CI DBs have `jobs` before the CREATE INDEX
+            # runs.
+            connection.execute(
+                text("CREATE INDEX IF NOT EXISTS jobs_next_run_at ON jobs (next_run_at)")
             )
             connection.execute(
                 text(
@@ -2928,12 +2998,19 @@ class SqlAlchemyPaperRepository(PaperRepository):
             for paper_id, data in ordered
         ]
 
-    def create_job(self, job_type: str, payload: dict[str, Any]) -> JobResponse:
+    def create_job(
+        self,
+        job_type: str,
+        payload: dict[str, Any],
+        *,
+        max_attempts: int | None = None,
+    ) -> JobResponse:
         job = JobORM(
             job_id=new_id("job"),
             job_type=job_type,
             status="pending",
             payload=payload,
+            max_attempts=max_attempts if max_attempts is not None else default_max_attempts(job_type),
             created_at=utcnow(),
             updated_at=utcnow(),
         )
@@ -2952,6 +3029,10 @@ class SqlAlchemyPaperRepository(PaperRepository):
             status=row.status,
             payload=row.payload,
             error=row.error,
+            attempts=row.attempts or 0,
+            max_attempts=row.max_attempts or 3,
+            next_run_at=row.next_run_at,
+            last_attempted_at=row.last_attempted_at,
             created_at=row.created_at,
             updated_at=row.updated_at,
             started_at=row.started_at,
@@ -2959,15 +3040,28 @@ class SqlAlchemyPaperRepository(PaperRepository):
         )
 
     def claim_pending_job(self) -> JobResponse | None:
+        # Claim ordering: next_run_at NULLS FIRST so fresh jobs (never scheduled
+        # for a future retry) win over retries that are coming back around. This
+        # keeps a failing job from cutting in front of real work every time its
+        # backoff expires.
+        now = utcnow()
         with self._session() as session:
             row = session.scalar(
-                select(JobORM).where(JobORM.status == "pending").order_by(JobORM.created_at.asc()).limit(1)
+                select(JobORM)
+                .where(
+                    JobORM.status == "pending",
+                    or_(JobORM.next_run_at.is_(None), JobORM.next_run_at <= now),
+                )
+                .order_by(JobORM.next_run_at.is_(None).desc(), JobORM.created_at.asc())
+                .limit(1)
             )
             if row is None:
                 return None
             row.status = "running"
             row.started_at = utcnow()
             row.updated_at = utcnow()
+            row.last_attempted_at = utcnow()
+            row.attempts = (row.attempts or 0) + 1
             job_id = row.job_id
         return self.get_job(job_id)
 
@@ -2987,14 +3081,62 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 row.finished_at = utcnow()
                 row.updated_at = utcnow()
 
-    def mark_job_failed(self, job_id: str, error: str) -> None:
+    def mark_job_failed(
+        self,
+        job_id: str,
+        error: str,
+        *,
+        permanent: bool = False,
+        next_run_at: Any | None = None,
+    ) -> None:
+        """Record a failed attempt.
+
+        When ``permanent`` is true, jumps straight to ``dead``. Otherwise,
+        if ``attempts`` has reached ``max_attempts`` the job moves to
+        ``dead``; if not, it's requeued as ``pending`` with ``next_run_at``
+        set (the caller computes the backoff).
+        """
         with self._session() as session:
             row = session.get(JobORM, job_id)
-            if row:
-                row.status = "failed"
-                row.error = error
+            if row is None:
+                return
+            row.error = error
+            row.updated_at = utcnow()
+            attempts = row.attempts or 0
+            max_attempts = row.max_attempts or 3
+            if permanent or attempts >= max_attempts:
+                row.status = "dead"
                 row.finished_at = utcnow()
-                row.updated_at = utcnow()
+                row.next_run_at = None
+            else:
+                row.status = "pending"
+                row.next_run_at = next_run_at
+
+    def requeue_dead_job(self, job_id: str) -> JobResponse | None:
+        """Promote a ``dead`` job back to ``pending`` and reset its attempt
+        counter. Used by the admin retry endpoint / CLI."""
+        with self._session() as session:
+            row = session.get(JobORM, job_id)
+            if row is None or row.status not in {"dead", "failed"}:
+                return None
+            row.status = "pending"
+            row.attempts = 0
+            row.error = None
+            row.next_run_at = None
+            row.finished_at = None
+            row.updated_at = utcnow()
+            job_id = row.job_id
+        return self.get_job(job_id)
+
+    def list_jobs_by_status(self, status: str, *, limit: int = 50) -> list[JobResponse]:
+        with self._session() as session:
+            rows = session.scalars(
+                select(JobORM)
+                .where(JobORM.status == status)
+                .order_by(JobORM.updated_at.desc())
+                .limit(limit)
+            ).all()
+        return [self.get_job(row.job_id) for row in rows if row is not None]  # type: ignore[list-item]
 
     def cleanup_expired_results(self) -> None:
         with self._session() as session:
@@ -4228,12 +4370,19 @@ class MemoryPaperRepository(PaperRepository):
             self.projects[thread.project_id] = project.model_copy(update={"updated_at": utcnow()})
         return True
 
-    def create_job(self, job_type: str, payload: dict[str, Any]) -> JobResponse:
+    def create_job(
+        self,
+        job_type: str,
+        payload: dict[str, Any],
+        *,
+        max_attempts: int | None = None,
+    ) -> JobResponse:
         job = JobResponse(
             job_id=new_id("job"),
             job_type=job_type,
             status="pending",
             payload=payload,
+            max_attempts=max_attempts if max_attempts is not None else default_max_attempts(job_type),
             created_at=utcnow(),
             updated_at=utcnow(),
         )
@@ -4244,12 +4393,28 @@ class MemoryPaperRepository(PaperRepository):
         return self.jobs.get(job_id)
 
     def claim_pending_job(self) -> JobResponse | None:
-        for job_id, job in self.jobs.items():
-            if job.status == "pending":
-                claimed = job.model_copy(update={"status": "running", "started_at": utcnow(), "updated_at": utcnow()})
-                self.jobs[job_id] = claimed
-                return claimed
-        return None
+        now = utcnow()
+        # next_run_at NULLS FIRST, then created_at ASC — same ordering as SQL.
+        candidates = [
+            (job_id, job)
+            for job_id, job in self.jobs.items()
+            if job.status == "pending" and (job.next_run_at is None or job.next_run_at <= now)
+        ]
+        candidates.sort(key=lambda item: (item[1].next_run_at is not None, item[1].created_at))
+        if not candidates:
+            return None
+        job_id, job = candidates[0]
+        claimed = job.model_copy(
+            update={
+                "status": "running",
+                "started_at": utcnow(),
+                "updated_at": utcnow(),
+                "last_attempted_at": utcnow(),
+                "attempts": (job.attempts or 0) + 1,
+            }
+        )
+        self.jobs[job_id] = claimed
+        return claimed
 
     def mark_job_running(self, job_id: str) -> None:
         job = self.jobs.get(job_id)
@@ -4265,12 +4430,59 @@ class MemoryPaperRepository(PaperRepository):
                 update={"status": "completed", "updated_at": utcnow(), "finished_at": utcnow()}
             )
 
-    def mark_job_failed(self, job_id: str, error: str) -> None:
+    def mark_job_failed(
+        self,
+        job_id: str,
+        error: str,
+        *,
+        permanent: bool = False,
+        next_run_at: Any | None = None,
+    ) -> None:
         job = self.jobs.get(job_id)
-        if job:
+        if job is None:
+            return
+        attempts = job.attempts or 0
+        max_attempts = job.max_attempts or 3
+        if permanent or attempts >= max_attempts:
             self.jobs[job_id] = job.model_copy(
-                update={"status": "failed", "error": error, "updated_at": utcnow(), "finished_at": utcnow()}
+                update={
+                    "status": "dead",
+                    "error": error,
+                    "updated_at": utcnow(),
+                    "finished_at": utcnow(),
+                    "next_run_at": None,
+                }
             )
+        else:
+            self.jobs[job_id] = job.model_copy(
+                update={
+                    "status": "pending",
+                    "error": error,
+                    "updated_at": utcnow(),
+                    "next_run_at": next_run_at,
+                }
+            )
+
+    def requeue_dead_job(self, job_id: str) -> JobResponse | None:
+        job = self.jobs.get(job_id)
+        if job is None or job.status not in {"dead", "failed"}:
+            return None
+        self.jobs[job_id] = job.model_copy(
+            update={
+                "status": "pending",
+                "attempts": 0,
+                "error": None,
+                "next_run_at": None,
+                "finished_at": None,
+                "updated_at": utcnow(),
+            }
+        )
+        return self.jobs[job_id]
+
+    def list_jobs_by_status(self, status: str, *, limit: int = 50) -> list[JobResponse]:
+        jobs = [job for job in self.jobs.values() if job.status == status]
+        jobs.sort(key=lambda item: item.updated_at, reverse=True)
+        return jobs[:limit]
 
     def cleanup_expired_results(self) -> None:
         now = utcnow()

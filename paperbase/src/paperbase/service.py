@@ -101,10 +101,27 @@ from .security import (
 from .summaries import build_paper_summaries
 from .storage import ObjectStore, build_object_store
 from . import sources
+from .errors import PermanentError
 from .utils import new_id, slugify, utcnow
 
 
 logger = logging.getLogger(__name__)
+
+
+def _retry_delay_for(attempts: int):
+    """Exponential backoff with full jitter, capped at ~1 hour.
+
+    ``attempts`` is the number of attempts already used (including the one
+    that just failed). The first retry waits ~60s, the second ~120s, etc.,
+    doubling up to a 3600s ceiling. Jitter spreads a flood of retries so a
+    backend blip doesn't produce a thundering herd when the backoff window
+    expires.
+    """
+    import random
+    from datetime import timedelta
+    base = min(60 * (2 ** max(0, attempts - 1)), 3600)
+    jitter = random.uniform(0.5, 1.5)
+    return utcnow() + timedelta(seconds=base * jitter)
 
 
 _MODEL_CACHE: dict[str, Any] = {}
@@ -2715,16 +2732,51 @@ class PaperbaseService:
                 },
             )
         except Exception as exc:  # pragma: no cover - surfaced via job state and API
-            self.repository.mark_job_failed(job.job_id, str(exc))
-            logger.exception(
-                "Job failed",
-                extra={
-                    "event": "jobs.failed",
-                    "job_id": job.job_id,
-                    "job_type": job.job_type,
-                },
-            )
+            self._handle_job_failure(job, exc)
         return self.repository.get_job(job.job_id)
+
+    def _handle_job_failure(self, job: JobResponse, exc: Exception) -> None:
+        """Classify the exception, compute the next-attempt schedule, and
+        hand the decision to the repository. ``PermanentError`` dead-letters
+        immediately. ``RetryableError`` and uncaught exceptions back off
+        exponentially with jitter until ``max_attempts`` is reached; after
+        that they too dead-letter. Uncaught defaults to retryable — safer
+        to retry a bug than to silently drop work."""
+        permanent = isinstance(exc, PermanentError)
+        attempts = (job.attempts or 0) + 0  # claim already incremented
+        max_attempts = job.max_attempts or 3
+        will_retry = (not permanent) and attempts < max_attempts
+        next_run_at = _retry_delay_for(attempts) if will_retry else None
+        self.repository.mark_job_failed(
+            job.job_id,
+            str(exc),
+            permanent=permanent,
+            next_run_at=next_run_at,
+        )
+        logger.exception(
+            "Job failed",
+            extra={
+                "event": "jobs.failed",
+                "job_id": job.job_id,
+                "job_type": job.job_type,
+                "attempts": attempts,
+                "max_attempts": max_attempts,
+                "classification": "permanent" if permanent else "retryable",
+                "will_retry": will_retry,
+                "next_run_at": next_run_at.isoformat() if next_run_at else None,
+            },
+        )
+
+    def retry_dead_job(self, job_id: str) -> JobResponse | None:
+        """Promote a dead job back to pending with attempts reset. Returns
+        the updated job, or None if the id isn't dead/failed."""
+        return self.repository.requeue_dead_job(job_id)
+
+    def list_dead_jobs(self, *, limit: int = 50) -> list[JobResponse]:
+        return self.repository.list_jobs_by_status("dead", limit=limit)
+
+    def list_jobs_by_status(self, status: str, *, limit: int = 50) -> list[JobResponse]:
+        return self.repository.list_jobs_by_status(status, limit=limit)
 
     def sync_latest_papers(self, *, days: int, categories: list[str], limit_per_category: int) -> list[PaperResponse]:
         logger.info(
@@ -2781,7 +2833,11 @@ class PaperbaseService:
         )
         metadata = paper or sources.get_paper_details(arxiv_id)
         if metadata is None:
-            raise HTTPException(status_code=404, detail=f"Paper {arxiv_id} not found on arXiv")
+            # Worker context: a missing arxiv id will never resolve, so this
+            # must dead-letter rather than spin through the retry ladder.
+            # API-level callers still see a 404 because HTTPException is
+            # translated by FastAPI before the worker dispatcher sees it.
+            raise PermanentError(f"Paper {arxiv_id} not found on arXiv")
         sources.enrich_with_semantic_scholar([metadata])
         metadata.index_status = "indexing"
         stored = self.repository.upsert_paper(metadata, search_document=metadata.abstract)

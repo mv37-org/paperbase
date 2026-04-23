@@ -518,6 +518,37 @@ def reindex_embeddings(*, limit: int, include_chunks: bool, rewrite_existing: bo
     return 0
 
 
+def jobs_list_dead(*, limit: int) -> int:
+    """Print dead-letter jobs (exhausted retries). Intended as a triage
+    entry point — operator eyeballs the error text, then either retries or
+    leaves dead. Reads via the service so memory-mode tests can exercise it."""
+    from .service import get_service
+
+    service = get_service()
+    dead = service.list_dead_jobs(limit=limit)
+    if not dead:
+        print("No dead-letter jobs.")
+        return 0
+    print(f"{'job_id':<22} {'job_type':<28} {'attempts':>8} {'last_error':<60}")
+    print("-" * 120)
+    for job in dead:
+        err = (job.error or "")[:58].replace("\n", " ")
+        print(f"{job.job_id:<22} {job.job_type:<28} {job.attempts:>3}/{job.max_attempts:<4} {err}")
+    return 0
+
+
+def jobs_retry(*, job_id: str) -> int:
+    from .service import get_service
+
+    service = get_service()
+    result = service.retry_dead_job(job_id)
+    if result is None:
+        print(f"{job_id} is not in a dead-letter state (or does not exist).")
+        return 1
+    print(f"Requeued {result.job_id} ({result.job_type}): status={result.status} attempts={result.attempts}")
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Local developer helpers for paperbase.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -572,6 +603,22 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Backfill NULL embeddings only instead of rewriting existing vectors.",
     )
+
+    jobs_parser = subparsers.add_parser(
+        "jobs",
+        help="Inspect and operate on the worker job queue (dead-letter, retry).",
+    )
+    jobs_sub = jobs_parser.add_subparsers(dest="jobs_command", required=True)
+    list_dead_parser = jobs_sub.add_parser(
+        "list-dead",
+        help="Print the most recent dead-letter jobs (exhausted retries).",
+    )
+    list_dead_parser.add_argument("--limit", type=int, default=50)
+    retry_parser = jobs_sub.add_parser(
+        "retry",
+        help="Promote a dead job back to pending with attempts reset.",
+    )
+    retry_parser.add_argument("job_id", help="Job id (e.g. job_abc123).")
     return parser
 
 
@@ -602,6 +649,11 @@ def main(argv: list[str] | None = None) -> int:
             include_chunks=not args.skip_chunks,
             rewrite_existing=not args.missing_only,
         )
+    if args.command == "jobs":
+        if args.jobs_command == "list-dead":
+            return jobs_list_dead(limit=args.limit)
+        if args.jobs_command == "retry":
+            return jobs_retry(job_id=args.job_id)
 
     parser.error(f"Unsupported command: {args.command}")
     return 2

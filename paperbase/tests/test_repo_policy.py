@@ -47,3 +47,21 @@ def test_cloudbuild_uses_supported_substitutions_only():
     )
 
     assert invalid == []
+
+
+def test_job_orm_carries_retry_policy_columns():
+    """Regression test for #32: the worker retry policy requires four new
+    columns on the jobs table plus a ``dead`` terminal state. This locks the
+    schema so a future migration can't accidentally drop the retry fields.
+    """
+    from paperbase.repository import JobORM, default_max_attempts
+
+    for column in ("attempts", "max_attempts", "next_run_at", "last_attempted_at"):
+        assert column in JobORM.__table__.columns, (
+            f"JobORM must carry '{column}' for the worker retry policy"
+        )
+
+    # Per-job-type attempt budgets per the #32 spec.
+    assert default_max_attempts("index_paper") == 3
+    assert default_max_attempts("sync_latest") == 5
+    assert default_max_attempts("reindex_embeddings") == 2

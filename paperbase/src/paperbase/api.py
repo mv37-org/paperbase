@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 
 from authlib.integrations.starlette_client import OAuth
 from fastapi.encoders import jsonable_encoder
-from fastapi import Depends, FastAPI, File, Form, Query, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -461,6 +461,37 @@ def browser_get_paper_table(
 @app.get("/v1/jobs/{job_id}", response_model=JobResponse, dependencies=[Depends(require_bearer_token)])
 def get_job(job_id: str, service: PaperbaseService = Depends(get_service)) -> JobResponse:
     return service.get_job(job_id)
+
+
+@app.get(
+    "/v1/jobs",
+    response_model=list[JobResponse],
+    dependencies=[Depends(require_bearer_token)],
+)
+def list_jobs(
+    status: str = Query(default="dead", description="Job status to filter on (dead|failed|pending|running|completed)."),
+    limit: int = Query(default=50, ge=1, le=500),
+    service: PaperbaseService = Depends(get_service),
+) -> list[JobResponse]:
+    return service.list_jobs_by_status(status, limit=limit)
+
+
+@app.post(
+    "/v1/jobs/{job_id}/retry",
+    response_model=JobResponse,
+    dependencies=[Depends(require_bearer_token)],
+)
+def retry_job(
+    job_id: str,
+    service: PaperbaseService = Depends(get_service),
+) -> JobResponse:
+    """Promote a dead (or legacy-failed) job back to pending with its
+    attempt counter reset. Returns 404 if the id isn't in a dead-letter
+    state."""
+    result = service.retry_dead_job(job_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} is not in a retryable state")
+    return result
 
 
 @app.post(
