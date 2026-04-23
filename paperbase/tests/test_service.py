@@ -2683,6 +2683,24 @@ def test_retry_dead_job_returns_none_for_non_dead_job():
     assert service.retry_dead_job("job_nonexistent") is None
 
 
+def test_list_dead_jobs_includes_legacy_failed_rows():
+    """Rows written before the dead-letter state existed used terminal
+    ``failed``. Operators should still discover them through the new
+    dead-letter list instead of needing a separate status filter."""
+    service = _retry_service()
+    dead = service.repository.create_job("index_paper", {"arxiv_id": "test/dead"})
+    legacy_failed = service.repository.create_job("index_paper", {"arxiv_id": "test/failed"})
+    service.repository.jobs[dead.job_id] = dead.model_copy(update={"status": "dead", "error": "dead"})
+    service.repository.jobs[legacy_failed.job_id] = legacy_failed.model_copy(
+        update={"status": "failed", "error": "legacy failed"}
+    )
+
+    jobs = service.list_dead_jobs()
+
+    assert {job.job_id for job in jobs} == {dead.job_id, legacy_failed.job_id}
+    assert {job.status for job in jobs} == {"dead", "failed"}
+
+
 def test_mark_job_completed_clears_stale_retry_metadata(monkeypatch):
     """Regression test for PR #36 review: a job that fails once, is
     requeued, and then succeeds must not keep the old ``error`` /

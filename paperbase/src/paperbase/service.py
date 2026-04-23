@@ -3508,9 +3508,16 @@ class PaperbaseService:
         return self.repository.requeue_dead_job(job_id)
 
     def list_dead_jobs(self, *, limit: int = 50) -> list[JobResponse]:
-        return self.repository.list_jobs_by_status("dead", limit=limit)
+        return self.list_jobs_by_status("dead", limit=limit)
 
     def list_jobs_by_status(self, status: str, *, limit: int = 50) -> list[JobResponse]:
+        if status == "dead":
+            jobs = [
+                *self.repository.list_jobs_by_status("dead", limit=limit),
+                *self.repository.list_jobs_by_status("failed", limit=limit),
+            ]
+            jobs.sort(key=lambda job: job.updated_at, reverse=True)
+            return jobs[:limit]
         return self.repository.list_jobs_by_status(status, limit=limit)
 
     def sync_latest_papers(self, *, days: int, categories: list[str], limit_per_category: int) -> list[PaperResponse]:

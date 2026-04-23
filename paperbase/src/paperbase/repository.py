@@ -200,8 +200,8 @@ class JobORM(Base):
     job_type: Mapped[str] = mapped_column(String(64), index=True)
     dedupe_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
     # `pending`, `running`, `completed`, or `dead`. The old `failed` terminal
-    # status still shows up on rows written before #32; the retry loop
-    # promotes such rows to `pending` on the next claim.
+    # status still shows up on rows written before #32; admin retry still
+    # accepts those rows for compatibility.
     status: Mapped[str] = mapped_column(String(32), index=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
