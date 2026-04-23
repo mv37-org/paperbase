@@ -1874,6 +1874,7 @@ textarea::placeholder,
   position: relative;
   display: inline-flex;
   align-items: center;
+  margin-right: 6px;
 }
 
 .context-usage-button {
