@@ -291,7 +291,7 @@ def _full_text_extraction(*, text: str) -> ExtractionOutput:
 
 def test_index_writes_manifest_and_artifacts(monkeypatch, service: PaperbaseService):
     paper = _sample_paper("2401.12345", title="Transformer Paper", abstract="Attention and transformers.")
-    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
     monkeypatch.setattr(
         "paperbase.service.index_paper_artifacts", lambda paper: _rich_extraction(text="Attention layers")
     )
@@ -322,7 +322,7 @@ def test_index_writes_manifest_and_artifacts(monkeypatch, service: PaperbaseServ
 
 def test_reindex_replaces_stale_artifacts(monkeypatch, service: PaperbaseService):
     paper = _sample_paper("2401.33333", title="Transformer Paper", abstract="Attention and transformers.")
-    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
 
     monkeypatch.setattr(
         "paperbase.service.index_paper_artifacts", lambda paper: _full_text_extraction(text="Old extraction")
@@ -341,7 +341,7 @@ def test_reindex_replaces_stale_artifacts(monkeypatch, service: PaperbaseService
 
 
 def test_search_and_grep_return_result_handles(monkeypatch, service: PaperbaseService):
-    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
     monkeypatch.setattr(
         "paperbase.service.index_paper_artifacts",
         lambda paper: _rich_extraction(
@@ -378,7 +378,7 @@ def test_search_and_grep_return_result_handles(monkeypatch, service: PaperbaseSe
 
 
 def test_search_can_shortlist_from_generated_summaries(monkeypatch, service: PaperbaseService):
-    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
     monkeypatch.setattr(
         "paperbase.service.index_paper_artifacts", lambda paper: _rich_extraction(text="General workflow discussion")
     )
@@ -453,7 +453,7 @@ def test_api_flow_for_jobs_and_results(monkeypatch, service: PaperbaseService):
     paper = _sample_paper("2401.55555", title="Queued Paper", abstract="Queued indexing")
 
     monkeypatch.setattr("paperbase.service.sources.get_paper_details", lambda arxiv_id: paper)
-    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
     monkeypatch.setattr(
         "paperbase.service.index_paper_artifacts", lambda paper: _rich_extraction(text="Queued attention result")
     )
@@ -1644,7 +1644,7 @@ def test_browser_uploads_and_chat_require_api_key_after_free_quota(monkeypatch, 
     assert signup.status_code == 200
     csrf_headers = {"X-Paperbase-CSRF": signup.json()["csrf_token"]}
 
-    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
     monkeypatch.setattr(
         "paperbase.service.index_paper_artifacts",
         lambda paper: _rich_extraction(text="Methods section explains grounding and citations."),
@@ -1790,7 +1790,7 @@ def test_search_only_tool_results_do_not_create_citations(monkeypatch):
     )
     assert session.user is not None
 
-    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
     monkeypatch.setattr(
         "paperbase.service.index_paper_artifacts",
         lambda paper: _rich_extraction(text="Methods section explains grounding and citations."),
@@ -1819,7 +1819,7 @@ def test_link_requests_force_tool_use_and_prompt_for_paper_links(monkeypatch, br
     )
     assert session.user is not None
 
-    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
     monkeypatch.setattr(
         "paperbase.service.index_paper_artifacts",
         lambda paper: _rich_extraction(text="## Methods\n\nGrounding methods and benchmark comparisons."),
@@ -2008,7 +2008,7 @@ def test_browser_chat_stream_emits_citations_and_completion(monkeypatch, browser
     assert signup.status_code == 200
     csrf_headers = {"X-Paperbase-CSRF": signup.json()["csrf_token"]}
 
-    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
     monkeypatch.setattr(
         "paperbase.service.index_paper_artifacts",
         lambda paper: _rich_extraction(text="## Methods\n\nMethods section explains grounding and citations."),
@@ -2096,7 +2096,7 @@ def test_browser_chat_stream_marks_partial_failure(monkeypatch, browser_service)
     assert signup.status_code == 200
     csrf_headers = {"X-Paperbase-CSRF": signup.json()["csrf_token"]}
 
-    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
     monkeypatch.setattr(
         "paperbase.service.index_paper_artifacts",
         lambda paper: _rich_extraction(text="Methods section explains grounding and citations."),
@@ -2141,7 +2141,7 @@ def test_browser_paper_read_endpoints(monkeypatch, browser_service):
     )
     assert signup.status_code == 200
 
-    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
     monkeypatch.setattr(
         "paperbase.service.index_paper_artifacts",
         lambda paper: _rich_extraction(text="## Introduction\n\nGrounded section content."),
@@ -2379,3 +2379,91 @@ def test_encode_prepends_query_prefix_for_bge_but_not_for_specter2(monkeypatch):
     monkeypatch.setattr(specter_provider, "_model", lambda: specter_model)
     specter_provider.encode("vision transformer")
     assert specter_model.calls[-1] == ["vision transformer"]
+
+
+def test_enrich_missing_metadata_backfills_papers_that_inline_enrichment_missed(monkeypatch):
+    """An indexed paper with citation_count=0 and no S2 id (the shape left
+    behind by a 429 during inline enrichment) gets picked up by
+    enrich_missing_metadata, receives citations + S2 id, and is persisted."""
+    from datetime import UTC, datetime, timedelta
+
+    service = PaperbaseService(
+        settings=Settings(storage_backend="memory", database_url="memory://", api_key="t"),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+    )
+    service.init()
+
+    stale = PaperMetadata(
+        arxiv_id="2401.33333",
+        title="Stale Paper",
+        authors="Z",
+        abstract="abstract",
+        categories="cs.AI",
+        primary_category="cs.AI",
+        published="2024-01-01",
+        updated="2024-01-01",
+        pdf_url="https://example.test/s.pdf",
+        html_url="https://example.test/s",
+        citation_count=0,
+        semantic_scholar_id=None,
+        index_status="indexed",
+        indexed_at=datetime.now(UTC) - timedelta(hours=2),
+    )
+    service.repository.upsert_paper(stale, search_document="", embedding=None)
+
+    def fake_enrich(papers, **_kwargs):
+        from paperbase.sources import EnrichmentOutcome
+        for paper in papers:
+            paper.citation_count = 4242
+            paper.influential_citation_count = 12
+            paper.semantic_scholar_id = f"s2-{paper.arxiv_id}"
+        return EnrichmentOutcome(attempted=len(papers), enriched=len(papers), batches_succeeded=1)
+
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", fake_enrich)
+
+    result = service.enrich_missing_metadata(limit=10)
+
+    assert result["papers_scanned"] == 1
+    assert result["papers_updated"] == 1
+    stored = service.repository.get_paper_by_arxiv_id("2401.33333")
+    assert stored is not None
+    assert stored.citation_count == 4242
+    assert stored.semantic_scholar_id == "s2-2401.33333"
+    # Second pass: the paper is out of the queue now that it has citations.
+    assert service.repository.list_papers_needing_enrichment(limit=10) == []
+
+
+def test_list_papers_needing_enrichment_respects_min_age_floor():
+    """Fresh papers (indexed less than min_age_seconds ago) must not be
+    returned — inline enrichment may still be in flight for them, and the
+    backfill job should not race with the index path."""
+    from datetime import UTC, datetime, timedelta
+
+    repo = MemoryPaperRepository()
+
+    def _seed(arxiv: str, age_seconds: int) -> None:
+        meta = PaperMetadata(
+            arxiv_id=arxiv,
+            title="t",
+            authors="a",
+            abstract="b",
+            categories="cs.AI",
+            primary_category="cs.AI",
+            published="2024-01-01",
+            updated="2024-01-01",
+            pdf_url="p",
+            html_url="h",
+            citation_count=0,
+            semantic_scholar_id=None,
+            index_status="indexed",
+            indexed_at=datetime.now(UTC) - timedelta(seconds=age_seconds),
+        )
+        repo.upsert_paper(meta, search_document="", embedding=None)
+
+    _seed("fresh/0001", age_seconds=60)
+    _seed("stale/0001", age_seconds=7200)
+
+    eligible = repo.list_papers_needing_enrichment(limit=10, min_age_seconds=3600)
+
+    assert [p.arxiv_id for p in eligible] == ["stale/0001"]

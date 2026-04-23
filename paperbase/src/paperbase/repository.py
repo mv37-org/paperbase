@@ -685,6 +685,29 @@ class PaperRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def list_papers_needing_enrichment(
+        self,
+        *,
+        limit: int,
+        min_age_seconds: int = 3600,
+        after: PaperResponse | None = None,
+    ) -> list[PaperResponse]:
+        """Return papers that still lack Semantic Scholar enrichment.
+
+        Predicate: indexed_at + ``min_age_seconds`` has elapsed, the paper
+        has no S2 id, AND has zero citations. The age floor keeps the
+        backfill job from racing with inline enrichment on freshly-ingested
+        papers.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def enrichment_stats(self) -> dict[str, int]:
+        """Return counts for observability / doctor: total indexed,
+        enriched (has S2 id OR non-zero citation_count), and missing."""
+        raise NotImplementedError
+
+    @abstractmethod
     def update_paper_embedding(self, paper_id: str, embedding: list[float]) -> None:
         raise NotImplementedError
 
@@ -1312,6 +1335,60 @@ class SqlAlchemyPaperRepository(PaperRepository):
         with self._session() as session:
             rows = session.scalars(select(PaperORM).from_statement(sql).params(**params)).all()
         return [_paper_from_orm(row) for row in rows]
+
+    def list_papers_needing_enrichment(
+        self,
+        *,
+        limit: int,
+        min_age_seconds: int = 3600,
+        after: PaperResponse | None = None,
+    ) -> list[PaperResponse]:
+        # Predicate: indexed long enough ago for inline enrichment to have
+        # run and failed, no S2 id recorded, and zero citations (so we don't
+        # re-hit the API for papers that actually came back with 0 cites).
+        base_sql = """
+            SELECT papers.*
+            FROM papers
+            WHERE papers.index_status = 'indexed'
+              AND (papers.semantic_scholar_id IS NULL OR papers.semantic_scholar_id = '')
+              AND (papers.citation_count IS NULL OR papers.citation_count = 0)
+              AND (papers.indexed_at IS NULL OR papers.indexed_at < NOW() - make_interval(secs => :min_age))
+              {after_predicate}
+            ORDER BY papers.indexed_at ASC NULLS FIRST, papers.paper_id ASC
+            LIMIT :limit
+        """
+        params: dict[str, Any] = {"limit": limit, "min_age": min_age_seconds}
+        after_predicate = ""
+        if after is not None:
+            after_predicate = "AND papers.paper_id > :after_paper_id"
+            params["after_paper_id"] = after.paper_id
+        sql = text(base_sql.format(after_predicate=after_predicate))
+        with self._session() as session:
+            rows = session.scalars(select(PaperORM).from_statement(sql).params(**params)).all()
+        return [_paper_from_orm(row) for row in rows]
+
+    def enrichment_stats(self) -> dict[str, int]:
+        sql = text(
+            """
+            SELECT
+              COUNT(*) FILTER (WHERE index_status = 'indexed') AS total_indexed,
+              COUNT(*) FILTER (
+                WHERE index_status = 'indexed'
+                AND (semantic_scholar_id IS NOT NULL AND semantic_scholar_id <> '')
+              ) AS with_semantic_scholar_id,
+              COUNT(*) FILTER (
+                WHERE index_status = 'indexed' AND citation_count > 0
+              ) AS with_citations
+            FROM papers
+            """
+        )
+        with self._session() as session:
+            row = session.execute(sql).mappings().one()
+        return {
+            "total_indexed": int(row["total_indexed"] or 0),
+            "with_semantic_scholar_id": int(row["with_semantic_scholar_id"] or 0),
+            "with_citations": int(row["with_citations"] or 0),
+        }
 
     def update_paper_embedding(self, paper_id: str, embedding: list[float]) -> None:
         with self._session() as session:
@@ -3202,6 +3279,50 @@ class MemoryPaperRepository(PaperRepository):
         if after is not None:
             candidates = [paper for paper in candidates if _paper_needs_summary_after(paper, after)]
         return candidates[:limit]
+
+    def list_papers_needing_enrichment(
+        self,
+        *,
+        limit: int,
+        min_age_seconds: int = 3600,
+        after: PaperResponse | None = None,
+    ) -> list[PaperResponse]:
+        now = utcnow()
+        candidates: list[PaperResponse] = []
+        for paper in self.papers.values():
+            if paper.index_status != "indexed":
+                continue
+            if paper.semantic_scholar_id:
+                continue
+            if paper.citation_count and paper.citation_count > 0:
+                continue
+            if paper.indexed_at is not None:
+                age = (now - paper.indexed_at).total_seconds()
+                if age < min_age_seconds:
+                    continue
+            candidates.append(paper)
+        candidates.sort(key=lambda p: (p.indexed_at or now, p.paper_id))
+        if after is not None:
+            candidates = [paper for paper in candidates if paper.paper_id > after.paper_id]
+        return candidates[:limit]
+
+    def enrichment_stats(self) -> dict[str, int]:
+        total_indexed = 0
+        with_s2 = 0
+        with_cites = 0
+        for paper in self.papers.values():
+            if paper.index_status != "indexed":
+                continue
+            total_indexed += 1
+            if paper.semantic_scholar_id:
+                with_s2 += 1
+            if paper.citation_count and paper.citation_count > 0:
+                with_cites += 1
+        return {
+            "total_indexed": total_indexed,
+            "with_semantic_scholar_id": with_s2,
+            "with_citations": with_cites,
+        }
 
     def update_paper_embedding(self, paper_id: str, embedding: list[float]) -> None:
         if paper_id in self.papers:

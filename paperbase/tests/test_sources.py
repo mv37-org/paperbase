@@ -4,10 +4,12 @@ from paperbase import sources
 
 
 class _FakeResponse:
-    def __init__(self, *, status_code: int = 200, text: str = "", json_data=None):
+    def __init__(self, *, status_code: int = 200, text: str = "", json_data=None, headers=None):
         self.status_code = status_code
         self.text = text
         self._json_data = json_data
+        self.headers = headers or {}
+        self.ok = 200 <= status_code < 400
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
@@ -58,8 +60,66 @@ def test_semantic_scholar_enrichment_updates_counts(monkeypatch):
     monkeypatch.setattr(sources.SESSION, "post", lambda *args, **kwargs: _FakeResponse(json_data=payload))
 
     paper = sources.PaperMetadata(arxiv_id="2401.12345", title="Paper")
-    enriched = sources.enrich_with_semantic_scholar([paper])
+    outcome = sources.enrich_with_semantic_scholar([paper])
 
-    assert enriched[0].semantic_scholar_id == "s2-123"
-    assert enriched[0].citation_count == 42
-    assert enriched[0].influential_citation_count == 7
+    # Enrichment mutates paper in-place; outcome reports the counts.
+    assert paper.semantic_scholar_id == "s2-123"
+    assert paper.citation_count == 42
+    assert paper.influential_citation_count == 7
+    assert outcome.attempted == 1
+    assert outcome.enriched == 1
+    assert outcome.batches_succeeded == 1
+    assert outcome.batches_failed == 0
+
+
+def test_semantic_scholar_enrichment_retries_on_429_then_succeeds(monkeypatch):
+    """On 429 the client must back off and retry rather than silently drop
+    the batch — that was the rate-limit hole that left 5/30 papers unenriched
+    during the PR #19 validation pass."""
+    payload = [{"paperId": "s2-9", "citationCount": 100, "influentialCitationCount": 2}]
+    responses = [
+        _FakeResponse(status_code=429, headers={"Retry-After": "0"}),
+        _FakeResponse(status_code=429, headers={"Retry-After": "0"}),
+        _FakeResponse(status_code=200, json_data=payload),
+    ]
+    call_count = {"n": 0}
+
+    def fake_post(*_args, **_kwargs):
+        response = responses[call_count["n"]]
+        call_count["n"] += 1
+        return response
+
+    monkeypatch.setattr(sources.SESSION, "post", fake_post)
+    # Make sleeps a no-op so the test runs instantly.
+    monkeypatch.setattr(sources.time, "sleep", lambda _s: None)
+
+    paper = sources.PaperMetadata(arxiv_id="2401.11111", title="Paper")
+    outcome = sources.enrich_with_semantic_scholar(
+        [paper], max_retries=4, base_backoff_seconds=0, inter_batch_sleep_seconds=0
+    )
+
+    assert call_count["n"] == 3, "expected two retries before success"
+    assert paper.citation_count == 100
+    assert outcome.enriched == 1
+    assert outcome.batches_failed == 0
+
+
+def test_semantic_scholar_enrichment_gives_up_after_retries(monkeypatch):
+    """After max_retries 429s, the batch is skipped (not silently pretended
+    succeeded) and recorded in batches_failed. The paper is left un-mutated
+    so the caller can requeue it through enrich_missing_metadata later."""
+    def fake_post(*_args, **_kwargs):
+        return _FakeResponse(status_code=429, headers={"Retry-After": "0"})
+
+    monkeypatch.setattr(sources.SESSION, "post", fake_post)
+    monkeypatch.setattr(sources.time, "sleep", lambda _s: None)
+
+    paper = sources.PaperMetadata(arxiv_id="2401.22222", title="Paper")
+    outcome = sources.enrich_with_semantic_scholar(
+        [paper], max_retries=2, base_backoff_seconds=0, inter_batch_sleep_seconds=0
+    )
+
+    assert outcome.enriched == 0
+    assert outcome.batches_failed == 1
+    assert paper.citation_count == 0
+    assert paper.semantic_scholar_id is None
