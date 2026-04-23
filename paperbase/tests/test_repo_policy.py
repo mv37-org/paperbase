@@ -17,16 +17,20 @@ def test_pre_push_hook_delegates_to_make_test():
     assert "make test" in hook
 
 
-def test_verify_workflow_delegates_to_make_test():
+def test_verify_workflow_uses_smoke_on_pull_requests_and_full_test_elsewhere():
     workflow = _read_repo_file(".github/workflows/verify.yml")
 
+    assert "make test-smoke" in workflow
     assert "make test" in workflow
+    assert "cancel-in-progress: true" in workflow
 
 
 def test_profile_workflow_delegates_to_make_profile():
     workflow = _read_repo_file(".github/workflows/profile.yml")
 
     assert "make profile" in workflow
+    assert '"codex/**"' not in workflow
+    assert "cancel-in-progress: true" in workflow
 
 
 def test_cloudbuild_uses_supported_substitutions_only():

@@ -25,13 +25,20 @@ ifneq ($(UPDATE_BASELINE),)
 BASELINE_FLAG := --update-baseline
 endif
 
-.PHONY: help setup doctor dev test profile clean _require_vp _require_setup _stop_stack
+.PHONY: help setup doctor dev test-smoke test profile clean _require_vp _require_setup _stop_stack
+
+SMOKE_BACKEND_TESTS := \
+	paperbase/tests/test_api_auth.py \
+	paperbase/tests/test_dev_cli.py \
+	paperbase/tests/test_repo_policy.py \
+	paperbase/tests/test_service.py
 
 help:
 	@printf "paper-ai local workflow\n\n"
 	@printf "  make setup   Install Python packages, chat dependencies, the repo .env, and Git hooks.\n"
 	@printf "  make doctor  Verify vp, Python, Postgres, pgvector, ports, and the repo .env.\n"
 	@printf "  make dev     Initialize local storage/database and run API, worker, MCP bridge, and chat.\n"
+	@printf "  make test-smoke  Run the PR-oriented smoke gate used by CI.\n"
 	@printf "  make test    Run doctor, init-local, run-prereq verification, lint, chat checks/tests/build, pytest, and timing comparisons.\n"
 	@printf "  make profile Run doctor, init-local, run-prereq verification, deterministic hotpath profiling, and baseline comparisons.\n"
 	@printf "  make clean   Stop local services and remove generated logs, caches, and frontend output.\n"
@@ -102,6 +109,19 @@ test:
 	@"$(PYTEST)" --junitxml="$(BACKEND_JUNIT)" paperbase/tests
 	@"$(PYTEST)" --junitxml="$(PLUGIN_JUNIT)" paperbase-plugin/tests
 	@"$(PAPERBASE_DEV)" record-test-times --backend-junit "$(BACKEND_JUNIT)" --plugin-junit "$(PLUGIN_JUNIT)" --chat-json "$(CHAT_TEST_JSON)" $(BASELINE_FLAG)
+
+test-smoke:
+	@$(MAKE) --no-print-directory _require_vp
+	@$(MAKE) --no-print-directory _require_setup
+	@"$(PAPERBASE_DEV)" doctor --mode test
+	@"$(PAPERBASE_DEV)" init-local
+	@"$(PAPERBASE_DEV)" verify-run --mode test
+	@"$(RUFF)" check paperbase/src paperbase/tests paperbase-plugin/src paperbase-plugin/tests paperbase-plugin/scripts
+	@(cd "$(CHAT_DIR)" && set -a && source ../.env && set +a && vp check)
+	@(cd "$(CHAT_DIR)" && set -a && source ../.env && set +a && ./node_modules/.bin/vitest run --no-file-parallelism --maxWorkers=1)
+	@(cd "$(CHAT_DIR)" && set -a && source ../.env && set +a && vp build)
+	@"$(PYTEST)" $(SMOKE_BACKEND_TESTS)
+	@"$(PYTEST)" paperbase-plugin/tests
 
 profile:
 	@$(MAKE) --no-print-directory _require_vp
