@@ -5048,7 +5048,10 @@ export default function App() {
                                     }
                                   }}
                                 />
-                                <span>Import all relevant files from this repo</span>
+                                <span>
+                                  Import all {projectRepoCandidates.length} relevant{" "}
+                                  {projectRepoCandidates.length === 1 ? "file" : "files"}
+                                </span>
                               </label>
                               <span className="project-repo-info">
                                 <button
@@ -5056,7 +5059,10 @@ export default function App() {
                                   className="project-repo-info-button"
                                   aria-label="Relevant file types"
                                 >
-                                  i
+                                  <MaskedAssetIcon
+                                    asset="info.svg"
+                                    className="project-repo-info-icon"
+                                  />
                                 </button>
                                 <span className="project-repo-info-popover" role="tooltip">
                                   Relevant files are the files Paperbase can currently import from
@@ -5107,7 +5113,7 @@ export default function App() {
                         disabled={projectRepoListLoading}
                         onClick={() => void refreshProjectRepositories()}
                       >
-                        {projectRepoListLoading ? "refreshing..." : "refresh"}
+                        {projectRepoListLoading ? "Refreshing..." : "Refresh"}
                       </button>
                       <a
                         className="project-repo-link"
@@ -5115,7 +5121,7 @@ export default function App() {
                         target="_blank"
                         rel="noreferrer"
                       >
-                        manage Paperbase access
+                        Manage Paperbase access
                       </a>
                     </div>
                     <div className="project-advanced-section">
@@ -5126,6 +5132,7 @@ export default function App() {
                         onClick={() => setProjectAdvancedOpen((open) => !open)}
                       >
                         Advanced
+                        <span className="project-advanced-chevron" aria-hidden="true" />
                       </button>
                       {projectAdvancedOpen ? (
                         <div className="project-advanced-panel">

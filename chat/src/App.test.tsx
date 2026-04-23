@@ -773,15 +773,15 @@ describe("App", () => {
         }),
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "refresh" }));
-    expect(screen.getByRole("button", { name: "refreshing..." })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(screen.getByRole("button", { name: "Refreshing..." })).toBeTruthy();
 
     await act(async () => {
       resolveRefresh(refreshedRepos);
     });
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "refresh" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Refresh" })).toBeTruthy();
     });
     expect(apiMocks.loadGitHubRepositories).toHaveBeenCalledTimes(2);
   });
@@ -823,9 +823,7 @@ describe("App", () => {
     });
     fireEvent.click(screen.getByRole("option", { name: /octocat\/existing-repo/ }));
 
-    const importAllCheckbox = await screen.findByLabelText(
-      "Import all relevant files from this repo",
-    );
+    const importAllCheckbox = await screen.findByLabelText("Import all 2 relevant files");
     expect((importAllCheckbox as HTMLInputElement).checked).toBe(true);
     expect(screen.getByText(/Python scripts and Jupyter notebooks/)).toBeTruthy();
     expect(screen.queryByText("notebooks/demo.ipynb")).toBeNull();
@@ -887,7 +885,7 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("option", { name: /octocat\/existing-repo/ }));
 
     await waitFor(() => {
-      expect(screen.getByLabelText("Import all relevant files from this repo")).toBeTruthy();
+      expect(screen.getByLabelText("Import all 2 relevant files")).toBeTruthy();
     });
 
     fireEvent.change(screen.getByLabelText("Base branch"), {
@@ -900,7 +898,7 @@ describe("App", () => {
         "dev",
       );
     });
-    fireEvent.click(screen.getByLabelText("Import all relevant files from this repo"));
+    fireEvent.click(screen.getByLabelText("Import all 2 relevant files"));
     await waitFor(() => {
       expect(screen.getByText("notebooks/demo.ipynb")).toBeTruthy();
     });

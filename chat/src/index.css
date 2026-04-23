@@ -2917,6 +2917,12 @@ textarea {
   text-align: center;
 }
 
+.project-modal-panel .modal-heading {
+  margin-bottom: 20px;
+  padding-right: 28px;
+  text-align: left;
+}
+
 .modal-heading-copy {
   display: grid;
   gap: 4px;
@@ -3329,6 +3335,9 @@ textarea {
 
 .project-repo-import-all span {
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .project-repo-info {
@@ -3342,14 +3351,25 @@ textarea {
   height: 16px;
   display: inline-grid;
   place-items: center;
-  border: 1px solid rgba(27, 22, 17, 0.18);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.82);
-  color: var(--muted);
-  font-size: 10px;
-  font-weight: 700;
+  border: 0;
+  background: transparent;
   line-height: 1;
   cursor: default;
+  opacity: 0.56;
+}
+
+.project-repo-info-button:hover,
+.project-repo-info-button:focus-visible {
+  opacity: 0.82;
+}
+
+.project-repo-info-icon {
+  width: 15px;
+  height: 15px;
+  display: block;
+  background: rgba(27, 22, 17, 0.42);
+  mask: var(--icon-url) center / contain no-repeat;
+  -webkit-mask: var(--icon-url) center / contain no-repeat;
 }
 
 .project-repo-info-popover {
@@ -3493,22 +3513,38 @@ textarea {
 }
 
 .project-advanced-section {
-  border-top: 1px solid rgba(27, 22, 17, 0.1);
-  padding-top: 10px;
+  border-top: 1px solid rgba(27, 22, 17, 0.14);
+  margin-top: 2px;
+  padding-top: 12px;
 }
 
 .modal-view .stack .project-advanced-toggle {
   min-height: auto;
   height: auto;
   max-height: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
   padding: 0;
   border: 0;
   background: transparent;
   color: var(--muted);
   font-size: 12px;
+  font-weight: 600;
   text-align: left;
-  text-decoration: underline;
-  text-underline-offset: 2px;
+}
+
+.project-advanced-chevron {
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg) translateY(-1px);
+  transition: transform 120ms ease;
+}
+
+.project-advanced-toggle[aria-expanded="true"] .project-advanced-chevron {
+  transform: rotate(225deg) translate(-1px, -1px);
 }
 
 .project-advanced-panel {
@@ -4532,6 +4568,19 @@ body.authenticated-theme-dark .project-repo-menu {
 body.authenticated-theme-dark .project-repo-info-popover {
   background: #121a24;
   box-shadow: 0 18px 40px rgba(0, 0, 0, 0.42);
+}
+
+body.authenticated-theme-dark .project-repo-info-button {
+  border: 0;
+  background: transparent;
+}
+
+body.authenticated-theme-dark .project-repo-info-icon {
+  background: rgba(223, 232, 244, 0.4);
+}
+
+body.authenticated-theme-dark .project-advanced-section {
+  border-top-color: rgba(223, 232, 244, 0.16);
 }
 
 body.authenticated-theme-dark .project-repo-import-list {
