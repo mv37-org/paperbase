@@ -1194,6 +1194,60 @@ def test_init_creates_trigram_indexes_for_summary_and_tldr():
     assert "summary_short gin_trgm_ops" in combined
     assert "papers_tldr_trgm" in combined
     assert "tldr gin_trgm_ops" in combined
+    assert "text_chunks_content_tsv_gin" in combined
+    assert "to_tsvector('english', coalesce(content, ''))" in combined
+
+
+def test_search_local_uses_chunk_candidates_without_grouping_before_vector_limit():
+    """Chunk vector recall keeps the pgvector nearest-neighbor shape.
+
+    Fetch nearest chunk rows first, then aggregate those top candidates to
+    papers. Grouping every chunk before LIMIT would force a broader scan.
+    """
+    from paperbase.repository import SqlAlchemyPaperRepository
+
+    statements: list[str] = []
+
+    class _FakeResult:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return []
+
+    class _FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def execute(self, stmt, *_args, **_kwargs):
+            text_attr = getattr(stmt, "text", None)
+            if text_attr is not None:
+                statements.append(" ".join(text_attr.split()))
+            return _FakeResult()
+
+    repo = SqlAlchemyPaperRepository.__new__(SqlAlchemyPaperRepository)
+    repo._session = lambda: _FakeSession()  # type: ignore[method-assign]
+
+    results = repo.search_local("caption query", limit=5, query_embedding=[0.1] * 768)
+
+    assert results == []
+    chunk_lexical_sql = next(
+        stmt for stmt in statements if "chunk_score" in stmt and "chunk_vector_score" not in stmt
+    )
+    assert "tc.chunk_kind <> 'full_text'" in chunk_lexical_sql
+    assert "JOIN papers ON papers.paper_id = scored.pid" in chunk_lexical_sql
+
+    chunk_vector_sql = next(
+        stmt for stmt in statements if "chunk_vector_score" in stmt and ") nearest" in stmt
+    )
+    assert (
+        chunk_vector_sql.index("ORDER BY tc.embedding <=> CAST(:query_embedding AS vector)")
+        < chunk_vector_sql.index("GROUP BY nearest.pid")
+    )
+    assert "GROUP BY tc.paper_id ORDER BY chunk_vector_score DESC LIMIT :candidate_pool" not in chunk_vector_sql
 
 
 def test_browser_auth_and_password_reset_flow(browser_service):
@@ -2448,6 +2502,43 @@ def test_memory_repository_search_local_bakes_in_citation_and_recency_boosts():
     # With boosts enabled, the highly-cited paper picks up additional score.
     assert with_boost_by_id["high/0001"] > with_boost_by_id["low/0001"]
     assert with_boost_by_id["high/0001"] > no_boost_by_id["high/0001"]
+
+
+def test_memory_repository_search_local_surfaces_caption_only_match():
+    repo = MemoryPaperRepository()
+    query = "captiononlyneedle"
+    paper = PaperMetadata(
+        arxiv_id="caption/0001",
+        title="Unrelated title",
+        authors="A",
+        abstract="abstract text",
+        categories="cs.AI",
+        primary_category="cs.AI",
+        published="2024-01-01",
+        updated="2024-01-01",
+        pdf_url="https://example.test/caption.pdf",
+        html_url="https://example.test/caption",
+        citation_count=0,
+        index_status="indexed",
+    )
+    stored = repo.upsert_paper(paper, search_document="unrelated search document", embedding=None)
+    repo.replace_text_chunks(
+        stored.paper_id,
+        [
+            {
+                "path": "figures/figure-1/caption.md",
+                "chunk_kind": "figure_caption",
+                "content": f"Caption text with {query}.",
+            }
+        ],
+    )
+
+    results = repo.search_local(query, limit=5, query_embedding=None)
+    sections = repo.search_sections(query, limit=5, paper_ids=[stored.paper_id], query_embedding=None)
+
+    assert [result.paper_id for result in results] == [stored.paper_id]
+    assert sections
+    assert sections[0].chunk_kind == "figure_caption"
 
 
 def test_query_prefix_for_model_matches_bge_e5_and_leaves_others_unchanged():

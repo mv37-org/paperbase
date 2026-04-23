@@ -126,6 +126,49 @@ def test_sql_repository_search_and_result_set_flow(integration_context):
 
 
 @pytest.mark.integration
+def test_sql_search_local_surfaces_caption_only_chunk_match(integration_context):
+    _, repository, _, namespace = integration_context
+    rare_token = f"{namespace.replace('/', '')}captionneedle"
+    paper = PaperMetadata(
+        arxiv_id=f"{namespace}/caption-only",
+        title="Unrelated title",
+        authors="Integration Tester",
+        abstract="This abstract intentionally omits the caption token.",
+        tldr="Unrelated tl;dr",
+        summary_short="Unrelated short summary",
+        summary_eli5="Unrelated simple summary",
+        categories="cs.AI",
+        primary_category="cs.AI",
+        published="2024-01-01",
+        updated="2024-01-01",
+        pdf_url="https://example.test/caption-only.pdf",
+        html_url="https://example.test/caption-only",
+        citation_count=0,
+        influential_citation_count=0,
+        index_status="indexed",
+    )
+    stored = repository.upsert_paper(paper, search_document="unrelated search document", embedding=None)
+    repository.replace_text_chunks(
+        stored.paper_id,
+        [
+            {
+                "path": "figures/figure-1/caption.md",
+                "chunk_kind": "figure_caption",
+                "content": f"Caption evidence includes {rare_token}.",
+                "embedding": None,
+                "chunk_index": 0,
+                "section_depth": 1,
+                "section_order": 0,
+            }
+        ],
+    )
+
+    results = repository.search_local(rare_token, limit=5, query_embedding=None)
+
+    assert [result.paper_id for result in results] == [stored.paper_id]
+
+
+@pytest.mark.integration
 def test_search_local_recency_boost_does_not_dominate_lexical_match(integration_context):
     """A recent-but-irrelevant paper must not outrank an older paper with a real
     lexical match. Regression for the recency_boost = 0.02 bug that exceeded
