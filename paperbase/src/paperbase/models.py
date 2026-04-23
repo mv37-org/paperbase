@@ -44,6 +44,10 @@ class SearchRequest(BaseModel):
     category: str | None = None
     year: str | None = None
     include_live_sources: bool = True
+    # Opt-in CrossEncoder rerank pass on top-k local candidates. Slower (~1.5s
+    # CPU vs ~150ms without), but recovers body-content matches that paper-level
+    # search misses. Off by default to keep type-as-you-search snappy.
+    rerank: bool = False
 
 
 class SearchPaperResult(PaperResponse):

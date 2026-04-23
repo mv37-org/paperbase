@@ -106,8 +106,13 @@ class LocalFileObjectStore(ObjectStore):
         normalized = self._normalized_path(path)
         return normalized, self._root.joinpath(*PurePosixPath(normalized).parts)
 
+    _EXTRA_CONTENT_TYPES = {".md": "text/markdown"}
+
     def _content_type_for(self, normalized: str) -> str | None:
         content_type, _ = mimetypes.guess_type(normalized)
+        if content_type is None:
+            suffix = PurePosixPath(normalized).suffix.lower()
+            return self._EXTRA_CONTENT_TYPES.get(suffix)
         return content_type
 
     def put_bytes(self, path: str, data: bytes, *, content_type: str | None = None) -> None:

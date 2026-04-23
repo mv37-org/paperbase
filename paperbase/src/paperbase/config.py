@@ -118,6 +118,10 @@ class Settings(BaseSettings):
     embedding_dim: int = 768
     rerank_model: str | None = None
     rerank_top_k: int = 50
+    # Small log-citation nudge added to rerank scores so a seminal highly-cited
+    # paper wins ties against a zero-cite recent variant when rerank scores are
+    # close. Kept small so it can only break near-ties, not flip clear winners.
+    rerank_citation_nudge: float = 0.02
     # Summaries at ingest: "none" (tldr-or-first-sentence, empty ELI5 — intended for mass indexing),
     # "heuristic" (local text wrangling), or "vertex" (Gemini on Vertex AI, expensive at scale).
     summary_provider: str = Field(default="none")
@@ -131,6 +135,11 @@ class Settings(BaseSettings):
     # boost <= one RRF rank unit (1/60 ≈ 0.017) so it never dominates relevance.
     citation_boost_scale: float = 0.003
     citation_boost_max: float = 0.015
+    # Recency boost: tie-breaker, kept smaller than citation_boost_max and the
+    # top RRF rank unit (1/60 ≈ 0.017) so a recent-but-irrelevant paper can't
+    # outrank an older paper with a real lexical or vector hit.
+    recency_boost_max: float = 0.005
+    recency_half_life_years: int = 10
     # Section chunking windows. Applied to sections whose raw markdown exceeds
     # chunk_max_chars; produces overlapping sub-chunks that are all embedded.
     chunk_max_chars: int = 1500

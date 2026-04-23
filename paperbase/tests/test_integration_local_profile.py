@@ -126,6 +126,152 @@ def test_sql_repository_search_and_result_set_flow(integration_context):
 
 
 @pytest.mark.integration
+def test_search_local_recency_boost_does_not_dominate_lexical_match(integration_context):
+    """A recent-but-irrelevant paper must not outrank an older paper with a real
+    lexical match. Regression for the recency_boost = 0.02 bug that exceeded
+    both the citation_boost cap and the top RRF rank unit (1/60 ≈ 0.017)."""
+    _, repository, _, namespace = integration_context
+    rare_token = f"{namespace.replace('/', '')}xenotoken"
+
+    relevant_old = PaperMetadata(
+        arxiv_id=f"{namespace}/relevant-old",
+        title=f"Older paper about {rare_token}",
+        authors="Vintage Author",
+        abstract=f"This older paper extensively studies {rare_token} mechanisms.",
+        categories="cs.AI",
+        primary_category="cs.AI",
+        published="2017-06-12",
+        updated="2017-06-12",
+        pdf_url="https://example.test/old.pdf",
+        html_url="https://example.test/old",
+        citation_count=0,
+        index_status="indexed",
+    )
+    irrelevant_recent = PaperMetadata(
+        arxiv_id=f"{namespace}/irrelevant-recent",
+        title="Recent paper on unrelated topic",
+        authors="Newer Author",
+        abstract="Discusses something completely unrelated to the query token.",
+        categories="cs.AI",
+        primary_category="cs.AI",
+        published="2026-04-21",
+        updated="2026-04-21",
+        pdf_url="https://example.test/new.pdf",
+        html_url="https://example.test/new",
+        citation_count=0,
+        index_status="indexed",
+    )
+    repository.upsert_paper(relevant_old, search_document=relevant_old.abstract, embedding=None)
+    repository.upsert_paper(irrelevant_recent, search_document=irrelevant_recent.abstract, embedding=None)
+
+    results = repository.search_local(rare_token, limit=5, query_embedding=None)
+    arxiv_ids = [r.arxiv_id for r in results]
+
+    assert relevant_old.arxiv_id in arxiv_ids, "relevant paper should be in results"
+    assert arxiv_ids[0] == relevant_old.arxiv_id, (
+        f"recent-but-irrelevant paper outranked the lexical match: {arxiv_ids}"
+    )
+
+
+@pytest.mark.integration
+def test_search_local_orders_similarity_fallback_by_relevance_not_citations(integration_context):
+    """When candidates fall through the trigram-similarity fallback (no @@ match),
+    the SQL must order by similarity to the query, not by raw citation count.
+    Otherwise an unrelated highly-cited paper outranks a low-cite paper that
+    actually matches the query."""
+    _, repository, _, namespace = integration_context
+    rare_phrase = f"{namespace.replace('/', '')} sparse niche topic phrase"
+
+    relevant_low_cite = PaperMetadata(
+        arxiv_id=f"{namespace}/relevant-lowcite",
+        title=f"{rare_phrase}",
+        authors="Author A",
+        abstract=f"Discusses {rare_phrase}.",
+        tldr=f"{rare_phrase} tldr",
+        categories="cs.AI",
+        primary_category="cs.AI",
+        published="2024-01-01",
+        updated="2024-01-01",
+        pdf_url="https://example.test/a.pdf",
+        html_url="https://example.test/a",
+        citation_count=0,
+        index_status="indexed",
+    )
+    irrelevant_high_cite = PaperMetadata(
+        arxiv_id=f"{namespace}/irrelevant-highcite",
+        title="Completely unrelated landmark paper",
+        authors="Author B",
+        abstract="On a totally different subject.",
+        categories="cs.AI",
+        primary_category="cs.AI",
+        published="2024-01-01",
+        updated="2024-01-01",
+        pdf_url="https://example.test/b.pdf",
+        html_url="https://example.test/b",
+        citation_count=200_000,
+        index_status="indexed",
+    )
+    repository.upsert_paper(relevant_low_cite, search_document=relevant_low_cite.abstract, embedding=None)
+    repository.upsert_paper(irrelevant_high_cite, search_document=irrelevant_high_cite.abstract, embedding=None)
+
+    results = repository.search_local(rare_phrase, limit=5, query_embedding=None)
+    arxiv_ids = [r.arxiv_id for r in results]
+
+    assert relevant_low_cite.arxiv_id in arxiv_ids
+    assert arxiv_ids[0] == relevant_low_cite.arxiv_id, (
+        f"high-citation unrelated paper outranked the relevant low-cite one: {arxiv_ids}"
+    )
+
+
+@pytest.mark.integration
+def test_search_rerank_only_runs_when_request_opts_in(integration_context, monkeypatch):
+    """The rerank flag on SearchRequest gates whether the CrossEncoder pass runs,
+    even when a rerank model is configured. Default search keeps the fast path."""
+    from paperbase.models import SearchRequest
+
+    _, repository, service, namespace = integration_context
+
+    arxiv_id = f"{namespace}/rerank/0001"
+    paper = PaperMetadata(
+        arxiv_id=arxiv_id,
+        title=f"{namespace} rerank paper",
+        authors="Author X",
+        abstract=f"{namespace} body",
+        categories="cs.AI",
+        primary_category="cs.AI",
+        published="2024-01-01",
+        updated="2024-01-01",
+        pdf_url="https://example.test/r.pdf",
+        html_url="https://example.test/r",
+        citation_count=10,
+        index_status="indexed",
+    )
+    repository.upsert_paper(paper, search_document=paper.abstract, embedding=None)
+
+    rerank_calls: list[bool] = []
+
+    class StubReranker:
+        def enabled(self) -> bool:
+            return True
+
+        @property
+        def top_k(self) -> int:
+            return 50
+
+        def score(self, query, docs):
+            rerank_calls.append(True)
+            return [0.5 for _ in docs]
+
+    monkeypatch.setattr(service, "reranker", StubReranker())
+
+    service.search(SearchRequest(query=namespace, limit=5, include_live_sources=False, rerank=False))
+    assert rerank_calls == [], "rerank ran despite request.rerank=False"
+
+    service.search(SearchRequest(query=namespace, limit=5, include_live_sources=False, rerank=True))
+    assert rerank_calls == [True], "rerank did not run despite request.rerank=True"
+
+
+@pytest.mark.integration
 def test_worker_processes_summarize_job_with_real_repository(integration_context, monkeypatch):
     _, repository, service, namespace = integration_context
     service.settings = service.settings.model_copy(
