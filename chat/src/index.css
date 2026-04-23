@@ -1791,6 +1791,7 @@ textarea::placeholder,
   margin: 0 auto;
   display: grid;
   gap: 18px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
 .message-row {
@@ -1851,7 +1852,7 @@ textarea::placeholder,
   min-height: 24px;
   padding: 0 2px;
   color: #6f5d4c;
-  font-family: "JetBrains Mono", "SFMono-Regular", monospace;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   font-size: 12px;
   line-height: 1.4;
   letter-spacing: -0.01em;
@@ -2012,6 +2013,7 @@ textarea::placeholder,
 .paper-drawer-markdown {
   color: var(--text);
   font-size: 15px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   line-height: 1.65;
   max-width: 100%;
   min-width: 0;
