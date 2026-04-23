@@ -1033,6 +1033,15 @@ describe("App", () => {
         options?: { signal?: AbortSignal },
       ) => {
         streamSignal = options?.signal;
+        onEvent("usage", {
+          model: "claude-opus-4-7",
+          input_tokens: 117900,
+          output_tokens: 100,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+          total_tokens: 118000,
+          context_window_tokens: 258000,
+        });
         onEvent("tool_start", {
           tool_call_id: "tool_1",
           tool_name: "paperbase_search",
@@ -1043,25 +1052,6 @@ describe("App", () => {
           tool_name: "paperbase_search",
           label: 'paper search for "grounding"',
           is_error: false,
-        });
-        onEvent("assistant_start", {
-          assistant_message: {
-            message_id: "msg_stream",
-            role: "assistant",
-            content_markdown: "",
-            citations: [],
-            created_at: "2026-04-21T00:00:00Z",
-            status: "streaming",
-          },
-        });
-        onEvent("usage", {
-          model: "claude-opus-4-7",
-          input_tokens: 11234,
-          output_tokens: 1,
-          cache_creation_input_tokens: 0,
-          cache_read_input_tokens: 0,
-          total_tokens: 11235,
-          context_window_tokens: 1000000,
         });
         await streamDone;
       },
@@ -1084,12 +1074,9 @@ describe("App", () => {
       expect(screen.getByText('Did paper search for "grounding"')).toBeTruthy();
     });
     await waitFor(() => {
-      expect(screen.getByText("Thinking...")).toBeTruthy();
-    });
-    await waitFor(() => {
       expect(
         screen.getByRole("button", {
-          name: "Context window usage: 11,235 / 1,000,000 context · 11,234 in · 1 out",
+          name: "Context window: 46% used (54% left), 118,000 of 258,000 tokens used",
         }),
       ).toBeTruthy();
     });
@@ -1097,11 +1084,13 @@ describe("App", () => {
 
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Context window usage: 11,235 / 1,000,000 context · 11,234 in · 1 out",
+        name: "Context window: 46% used (54% left), 118,000 of 258,000 tokens used",
       }),
     );
-    expect(screen.getByText("Context window")).toBeTruthy();
-    expect(screen.getByText("11,235 / 1,000,000 context")).toBeTruthy();
+    expect(screen.getByText("Context window:")).toBeTruthy();
+    expect(screen.getByText("46% used (54% left)")).toBeTruthy();
+    expect(screen.getByText("118k / 258k tokens used")).toBeTruthy();
+    expect(screen.getByText("Paperbase automatically compacts context")).toBeTruthy();
 
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Stop" }));
@@ -1139,12 +1128,12 @@ describe("App", () => {
         });
         onEvent("usage", {
           model: "claude-opus-4-7",
-          input_tokens: 48123,
-          output_tokens: 512,
-          cache_creation_input_tokens: 2048,
-          cache_read_input_tokens: 1024,
-          total_tokens: 51683,
-          context_window_tokens: 200000,
+          input_tokens: 117900,
+          output_tokens: 100,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+          total_tokens: 118000,
+          context_window_tokens: 258000,
         });
         onEvent("done", {
           assistant_message: {
@@ -1160,12 +1149,12 @@ describe("App", () => {
           state: "completed",
           usage: {
             model: "claude-opus-4-7",
-            input_tokens: 48123,
-            output_tokens: 512,
-            cache_creation_input_tokens: 2048,
-            cache_read_input_tokens: 1024,
-            total_tokens: 51683,
-            context_window_tokens: 200000,
+            input_tokens: 117900,
+            output_tokens: 100,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            total_tokens: 118000,
+            context_window_tokens: 258000,
           },
         });
       },
@@ -1189,19 +1178,16 @@ describe("App", () => {
     });
 
     const usageButton = screen.getByRole("button", {
-      name: "Context window usage: 51,683 / 200,000 context · 48,123 in · 512 out · 2,048 cache write · 1,024 cache read",
+      name: "Context window: 46% used (54% left), 118,000 of 258,000 tokens used",
     });
     expect(usageButton).toBeTruthy();
 
     fireEvent.click(usageButton);
 
-    expect(screen.getByText("Context window")).toBeTruthy();
-    expect(screen.getByText("51,683 / 200,000 context")).toBeTruthy();
-    expect(screen.getByText("claude-opus-4-7")).toBeTruthy();
-    expect(screen.getByText("48,123")).toBeTruthy();
-    expect(screen.getByText("512")).toBeTruthy();
-    expect(screen.getByText("2,048")).toBeTruthy();
-    expect(screen.getByText("1,024")).toBeTruthy();
+    expect(screen.getByText("Context window:")).toBeTruthy();
+    expect(screen.getByText("46% used (54% left)")).toBeTruthy();
+    expect(screen.getByText("118k / 258k tokens used")).toBeTruthy();
+    expect(screen.getByText("Paperbase automatically compacts context")).toBeTruthy();
   });
 
   it("opens the settings modal with appearance controls and no notifications tab", async () => {

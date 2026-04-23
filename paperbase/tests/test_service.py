@@ -55,6 +55,7 @@ class FakeChatModel:
         self.stream_calls: list[dict[str, object]] = []
         self.stream_chunks: list[str] = ["Grounded ", "answer with citations [S1]"]
         self.fail_stream_after_chunks: int | None = None
+        self.tool_round_usage = ChatModelUsage(input_tokens=84512, output_tokens=98)
         self.initial_stream_usage = ChatModelUsage(input_tokens=11234, output_tokens=1)
         self.final_stream_usage = ChatModelUsage(input_tokens=11234, output_tokens=27)
 
@@ -113,6 +114,12 @@ class FakeChatModel:
                             "input": {"query": query, "limit": 3},
                         }
                     ],
+                    "usage": {
+                        "input_tokens": self.tool_round_usage.input_tokens,
+                        "output_tokens": self.tool_round_usage.output_tokens,
+                        "cache_creation_input_tokens": self.tool_round_usage.cache_creation_input_tokens,
+                        "cache_read_input_tokens": self.tool_round_usage.cache_read_input_tokens,
+                    },
                     "stop_reason": "tool_use",
                 }
         return {
@@ -1982,17 +1989,20 @@ def test_browser_chat_stream_emits_citations_and_completion(monkeypatch, browser
         events = _parse_sse_events("".join(response.iter_text()))
 
     event_names = [event_name for event_name, _ in events]
-    assert event_names[:2] == ["tool_start", "tool_done"]
-    assert events[0][1]["label"]
+    assert event_names[:3] == ["usage", "tool_start", "tool_done"]
+    assert events[1][1]["label"]
     assert "assistant_start" in event_names
     assert "usage" in event_names
     assert "delta" in event_names
     assert event_names[-1] == "done"
     assistant_start_index = event_names.index("assistant_start")
-    usage_index = event_names.index("usage")
+    tool_usage_index = 0
+    stream_usage_index = event_names.index("usage", assistant_start_index)
     assert events[assistant_start_index][1]["assistant_message"]["citations"]
-    assert events[usage_index][1]["input_tokens"] == 11234
-    assert events[usage_index][1]["context_window_tokens"] == 1_000_000
+    assert events[tool_usage_index][1]["input_tokens"] == 84512
+    assert events[tool_usage_index][1]["output_tokens"] == 98
+    assert events[tool_usage_index][1]["context_window_tokens"] == 1_000_000
+    assert events[stream_usage_index][1]["input_tokens"] == 11234
     assert events[-1][1]["assistant_message"]["status"] == "completed"
     assert events[-1][1]["usage"]["output_tokens"] == 27
 
@@ -2076,7 +2086,7 @@ def test_browser_chat_stream_marks_partial_failure(monkeypatch, browser_service)
         events = _parse_sse_events("".join(response.iter_text()))
 
     event_names = [event_name for event_name, _ in events]
-    assert event_names[:3] == ["tool_start", "tool_done", "assistant_start"]
+    assert event_names[:4] == ["usage", "tool_start", "tool_done", "assistant_start"]
     assert "delta" in event_names
     assert events[-1][0] == "error"
     refreshed = client.get(f"/v1/browser/chats/{thread_id}").json()

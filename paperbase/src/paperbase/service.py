@@ -34,7 +34,7 @@ from .extractors import (
     table_index_payload,
     table_json_bytes,
 )
-from .llm import AnthropicChatModelClient, ChatModelClient, ChatModelUsage
+from .llm import AnthropicChatModelClient, ChatModelClient, ChatModelUsage, response_usage
 from .models import (
     BrowserSessionResponse,
     BrowserUser,
@@ -2174,6 +2174,9 @@ class PaperbaseService:
             tool_uses = [block for block in assistant_content if block.get("type") == "tool_use"]
             if not tool_uses:
                 break
+            usage = response_usage(response)
+            if usage is not None:
+                yield ("usage", self._chat_usage_payload(usage))
             messages.append({"role": "assistant", "content": assistant_content})
             blocks: list[dict[str, Any]] = []
             for index, tool_use in enumerate(tool_uses):

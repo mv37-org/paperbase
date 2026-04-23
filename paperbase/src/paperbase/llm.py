@@ -67,6 +67,12 @@ def _merge_usage(
     )
 
 
+def response_usage(payload: Any) -> ChatModelUsage | None:
+    if not isinstance(payload, dict):
+        return None
+    return _merge_usage(payload.get("usage"))
+
+
 class ChatModelClient(ABC):
     @abstractmethod
     def create_message(

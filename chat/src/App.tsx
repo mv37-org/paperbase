@@ -504,8 +504,17 @@ function formatTokenCount(value: number) {
   return new Intl.NumberFormat("en-US").format(Math.max(0, Math.round(value)));
 }
 
-function formatContextUsageLabel(usage: ChatStreamUsageEvent) {
-  return `${formatTokenCount(usage.total_tokens)} / ${formatTokenCount(usage.context_window_tokens)} context`;
+function formatCompactTokenCount(value: number) {
+  const rounded = Math.max(0, Math.round(value));
+  if (rounded < 1000) {
+    return formatTokenCount(rounded);
+  }
+  return new Intl.NumberFormat("en-US", {
+    notation: "compact",
+    maximumFractionDigits: rounded < 100_000 ? 1 : 0,
+  })
+    .format(rounded)
+    .replace(/[A-Z]/g, (match) => match.toLowerCase());
 }
 
 function contextUsagePercent(usage: ChatStreamUsageEvent) {
@@ -515,26 +524,34 @@ function contextUsagePercent(usage: ChatStreamUsageEvent) {
   return Math.min(100, (usage.total_tokens / usage.context_window_tokens) * 100);
 }
 
-function contextUsageDetailLabel(usage: ChatStreamUsageEvent) {
-  const details = [
-    `${formatTokenCount(usage.input_tokens)} in`,
-    `${formatTokenCount(usage.output_tokens)} out`,
-  ];
-  if (usage.cache_creation_input_tokens > 0) {
-    details.push(`${formatTokenCount(usage.cache_creation_input_tokens)} cache write`);
-  }
-  if (usage.cache_read_input_tokens > 0) {
-    details.push(`${formatTokenCount(usage.cache_read_input_tokens)} cache read`);
-  }
-  return `${formatContextUsageLabel(usage)} · ${details.join(" · ")}`;
-}
-
 function formatContextUsagePercentValue(usage: ChatStreamUsageEvent) {
   const usagePercent = contextUsagePercent(usage);
   if (usagePercent > 0 && usagePercent < 1) {
     return "<1";
   }
   return String(Math.round(usagePercent));
+}
+
+function formatContextUsageRemainingPercentValue(usage: ChatStreamUsageEvent) {
+  const usagePercent = contextUsagePercent(usage);
+  const roundedUsed = Math.round(usagePercent);
+  const remaining = Math.max(0, 100 - roundedUsed);
+  if (remaining === 0 && usagePercent < 100) {
+    return "<1";
+  }
+  return String(remaining);
+}
+
+function formatContextUsageSummary(usage: ChatStreamUsageEvent) {
+  return `${formatContextUsagePercentValue(usage)}% used (${formatContextUsageRemainingPercentValue(usage)}% left)`;
+}
+
+function formatContextUsageTokenSummary(usage: ChatStreamUsageEvent) {
+  return `${formatCompactTokenCount(usage.total_tokens)} / ${formatCompactTokenCount(usage.context_window_tokens)} tokens used`;
+}
+
+function contextUsageButtonLabel(usage: ChatStreamUsageEvent) {
+  return `Context window: ${formatContextUsageSummary(usage)}, ${formatTokenCount(usage.total_tokens)} of ${formatTokenCount(usage.context_window_tokens)} tokens used`;
 }
 
 function apiKeyStateMessage(state: string) {
@@ -3009,11 +3026,11 @@ export default function App() {
         <button
           type="button"
           className={`context-usage-button${activeStreamInView ? " live" : ""}`}
-          aria-label={`Context window usage: ${contextUsageDetailLabel(activeContextUsage)}`}
+          aria-label={contextUsageButtonLabel(activeContextUsage)}
           aria-haspopup="dialog"
           aria-expanded={contextUsagePopoverOpen}
           aria-controls={contextUsagePopoverOpen ? contextUsagePopoverId : undefined}
-          title={contextUsageDetailLabel(activeContextUsage)}
+          title={contextUsageButtonLabel(activeContextUsage)}
           onClick={() => setContextUsagePopoverOpen((current) => !current)}
         >
           <span
@@ -3024,12 +3041,7 @@ export default function App() {
               } as CSSProperties
             }
             aria-hidden="true"
-          >
-            <span className="context-usage-button-ring-core" />
-          </span>
-          <span className="context-usage-button-value">
-            {formatContextUsagePercentValue(activeContextUsage)}%
-          </span>
+          />
         </button>
         {contextUsagePopoverOpen ? (
           <div
@@ -3039,48 +3051,13 @@ export default function App() {
             aria-label="Context window usage details"
           >
             <div className="context-usage-popover-header">
-              <span className="context-usage-popover-eyebrow">Context window</span>
-              <strong>{formatContextUsagePercentValue(activeContextUsage)}% used</strong>
+              <span className="context-usage-popover-eyebrow">Context window:</span>
+              <strong>{formatContextUsageSummary(activeContextUsage)}</strong>
             </div>
             <div className="context-usage-popover-summary">
-              <span>{formatContextUsageLabel(activeContextUsage)}</span>
-              <span>{activeContextUsage.model}</span>
+              {formatContextUsageTokenSummary(activeContextUsage)}
             </div>
-            <div
-              className="context-usage-popover-track"
-              role="progressbar"
-              aria-label="Context window used"
-              aria-valuemin={0}
-              aria-valuemax={activeContextUsage.context_window_tokens}
-              aria-valuenow={Math.min(
-                activeContextUsage.context_window_tokens,
-                activeContextUsage.total_tokens,
-              )}
-            >
-              <span
-                className="context-usage-popover-fill"
-                style={{ width: `${activeContextUsagePercent}%` }}
-                aria-hidden="true"
-              />
-            </div>
-            <dl className="context-usage-popover-details">
-              <div>
-                <dt>Input</dt>
-                <dd>{formatTokenCount(activeContextUsage.input_tokens)}</dd>
-              </div>
-              <div>
-                <dt>Output</dt>
-                <dd>{formatTokenCount(activeContextUsage.output_tokens)}</dd>
-              </div>
-              <div>
-                <dt>Cache write</dt>
-                <dd>{formatTokenCount(activeContextUsage.cache_creation_input_tokens)}</dd>
-              </div>
-              <div>
-                <dt>Cache read</dt>
-                <dd>{formatTokenCount(activeContextUsage.cache_read_input_tokens)}</dd>
-              </div>
-            </dl>
+            <p className="context-usage-popover-note">Paperbase automatically compacts context</p>
           </div>
         ) : null}
       </div>
