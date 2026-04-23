@@ -10,6 +10,7 @@ Use the repo-root `Makefile` as the primary interface:
 - `make doctor`
 - `make dev`
 - `make test`
+- `make test-smoke` (PR CI smoke gate)
 - `make profile`
 - `make clean`
 
@@ -32,6 +33,11 @@ Before tests or profiling, the repo now expects explicit readiness checks:
   - `paperbase-dev init-local`
   - `paperbase-dev verify-run --mode test`
   - chat Vitest in single-worker mode with both console and JSON reporting so CI surfaces frontend failures clearly
+- `make test-smoke` runs:
+  - the same doctor / init-local / verify-run readiness checks as `make test`
+  - `ruff check`, `vp check`, frontend Vitest, and a frontend build
+  - a focused backend subset (`test_api_auth`, `test_dev_cli`, `test_repo_policy`, `test_service`) plus plugin tests
+  - it skips the full backend suite and timing comparison step, and is intended for PR CI rather than the default local correctness gate
 - `make profile` runs:
   - `paperbase-dev doctor --mode profile`
   - `paperbase-dev init-local`
@@ -54,6 +60,7 @@ Minimum expectations:
 Always run the appropriate verification before you stop:
 
 - default for meaningful changes: `make test`
+- PR CI uses `make test-smoke`, but local completion and pre-push validation still expect `make test`
 - performance-sensitive or retrieval/indexing/worker hotpath changes: `make profile`
 
 If a test or profile baseline is intentionally changed, refresh the committed baselines with:

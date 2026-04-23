@@ -9,6 +9,7 @@ Primary commands:
 - `make setup`
 - `make doctor`
 - `make dev`
+- `make test-smoke`
 - `make test`
 - `make profile`
 - `make clean`
@@ -25,6 +26,7 @@ For tests:
 - `paperbase-dev init-local`
 - `paperbase-dev verify-run --mode test`
 - then pytest, chat checks, and timing comparison through `make test`
+- pull-request CI may use `make test-smoke`, which keeps the same readiness checks but runs a focused backend subset instead of the full test suite
 
 For profiling:
 
@@ -97,6 +99,7 @@ The intended local experience is:
 For validation:
 
 - `make test` is the standard correctness gate
+- `make test-smoke` is the cheaper PR CI gate
 - `make profile` is the standard performance/profiling gate
 
-Git hooks and CI are expected to delegate to these same make targets.
+Git hooks still use `make test`. PR CI uses `make test-smoke`, while `main` and manual verify runs use `make test`.
