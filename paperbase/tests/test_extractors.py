@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import tarfile
 
+import requests
 from PIL import Image
 
 from paperbase.extractors import (
@@ -84,6 +85,7 @@ def test_index_paper_artifacts_splits_html_into_real_sections(monkeypatch):
 
     monkeypatch.setattr("paperbase.extractors.fetch_html", lambda arxiv_id: html)
     monkeypatch.setattr("paperbase.extractors.fetch_source", lambda arxiv_id: None)
+    monkeypatch.setattr("paperbase.extractors.fetch_pdf", lambda arxiv_id, pdf_url=None: None)
     monkeypatch.setattr("paperbase.extractors._extract_figures_from_html", lambda html: [])
     monkeypatch.setattr("paperbase.extractors._extract_tables_from_html", lambda html: [])
 
@@ -393,6 +395,7 @@ def _install_preview_monkeypatches(
     html: str | None = None,
     source_bytes: bytes | None = None,
     pdf_bytes: bytes | None = None,
+    pdf_error: Exception | None = None,
     with_docling: bool = False,
 ) -> dict[str, int]:
     counts = {"fetch_pdf": 0, "fetch_html": 0, "fetch_source": 0}
@@ -407,6 +410,8 @@ def _install_preview_monkeypatches(
 
     def _fetch_pdf(_arxiv_id, _pdf_url=None):
         counts["fetch_pdf"] += 1
+        if pdf_error is not None:
+            raise pdf_error
         return pdf_bytes
 
     monkeypatch.setattr("paperbase.extractors.fetch_html", _fetch_html)
@@ -499,6 +504,32 @@ def test_index_paper_artifacts_skips_preview_when_pdf_unavailable(monkeypatch):
     assert counts["fetch_pdf"] == 1
     manifest = build_manifest("paper_1", _sample_paper(), extraction)
     assert manifest["available_artifacts"]["preview"] is None
+
+
+def test_index_paper_artifacts_skips_preview_when_pdf_fetch_raises(monkeypatch, caplog):
+    html = """
+    <html><body>
+      <article class="ltx_document">
+        <section class="ltx_section" id="S1">
+          <h2 class="ltx_title ltx_title_section">Introduction</h2>
+          <div class="ltx_para"><p class="ltx_p">Intro.</p></div>
+        </section>
+      </article>
+    </body></html>
+    """.strip()
+    counts = _install_preview_monkeypatches(
+        monkeypatch,
+        html=html,
+        pdf_error=requests.Timeout("preview fetch timed out"),
+    )
+
+    with caplog.at_level("WARNING"):
+        extraction = index_paper_artifacts(_sample_paper())
+
+    assert extraction.source_type == "html"
+    assert all(artifact.path != PREVIEW_ARTIFACT_PATH for artifact in extraction.raw_artifacts)
+    assert counts["fetch_pdf"] == 1
+    assert any("preview" in record.message.lower() for record in caplog.records)
 
 
 def test_index_paper_artifacts_skips_preview_when_render_fails(monkeypatch, caplog):

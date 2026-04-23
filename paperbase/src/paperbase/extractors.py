@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import re
 from pathlib import Path
 import tarfile
@@ -19,6 +20,8 @@ from .preview import generate_first_page_preview
 from .utils import csv_bytes, make_slug, slugify
 
 PREVIEW_ARTIFACT_PATH = "preview/first-page-top.webp"
+
+logger = logging.getLogger(__name__)
 
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": "paperbase/0.1.0 (paper extractor)"})
@@ -749,13 +752,21 @@ def _attach_preview_artifact(
     the preview. Any failure (PDF missing, render failure) is swallowed so
     ingestion continues without a preview.
     """
-    bytes_to_render = pdf_bytes
-    if bytes_to_render is None:
-        bytes_to_render = fetch_pdf(paper.arxiv_id, paper.pdf_url)
-    if not bytes_to_render:
-        return
-    image_bytes = generate_first_page_preview(bytes_to_render)
-    if not image_bytes:
+    try:
+        bytes_to_render = pdf_bytes
+        if bytes_to_render is None:
+            bytes_to_render = fetch_pdf(paper.arxiv_id, paper.pdf_url)
+        if not bytes_to_render:
+            return
+        image_bytes = generate_first_page_preview(bytes_to_render)
+        if not image_bytes:
+            return
+    except Exception:
+        logger.warning(
+            "Failed to attach first-page preview",
+            extra={"event": "preview.attach_failed", "arxiv_id": paper.arxiv_id},
+            exc_info=True,
+        )
         return
     extraction.raw_artifacts.append(
         RawArtifact(path=PREVIEW_ARTIFACT_PATH, data=image_bytes, content_type="image/webp")
