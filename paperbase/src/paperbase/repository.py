@@ -3265,10 +3265,18 @@ class SqlAlchemyPaperRepository(PaperRepository):
         )
 
     def claim_pending_job(self) -> JobResponse | None:
-        # Claim ordering: next_run_at NULLS FIRST so fresh jobs (never scheduled
-        # for a future retry) win over retries that are coming back around. This
-        # keeps a failing job from cutting in front of real work every time its
-        # backoff expires.
+        # Atomic lease via ``SELECT ... FOR UPDATE SKIP LOCKED``. Without the
+        # row lock, two concurrent workers reading at the same instant could
+        # both match the same row, both set status='running', and both
+        # believe they had the claim — Cloud Run horizontal scaling would
+        # quickly double-process jobs. SKIP LOCKED makes each worker jump
+        # over a row that another worker has already locked inside this
+        # transaction, so at most one claims a given row per iteration.
+        #
+        # Claim ordering: next_run_at NULLS FIRST so fresh jobs (never
+        # scheduled for a future retry) win over retries that are coming
+        # back around, which keeps a failing job from cutting in front of
+        # real work every time its backoff expires.
         now = utcnow()
         with self._session() as session:
             row = session.scalar(
@@ -3279,6 +3287,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 )
                 .order_by(JobORM.next_run_at.is_(None).desc(), JobORM.created_at.asc())
                 .limit(1)
+                .with_for_update(skip_locked=True)
             )
             if row is None:
                 return None
