@@ -117,8 +117,9 @@ class Settings(BaseSettings):
     # and scores poorly on query-to-paper retrieval — pure vector-only top-1
     # was 10/30 vs 27/30 for BGE-base on the same 30-paper benchmark.
     # BGE-base matches SPECTER2's dim (768) and encoding throughput so the
-    # switch is a zero-cost quality lift. Existing deployments must run
-    # `paperbase-dev reindex-embeddings` after upgrading.
+    # switch is a zero-cost quality lift. Existing deployments should queue a
+    # full rewrite after upgrading via `paperbase-dev reindex-embeddings` or
+    # POST /v1/index/reindex-embeddings (both default to rewrite_existing=true).
     embedding_model: str | None = Field(default="BAAI/bge-base-en-v1.5")
     embedding_dim: int = 768
     rerank_model: str | None = None

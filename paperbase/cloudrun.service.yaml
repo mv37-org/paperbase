@@ -39,7 +39,7 @@ spec:
             - name: PAPERBASE_LATEST_SYNC_LIMIT_PER_CATEGORY
               value: "100"
             - name: PAPERBASE_EMBEDDING_MODEL
-              value: allenai/specter2_base
+              value: BAAI/bge-base-en-v1.5
             - name: PAPERBASE_EMBEDDING_DIM
               value: "768"
             - name: PAPERBASE_RERANK_MODEL
@@ -64,6 +64,6 @@ spec:
           resources:
             limits:
               cpu: "2"
-              # SPECTER2 (~450 MB) + BGE-reranker-v2-m3 (~2.2 GB) + docling
+              # BGE-base (~450 MB) + BGE-reranker-v2-m3 (~2.2 GB) + docling
               # (~1.2 GB) + Python runtime state leaves ~2 GB headroom at 6Gi.
               memory: 6Gi

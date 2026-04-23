@@ -242,9 +242,14 @@ def summarize_top_cited(
 def reindex_embeddings(
     limit: int = Query(default=100_000, ge=1, le=5_000_000),
     include_chunks: bool = Query(default=True),
+    rewrite_existing: bool = Query(default=True),
     service: PaperbaseService = Depends(get_service),
 ) -> JobResponse:
-    return service.enqueue_reindex_embeddings_job(limit=limit, include_chunks=include_chunks)
+    return service.enqueue_reindex_embeddings_job(
+        limit=limit,
+        include_chunks=include_chunks,
+        rewrite_existing=rewrite_existing,
+    )
 
 
 @app.post("/v1/query/expand", dependencies=[Depends(require_bearer_token)])

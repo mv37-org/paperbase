@@ -52,6 +52,13 @@ For a full reset of the local database and storage, use the installed admin CLI 
 .venv/bin/paperbase-dev flush-local
 ```
 
+After changing the embedding model in a deployed environment, queue a full
+paper/chunk vector rewrite with:
+
+```bash
+.venv/bin/paperbase-dev reindex-embeddings
+```
+
 ## Local Architecture
 
 The repo has four moving pieces:
