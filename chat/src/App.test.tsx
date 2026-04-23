@@ -62,6 +62,9 @@ const apiMocks = vi.hoisted(() => {
             (props.onChange as ((value: string) => void) | undefined)?.(event.target.value)
           }
         />
+        {props.actionAccessory ? (
+          <div data-testid="mention-action-accessory">{props.actionAccessory as any}</div>
+        ) : null}
         {props.submitButtonId ? (
           <button
             id={String(props.submitButtonId)}
@@ -1030,6 +1033,15 @@ describe("App", () => {
         options?: { signal?: AbortSignal },
       ) => {
         streamSignal = options?.signal;
+        onEvent("usage", {
+          model: "claude-opus-4-7",
+          input_tokens: 117900,
+          output_tokens: 100,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+          total_tokens: 118000,
+          context_window_tokens: 258000,
+        });
         onEvent("tool_start", {
           tool_call_id: "tool_1",
           tool_name: "paperbase_search",
@@ -1040,16 +1052,6 @@ describe("App", () => {
           tool_name: "paperbase_search",
           label: 'paper search for "grounding"',
           is_error: false,
-        });
-        onEvent("assistant_start", {
-          assistant_message: {
-            message_id: "msg_stream",
-            role: "assistant",
-            content_markdown: "",
-            citations: [],
-            created_at: "2026-04-21T00:00:00Z",
-            status: "streaming",
-          },
         });
         await streamDone;
       },
@@ -1072,9 +1074,23 @@ describe("App", () => {
       expect(screen.getByText('Did paper search for "grounding"')).toBeTruthy();
     });
     await waitFor(() => {
-      expect(screen.getByText("Thinking...")).toBeTruthy();
+      expect(
+        screen.getByRole("button", {
+          name: "Context window: 46% used (54% left), 118,000 of 258,000 tokens used",
+        }),
+      ).toBeTruthy();
     });
     expect(screen.queryByText("Streaming")).toBeNull();
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Context window: 46% used (54% left), 118,000 of 258,000 tokens used",
+      }),
+    );
+    expect(screen.getByText("Context window:")).toBeTruthy();
+    expect(screen.getByText("46% used (54% left)")).toBeTruthy();
+    expect(screen.getByText("118k / 258k tokens used")).toBeTruthy();
+    expect(screen.getByText("Paperbase compacts context near the limit")).toBeTruthy();
 
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Stop" }));
@@ -1089,6 +1105,187 @@ describe("App", () => {
       await streamDone;
     });
     randomSpy.mockRestore();
+  });
+
+  it("keeps the context usage control in the composer after streaming completes", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.createThread.mockResolvedValue(emptyThreadResponse("thread_2"));
+    apiMocks.sendThreadMessageStream.mockImplementation(
+      async (
+        _threadId: string,
+        _payload: unknown,
+        onEvent: (eventName: string, payload: unknown) => void,
+      ) => {
+        onEvent("assistant_start", {
+          assistant_message: {
+            message_id: "msg_stream",
+            role: "assistant",
+            content_markdown: "",
+            citations: [],
+            created_at: "2026-04-21T00:00:00Z",
+            status: "streaming",
+          },
+        });
+        onEvent("usage", {
+          model: "claude-opus-4-7",
+          input_tokens: 117900,
+          output_tokens: 100,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+          total_tokens: 118000,
+          context_window_tokens: 258000,
+        });
+        onEvent("done", {
+          assistant_message: {
+            message_id: "msg_stream",
+            role: "assistant",
+            content_markdown: "Grounded streamed answer",
+            citations: [],
+            created_at: "2026-04-21T00:00:00Z",
+            status: "completed",
+          },
+          remaining_free_responses: 2,
+          has_anthropic_api_key: false,
+          state: "completed",
+          usage: {
+            model: "claude-opus-4-7",
+            input_tokens: 117900,
+            output_tokens: 100,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            total_tokens: 118000,
+            context_window_tokens: 258000,
+          },
+        });
+      },
+    );
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Start new research in")).toBeTruthy();
+    });
+    fireEvent.change(screen.getByLabelText("mention-input-chat"), {
+      target: { value: "Summarize retrieval strategies" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Grounded streamed answer")).toBeTruthy();
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Send" })).toBeTruthy();
+    });
+
+    const usageButton = screen.getByRole("button", {
+      name: "Context window: 46% used (54% left), 118,000 of 258,000 tokens used",
+    });
+    expect(usageButton).toBeTruthy();
+
+    fireEvent.click(usageButton);
+
+    expect(screen.getByText("Context window:")).toBeTruthy();
+    expect(screen.getByText("46% used (54% left)")).toBeTruthy();
+    expect(screen.getByText("118k / 258k tokens used")).toBeTruthy();
+    expect(screen.getByText("Paperbase compacts context near the limit")).toBeTruthy();
+  });
+
+  it("renders compaction checkpoints during a stream and keeps the summary", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.createThread.mockResolvedValue(emptyThreadResponse("thread_compact"));
+    apiMocks.sendThreadMessageStream.mockImplementation(
+      async (
+        _threadId: string,
+        _payload: unknown,
+        onEvent: (eventName: string, payload: unknown) => void,
+      ) => {
+        onEvent("compaction_start", {
+          compaction_message: {
+            message_id: "msg_compact",
+            role: "user",
+            kind: "compaction",
+            content_markdown: "Compacting conversation...",
+            citations: [],
+            created_at: "2026-04-21T00:00:00Z",
+            status: "streaming",
+          },
+        });
+        onEvent("compaction_done", {
+          compaction_message: {
+            message_id: "msg_compact",
+            role: "user",
+            kind: "compaction",
+            content_markdown: "## Compacted Conversation\n\nPreserved the current task.",
+            citations: [],
+            created_at: "2026-04-21T00:00:00Z",
+            status: "completed",
+          },
+          messages: [
+            {
+              message_id: "msg_compact",
+              role: "user",
+              kind: "compaction",
+              content_markdown: "## Compacted Conversation\n\nPreserved the current task.",
+              citations: [],
+              created_at: "2026-04-21T00:00:00Z",
+              status: "completed",
+            },
+          ],
+        });
+        onEvent("tool_start", {
+          tool_call_id: "tool_after_compact",
+          tool_name: "paperbase_search",
+          label: 'paper search for "context"',
+        });
+        onEvent("tool_done", {
+          tool_call_id: "tool_after_compact",
+          tool_name: "paperbase_search",
+          label: 'paper search for "context"',
+          is_error: false,
+        });
+        onEvent("assistant_start", {
+          assistant_message: {
+            message_id: "msg_answer",
+            role: "assistant",
+            content_markdown: "",
+            citations: [],
+            created_at: "2026-04-21T00:00:01Z",
+            status: "streaming",
+          },
+        });
+        onEvent("done", {
+          assistant_message: {
+            message_id: "msg_answer",
+            role: "assistant",
+            content_markdown: "Answer after compaction",
+            citations: [],
+            created_at: "2026-04-21T00:00:01Z",
+            status: "completed",
+          },
+          remaining_free_responses: 2,
+          has_anthropic_api_key: false,
+          state: "completed",
+          usage: null,
+        });
+      },
+    );
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Start new research in")).toBeTruthy();
+    });
+    fireEvent.change(screen.getByLabelText("mention-input-chat"), {
+      target: { value: "Find context compaction papers" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Compacted Conversation/)).toBeTruthy();
+    });
+    expect(screen.queryByText("Compacting conversation...")).toBeNull();
+    expect(screen.getByText('Did paper search for "context"')).toBeTruthy();
+    expect(screen.getByText("Answer after compaction")).toBeTruthy();
   });
 
   it("opens the settings modal with appearance controls and no notifications tab", async () => {
@@ -1166,6 +1363,11 @@ describe("App", () => {
         body: JSON.stringify({ theme: "dark" }),
       });
     });
+    await waitFor(() => {
+      expect(screen.getByText("Dark mode enabled.")).toBeTruthy();
+    });
+    expect(document.querySelector(".settings-tab-panels > #modal-flash")).toBeTruthy();
+    expect(document.querySelector(".modal-panel > #modal-flash")).toBeNull();
     await waitFor(() => {
       expect(document.body.classList.contains("authenticated-theme-dark")).toBe(true);
     });

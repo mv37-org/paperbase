@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import requests
@@ -12,6 +14,8 @@ import requests
 from .config import DEFAULT_AI_CATEGORIES
 from .models import PaperMetadata
 from .utils import canonical_arxiv_id
+
+logger = logging.getLogger(__name__)
 
 
 ARXIV_API = "http://export.arxiv.org/api/query"
@@ -121,36 +125,152 @@ def get_paper_details(arxiv_id: str) -> PaperMetadata | None:
     return _parse_arxiv_entry(entries[0])
 
 
-def enrich_with_semantic_scholar(papers: list[PaperMetadata], *, batch_size: int = 20) -> list[PaperMetadata]:
-    for offset in range(0, len(papers), batch_size):
-        batch = papers[offset: offset + batch_size]
-        ids = [f"ArXiv:{paper.arxiv_id}" for paper in batch]
+@dataclass(slots=True)
+class EnrichmentOutcome:
+    """Result of a Semantic Scholar enrichment pass.
+
+    Callers use the counts to log observability (doctor reports success
+    rate at scale) and to decide whether to enqueue a backfill job.
+    """
+    attempted: int = 0
+    enriched: int = 0
+    skipped_empty: int = 0
+    batches_failed: int = 0
+    batches_succeeded: int = 0
+
+    @property
+    def success_rate(self) -> float:
+        return self.enriched / self.attempted if self.attempted else 0.0
+
+
+def _s2_batch_with_retry(
+    ids: list[str],
+    *,
+    max_retries: int,
+    base_backoff_seconds: float,
+    timeout_seconds: float,
+) -> list[dict] | None:
+    """POST one batch to Semantic Scholar with exponential backoff on 429/5xx.
+
+    Honors the ``Retry-After`` header when present, otherwise falls back to
+    exponential backoff: base * (4 ** attempt), i.e. 1s / 4s / 16s / 64s at
+    base=1.0. Returns the parsed JSON list on success, or ``None`` after the
+    final retry is exhausted. The caller logs and decides whether to requeue.
+    """
+    last_error: Exception | None = None
+    for attempt in range(max_retries + 1):
         try:
             response = SESSION.post(
                 f"{S2_API}/paper/batch",
                 json={"ids": ids},
                 params={"fields": "citationCount,influentialCitationCount,externalIds,tldr"},
-                timeout=15,
+                timeout=timeout_seconds,
             )
-            if response.status_code == 429:
-                time.sleep(2)
-                continue
-            response.raise_for_status()
-            for paper, item in zip(batch, response.json()):
-                if not item:
-                    continue
-                paper.citation_count = item.get("citationCount", 0) or 0
-                paper.influential_citation_count = item.get("influentialCitationCount", 0) or 0
-                paper.semantic_scholar_id = item.get("paperId")
-                tldr_payload = item.get("tldr") or {}
-                tldr_text = tldr_payload.get("text") if isinstance(tldr_payload, dict) else None
-                if tldr_text:
-                    paper.tldr = tldr_text
-        except requests.RequestException:
+        except requests.RequestException as exc:
+            last_error = exc
+            if attempt >= max_retries:
+                break
+            sleep_for = base_backoff_seconds * (4 ** attempt)
+            logger.warning(
+                "S2 batch request failed, retrying",
+                extra={"event": "s2.request_error", "attempt": attempt + 1, "sleep": sleep_for, "error": str(exc)},
+            )
+            time.sleep(sleep_for)
             continue
+
+        if response.status_code in (429, 500, 502, 503, 504):
+            if attempt >= max_retries:
+                last_error = requests.HTTPError(f"HTTP {response.status_code} after {attempt + 1} attempts")
+                break
+            retry_after_header = response.headers.get("Retry-After")
+            sleep_for = base_backoff_seconds * (4 ** attempt)
+            if retry_after_header:
+                try:
+                    sleep_for = max(sleep_for, float(retry_after_header))
+                except ValueError:
+                    pass
+            logger.warning(
+                "S2 rate-limited / 5xx, backing off",
+                extra={"event": "s2.backoff", "status": response.status_code, "attempt": attempt + 1, "sleep": sleep_for},
+            )
+            time.sleep(sleep_for)
+            continue
+
+        if not response.ok:
+            last_error = requests.HTTPError(f"HTTP {response.status_code}: {response.text[:200]}")
+            break
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            last_error = exc
+            break
+        if not isinstance(payload, list):
+            last_error = ValueError(f"unexpected S2 response shape: {type(payload).__name__}")
+            break
+        return payload
+
+    logger.warning(
+        "S2 batch enrichment gave up",
+        extra={
+            "event": "s2.give_up",
+            "batch_size": len(ids),
+            "error": str(last_error) if last_error else "",
+        },
+    )
+    return None
+
+
+def enrich_with_semantic_scholar(
+    papers: list[PaperMetadata],
+    *,
+    batch_size: int = 20,
+    max_retries: int = 4,
+    base_backoff_seconds: float = 1.0,
+    inter_batch_sleep_seconds: float = 1.0,
+    timeout_seconds: float = 15.0,
+) -> EnrichmentOutcome:
+    """Populate citation / influential-cite / S2 id / tldr on each paper in-place.
+
+    Retries each batch up to ``max_retries`` times on 429 / 5xx / connection
+    errors, with exponential backoff (1s, 4s, 16s, 64s by default). Honors
+    the Retry-After response header. A batch that exhausts its retries is
+    logged and skipped — the caller can re-enqueue those papers via the
+    ``enrich_missing_metadata`` job for a later pass.
+
+    For inline (index-time) enrichment, set ``max_retries=1`` so a single
+    transient failure doesn't block ingestion. For backfill, use the default
+    so stragglers get aggressive retry coverage.
+    """
+    outcome = EnrichmentOutcome(attempted=len(papers))
+    for offset in range(0, len(papers), batch_size):
+        batch = papers[offset: offset + batch_size]
+        ids = [f"ArXiv:{paper.arxiv_id}" for paper in batch]
+        payload = _s2_batch_with_retry(
+            ids,
+            max_retries=max_retries,
+            base_backoff_seconds=base_backoff_seconds,
+            timeout_seconds=timeout_seconds,
+        )
+        if payload is None:
+            outcome.batches_failed += 1
+            continue
+        outcome.batches_succeeded += 1
+        for paper, item in zip(batch, payload):
+            if not item:
+                outcome.skipped_empty += 1
+                continue
+            paper.citation_count = item.get("citationCount", 0) or 0
+            paper.influential_citation_count = item.get("influentialCitationCount", 0) or 0
+            paper.semantic_scholar_id = item.get("paperId")
+            tldr_payload = item.get("tldr") or {}
+            tldr_text = tldr_payload.get("text") if isinstance(tldr_payload, dict) else None
+            if tldr_text:
+                paper.tldr = tldr_text
+            outcome.enriched += 1
         if offset + batch_size < len(papers):
-            time.sleep(1)
-    return papers
+            time.sleep(inter_batch_sleep_seconds)
+    return outcome
 
 
 def search_semantic_scholar(
@@ -213,8 +333,12 @@ def fetch_references(
     """
     resolved_s2_id = semantic_scholar_id
     if not resolved_s2_id:
-        enriched = enrich_with_semantic_scholar([PaperMetadata(arxiv_id=arxiv_id)])
-        resolved_s2_id = enriched[0].semantic_scholar_id if enriched else None
+        # Interactive path: keep the retry budget tight so a rate-limited S2
+        # doesn't block the user on 1/4/16/64s backoff. The enrich_missing
+        # backfill job owns the aggressive retry ladder.
+        stub = PaperMetadata(arxiv_id=arxiv_id)
+        enrich_with_semantic_scholar([stub], max_retries=1, base_backoff_seconds=0.5)
+        resolved_s2_id = stub.semantic_scholar_id
     if not resolved_s2_id:
         return []
     try:
@@ -248,8 +372,12 @@ def fetch_references(
 def get_related_papers(arxiv_id: str, semantic_scholar_id: str | None, *, limit: int = 10) -> list[PaperMetadata]:
     resolved_s2_id = semantic_scholar_id
     if not resolved_s2_id:
-        enriched = enrich_with_semantic_scholar([PaperMetadata(arxiv_id=arxiv_id)])
-        resolved_s2_id = enriched[0].semantic_scholar_id
+        # Interactive path: keep the retry budget tight so a rate-limited S2
+        # doesn't block the user on 1/4/16/64s backoff. The enrich_missing
+        # backfill job owns the aggressive retry ladder.
+        stub = PaperMetadata(arxiv_id=arxiv_id)
+        enrich_with_semantic_scholar([stub], max_retries=1, base_backoff_seconds=0.5)
+        resolved_s2_id = stub.semantic_scholar_id
     if not resolved_s2_id:
         return []
     response = SESSION.get(

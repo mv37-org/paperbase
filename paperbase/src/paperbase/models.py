@@ -300,6 +300,7 @@ class ChatMessageResponse(BaseModel):
     citations: list[ChatCitation] = Field(default_factory=list)
     created_at: datetime
     status: str = "completed"
+    kind: str = "default"
 
 
 class ChatThreadSummary(BaseModel):

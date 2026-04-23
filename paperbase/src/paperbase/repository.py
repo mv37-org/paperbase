@@ -453,8 +453,11 @@ class ChatMessageORM(Base):
     role: Mapped[str] = mapped_column(String(32), index=True)
     content_markdown: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(32), default="completed")
+    kind: Mapped[str] = mapped_column(String(32), default="default")
     citations: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
+    archived_at: Mapped[Any | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    archived_by_message_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 def _paper_from_orm(row: PaperORM) -> PaperResponse:
@@ -629,6 +632,7 @@ def _chat_message_from_orm(row: ChatMessageORM) -> ChatMessageResponse:
         citations=[ChatCitation.model_validate(citation) for citation in (row.citations or [])],
         created_at=row.created_at,
         status=row.status,
+        kind=row.kind or "default",
     )
 
 
@@ -705,6 +709,36 @@ class PaperRepository(ABC):
 
         Always returns the current frontier — callers should fetch without an
         offset and rely on the predicate to drop rows as they get repaired.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_papers_needing_enrichment(
+        self,
+        *,
+        limit: int,
+        min_age_seconds: int = 3600,
+        after: PaperResponse | None = None,
+    ) -> list[PaperResponse]:
+        """Return papers that still lack Semantic Scholar enrichment.
+
+        Predicate: indexed_at + ``min_age_seconds`` has elapsed, the paper
+        has no S2 id, AND has zero citations. The age floor keeps the
+        backfill job from racing with inline enrichment on freshly-ingested
+        papers.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def enrichment_stats(self) -> dict[str, int]:
+        """Return counts for observability / doctor. Keys:
+
+        - ``total_indexed`` — indexed papers
+        - ``with_semantic_scholar_id`` — of those, how many have a populated S2 id
+        - ``with_citations`` — of those, how many have ``citation_count > 0``
+        - ``enriched`` — has S2 id OR non-zero citations. This is the metric
+          that represents "S2 enrichment succeeded"; a zero-citation recent
+          paper with a populated S2 id still counts as enriched.
         """
         raise NotImplementedError
 
@@ -958,6 +992,18 @@ class SqlAlchemyPaperRepository(PaperRepository):
             )
             connection.execute(
                 text("ALTER TABLE IF EXISTS chat_threads ADD COLUMN IF NOT EXISTS project_instructions TEXT DEFAULT ''")
+            )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS chat_messages ADD COLUMN IF NOT EXISTS kind VARCHAR(32) DEFAULT 'default'")
+            )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS chat_messages ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ")
+            )
+            connection.execute(
+                text(
+                    "ALTER TABLE IF EXISTS chat_messages "
+                    "ADD COLUMN IF NOT EXISTS archived_by_message_id VARCHAR(64)"
+                )
             )
             connection.execute(
                 text(
@@ -1362,6 +1408,92 @@ class SqlAlchemyPaperRepository(PaperRepository):
         with self._session() as session:
             rows = session.scalars(select(PaperORM).from_statement(sql).params(**params)).all()
         return [_paper_from_orm(row) for row in rows]
+
+    def list_papers_needing_enrichment(
+        self,
+        *,
+        limit: int,
+        min_age_seconds: int = 3600,
+        after: PaperResponse | None = None,
+    ) -> list[PaperResponse]:
+        # Predicate: indexed long enough ago for inline enrichment to have
+        # run and failed, no S2 id recorded, and zero citations (so we don't
+        # re-hit the API for papers that actually came back with 0 cites).
+        base_sql = """
+            SELECT papers.*
+            FROM papers
+            WHERE papers.index_status = 'indexed'
+              AND (papers.semantic_scholar_id IS NULL OR papers.semantic_scholar_id = '')
+              AND (papers.citation_count IS NULL OR papers.citation_count = 0)
+              AND (papers.indexed_at IS NULL OR papers.indexed_at < NOW() - make_interval(secs => :min_age))
+              {after_predicate}
+            ORDER BY papers.indexed_at ASC NULLS FIRST, papers.paper_id ASC
+            LIMIT :limit
+        """
+        params: dict[str, Any] = {"limit": limit, "min_age": min_age_seconds}
+        after_predicate = ""
+        # Keyset cursor must mirror the full ORDER BY tuple
+        # (indexed_at ASC NULLS FIRST, paper_id ASC). Advancing on paper_id alone
+        # skips rows whenever an earlier page ended on a lexicographically large
+        # id and newer eligible rows have smaller ids.
+        if after is not None:
+            params["after_paper_id"] = after.paper_id
+            if after.indexed_at is None:
+                # Still in the NULLS-first group: advance by paper_id within
+                # the NULL-indexed rows, then include every non-NULL row.
+                after_predicate = (
+                    "AND ((papers.indexed_at IS NULL AND papers.paper_id > :after_paper_id) "
+                    "OR papers.indexed_at IS NOT NULL)"
+                )
+            else:
+                # Past the NULL-indexed rows. Within non-NULL rows, order by
+                # (indexed_at, paper_id).
+                params["after_indexed_at"] = after.indexed_at
+                after_predicate = (
+                    "AND papers.indexed_at IS NOT NULL AND ("
+                    "papers.indexed_at > :after_indexed_at "
+                    "OR (papers.indexed_at = :after_indexed_at AND papers.paper_id > :after_paper_id)"
+                    ")"
+                )
+        sql = text(base_sql.format(after_predicate=after_predicate))
+        with self._session() as session:
+            rows = session.scalars(select(PaperORM).from_statement(sql).params(**params)).all()
+        return [_paper_from_orm(row) for row in rows]
+
+    def enrichment_stats(self) -> dict[str, int]:
+        # "enriched" must include papers with a populated S2 id even if their
+        # citation_count is legitimately zero (e.g. freshly-published).
+        # Using citation_count > 0 alone would flag a healthy recent corpus
+        # as under-enriched and trigger false doctor warnings.
+        sql = text(
+            """
+            SELECT
+              COUNT(*) FILTER (WHERE index_status = 'indexed') AS total_indexed,
+              COUNT(*) FILTER (
+                WHERE index_status = 'indexed'
+                AND (semantic_scholar_id IS NOT NULL AND semantic_scholar_id <> '')
+              ) AS with_semantic_scholar_id,
+              COUNT(*) FILTER (
+                WHERE index_status = 'indexed' AND citation_count > 0
+              ) AS with_citations,
+              COUNT(*) FILTER (
+                WHERE index_status = 'indexed'
+                AND (
+                  (semantic_scholar_id IS NOT NULL AND semantic_scholar_id <> '')
+                  OR citation_count > 0
+                )
+              ) AS enriched
+            FROM papers
+            """
+        )
+        with self._session() as session:
+            row = session.execute(sql).mappings().one()
+        return {
+            "total_indexed": int(row["total_indexed"] or 0),
+            "with_semantic_scholar_id": int(row["with_semantic_scholar_id"] or 0),
+            "with_citations": int(row["with_citations"] or 0),
+            "enriched": int(row["enriched"] or 0),
+        }
 
     def update_paper_embedding(self, paper_id: str, embedding: list[float]) -> None:
         with self._session() as session:
@@ -2473,7 +2605,10 @@ class SqlAlchemyPaperRepository(PaperRepository):
             for thread in threads:
                 last_message = session.scalar(
                     select(ChatMessageORM)
-                    .where(ChatMessageORM.thread_id == thread.thread_id)
+                    .where(
+                        ChatMessageORM.thread_id == thread.thread_id,
+                        ChatMessageORM.archived_at.is_(None),
+                    )
                     .order_by(ChatMessageORM.created_at.desc())
                     .limit(1)
                 )
@@ -2510,7 +2645,10 @@ class SqlAlchemyPaperRepository(PaperRepository):
             for thread in thread_rows:
                 last_message = session.scalar(
                     select(ChatMessageORM)
-                    .where(ChatMessageORM.thread_id == thread.thread_id)
+                    .where(
+                        ChatMessageORM.thread_id == thread.thread_id,
+                        ChatMessageORM.archived_at.is_(None),
+                    )
                     .order_by(ChatMessageORM.created_at.desc())
                     .limit(1)
                 )
@@ -2754,7 +2892,10 @@ class SqlAlchemyPaperRepository(PaperRepository):
             for thread in threads:
                 last_message = session.scalar(
                     select(ChatMessageORM)
-                    .where(ChatMessageORM.thread_id == thread.thread_id)
+                    .where(
+                        ChatMessageORM.thread_id == thread.thread_id,
+                        ChatMessageORM.archived_at.is_(None),
+                    )
                     .order_by(ChatMessageORM.created_at.desc())
                     .limit(1)
                 )
@@ -2771,7 +2912,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 return None
             messages = session.scalars(
                 select(ChatMessageORM)
-                .where(ChatMessageORM.thread_id == thread_id)
+                .where(ChatMessageORM.thread_id == thread_id, ChatMessageORM.archived_at.is_(None))
                 .order_by(ChatMessageORM.created_at.asc())
             ).all()
         return ChatThreadResponse(
@@ -2793,6 +2934,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
         content_markdown: str,
         citations: list[dict[str, Any]] | None = None,
         status: str = "completed",
+        kind: str = "default",
     ) -> ChatMessageResponse:
         row = ChatMessageORM(
             message_id=new_id("msg"),
@@ -2801,6 +2943,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
             content_markdown=content_markdown,
             citations=citations or [],
             status=status,
+            kind=kind,
         )
         with self._session() as session:
             session.add(row)
@@ -2819,6 +2962,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
         content_markdown: str | None = None,
         citations: list[dict[str, Any]] | None = None,
         status: str | None = None,
+        kind: str | None = None,
     ) -> ChatMessageResponse | None:
         with self._session() as session:
             row = session.get(ChatMessageORM, message_id)
@@ -2830,6 +2974,8 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 row.citations = citations
             if status is not None:
                 row.status = status
+            if kind is not None:
+                row.kind = kind
             thread = session.get(ChatThreadORM, row.thread_id)
             if thread:
                 thread.updated_at = utcnow()
@@ -2837,6 +2983,35 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 if project is not None:
                     project.updated_at = thread.updated_at
         return _chat_message_from_orm(row)
+
+    def archive_chat_messages(
+        self,
+        *,
+        thread_id: str,
+        message_ids: list[str],
+        archived_by_message_id: str,
+    ) -> int:
+        if not message_ids:
+            return 0
+        archived_at = utcnow()
+        with self._session() as session:
+            rows = session.scalars(
+                select(ChatMessageORM).where(
+                    ChatMessageORM.thread_id == thread_id,
+                    ChatMessageORM.message_id.in_(message_ids),
+                    ChatMessageORM.archived_at.is_(None),
+                )
+            ).all()
+            for row in rows:
+                row.archived_at = archived_at
+                row.archived_by_message_id = archived_by_message_id
+            thread = session.get(ChatThreadORM, thread_id)
+            if thread:
+                thread.updated_at = archived_at
+                project = session.get(ProjectORM, thread.project_id) if thread.project_id else None
+                if project is not None:
+                    project.updated_at = archived_at
+        return len(rows)
 
     def delete_chat_thread(self, *, user_id: str, thread_id: str) -> bool:
         with self._session() as session:
@@ -3289,6 +3464,79 @@ class MemoryPaperRepository(PaperRepository):
         if after is not None:
             candidates = [paper for paper in candidates if _paper_needs_summary_after(paper, after)]
         return candidates[:limit]
+
+    def list_papers_needing_enrichment(
+        self,
+        *,
+        limit: int,
+        min_age_seconds: int = 3600,
+        after: PaperResponse | None = None,
+    ) -> list[PaperResponse]:
+        now = utcnow()
+        candidates: list[PaperResponse] = []
+        for paper in self.papers.values():
+            if paper.index_status != "indexed":
+                continue
+            if paper.semantic_scholar_id:
+                continue
+            if paper.citation_count and paper.citation_count > 0:
+                continue
+            if paper.indexed_at is not None:
+                age = (now - paper.indexed_at).total_seconds()
+                if age < min_age_seconds:
+                    continue
+            candidates.append(paper)
+        # Match the SqlAlchemy ordering: NULL indexed_at sorts first, then by
+        # (indexed_at, paper_id). Using utcnow() here would invert NULLS FIRST,
+        # so sort NULL as a distinct bucket that precedes any datetime.
+        def _sort_key(p: PaperResponse) -> tuple[int, Any, str]:
+            return (0, None, p.paper_id) if p.indexed_at is None else (1, p.indexed_at, p.paper_id)
+
+        candidates.sort(key=_sort_key)
+        if after is not None:
+            # Mirror the ORDER BY tuple: advance by (indexed_at, paper_id)
+            # with NULL-indexed rows forming a distinct leading bucket.
+            def _after(paper: PaperResponse) -> bool:
+                if after.indexed_at is None:
+                    if paper.indexed_at is None:
+                        return paper.paper_id > after.paper_id
+                    return True
+                if paper.indexed_at is None:
+                    return False
+                if paper.indexed_at > after.indexed_at:
+                    return True
+                if paper.indexed_at < after.indexed_at:
+                    return False
+                return paper.paper_id > after.paper_id
+
+            candidates = [paper for paper in candidates if _after(paper)]
+        return candidates[:limit]
+
+    def enrichment_stats(self) -> dict[str, int]:
+        total_indexed = 0
+        with_s2 = 0
+        with_cites = 0
+        enriched = 0
+        for paper in self.papers.values():
+            if paper.index_status != "indexed":
+                continue
+            total_indexed += 1
+            has_s2 = bool(paper.semantic_scholar_id)
+            has_cites = bool(paper.citation_count and paper.citation_count > 0)
+            if has_s2:
+                with_s2 += 1
+            if has_cites:
+                with_cites += 1
+            # enriched = has populated S2 id OR non-zero citations. See the
+            # SqlAlchemy docstring for why citation_count > 0 alone is wrong.
+            if has_s2 or has_cites:
+                enriched += 1
+        return {
+            "total_indexed": total_indexed,
+            "with_semantic_scholar_id": with_s2,
+            "with_citations": with_cites,
+            "enriched": enriched,
+        }
 
     def update_paper_embedding(self, paper_id: str, embedding: list[float]) -> None:
         if paper_id in self.papers:
@@ -4252,6 +4500,7 @@ class MemoryPaperRepository(PaperRepository):
         content_markdown: str,
         citations: list[dict[str, Any]] | None = None,
         status: str = "completed",
+        kind: str = "default",
     ) -> ChatMessageResponse:
         message = ChatMessageResponse(
             message_id=new_id("msg"),
@@ -4260,6 +4509,7 @@ class MemoryPaperRepository(PaperRepository):
             citations=[ChatCitation.model_validate(citation) for citation in (citations or [])],
             created_at=utcnow(),
             status=status,
+            kind=kind,
         )
         thread = self.chat_threads[thread_id]
         updated_at = utcnow()
@@ -4277,6 +4527,7 @@ class MemoryPaperRepository(PaperRepository):
         content_markdown: str | None = None,
         citations: list[dict[str, Any]] | None = None,
         status: str | None = None,
+        kind: str | None = None,
     ) -> ChatMessageResponse | None:
         for thread_id, thread in self.chat_threads.items():
             for index, message in enumerate(thread.messages):
@@ -4289,6 +4540,7 @@ class MemoryPaperRepository(PaperRepository):
                         if citations is None
                         else [ChatCitation.model_validate(citation) for citation in citations],
                         "status": message.status if status is None else status,
+                        "kind": message.kind if kind is None else kind,
                     }
                 )
                 messages = list(thread.messages)
@@ -4302,6 +4554,29 @@ class MemoryPaperRepository(PaperRepository):
                     self.projects[thread.project_id] = project.model_copy(update={"updated_at": updated_at})
                 return updated_message
         return None
+
+    def archive_chat_messages(
+        self,
+        *,
+        thread_id: str,
+        message_ids: list[str],
+        archived_by_message_id: str,
+    ) -> int:
+        del archived_by_message_id
+        thread = self.chat_threads.get(thread_id)
+        if thread is None or not message_ids:
+            return 0
+        archived_ids = set(message_ids)
+        messages = [message for message in thread.messages if message.message_id not in archived_ids]
+        archived_count = len(thread.messages) - len(messages)
+        if archived_count == 0:
+            return 0
+        updated_at = utcnow()
+        self.chat_threads[thread_id] = thread.model_copy(update={"messages": messages, "updated_at": updated_at})
+        project = self.projects.get(thread.project_id)
+        if project is not None:
+            self.projects[thread.project_id] = project.model_copy(update={"updated_at": updated_at})
+        return archived_count
 
     def delete_chat_thread(self, *, user_id: str, thread_id: str) -> bool:
         if self.chat_thread_users.get(thread_id) != user_id:

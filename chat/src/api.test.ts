@@ -393,12 +393,13 @@ describe("chat api", () => {
                   'event: tool_start\ndata: {"tool_call_id":"tool_1","tool_name":"paperbase_search","label":"paper search"}\n\n' +
                     'event: tool_done\ndata: {"tool_call_id":"tool_1","tool_name":"paperbase_search","label":"paper search","is_error":false}\n\n' +
                     'event: assistant_start\ndata: {"assistant_message":{"message_id":"msg_1","role":"assistant","content_markdown":"","citations":[],"created_at":"2026-04-21T00:00:00Z","status":"streaming"}}\n\n' +
+                    'event: usage\ndata: {"model":"claude-opus-4-7","input_tokens":11234,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"total_tokens":11235,"context_window_tokens":1000000}\n\n' +
                     'event: delta\ndata: {"message_id":"msg_1","delta":"Ground',
                 ),
               );
               controller.enqueue(
                 encoder.encode(
-                  'ed answer"}\n\nevent: done\ndata: {"assistant_message":{"message_id":"msg_1","role":"assistant","content_markdown":"Grounded answer","citations":[],"created_at":"2026-04-21T00:00:00Z","status":"completed"},"remaining_free_responses":2,"has_anthropic_api_key":false,"state":"completed"}\n\n',
+                  'ed answer"}\n\nevent: done\ndata: {"assistant_message":{"message_id":"msg_1","role":"assistant","content_markdown":"Grounded answer","citations":[],"created_at":"2026-04-21T00:00:00Z","status":"completed"},"remaining_free_responses":2,"has_anthropic_api_key":false,"state":"completed","usage":{"model":"claude-opus-4-7","input_tokens":11234,"output_tokens":27,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"total_tokens":11261,"context_window_tokens":1000000}}\n\n',
                 ),
               );
               controller.close();
@@ -449,6 +450,18 @@ describe("chat api", () => {
           },
         },
       ],
+      [
+        "usage",
+        {
+          model: "claude-opus-4-7",
+          input_tokens: 11234,
+          output_tokens: 1,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+          total_tokens: 11235,
+          context_window_tokens: 1000000,
+        },
+      ],
       ["delta", { message_id: "msg_1", delta: "Grounded answer" }],
       [
         "done",
@@ -464,6 +477,15 @@ describe("chat api", () => {
           remaining_free_responses: 2,
           has_anthropic_api_key: false,
           state: "completed",
+          usage: {
+            model: "claude-opus-4-7",
+            input_tokens: 11234,
+            output_tokens: 27,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            total_tokens: 11261,
+            context_window_tokens: 1000000,
+          },
         },
       ],
     ]);
