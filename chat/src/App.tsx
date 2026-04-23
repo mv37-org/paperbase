@@ -762,6 +762,7 @@ export default function App() {
     [],
   );
   const [projectRepoSelectedPaths, setProjectRepoSelectedPaths] = useState<string[]>([]);
+  const [projectRepoImportAll, setProjectRepoImportAll] = useState(true);
   const [projectRepoList, setProjectRepoList] = useState<GitHubRepoSummary[]>([]);
   const [projectRepoLoading, setProjectRepoLoading] = useState(false);
   const [projectRepoListLoading, setProjectRepoListLoading] = useState(false);
@@ -2500,11 +2501,14 @@ export default function App() {
           repoName,
           selectedBranch,
         );
+        const candidatePaths = candidates.candidates.map((candidate) => candidate.path);
         setProjectRepoCandidates(candidates.candidates);
         setProjectRepoSelectedPaths((current) =>
-          current.filter((path) =>
-            candidates.candidates.some((candidate) => candidate.path === path),
-          ),
+          projectRepoImportAll
+            ? candidatePaths
+            : current.length
+              ? current.filter((path) => candidatePaths.includes(path))
+              : candidatePaths,
         );
         setProjectRepoStatus(
           candidates.candidates.length
@@ -2522,7 +2526,7 @@ export default function App() {
         setProjectRepoLoading(false);
       }
     },
-    [projectRepoBranch],
+    [projectRepoBranch, projectRepoImportAll],
   );
 
   const refreshProjectRepositories = useCallback(
@@ -2571,6 +2575,7 @@ export default function App() {
     (repo: GitHubRepoSummary | null) => {
       setProjectRepoDropdownOpen(false);
       setProjectRepoSelectedPaths([]);
+      setProjectRepoImportAll(true);
       if (repo === null) {
         setProjectRepoMode("create");
         setProjectRepoOwner(sessionSettings.github_login || "");
@@ -2604,6 +2609,7 @@ export default function App() {
     setProjectRepoMetadata(null);
     setProjectRepoCandidates([]);
     setProjectRepoSelectedPaths([]);
+    setProjectRepoImportAll(true);
     setProjectRepoLoading(false);
     setProjectRepoDropdownOpen(false);
     setProjectAdvancedOpen(false);
@@ -2653,6 +2659,7 @@ export default function App() {
     setProjectRepoMetadata(null);
     setProjectRepoCandidates([]);
     setProjectRepoSelectedPaths([]);
+    setProjectRepoImportAll(true);
     setProjectRepoLoading(false);
     setProjectRepoDropdownOpen(false);
     setProjectAdvancedOpen(false);
@@ -2691,6 +2698,9 @@ export default function App() {
           setProjectFormError("GitHub repository name is required.");
           return;
         }
+        const existingRepoImportPaths = projectRepoImportAll
+          ? projectRepoCandidates.map((candidate) => candidate.path)
+          : projectRepoSelectedPaths;
         const githubRepo =
           projectRepoMode === "create"
             ? {
@@ -2704,7 +2714,7 @@ export default function App() {
                 owner: projectRepoOwner.trim(),
                 name: repoName,
                 base_branch: projectRepoBranch.trim(),
-                import_paths: projectRepoSelectedPaths,
+                import_paths: existingRepoImportPaths,
               };
         if (githubRepo.mode === "existing" && (!githubRepo.owner || !githubRepo.base_branch)) {
           setProjectFormError("Existing repositories require an owner and base branch.");
@@ -2732,6 +2742,8 @@ export default function App() {
     projectFormName,
     projectModalState,
     projectRepoBranch,
+    projectRepoCandidates,
+    projectRepoImportAll,
     projectRepoMode,
     projectRepoName,
     projectRepoOwner,
@@ -5020,27 +5032,67 @@ export default function App() {
                           <div className="project-repo-status">{projectRepoStatus}</div>
                         ) : null}
                         {projectRepoCandidates.length > 0 ? (
-                          <div className="project-repo-import-list">
-                            {projectRepoCandidates.map((candidate) => {
-                              const selected = projectRepoSelectedPaths.includes(candidate.path);
-                              return (
-                                <label key={candidate.path} className="project-repo-import-item">
-                                  <input
-                                    type="checkbox"
-                                    checked={selected}
-                                    onChange={(event) => {
-                                      setProjectRepoSelectedPaths((current) =>
-                                        event.target.checked
-                                          ? [...new Set([...current, candidate.path])]
-                                          : current.filter((path) => path !== candidate.path),
+                          <div className="project-repo-import-options">
+                            <div className="project-repo-import-choice">
+                              <label className="project-repo-import-all">
+                                <input
+                                  type="checkbox"
+                                  checked={projectRepoImportAll}
+                                  onChange={(event) => {
+                                    const checked = event.target.checked;
+                                    setProjectRepoImportAll(checked);
+                                    if (checked || projectRepoSelectedPaths.length === 0) {
+                                      setProjectRepoSelectedPaths(
+                                        projectRepoCandidates.map((candidate) => candidate.path),
                                       );
-                                    }}
-                                  />
-                                  <span>{candidate.path}</span>
-                                  <em>{projectFileKindLabel(candidate.file_kind)}</em>
-                                </label>
-                              );
-                            })}
+                                    }
+                                  }}
+                                />
+                                <span>Import all relevant files from this repo</span>
+                              </label>
+                              <span className="project-repo-info">
+                                <button
+                                  type="button"
+                                  className="project-repo-info-button"
+                                  aria-label="Relevant file types"
+                                >
+                                  i
+                                </button>
+                                <span className="project-repo-info-popover" role="tooltip">
+                                  Relevant files are the files Paperbase can currently import from
+                                  GitHub: Python scripts and Jupyter notebooks (.py, .ipynb).
+                                </span>
+                              </span>
+                            </div>
+                            {projectRepoImportAll ? null : (
+                              <div className="project-repo-import-list">
+                                {projectRepoCandidates.map((candidate) => {
+                                  const selected = projectRepoSelectedPaths.includes(
+                                    candidate.path,
+                                  );
+                                  return (
+                                    <label
+                                      key={candidate.path}
+                                      className="project-repo-import-item"
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        checked={selected}
+                                        onChange={(event) => {
+                                          setProjectRepoSelectedPaths((current) =>
+                                            event.target.checked
+                                              ? [...new Set([...current, candidate.path])]
+                                              : current.filter((path) => path !== candidate.path),
+                                          );
+                                        }}
+                                      />
+                                      <span>{candidate.path}</span>
+                                      <em>{projectFileKindLabel(candidate.file_kind)}</em>
+                                    </label>
+                                  );
+                                })}
+                              </div>
+                            )}
                           </div>
                         ) : null}
                       </div>

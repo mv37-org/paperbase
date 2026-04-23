@@ -786,7 +786,64 @@ describe("App", () => {
     expect(apiMocks.loadGitHubRepositories).toHaveBeenCalledTimes(2);
   });
 
-  it("creates a project from an existing repo with branch and import selection", async () => {
+  it("defaults existing repo project creation to import all relevant files", async () => {
+    apiMocks.loadSession.mockResolvedValue(
+      authenticatedSession({ settings: { has_github_connection: true, github_login: "octocat" } }),
+    );
+    apiMocks.loadGitHubRepoMetadata.mockResolvedValue({
+      owner: "octocat",
+      name: "existing-repo",
+      html_url: "https://github.com/octocat/existing-repo",
+      default_branch: "main",
+      branches: [{ name: "main", commit_sha: "abc123", is_default: true }],
+    });
+    apiMocks.loadGitHubRepoImportCandidates.mockResolvedValue({
+      owner: "octocat",
+      name: "existing-repo",
+      base_branch: "main",
+      candidates: [
+        { path: "src/analysis.py", file_kind: "python", size: 18 },
+        { path: "notebooks/demo.ipynb", file_kind: "notebook", size: 128 },
+      ],
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByLabelText("Create project"));
+    fireEvent.change(screen.getByPlaceholderText("Project name"), {
+      target: { value: "Repo Import" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Repository" }));
+    await waitFor(() => {
+      expect(screen.getByRole("option", { name: /octocat\/existing-repo/ })).toBeTruthy();
+    });
+    fireEvent.click(screen.getByRole("option", { name: /octocat\/existing-repo/ }));
+
+    const importAllCheckbox = await screen.findByLabelText(
+      "Import all relevant files from this repo",
+    );
+    expect((importAllCheckbox as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByText(/Python scripts and Jupyter notebooks/)).toBeTruthy();
+    expect(screen.queryByText("notebooks/demo.ipynb")).toBeNull();
+
+    fireEvent.submit(document.querySelector("#project-modal form")!);
+
+    await waitFor(() => {
+      expect(apiMocks.createProject).toHaveBeenCalledWith("Repo Import", "", {
+        mode: "existing",
+        owner: "octocat",
+        name: "existing-repo",
+        base_branch: "main",
+        import_paths: ["src/analysis.py", "notebooks/demo.ipynb"],
+      });
+    });
+  });
+
+  it("creates a project from an existing repo with branch and custom import selection", async () => {
     apiMocks.loadSession.mockResolvedValue(
       authenticatedSession({ settings: { has_github_connection: true, github_login: "octocat" } }),
     );
@@ -830,18 +887,35 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("option", { name: /octocat\/existing-repo/ }));
 
     await waitFor(() => {
-      expect(screen.getByText("notebooks/demo.ipynb")).toBeTruthy();
+      expect(screen.getByLabelText("Import all relevant files from this repo")).toBeTruthy();
     });
 
     fireEvent.change(screen.getByLabelText("Base branch"), {
       target: { value: "dev" },
     });
+    await waitFor(() => {
+      expect(apiMocks.loadGitHubRepoImportCandidates).toHaveBeenLastCalledWith(
+        "octocat",
+        "existing-repo",
+        "dev",
+      );
+    });
+    fireEvent.click(screen.getByLabelText("Import all relevant files from this repo"));
+    await waitFor(() => {
+      expect(screen.getByText("notebooks/demo.ipynb")).toBeTruthy();
+    });
+    const analysisCheckbox = screen
+      .getByText("src/analysis.py")
+      .closest("label")
+      ?.querySelector("input");
+    expect(analysisCheckbox).toBeTruthy();
+    fireEvent.click(analysisCheckbox!);
     const notebookCheckbox = screen
       .getByText("notebooks/demo.ipynb")
       .closest("label")
       ?.querySelector("input");
     expect(notebookCheckbox).toBeTruthy();
-    fireEvent.click(notebookCheckbox!);
+    expect(notebookCheckbox!.checked).toBe(true);
     fireEvent.submit(document.querySelector("#project-modal form")!);
 
     await waitFor(() => {

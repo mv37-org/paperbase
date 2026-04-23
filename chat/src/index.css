@@ -3301,6 +3301,85 @@ textarea {
   line-height: 1.35;
 }
 
+.project-repo-import-options {
+  display: grid;
+  gap: 8px;
+}
+
+.project-repo-import-choice {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.project-repo-import-all {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.project-repo-import-all input {
+  flex: 0 0 auto;
+}
+
+.project-repo-import-all span {
+  min-width: 0;
+}
+
+.project-repo-info {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.project-repo-info-button {
+  width: 16px;
+  height: 16px;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid rgba(27, 22, 17, 0.18);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.82);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: default;
+}
+
+.project-repo-info-popover {
+  position: absolute;
+  z-index: 5;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  width: min(260px, calc(100vw - 48px));
+  padding: 9px 10px;
+  border: 1px solid rgba(27, 22, 17, 0.14);
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 16px 36px rgba(16, 24, 40, 0.16);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.35;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, 4px);
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease;
+}
+
+.project-repo-info:hover .project-repo-info-popover,
+.project-repo-info:focus-within .project-repo-info-popover {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
 .project-repo-import-list {
   max-height: 150px;
   overflow: auto;
@@ -3310,6 +3389,29 @@ textarea {
   border: 1px solid rgba(27, 22, 17, 0.1);
   border-radius: var(--radius);
   background: rgba(255, 253, 250, 0.7);
+  scrollbar-color: rgba(89, 105, 124, 0.36) transparent;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+}
+
+.project-repo-import-list::-webkit-scrollbar {
+  width: 8px;
+}
+
+.project-repo-import-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.project-repo-import-list::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: rgba(89, 105, 124, 0.34);
+  background-clip: content-box;
+}
+
+.project-repo-import-list::-webkit-scrollbar-thumb:hover {
+  background: rgba(89, 105, 124, 0.5);
+  background-clip: content-box;
 }
 
 .project-repo-import-item {
@@ -4265,6 +4367,7 @@ body.authenticated-theme-dark .project-repo-option small,
 body.authenticated-theme-dark .project-repo-menu-note,
 body.authenticated-theme-dark .project-github-required-note,
 body.authenticated-theme-dark .project-field > span,
+body.authenticated-theme-dark .project-repo-info-button,
 body.authenticated-theme-dark .python-conflict-summary span {
   color: var(--muted);
 }
@@ -4286,7 +4389,9 @@ body.authenticated-theme-dark .paper-drawer-body,
 body.authenticated-theme-dark .project-field,
 body.authenticated-theme-dark .project-github-heading,
 body.authenticated-theme-dark .project-repo-option,
+body.authenticated-theme-dark .project-repo-import-all,
 body.authenticated-theme-dark .project-repo-import-item,
+body.authenticated-theme-dark .project-repo-info-popover,
 body.authenticated-theme-dark .project-advanced-group h3,
 body.authenticated-theme-dark .python-conflict-summary strong,
 body.authenticated-theme-dark .chat-tab.active .chat-tab-trigger,
@@ -4406,9 +4511,11 @@ body.authenticated-theme-dark .settings-appearance-option,
 body.authenticated-theme-dark .paper-drawer-placeholder,
 body.authenticated-theme-dark .paper-drawer-error,
 body.authenticated-theme-dark .citation-card,
+body.authenticated-theme-dark .project-repo-info-button,
 body.authenticated-theme-dark .project-github-required,
 body.authenticated-theme-dark .project-repo-menu,
 body.authenticated-theme-dark .project-repo-import-list,
+body.authenticated-theme-dark .project-repo-info-popover,
 body.authenticated-theme-dark .modal-flash.warning,
 body.authenticated-theme-dark .python-conflict-file-tab {
   border-color: rgba(223, 232, 244, 0.12);
@@ -4422,12 +4529,31 @@ body.authenticated-theme-dark .project-repo-menu {
   scrollbar-color: rgba(188, 202, 222, 0.34) transparent;
 }
 
+body.authenticated-theme-dark .project-repo-info-popover {
+  background: #121a24;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.42);
+}
+
+body.authenticated-theme-dark .project-repo-import-list {
+  scrollbar-color: rgba(188, 202, 222, 0.34) transparent;
+}
+
 body.authenticated-theme-dark .project-repo-menu::-webkit-scrollbar-thumb {
   background: rgba(188, 202, 222, 0.3);
   background-clip: content-box;
 }
 
 body.authenticated-theme-dark .project-repo-menu::-webkit-scrollbar-thumb:hover {
+  background: rgba(188, 202, 222, 0.46);
+  background-clip: content-box;
+}
+
+body.authenticated-theme-dark .project-repo-import-list::-webkit-scrollbar-thumb {
+  background: rgba(188, 202, 222, 0.3);
+  background-clip: content-box;
+}
+
+body.authenticated-theme-dark .project-repo-import-list::-webkit-scrollbar-thumb:hover {
   background: rgba(188, 202, 222, 0.46);
   background-clip: content-box;
 }
