@@ -216,6 +216,15 @@ const APPEARANCE_OPTIONS: Array<{
 
 const AUTHENTICATED_DARK_THEME_CLASS = "authenticated-theme-dark";
 
+function SettingsSectionHeading({ title, caption }: { title: string; caption: string }) {
+  return (
+    <div className="settings-section-heading">
+      <h3 className="settings-section-title">{title}</h3>
+      <p className="settings-section-copy">{caption}</p>
+    </div>
+  );
+}
+
 const EXAMPLES = [
   {
     label: "Reliable multi-step agents",
@@ -4236,16 +4245,18 @@ export default function App() {
           >
             ×
           </button>
-          <div className="modal-heading">
-            <div className="modal-heading-copy">
-              <h2 id="auth-modal-title" className="modal-title">
-                {authCopy.title}
-              </h2>
-              <p id="auth-modal-caption" className="modal-caption">
-                {authCaption}
-              </p>
+          {authView === "settings" ? null : (
+            <div className="modal-heading">
+              <div className="modal-heading-copy">
+                <h2 id="auth-modal-title" className="modal-title">
+                  {authCopy.title}
+                </h2>
+                <p id="auth-modal-caption" className="modal-caption">
+                  {authCaption}
+                </p>
+              </div>
             </div>
-          </div>
+          )}
 
           {flash ? (
             <div
@@ -4453,6 +4464,10 @@ export default function App() {
                     id="settings-panel-inference"
                     aria-labelledby="settings-tab-inference"
                   >
+                    <SettingsSectionHeading
+                      title="Inference"
+                      caption="Manage Anthropic inference API key."
+                    />
                     {sessionSummary?.hasAnthropicApiKey ? (
                       <div className="settings-secret-row">
                         <div className="settings-secret-copy">
@@ -4538,6 +4553,10 @@ export default function App() {
                     id="settings-panel-sandbox"
                     aria-labelledby="settings-tab-sandbox"
                   >
+                    <SettingsSectionHeading
+                      title="Sandbox"
+                      caption="Manage Modal sandbox credentials."
+                    />
                     {sessionSettings.has_modal_credentials ? (
                       <div className="settings-secret-row">
                         <div className="settings-secret-copy">
@@ -4634,6 +4653,10 @@ export default function App() {
                     id="settings-panel-version-control"
                     aria-labelledby="settings-tab-version-control"
                   >
+                    <SettingsSectionHeading
+                      title="Version control"
+                      caption="Manage GitHub connection for repositories."
+                    />
                     {sessionSettings.has_github_connection ? (
                       <div className="settings-connected-card">
                         <div>
@@ -4696,6 +4719,10 @@ export default function App() {
                     id="settings-panel-appearance"
                     aria-labelledby="settings-tab-appearance"
                   >
+                    <SettingsSectionHeading
+                      title="Appearance"
+                      caption="Choose the theme for signed-in pages."
+                    />
                     <form
                       className="settings-form"
                       onSubmit={async (event) => {

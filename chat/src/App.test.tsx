@@ -1110,12 +1110,16 @@ describe("App", () => {
     expect(screen.getByRole("tab", { name: "Version control" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "Appearance" })).toBeTruthy();
     expect(screen.queryByRole("tab", { name: "Notifications" })).toBeNull();
+    expect(document.querySelector("#auth-modal-title")).toBeNull();
+    expect(document.querySelector(".settings-section-title")?.textContent).toBe("Inference");
     expect(screen.getAllByText("Manage Anthropic inference API key.")).toHaveLength(1);
 
     fireEvent.click(screen.getByRole("tab", { name: "Sandbox" }));
+    expect(document.querySelector(".settings-section-title")?.textContent).toBe("Sandbox");
     expect(screen.getAllByText("Manage Modal sandbox credentials.")).toHaveLength(1);
 
     fireEvent.click(screen.getByRole("tab", { name: "Appearance" }));
+    expect(document.querySelector(".settings-section-title")?.textContent).toBe("Appearance");
     expect(screen.getAllByText("Choose the theme for signed-in pages.")).toHaveLength(1);
     expect(screen.getByRole("radio", { name: /Light/i })).toBeTruthy();
     expect(screen.getByRole("radio", { name: /Dark/i })).toBeTruthy();

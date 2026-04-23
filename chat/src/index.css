@@ -2689,10 +2689,11 @@ textarea {
 }
 
 .settings-modal-panel {
-  width: min(329px, calc(100vw - 32px));
-  max-height: min(88vh, 760px);
-  overflow: auto;
-  padding: 18px 18px 20px;
+  width: min(860px, calc(100vw - 32px));
+  min-height: min(680px, calc(100vh - 48px));
+  max-height: min(92vh, 820px);
+  overflow: hidden;
+  padding: 22px 22px 24px;
 }
 
 .python-save-modal-panel {
@@ -2972,39 +2973,30 @@ textarea {
 
 .settings-panel {
   display: grid;
-  gap: 0;
-}
-
-.settings-modal-panel .modal-heading {
-  margin-bottom: 16px;
-  text-align: left;
-}
-
-.settings-modal-panel .modal-heading-copy {
-  min-width: 0;
-  gap: 2px;
-}
-
-.settings-modal-panel .modal-caption {
-  margin-top: 0;
+  grid-template-columns: 180px minmax(0, 1fr);
+  gap: 28px;
+  min-height: 0;
+  height: 100%;
 }
 
 .settings-tabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 18px;
+  display: grid;
+  align-content: start;
+  gap: 6px;
   padding: 0;
-  border-bottom: 1px solid rgba(27, 22, 17, 0.08);
+  border-right: 1px solid rgba(27, 22, 17, 0.08);
 }
 
 .settings-tab {
-  border: 0;
-  border-bottom: 2px solid transparent;
-  border-radius: 0;
+  width: 100%;
+  border: 1px solid transparent;
+  border-bottom: 1px solid transparent;
+  border-radius: 8px;
   background: transparent;
   color: var(--muted);
-  padding: 0 0 12px;
+  padding: 10px 12px;
   font-size: 13px;
+  text-align: left;
   cursor: pointer;
   transition:
     background-color 120ms ease,
@@ -3013,19 +3005,26 @@ textarea {
 }
 
 .settings-tab[aria-selected="true"] {
-  background: transparent;
-  border-color: rgba(27, 22, 17, 0.92);
+  background: rgba(27, 22, 17, 0.04);
+  border-color: rgba(27, 22, 17, 0.1);
+  color: var(--text);
+}
+
+.settings-tab:hover {
+  background: rgba(27, 22, 17, 0.03);
   color: var(--text);
 }
 
 .settings-tab:focus-visible {
   outline: 2px solid rgba(23, 111, 230, 0.2);
-  outline-offset: 3px;
+  outline-offset: 2px;
 }
 
 .settings-tab-panels {
   display: grid;
-  padding-top: 16px;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
 }
 
 .settings-section {
@@ -3036,6 +3035,25 @@ textarea {
   border-radius: 0;
   background: transparent;
   align-content: start;
+}
+
+.settings-section-heading {
+  display: grid;
+  gap: 4px;
+}
+
+.settings-section-title {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.15;
+  letter-spacing: -0.03em;
+}
+
+.settings-section-copy {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 .settings-form {
@@ -3827,8 +3845,17 @@ body.authenticated-theme-dark .settings-appearance-option.selected {
   background: rgba(79, 140, 255, 0.12);
 }
 
+body.authenticated-theme-dark .settings-tabs {
+  border-right-color: rgba(223, 232, 244, 0.12);
+}
+
 body.authenticated-theme-dark .settings-tab[aria-selected="true"] {
-  border-color: rgba(237, 243, 251, 0.92);
+  border-color: rgba(223, 232, 244, 0.14);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+body.authenticated-theme-dark .settings-tab:hover {
+  background: rgba(255, 255, 255, 0.05);
 }
 
 body.authenticated-theme-dark .settings-tab:focus-visible {
