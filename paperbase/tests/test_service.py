@@ -19,6 +19,7 @@ from paperbase.browser_code import (
 from paperbase.config import Settings, get_settings
 from paperbase.extractors import ExtractionOutput, FigureArtifact, RawArtifact, SectionArtifact, TableArtifact
 from paperbase.models import (
+    ChatCitation,
     CreateChatThreadRequest,
     CreateProjectRequest,
     MoveChatThreadProjectRequest,
@@ -34,7 +35,7 @@ from paperbase.models import (
     UpdateProjectRequest,
 )
 from paperbase.repository import MemoryPaperRepository
-from paperbase.service import PaperbaseService, get_service
+from paperbase.service import PaperbaseService, _sanitize_inline_citations, get_service
 from paperbase.storage import MemoryObjectStore
 
 
@@ -1237,6 +1238,42 @@ def test_invalid_saved_anthropic_key_is_cleared_and_gates_chat(browser_service):
     assert service.repository.get_anthropic_api_key_record(session.user.user_id) is None  # type: ignore[attr-defined]
     assert [event_name for event_name, _ in streamed] == ["api_key_required"]
     assert streamed[0][1]["state"] == "api_key_invalid"
+
+
+def test_sanitize_inline_citations_preserves_markdown_structure():
+    answer = """# Findings
+
+- Keep this citation [S1]
+- Remove this one [S9]
+
+```python
+if grounded:
+    print("still indented")
+```
+"""
+
+    sanitized = _sanitize_inline_citations(
+        answer,
+        [
+            ChatCitation(
+                source_id="S1",
+                source_kind="paperbase_paper",
+                title="Grounding Paper",
+                path="sections/findings.md",
+                excerpt="Grounded finding.",
+            )
+        ],
+    )
+
+    assert sanitized == """# Findings
+
+- Keep this citation [S1]
+- Remove this one 
+
+```python
+if grounded:
+    print("still indented")
+```"""
 
 
 def test_python_file_creation_requires_github_and_normalizes_names(browser_service):

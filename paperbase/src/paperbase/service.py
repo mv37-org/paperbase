@@ -658,9 +658,6 @@ def _sanitize_inline_citations(answer: str, citations: list[ChatCitation]) -> st
         return match.group(0) if source_id in allowed_source_ids else ""
 
     sanitized = _INLINE_SOURCE_ID_RE.sub(_replace, answer)
-    sanitized = re.sub(r"\s{2,}", " ", sanitized)
-    sanitized = re.sub(r" +([,.;:!?])", r"\1", sanitized)
-    sanitized = re.sub(r"\n{3,}", "\n\n", sanitized)
     return sanitized.strip()
 
 

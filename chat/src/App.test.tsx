@@ -1068,7 +1068,7 @@ describe("App", () => {
       expect(screen.getByText('Did paper search for "grounding"')).toBeTruthy();
     });
     await waitFor(() => {
-      expect(screen.getByText("Thinking")).toBeTruthy();
+      expect(screen.getByText("Thinking...")).toBeTruthy();
     });
     expect(screen.queryByText("Streaming")).toBeNull();
 

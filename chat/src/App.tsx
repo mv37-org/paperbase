@@ -423,6 +423,12 @@ function pickThinkingWord(previous?: string | null) {
   return next;
 }
 
+function formatThinkingLabel(word?: string | null) {
+  const trimmed = word?.trim();
+  const label = trimmed ? trimmed.replace(/\.+$/, "") : "Thinking";
+  return `${label}...`;
+}
+
 function apiKeyStateMessage(state: string) {
   if (state === "api_key_invalid") {
     return "Your saved Anthropic API key could not be decrypted. Add it again in Settings.";
@@ -3586,7 +3592,7 @@ export default function App() {
                                   className={`message-status-label${message.status === "streaming" ? " thinking-shimmer" : ""}`}
                                 >
                                   {message.status === "streaming"
-                                    ? (activeThreadStreamState?.thinkingWord ?? "Thinking")
+                                    ? formatThinkingLabel(activeThreadStreamState?.thinkingWord)
                                     : "Failed"}
                                 </span>
                               </div>
@@ -3689,7 +3695,7 @@ export default function App() {
                           {showThinkingPlaceholder ? (
                             <div className="tool-activity-row status-running thinking-only">
                               <span className="tool-activity-label thinking-shimmer">
-                                {activeThreadStreamState?.thinkingWord ?? "Thinking"}
+                                {formatThinkingLabel(activeThreadStreamState?.thinkingWord)}
                               </span>
                             </div>
                           ) : null}
