@@ -102,7 +102,7 @@ from .security import (
 from .summaries import build_paper_summaries
 from .storage import ObjectStore, build_object_store
 from . import sources
-from .errors import PermanentError
+from .errors import PermanentError, RetryableError
 from .utils import new_id, slugify, utcnow
 
 
@@ -2979,6 +2979,19 @@ class PaperbaseService:
                 "batches_failed": total_batches_failed,
             },
         )
+        # Surface any S2 batches that exhausted their internal retries to
+        # the worker-level retry policy (#32). Without this, an
+        # ``enrich_missing_metadata`` run where half the batches 429'd
+        # would return normally → ``process_next_job`` would mark the
+        # job ``completed`` → those papers stay un-enriched until the
+        # next manual trigger. Raising RetryableError AFTER persisting
+        # the successful batches requeues the job with exponential
+        # backoff while keeping the progress we already made.
+        if total_batches_failed > 0:
+            raise RetryableError(
+                f"Semantic Scholar enrichment left {total_batches_failed} "
+                f"batch(es) un-persisted after internal retries"
+            )
         return {
             "papers_scanned": total_scanned,
             "papers_updated": total_updated,

@@ -2683,6 +2683,98 @@ def test_retry_dead_job_returns_none_for_non_dead_job():
     assert service.retry_dead_job("job_nonexistent") is None
 
 
+def test_mark_job_completed_clears_stale_retry_metadata(monkeypatch):
+    """Regression test for PR #36 review: a job that fails once, is
+    requeued, and then succeeds must not keep the old ``error`` /
+    ``next_run_at`` in its completed ``JobResponse``. Otherwise ``/jobs``,
+    ``service.get_job``, and the worker's ``last_error`` report a stale
+    transient failure long after the retry succeeded."""
+    from paperbase.errors import RetryableError
+
+    service = _retry_service()
+    service.repository.create_job("index_paper", {"arxiv_id": "test/8"})
+
+    # First attempt: fails transiently and gets requeued with next_run_at set.
+    def fail_once(arxiv_id, force=False):
+        raise RetryableError("upstream 503")
+
+    monkeypatch.setattr(service, "index_arxiv_paper", fail_once)
+    failed = service.process_next_job()
+    assert failed is not None
+    assert failed.status == "pending"
+    assert failed.error == "upstream 503"
+    assert failed.next_run_at is not None
+
+    # Move next_run_at into the past so the retry claim fires immediately.
+    from datetime import UTC, datetime, timedelta
+
+    service.repository.jobs[failed.job_id] = service.repository.jobs[failed.job_id].model_copy(
+        update={"next_run_at": datetime.now(UTC) - timedelta(seconds=1)}
+    )
+
+    # Second attempt succeeds.
+    monkeypatch.setattr(service, "index_arxiv_paper", lambda arxiv_id, force=False: None)
+    succeeded = service.process_next_job()
+    assert succeeded is not None
+    assert succeeded.status == "completed"
+    assert succeeded.error is None, (
+        f"completed job must not surface a stale transient error; got {succeeded.error!r}"
+    )
+    assert succeeded.next_run_at is None, (
+        "completed job must not surface a stale next_run_at from the prior failure"
+    )
+
+
+def test_enrich_missing_metadata_requests_retry_when_s2_batches_fail(monkeypatch):
+    """Regression test for PR #36 review (P2): when Semantic Scholar
+    exhausts its internal retries on some batches, the service must raise
+    ``RetryableError`` AFTER persisting the successful batches so the
+    worker-level retry policy re-queues the job. Without this, the job
+    would complete normally and the missing papers would stay
+    un-enriched until the next manual trigger."""
+    from datetime import UTC, datetime, timedelta
+    from paperbase.errors import RetryableError
+
+    service = _retry_service()
+
+    # Seed one indexed paper that needs enrichment, aged past the min_age
+    # floor so the frontier picks it up.
+    meta = PaperMetadata(
+        arxiv_id="2401.99999",
+        title="needs-enrichment",
+        authors="A",
+        abstract="x",
+        categories="cs.AI",
+        primary_category="cs.AI",
+        published="2024-01-01",
+        updated="2024-01-01",
+        pdf_url="",
+        html_url="",
+        citation_count=0,
+        semantic_scholar_id=None,
+        index_status="indexed",
+        indexed_at=datetime.now(UTC) - timedelta(hours=2),
+    )
+    service.repository.upsert_paper(meta, search_document="x", embedding=None)
+
+    def fake_enrich(papers, *, batch_size=20, **_kwargs):
+        # Pretend S2 returned empty + recorded one failed batch (what the
+        # retry-aware client emits when the final attempt 429'd).
+        from paperbase.sources import EnrichmentOutcome
+
+        return EnrichmentOutcome(
+            attempted=len(papers),
+            enriched=0,
+            batches_succeeded=0,
+            batches_failed=1,
+        )
+
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", fake_enrich)
+
+    with pytest.raises(RetryableError):
+        service.enrich_missing_metadata(limit=10, min_age_seconds=3600)
+
+
 def test_default_max_attempts_per_job_type():
     """Per-job-type defaults from the issue spec: index_paper=3,
     sync_latest=5, etc. Locks the table in so a future change has to be

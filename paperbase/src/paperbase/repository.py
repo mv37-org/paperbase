@@ -3352,6 +3352,12 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 row.status = "completed"
                 row.finished_at = utcnow()
                 row.updated_at = utcnow()
+                # Clear retry metadata from prior failed attempts so the
+                # completed JobResponse doesn't surface a stale transient
+                # error message or a dangling next_run_at. The retry loop
+                # sets these on failure; success must wipe them.
+                row.error = None
+                row.next_run_at = None
 
     def mark_job_failed(
         self,
@@ -4841,8 +4847,17 @@ class MemoryPaperRepository(PaperRepository):
     def mark_job_completed(self, job_id: str) -> None:
         job = self.jobs.get(job_id)
         if job:
+            # Clear retry metadata from prior failed attempts so the
+            # completed JobResponse doesn't surface a stale transient
+            # error message or a dangling next_run_at.
             self.jobs[job_id] = job.model_copy(
-                update={"status": "completed", "updated_at": utcnow(), "finished_at": utcnow()}
+                update={
+                    "status": "completed",
+                    "updated_at": utcnow(),
+                    "finished_at": utcnow(),
+                    "error": None,
+                    "next_run_at": None,
+                }
             )
 
     def mark_job_failed(
