@@ -1428,14 +1428,23 @@ export default function App() {
 
   const refreshProjects = useCallback(async () => {
     const payload = await loadProjects();
-    setProjects(payload.projects);
+    const loadedProjects = payload.projects;
+    projectsRef.current = loadedProjects;
+    const fallbackProjectId = loadedProjects[0]?.project_id ?? null;
+    const immediateProjectId =
+      selectedProjectIdRef.current &&
+      loadedProjects.some((project) => project.project_id === selectedProjectIdRef.current)
+        ? selectedProjectIdRef.current
+        : fallbackProjectId;
+    selectedProjectIdRef.current = immediateProjectId;
+    setProjects(loadedProjects);
     setSelectedProjectId((current) => {
-      if (current && payload.projects.some((project) => project.project_id === current)) {
+      if (current && loadedProjects.some((project) => project.project_id === current)) {
         return current;
       }
-      return payload.projects[0]?.project_id ?? null;
+      return fallbackProjectId;
     });
-    return payload.projects;
+    return loadedProjects;
   }, []);
 
   const updateProjectItemCache = useCallback(
