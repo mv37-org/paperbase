@@ -48,6 +48,10 @@ class SearchRequest(BaseModel):
     # CPU vs ~150ms without), but recovers body-content matches that paper-level
     # search misses. Off by default to keep type-as-you-search snappy.
     rerank: bool = False
+    # Persist a row in search_logs for this query (see issue #23). Default on so
+    # we can build a real-user-query benchmark; disable for healthchecks,
+    # internal grounding calls, or anywhere the query is synthetic.
+    log_query: bool = True
 
 
 class SearchPaperResult(PaperResponse):
@@ -61,6 +65,14 @@ class SearchResponse(BaseModel):
     query: str
     papers: list[SearchPaperResult]
     expires_at: datetime
+    # Stable identifier for this search event; returned so a follow-up call to
+    # POST /v1/search/{query_id}/click can attribute the click back to this
+    # exact query. Null when log_query=False was passed on the request.
+    query_id: str | None = None
+
+
+class SearchClickRequest(BaseModel):
+    paper_id: str = Field(..., min_length=1)
 
 
 class SearchSectionRequest(BaseModel):
@@ -294,6 +306,7 @@ class ChatMessageResponse(BaseModel):
     citations: list[ChatCitation] = Field(default_factory=list)
     created_at: datetime
     status: str = "completed"
+    kind: str = "default"
 
 
 class ChatThreadSummary(BaseModel):

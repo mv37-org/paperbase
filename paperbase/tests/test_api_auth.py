@@ -263,6 +263,10 @@ class StubApiService:
         self.calls.append(("get_job", job_id))
         return _job("index_paper", payload={"job_id": job_id})
 
+    def record_search_click(self, query_id: str, paper_id: str) -> bool:
+        self.calls.append(("record_search_click", (query_id, paper_id)))
+        return query_id == "qry_known"
+
     def get_current_browser_user(self, raw_token: str | None):
         self.calls.append(("get_current_browser_user", raw_token))
         if raw_token == "browser-session-token":
@@ -708,6 +712,38 @@ def test_bearer_routes_require_valid_authentication(api_client):
     assert invalid.status_code == 403
 
 
+def test_search_click_endpoint_delegates_to_service_and_404s_on_unknown(api_client):
+    """POST /v1/search/{query_id}/click returns 204 on success, 404 when
+    the service reports the query_id is unknown."""
+    client, service, settings = api_client
+    headers = {"Authorization": f"Bearer {settings.api_key}"}
+
+    ok = client.post(
+        "/v1/search/qry_known/click",
+        headers=headers,
+        json={"paper_id": "arxiv:2401.12345"},
+    )
+    unknown = client.post(
+        "/v1/search/qry_unknown/click",
+        headers=headers,
+        json={"paper_id": "arxiv:2401.12345"},
+    )
+
+    assert ok.status_code == 204
+    assert unknown.status_code == 404
+    assert ("record_search_click", ("qry_known", "arxiv:2401.12345")) in service.calls
+
+
+def test_search_click_endpoint_requires_bearer_auth(api_client):
+    """The click endpoint is authenticated just like /v1/search itself."""
+    client, _, _ = api_client
+    response = client.post(
+        "/v1/search/qry_known/click",
+        json={"paper_id": "arxiv:2401.12345"},
+    )
+    assert response.status_code == 401
+
+
 def test_bearer_routes_delegate_to_service(api_client):
     client, service, settings = api_client
     headers = {"Authorization": f"Bearer {settings.api_key}"}
@@ -936,6 +972,24 @@ def test_browser_project_and_chat_write_routes_delegate_with_valid_csrf(api_clie
     assert ("sync_project_repo", ("user_1", "proj_2", "Save analysis.py")) in service.calls
     assert ("delete_chat_thread", ("user_1", "thread_1")) in service.calls
     assert ("delete_project", ("user_1", "proj_2")) in service.calls
+
+
+def test_browser_write_routes_allow_same_origin_api_host_with_valid_csrf(api_client):
+    client, service, settings = api_client
+    client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
+    csrf = csrf_token_for_session("browser-session-token", settings)
+
+    deleted_chat = client.delete(
+        "/v1/browser/chats/thread_1",
+        headers={
+          "Origin": "http://testserver",
+          "X-Paperbase-CSRF": csrf,
+        },
+    )
+
+    assert deleted_chat.status_code == 200
+    assert deleted_chat.json() == {"status": "deleted"}
+    assert ("delete_chat_thread", ("user_1", "thread_1")) in service.calls
 
 
 def test_browser_project_item_routes_delegate_to_service(api_client):
