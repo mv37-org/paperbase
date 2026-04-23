@@ -57,7 +57,7 @@ spec:
               value: "100"
             # Embeddings are required for indexing, same config as the API.
             - name: PAPERBASE_EMBEDDING_MODEL
-              value: allenai/specter2_base
+              value: BAAI/bge-base-en-v1.5
             - name: PAPERBASE_EMBEDDING_DIM
               value: "768"
             # Reranker is not loaded on the worker — only search() uses it.
@@ -75,9 +75,9 @@ spec:
               value: us-central1
             - name: PAPERBASE_FEATURED_TIER_CONCURRENCY
               value: "16"
-            # Matches the API — SPECTER2 + docling live in memory, and the
-            # summarize_top_cited / reindex_missing_embeddings paths are the
-            # worker's heaviest users.
+            # Matches the API — BGE-base + docling live in memory, and the
+            # summarize_top_cited / reindex_embeddings paths are the worker's
+            # heaviest users.
           resources:
             limits:
               cpu: "2"

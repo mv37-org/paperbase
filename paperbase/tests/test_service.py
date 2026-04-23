@@ -606,6 +606,60 @@ def test_reindex_processes_all_pages_without_skipping(service: PaperbaseService)
         assert service.repository.list_chunks_missing_embedding(paper_id) == []
 
 
+def test_reindex_rewrites_existing_embeddings_when_requested(service: PaperbaseService):
+    paper_id = _seed_indexed_paper(
+        service.repository,
+        "2402.99999",
+        with_paper_embedding=True,
+        chunks_with_embedding=2,
+        chunks_without_embedding=0,
+    )
+    original_paper_embedding = list(service.repository.paper_embeddings[paper_id])
+    original_chunk_embeddings = [
+        list(chunk["embedding"])
+        for chunk in service.repository.list_chunks_missing_embedding(paper_id, include_existing=True)
+    ]
+
+    service.embeddings = _StubEmbeddings()
+    result = service.reindex_embeddings(limit=10, include_chunks=True, rewrite_existing=True)
+
+    assert result == {"papers_updated": 1, "chunks_updated": 2}
+    assert service.repository.paper_embeddings[paper_id] != original_paper_embedding
+    updated_chunk_embeddings = [
+        list(chunk["embedding"])
+        for chunk in service.repository.list_chunks_missing_embedding(paper_id, include_existing=True)
+    ]
+    assert updated_chunk_embeddings != original_chunk_embeddings
+
+
+def test_reindex_batches_large_chunk_rewrites(service: PaperbaseService):
+    _seed_indexed_paper(
+        service.repository,
+        "2402.99998",
+        with_paper_embedding=True,
+        chunks_with_embedding=260,
+        chunks_without_embedding=0,
+    )
+    embeddings = _StubEmbeddings()
+    service.embeddings = embeddings
+
+    result = service.reindex_embeddings(limit=10, include_chunks=True, rewrite_existing=True)
+
+    assert result["chunks_updated"] == 260
+    assert [len(batch) for batch in embeddings.chunk_calls] == [128, 128, 4]
+
+
+def test_enqueue_reindex_embeddings_job_defaults_to_full_rewrite(service: PaperbaseService):
+    job = service.enqueue_reindex_embeddings_job(limit=11, include_chunks=False)
+
+    assert job.job_type == "reindex_embeddings"
+    assert job.payload == {
+        "limit": 11,
+        "include_chunks": False,
+        "rewrite_existing": True,
+    }
+
+
 def test_suggest_and_stats_endpoints(service: PaperbaseService):
     _seed_indexed_paper(service.repository, "2403.00001", with_paper_embedding=True, chunks_with_embedding=2, chunks_without_embedding=0)
     response = service.suggest_papers("paper 2403", limit=5)

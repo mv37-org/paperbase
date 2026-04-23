@@ -241,6 +241,25 @@ def test_main_dispatches_profile_with_current_settings(monkeypatch):
     assert captured == {"settings": settings, "update_baseline": True}
 
 
+def test_main_dispatches_reindex_embeddings(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_reindex_embeddings(**kwargs):
+        captured.update(kwargs)
+        return 29
+
+    monkeypatch.setattr("paperbase.dev_cli.reindex_embeddings", fake_reindex_embeddings)
+
+    exit_code = main(["reindex-embeddings", "--limit", "42", "--skip-chunks", "--missing-only"])
+
+    assert exit_code == 29
+    assert captured == {
+        "limit": 42,
+        "include_chunks": False,
+        "rewrite_existing": False,
+    }
+
+
 def test_main_dispatches_doctor_mode(monkeypatch):
     captured: list[DoctorMode] = []
     monkeypatch.setattr("paperbase.dev_cli.doctor", lambda *, mode: captured.append(mode) or 0)

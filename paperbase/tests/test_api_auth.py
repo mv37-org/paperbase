@@ -92,11 +92,15 @@ class StubApiService:
         self.calls.append(("summarize_top_cited", limit))
         return _job("summarize_top_cited", payload={"limit": limit})
 
-    def enqueue_reindex_embeddings_job(self, *, limit: int, include_chunks: bool):
-        self.calls.append(("reindex_missing_embeddings", (limit, include_chunks)))
+    def enqueue_reindex_embeddings_job(self, *, limit: int, include_chunks: bool, rewrite_existing: bool):
+        self.calls.append(("reindex_embeddings", (limit, include_chunks, rewrite_existing)))
         return _job(
-            "reindex_missing_embeddings",
-            payload={"limit": limit, "include_chunks": include_chunks},
+            "reindex_embeddings" if rewrite_existing else "reindex_missing_embeddings",
+            payload={
+                "limit": limit,
+                "include_chunks": include_chunks,
+                "rewrite_existing": rewrite_existing,
+            },
         )
 
     def expand_query(self, query: str, *, variants: int = 4) -> list[str]:
@@ -398,7 +402,7 @@ def test_bearer_routes_delegate_to_service(api_client):
     sync = client.post("/v1/index/sync/latest", headers=headers)
     summarize = client.post("/v1/index/summarize-top-cited?limit=42", headers=headers)
     reindex = client.post(
-        "/v1/index/reindex-embeddings?limit=11&include_chunks=false",
+        "/v1/index/reindex-embeddings?limit=11&include_chunks=false&rewrite_existing=false",
         headers=headers,
     )
     expanded = client.post("/v1/query/expand?query=grounding&variants=2", headers=headers)
@@ -413,7 +417,11 @@ def test_bearer_routes_delegate_to_service(api_client):
 
     assert sync.status_code == 200
     assert summarize.json()["payload"]["limit"] == 42
-    assert reindex.json()["payload"] == {"limit": 11, "include_chunks": False}
+    assert reindex.json()["payload"] == {
+        "limit": 11,
+        "include_chunks": False,
+        "rewrite_existing": False,
+    }
     assert expanded.json() == {"queries": ["grounding", "grounding variant"]}
     assert suggested.json()["fallback"] is False
     assert suggested.json()["suggestions"][0]["matched_field"] == "title"
@@ -425,6 +433,7 @@ def test_bearer_routes_delegate_to_service(api_client):
     assert references.json()[0]["reference_type"] == "citation"
     assert job.json()["payload"]["job_id"] == "job_123"
     assert ("sync_latest", None) in service.calls
+    assert ("reindex_embeddings", (11, False, False)) in service.calls
     assert ("get_job", "job_123") in service.calls
 
 
