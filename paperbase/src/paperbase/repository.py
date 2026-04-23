@@ -168,6 +168,30 @@ class JobORM(Base):
     finished_at: Mapped[Any | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class SearchLogORM(Base):
+    """Append-only log of /v1/search calls — groundwork for the real-user-query
+    benchmark in #21 and for diagnosing ranking regressions at scale.
+
+    Stores query text, the top paper IDs returned, whether the rerank path was
+    used, request latency, and (updated later, when the UI sends it) which
+    paper the user actually clicked on. Never stores tokens or other auth
+    material — see service.search for the logging discipline.
+    """
+
+    __tablename__ = "search_logs"
+
+    query_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    query_text: Mapped[str] = mapped_column(Text)
+    request_rerank: Mapped[bool] = mapped_column(default=False)
+    top_paper_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    result_set_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    clicked_paper_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    clicked_at: Mapped[Any | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
 _SUGGEST_HIGHLIGHT_RADIUS = 80
 _SUGGEST_HIGHLIGHT_FALLBACK = 160
 
@@ -838,6 +862,32 @@ class PaperRepository(ABC):
 
     @abstractmethod
     def cleanup_expired_results(self) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def record_search_log(
+        self,
+        *,
+        query_id: str,
+        user_id: str | None,
+        query_text: str,
+        request_rerank: bool,
+        top_paper_ids: list[str],
+        result_set_id: str | None,
+        latency_ms: int | None,
+    ) -> None:
+        """Persist a row to search_logs. Must not raise on the hot path —
+        implementations should swallow storage errors and log them; a search
+        response must not fail because logging failed."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def record_search_click(self, query_id: str, paper_id: str) -> bool:
+        """Attach a clicked_paper_id + clicked_at to an existing search_logs
+        row. Returns False when the query_id is unknown OR when the paper_id
+        was not part of the logged top_paper_ids, so the API layer can
+        return 404. The membership check exists to keep the click-label
+        dataset trustworthy for retrieval evaluation."""
         raise NotImplementedError
 
 
@@ -3180,6 +3230,42 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 session.execute(delete(ResultItemORM).where(ResultItemORM.result_set_id.in_(expired_ids)))
                 session.execute(delete(ResultSetORM).where(ResultSetORM.result_set_id.in_(expired_ids)))
 
+    def record_search_log(
+        self,
+        *,
+        query_id: str,
+        user_id: str | None,
+        query_text: str,
+        request_rerank: bool,
+        top_paper_ids: list[str],
+        result_set_id: str | None,
+        latency_ms: int | None,
+    ) -> None:
+        with self._session() as session:
+            session.add(
+                SearchLogORM(
+                    query_id=query_id,
+                    user_id=user_id,
+                    query_text=query_text,
+                    request_rerank=bool(request_rerank),
+                    top_paper_ids=list(top_paper_ids),
+                    result_set_id=result_set_id,
+                    latency_ms=latency_ms,
+                    created_at=utcnow(),
+                )
+            )
+
+    def record_search_click(self, query_id: str, paper_id: str) -> bool:
+        with self._session() as session:
+            row = session.get(SearchLogORM, query_id)
+            if row is None:
+                return False
+            if paper_id not in (row.top_paper_ids or []):
+                return False
+            row.clicked_paper_id = paper_id
+            row.clicked_at = utcnow()
+            return True
+
 
 class MemoryPaperRepository(PaperRepository):
     def __init__(self) -> None:
@@ -3212,6 +3298,7 @@ class MemoryPaperRepository(PaperRepository):
         self.python_files: dict[str, PythonFileResponse] = {}
         self.python_file_users: dict[str, str] = {}
         self.project_repo_syncs: dict[str, ProjectRepoSyncResponse] = {}
+        self.search_logs: dict[str, dict[str, Any]] = {}
 
     def init(self) -> None:
         return None
@@ -4551,6 +4638,40 @@ class MemoryPaperRepository(PaperRepository):
         now = utcnow()
         for result_set_id in [key for key, value in self.result_sets.items() if value.expires_at < now]:
             del self.result_sets[result_set_id]
+
+    def record_search_log(
+        self,
+        *,
+        query_id: str,
+        user_id: str | None,
+        query_text: str,
+        request_rerank: bool,
+        top_paper_ids: list[str],
+        result_set_id: str | None,
+        latency_ms: int | None,
+    ) -> None:
+        self.search_logs[query_id] = {
+            "query_id": query_id,
+            "user_id": user_id,
+            "query_text": query_text,
+            "request_rerank": bool(request_rerank),
+            "top_paper_ids": list(top_paper_ids),
+            "result_set_id": result_set_id,
+            "latency_ms": latency_ms,
+            "clicked_paper_id": None,
+            "clicked_at": None,
+            "created_at": utcnow(),
+        }
+
+    def record_search_click(self, query_id: str, paper_id: str) -> bool:
+        row = self.search_logs.get(query_id)
+        if row is None:
+            return False
+        if paper_id not in (row.get("top_paper_ids") or []):
+            return False
+        row["clicked_paper_id"] = paper_id
+        row["clicked_at"] = utcnow()
+        return True
 
 
 def build_repository(settings: Settings) -> PaperRepository:

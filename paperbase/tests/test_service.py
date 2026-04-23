@@ -1801,7 +1801,7 @@ def test_stream_chat_compacts_mid_turn_after_tool_results(monkeypatch, browser_s
     )
     assert session.user is not None
 
-    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers: papers)
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
     monkeypatch.setattr(
         "paperbase.service.index_paper_artifacts",
         lambda paper: _rich_extraction(text="## Methods\n\nMethods section explains grounding and citations."),
@@ -2701,3 +2701,185 @@ def test_enrichment_stats_counts_papers_with_s2_id_but_zero_citations_as_enriche
     # Both the cited paper AND the newly-enriched zero-citation paper count.
     # Only the paper with no S2 id and no citations is missing.
     assert stats["enriched"] == 2
+
+
+def _make_service_with_one_paper() -> tuple[PaperbaseService, str]:
+    service = PaperbaseService(
+        settings=Settings(storage_backend="memory", database_url="memory://", api_key="t"),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+    )
+    service.init()
+    meta = PaperMetadata(
+        arxiv_id="2401.99999",
+        title="Logging Test Paper",
+        authors="Z",
+        abstract="An abstract mentioning attention.",
+        categories="cs.AI",
+        primary_category="cs.AI",
+        published="2024-01-01",
+        updated="2024-01-01",
+        pdf_url="p",
+        html_url="h",
+        citation_count=5,
+        index_status="indexed",
+    )
+    paper = service.repository.upsert_paper(meta, search_document="attention", embedding=None)
+    return service, paper.paper_id
+
+
+def test_search_records_query_log_and_returns_query_id_by_default():
+    """A default SearchRequest (log_query omitted) persists a row in
+    search_logs and returns the row's query_id so the client can follow
+    up with a click event."""
+    service, paper_id = _make_service_with_one_paper()
+
+    response = service.search(SearchRequest(query="attention", limit=5, include_live_sources=False))
+
+    assert response.query_id is not None
+    assert response.query_id.startswith("qry_")
+    log = service.repository.search_logs[response.query_id]
+    assert log["query_text"] == "attention"
+    assert log["request_rerank"] is False
+    assert log["top_paper_ids"] == [paper_id]
+    assert log["result_set_id"] == response.result_set_id
+    assert log["latency_ms"] is not None and log["latency_ms"] >= 0
+    assert log["clicked_paper_id"] is None
+    assert log["user_id"] is None
+
+
+def test_search_skips_logging_when_log_query_false():
+    """log_query=False is the opt-out path. No row is written and the
+    response has query_id=None so clients know click tracking is off."""
+    service, _ = _make_service_with_one_paper()
+
+    response = service.search(
+        SearchRequest(query="attention", limit=5, include_live_sources=False, log_query=False)
+    )
+
+    assert response.query_id is None
+    assert service.repository.search_logs == {}
+
+
+def test_search_attaches_user_id_when_service_caller_provides_one():
+    """Callers that know the authenticated user can pass user_id so
+    downstream analysis can group queries by user without the search layer
+    needing to parse session cookies."""
+    service, _ = _make_service_with_one_paper()
+
+    response = service.search(
+        SearchRequest(query="attention", limit=5, include_live_sources=False),
+        user_id="usr_abc123",
+    )
+
+    assert response.query_id is not None
+    assert service.repository.search_logs[response.query_id]["user_id"] == "usr_abc123"
+
+
+def test_search_logging_failure_does_not_break_response(monkeypatch):
+    """A storage-side failure in record_search_log must not fail the
+    search — ranking quality matters more than observability in the hot
+    path. query_id is nulled so the client knows click tracking is
+    unavailable."""
+    service, paper_id = _make_service_with_one_paper()
+
+    def boom(**_kwargs):
+        raise RuntimeError("db went away")
+
+    monkeypatch.setattr(service.repository, "record_search_log", boom)
+
+    response = service.search(SearchRequest(query="attention", limit=5, include_live_sources=False))
+
+    assert [p.paper_id for p in response.papers] == [paper_id]
+    assert response.query_id is None
+
+
+def test_record_search_click_updates_log_and_404s_on_unknown_query_id():
+    """The click endpoint is idempotent on the last click. Unknown query_id
+    returns False so the API layer can translate to 404."""
+    service, paper_id = _make_service_with_one_paper()
+    response = service.search(SearchRequest(query="attention", limit=5, include_live_sources=False))
+    assert response.query_id is not None
+
+    assert service.record_search_click(response.query_id, paper_id) is True
+    log = service.repository.search_logs[response.query_id]
+    assert log["clicked_paper_id"] == paper_id
+    assert log["clicked_at"] is not None
+
+    assert service.record_search_click("qry_nonexistent", paper_id) is False
+
+
+def test_chat_search_tool_does_not_write_search_log_row():
+    """The paperbase_search chat tool runs LLM-generated reformulations, not
+    real user queries, so its searches must never land in search_logs — they
+    would pollute the #21 real-user-query benchmark. The tool path forces
+    log_query=False so the response carries query_id=None and no row is
+    persisted."""
+    from paperbase.service import ChatCitationRegistry
+
+    service, paper_id = _make_service_with_one_paper()
+    registry = ChatCitationRegistry()
+    fake_user = type("U", (), {"user_id": "u1"})()
+
+    result = service._execute_chat_tool(
+        tool_name="paperbase_search",
+        tool_input={"query": "attention"},
+        user=fake_user,
+        citation_registry=registry,
+    )
+
+    assert service.repository.search_logs == {}
+    # The tool result dict is the view the model sees — no query_id surfaces
+    # because click attribution is meaningless for a synthetic reformulation.
+    assert "query_id" not in result
+    assert any(p["paper_id"] == paper_id for p in result.get("papers", []))
+
+
+def test_record_search_click_rejects_paper_outside_logged_result_set():
+    """The click endpoint only accepts clicks for papers that were actually in
+    the logged top_paper_ids. A buggy or malicious caller that sends an
+    arbitrary paper_id must not be able to poison the click-label dataset —
+    the return is False so the API layer translates to 404."""
+    service, returned_paper_id = _make_service_with_one_paper()
+
+    response = service.search(SearchRequest(query="attention", limit=5, include_live_sources=False))
+    assert response.query_id is not None
+    assert [p.paper_id for p in response.papers] == [returned_paper_id]
+
+    # Attaching a paper that was never in the logged top_paper_ids must be rejected.
+    outsider_paper_id = "arxiv:9999.00000"
+    assert service.record_search_click(response.query_id, outsider_paper_id) is False
+    log = service.repository.search_logs[response.query_id]
+    assert log["clicked_paper_id"] is None
+    assert log["clicked_at"] is None
+
+    # And the legitimate click for a paper that was returned still works.
+    assert service.record_search_click(response.query_id, returned_paper_id) is True
+    assert service.repository.search_logs[response.query_id]["clicked_paper_id"] == returned_paper_id
+
+
+def test_search_log_does_not_persist_auth_tokens_or_secrets():
+    """Belt-and-braces: even if a caller somehow passes a bearer token or
+    API key as the query text, the SearchRequest schema has no field for
+    auth material, so nothing but `query` lands in the log. Lock the
+    persisted row's keys in place so a future migration can't silently
+    add a token-bearing column."""
+    service, _ = _make_service_with_one_paper()
+    response = service.search(SearchRequest(query="attention", limit=5, include_live_sources=False))
+    assert response.query_id is not None
+
+    persisted = service.repository.search_logs[response.query_id]
+    assert set(persisted.keys()) == {
+        "query_id",
+        "user_id",
+        "query_text",
+        "request_rerank",
+        "top_paper_ids",
+        "result_set_id",
+        "latency_ms",
+        "clicked_paper_id",
+        "clicked_at",
+        "created_at",
+    }
+    for forbidden in ("api_key", "token", "authorization", "bearer", "secret"):
+        assert forbidden not in persisted, f"{forbidden!r} must never appear in search_logs"

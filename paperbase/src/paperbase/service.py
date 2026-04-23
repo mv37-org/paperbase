@@ -1978,6 +1978,8 @@ class PaperbaseService:
     ) -> dict[str, Any]:
         if tool_name == "paperbase_search":
             query = str(tool_input.get("query") or "").strip()
+            # Chat-tool searches are synthetic LLM reformulations, not real user
+            # queries, so they must never pollute the search_logs benchmark dataset.
             request = SearchRequest(
                 query=query,
                 limit=_tool_int(tool_input.get("limit"), default=8, maximum=20),
@@ -1985,6 +1987,7 @@ class PaperbaseService:
                 year=(str(tool_input.get("year") or "").strip() or None),
                 include_live_sources=_tool_bool(tool_input.get("include_live_sources"), default=False),
                 rerank=_tool_bool(tool_input.get("rerank"), default=False),
+                log_query=False,
             )
             response = self.search(request)
             papers = []
@@ -3348,7 +3351,9 @@ class PaperbaseService:
         )
         return stored
 
-    def search(self, request: SearchRequest) -> SearchResponse:
+    def search(self, request: SearchRequest, *, user_id: str | None = None) -> SearchResponse:
+        import time as _time
+        _search_started_at = _time.monotonic()
         k = self.settings.rrf_k
         pool_size = max(request.limit * 4, 50)
         query_embedding = self.embeddings.encode(request.query)
@@ -3469,12 +3474,43 @@ class PaperbaseService:
             papers=ordered,
             ttl_days=self.settings.result_ttl_days,
         )
+
+        query_id: str | None = None
+        if request.log_query:
+            query_id = new_id("qry")
+            latency_ms = int((_time.monotonic() - _search_started_at) * 1000)
+            try:
+                self.repository.record_search_log(
+                    query_id=query_id,
+                    user_id=user_id,
+                    query_text=request.query,
+                    request_rerank=bool(request.rerank),
+                    top_paper_ids=[p.paper_id for p in ordered],
+                    result_set_id=result_set.result_set_id,
+                    latency_ms=latency_ms,
+                )
+            except Exception as exc:
+                # Never fail the search on a logging failure — ranking quality
+                # matters more than observability in the hot path. Warn so the
+                # operator notices a DB-side regression.
+                logger.warning(
+                    "search_logs write failed",
+                    extra={"event": "search_log.write_failed", "error": str(exc)},
+                )
+                query_id = None
+
         return SearchResponse(
             result_set_id=result_set.result_set_id,
             query=request.query,
             papers=ordered,
             expires_at=result_set.expires_at,
+            query_id=query_id,
         )
+
+    def record_search_click(self, query_id: str, paper_id: str) -> bool:
+        """Attach a clicked_paper_id to a previously-logged search event.
+        Returns False when the query_id is unknown (caller translates to 404)."""
+        return self.repository.record_search_click(query_id, paper_id)
 
     def get_results(self, result_set_id: str) -> ResultSetResponse:
         result_set = self.repository.get_result_set(result_set_id)
