@@ -3,14 +3,24 @@ from __future__ import annotations
 import io
 import tarfile
 
+from PIL import Image
+
 from paperbase.extractors import (
+    PREVIEW_ARTIFACT_PATH,
     _extract_latex_text,
     _extract_sections,
     _latex_to_markdown,
     _sanitize_extracted_text,
+    build_manifest,
     index_paper_artifacts,
 )
 from paperbase.models import PaperMetadata
+
+
+def _valid_single_page_pdf() -> bytes:
+    buffer = io.BytesIO()
+    Image.new("RGB", (612, 792), color="white").save(buffer, format="PDF")
+    return buffer.getvalue()
 
 
 def _sample_paper(arxiv_id: str = "2401.12345") -> PaperMetadata:
@@ -375,3 +385,142 @@ def test_extract_latex_text_skips_includepdf_wrapper():
     tarball = _build_tex_tarball({"arxiv.tex": wrapper})
 
     assert _extract_latex_text(tarball) is None
+
+
+def _install_preview_monkeypatches(
+    monkeypatch,
+    *,
+    html: str | None = None,
+    source_bytes: bytes | None = None,
+    pdf_bytes: bytes | None = None,
+    with_docling: bool = False,
+) -> dict[str, int]:
+    counts = {"fetch_pdf": 0, "fetch_html": 0, "fetch_source": 0}
+
+    def _fetch_html(_arxiv_id):
+        counts["fetch_html"] += 1
+        return html
+
+    def _fetch_source(_arxiv_id):
+        counts["fetch_source"] += 1
+        return source_bytes
+
+    def _fetch_pdf(_arxiv_id, _pdf_url=None):
+        counts["fetch_pdf"] += 1
+        return pdf_bytes
+
+    monkeypatch.setattr("paperbase.extractors.fetch_html", _fetch_html)
+    monkeypatch.setattr("paperbase.extractors.fetch_source", _fetch_source)
+    monkeypatch.setattr("paperbase.extractors.fetch_pdf", _fetch_pdf)
+    monkeypatch.setattr("paperbase.extractors._extract_figures_from_html", lambda _html: [])
+    monkeypatch.setattr("paperbase.extractors._extract_tables_from_html", lambda _html: [])
+    if with_docling:
+        # Leave docling's real behavior alone.
+        pass
+    else:
+        monkeypatch.setattr("paperbase.extractors.extract_with_docling", lambda _bytes: None)
+    return counts
+
+
+def test_index_paper_artifacts_attaches_preview_on_pdf_fallback_without_refetching(monkeypatch):
+    pdf_bytes = _valid_single_page_pdf()
+    counts = _install_preview_monkeypatches(monkeypatch, pdf_bytes=pdf_bytes)
+
+    extraction = index_paper_artifacts(_sample_paper())
+
+    assert extraction.source_type == "pdf"
+    preview_artifacts = [a for a in extraction.raw_artifacts if a.path == PREVIEW_ARTIFACT_PATH]
+    assert len(preview_artifacts) == 1
+    assert preview_artifacts[0].content_type == "image/webp"
+    assert preview_artifacts[0].data.startswith(b"RIFF")
+    # PDF fallback path must not refetch — one fetch covers both extraction and preview.
+    assert counts["fetch_pdf"] == 1
+
+
+def test_index_paper_artifacts_attaches_preview_on_html_path_with_one_pdf_fetch(monkeypatch):
+    html = """
+    <html><body>
+      <article class="ltx_document">
+        <section class="ltx_section" id="S1">
+          <h2 class="ltx_title ltx_title_section">Introduction</h2>
+          <div class="ltx_para"><p class="ltx_p">Intro.</p></div>
+        </section>
+      </article>
+    </body></html>
+    """.strip()
+    pdf_bytes = _valid_single_page_pdf()
+    counts = _install_preview_monkeypatches(monkeypatch, html=html, pdf_bytes=pdf_bytes)
+
+    extraction = index_paper_artifacts(_sample_paper())
+
+    assert extraction.source_type == "html"
+    preview_artifacts = [a for a in extraction.raw_artifacts if a.path == PREVIEW_ARTIFACT_PATH]
+    assert len(preview_artifacts) == 1
+    # HTML path does not fetch the PDF for extraction, so the preview fetch is the only one.
+    assert counts["fetch_pdf"] == 1
+
+
+def test_index_paper_artifacts_attaches_preview_on_latex_path_with_one_pdf_fetch(monkeypatch):
+    latex_tarball = _build_tex_tarball(
+        {
+            "paper.tex": (
+                "\\documentclass{article}\n"
+                "\\begin{document}\n"
+                "\\section{Introduction}\n"
+                "Hello world.\n"
+                "\\end{document}\n"
+            )
+        }
+    )
+    pdf_bytes = _valid_single_page_pdf()
+    counts = _install_preview_monkeypatches(
+        monkeypatch,
+        html=None,
+        source_bytes=latex_tarball,
+        pdf_bytes=pdf_bytes,
+    )
+
+    extraction = index_paper_artifacts(_sample_paper())
+
+    assert extraction.source_type == "latex"
+    preview_artifacts = [a for a in extraction.raw_artifacts if a.path == PREVIEW_ARTIFACT_PATH]
+    assert len(preview_artifacts) == 1
+    assert counts["fetch_pdf"] == 1
+
+
+def test_index_paper_artifacts_skips_preview_when_pdf_unavailable(monkeypatch):
+    html = "<html><body><article><p>Just intro.</p></article></body></html>"
+    counts = _install_preview_monkeypatches(monkeypatch, html=html, pdf_bytes=None)
+
+    extraction = index_paper_artifacts(_sample_paper())
+
+    assert extraction.source_type == "html"
+    assert all(artifact.path != PREVIEW_ARTIFACT_PATH for artifact in extraction.raw_artifacts)
+    assert counts["fetch_pdf"] == 1
+    manifest = build_manifest("paper_1", _sample_paper(), extraction)
+    assert manifest["available_artifacts"]["preview"] is None
+
+
+def test_index_paper_artifacts_skips_preview_when_render_fails(monkeypatch, caplog):
+    # PDF fallback path with garbage bytes — docling stub returns None,
+    # pdf-fallback branch stores raw/paper.pdf, preview render fails silently.
+    counts = _install_preview_monkeypatches(monkeypatch, pdf_bytes=b"not a real pdf")
+
+    with caplog.at_level("WARNING"):
+        extraction = index_paper_artifacts(_sample_paper())
+
+    assert extraction.source_type == "pdf"
+    assert all(artifact.path != PREVIEW_ARTIFACT_PATH for artifact in extraction.raw_artifacts)
+    # One fetch total on the PDF-fallback path; preview reuses those bytes and fails on them.
+    assert counts["fetch_pdf"] == 1
+
+
+def test_manifest_always_carries_preview_key(monkeypatch):
+    pdf_bytes = _valid_single_page_pdf()
+    _install_preview_monkeypatches(monkeypatch, pdf_bytes=pdf_bytes)
+
+    extraction = index_paper_artifacts(_sample_paper())
+    manifest = build_manifest("paper_1", _sample_paper(), extraction)
+
+    assert "preview" in manifest["available_artifacts"]
+    assert manifest["available_artifacts"]["preview"] == PREVIEW_ARTIFACT_PATH

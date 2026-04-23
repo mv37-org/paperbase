@@ -15,7 +15,10 @@ import requests
 from bs4 import BeautifulSoup
 
 from .models import PaperMetadata
+from .preview import generate_first_page_preview
 from .utils import csv_bytes, make_slug, slugify
+
+PREVIEW_ARTIFACT_PATH = "preview/first-page-top.webp"
 
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": "paperbase/0.1.0 (paper extractor)"})
@@ -734,6 +737,31 @@ def extract_uploaded_document(filename: str, data: bytes, *, content_type: str |
     raise RuntimeError(f"Unsupported upload type for {filename}")
 
 
+def _attach_preview_artifact(
+    extraction: ExtractionOutput,
+    paper: PaperMetadata,
+    *,
+    pdf_bytes: bytes | None,
+) -> None:
+    """Append a first-page preview artifact to ``extraction`` when possible.
+
+    Reuses ``pdf_bytes`` when already fetched; otherwise fetches once purely for
+    the preview. Any failure (PDF missing, render failure) is swallowed so
+    ingestion continues without a preview.
+    """
+    bytes_to_render = pdf_bytes
+    if bytes_to_render is None:
+        bytes_to_render = fetch_pdf(paper.arxiv_id, paper.pdf_url)
+    if not bytes_to_render:
+        return
+    image_bytes = generate_first_page_preview(bytes_to_render)
+    if not image_bytes:
+        return
+    extraction.raw_artifacts.append(
+        RawArtifact(path=PREVIEW_ARTIFACT_PATH, data=image_bytes, content_type="image/webp")
+    )
+
+
 def index_paper_artifacts(paper: PaperMetadata) -> ExtractionOutput:
     html = fetch_html(paper.arxiv_id)
     if html:
@@ -749,7 +777,7 @@ def index_paper_artifacts(paper: PaperMetadata) -> ExtractionOutput:
                     content_type="application/gzip",
                 )
             )
-        return ExtractionOutput(
+        extraction = ExtractionOutput(
             source_type="html",
             text_markdown=markdown,
             sections=sections or _extract_sections(markdown),
@@ -757,13 +785,15 @@ def index_paper_artifacts(paper: PaperMetadata) -> ExtractionOutput:
             tables=_extract_tables_from_html(html),
             raw_artifacts=raw_artifacts,
         )
+        _attach_preview_artifact(extraction, paper, pdf_bytes=None)
+        return extraction
 
     source_bytes = fetch_source(paper.arxiv_id)
     if source_bytes:
         latex = _extract_latex_text(source_bytes)
         if latex:
             markdown = _latex_to_markdown(latex)
-            return ExtractionOutput(
+            extraction = ExtractionOutput(
                 source_type="latex",
                 text_markdown=markdown,
                 sections=_extract_sections(markdown),
@@ -774,23 +804,28 @@ def index_paper_artifacts(paper: PaperMetadata) -> ExtractionOutput:
                     RawArtifact(path="raw/raw.tex", data=latex.encode("utf-8"), content_type="text/x-tex"),
                 ],
             )
+            _attach_preview_artifact(extraction, paper, pdf_bytes=None)
+            return extraction
 
     pdf_bytes = fetch_pdf(paper.arxiv_id, paper.pdf_url)
     if pdf_bytes:
         docling_output = extract_with_docling(pdf_bytes)
         if docling_output:
+            _attach_preview_artifact(docling_output, paper, pdf_bytes=pdf_bytes)
             return docling_output
         fallback_markdown = (
             f"# {paper.title}\n\n"
             f"## Abstract\n\n{paper.abstract}\n\n"
             "_PDF fallback stored because structured extraction was unavailable._"
         )
-        return ExtractionOutput(
+        extraction = ExtractionOutput(
             source_type="pdf",
             text_markdown=fallback_markdown,
             sections=_extract_sections(fallback_markdown),
             raw_artifacts=[RawArtifact(path="raw/paper.pdf", data=pdf_bytes, content_type="application/pdf")],
         )
+        _attach_preview_artifact(extraction, paper, pdf_bytes=pdf_bytes)
+        return extraction
 
     abstract_only = f"# {paper.title}\n\n## Abstract\n\n{paper.abstract}\n"
     return ExtractionOutput(
@@ -804,6 +839,10 @@ def build_manifest(paper_id: str, paper: PaperMetadata, extraction: ExtractionOu
     figure_count = len(extraction.figures)
     table_count = len(extraction.tables)
     section_slugs = [section.slug for section in extraction.sections]
+    preview_path = next(
+        (artifact.path for artifact in extraction.raw_artifacts if artifact.path == PREVIEW_ARTIFACT_PATH),
+        None,
+    )
     files = {
         "meta": "meta.json",
         "manifest": "manifest.json",
@@ -811,6 +850,7 @@ def build_manifest(paper_id: str, paper: PaperMetadata, extraction: ExtractionOu
         "sections": [f"sections/{section.slug}.md" for section in extraction.sections],
         "figures_index": "figures/index.json" if figure_count else None,
         "tables_index": "tables/index.json" if table_count else None,
+        "preview": preview_path,
         "raw": [artifact.path for artifact in extraction.raw_artifacts],
     }
     return {

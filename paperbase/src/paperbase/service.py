@@ -57,6 +57,7 @@ from .models import (
     LoginRequest,
     ManifestResponse,
     PaperMetadata,
+    PaperPreviewResponse,
     PaperResponse,
     ProjectItemPageResponse,
     ProjectRepoConflictDetail,
@@ -3170,6 +3171,21 @@ class PaperbaseService:
         if not self.object_store.exists(full_path):
             raise HTTPException(status_code=404, detail=f"File {path} not found for {paper_id}")
         return FileContentResponse(paper_id=paper_id, path=path, content=self.object_store.get_text(full_path))
+
+    def get_paper_preview(self, paper_id: str) -> PaperPreviewResponse:
+        """Return a short-lived signed URL for the paper's first-page preview.
+
+        Fixed-function: the object path is resolved server-side from ``paper_id`` only.
+        Raises 404 when the paper or the preview artifact is missing.
+        """
+        self.get_paper(paper_id)
+        preview_path = f"papers/{paper_id}/preview/first-page-top.webp"
+        if not self.object_store.exists(preview_path):
+            raise HTTPException(status_code=404, detail=f"Preview not found for {paper_id}")
+        image_url = self.object_store.presign_get(preview_path, expires_in=self.settings.presign_ttl_seconds)
+        if not image_url:
+            raise HTTPException(status_code=404, detail=f"Preview not available for {paper_id}")
+        return PaperPreviewResponse(paper_id=paper_id, image_url=image_url, content_type="image/webp")
 
     def get_figure(self, paper_id: str, figure_id: str) -> FigureResponse:
         caption_path = f"papers/{paper_id}/figures/{figure_id}/caption.md"

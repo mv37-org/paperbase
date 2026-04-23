@@ -151,6 +151,12 @@ class FigureResponse(BaseModel):
     content_type: str | None = None
 
 
+class PaperPreviewResponse(BaseModel):
+    paper_id: str
+    image_url: str
+    content_type: str
+
+
 class TableResponse(BaseModel):
     paper_id: str
     table_id: str

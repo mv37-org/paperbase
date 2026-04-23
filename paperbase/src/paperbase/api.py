@@ -42,6 +42,7 @@ from .models import (
     LoginRequest,
     ManifestResponse,
     MoveChatThreadProjectRequest,
+    PaperPreviewResponse,
     PaperResponse,
     ProjectItemPageResponse,
     ProjectRepoSyncRequest,
@@ -446,6 +447,18 @@ def browser_get_paper_figure(
     service: PaperbaseService = Depends(get_service),
 ) -> FigureResponse:
     return service.get_figure(paper_id, figure_id)
+
+
+@app.get("/v1/browser/papers/{paper_id}/preview", response_model=PaperPreviewResponse)
+def browser_get_paper_preview(
+    paper_id: str,
+    response: Response,
+    user=Depends(require_browser_user),
+    service: PaperbaseService = Depends(get_service),
+) -> PaperPreviewResponse:
+    preview = service.get_paper_preview(paper_id)
+    set_no_store_headers(response)
+    return preview
 
 
 @app.get("/v1/browser/papers/{paper_id}/tables/{table_id}", response_model=TableResponse)
