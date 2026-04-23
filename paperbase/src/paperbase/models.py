@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -194,6 +194,7 @@ class BrowserUserSettingsResponse(BaseModel):
     github_login: str = ""
     github_oauth_available: bool = False
     weekly_papers_review_email: bool = False
+    appearance_theme: Literal["light", "dark"] = "light"
 
 
 class BrowserSessionResponse(BaseModel):
@@ -236,6 +237,10 @@ class SaveModalCredentialsRequest(BaseModel):
 
 class UpdateNotificationsRequest(BaseModel):
     weekly_papers_review_email: bool
+
+
+class UpdateAppearanceRequest(BaseModel):
+    theme: Literal["light", "dark"]
 
 
 class UploadedDocumentResponse(BaseModel):

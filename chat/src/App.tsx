@@ -144,11 +144,11 @@ const AUTH_VIEW_COPY: Record<AuthView, { title: string; caption: string }> = {
   "reset-password": { title: "Reset password", caption: "Choose a new password for your account." },
   settings: {
     title: "Settings",
-    caption: "Manage inference, sandbox, and repos.",
+    caption: "Manage inference, sandbox, repos, and appearance.",
   },
 };
 
-const DEFAULT_BROWSER_SETTINGS = {
+const DEFAULT_BROWSER_SETTINGS: NonNullable<BrowserSessionResponse["settings"]> = {
   anthropic_api_key_hint: "",
   has_modal_credentials: false,
   modal_token_id_hint: "",
@@ -156,9 +156,11 @@ const DEFAULT_BROWSER_SETTINGS = {
   github_login: "",
   github_oauth_available: false,
   weekly_papers_review_email: false,
+  appearance_theme: "light",
 };
 
-type SettingsTab = "inference" | "sandbox" | "version-control";
+type AppearanceTheme = "light" | "dark";
+type SettingsTab = "inference" | "sandbox" | "version-control" | "appearance";
 
 const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; caption: string }> = [
   {
@@ -176,14 +178,43 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; caption: string }> 
     label: "Version control",
     caption: "Manage GitHub connection for repositories.",
   },
+  {
+    id: "appearance",
+    label: "Appearance",
+    caption: "Choose the theme for signed-in pages.",
+  },
 ];
 
 const normalizeSettingsTab = (value: string | null): SettingsTab | null => {
-  if (value === "inference" || value === "sandbox" || value === "version-control") {
+  if (
+    value === "inference" ||
+    value === "sandbox" ||
+    value === "version-control" ||
+    value === "appearance"
+  ) {
     return value;
   }
   return null;
 };
+
+const APPEARANCE_OPTIONS: Array<{
+  id: AppearanceTheme;
+  label: string;
+  caption: string;
+}> = [
+  {
+    id: "light",
+    label: "Light",
+    caption: "Keeps the signed-in workspace bright and minimal.",
+  },
+  {
+    id: "dark",
+    label: "Dark",
+    caption: "Uses a higher-contrast dark workspace across the app shell.",
+  },
+];
+
+const AUTHENTICATED_DARK_THEME_CLASS = "authenticated-theme-dark";
 
 const EXAMPLES = [
   {
@@ -615,6 +646,7 @@ export default function App() {
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [authReady, setAuthReady] = useState(false);
   const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTab>("inference");
+  const [appearanceThemeDraft, setAppearanceThemeDraft] = useState<AppearanceTheme>("light");
   const [flash, setFlash] = useState("");
   const [flashKind, setFlashKind] = useState<ModalFlashKind>("note");
   const [landingPrompt, setLandingPrompt] = useState("");
@@ -1022,11 +1054,29 @@ export default function App() {
     };
   }, [session]);
   const sessionSettings = sessionSummary?.settings ?? DEFAULT_BROWSER_SETTINGS;
+  const appliedAppearanceTheme = sessionSettings.appearance_theme === "dark" ? "dark" : "light";
+  const authenticatedDarkThemeEnabled = authenticated && appliedAppearanceTheme === "dark";
   const activeSettingsConfig = useMemo(
     () => SETTINGS_TABS.find((tab) => tab.id === activeSettingsTab) ?? SETTINGS_TABS[0],
     [activeSettingsTab],
   );
   const authCaption = authView === "settings" ? activeSettingsConfig.caption : authCopy.caption;
+
+  useEffect(() => {
+    setAppearanceThemeDraft(appliedAppearanceTheme);
+  }, [appliedAppearanceTheme]);
+
+  useEffect(() => {
+    document.documentElement.classList.toggle(
+      AUTHENTICATED_DARK_THEME_CLASS,
+      authenticatedDarkThemeEnabled,
+    );
+    document.body.classList.toggle(AUTHENTICATED_DARK_THEME_CLASS, authenticatedDarkThemeEnabled);
+    return () => {
+      document.documentElement.classList.remove(AUTHENTICATED_DARK_THEME_CLASS);
+      document.body.classList.remove(AUTHENTICATED_DARK_THEME_CLASS);
+    };
+  }, [authenticatedDarkThemeEnabled]);
 
   const clearFlash = useCallback(() => {
     setFlash("");
@@ -4636,6 +4686,92 @@ export default function App() {
                         ) : null}
                       </div>
                     )}
+                  </section>
+                ) : null}
+
+                {activeSettingsTab === "appearance" ? (
+                  <section
+                    className="settings-section"
+                    role="tabpanel"
+                    id="settings-panel-appearance"
+                    aria-labelledby="settings-tab-appearance"
+                  >
+                    <form
+                      className="settings-form"
+                      onSubmit={async (event) => {
+                        event.preventDefault();
+                        try {
+                          const nextSession = await api<BrowserSessionResponse>(
+                            "/v1/browser/settings/appearance",
+                            {
+                              method: "PUT",
+                              body: JSON.stringify({ theme: appearanceThemeDraft }),
+                            },
+                          );
+                          setSession(nextSession);
+                          showNoteFlash(
+                            appearanceThemeDraft === "dark"
+                              ? "Dark mode enabled."
+                              : "Light mode enabled.",
+                          );
+                        } catch (error) {
+                          showErrorFlash(
+                            error instanceof Error
+                              ? error.message
+                              : "Saving appearance settings failed",
+                          );
+                        }
+                      }}
+                    >
+                      <div
+                        className="settings-appearance-grid"
+                        role="radiogroup"
+                        aria-label="Appearance theme"
+                      >
+                        {APPEARANCE_OPTIONS.map((option) => {
+                          const selected = appearanceThemeDraft === option.id;
+                          return (
+                            <button
+                              key={option.id}
+                              type="button"
+                              role="radio"
+                              aria-checked={selected}
+                              className={`settings-appearance-option${selected ? " selected" : ""}`}
+                              onClick={() => setAppearanceThemeDraft(option.id)}
+                            >
+                              <span
+                                className={`settings-appearance-preview ${option.id}`}
+                                aria-hidden="true"
+                              >
+                                <span className="settings-appearance-preview-header" />
+                                <span className="settings-appearance-preview-body">
+                                  <span className="settings-appearance-preview-sidebar" />
+                                  <span className="settings-appearance-preview-main" />
+                                </span>
+                              </span>
+                              <span className="settings-appearance-copy">
+                                <span className="settings-appearance-label">{option.label}</span>
+                                <span className="settings-appearance-caption">
+                                  {option.caption}
+                                </span>
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <p className="settings-inline-note">
+                        Applies only to the signed-in workspace and its modals.
+                      </p>
+                      <div className="settings-footer-actions">
+                        <button
+                          className="primary-button settings-submit-button"
+                          type="submit"
+                          disabled={appearanceThemeDraft === appliedAppearanceTheme}
+                        >
+                          Save appearance
+                        </button>
+                      </div>
+                    </form>
                   </section>
                 ) : null}
               </div>

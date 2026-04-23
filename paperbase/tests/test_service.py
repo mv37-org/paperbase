@@ -31,6 +31,7 @@ from paperbase.models import (
     SearchSectionRequest,
     SendChatMessageRequest,
     SignupRequest,
+    UpdateAppearanceRequest,
     UpdateNotificationsRequest,
     UpdateProjectRequest,
 )
@@ -1168,6 +1169,10 @@ def test_browser_settings_round_trip(browser_service):
         session.user,
         UpdateNotificationsRequest(weekly_papers_review_email=True),
     )
+    appearance = service.update_user_appearance(
+        session.user,
+        UpdateAppearanceRequest(theme="dark"),
+    )
     github = service.save_github_connection(
         session.user,
         github_user_id="42",
@@ -1181,6 +1186,7 @@ def test_browser_settings_round_trip(browser_service):
     assert modal_credentials.settings.has_modal_credentials is True
     assert modal_credentials.settings.modal_token_id_hint.startswith("moda")
     assert notifications.settings.weekly_papers_review_email is True
+    assert appearance.settings.appearance_theme == "dark"
     assert github.settings.has_github_connection is True
     assert github.settings.github_login == "octocat"
 

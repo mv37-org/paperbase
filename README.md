@@ -40,7 +40,7 @@ Optional browser-account settings now hang off the same API env surface:
 
 - `PAPERBASE_GOOGLE_*` powers Google sign-in
 - `PAPERBASE_GITHUB_*` powers the in-app GitHub connection flow and project repo sync
-- logged-in users can store Anthropic keys, Modal sandbox credentials, and a weekly papers review email preference
+- logged-in users can store Anthropic keys, Modal sandbox credentials, a signed-in-only light/dark appearance preference, and a weekly papers review email preference
 
 ## Commands
 
@@ -87,6 +87,7 @@ The browser chat experience is project-based:
 - the sidebar lazily loads mixed project items per project, so chats and Python files appear together
 - project descriptions are snapped onto new sessions as per-session prompt context, so later project edits do not rewrite existing chats
 - Python files are project-scoped tabs backed by Monaco in a high-contrast editor view
+- signed-in pages support a persisted appearance setting, so the sidebar, chat shell, markdown surfaces, drawers, and modals can switch between light and dark mode without affecting the public landing page
 - creating or saving a Python file requires a connected GitHub account with repo access
 - `Save` creates a single Paperbase-managed GitHub commit for the current project, and `Run` saves first, then executes the saved file through the user’s Modal sandbox credentials
 - project repos are written with `/src` for Python files, `/notes` reserved for notes, and a root `.paperbase` metadata file

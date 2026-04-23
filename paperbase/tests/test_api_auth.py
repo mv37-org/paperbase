@@ -280,6 +280,15 @@ class StubApiService:
             has_anthropic_api_key=False,
         )
 
+    def update_user_appearance(self, user: BrowserUser, request) -> BrowserSessionResponse:
+        self.calls.append(("update_user_appearance", (user.user_id, request.theme)))
+        return BrowserSessionResponse(
+            authenticated=True,
+            user=user,
+            remaining_free_responses=2,
+            has_anthropic_api_key=False,
+        )
+
     def save_github_connection(
         self,
         user: BrowserUser,
@@ -804,19 +813,27 @@ def test_browser_settings_routes_delegate_with_valid_csrf(api_client):
         json={"weekly_papers_review_email": True},
         headers=headers,
     )
+    appearance = client.put(
+        "/v1/browser/settings/appearance",
+        json={"theme": "dark"},
+        headers=headers,
+    )
     github = client.delete("/v1/browser/settings/github", headers=headers)
 
     assert modal_credentials.status_code == 200
     assert notifications.status_code == 200
+    assert appearance.status_code == 200
     assert github.status_code == 200
     assert modal_credentials.json()["csrf_token"] == csrf
     assert notifications.json()["csrf_token"] == csrf
+    assert appearance.json()["csrf_token"] == csrf
     assert github.json()["csrf_token"] == csrf
     assert (
         "save_user_modal_credentials",
         ("user_1", "modal-token-id-123", "modal-token-secret-456"),
     ) in service.calls
     assert ("update_user_notification_preferences", ("user_1", True)) in service.calls
+    assert ("update_user_appearance", ("user_1", "dark")) in service.calls
     assert ("delete_github_connection", "user_1") in service.calls
 
 

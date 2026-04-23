@@ -81,6 +81,7 @@ from .models import (
     SendChatMessageResponse,
     SignupRequest,
     TableResponse,
+    UpdateAppearanceRequest,
     UpdateNotificationsRequest,
     UpdateProjectRequest,
     CreateProjectRequest,
@@ -930,6 +931,17 @@ class PaperbaseService:
         self.repository.set_weekly_papers_review_email(  # type: ignore[attr-defined]
             user_id=user.user_id,
             enabled=request.weekly_papers_review_email,
+        )
+        return self._browser_session_response(user)
+
+    def update_user_appearance(
+        self,
+        user: BrowserUser,
+        request: UpdateAppearanceRequest,
+    ) -> BrowserSessionResponse:
+        self.repository.set_appearance_theme(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            theme=request.theme,
         )
         return self._browser_session_response(user)
 
