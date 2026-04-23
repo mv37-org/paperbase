@@ -4,8 +4,11 @@ on:
   push:
     branches:
       - main
-      - "codex/**"
   workflow_dispatch:
+
+concurrency:
+  group: profile-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   hotpaths:
@@ -36,6 +39,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: |
+            paperbase/pyproject.toml
+            paperbase-plugin/pyproject.toml
 
       - name: Install vp
         run: curl -fsSL https://vite.plus | bash

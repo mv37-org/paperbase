@@ -7,6 +7,14 @@ import type {
   FileContentResponse,
   MentionSuggestionResult,
   PaperResponse,
+  ProjectItemPageResponse,
+  ProjectRepoConflictResolution,
+  ProjectRepoSyncResponse,
+  ProjectListResponse,
+  ProjectResponse,
+  ProjectSessionPageResponse,
+  PythonFileResponse,
+  RunPythonFileResponse,
   SendChatMessageResponse,
   TableResponse,
   UploadListResponse,
@@ -40,6 +48,25 @@ export class StreamingChatError extends Error {
     super(message);
     this.name = "StreamingChatError";
     this.canFallback = canFallback;
+  }
+}
+
+export class StreamingChatAbortError extends Error {
+  constructor(message = "Streaming request aborted") {
+    super(message);
+    this.name = "StreamingChatAbortError";
+  }
+}
+
+export class ApiError extends Error {
+  status: number;
+  payload: unknown;
+
+  constructor(message: string, status: number, payload: unknown) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.payload = payload;
   }
 }
 
@@ -207,7 +234,7 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const payload = await parsePayload(response);
   if (!response.ok) {
     handleUnauthorized(response);
-    throw new Error(normalizeErrorMessage(payload, "Request failed"));
+    throw new ApiError(normalizeErrorMessage(payload, "Request failed"), response.status, payload);
   }
   syncBrowserSession(payload);
   return payload as T;
@@ -216,6 +243,11 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
 export function googleLoginUrl() {
   const returnTo = encodeURIComponent(window.location.origin);
   return `${API_BASE}/v1/browser/auth/google/start?return_to=${returnTo}`;
+}
+
+export function githubLoginUrl() {
+  const returnTo = encodeURIComponent(`${window.location.origin}${window.location.pathname}`);
+  return `${API_BASE}/v1/browser/auth/github/start?return_to=${returnTo}`;
 }
 
 export function loadSession() {
@@ -246,15 +278,120 @@ export function loadThreads() {
   return api<ChatThreadListResponse>("/v1/browser/chats", { method: "GET" });
 }
 
+export function loadProjects() {
+  return api<ProjectListResponse>("/v1/browser/projects", { method: "GET" });
+}
+
+export function createProject(name: string, description = "") {
+  return api<ProjectResponse>("/v1/browser/projects", {
+    method: "POST",
+    body: JSON.stringify({ name, description }),
+  });
+}
+
+export function updateProject(projectId: string, name: string, description = "") {
+  return api<ProjectResponse>(`/v1/browser/projects/${projectId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ name, description }),
+  });
+}
+
+export function deleteProject(projectId: string) {
+  return api<{ status: string }>(`/v1/browser/projects/${projectId}`, { method: "DELETE" });
+}
+
+export function loadProjectSessions(projectId: string, limit = 5, offset = 0) {
+  const params = new URLSearchParams({
+    limit: String(limit),
+    offset: String(offset),
+  });
+  return api<ProjectSessionPageResponse>(
+    `/v1/browser/projects/${projectId}/sessions?${params.toString()}`,
+    { method: "GET" },
+  );
+}
+
+export function loadProjectItems(projectId: string, limit = 25, offset = 0) {
+  const params = new URLSearchParams({
+    limit: String(limit),
+    offset: String(offset),
+  });
+  return api<ProjectItemPageResponse>(
+    `/v1/browser/projects/${projectId}/items?${params.toString()}`,
+    { method: "GET" },
+  );
+}
+
+export function createPythonFile(projectId: string) {
+  return api<PythonFileResponse>(`/v1/browser/projects/${projectId}/python-files`, {
+    method: "POST",
+  });
+}
+
+export function getPythonFile(fileId: string) {
+  return api<PythonFileResponse>(`/v1/browser/python-files/${fileId}`, { method: "GET" });
+}
+
+export function updatePythonFile(
+  fileId: string,
+  payload: { filename?: string | null; content?: string | null },
+) {
+  return api<PythonFileResponse>(`/v1/browser/python-files/${fileId}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function runPythonFile(fileId: string) {
+  return api<RunPythonFileResponse>(`/v1/browser/python-files/${fileId}/run`, {
+    method: "POST",
+  });
+}
+
+export function getProjectRepoSync(projectId: string) {
+  return api<ProjectRepoSyncResponse>(`/v1/browser/projects/${projectId}/repo-sync`, {
+    method: "GET",
+  });
+}
+
+export function syncProjectRepo(
+  projectId: string,
+  payload: {
+    commitMessage: string;
+    expectedRemoteHeadSha?: string | null;
+    conflictResolutions?: ProjectRepoConflictResolution[];
+  },
+) {
+  return api<ProjectRepoSyncResponse>(`/v1/browser/projects/${projectId}/repo-sync`, {
+    method: "POST",
+    body: JSON.stringify({
+      commit_message: payload.commitMessage,
+      expected_remote_head_sha: payload.expectedRemoteHeadSha ?? null,
+      conflict_resolutions: payload.conflictResolutions ?? [],
+    }),
+  });
+}
+
 export function getThread(threadId: string) {
   return api<ChatThreadResponse>(`/v1/browser/chats/${threadId}`, { method: "GET" });
 }
 
-export function createThread(title = "") {
+export function createThread(title = "", projectId?: string) {
   return api<ChatThreadResponse>("/v1/browser/chats", {
     method: "POST",
-    body: JSON.stringify({ title }),
+    body: JSON.stringify({ title, project_id: projectId ?? null }),
   });
+}
+
+export function moveThreadToProject(threadId: string, projectId: string) {
+  return api<ChatThreadResponse>(`/v1/browser/chats/${threadId}/project`, {
+    method: "PATCH",
+    body: JSON.stringify({ project_id: projectId }),
+  });
+}
+
+export function deleteThread(threadId: string) {
+  return api<{ status: string }>(`/v1/browser/chats/${threadId}`, { method: "DELETE" });
 }
 
 export function sendThreadMessage(threadId: string, payload: SendThreadMessagePayload) {
@@ -268,14 +405,24 @@ export async function sendThreadMessageStream(
   threadId: string,
   payload: SendThreadMessagePayload,
   onEvent: StreamEventHandler,
+  options: { signal?: AbortSignal } = {},
 ) {
-  const response = await fetch(`${API_BASE}/v1/browser/chats/${threadId}/messages/stream`, {
-    method: "POST",
-    body: chatRequestBody(payload),
-    credentials: "include",
-    cache: "no-store",
-    headers: buildHeaders({ method: "POST" }),
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE}/v1/browser/chats/${threadId}/messages/stream`, {
+      method: "POST",
+      body: chatRequestBody(payload),
+      credentials: "include",
+      cache: "no-store",
+      headers: buildHeaders({ method: "POST" }),
+      signal: options.signal,
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new StreamingChatAbortError();
+    }
+    throw error;
+  }
 
   if (!response.ok) {
     handleUnauthorized(response);
@@ -326,6 +473,9 @@ export async function sendThreadMessageStream(
       emitBlock(trailing);
     }
   } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new StreamingChatAbortError();
+    }
     throw new StreamingChatError(
       error instanceof Error ? error.message : "Streaming request failed",
       !sawEvent,

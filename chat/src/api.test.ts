@@ -10,6 +10,10 @@ function jsonResponse(payload: unknown, init: ResponseInit = {}) {
   });
 }
 
+function requestPath(input: RequestInfo | URL) {
+  return new URL(String(input), "http://localhost").pathname;
+}
+
 async function loadApiModule() {
   vi.resetModules();
   (window as typeof window & { PAPERBASE_BASE_URL?: string }).PAPERBASE_BASE_URL = "";
@@ -47,6 +51,9 @@ describe("chat api", () => {
       .mockResolvedValueOnce(
         jsonResponse({
           thread_id: "thread_1",
+          project_id: "proj_1",
+          project_name: "General",
+          project_instructions: "",
           title: "New chat",
           created_at: "2026-04-21T00:00:00Z",
           updated_at: "2026-04-21T00:00:00Z",
@@ -87,6 +94,9 @@ describe("chat api", () => {
       .mockResolvedValueOnce(
         jsonResponse({
           thread_id: "thread_2",
+          project_id: "proj_1",
+          project_name: "General",
+          project_instructions: "",
           title: "Recovered",
           created_at: "2026-04-21T00:00:00Z",
           updated_at: "2026-04-21T00:00:00Z",
@@ -219,6 +229,157 @@ describe("chat api", () => {
     expect(result.suggestions[0]?.matched_field).toBe("fallback");
   });
 
+  it("creates, moves, and deletes project chats with CSRF", async () => {
+    const fetchMock = vi
+      .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          authenticated: true,
+          user: {
+            user_id: "user_1",
+            email: "user@example.com",
+            display_name: "User",
+            free_responses_used: 0,
+          },
+          remaining_free_responses: 3,
+          has_anthropic_api_key: false,
+          csrf_token: "csrf-123",
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          thread_id: "thread_3",
+          project_id: "proj_9",
+          project_name: "Agents",
+          project_instructions: "",
+          title: "Project chat",
+          created_at: "2026-04-21T00:00:00Z",
+          updated_at: "2026-04-21T00:00:00Z",
+          messages: [],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          thread_id: "thread_3",
+          project_id: "proj_2",
+          project_name: "Agents",
+          project_instructions: "",
+          title: "Project chat",
+          created_at: "2026-04-21T00:00:00Z",
+          updated_at: "2026-04-21T00:00:00Z",
+          messages: [],
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ status: "deleted" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await loadApiModule();
+
+    await api.loadSession();
+    await api.createThread("Project chat", "proj_9");
+    await api.moveThreadToProject("thread_3", "proj_2");
+    await api.deleteThread("thread_3");
+
+    const [, createInit] = fetchMock.mock.calls[1] as FetchCall;
+    const [movePath, moveInit] = fetchMock.mock.calls[2] as FetchCall;
+    const [, deleteInit] = fetchMock.mock.calls[3] as FetchCall;
+    expect(createInit?.body).toBe(JSON.stringify({ title: "Project chat", project_id: "proj_9" }));
+    expect(requestPath(movePath)).toBe("/v1/browser/chats/thread_3/project");
+    expect(moveInit?.body).toBe(JSON.stringify({ project_id: "proj_2" }));
+    expect(new Headers(deleteInit?.headers).get("X-Paperbase-CSRF")).toBe("csrf-123");
+  });
+
+  it("loads and mutates projects through the browser endpoints", async () => {
+    const fetchMock = vi
+      .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          projects: [
+            {
+              project_id: "proj_1",
+              name: "General",
+              description: "",
+              is_default: true,
+              session_count: 1,
+              created_at: "2026-04-21T00:00:00Z",
+              updated_at: "2026-04-21T00:00:00Z",
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          project_id: "proj_2",
+          name: "Agents",
+          description: "Agent eval work",
+          is_default: false,
+          session_count: 0,
+          created_at: "2026-04-21T00:00:00Z",
+          updated_at: "2026-04-21T00:00:00Z",
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ status: "deleted" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await loadApiModule();
+
+    const projects = await api.loadProjects();
+    const created = await api.createProject("Agents", "Agent eval work");
+    await api.deleteProject("proj_2");
+
+    const [loadPath] = fetchMock.mock.calls[0] as FetchCall;
+    const [createPath, createInit] = fetchMock.mock.calls[1] as FetchCall;
+    expect(requestPath(loadPath)).toBe("/v1/browser/projects");
+    expect(requestPath(createPath)).toBe("/v1/browser/projects");
+    expect(createInit?.method).toBe("POST");
+    expect(projects.projects[0]?.project_id).toBe("proj_1");
+    expect(created.project_id).toBe("proj_2");
+  });
+
+  it("sends structured GitHub sync payloads for project saves", async () => {
+    const fetchMock = vi
+      .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          project_id: "proj_1",
+          repo_exists: true,
+          github_repo_name: "paperbase-general-123abc",
+          github_repo_url: "https://github.com/octocat/paperbase-general-123abc",
+          default_branch: "main",
+          last_sync_commit_sha: "abc123",
+          last_sync_commit_url: "https://github.com/octocat/paperbase-general-123abc/commit/abc123",
+          last_synced_at: "2026-04-21T00:00:00Z",
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await loadApiModule();
+
+    await api.syncProjectRepo("proj_1", {
+      commitMessage: "Save something.py",
+      expectedRemoteHeadSha: "def5678",
+      conflictResolutions: [
+        {
+          path: "src/something.py",
+          content: "print('merged')",
+        },
+      ],
+    });
+
+    const [path, init] = fetchMock.mock.calls[0] as FetchCall;
+    expect(requestPath(path)).toBe("/v1/browser/projects/proj_1/repo-sync");
+    expect(init?.method).toBe("POST");
+    expect(init?.body).toBe(
+      JSON.stringify({
+        commit_message: "Save something.py",
+        expected_remote_head_sha: "def5678",
+        conflict_resolutions: [
+          {
+            path: "src/something.py",
+            content: "print('merged')",
+          },
+        ],
+      }),
+    );
+  });
+
   it("parses streamed SSE events even when chunk boundaries split the payload", async () => {
     const encoder = new TextEncoder();
     const fetchMock = vi
@@ -229,7 +390,9 @@ describe("chat api", () => {
             start(controller) {
               controller.enqueue(
                 encoder.encode(
-                  'event: assistant_start\ndata: {"assistant_message":{"message_id":"msg_1","role":"assistant","content_markdown":"","citations":[],"created_at":"2026-04-21T00:00:00Z","status":"streaming"}}\n\n' +
+                  'event: tool_start\ndata: {"tool_call_id":"tool_1","tool_name":"paperbase_search","label":"paper search"}\n\n' +
+                    'event: tool_done\ndata: {"tool_call_id":"tool_1","tool_name":"paperbase_search","label":"paper search","is_error":false}\n\n' +
+                    'event: assistant_start\ndata: {"assistant_message":{"message_id":"msg_1","role":"assistant","content_markdown":"","citations":[],"created_at":"2026-04-21T00:00:00Z","status":"streaming"}}\n\n' +
                     'event: delta\ndata: {"message_id":"msg_1","delta":"Ground',
                 ),
               );
@@ -260,6 +423,19 @@ describe("chat api", () => {
     );
 
     expect(events).toEqual([
+      [
+        "tool_start",
+        { tool_call_id: "tool_1", tool_name: "paperbase_search", label: "paper search" },
+      ],
+      [
+        "tool_done",
+        {
+          tool_call_id: "tool_1",
+          tool_name: "paperbase_search",
+          label: "paper search",
+          is_error: false,
+        },
+      ],
       [
         "assistant_start",
         {
@@ -319,5 +495,36 @@ describe("chat api", () => {
         () => undefined,
       ),
     ).rejects.toMatchObject({ canFallback: true, message: "stream blew up" });
+  });
+
+  it("raises a dedicated abort error when the stream request is cancelled", async () => {
+    const fetchMock = vi.fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>(
+      async (_path, init) => {
+        await new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("The operation was aborted.", "AbortError")),
+            { once: true },
+          );
+        });
+        throw new Error("unreachable");
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await loadApiModule();
+    const controller = new AbortController();
+    const streamPromise = api.sendThreadMessageStream(
+      "thread_1",
+      { content: "cancel me", include_papers: true, include_uploads: true },
+      () => undefined,
+      { signal: controller.signal },
+    );
+
+    controller.abort();
+
+    await expect(streamPromise).rejects.toMatchObject({
+      name: "StreamingChatAbortError",
+      message: "Streaming request aborted",
+    });
   });
 });

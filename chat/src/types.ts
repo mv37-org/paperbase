@@ -1,4 +1,4 @@
-export type AuthView = "login" | "signup" | "reset-request" | "reset-password" | "api-key";
+export type AuthView = "login" | "signup" | "reset-request" | "reset-password" | "settings";
 
 export interface BrowserUser {
   user_id: string;
@@ -7,11 +7,23 @@ export interface BrowserUser {
   free_responses_used: number;
 }
 
+export interface BrowserUserSettingsResponse {
+  anthropic_api_key_hint: string;
+  has_modal_credentials: boolean;
+  modal_token_id_hint: string;
+  has_github_connection: boolean;
+  github_login: string;
+  github_oauth_available: boolean;
+  weekly_papers_review_email: boolean;
+  appearance_theme: "light" | "dark";
+}
+
 export interface BrowserSessionResponse {
   authenticated: boolean;
   user: BrowserUser | null;
   remaining_free_responses: number;
   has_anthropic_api_key: boolean;
+  settings?: BrowserUserSettingsResponse;
   csrf_token: string | null;
 }
 
@@ -102,6 +114,7 @@ export interface ChatMessageResponse {
 
 export interface ChatThreadSummary {
   thread_id: string;
+  project_id: string;
   title: string;
   created_at: string;
   updated_at: string;
@@ -110,6 +123,9 @@ export interface ChatThreadSummary {
 
 export interface ChatThreadResponse {
   thread_id: string;
+  project_id: string;
+  project_name: string;
+  project_instructions: string;
   title: string;
   created_at: string;
   updated_at: string;
@@ -118,6 +134,111 @@ export interface ChatThreadResponse {
 
 export interface ChatThreadListResponse {
   threads: ChatThreadSummary[];
+}
+
+export interface ProjectSummary {
+  project_id: string;
+  name: string;
+  description: string;
+  is_default: boolean;
+  session_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProjectResponse extends ProjectSummary {}
+
+export interface ProjectListResponse {
+  projects: ProjectSummary[];
+}
+
+export interface ProjectSessionPageResponse {
+  project_id: string;
+  threads: ChatThreadSummary[];
+  offset: number;
+  limit: number;
+  total_count: number;
+  has_more: boolean;
+}
+
+export interface PythonFileSummary {
+  file_id: string;
+  project_id: string;
+  filename: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PythonFileResponse extends PythonFileSummary {
+  content: string;
+}
+
+export interface ProjectItemSummary {
+  item_id: string;
+  item_kind: "thread" | "python_file";
+  project_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  thread_id?: string | null;
+  file_id?: string | null;
+  last_message_preview: string;
+  filename: string;
+}
+
+export interface ProjectItemPageResponse {
+  project_id: string;
+  items: ProjectItemSummary[];
+  offset: number;
+  limit: number;
+  total_count: number;
+  has_more: boolean;
+}
+
+export interface RunPythonFileResponse {
+  file_id: string;
+  status: "completed" | "failed";
+  stdout: string;
+  stderr: string;
+  exit_code: number;
+  started_at: string;
+  finished_at: string;
+}
+
+export interface ProjectRepoConflictResolution {
+  path: string;
+  content: string;
+}
+
+export interface ProjectRepoConflictFile {
+  path: string;
+  base_content: string;
+  local_content: string;
+  remote_content: string;
+}
+
+export interface ProjectRepoConflictDetail {
+  code: "github_merge_conflict";
+  message: string;
+  project_id: string;
+  repo_exists: boolean;
+  github_repo_name: string;
+  github_repo_url: string;
+  default_branch: string;
+  base_commit_sha: string;
+  remote_head_sha: string;
+  conflicts: ProjectRepoConflictFile[];
+}
+
+export interface ProjectRepoSyncResponse {
+  project_id: string;
+  repo_exists: boolean;
+  github_repo_name: string;
+  github_repo_url: string;
+  default_branch: string;
+  last_sync_commit_sha: string;
+  last_sync_commit_url: string;
+  last_synced_at?: string | null;
 }
 
 export interface SendChatMessageResponse {
@@ -149,7 +270,22 @@ export interface ChatStreamErrorEvent {
   detail: string;
 }
 
+export interface ChatStreamToolStartEvent {
+  tool_call_id: string;
+  tool_name: string;
+  label: string;
+}
+
+export interface ChatStreamToolDoneEvent {
+  tool_call_id: string;
+  tool_name: string;
+  label: string;
+  is_error: boolean;
+}
+
 export type ChatStreamEventMap = {
+  tool_start: ChatStreamToolStartEvent;
+  tool_done: ChatStreamToolDoneEvent;
   assistant_start: ChatStreamAssistantStartEvent;
   delta: ChatStreamDeltaEvent;
   done: ChatStreamDoneEvent;

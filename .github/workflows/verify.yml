@@ -4,8 +4,12 @@ on:
   push:
     branches:
       - main
-      - "codex/**"
   pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: verify-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
@@ -35,6 +39,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: |
+            paperbase/pyproject.toml
+            paperbase-plugin/pyproject.toml
 
       - name: Install vp
         run: curl -fsSL https://vite.plus | bash
@@ -46,4 +54,9 @@ jobs:
         run: make setup
 
       - name: Verify repo
-        run: make test
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            make test-smoke
+          else
+            make test
+          fi
