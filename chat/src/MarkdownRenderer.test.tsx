@@ -1,4 +1,4 @@
-import { render } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { MarkdownRenderer } from "./MarkdownRenderer";
@@ -21,5 +21,24 @@ describe("MarkdownRenderer", () => {
     expect(container.textContent).toContain(
       "The most recent by publication date is Generalization at the Edge of Stability.",
     );
+  });
+
+  it("renders collapsible editor-styled Python blocks with line numbers", () => {
+    const markdown = "```python\ndef train():\n    return 1\n```";
+
+    render(<MarkdownRenderer markdown={markdown} />);
+
+    expect(screen.getByText("python")).toBeTruthy();
+    expect(screen.getByText("2 lines")).toBeTruthy();
+    const lineNumbers = [...document.querySelectorAll(".code-snippet-line-number")].map(
+      (element) => element.textContent,
+    );
+    expect(lineNumbers).toEqual(["1", "2"]);
+    expect(screen.getByText("Hide code")).toBeTruthy();
+    expect(document.querySelector(".code-snippet-token.keyword")?.textContent).toBe("def");
+
+    fireEvent.click(screen.getByRole("button", { name: "Hide code" }));
+    expect(screen.getByRole("button", { name: "Show code" })).toBeTruthy();
+    expect(screen.queryByText("def")).toBeNull();
   });
 });

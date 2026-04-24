@@ -1900,10 +1900,11 @@ describe("App", () => {
     });
     const preview = await screen.findByTestId("streaming-code-preview");
     expect(within(preview).getByText("Writing code")).toBeTruthy();
+    expect(preview.textContent).toContain("python");
+    expect(preview.textContent).toContain("1");
+    expect(preview.textContent).toContain("2");
     expect(preview.textContent).toContain("def train():");
-    expect(document.querySelector(".message-streaming-code-token.keyword")?.textContent).toBe(
-      "def",
-    );
+    expect(document.querySelector(".code-snippet-token.keyword")?.textContent).toBe("def");
 
     await act(async () => {
       releaseStream?.();

@@ -1,5 +1,8 @@
+import type { ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+
+import { CodeSnippet, flattenCodeChildren } from "./CodeSnippet";
 
 type MarkdownNode = {
   type: string;
@@ -176,6 +179,10 @@ function citationPlugin() {
   };
 }
 
+function flattenMarkdownCodeChildren(children: ReactNode) {
+  return flattenCodeChildren(children);
+}
+
 export function MarkdownRenderer({
   markdown,
   className,
@@ -214,6 +221,24 @@ export function MarkdownRenderer({
               <table>{children}</table>
             </div>
           ),
+          pre: ({ children }) => <>{children}</>,
+          code: ({ inline, className, children }) => {
+            if (inline) {
+              return <code className={className}>{children}</code>;
+            }
+            const languageMatch = /language-([A-Za-z0-9_+-]+)/.exec(className ?? "");
+            const code = flattenMarkdownCodeChildren(children).replace(/\n$/, "");
+            const lines = code.replace(/\r\n?/g, "\n").split("\n");
+            return (
+              <CodeSnippet
+                code={code}
+                language={languageMatch?.[1]}
+                className="message-code-snippet"
+                collapsible
+                defaultCollapsed={lines.length > 12}
+              />
+            );
+          },
         }}
       >
         {normalizedMarkdown}
