@@ -112,10 +112,14 @@ The browser chat experience is project-based:
 - the sidebar lazily loads mixed project items per project, so chats, Python files, and imported notebooks appear together
 - project descriptions are snapped onto new sessions as per-session prompt context, so later project edits do not rewrite existing chats
 - Python and notebook files are project-scoped tabs backed by Monaco in a high-contrast Python editor view
+- project chats can invoke a project-scoped coding tool surface against Paperbase-managed `.py` files, including list/read/grep/touch/edit/delete/run operations instead of raw repo-shell access
+- coding turns auto-persist dirty project Python drafts before the agent runs tools, so the backend tool view stays aligned with Monaco edits
+- duplicate Python basenames are disambiguated with repo-path context in the sidebar and tab strip
 - notebooks are converted with Jupytext to `py:percent` source for editing/running, then regenerated back to `.ipynb` when saved to GitHub
 - signed-in pages support a persisted appearance setting, so the sidebar, chat shell, markdown surfaces, drawers, and modals can switch between light and dark mode without affecting the public landing page
 - creating, importing, or saving project files requires a connected GitHub account with repo access
-- `Save` creates a single Paperbase-managed GitHub commit for the current project, and `Run` saves first, then executes the saved file through the user’s Modal sandbox credentials
+- the coding agent is PyTorch-first for generated ML code, reads files before editing, uses exact-match edits, and emits runnable entrypoints that accept `--run-mode smoke|full`
+- `Save` creates a single Paperbase-managed GitHub commit for the current project, and `Run` saves first, then executes the full saved project workspace through the user’s Modal sandbox credentials with `full` mode by default
 - project sync writes only Paperbase-managed paths tracked in `.paperbase`, preserving unrelated files in existing repositories
 - if GitHub has moved ahead since the last project save, Paperbase opens a Monaco conflict-resolution flow before creating the next commit
 

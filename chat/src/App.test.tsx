@@ -286,20 +286,27 @@ function pythonFileResponse(
   filename = "something.py",
   content = "",
   projectId = "proj_1",
+  repoPath?: string,
 ) {
   return {
     file_id: fileId,
     project_id: projectId,
     filename,
     file_kind: filename.endsWith(".ipynb") ? "notebook" : "python",
-    repo_path: filename.endsWith(".ipynb") ? `notebooks/${filename}` : `src/${filename}`,
+    repo_path:
+      repoPath ?? (filename.endsWith(".ipynb") ? `notebooks/${filename}` : `src/${filename}`),
     content,
     created_at: "2026-04-21T00:00:00Z",
     updated_at: "2026-04-21T00:00:00Z",
   };
 }
 
-function projectItemFile(fileId: string, filename = "something.py", projectId = "proj_1") {
+function projectItemFile(
+  fileId: string,
+  filename = "something.py",
+  projectId = "proj_1",
+  repoPath?: string,
+) {
   return {
     item_id: fileId,
     item_kind: "python_file",
@@ -312,7 +319,8 @@ function projectItemFile(fileId: string, filename = "something.py", projectId = 
     last_message_preview: "",
     filename,
     file_kind: filename.endsWith(".ipynb") ? "notebook" : "python",
-    repo_path: filename.endsWith(".ipynb") ? `notebooks/${filename}` : `src/${filename}`,
+    repo_path:
+      repoPath ?? (filename.endsWith(".ipynb") ? `notebooks/${filename}` : `src/${filename}`),
   };
 }
 
@@ -670,6 +678,69 @@ describe("App", () => {
       expect(apiMocks.loadProjectItems).toHaveBeenCalledWith("proj_1", 5, 5, "python_file");
     });
     expect(await screen.findByText("analysis-6.py")).toBeTruthy();
+  });
+
+  it("shows repo path context for duplicate Python basenames in the sidebar and tabs", async () => {
+    localStorage.setItem(
+      OPEN_TABS_KEY,
+      JSON.stringify([
+        { kind: "python_file", id: "file_1" },
+        { kind: "python_file", id: "file_2" },
+      ]),
+    );
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.loadProjectItems.mockImplementation(
+      async (projectId: string, limit = 25, offset = 0, itemKind?: "thread" | "python_file") => {
+        const allItems =
+          itemKind === "python_file"
+            ? [
+                projectItemFile("file_1", "train.py", projectId, "src/models/train.py"),
+                projectItemFile("file_2", "train.py", projectId, "experiments/models/train.py"),
+              ]
+            : [projectItemThread("thread_1", "Recovered thread", projectId)];
+        const pageItems = allItems.slice(offset, offset + limit);
+        return {
+          ...projectItemsPage(projectId, pageItems),
+          offset,
+          limit,
+          total_count: allItems.length,
+          has_more: offset + pageItems.length < allItems.length,
+        };
+      },
+    );
+    apiMocks.getPythonFile.mockImplementation(async (fileId: string) => {
+      if (fileId === "file_1") {
+        return pythonFileResponse(
+          "file_1",
+          "train.py",
+          "print('a')\n",
+          "proj_1",
+          "src/models/train.py",
+        );
+      }
+      return pythonFileResponse(
+        "file_2",
+        "train.py",
+        "print('b')\n",
+        "proj_1",
+        "experiments/models/train.py",
+      );
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Close src/models/train.py" })).toBeTruthy();
+    });
+    expect(screen.getByRole("button", { name: "Close experiments/models/train.py" })).toBeTruthy();
+
+    fireEvent.click(screen.getAllByText("General")[0]!);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("train.py")).toHaveLength(2);
+    });
+    expect(screen.getAllByText("src/models/train.py").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("experiments/models/train.py").length).toBeGreaterThan(0);
   });
 
   it("paginates project sessions inside the sessions section", async () => {
@@ -1368,10 +1439,157 @@ describe("App", () => {
       expectedRemoteHeadSha: null,
       conflictResolutions: [],
     });
-    expect(apiMocks.runPythonFile).toHaveBeenCalledWith("file_1");
+    expect(apiMocks.runPythonFile).toHaveBeenCalledWith("file_1", "full");
     await waitFor(() => {
       expect(screen.getByText("Latest run")).toBeTruthy();
     });
+  });
+
+  it("persists dirty project drafts before project-code chat turns", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.loadProjectItems.mockImplementation(
+      async (projectId: string, limit = 25, offset = 0, itemKind?: "thread" | "python_file") => {
+        const allItems =
+          itemKind === "python_file"
+            ? [projectItemFile("file_1", "agent.py", projectId, "src/agent.py")]
+            : [projectItemThread("thread_1", "Recovered thread", projectId)];
+        const pageItems = allItems.slice(offset, offset + limit);
+        return {
+          ...projectItemsPage(projectId, pageItems),
+          offset,
+          limit,
+          total_count: allItems.length,
+          has_more: false,
+        };
+      },
+    );
+    apiMocks.getPythonFile.mockResolvedValue(
+      pythonFileResponse("file_1", "agent.py", "print('base')\n", "proj_1", "src/agent.py"),
+    );
+    apiMocks.updatePythonFile.mockResolvedValue(
+      pythonFileResponse("file_1", "agent.py", "print('dirty')\n", "proj_1", "src/agent.py"),
+    );
+    apiMocks.sendThreadMessageStream.mockRejectedValue(
+      new apiMocks.StreamingChatError("stream failed", true),
+    );
+    apiMocks.sendThreadMessage.mockResolvedValue({
+      thread: threadResponse("thread_1", "Recovered thread", "Code answer"),
+      assistant_message: {
+        message_id: "msg_2",
+        role: "assistant",
+        content_markdown: "Code answer",
+        citations: [],
+        created_at: "2026-04-21T00:00:00Z",
+        status: "completed",
+      },
+      remaining_free_responses: 2,
+      has_anthropic_api_key: false,
+      state: "completed",
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+    fireEvent.click(screen.getAllByText("General")[0]!);
+    fireEvent.click(await screen.findByText("agent.py"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("monaco-editor")).toBeTruthy();
+    });
+    fireEvent.change(screen.getByTestId("monaco-editor"), {
+      target: { value: "print('dirty')\n" },
+    });
+
+    fireEvent.click(screen.getAllByText("Recovered thread")[0]!);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("mention-input-chat")).toBeTruthy();
+    });
+    fireEvent.change(screen.getByLabelText("mention-input-chat"), {
+      target: { value: "edit src/agent.py to add a torch smoke run" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
+      expect(apiMocks.updatePythonFile).toHaveBeenCalledWith("file_1", {
+        content: "print('dirty')\n",
+      });
+    });
+    await waitFor(() => {
+      expect(apiMocks.sendThreadMessage).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("does not persist dirty project drafts for non-coding chat turns", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.loadProjectItems.mockImplementation(
+      async (projectId: string, limit = 25, offset = 0, itemKind?: "thread" | "python_file") => {
+        const allItems =
+          itemKind === "python_file"
+            ? [projectItemFile("file_1", "agent.py", projectId, "src/agent.py")]
+            : [projectItemThread("thread_1", "Recovered thread", projectId)];
+        const pageItems = allItems.slice(offset, offset + limit);
+        return {
+          ...projectItemsPage(projectId, pageItems),
+          offset,
+          limit,
+          total_count: allItems.length,
+          has_more: false,
+        };
+      },
+    );
+    apiMocks.getPythonFile.mockResolvedValue(
+      pythonFileResponse("file_1", "agent.py", "print('base')\n", "proj_1", "src/agent.py"),
+    );
+    apiMocks.sendThreadMessageStream.mockRejectedValue(
+      new apiMocks.StreamingChatError("stream failed", true),
+    );
+    apiMocks.sendThreadMessage.mockResolvedValue({
+      thread: threadResponse("thread_1", "Recovered thread", "Research answer"),
+      assistant_message: {
+        message_id: "msg_2",
+        role: "assistant",
+        content_markdown: "Research answer",
+        citations: [],
+        created_at: "2026-04-21T00:00:00Z",
+        status: "completed",
+      },
+      remaining_free_responses: 2,
+      has_anthropic_api_key: false,
+      state: "completed",
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+    fireEvent.click(screen.getAllByText("General")[0]!);
+    fireEvent.click(await screen.findByText("agent.py"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("monaco-editor")).toBeTruthy();
+    });
+    fireEvent.change(screen.getByTestId("monaco-editor"), {
+      target: { value: "print('dirty')\n" },
+    });
+
+    fireEvent.click(screen.getAllByText("Recovered thread")[0]!);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("mention-input-chat")).toBeTruthy();
+    });
+    fireEvent.change(screen.getByLabelText("mention-input-chat"), {
+      target: { value: "Summarize the benchmark papers" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
+      expect(apiMocks.sendThreadMessage).toHaveBeenCalledTimes(1);
+    });
+    expect(apiMocks.updatePythonFile).not.toHaveBeenCalled();
   });
 
   it("opens the project menu from the action button", async () => {

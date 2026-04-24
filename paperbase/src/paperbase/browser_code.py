@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 import shutil
 import subprocess
@@ -708,62 +709,10 @@ class ModalPythonRunner:
             raise ModalExecutionError("Modal SDK is not installed. Run setup again before using the sandbox.") from exc
 
         sandbox = None
-        client = None
         try:
-            client_factory = getattr(getattr(modal, "Client", None), "from_credentials", None)
-            if client_factory is not None:
-                try:
-                    client = client_factory(token_id=token_id, token_secret=token_secret)
-                except TypeError:
-                    client = client_factory(token_id, token_secret)
-
-            image = modal.Image.debian_slim(python_version=self.python_version)
-            if client is not None:
-                app = modal.App.lookup(self.app_name, create_if_missing=True, client=client)
-                sandbox = modal.Sandbox.create(
-                    app=app,
-                    image=image,
-                    timeout=self.timeout_seconds,
-                    idle_timeout=self.idle_timeout_seconds,
-                    client=client,
-                )
-            else:
-                with _MODAL_ENV_LOCK:
-                    previous_token_id = os.environ.get("MODAL_TOKEN_ID")
-                    previous_token_secret = os.environ.get("MODAL_TOKEN_SECRET")
-                    os.environ["MODAL_TOKEN_ID"] = token_id
-                    os.environ["MODAL_TOKEN_SECRET"] = token_secret
-                    try:
-                        app = modal.App.lookup(self.app_name, create_if_missing=True)
-                        sandbox = modal.Sandbox.create(
-                            app=app,
-                            image=image,
-                            timeout=self.timeout_seconds,
-                            idle_timeout=self.idle_timeout_seconds,
-                        )
-                    finally:
-                        if previous_token_id is None:
-                            os.environ.pop("MODAL_TOKEN_ID", None)
-                        else:
-                            os.environ["MODAL_TOKEN_ID"] = previous_token_id
-                        if previous_token_secret is None:
-                            os.environ.pop("MODAL_TOKEN_SECRET", None)
-                        else:
-                            os.environ["MODAL_TOKEN_SECRET"] = previous_token_secret
-
+            sandbox = self._create_sandbox(modal=modal, token_id=token_id, token_secret=token_secret)
             process = sandbox.exec("python", "-c", code, timeout=self.timeout_seconds)
-            exit_code = int(process.wait() or 0)
-            stdout = str(process.stdout.read() or "")
-            stderr = str(process.stderr.read() or "")
-            finished_at = utcnow()
-            return ModalRunResult(
-                status="completed" if exit_code == 0 else "failed",
-                stdout=stdout,
-                stderr=stderr,
-                exit_code=exit_code,
-                started_at=started_at,
-                finished_at=finished_at,
-            )
+            return self._collect_process_result(process=process, started_at=started_at)
         except Exception as exc:
             finished_at = utcnow()
             return ModalRunResult(
@@ -780,14 +729,165 @@ class ModalPythonRunner:
                     sandbox.terminate()
                 except Exception:
                     pass
+
+    def run_project(
+        self,
+        *,
+        token_id: str,
+        token_secret: str,
+        files: dict[str, str],
+        entrypoint_path: str,
+        run_mode: str,
+    ) -> ModalRunResult:
+        started_at = utcnow()
+        try:
+            import modal
+        except ImportError as exc:
+            raise ModalExecutionError("Modal SDK is not installed. Run setup again before using the sandbox.") from exc
+
+        sandbox = None
+        try:
+            sandbox = self._create_sandbox(modal=modal, token_id=token_id, token_secret=token_secret)
+            bootstrap = self._project_bootstrap_code(
+                files=files,
+                entrypoint_path=entrypoint_path,
+                run_mode=run_mode,
+            )
+            process = sandbox.exec("python", "-c", bootstrap, timeout=self.timeout_seconds)
+            return self._collect_process_result(process=process, started_at=started_at)
+        except Exception as exc:
+            finished_at = utcnow()
+            return ModalRunResult(
+                status="failed",
+                stdout="",
+                stderr=str(exc),
+                exit_code=1,
+                started_at=started_at,
+                finished_at=finished_at,
+            )
+        finally:
+            if sandbox is not None:
                 try:
-                    sandbox.detach()
+                    sandbox.terminate()
                 except Exception:
                     pass
-            if client is not None:
-                close = getattr(client, "close", None)
-                if callable(close):
-                    try:
-                        close()
-                    except Exception:
-                        pass
+
+    def _create_sandbox(self, *, modal, token_id: str, token_secret: str):
+        client = None
+        client_factory = getattr(getattr(modal, "Client", None), "from_credentials", None)
+        if client_factory is not None:
+            try:
+                client = client_factory(token_id=token_id, token_secret=token_secret)
+            except TypeError:
+                client = client_factory(token_id, token_secret)
+
+        image = modal.Image.debian_slim(python_version=self.python_version)
+        if client is not None:
+            app = modal.App.lookup(self.app_name, create_if_missing=True, client=client)
+            return modal.Sandbox.create(
+                app=app,
+                image=image,
+                timeout=self.timeout_seconds,
+                idle_timeout=self.idle_timeout_seconds,
+                client=client,
+            )
+
+        with _MODAL_ENV_LOCK:
+            previous_token_id = os.environ.get("MODAL_TOKEN_ID")
+            previous_token_secret = os.environ.get("MODAL_TOKEN_SECRET")
+            os.environ["MODAL_TOKEN_ID"] = token_id
+            os.environ["MODAL_TOKEN_SECRET"] = token_secret
+            try:
+                app = modal.App.lookup(self.app_name, create_if_missing=True)
+                return modal.Sandbox.create(
+                    app=app,
+                    image=image,
+                    timeout=self.timeout_seconds,
+                    idle_timeout=self.idle_timeout_seconds,
+                )
+            finally:
+                if previous_token_id is None:
+                    os.environ.pop("MODAL_TOKEN_ID", None)
+                else:
+                    os.environ["MODAL_TOKEN_ID"] = previous_token_id
+                if previous_token_secret is None:
+                    os.environ.pop("MODAL_TOKEN_SECRET", None)
+                else:
+                    os.environ["MODAL_TOKEN_SECRET"] = previous_token_secret
+
+    def _collect_process_result(self, *, process, started_at: object) -> ModalRunResult:
+        exit_code = int(process.wait() or 0)
+        stdout = str(process.stdout.read() or "")
+        stderr = str(process.stderr.read() or "")
+        finished_at = utcnow()
+        return ModalRunResult(
+            status="completed" if exit_code == 0 else "failed",
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=exit_code,
+            started_at=started_at,
+            finished_at=finished_at,
+        )
+
+    def _project_bootstrap_code(self, *, files: dict[str, str], entrypoint_path: str, run_mode: str) -> str:
+        file_payload = base64.b64encode(json.dumps(files, sort_keys=True).encode("utf-8")).decode("ascii")
+        entry_payload = json.dumps(entrypoint_path)
+        mode_payload = json.dumps(run_mode)
+        return f"""
+import base64
+import json
+import os
+import pathlib
+import runpy
+import shutil
+import subprocess
+import sys
+import tempfile
+
+workspace = pathlib.Path(tempfile.mkdtemp(prefix="paperbase-project-"))
+try:
+    files = json.loads(base64.b64decode({file_payload!r}).decode("utf-8"))
+    for rel_path, content in files.items():
+        target = workspace / rel_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+
+    entrypoint = {entry_payload}
+    run_mode = {mode_payload}
+    entry_source = files.get(entrypoint, "")
+    wants_run_mode = "--run-mode" in entry_source or "run_mode" in entry_source
+    command = [sys.executable, entrypoint]
+    if wants_run_mode:
+        command.extend(["--run-mode", run_mode])
+
+    env = os.environ.copy()
+    env["PAPERBASE_RUN_MODE"] = run_mode
+    env["PYTHONPATH"] = str(workspace) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+
+    result = subprocess.run(
+        command,
+        cwd=workspace,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    if (
+        wants_run_mode
+        and result.returncode != 0
+        and "--run-mode" in (result.stderr or "")
+        and "unrecognized arguments" in (result.stderr or "")
+    ):
+        result = subprocess.run(
+            [sys.executable, entrypoint],
+            cwd=workspace,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+    sys.stdout.write(result.stdout)
+    sys.stderr.write(result.stderr)
+    raise SystemExit(result.returncode)
+finally:
+    shutil.rmtree(workspace, ignore_errors=True)
+"""

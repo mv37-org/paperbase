@@ -315,6 +315,35 @@ class FakeModalRunner:
             finished_at=finished,
         )
 
+    def run_project(
+        self,
+        *,
+        token_id: str,
+        token_secret: str,
+        files: dict[str, str],
+        entrypoint_path: str,
+        run_mode: str,
+    ) -> ModalRunResult:
+        self.calls.append(
+            {
+                "token_id": token_id,
+                "token_secret": token_secret,
+                "files": files,
+                "entrypoint_path": entrypoint_path,
+                "run_mode": run_mode,
+            }
+        )
+        started = datetime(2026, 4, 22, 0, 0, tzinfo=timezone.utc)
+        finished = datetime(2026, 4, 22, 0, 0, 1, tzinfo=timezone.utc)
+        return ModalRunResult(
+            status="completed",
+            stdout="runner output",
+            stderr="",
+            exit_code=0,
+            started_at=started,
+            finished_at=finished,
+        )
+
 
 def _parse_sse_events(body: str) -> list[tuple[str, dict]]:
     events: list[tuple[str, dict]] = []
@@ -1605,6 +1634,134 @@ def test_python_file_creation_requires_github_and_normalizes_names(browser_servi
     assert renamed.content == "print('hello')"
 
 
+def test_project_code_paths_allow_duplicate_basenames(browser_service):
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="paths@example.com", password="topsecret123", display_name="Path User")
+    )
+    assert session.user is not None
+    service.save_github_connection(
+        session.user,
+        github_user_id="42",
+        github_login="octocat",
+        access_token="github-access-token",
+        scope="repo,read:user",
+    )
+
+    project_id = service.list_projects(session.user).projects[0].project_id
+    train = service.create_project_python_file(
+        session.user,
+        project_id,
+        repo_path="src/train.py",
+        content="print('train')",
+    )
+    eval_file = service.create_project_python_file(
+        session.user,
+        project_id,
+        repo_path="experiments/train.py",
+        content="print('eval')",
+    )
+
+    files = service.list_project_code_files(session.user, project_id)
+
+    assert train.filename == "train.py"
+    assert eval_file.filename == "train.py"
+    assert {item.repo_path for item in files} == {"experiments/train.py", "src/train.py"}
+
+
+def test_project_code_read_grep_edit_and_delete(browser_service):
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="code-tools@example.com", password="topsecret123", display_name="Code User")
+    )
+    assert session.user is not None
+    service.save_github_connection(
+        session.user,
+        github_user_id="42",
+        github_login="octocat",
+        access_token="github-access-token",
+        scope="repo,read:user",
+    )
+
+    project_id = service.list_projects(session.user).projects[0].project_id
+    created = service.create_project_python_file(
+        session.user,
+        project_id,
+        repo_path="train.py",
+        content="import torch\n\nvalue = 1\nvalue = 1\n",
+    )
+
+    read_result = service.read_project_code_file(session.user, project_id, "train.py", start_line=1, end_line=2)
+    grep_result = service.grep_project_code(session.user, project_id, pattern="torch", literal=True, limit=5)
+
+    assert read_result["repo_path"] == "train.py"
+    assert read_result["total_lines"] == 4
+    assert read_result["content"] == "1: import torch\n2: "
+    assert grep_result["matches"] == [
+        {
+            "file_id": created.file_id,
+            "repo_path": "train.py",
+            "filename": "train.py",
+            "line_number": 1,
+            "line": "import torch",
+        }
+    ]
+
+    with pytest.raises(HTTPException) as exc_info:
+        service.edit_project_code_file(
+            session.user,
+            project_id,
+            repo_path="train.py",
+            old_string="value = 1",
+            new_string="value = 2",
+        )
+    assert exc_info.value.status_code == 409
+
+    edited = service.edit_project_code_file(
+        session.user,
+        project_id,
+        repo_path="train.py",
+        old_string="value = 1",
+        new_string="value = 2",
+        replace_all=True,
+    )
+    deleted = service.delete_project_code_file(session.user, project_id, repo_path="train.py")
+
+    assert edited["match_count"] == 2
+    assert "value = 2" in edited["content"]
+    assert deleted == {
+        "file_id": created.file_id,
+        "repo_path": "train.py",
+        "filename": "train.py",
+        "deleted": True,
+    }
+
+
+def test_project_chat_tools_are_advertised_for_coding_turns(browser_service):
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="coding-chat@example.com", password="topsecret123", display_name="Coding Chat")
+    )
+    assert session.user is not None
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="Project chat"))
+
+    tools = service._chat_tool_definitions(
+        SendChatMessageRequest(content="Create a PyTorch training script and run a smoke test"),
+        thread=thread,
+    )
+    tool_names = {tool["name"] for tool in tools}
+
+    assert {
+        "project_list_files",
+        "project_read_file",
+        "project_grep",
+        "project_touch",
+        "project_edit",
+        "project_delete",
+        "project_run",
+    }.issubset(tool_names)
+
+
 def test_python_file_sync_project_repo_writes_metadata_and_files():
     repo_manager = FakeGitHubRepoManager()
     service = PaperbaseService(
@@ -2230,7 +2387,75 @@ def test_run_python_file_requires_modal_credentials_and_uses_saved_content():
         {
             "token_id": "modal-token-id-999",
             "token_secret": "modal-token-secret-999",
-            "code": "print('run')",
+            "files": {"src/something.py": "print('run')"},
+            "entrypoint_path": "src/something.py",
+            "run_mode": "full",
+        }
+    ]
+
+
+def test_run_project_python_file_materializes_workspace_and_threads_smoke_mode():
+    modal_runner = FakeModalRunner()
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        modal_runner=modal_runner,
+    )
+
+    session, _ = service.register_browser_user(
+        SignupRequest(email="workspace@example.com", password="topsecret123", display_name="Workspace User")
+    )
+    assert session.user is not None
+    service.save_github_connection(
+        session.user,
+        github_user_id="42",
+        github_login="octocat",
+        access_token="github-access-token",
+        scope="repo,read:user",
+    )
+    service.save_user_modal_credentials(
+        session.user,
+        SaveModalCredentialsRequest(
+            token_id="modal-token-id-999",
+            token_secret="modal-token-secret-999",
+        ),
+    )
+
+    project_id = service.list_projects(session.user).projects[0].project_id
+    service.create_project_python_file(session.user, project_id, repo_path="pkg/__init__.py", content="")
+    service.create_project_python_file(
+        session.user,
+        project_id,
+        repo_path="pkg/utils.py",
+        content="MSG = 'hello'\n",
+    )
+    service.create_project_python_file(
+        session.user,
+        project_id,
+        repo_path="train.py",
+        content="from pkg.utils import MSG\nprint(MSG)\n",
+    )
+
+    result = service.run_project_python_file(session.user, project_id, repo_path="train.py", mode="smoke")
+
+    assert result.status == "completed"
+    assert modal_runner.calls == [
+        {
+            "token_id": "modal-token-id-999",
+            "token_secret": "modal-token-secret-999",
+            "files": {
+                "pkg/__init__.py": "",
+                "pkg/utils.py": "MSG = 'hello'\n",
+                "train.py": "from pkg.utils import MSG\nprint(MSG)\n",
+            },
+            "entrypoint_path": "train.py",
+            "run_mode": "smoke",
         }
     ]
 

@@ -1551,11 +1551,16 @@ textarea::placeholder,
 
 .python-file-card {
   grid-template-columns: minmax(0, 1fr) auto auto;
+  min-height: 38px;
+  max-height: none;
+  height: auto;
+  padding-top: 4px;
+  padding-bottom: 4px;
 }
 
 .python-file-card-copy {
   display: inline-flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
 }
 
@@ -1563,6 +1568,25 @@ textarea::placeholder,
   width: 14px;
   height: 14px;
   opacity: 0.78;
+  margin-top: 2px;
+}
+
+.python-file-card-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.thread-card-subtitle {
+  display: block;
+  max-width: 132px;
+  font-size: 11px;
+  line-height: 1.2;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .thread-card-rename {
@@ -4651,7 +4675,8 @@ body.authenticated-theme-dark .project-repo-menu-note,
 body.authenticated-theme-dark .project-github-required-note,
 body.authenticated-theme-dark .project-field > span,
 body.authenticated-theme-dark .project-repo-info-button,
-body.authenticated-theme-dark .python-conflict-summary span {
+body.authenticated-theme-dark .python-conflict-summary span,
+body.authenticated-theme-dark .thread-card-subtitle {
   color: var(--muted);
 }
 

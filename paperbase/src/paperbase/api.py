@@ -59,6 +59,7 @@ from .models import (
     ProjectResponse,
     ProjectSessionPageResponse,
     PythonFileResponse,
+    RunPythonFileRequest,
     ResetPasswordRequest,
     ResultSetResponse,
     RunPythonFileResponse,
@@ -1200,10 +1201,11 @@ def browser_update_python_file(
 @app.post("/v1/browser/python-files/{file_id}/run", response_model=RunPythonFileResponse)
 def browser_run_python_file(
     file_id: str,
+    request: RunPythonFileRequest | None = None,
     user=Depends(require_browser_write_user),
     service: PaperbaseService = Depends(get_service),
 ) -> RunPythonFileResponse:
-    return service.run_python_file(user, file_id)
+    return service.run_python_file(user, file_id, mode=(request.mode if request is not None else "full"))
 
 
 @app.get("/v1/browser/projects/{project_id}/repo-sync", response_model=ProjectRepoSyncResponse)

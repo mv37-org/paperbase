@@ -650,8 +650,8 @@ class StubApiService:
             content=content or "",
         )
 
-    def run_python_file(self, user: BrowserUser, file_id: str) -> RunPythonFileResponse:
-        self.calls.append(("run_python_file", (user.user_id, file_id)))
+    def run_python_file(self, user: BrowserUser, file_id: str, *, mode: str = "full") -> RunPythonFileResponse:
+        self.calls.append(("run_python_file", (user.user_id, file_id, mode)))
         return RunPythonFileResponse(
             file_id=file_id,
             status="completed",
@@ -1139,6 +1139,7 @@ def test_browser_project_and_chat_write_routes_delegate_with_valid_csrf(api_clie
     )
     ran_python_file = client.post(
         "/v1/browser/python-files/file_1/run",
+        json={"mode": "smoke"},
         headers=headers,
     )
     synced_project_repo = client.post(
@@ -1179,7 +1180,7 @@ def test_browser_project_and_chat_write_routes_delegate_with_valid_csrf(api_clie
         ("user_1", "proj_2", "demo.ipynb", b'{"nbformat":4}'),
     ) in service.calls
     assert ("update_python_file", ("user_1", "file_1", "analysis.py", "print('hello')")) in service.calls
-    assert ("run_python_file", ("user_1", "file_1")) in service.calls
+    assert ("run_python_file", ("user_1", "file_1", "smoke")) in service.calls
     assert ("sync_project_repo", ("user_1", "proj_2", "Save analysis.py")) in service.calls
     assert ("delete_chat_thread", ("user_1", "thread_1")) in service.calls
     assert ("delete_project", ("user_1", "proj_2")) in service.calls

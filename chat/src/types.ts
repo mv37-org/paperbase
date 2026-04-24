@@ -152,6 +152,7 @@ export interface ProjectSummary {
 export interface ProjectResponse extends ProjectSummary {}
 
 export type ProjectFileKind = "python" | "notebook";
+export type ProjectRunMode = "smoke" | "full";
 
 export interface CreateProjectGitHubRepoPayload {
   mode: "existing" | "create";

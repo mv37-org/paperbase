@@ -605,4 +605,29 @@ describe("chat api", () => {
       message: "Streaming request aborted",
     });
   });
+
+  it("posts the requested run mode when running a Python file", async () => {
+    const fetchMock = vi
+      .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          file_id: "file_1",
+          status: "completed",
+          stdout: "smoke",
+          stderr: "",
+          exit_code: 0,
+          started_at: "2026-04-21T00:00:00Z",
+          finished_at: "2026-04-21T00:00:01Z",
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await loadApiModule();
+
+    await api.runPythonFile("file_1", "smoke");
+
+    const [path, init] = fetchMock.mock.calls[0] as FetchCall;
+    expect(requestPath(path)).toBe("/v1/browser/python-files/file_1/run");
+    expect(init?.method).toBe("POST");
+    expect(init?.body).toBe(JSON.stringify({ mode: "smoke" }));
+  });
 });

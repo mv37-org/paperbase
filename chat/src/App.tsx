@@ -353,6 +353,14 @@ const THINKING_WORDS = [
   "Synthesizing",
 ];
 
+const PROJECT_CODE_ACTION_RE =
+  /\b(write|create|make|add|implement|edit|modify|update|refactor|fix|rename|delete|remove|read|show|open|grep|search|run)\b/i;
+const PROJECT_CODE_TARGET_RE =
+  /\b(code|python|pytorch|torch|script|module|file|files|function|class|training|train|evaluation|eval|workflow|repo|project)\b/i;
+const PROJECT_CODE_DIRECT_TOOL_RE =
+  /\b(project_(?:list_files|read_file|grep|touch|edit|delete|run))\b/i;
+const PROJECT_CODE_PATH_HINT_RE = /(?:^|[\s`'"])([A-Za-z0-9_./-]+\.py)(?:$|[\s`'",.:;!?])/i;
+
 function staticAssetPath(name: string) {
   const path = `${import.meta.env.BASE_URL}${name.replace(/^\/+/, "")}`;
   return `${path}${path.includes("?") ? "&" : "?"}v=${PUBLIC_ASSET_CACHE_KEY}`;
@@ -730,6 +738,59 @@ function displayPythonFilename(filename: string) {
   return filename.trim() || "something.py";
 }
 
+function pythonFilenameKey(filename: string) {
+  return displayPythonFilename(filename);
+}
+
+function duplicatePythonFilenameKeys(
+  files: Array<
+    Pick<ProjectItemSummary, "filename" | "title"> | Pick<PythonFileResponse, "filename">
+  >,
+) {
+  const counts = new Map<string, number>();
+  for (const file of files) {
+    const key = pythonFilenameKey("filename" in file ? file.filename : file.title);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return new Set([...counts.entries()].filter(([, count]) => count > 1).map(([key]) => key));
+}
+
+function displayPythonFileTitle(
+  file: Pick<PythonFileResponse, "filename" | "repo_path">,
+  _duplicateKeys: Set<string>,
+) {
+  return displayPythonFilename(file.filename);
+}
+
+function displayPythonFilePathContext(
+  file: Pick<PythonFileResponse, "filename" | "repo_path">,
+  duplicateKeys: Set<string>,
+) {
+  const filename = displayPythonFilename(file.filename);
+  return duplicateKeys.has(filename) ? pythonRepoPathForFile(file) : "";
+}
+
+function displayPythonTabTitle(
+  file: Pick<PythonFileResponse, "filename" | "repo_path">,
+  duplicateKeys: Set<string>,
+) {
+  const filename = displayPythonFilename(file.filename);
+  return duplicateKeys.has(filename) ? pythonRepoPathForFile(file) : filename;
+}
+
+function messageHasProjectCodeIntent(content: string) {
+  if (!content.trim()) {
+    return false;
+  }
+  if (PROJECT_CODE_DIRECT_TOOL_RE.test(content)) {
+    return true;
+  }
+  if (PROJECT_CODE_PATH_HINT_RE.test(content) && /(read|edit|run)/i.test(content)) {
+    return true;
+  }
+  return PROJECT_CODE_ACTION_RE.test(content) && PROJECT_CODE_TARGET_RE.test(content);
+}
+
 function projectFileKindLabel(fileKind: ProjectFileKind | undefined) {
   return fileKind === "notebook" ? "Notebook" : "Python";
 }
@@ -1102,43 +1163,52 @@ export default function App() {
       projects.every((project) => expandedProjectIds.includes(project.project_id)),
     [expandedProjectIds, projects],
   );
-  const openTabItems = useMemo(
-    () =>
-      openTabs.map((tab) => {
-        if (tab.kind === "thread") {
-          const loadedThread = threadMap[tab.id];
-          const title = loadedThread?.title ?? "New chat";
-          return {
-            key: `thread:${tab.id}`,
-            kind: tab.kind,
-            id: tab.id,
-            title: displayThreadTitle(title),
-            tabTitle: truncateTabTitle(title),
-          };
-        }
-        if (tab.kind === "project_home") {
-          const project = projects.find((item) => item.project_id === tab.id);
-          const title = project ? `${project.name} Home` : "Project Home";
-          return {
-            key: `project_home:${tab.id}`,
-            kind: tab.kind,
-            id: tab.id,
-            title,
-            tabTitle: truncateTabTitle(title),
-          };
-        }
-        const loadedFile = pythonFileMap[tab.id];
-        const title = displayPythonFilename(loadedFile?.filename ?? "something.py");
+  const openTabItems = useMemo(() => {
+    const openPythonFiles = openTabs
+      .filter((tab): tab is Extract<OpenTab, { kind: "python_file" }> => tab.kind === "python_file")
+      .map(
+        (tab) =>
+          pythonFileMap[tab.id] ?? { filename: "something.py", repo_path: `src/${tab.id}.py` },
+      );
+    const duplicateKeys = duplicatePythonFilenameKeys(openPythonFiles);
+    return openTabs.map((tab) => {
+      if (tab.kind === "thread") {
+        const loadedThread = threadMap[tab.id];
+        const title = loadedThread?.title ?? "New chat";
         return {
-          key: `python_file:${tab.id}`,
+          key: `thread:${tab.id}`,
+          kind: tab.kind,
+          id: tab.id,
+          title: displayThreadTitle(title),
+          tabTitle: truncateTabTitle(title),
+        };
+      }
+      if (tab.kind === "project_home") {
+        const project = projects.find((item) => item.project_id === tab.id);
+        const title = project ? `${project.name} Home` : "Project Home";
+        return {
+          key: `project_home:${tab.id}`,
           kind: tab.kind,
           id: tab.id,
           title,
           tabTitle: truncateTabTitle(title),
         };
-      }),
-    [openTabs, projects, pythonFileMap, threadMap],
-  );
+      }
+      const loadedFile = pythonFileMap[tab.id];
+      const file = loadedFile ?? {
+        filename: "something.py",
+        repo_path: `src/${tab.id}.py`,
+      };
+      const title = displayPythonTabTitle(file, duplicateKeys);
+      return {
+        key: `python_file:${tab.id}`,
+        kind: tab.kind,
+        id: tab.id,
+        title,
+        tabTitle: truncateTabTitle(title),
+      };
+    });
+  }, [openTabs, projects, pythonFileMap, threadMap]);
   const hasOpenTabs = openTabItems.length > 0;
   const tabStripStyle = useMemo(
     () =>
@@ -1911,6 +1981,39 @@ export default function App() {
     [upsertPythonFileIntoProjectItems],
   );
 
+  const persistPythonFile = useCallback(
+    async (fileId: string, content: string) => {
+      const updated = await updatePythonFile(fileId, { content });
+      setPythonFileMap((current) => ({ ...current, [updated.file_id]: updated }));
+      setPythonFileDrafts((current) => ({
+        ...current,
+        [updated.file_id]: { content: updated.content, dirty: false },
+      }));
+      upsertPythonFileIntoProjectItems(updated);
+      await refreshProjects();
+      return updated;
+    },
+    [refreshProjects, upsertPythonFileIntoProjectItems],
+  );
+
+  const persistDirtyProjectDrafts = useCallback(
+    async (projectId: string) => {
+      const dirtyFileIds = Object.entries(pythonFileDraftsRef.current)
+        .filter(([fileId, draft]) => {
+          const pythonFile = pythonFileMapRef.current[fileId];
+          return Boolean(draft.dirty && pythonFile && pythonFile.project_id === projectId);
+        })
+        .map(([fileId]) => fileId);
+      for (const fileId of dirtyFileIds) {
+        const pythonFile =
+          pythonFileMapRef.current[fileId] ?? (await fetchAndStorePythonFile(fileId));
+        const nextContent = pythonFileDraftsRef.current[fileId]?.content ?? pythonFile.content;
+        await persistPythonFile(fileId, nextContent);
+      }
+    },
+    [fetchAndStorePythonFile, persistPythonFile],
+  );
+
   const openPythonFile = useCallback(
     async (fileId: string) => {
       const file = pythonFileMapRef.current[fileId] ?? (await fetchAndStorePythonFile(fileId));
@@ -1975,16 +2078,33 @@ export default function App() {
 
   const sendMessage = useCallback(
     async (threadId: string, content: string) => {
-      const optimisticUserMessage = createLocalMessage("user", content);
-      const now = new Date().toISOString();
-      const fallbackThread = threadMapRef.current[threadId];
-      const turnIndex =
-        (fallbackThread?.messages.filter((message) => message.role === "user").length ?? 0) + 1;
-      const fallbackProjectId =
-        fallbackThread?.project_id ??
+      const existingThread = threadMapRef.current[threadId];
+      const projectIdForTurn =
+        existingThread?.project_id ??
         selectedProjectIdRef.current ??
         projectsRef.current[0]?.project_id ??
         "";
+      if (projectIdForTurn && messageHasProjectCodeIntent(content)) {
+        try {
+          await persistDirtyProjectDrafts(projectIdForTurn);
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : "Project drafts could not be saved.";
+          setComposerStatus(message);
+          if (message.toLowerCase().includes("github")) {
+            showErrorFlash(message);
+            setAuthView("settings");
+            setAuthModalOpen(true);
+          }
+          return null;
+        }
+      }
+      const optimisticUserMessage = createLocalMessage("user", content);
+      const now = new Date().toISOString();
+      const fallbackThread = existingThread;
+      const turnIndex =
+        (fallbackThread?.messages.filter((message) => message.role === "user").length ?? 0) + 1;
+      const fallbackProjectId = projectIdForTurn;
       const fallbackProjectName =
         fallbackThread?.project_name ??
         projectsRef.current.find((project) => project.project_id === fallbackProjectId)?.name ??
@@ -2324,6 +2444,7 @@ export default function App() {
       includePapers,
       includeUploads,
       markThreadAssistantStarted,
+      persistDirtyProjectDrafts,
       refreshProjects,
       setThreadUsageSnapshot,
       showErrorFlash,
@@ -3296,21 +3417,6 @@ export default function App() {
     ],
   );
 
-  const persistPythonFile = useCallback(
-    async (fileId: string, content: string) => {
-      const updated = await updatePythonFile(fileId, { content });
-      setPythonFileMap((current) => ({ ...current, [updated.file_id]: updated }));
-      setPythonFileDrafts((current) => ({
-        ...current,
-        [updated.file_id]: { content: updated.content, dirty: false },
-      }));
-      upsertPythonFileIntoProjectItems(updated);
-      await refreshProjects();
-      return updated;
-    },
-    [refreshProjects, upsertPythonFileIntoProjectItems],
-  );
-
   const applyConflictResolutionsLocally = useCallback(
     (projectId: string, resolutions: ProjectRepoConflictResolution[]) => {
       if (resolutions.length === 0) {
@@ -3537,7 +3643,7 @@ export default function App() {
         [fileId]: { running: true, result: null, error: "" },
       }));
       try {
-        const result = await runPythonFile(fileId);
+        const result = await runPythonFile(fileId, "full");
         setPythonFileRuns((current) => ({
           ...current,
           [fileId]: { running: false, result, error: "" },
@@ -3635,7 +3741,7 @@ export default function App() {
         }));
         return;
       }
-      const result = await runPythonFile(activePythonFileId);
+      const result = await runPythonFile(activePythonFileId, "full");
       setPythonFileRuns((current) => ({
         ...current,
         [activePythonFileId]: { running: false, result, error: "" },
@@ -4254,58 +4360,82 @@ export default function App() {
                                   </div>
                                   {!collapsedCategories.code && codeItems.length > 0 ? (
                                     <div className="thread-list project-thread-list project-category-list">
-                                      {codeItems.map((item) => {
-                                        const title = displayPythonFilename(
-                                          item.filename || item.title,
-                                        );
-                                        return (
-                                          <div
-                                            key={item.item_id}
-                                            role="button"
-                                            tabIndex={0}
-                                            className={`thread-card python-file-card${activePythonFileId === item.file_id ? " active" : ""}`}
-                                            title={title}
-                                            onClick={() =>
-                                              void handlePythonFileSelection(item.file_id ?? "")
-                                            }
-                                            onKeyDown={(event) => {
-                                              if (event.key === "Enter" || event.key === " ") {
-                                                event.preventDefault();
-                                                void handlePythonFileSelection(item.file_id ?? "");
+                                      {(() => {
+                                        const duplicateKeys =
+                                          duplicatePythonFilenameKeys(codeItems);
+                                        return codeItems.map((item) => {
+                                          const displayFile = {
+                                            filename: item.filename || item.title,
+                                            repo_path: item.repo_path,
+                                          };
+                                          const title = displayPythonFileTitle(
+                                            displayFile,
+                                            duplicateKeys,
+                                          );
+                                          const pathContext = displayPythonFilePathContext(
+                                            displayFile,
+                                            duplicateKeys,
+                                          );
+                                          return (
+                                            <div
+                                              key={item.item_id}
+                                              role="button"
+                                              tabIndex={0}
+                                              className={`thread-card python-file-card${activePythonFileId === item.file_id ? " active" : ""}`}
+                                              title={pathContext || title}
+                                              onClick={() =>
+                                                void handlePythonFileSelection(item.file_id ?? "")
                                               }
-                                            }}
-                                          >
-                                            <div className="thread-card-copy python-file-card-copy">
-                                              <AppIcon
-                                                src={staticAssetPath(
-                                                  item.file_kind === "notebook"
-                                                    ? "note.svg"
-                                                    : "python.svg",
-                                                )}
-                                                className="python-file-card-icon"
-                                              />
-                                              <strong className="thread-card-title">{title}</strong>
-                                            </div>
-                                            <span className="thread-card-age">
-                                              {formatThreadAge(item.updated_at)}
-                                            </span>
-                                            <button
-                                              type="button"
-                                              className="thread-card-delete thread-card-rename"
-                                              aria-label={`Rename ${title}`}
-                                              onClick={(event) => {
-                                                event.stopPropagation();
-                                                void handleRenamePythonFile(item.file_id ?? "");
+                                              onKeyDown={(event) => {
+                                                if (event.key === "Enter" || event.key === " ") {
+                                                  event.preventDefault();
+                                                  void handlePythonFileSelection(
+                                                    item.file_id ?? "",
+                                                  );
+                                                }
                                               }}
                                             >
-                                              <AppIcon
-                                                src={staticAssetPath("edit.svg")}
-                                                className="thread-card-delete-icon"
-                                              />
-                                            </button>
-                                          </div>
-                                        );
-                                      })}
+                                              <div className="thread-card-copy python-file-card-copy">
+                                                <AppIcon
+                                                  src={staticAssetPath(
+                                                    item.file_kind === "notebook"
+                                                      ? "note.svg"
+                                                      : "python.svg",
+                                                  )}
+                                                  className="python-file-card-icon"
+                                                />
+                                                <span className="python-file-card-text">
+                                                  <strong className="thread-card-title">
+                                                    {title}
+                                                  </strong>
+                                                  {pathContext ? (
+                                                    <span className="thread-card-subtitle">
+                                                      {pathContext}
+                                                    </span>
+                                                  ) : null}
+                                                </span>
+                                              </div>
+                                              <span className="thread-card-age">
+                                                {formatThreadAge(item.updated_at)}
+                                              </span>
+                                              <button
+                                                type="button"
+                                                className="thread-card-delete thread-card-rename"
+                                                aria-label={`Rename ${title}`}
+                                                onClick={(event) => {
+                                                  event.stopPropagation();
+                                                  void handleRenamePythonFile(item.file_id ?? "");
+                                                }}
+                                              >
+                                                <AppIcon
+                                                  src={staticAssetPath("edit.svg")}
+                                                  className="thread-card-delete-icon"
+                                                />
+                                              </button>
+                                            </div>
+                                          );
+                                        });
+                                      })()}
                                     </div>
                                   ) : !collapsedCategories.code ? (
                                     <div className="project-tree-empty">No code files yet.</div>

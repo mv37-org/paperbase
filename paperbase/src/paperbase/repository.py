@@ -8,6 +8,7 @@ from collections import defaultdict
 from collections.abc import Iterable
 from contextlib import contextmanager
 from datetime import timedelta
+from pathlib import PurePosixPath
 from typing import Any
 
 from pgvector.sqlalchemy import Vector
@@ -389,6 +390,37 @@ def _resolve_unique_project_filename(
         index += 1
         candidate = f"{stem}_{index}{suffix}"
     return candidate
+
+
+def _filename_from_repo_path(repo_path: str) -> str:
+    return PurePosixPath(repo_path).name
+
+
+def _resolve_unique_repo_path(
+    repo_path: str,
+    existing_repo_paths: Iterable[str],
+    *,
+    exclude_repo_path: str | None = None,
+) -> str:
+    taken = {value for value in existing_repo_paths if value and value != exclude_repo_path}
+    if repo_path not in taken:
+        return repo_path
+    path = PurePosixPath(repo_path)
+    parent = "" if str(path.parent) == "." else str(path.parent)
+    filename = path.name
+    if "." in filename:
+        stem, suffix = filename.rsplit(".", 1)
+        suffix = f".{suffix}"
+    else:
+        stem, suffix = filename, ""
+    index = 2
+    candidate_name = f"{stem}_{index}{suffix}"
+    candidate_path = f"{parent}/{candidate_name}" if parent else candidate_name
+    while candidate_path in taken:
+        index += 1
+        candidate_name = f"{stem}_{index}{suffix}"
+        candidate_path = f"{parent}/{candidate_name}" if parent else candidate_name
+    return candidate_path
 
 
 def _repo_path_for_filename(filename: str, file_kind: str, repo_path: str | None = None) -> str:
@@ -1399,8 +1431,13 @@ class SqlAlchemyPaperRepository(PaperRepository):
             )
             connection.execute(
                 text(
-                    "CREATE UNIQUE INDEX IF NOT EXISTS python_files_project_filename_unique "
-                    "ON python_files (project_id, filename)"
+                    "DROP INDEX IF EXISTS python_files_project_filename_unique"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS python_files_project_repo_path_unique "
+                    "ON python_files (project_id, repo_path)"
                 )
             )
             connection.execute(
@@ -3365,21 +3402,19 @@ class SqlAlchemyPaperRepository(PaperRepository):
             )
             if project is None:
                 return None
-            existing_filenames = session.scalars(
-                select(PythonFileORM.filename).where(PythonFileORM.project_id == project_id)
+            existing_repo_paths = session.scalars(
+                select(PythonFileORM.repo_path).where(PythonFileORM.project_id == project_id)
             ).all()
-            resolved_filename = (
-                _resolve_unique_python_filename(filename, existing_filenames)
-                if file_kind == "python"
-                else _resolve_unique_project_filename(filename, existing_filenames)
-            )
+            base_repo_path = _repo_path_for_filename(filename, file_kind, repo_path)
+            resolved_repo_path = _resolve_unique_repo_path(base_repo_path, existing_repo_paths)
+            resolved_filename = _filename_from_repo_path(resolved_repo_path)
             row = PythonFileORM(
                 file_id=new_id("pyf"),
                 user_id=user_id,
                 project_id=project_id,
                 filename=resolved_filename,
                 file_kind=file_kind,
-                repo_path=_repo_path_for_filename(resolved_filename, file_kind, repo_path),
+                repo_path=resolved_repo_path,
                 content=content,
             )
             session.add(row)
@@ -3411,29 +3446,34 @@ class SqlAlchemyPaperRepository(PaperRepository):
             if row is None:
                 return None
             updated_at = utcnow()
+            next_repo_path = row.repo_path or _repo_path_for_filename(row.filename, row.file_kind or "python")
+            next_filename = row.filename
             if filename is not None and filename.strip():
-                existing_filenames = session.scalars(
-                    select(PythonFileORM.filename).where(PythonFileORM.project_id == row.project_id)
+                existing_repo_paths = session.scalars(
+                    select(PythonFileORM.repo_path).where(PythonFileORM.project_id == row.project_id)
                 ).all()
-                row.filename = (
-                    _resolve_unique_python_filename(
-                        filename,
-                        existing_filenames,
-                        exclude_filename=row.filename,
-                    )
-                    if (row.file_kind or "python") == "python"
-                    else _resolve_unique_project_filename(
-                        filename,
-                        existing_filenames,
-                        exclude_filename=row.filename,
-                    )
+                requested_repo_path = _repo_path_with_filename(
+                    next_repo_path,
+                    filename,
                 )
-                row.repo_path = _repo_path_with_filename(
-                    row.repo_path or _repo_path_for_filename(row.filename, row.file_kind or "python"),
-                    row.filename,
+                next_repo_path = _resolve_unique_repo_path(
+                    requested_repo_path,
+                    existing_repo_paths,
+                    exclude_repo_path=row.repo_path,
                 )
+                next_filename = _filename_from_repo_path(next_repo_path)
             if repo_path is not None and repo_path.strip():
-                row.repo_path = repo_path.strip()
+                existing_repo_paths = session.scalars(
+                    select(PythonFileORM.repo_path).where(PythonFileORM.project_id == row.project_id)
+                ).all()
+                next_repo_path = _resolve_unique_repo_path(
+                    repo_path.strip(),
+                    existing_repo_paths,
+                    exclude_repo_path=row.repo_path,
+                )
+                next_filename = _filename_from_repo_path(next_repo_path)
+            row.filename = next_filename
+            row.repo_path = next_repo_path
             if content is not None:
                 row.content = content
             row.updated_at = updated_at
@@ -3441,6 +3481,39 @@ class SqlAlchemyPaperRepository(PaperRepository):
             if project is not None:
                 project.updated_at = updated_at
         return self.get_python_file(user_id=user_id, file_id=file_id)
+
+    def get_project_python_file_by_path(
+        self,
+        *,
+        user_id: str,
+        project_id: str,
+        repo_path: str,
+    ) -> PythonFileResponse | None:
+        with self._session() as session:
+            row = session.scalar(
+                select(PythonFileORM).where(
+                    PythonFileORM.user_id == user_id,
+                    PythonFileORM.project_id == project_id,
+                    PythonFileORM.repo_path == repo_path,
+                )
+            )
+            if row is None:
+                return None
+        return _python_file_from_orm(row)
+
+    def delete_python_file(self, *, user_id: str, file_id: str) -> bool:
+        with self._session() as session:
+            row = session.scalar(
+                select(PythonFileORM).where(PythonFileORM.file_id == file_id, PythonFileORM.user_id == user_id)
+            )
+            if row is None:
+                return False
+            updated_at = utcnow()
+            project = session.get(ProjectORM, row.project_id)
+            if project is not None:
+                project.updated_at = updated_at
+            session.delete(row)
+        return True
 
     def get_project_repo_sync(self, *, user_id: str, project_id: str) -> ProjectRepoSyncResponse | None:
         with self._session() as session:
@@ -5207,23 +5280,21 @@ class MemoryPaperRepository(PaperRepository):
         project = self.get_project(user_id=user_id, project_id=project_id)
         if project is None:
             return None
-        existing = [
-            file.filename
+        existing_repo_paths = [
+            file.repo_path
             for file in self.python_files.values()
             if self.python_file_users.get(file.file_id) == user_id and file.project_id == project_id
         ]
-        resolved_filename = (
-            _resolve_unique_python_filename(filename, existing)
-            if file_kind == "python"
-            else _resolve_unique_project_filename(filename, existing)
-        )
+        base_repo_path = _repo_path_for_filename(filename, file_kind, repo_path)
+        resolved_repo_path = _resolve_unique_repo_path(base_repo_path, existing_repo_paths)
+        resolved_filename = _filename_from_repo_path(resolved_repo_path)
         now = utcnow()
         file = PythonFileResponse(
             file_id=new_id("pyf"),
             project_id=project_id,
             filename=resolved_filename,
             file_kind=file_kind,  # type: ignore[arg-type]
-            repo_path=_repo_path_for_filename(resolved_filename, file_kind, repo_path),
+            repo_path=resolved_repo_path,
             content=content,
             created_at=now,
             updated_at=now,
@@ -5250,31 +5321,36 @@ class MemoryPaperRepository(PaperRepository):
         current = self.get_python_file(user_id=user_id, file_id=file_id)
         if current is None:
             return None
+        next_repo_path = current.repo_path or _repo_path_for_filename(current.filename, current.file_kind)
         next_filename = current.filename
         if filename is not None and filename.strip():
-            existing = [
-                file.filename
+            existing_repo_paths = [
+                file.repo_path
                 for file in self.python_files.values()
                 if self.python_file_users.get(file.file_id) == user_id and file.project_id == current.project_id
             ]
-            next_filename = (
-                _resolve_unique_python_filename(
-                    filename,
-                    existing,
-                    exclude_filename=current.filename,
-                )
-                if current.file_kind == "python"
-                else _resolve_unique_project_filename(
-                    filename,
-                    existing,
-                    exclude_filename=current.filename,
-                )
+            requested_repo_path = _repo_path_with_filename(
+                next_repo_path,
+                filename,
             )
-        next_repo_path = current.repo_path
-        if filename is not None and filename.strip():
-            next_repo_path = _repo_path_with_filename(current.repo_path or _repo_path_for_filename(current.filename, current.file_kind), next_filename)
+            next_repo_path = _resolve_unique_repo_path(
+                requested_repo_path,
+                existing_repo_paths,
+                exclude_repo_path=current.repo_path,
+            )
+            next_filename = _filename_from_repo_path(next_repo_path)
         if repo_path is not None and repo_path.strip():
-            next_repo_path = repo_path.strip()
+            existing_repo_paths = [
+                file.repo_path
+                for file in self.python_files.values()
+                if self.python_file_users.get(file.file_id) == user_id and file.project_id == current.project_id
+            ]
+            next_repo_path = _resolve_unique_repo_path(
+                repo_path.strip(),
+                existing_repo_paths,
+                exclude_repo_path=current.repo_path,
+            )
+            next_filename = _filename_from_repo_path(next_repo_path)
         updated_at = utcnow()
         updated = current.model_copy(
             update={
@@ -5289,6 +5365,33 @@ class MemoryPaperRepository(PaperRepository):
         if project is not None:
             self.projects[current.project_id] = project.model_copy(update={"updated_at": updated_at})
         return updated
+
+    def get_project_python_file_by_path(
+        self,
+        *,
+        user_id: str,
+        project_id: str,
+        repo_path: str,
+    ) -> PythonFileResponse | None:
+        for file in self.python_files.values():
+            if (
+                self.python_file_users.get(file.file_id) == user_id
+                and file.project_id == project_id
+                and file.repo_path == repo_path
+            ):
+                return file
+        return None
+
+    def delete_python_file(self, *, user_id: str, file_id: str) -> bool:
+        current = self.get_python_file(user_id=user_id, file_id=file_id)
+        if current is None:
+            return False
+        self.python_files.pop(file_id, None)
+        self.python_file_users.pop(file_id, None)
+        project = self.projects.get(current.project_id)
+        if project is not None:
+            self.projects[current.project_id] = project.model_copy(update={"updated_at": utcnow()})
+        return True
 
     def get_project_repo_sync(self, *, user_id: str, project_id: str) -> ProjectRepoSyncResponse | None:
         if self.get_project(user_id=user_id, project_id=project_id) is None:

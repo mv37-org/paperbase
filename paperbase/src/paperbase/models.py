@@ -424,6 +424,10 @@ class UpdatePythonFileRequest(BaseModel):
     content: str | None = None
 
 
+class RunPythonFileRequest(BaseModel):
+    mode: Literal["smoke", "full"] = "full"
+
+
 class ProjectItemSummary(BaseModel):
     item_id: str
     item_kind: str
