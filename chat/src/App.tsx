@@ -90,7 +90,13 @@ type OpenTab =
   | { kind: "thread"; id: string }
   | { kind: "python_file"; id: string }
   | { kind: "project_home"; id: string };
-type ProjectSidebarCategoryKey = "code" | "sessions" | "notes" | "data" | "experiments";
+type ProjectSidebarCategoryKey =
+  | "workflows"
+  | "experiments"
+  | "data"
+  | "notes"
+  | "sessions"
+  | "code";
 type ProjectItemState = {
   items: ProjectItemSummary[];
   totalCount: number;
@@ -238,10 +244,16 @@ const APPEARANCE_OPTIONS: Array<{
 
 const AUTHENTICATED_DARK_THEME_CLASS = "authenticated-theme-dark";
 const PROJECT_PLACEHOLDER_CATEGORIES = [
-  { key: "notes", label: "Notes", asset: "notes.svg" },
-  { key: "data", label: "Data", asset: "data.svg" },
-  { key: "experiments", label: "Experiments", asset: "experiments.svg" },
-] satisfies Array<{ key: ProjectSidebarCategoryKey; label: string; asset: string }>;
+  { key: "workflows", label: "Workflows", asset: "workflow.svg", showCount: true },
+  { key: "experiments", label: "Experiments", asset: "experiments.svg", showCount: true },
+  { key: "data", label: "Data", asset: "data.svg", showCount: false },
+  { key: "notes", label: "Notes", asset: "notes.svg", showCount: false },
+] satisfies Array<{
+  key: ProjectSidebarCategoryKey;
+  label: string;
+  asset: string;
+  showCount: boolean;
+}>;
 
 function SettingsSectionHeading({ title, caption }: { title: string; caption: string }) {
   return (
@@ -3895,8 +3907,6 @@ export default function App() {
                       last_message_preview: item.last_message_preview,
                     });
                   });
-                  const codeCount = itemState?.totalCountByKind?.python_file ?? codeItems.length;
-                  const sessionCount = itemState?.totalCountByKind?.thread ?? sessionItems.length;
                   const codeHasMore = Boolean(itemState?.hasMoreByKind?.python_file);
                   const sessionsHasMore = Boolean(itemState?.hasMoreByKind?.thread);
                   const codeLoadingMore = Boolean(itemState?.loadingMoreByKind?.python_file);
@@ -4010,6 +4020,124 @@ export default function App() {
                           {itemState?.loaded ? (
                             <>
                               <div className="project-tree">
+                                {PROJECT_PLACEHOLDER_CATEGORIES.map((category) => (
+                                  <div key={category.label} className="project-tree-category">
+                                    <div className="project-tree-category-header">
+                                      <button
+                                        type="button"
+                                        className="project-tree-category-label"
+                                        aria-expanded={!collapsedCategories[category.key]}
+                                        onClick={() =>
+                                          toggleProjectCategory(project.project_id, category.key)
+                                        }
+                                      >
+                                        <span
+                                          className="project-tree-category-chevron"
+                                          aria-hidden="true"
+                                        />
+                                        <MaskedAssetIcon
+                                          asset={category.asset}
+                                          className="project-tree-category-icon"
+                                        />
+                                        <span>{category.label}</span>
+                                      </button>
+                                      {category.showCount ? (
+                                        <div className="project-tree-category-actions">
+                                          <em className="project-tree-category-count">0</em>
+                                        </div>
+                                      ) : null}
+                                    </div>
+                                    {!collapsedCategories[category.key] ? (
+                                      <div className="project-tree-empty">Empty</div>
+                                    ) : null}
+                                  </div>
+                                ))}
+                                <div className="project-tree-category">
+                                  <div className="project-tree-category-header">
+                                    <button
+                                      type="button"
+                                      className="project-tree-category-label"
+                                      aria-expanded={!collapsedCategories.sessions}
+                                      onClick={() =>
+                                        toggleProjectCategory(project.project_id, "sessions")
+                                      }
+                                    >
+                                      <span
+                                        className="project-tree-category-chevron"
+                                        aria-hidden="true"
+                                      />
+                                      <MaskedAssetIcon
+                                        asset="sessions.svg"
+                                        className="project-tree-category-icon"
+                                      />
+                                      <span>Sessions</span>
+                                    </button>
+                                  </div>
+                                  {!collapsedCategories.sessions && sessionItems.length > 0 ? (
+                                    <div className="thread-list project-thread-list project-category-list">
+                                      {sessionItems.map((item) => {
+                                        const title = displayThreadTitle(item.title);
+                                        return (
+                                          <div
+                                            key={item.item_id}
+                                            role="button"
+                                            tabIndex={0}
+                                            className={`thread-card${activeThreadId === item.thread_id ? " active" : ""}`}
+                                            title={title}
+                                            onClick={() =>
+                                              void handleThreadSelection(item.thread_id ?? "")
+                                            }
+                                            onKeyDown={(event) => {
+                                              if (event.key === "Enter" || event.key === " ") {
+                                                event.preventDefault();
+                                                void handleThreadSelection(item.thread_id ?? "");
+                                              }
+                                            }}
+                                          >
+                                            <div className="thread-card-copy">
+                                              <strong className="thread-card-title">{title}</strong>
+                                            </div>
+                                            <span className="thread-card-age">
+                                              {formatThreadAge(item.updated_at)}
+                                            </span>
+                                            <button
+                                              type="button"
+                                              className="thread-card-delete"
+                                              aria-label={`Delete ${title}`}
+                                              onClick={(event) => {
+                                                event.stopPropagation();
+                                                openDeleteThreadModal(
+                                                  project.project_id,
+                                                  item.thread_id ?? "",
+                                                  title,
+                                                );
+                                              }}
+                                            >
+                                              <AppIcon
+                                                src={staticAssetPath("delete-session.svg")}
+                                                className="thread-card-delete-icon"
+                                              />
+                                            </button>
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  ) : !collapsedCategories.sessions ? (
+                                    <div className="project-tree-empty">No sessions yet.</div>
+                                  ) : null}
+                                  {!collapsedCategories.sessions && sessionsHasMore ? (
+                                    <button
+                                      type="button"
+                                      className="project-show-more"
+                                      disabled={sessionsLoadingMore}
+                                      onClick={() =>
+                                        void handleLoadMoreItems(project.project_id, "thread")
+                                      }
+                                    >
+                                      {sessionsLoadingMore ? "Loading..." : "Show more"}
+                                    </button>
+                                  ) : null}
+                                </div>
                                 <div className="project-tree-category">
                                   <div className="project-tree-category-header">
                                     <button
@@ -4047,7 +4175,6 @@ export default function App() {
                                           />
                                         </a>
                                       ) : null}
-                                      <em className="project-tree-category-count">{codeCount}</em>
                                     </div>
                                   </div>
                                   {!collapsedCategories.code && codeItems.length > 0 ? (
@@ -4117,131 +4244,10 @@ export default function App() {
                                         void handleLoadMoreItems(project.project_id, "python_file")
                                       }
                                     >
-                                      {codeLoadingMore ? "Loading…" : "Show more"}
+                                      {codeLoadingMore ? "Loading..." : "Show more"}
                                     </button>
                                   ) : null}
                                 </div>
-                                <div className="project-tree-category">
-                                  <div className="project-tree-category-header">
-                                    <button
-                                      type="button"
-                                      className="project-tree-category-label"
-                                      aria-expanded={!collapsedCategories.sessions}
-                                      onClick={() =>
-                                        toggleProjectCategory(project.project_id, "sessions")
-                                      }
-                                    >
-                                      <span
-                                        className="project-tree-category-chevron"
-                                        aria-hidden="true"
-                                      />
-                                      <MaskedAssetIcon
-                                        asset="sessions.svg"
-                                        className="project-tree-category-icon"
-                                      />
-                                      <span>Sessions</span>
-                                    </button>
-                                    <div className="project-tree-category-actions">
-                                      <em className="project-tree-category-count">
-                                        {sessionCount}
-                                      </em>
-                                    </div>
-                                  </div>
-                                  {!collapsedCategories.sessions && sessionItems.length > 0 ? (
-                                    <div className="thread-list project-thread-list project-category-list">
-                                      {sessionItems.map((item) => {
-                                        const title = displayThreadTitle(item.title);
-                                        return (
-                                          <div
-                                            key={item.item_id}
-                                            role="button"
-                                            tabIndex={0}
-                                            className={`thread-card${activeThreadId === item.thread_id ? " active" : ""}`}
-                                            title={title}
-                                            onClick={() =>
-                                              void handleThreadSelection(item.thread_id ?? "")
-                                            }
-                                            onKeyDown={(event) => {
-                                              if (event.key === "Enter" || event.key === " ") {
-                                                event.preventDefault();
-                                                void handleThreadSelection(item.thread_id ?? "");
-                                              }
-                                            }}
-                                          >
-                                            <div className="thread-card-copy">
-                                              <strong className="thread-card-title">{title}</strong>
-                                            </div>
-                                            <span className="thread-card-age">
-                                              {formatThreadAge(item.updated_at)}
-                                            </span>
-                                            <button
-                                              type="button"
-                                              className="thread-card-delete"
-                                              aria-label={`Delete ${title}`}
-                                              onClick={(event) => {
-                                                event.stopPropagation();
-                                                openDeleteThreadModal(
-                                                  project.project_id,
-                                                  item.thread_id ?? "",
-                                                  title,
-                                                );
-                                              }}
-                                            >
-                                              <AppIcon
-                                                src={staticAssetPath("delete-session.svg")}
-                                                className="thread-card-delete-icon"
-                                              />
-                                            </button>
-                                          </div>
-                                        );
-                                      })}
-                                    </div>
-                                  ) : !collapsedCategories.sessions ? (
-                                    <div className="project-tree-empty">No sessions yet.</div>
-                                  ) : null}
-                                  {!collapsedCategories.sessions && sessionsHasMore ? (
-                                    <button
-                                      type="button"
-                                      className="project-show-more"
-                                      disabled={sessionsLoadingMore}
-                                      onClick={() =>
-                                        void handleLoadMoreItems(project.project_id, "thread")
-                                      }
-                                    >
-                                      {sessionsLoadingMore ? "Loading…" : "Show more"}
-                                    </button>
-                                  ) : null}
-                                </div>
-                                {PROJECT_PLACEHOLDER_CATEGORIES.map((category) => (
-                                  <div key={category.label} className="project-tree-category">
-                                    <div className="project-tree-category-header">
-                                      <button
-                                        type="button"
-                                        className="project-tree-category-label"
-                                        aria-expanded={!collapsedCategories[category.key]}
-                                        onClick={() =>
-                                          toggleProjectCategory(project.project_id, category.key)
-                                        }
-                                      >
-                                        <span
-                                          className="project-tree-category-chevron"
-                                          aria-hidden="true"
-                                        />
-                                        <MaskedAssetIcon
-                                          asset={category.asset}
-                                          className="project-tree-category-icon"
-                                        />
-                                        <span>{category.label}</span>
-                                      </button>
-                                      <div className="project-tree-category-actions">
-                                        <em className="project-tree-category-count">0</em>
-                                      </div>
-                                    </div>
-                                    {!collapsedCategories[category.key] ? (
-                                      <div className="project-tree-empty">Empty</div>
-                                    ) : null}
-                                  </div>
-                                ))}
                                 <button
                                   type="button"
                                   className={`project-tree-home${activeProjectHomeId === project.project_id ? " active" : ""}`}

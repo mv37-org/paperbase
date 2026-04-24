@@ -573,12 +573,25 @@ describe("App", () => {
     await waitFor(() => {
       expect(screen.getByText("Recovered thread")).toBeTruthy();
     });
+    const categoryLabels = [
+      ...document.querySelectorAll<HTMLElement>(".project-tree-category-label"),
+    ].map((element) => element.textContent?.trim());
+    expect(categoryLabels).toEqual([
+      "Workflows",
+      "Experiments",
+      "Data",
+      "Notes",
+      "Sessions",
+      "Code",
+    ]);
+    expect(document.querySelectorAll(".project-tree-category-count")).toHaveLength(2);
     expect(screen.getByText("Home")).toBeTruthy();
-    expect(screen.getByText("Code")).toBeTruthy();
-    expect(screen.getByText("Sessions")).toBeTruthy();
+    expect(screen.getByText("Workflows")).toBeTruthy();
+    expect(screen.getByText("Experiments")).toBeTruthy();
     expect(screen.getByText("Notes")).toBeTruthy();
     expect(screen.getByText("Data")).toBeTruthy();
-    expect(screen.getByText("Experiments")).toBeTruthy();
+    expect(screen.getByText("Sessions")).toBeTruthy();
+    expect(screen.getByText("Code")).toBeTruthy();
 
     fireEvent.click(screen.getByText("Sessions"));
     expect(screen.queryByText("Recovered thread")).toBeNull();
