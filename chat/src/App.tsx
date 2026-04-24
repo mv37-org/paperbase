@@ -4670,7 +4670,12 @@ export default function App() {
                             }
                           }}
                         >
-                          <span className="chat-tab-title">{tab.tabTitle}</span>
+                          <span className="chat-tab-label">
+                            {tab.kind === "thread" ? (
+                              <span className="chat-tab-thread-indicator" aria-hidden="true" />
+                            ) : null}
+                            <span className="chat-tab-title">{tab.tabTitle}</span>
+                          </span>
                         </button>
                         <button
                           type="button"

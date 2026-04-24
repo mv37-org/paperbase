@@ -560,6 +560,12 @@ describe("App", () => {
     });
     expect(apiMocks.getThread).toHaveBeenCalledWith("thread_1");
     expect(apiMocks.loadProjects).toHaveBeenCalledTimes(1);
+    const tabElements = [...document.querySelectorAll<HTMLElement>(".chat-tab")];
+    const restoredTab = tabElements.find((element) =>
+      element.textContent?.includes("Restored research thread"),
+    );
+    expect(restoredTab?.querySelector(".chat-tab-thread-indicator")).toBeTruthy();
+    expect(document.querySelectorAll(".chat-tab-thread-indicator")).toHaveLength(1);
   });
 
   it("loads project sessions lazily when a project is expanded", async () => {
