@@ -601,9 +601,12 @@ describe("App", () => {
 
     fireEvent.click(screen.getByLabelText("Collapse all sections in General"));
     expect(screen.queryByText("Recovered thread")).toBeNull();
+    expect(screen.queryByText("Workflows")).toBeNull();
+    expect(screen.queryByText("Home")).toBeNull();
     expect(screen.getByLabelText("Expand all sections in General")).toBeTruthy();
 
     fireEvent.click(screen.getByLabelText("Expand all sections in General"));
+    expect(await screen.findByText("Workflows")).toBeTruthy();
     expect(await screen.findByText("Recovered thread")).toBeTruthy();
 
     fireEvent.click(screen.getByText("Home"));

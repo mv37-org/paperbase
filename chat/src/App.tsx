@@ -251,6 +251,10 @@ const PROJECT_SIDEBAR_CATEGORY_KEYS: ProjectSidebarCategoryKey[] = [
   "sessions",
   "code",
 ];
+const buildProjectCategoryCollapseState = (collapsed: boolean) =>
+  Object.fromEntries(PROJECT_SIDEBAR_CATEGORY_KEYS.map((key) => [key, collapsed])) as Partial<
+    Record<ProjectSidebarCategoryKey, boolean>
+  >;
 const PROJECT_PLACEHOLDER_CATEGORIES = [
   { key: "workflows", label: "Workflows", asset: "workflow.svg", showCount: true },
   { key: "experiments", label: "Experiments", asset: "experiments.svg", showCount: true },
@@ -2692,21 +2696,39 @@ export default function App() {
     [],
   );
 
-  const toggleAllProjectCategories = useCallback((projectId: string) => {
-    setCollapsedProjectCategories((current) => {
-      const projectCategories = current[projectId] ?? {};
+  const toggleAllProjectCategories = useCallback(
+    async (projectId: string) => {
+      const expanded = expandedProjectIds.includes(projectId);
+      const projectCategories = collapsedProjectCategories[projectId] ?? {};
       const allCollapsed = PROJECT_SIDEBAR_CATEGORY_KEYS.every((key) =>
         Boolean(projectCategories[key]),
       );
-      const nextCollapsed = !allCollapsed;
-      return {
+
+      if (!expanded || allCollapsed) {
+        setExpandedProjectIds((current) =>
+          current.includes(projectId) ? current : [...current, projectId],
+        );
+        setCollapsedProjectCategories((current) => ({
+          ...current,
+          [projectId]: buildProjectCategoryCollapseState(false),
+        }));
+        if (
+          !projectItemsRef.current[projectId]?.loaded &&
+          !projectItemsRef.current[projectId]?.loading
+        ) {
+          await fetchProjectItems(projectId);
+        }
+        return;
+      }
+
+      setCollapsedProjectCategories((current) => ({
         ...current,
-        [projectId]: Object.fromEntries(
-          PROJECT_SIDEBAR_CATEGORY_KEYS.map((key) => [key, nextCollapsed]),
-        ) as Partial<Record<ProjectSidebarCategoryKey, boolean>>,
-      };
-    });
-  }, []);
+        [projectId]: buildProjectCategoryCollapseState(true),
+      }));
+      setExpandedProjectIds((current) => current.filter((value) => value !== projectId));
+    },
+    [collapsedProjectCategories, expandedProjectIds, fetchProjectItems],
+  );
 
   const loadProjectRepoDetails = useCallback(
     async (owner: string, repo: string, branchOverride?: string) => {
@@ -3938,6 +3960,7 @@ export default function App() {
                   const allProjectCategoriesCollapsed = PROJECT_SIDEBAR_CATEGORY_KEYS.every((key) =>
                     Boolean(collapsedCategories[key]),
                   );
+                  const expandProjectSections = !expanded || allProjectCategoriesCollapsed;
                   return (
                     <div
                       key={project.project_id}
@@ -3974,19 +3997,19 @@ export default function App() {
                             type="button"
                             className="sidebar-icon-button project-action-button"
                             aria-label={
-                              allProjectCategoriesCollapsed
+                              expandProjectSections
                                 ? `Expand all sections in ${project.name}`
                                 : `Collapse all sections in ${project.name}`
                             }
                             onMouseDown={(event) => event.stopPropagation()}
                             onClick={(event) => {
                               event.stopPropagation();
-                              toggleAllProjectCategories(project.project_id);
+                              void toggleAllProjectCategories(project.project_id);
                             }}
                           >
                             <AppIcon
                               src={staticAssetPath(
-                                allProjectCategoriesCollapsed
+                                expandProjectSections
                                   ? "expand-projects.svg"
                                   : "collapse-projects.svg",
                               )}
