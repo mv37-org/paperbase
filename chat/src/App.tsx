@@ -151,11 +151,16 @@ type DeleteModalState =
 type ToolActivityEntry = {
   id: string;
   turnIndex: number;
+  toolName?: string;
   label: string;
   status: "running" | "completed";
   startedAt: string;
   finishedAt: string | null;
   isError: boolean;
+};
+type StreamingCodePreview = {
+  language: "python";
+  code: string;
 };
 type ThreadStreamState = {
   turnIndex: number;
@@ -360,6 +365,12 @@ const PROJECT_CODE_TARGET_RE =
 const PROJECT_CODE_DIRECT_TOOL_RE =
   /\b(project_(?:list_files|read_file|grep|touch|edit|delete|run))\b/i;
 const PROJECT_CODE_PATH_HINT_RE = /(?:^|[\s`'"])([A-Za-z0-9_./-]+\.py)(?:$|[\s`'",.:;!?])/i;
+const TOOL_ACTIVITY_TARGET_RE = /"([^"]+)"/;
+const PYTHON_FENCE_OPEN_RE = /^(```|~~~)\s*([A-Za-z0-9_+-]*)\s*$/;
+const PYTHON_KEYWORD_TOKEN_RE =
+  /\b(?:and|as|assert|async|await|break|case|class|continue|def|del|elif|else|except|False|finally|for|from|global|if|import|in|is|lambda|match|None|nonlocal|not|or|pass|raise|return|True|try|while|with|yield)\b/;
+const PYTHON_TOKEN_RE =
+  /("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|#.*$|@\w+|\b(?:and|as|assert|async|await|break|case|class|continue|def|del|elif|else|except|False|finally|for|from|global|if|import|in|is|lambda|match|None|nonlocal|not|or|pass|raise|return|True|try|while|with|yield)\b|\b\d+(?:\.\d+)?\b)/g;
 
 function staticAssetPath(name: string) {
   const path = `${import.meta.env.BASE_URL}${name.replace(/^\/+/, "")}`;
@@ -789,6 +800,178 @@ function messageHasProjectCodeIntent(content: string) {
     return true;
   }
   return PROJECT_CODE_ACTION_RE.test(content) && PROJECT_CODE_TARGET_RE.test(content);
+}
+
+function quotedToolActivityTarget(label: string) {
+  return label.match(TOOL_ACTIVITY_TARGET_RE)?.[1] ?? "";
+}
+
+function formatToolActivityText(
+  activity: Pick<ToolActivityEntry, "label" | "status" | "toolName">,
+) {
+  const running = activity.status === "running";
+  const target = quotedToolActivityTarget(activity.label);
+  switch (activity.toolName) {
+    case "project_list_files":
+      return running ? "Listing files..." : "Listed files";
+    case "project_read_file":
+      return running ? `Reading ${target || "file"}...` : `Read ${target || "file"}`;
+    case "project_grep":
+      return running
+        ? `Searching files${target ? ` for ${target}` : ""}...`
+        : `Searched files${target ? ` for ${target}` : ""}`;
+    case "project_touch":
+      return running ? `Creating ${target || "file"}...` : `Created ${target || "file"}`;
+    case "project_edit":
+      return running
+        ? `Writing code${target ? ` in ${target}` : ""}...`
+        : `Wrote code${target ? ` in ${target}` : ""}`;
+    case "project_delete":
+      return running ? `Deleting ${target || "file"}...` : `Deleted ${target || "file"}`;
+    case "project_run":
+      return running ? `Running ${target || "file"}...` : `Ran ${target || "file"}`;
+    default:
+      return running ? `Doing ${activity.label}...` : `Did ${activity.label}`;
+  }
+}
+
+function looksLikePythonCode(code: string) {
+  return /\b(?:def|class|import|from|return|torch|nn\.Module|if __name__)\b/.test(code);
+}
+
+function extractStreamingPythonPreview(markdown: string): StreamingCodePreview | null {
+  const lines = markdown.replace(/\r\n?/g, "\n").split("\n");
+  let fence: string | null = null;
+  let language = "";
+  let buffer: string[] = [];
+  let lastBlock: { language: string; code: string } | null = null;
+
+  for (const line of lines) {
+    if (!fence) {
+      const openMatch = line.match(PYTHON_FENCE_OPEN_RE);
+      if (openMatch) {
+        fence = openMatch[1];
+        language = (openMatch[2] ?? "").trim().toLowerCase();
+        buffer = [];
+      }
+      continue;
+    }
+
+    if (line.trim() === fence) {
+      lastBlock = { language, code: buffer.join("\n") };
+      fence = null;
+      language = "";
+      buffer = [];
+      continue;
+    }
+
+    buffer.push(line);
+  }
+
+  if (fence) {
+    lastBlock = { language, code: buffer.join("\n") };
+  }
+  if (!lastBlock) {
+    return null;
+  }
+
+  const code = lastBlock.code.replace(/\s+$/, "");
+  if (!code.trim()) {
+    return null;
+  }
+
+  const languageHint = lastBlock.language;
+  const isPython =
+    languageHint === "py" ||
+    languageHint === "python" ||
+    (languageHint.length === 0 && looksLikePythonCode(code));
+  if (!isPython) {
+    return null;
+  }
+
+  return { language: "python", code };
+}
+
+function classifyPythonToken(token: string) {
+  if (token.startsWith("#")) {
+    return "comment";
+  }
+  if (token.startsWith("@")) {
+    return "decorator";
+  }
+  if (token.startsWith('"') || token.startsWith("'")) {
+    return "string";
+  }
+  if (/^\d/.test(token)) {
+    return "number";
+  }
+  if (PYTHON_KEYWORD_TOKEN_RE.test(token)) {
+    return "keyword";
+  }
+  return "";
+}
+
+function highlightPythonLine(line: string) {
+  const tokens: Array<{ text: string; className: string }> = [];
+  let lastIndex = 0;
+  let match = PYTHON_TOKEN_RE.exec(line);
+
+  while (match) {
+    const token = match[0];
+    const tokenIndex = match.index;
+    if (tokenIndex > lastIndex) {
+      tokens.push({ text: line.slice(lastIndex, tokenIndex), className: "" });
+    }
+    tokens.push({ text: token, className: classifyPythonToken(token) });
+    lastIndex = tokenIndex + token.length;
+    if (token.startsWith("#")) {
+      break;
+    }
+    match = PYTHON_TOKEN_RE.exec(line);
+  }
+
+  if (lastIndex < line.length) {
+    tokens.push({ text: line.slice(lastIndex), className: "" });
+  }
+  if (tokens.length === 0) {
+    tokens.push({ text: line, className: "" });
+  }
+  PYTHON_TOKEN_RE.lastIndex = 0;
+  return tokens;
+}
+
+function StreamingCodeBox({ preview }: { preview: StreamingCodePreview }) {
+  return (
+    <div className="message-streaming-code-preview" data-testid="streaming-code-preview">
+      <div className="message-streaming-code-preview-header">
+        <strong className="message-streaming-code-preview-title thinking-shimmer">
+          Writing code
+        </strong>
+        <span className="message-streaming-code-preview-language">{preview.language}</span>
+      </div>
+      <pre className="message-streaming-code-preview-body">
+        <code>
+          {preview.code.split("\n").map((line, index, lines) => (
+            <Fragment key={`${index}:${line}`}>
+              {highlightPythonLine(line).map((token, tokenIndex) => (
+                <span
+                  key={`${index}:${tokenIndex}:${token.text}`}
+                  className={
+                    token.className
+                      ? `message-streaming-code-token ${token.className}`
+                      : "message-streaming-code-token"
+                  }
+                >
+                  {token.text || " "}
+                </span>
+              ))}
+              {index < lines.length - 1 ? "\n" : null}
+            </Fragment>
+          ))}
+        </code>
+      </pre>
+    </div>
+  );
 }
 
 function projectFileKindLabel(fileKind: ProjectFileKind | undefined) {
@@ -2195,6 +2378,7 @@ export default function App() {
               upsertToolActivity(threadId, {
                 id: payload.tool_call_id,
                 turnIndex,
+                toolName: payload.tool_name,
                 label: payload.label,
                 status: "running",
                 startedAt: new Date().toISOString(),
@@ -4905,6 +5089,12 @@ export default function App() {
                     let userTurnIndex = 0;
                     return activeThread.messages.map((message) => {
                       const isCompactionMessage = message.kind === "compaction";
+                      const streamingCodePreview =
+                        message.role === "assistant" &&
+                        message.status === "streaming" &&
+                        !isCompactionMessage
+                          ? extractStreamingPythonPreview(message.content_markdown)
+                          : null;
                       if (message.role === "user" && !isCompactionMessage) {
                         userTurnIndex += 1;
                       }
@@ -4972,6 +5162,9 @@ export default function App() {
                                 <div className="message-plain-text">{message.content_markdown}</div>
                               )}
                             </div>
+                            {streamingCodePreview ? (
+                              <StreamingCodeBox preview={streamingCodePreview} />
+                            ) : null}
                             {message.role === "assistant" && !isCompactionMessage ? (
                               <div className="assistant-hover-actions">
                                 {hoverTime ? (
@@ -5040,9 +5233,7 @@ export default function App() {
                               <span
                                 className={`tool-activity-label${activity.status === "running" ? " thinking-shimmer" : ""}`}
                               >
-                                {activity.status === "running"
-                                  ? `Doing ${activity.label}...`
-                                  : `Did ${activity.label}`}
+                                {formatToolActivityText(activity)}
                               </span>
                             </div>
                           ))}

@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const apiMocks = vi.hoisted(() => {
@@ -1818,6 +1818,100 @@ describe("App", () => {
       await streamDone;
     });
     randomSpy.mockRestore();
+  });
+
+  it("shows project coding activity copy and a live Python preview while code streams", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.createThread.mockResolvedValue(emptyThreadResponse("thread_2"));
+    apiMocks.getThread.mockResolvedValue(
+      threadResponse("thread_2", "New chat", "```python\ndef train():\n    return 1\n```"),
+    );
+
+    let releaseStream: (() => void) | null = null;
+    const streamDone = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+
+    apiMocks.sendThreadMessageStream.mockImplementation(
+      async (
+        _threadId: string,
+        _payload: unknown,
+        onEvent: (eventName: string, payload: unknown) => void,
+      ) => {
+        onEvent("tool_start", {
+          tool_call_id: "tool_1",
+          tool_name: "project_edit",
+          label: 'project file edit for "src/train.py"',
+        });
+        onEvent("assistant_start", {
+          assistant_message: {
+            message_id: "msg_2",
+            role: "assistant",
+            content_markdown: "",
+            citations: [],
+            created_at: "2026-04-21T00:00:00Z",
+            status: "streaming",
+          },
+        });
+        onEvent("delta", {
+          message_id: "msg_2",
+          delta: "```python\ndef train():\n    return 1\n",
+        });
+        await streamDone;
+        onEvent("tool_done", {
+          tool_call_id: "tool_1",
+          tool_name: "project_edit",
+          label: 'project file edit for "src/train.py"',
+          is_error: false,
+        });
+        onEvent("done", {
+          thread: threadResponse(
+            "thread_2",
+            "New chat",
+            "```python\ndef train():\n    return 1\n```",
+          ),
+          assistant_message: {
+            message_id: "msg_2",
+            role: "assistant",
+            content_markdown: "```python\ndef train():\n    return 1\n```",
+            citations: [],
+            created_at: "2026-04-21T00:00:00Z",
+            status: "completed",
+          },
+          remaining_free_responses: 2,
+          has_anthropic_api_key: false,
+          state: "completed",
+        });
+      },
+    );
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Start new research in")).toBeTruthy();
+    });
+    fireEvent.change(screen.getByLabelText("mention-input-chat"), {
+      target: { value: "write a training script" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Writing code in src/train.py...")).toBeTruthy();
+    });
+    const preview = await screen.findByTestId("streaming-code-preview");
+    expect(within(preview).getByText("Writing code")).toBeTruthy();
+    expect(preview.textContent).toContain("def train():");
+    expect(document.querySelector(".message-streaming-code-token.keyword")?.textContent).toBe(
+      "def",
+    );
+
+    await act(async () => {
+      releaseStream?.();
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("streaming-code-preview")).toBeNull();
+    });
   });
 
   it("keeps the context usage control in the composer after streaming completes", async () => {
