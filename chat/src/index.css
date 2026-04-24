@@ -1203,7 +1203,6 @@ textarea::placeholder,
 .project-tree-category-label {
   min-height: 26px;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 7px;
   border-radius: var(--radius);
@@ -1212,6 +1211,7 @@ textarea::placeholder,
 }
 
 .project-tree-home {
+  grid-template-columns: auto minmax(0, 1fr);
   width: 100%;
   padding: 0 6px;
   border: 1px solid transparent;
@@ -1230,9 +1230,19 @@ textarea::placeholder,
 }
 
 .project-tree-category-label {
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
+  width: 100%;
   padding: 0 6px;
+  border: 0;
+  background: transparent;
   color: var(--muted);
   font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.project-tree-category-label:hover {
+  background: rgba(27, 22, 17, 0.035);
 }
 
 .project-tree-category-label span {
@@ -1243,10 +1253,32 @@ textarea::placeholder,
 }
 
 .project-tree-category-label em {
+  min-width: 16px;
+  height: 16px;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid rgba(27, 22, 17, 0.08);
+  border-radius: 999px;
+  background: rgba(27, 22, 17, 0.035);
   color: var(--muted);
   font-size: 11px;
   font-style: normal;
   font-weight: 500;
+  line-height: 1;
+}
+
+.project-tree-category-chevron {
+  width: 6px;
+  height: 6px;
+  border-right: 1.4px solid currentColor;
+  border-bottom: 1.4px solid currentColor;
+  opacity: 0.58;
+  transform: rotate(45deg) translateY(-1px);
+  transition: transform 120ms ease;
+}
+
+.project-tree-category-label[aria-expanded="false"] .project-tree-category-chevron {
+  transform: rotate(-45deg);
 }
 
 .project-tree-category-icon {
@@ -4075,6 +4107,15 @@ body.authenticated-theme-dark .thread-card.active:hover {
 
 body.authenticated-theme-dark .project-tree-category-icon {
   background: rgba(223, 232, 244, 0.36);
+}
+
+body.authenticated-theme-dark .project-tree-category-label:hover {
+  background: rgba(255, 255, 255, 0.045);
+}
+
+body.authenticated-theme-dark .project-tree-category-label em {
+  border-color: rgba(223, 232, 244, 0.1);
+  background: rgba(255, 255, 255, 0.055);
 }
 
 body.authenticated-theme-dark .chat-tab {

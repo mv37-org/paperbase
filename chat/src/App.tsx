@@ -78,6 +78,7 @@ type OpenTab =
   | { kind: "thread"; id: string }
   | { kind: "python_file"; id: string }
   | { kind: "project_home"; id: string };
+type ProjectSidebarCategoryKey = "code" | "sessions" | "notes" | "data" | "experiments";
 type ProjectItemState = {
   items: ProjectItemSummary[];
   totalCount: number;
@@ -221,10 +222,10 @@ const APPEARANCE_OPTIONS: Array<{
 
 const AUTHENTICATED_DARK_THEME_CLASS = "authenticated-theme-dark";
 const PROJECT_PLACEHOLDER_CATEGORIES = [
-  { label: "Notes", asset: "notes.svg" },
-  { label: "Data", asset: "data.svg" },
-  { label: "Experiments", asset: "experiments.svg" },
-] as const;
+  { key: "notes", label: "Notes", asset: "notes.svg" },
+  { key: "data", label: "Data", asset: "data.svg" },
+  { key: "experiments", label: "Experiments", asset: "experiments.svg" },
+] satisfies Array<{ key: ProjectSidebarCategoryKey; label: string; asset: string }>;
 
 function SettingsSectionHeading({ title, caption }: { title: string; caption: string }) {
   return (
@@ -732,6 +733,9 @@ export default function App() {
   const [projectItems, setProjectItems] = useState<Record<string, ProjectItemState>>({});
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [expandedProjectIds, setExpandedProjectIds] = useState<string[]>([]);
+  const [collapsedProjectCategories, setCollapsedProjectCategories] = useState<
+    Record<string, Partial<Record<ProjectSidebarCategoryKey, boolean>>>
+  >({});
   const [threadMap, setThreadMap] = useState<Record<string, ChatThreadResponse>>({});
   const [pythonFileMap, setPythonFileMap] = useState<Record<string, PythonFileResponse>>({});
   const [pythonFileDrafts, setPythonFileDrafts] = useState<Record<string, PythonFileDraft>>({});
@@ -2466,6 +2470,22 @@ export default function App() {
     );
   }, [allProjectsExpanded, fetchProjectItems, projects]);
 
+  const toggleProjectCategory = useCallback(
+    (projectId: string, category: ProjectSidebarCategoryKey) => {
+      setCollapsedProjectCategories((current) => {
+        const projectCategories = current[projectId] ?? {};
+        return {
+          ...current,
+          [projectId]: {
+            ...projectCategories,
+            [category]: !projectCategories[category],
+          },
+        };
+      });
+    },
+    [],
+  );
+
   const openCreateProjectModal = useCallback(() => {
     setProjectModalState({ mode: "create" });
     setProjectFormName("");
@@ -3345,6 +3365,7 @@ export default function App() {
                 {projects.map((project) => {
                   const expanded = expandedProjectIds.includes(project.project_id);
                   const itemState = projectItems[project.project_id];
+                  const collapsedCategories = collapsedProjectCategories[project.project_id] ?? {};
                   const visibleProjectItems = itemState?.items ?? [];
                   const codeItems = visibleProjectItems.filter(
                     (item) => item.item_kind === "python_file",
@@ -3472,15 +3493,26 @@ export default function App() {
                             <>
                               <div className="project-tree">
                                 <div className="project-tree-category">
-                                  <div className="project-tree-category-label">
+                                  <button
+                                    type="button"
+                                    className="project-tree-category-label"
+                                    aria-expanded={!collapsedCategories.code}
+                                    onClick={() =>
+                                      toggleProjectCategory(project.project_id, "code")
+                                    }
+                                  >
+                                    <span
+                                      className="project-tree-category-chevron"
+                                      aria-hidden="true"
+                                    />
                                     <MaskedAssetIcon
                                       asset="code.svg"
                                       className="project-tree-category-icon"
                                     />
                                     <span>Code</span>
                                     <em>{codeItems.length}</em>
-                                  </div>
-                                  {codeItems.length > 0 ? (
+                                  </button>
+                                  {!collapsedCategories.code && codeItems.length > 0 ? (
                                     <div className="thread-list project-thread-list project-category-list">
                                       {codeItems.map((item) => {
                                         const title = displayPythonFilename(
@@ -3531,20 +3563,31 @@ export default function App() {
                                         );
                                       })}
                                     </div>
-                                  ) : (
+                                  ) : !collapsedCategories.code ? (
                                     <div className="project-tree-empty">No code files yet.</div>
-                                  )}
+                                  ) : null}
                                 </div>
                                 <div className="project-tree-category">
-                                  <div className="project-tree-category-label">
+                                  <button
+                                    type="button"
+                                    className="project-tree-category-label"
+                                    aria-expanded={!collapsedCategories.sessions}
+                                    onClick={() =>
+                                      toggleProjectCategory(project.project_id, "sessions")
+                                    }
+                                  >
+                                    <span
+                                      className="project-tree-category-chevron"
+                                      aria-hidden="true"
+                                    />
                                     <MaskedAssetIcon
                                       asset="sessions.svg"
                                       className="project-tree-category-icon"
                                     />
                                     <span>Sessions</span>
                                     <em>{sessionItems.length}</em>
-                                  </div>
-                                  {sessionItems.length > 0 ? (
+                                  </button>
+                                  {!collapsedCategories.sessions && sessionItems.length > 0 ? (
                                     <div className="thread-list project-thread-list project-category-list">
                                       {sessionItems.map((item) => {
                                         const title = displayThreadTitle(item.title);
@@ -3593,21 +3636,34 @@ export default function App() {
                                         );
                                       })}
                                     </div>
-                                  ) : (
+                                  ) : !collapsedCategories.sessions ? (
                                     <div className="project-tree-empty">No sessions yet.</div>
-                                  )}
+                                  ) : null}
                                 </div>
                                 {PROJECT_PLACEHOLDER_CATEGORIES.map((category) => (
                                   <div key={category.label} className="project-tree-category">
-                                    <div className="project-tree-category-label">
+                                    <button
+                                      type="button"
+                                      className="project-tree-category-label"
+                                      aria-expanded={!collapsedCategories[category.key]}
+                                      onClick={() =>
+                                        toggleProjectCategory(project.project_id, category.key)
+                                      }
+                                    >
+                                      <span
+                                        className="project-tree-category-chevron"
+                                        aria-hidden="true"
+                                      />
                                       <MaskedAssetIcon
                                         asset={category.asset}
                                         className="project-tree-category-icon"
                                       />
                                       <span>{category.label}</span>
                                       <em>0</em>
-                                    </div>
-                                    <div className="project-tree-empty">Empty</div>
+                                    </button>
+                                    {!collapsedCategories[category.key] ? (
+                                      <div className="project-tree-empty">Empty</div>
+                                    ) : null}
                                   </div>
                                 ))}
                                 <button

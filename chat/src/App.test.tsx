@@ -521,6 +521,11 @@ describe("App", () => {
     expect(screen.getByText("Data")).toBeTruthy();
     expect(screen.getByText("Experiments")).toBeTruthy();
 
+    fireEvent.click(screen.getByText("Sessions"));
+    expect(screen.queryByText("Recovered thread")).toBeNull();
+    fireEvent.click(screen.getByText("Sessions"));
+    expect(await screen.findByText("Recovered thread")).toBeTruthy();
+
     fireEvent.click(screen.getByText("Home"));
     expect(await screen.findByText("Project Home")).toBeTruthy();
   });
