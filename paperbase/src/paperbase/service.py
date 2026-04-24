@@ -46,6 +46,13 @@ from .models import (
     ChatMessageResponse,
     ChatThreadListResponse,
     ChatThreadResponse,
+    CodeContextResponse,
+    CodeEligibility,
+    CodeFileListResponse,
+    CodeFileSummary,
+    CodeReadResponse,
+    CodeSearchHit,
+    CodeSearchResponse,
     CreateChatThreadRequest,
     MoveChatThreadProjectRequest,
     FileContentResponse,
@@ -3494,6 +3501,16 @@ class PaperbaseService:
                     max_scanned_files=self.settings.code_repo_max_scanned_files,
                 )
                 is_python, reason = code_ingest.classify_python(report)
+                # Selective code indexing (#5 PR 2): only Python-eligible
+                # repos get high-signal chunks (README / docs / manifests /
+                # entrypoints / ast.parse signatures). Non-Python repos keep
+                # their extracted files in object store for future tooling
+                # but stay absent from any index so the paper-code retrieval
+                # primitives cleanly reject them on eligibility alone.
+                code_chunks = (
+                    code_ingest.build_code_chunks(scratch, report) if is_python else []
+                )
+                indexed_paths = sorted({chunk.repo_path for chunk in code_chunks})
                 manifest = code_ingest.build_manifest(
                     code_url=code_url,
                     ref=ref,
@@ -3502,6 +3519,7 @@ class PaperbaseService:
                     is_python=is_python,
                     python_reason=reason,
                 )
+                manifest["indexed_paths"] = indexed_paths
                 code_prefix = f"papers/{paper_id}/code"
                 self.object_store.delete_prefix(f"{code_prefix}/")
                 self.object_store.put_bytes(
@@ -3519,6 +3537,23 @@ class PaperbaseService:
                     if not source.exists():
                         continue
                     self.object_store.put_bytes(f"{code_prefix}/files/{rel}", source.read_bytes())
+                # Persist chunks after files land so a crash between
+                # ``put_bytes`` and ``replace_code_chunks`` cannot leave
+                # index rows pointing at files that aren't in object store.
+                self.repository.replace_code_chunks(
+                    paper_id,
+                    [
+                        {
+                            "path": f"code/files/{chunk.repo_path}",
+                            "chunk_kind": chunk.chunk_kind,
+                            "content": chunk.content,
+                            "chunk_index": idx,
+                            "section_depth": 1,
+                            "section_order": idx,
+                        }
+                        for idx, chunk in enumerate(code_chunks)
+                    ],
+                )
             logger.info(
                 "Completed code ingest",
                 extra={
@@ -3533,6 +3568,7 @@ class PaperbaseService:
                     "python_reason": reason,
                     "stored_file_count": len(report.stored_paths),
                     "scanned_file_count": len(report.scanned_paths),
+                    "indexed_chunk_count": len(code_chunks),
                 },
             )
             return self.repository.update_code_ingest_state(
@@ -3570,6 +3606,169 @@ class PaperbaseService:
             is_python=None,
             python_reason=reason,
             manifest=manifest,
+        )
+
+    # ------------------------------------------------------------------ #
+    # Paper-code retrieval primitives (#5 PR 2) — read-only.
+    # ------------------------------------------------------------------ #
+
+    def _code_eligibility(self, paper: PaperResponse) -> CodeEligibility:
+        if paper.code_is_python is True and paper.code_index_status == "indexed":
+            return CodeEligibility(eligible=True, status=paper.code_index_status, reason=None)
+        return CodeEligibility(
+            eligible=False,
+            status=paper.code_index_status or "none",
+            reason=paper.code_python_reason,
+        )
+
+    def list_paper_code_files(self, paper_id: str) -> CodeFileListResponse | None:
+        """List repo files stored under ``papers/{paper_id}/code/files/``.
+
+        Manifest is source-of-truth for what got ingested; this method does
+        not walk the object store to preserve a stable ordering. Non-Python
+        repos surface a structured ineligible response — callers branch on
+        ``eligibility.eligible`` rather than empty-list vs populated-list.
+        """
+        paper = self.repository.get_paper(paper_id)
+        if paper is None:
+            return None
+        eligibility = self._code_eligibility(paper)
+        manifest = paper.code_manifest or {}
+        resolved_sha = manifest.get("resolved_sha")
+        if not eligibility.eligible:
+            return CodeFileListResponse(
+                paper_id=paper_id, eligibility=eligibility, resolved_sha=resolved_sha, files=[]
+            )
+        indexed = set(manifest.get("indexed_paths") or [])
+        files: list[CodeFileSummary] = []
+        for rel_path in manifest.get("stored_paths") or []:
+            stored = self._stat_code_file(paper_id, rel_path)
+            files.append(
+                CodeFileSummary(
+                    repo_path=rel_path,
+                    size_bytes=stored,
+                    indexed=rel_path in indexed,
+                )
+            )
+        return CodeFileListResponse(
+            paper_id=paper_id, eligibility=eligibility, resolved_sha=resolved_sha, files=files
+        )
+
+    def _stat_code_file(self, paper_id: str, rel_path: str) -> int:
+        try:
+            data = self.object_store.get_bytes(f"papers/{paper_id}/code/files/{rel_path}")
+        except Exception:  # pragma: no cover — file evicted between manifest write and read
+            return 0
+        return len(data)
+
+    def read_paper_code_file(self, paper_id: str, repo_path: str) -> CodeReadResponse | None:
+        """Stream a single repo file back as text.
+
+        Repo-relative path; any ``..`` segment is rejected. Preserves lazy
+        reads for files that were stored but not ingested into ``text_chunks``
+        (PR 2 spec's "full file read works for scanned stored text files
+        that were not fully indexed").
+        """
+        paper = self.repository.get_paper(paper_id)
+        if paper is None:
+            return None
+        eligibility = self._code_eligibility(paper)
+        safe_path = self._normalize_code_path(repo_path)
+        base = CodeReadResponse(paper_id=paper_id, eligibility=eligibility, repo_path=safe_path or repo_path)
+        if safe_path is None or not eligibility.eligible:
+            return base
+        try:
+            data = self.object_store.get_bytes(f"papers/{paper_id}/code/files/{safe_path}")
+        except Exception:
+            return base
+        text_content = data.decode("utf-8", errors="replace")
+        return CodeReadResponse(
+            paper_id=paper_id,
+            eligibility=eligibility,
+            repo_path=safe_path,
+            content=text_content,
+            size_bytes=len(data),
+        )
+
+    @staticmethod
+    def _normalize_code_path(raw: str) -> str | None:
+        raw = (raw or "").strip().lstrip("/")
+        if not raw:
+            return None
+        parts = raw.split("/")
+        if any(segment in {"", "..", "."} for segment in parts):
+            return None
+        return "/".join(parts)
+
+    def search_paper_code(
+        self, paper_id: str, query: str, *, limit: int = 10
+    ) -> CodeSearchResponse | None:
+        """Paper-scoped code search over indexed README / docs / manifest /
+        entrypoint / signature chunks. Non-Python papers return ineligible
+        (empty ``hits``) without hitting the chunk table."""
+        paper = self.repository.get_paper(paper_id)
+        if paper is None:
+            return None
+        eligibility = self._code_eligibility(paper)
+        base = CodeSearchResponse(paper_id=paper_id, eligibility=eligibility, query=query, hits=[])
+        if not eligibility.eligible or not (query or "").strip():
+            return base
+        rows = self.repository.search_paper_code_sections(
+            paper_id, query, limit=max(1, min(limit, 50))
+        )
+        hits = [
+            CodeSearchHit(
+                repo_path=row.path.removeprefix("code/files/") if row.path.startswith("code/files/") else row.path,
+                chunk_kind=row.chunk_kind,
+                preview=row.preview,
+                score=row.score or 0.0,
+            )
+            for row in rows
+        ]
+        return CodeSearchResponse(
+            paper_id=paper_id, eligibility=eligibility, query=query, hits=hits
+        )
+
+    def get_paper_code_context(
+        self, paper_id: str, query: str, *, limit: int = 5
+    ) -> CodeContextResponse | None:
+        """Compact top-N chunks concatenated into a single context blob.
+
+        Useful when the caller wants "give me the strongest implementation
+        evidence for this query" rather than a ranked hit list. Returns
+        ineligible for non-Python papers.
+        """
+        paper = self.repository.get_paper(paper_id)
+        if paper is None:
+            return None
+        eligibility = self._code_eligibility(paper)
+        base = CodeContextResponse(paper_id=paper_id, eligibility=eligibility, query=query)
+        if not eligibility.eligible or not (query or "").strip():
+            return base
+        rows = self.repository.search_paper_code_sections(
+            paper_id, query, limit=max(1, min(limit, 20))
+        )
+        hits: list[CodeSearchHit] = []
+        blocks: list[str] = []
+        for row in rows:
+            clean_path = (
+                row.path.removeprefix("code/files/") if row.path.startswith("code/files/") else row.path
+            )
+            hits.append(
+                CodeSearchHit(
+                    repo_path=clean_path,
+                    chunk_kind=row.chunk_kind,
+                    preview=row.preview,
+                    score=row.score or 0.0,
+                )
+            )
+            blocks.append(f"### {clean_path} ({row.chunk_kind})\n{row.preview}")
+        return CodeContextResponse(
+            paper_id=paper_id,
+            eligibility=eligibility,
+            query=query,
+            context="\n\n".join(blocks),
+            hits=hits,
         )
 
     def enqueue_summarize_top_cited_job(self, *, limit: int = 500_000) -> JobResponse:

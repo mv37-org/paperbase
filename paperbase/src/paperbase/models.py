@@ -556,3 +556,66 @@ class SendChatMessageResponse(BaseModel):
 
 class ChatThreadListResponse(BaseModel):
     threads: list[ChatThreadSummary] = Field(default_factory=list)
+
+
+# --------------------------------------------------------------------------- #
+# Paper-code retrieval (#5 PR 2)
+# --------------------------------------------------------------------------- #
+
+
+class CodeEligibility(BaseModel):
+    """Structured gate on the paper-code retrieval primitives.
+
+    ``eligible`` is ``True`` iff the paper's linked repo has been ingested,
+    classified as Python, and currently sits in ``code_index_status='indexed'``.
+    Anything else surfaces as ``eligible=False`` with the underlying status
+    and classifier reason so agents / UIs can distinguish "not yet fetched"
+    from "fetched and rejected as non-Python" without a second round-trip.
+    """
+
+    eligible: bool
+    status: str = "none"
+    reason: str | None = None
+
+
+class CodeFileSummary(BaseModel):
+    repo_path: str
+    size_bytes: int = 0
+    indexed: bool = False
+
+
+class CodeFileListResponse(BaseModel):
+    paper_id: str
+    eligibility: CodeEligibility
+    resolved_sha: str | None = None
+    files: list[CodeFileSummary] = Field(default_factory=list)
+
+
+class CodeReadResponse(BaseModel):
+    paper_id: str
+    eligibility: CodeEligibility
+    repo_path: str
+    content: str = ""
+    size_bytes: int = 0
+
+
+class CodeSearchHit(BaseModel):
+    repo_path: str
+    chunk_kind: str
+    preview: str
+    score: float = 0.0
+
+
+class CodeSearchResponse(BaseModel):
+    paper_id: str
+    eligibility: CodeEligibility
+    query: str = ""
+    hits: list[CodeSearchHit] = Field(default_factory=list)
+
+
+class CodeContextResponse(BaseModel):
+    paper_id: str
+    eligibility: CodeEligibility
+    query: str = ""
+    context: str = ""
+    hits: list[CodeSearchHit] = Field(default_factory=list)

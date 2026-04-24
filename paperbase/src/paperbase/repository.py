@@ -66,6 +66,23 @@ class Base(DeclarativeBase):
     pass
 
 
+# Chunk-kind namespace split (#5 PR 2). Paper search must never surface code
+# chunks: a query like "transformer attention" should return the paper's
+# methodology section, not a random README snippet of a linked repo that
+# happens to mention "attention". Code retrieval lives on its own
+# paper-scoped primitives (`search_paper_code_sections`) and operates on a
+# disjoint kind set. Any future chunk kind must be opted into exactly one of
+# these two buckets.
+PAPER_SECTION_CHUNK_KINDS: tuple[str, ...] = ("section", "table", "figure_caption")
+CODE_CHUNK_KINDS: tuple[str, ...] = (
+    "code_readme",
+    "code_doc",
+    "code_manifest",
+    "code_entrypoint",
+    "code_signature",
+)
+
+
 class PaperORM(Base):
     __tablename__ = "papers"
 
@@ -821,6 +838,36 @@ class PaperRepository(ABC):
         flipping ``status`` to ``indexing`` before the fetch starts) don't
         clobber the classification verdict from a prior run. Returns the
         refreshed paper row, or ``None`` if the paper disappeared mid-job.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def replace_code_chunks(self, paper_id: str, chunks: list[dict[str, Any]]) -> None:
+        """Replace only the code-kind chunks for a paper (#5 PR 2).
+
+        Unlike :meth:`replace_text_chunks`, this preserves paper-section
+        chunks (``section`` / ``table`` / ``figure_caption`` / ``full_text``)
+        so a re-ingest of the linked repo doesn't force a full paper
+        re-extraction. Implementations must delete all existing chunks
+        whose ``chunk_kind`` is in :data:`CODE_CHUNK_KINDS` for the given
+        paper, then insert the supplied chunks.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def search_paper_code_sections(
+        self,
+        paper_id: str,
+        query: str,
+        *,
+        limit: int,
+        query_embedding: list[float] | None = None,
+    ) -> list[SearchSectionResult]:
+        """Paper-scoped lexical + optional vector search restricted to
+        code chunks (#5 PR 2). Returns :class:`SearchSectionResult` rows
+        whose ``chunk_kind`` is in :data:`CODE_CHUNK_KINDS`. Callers must
+        gate on ``paper.code_is_python is True`` — this method does not
+        re-check eligibility.
         """
         raise NotImplementedError
 
@@ -1584,6 +1631,134 @@ class SqlAlchemyPaperRepository(PaperRepository):
             session.flush()
             return _paper_from_orm(row)
 
+    def replace_code_chunks(self, paper_id: str, chunks: list[dict[str, Any]]) -> None:
+        with self._session() as session:
+            session.execute(
+                delete(TextChunkORM).where(
+                    TextChunkORM.paper_id == paper_id,
+                    TextChunkORM.chunk_kind.in_(CODE_CHUNK_KINDS),
+                )
+            )
+            for chunk in chunks:
+                session.add(
+                    TextChunkORM(
+                        chunk_id=new_id("chunk"),
+                        paper_id=paper_id,
+                        path=chunk["path"],
+                        chunk_kind=chunk["chunk_kind"],
+                        content=chunk["content"],
+                        embedding=chunk.get("embedding"),
+                        chunk_index=int(chunk.get("chunk_index", 0)),
+                        section_depth=int(chunk.get("section_depth", 1)),
+                        section_order=int(chunk.get("section_order", 0)),
+                    )
+                )
+
+    def search_paper_code_sections(
+        self,
+        paper_id: str,
+        query: str,
+        *,
+        limit: int,
+        query_embedding: list[float] | None = None,
+    ) -> list[SearchSectionResult]:
+        if not query or not paper_id:
+            return []
+        candidate_pool = max(limit * 4, 20)
+        params: dict[str, Any] = {
+            "query": query,
+            "paper_id": paper_id,
+            "candidate_pool": candidate_pool,
+            "code_kinds": list(CODE_CHUNK_KINDS),
+        }
+        lexical_sql = text(
+            """
+            SELECT
+                tc.chunk_id,
+                tc.paper_id,
+                p.arxiv_id,
+                p.title,
+                tc.path,
+                tc.chunk_kind,
+                tc.content,
+                ts_rank_cd(
+                    to_tsvector('english', coalesce(tc.content, '')),
+                    websearch_to_tsquery('english', :query)
+                ) AS lexical_score
+            FROM text_chunks tc
+            JOIN papers p ON p.paper_id = tc.paper_id
+            WHERE tc.paper_id = :paper_id
+              AND tc.chunk_kind = ANY(CAST(:code_kinds AS text[]))
+              AND (
+                to_tsvector('english', coalesce(tc.content, '')) @@ websearch_to_tsquery('english', :query)
+                OR similarity(coalesce(tc.content, ''), :query) > 0.1
+              )
+            ORDER BY lexical_score DESC
+            LIMIT :candidate_pool
+            """
+        )
+        with self._session() as session:
+            lexical_rows = session.execute(lexical_sql, params).mappings().all()
+        vector_rows: list[Any] = []
+        if query_embedding:
+            embedding_literal = "[" + ",".join(f"{value:.6f}" for value in query_embedding) + "]"
+            vector_params = {
+                "query_embedding": embedding_literal,
+                "paper_id": paper_id,
+                "candidate_pool": candidate_pool,
+                "code_kinds": list(CODE_CHUNK_KINDS),
+            }
+            vector_sql = text(
+                """
+                SELECT
+                    tc.chunk_id,
+                    tc.paper_id,
+                    p.arxiv_id,
+                    p.title,
+                    tc.path,
+                    tc.chunk_kind,
+                    tc.content,
+                    1 - (tc.embedding <=> CAST(:query_embedding AS vector)) AS vector_score
+                FROM text_chunks tc
+                JOIN papers p ON p.paper_id = tc.paper_id
+                WHERE tc.paper_id = :paper_id
+                  AND tc.chunk_kind = ANY(CAST(:code_kinds AS text[]))
+                  AND tc.embedding IS NOT NULL
+                ORDER BY tc.embedding <=> CAST(:query_embedding AS vector)
+                LIMIT :candidate_pool
+                """
+            )
+            with self._session() as session:
+                vector_rows = session.execute(vector_sql, vector_params).mappings().all()
+        # Simple RRF fuse: lexical first pass, vector second. Code search is
+        # paper-scoped and tight, so no need for the heavier kind_score /
+        # depth_weight apparatus used by paper-section search.
+        rrf_k = 60
+        scored: dict[str, tuple[float, Any]] = {}
+        for rank, row in enumerate(lexical_rows):
+            cid = row["chunk_id"]
+            scored[cid] = (1.0 / (rrf_k + rank), row)
+        for rank, row in enumerate(vector_rows):
+            cid = row["chunk_id"]
+            prev_score, prev_row = scored.get(cid, (0.0, row))
+            scored[cid] = (prev_score + 1.2 / (rrf_k + rank), prev_row or row)
+        fused = sorted(scored.items(), key=lambda kv: kv[1][0], reverse=True)
+        results: list[SearchSectionResult] = []
+        for _cid, (score, row) in fused[:limit]:
+            content = row["content"] or ""
+            results.append(
+                SearchSectionResult(
+                    paper_id=row["paper_id"],
+                    arxiv_id=row["arxiv_id"],
+                    title=row["title"],
+                    path=row["path"],
+                    chunk_kind=row["chunk_kind"],
+                    preview=content[:320],
+                    score=score,
+                )
+            )
+        return results
+
     def list_papers_needing_summary(
         self,
         *,
@@ -1865,7 +2040,11 @@ class SqlAlchemyPaperRepository(PaperRepository):
     ) -> dict[str, str]:
         if not paper_ids:
             return {}
-        params: dict[str, Any] = {"query": query, "paper_ids": paper_ids}
+        params: dict[str, Any] = {
+            "query": query,
+            "paper_ids": paper_ids,
+            "section_kinds": list(PAPER_SECTION_CHUNK_KINDS),
+        }
         order_clause = "lexical_score DESC, kind_score DESC"
         select_vector_score = "NULL AS vector_score"
         if query_embedding:
@@ -1898,7 +2077,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     {select_vector_score}
                 FROM text_chunks tc
                 WHERE tc.paper_id = ANY(CAST(:paper_ids AS text[]))
-                  AND tc.chunk_kind <> 'full_text'
+                  AND tc.chunk_kind = ANY(CAST(:section_kinds AS text[]))
             ) scored
             ORDER BY paper_id, {order_clause}
             """
@@ -2292,11 +2471,20 @@ class SqlAlchemyPaperRepository(PaperRepository):
         rrf_k: int = 60,
     ) -> list[SearchSectionResult]:
         candidate_pool = max(limit * 4, 50)
-        params: dict[str, Any] = {"query": query, "candidate_pool": candidate_pool}
+        params: dict[str, Any] = {
+            "query": query,
+            "candidate_pool": candidate_pool,
+            "section_kinds": list(PAPER_SECTION_CHUNK_KINDS),
+        }
         joins = ["JOIN papers p ON p.paper_id = tc.paper_id"]
+        # Namespace gate (#5 PR 2): paper search operates on paper-section
+        # chunk kinds only. Code chunks (``code_readme`` etc.) live in the
+        # same ``text_chunks`` table but are reachable only through the
+        # paper-scoped code retrieval primitives.
         filters = [
+            "tc.chunk_kind = ANY(CAST(:section_kinds AS text[]))",
             "(to_tsvector('english', coalesce(tc.content, '')) @@ websearch_to_tsquery('english', :query) "
-            "OR similarity(coalesce(tc.content, ''), :query) > 0.1)"
+            "OR similarity(coalesce(tc.content, ''), :query) > 0.1)",
         ]
         if result_set_id:
             joins.append("JOIN result_items ri ON ri.paper_id = tc.paper_id")
@@ -2350,10 +2538,14 @@ class SqlAlchemyPaperRepository(PaperRepository):
         if query_embedding:
             embedding_literal = "[" + ",".join(f"{value:.6f}" for value in query_embedding) + "]"
             vector_joins = ["JOIN papers p ON p.paper_id = tc.paper_id"]
-            vector_filters = ["tc.embedding IS NOT NULL"]
+            vector_filters = [
+                "tc.embedding IS NOT NULL",
+                "tc.chunk_kind = ANY(CAST(:section_kinds AS text[]))",
+            ]
             vector_params: dict[str, Any] = {
                 "query_embedding": embedding_literal,
                 "candidate_pool": candidate_pool,
+                "section_kinds": list(PAPER_SECTION_CHUNK_KINDS),
             }
             if result_set_id:
                 vector_joins.append("JOIN result_items ri ON ri.paper_id = tc.paper_id")
@@ -3926,6 +4118,52 @@ class MemoryPaperRepository(PaperRepository):
         self.papers[paper_id] = updated
         return updated
 
+    def replace_code_chunks(self, paper_id: str, chunks: list[dict[str, Any]]) -> None:
+        existing = self.text_chunks.get(paper_id, [])
+        # Keep paper-section chunks untouched so a repo re-ingest doesn't
+        # wipe the paper's existing sections / figures / tables.
+        preserved = [c for c in existing if c["chunk_kind"] not in CODE_CHUNK_KINDS]
+        stamped: list[dict[str, Any]] = []
+        for chunk in chunks:
+            stamped.append({**chunk, "chunk_id": chunk.get("chunk_id") or new_id("chunk")})
+        self.text_chunks[paper_id] = preserved + stamped
+
+    def search_paper_code_sections(
+        self,
+        paper_id: str,
+        query: str,
+        *,
+        limit: int,
+        query_embedding: list[float] | None = None,
+    ) -> list[SearchSectionResult]:
+        query_lower = (query or "").lower().strip()
+        if not query_lower or paper_id not in self.text_chunks:
+            return []
+        paper = self.papers.get(paper_id)
+        if paper is None:
+            return []
+        results: list[SearchSectionResult] = []
+        for chunk in self.text_chunks[paper_id]:
+            if chunk["chunk_kind"] not in CODE_CHUNK_KINDS:
+                continue
+            content = chunk["content"]
+            if query_lower not in content.lower():
+                continue
+            score = len(query_lower) / max(len(content), 1)
+            results.append(
+                SearchSectionResult(
+                    paper_id=paper.paper_id,
+                    arxiv_id=paper.arxiv_id,
+                    title=paper.title,
+                    path=chunk["path"],
+                    chunk_kind=chunk["chunk_kind"],
+                    preview=content[:320],
+                    score=score,
+                )
+            )
+        results.sort(key=lambda item: item.score or 0, reverse=True)
+        return results[:limit]
+
     def list_papers_needing_summary(
         self,
         *,
@@ -4290,6 +4528,10 @@ class MemoryPaperRepository(PaperRepository):
             if paper is None:
                 continue
             for chunk in chunks:
+                # Paper search must skip code chunks (#5 PR 2); those are
+                # retrievable only via the paper-scoped code primitives.
+                if chunk["chunk_kind"] not in PAPER_SECTION_CHUNK_KINDS:
+                    continue
                 content = chunk["content"]
                 if query_lower not in content.lower():
                     continue
@@ -4297,7 +4539,6 @@ class MemoryPaperRepository(PaperRepository):
                     "section": 0.30,
                     "table": 0.20,
                     "figure_caption": 0.15,
-                    "full_text": 0.05,
                 }.get(chunk["chunk_kind"], 0.0)
                 score = len(query_lower) / max(len(content), 1) + kind_score
                 results.append(

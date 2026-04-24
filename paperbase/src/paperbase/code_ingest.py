@@ -25,6 +25,7 @@ Indexing the extracted files into ``text_chunks`` is PR 2.
 
 from __future__ import annotations
 
+import ast
 import io
 import os
 import re
@@ -434,6 +435,182 @@ def classify_python(report: ScanReport) -> tuple[bool, str]:
 
 
 # --------------------------------------------------------------------------- #
+# Code chunk extraction (PR 2)
+# --------------------------------------------------------------------------- #
+
+
+CODE_CHUNK_KINDS: tuple[str, ...] = (
+    "code_readme",
+    "code_doc",
+    "code_manifest",
+    "code_entrypoint",
+    "code_signature",
+)
+
+
+# Per-chunk character cap. README / docs / manifests that exceed this are
+# truncated rather than chunked-with-overlap — PR 2 scope is "one chunk per
+# high-signal artifact", not paper-style section windowing. The cap is big
+# enough to cover a typical ML-paper README while keeping any single chunk
+# within the encoder context window.
+_CODE_CHUNK_MAX_CHARS = 4000
+
+
+_DOC_DIRS: frozenset[str] = frozenset({"docs", "doc"})
+
+
+@dataclass(frozen=True)
+class CodeChunk:
+    """Single indexable unit carved out of a paper's linked repo.
+
+    Parallels the in-memory shape of `paperbase.repository.TextChunkORM`
+    rows, plus the ``repo_path`` that tests / the read-only retrieval
+    primitives (PR 2) use to surface "which file in the repo does this
+    chunk come from?".
+    """
+
+    repo_path: str
+    chunk_kind: str
+    content: str
+
+
+def build_code_chunks(repo_root: Path, report: ScanReport) -> list[CodeChunk]:
+    """Turn the extracted repo tree into a list of high-signal code chunks.
+
+    Scope matches issue #5 PR 2 (arslnb 2026-04-23T21:16): one chunk per
+    README / docs-markdown file, one per manifest, one per candidate
+    entrypoint, and one ``code_signature`` chunk per Python module holding
+    the module-level docstring plus every top-level class / function
+    signature and their docstrings.
+
+    The full source of each file is deliberately *not* chunked — readers
+    can still reach it via the paper-code retrieval API, which lazily
+    streams ``papers/{paper_id}/code/files/{path}`` from the object store.
+    """
+    chunks: list[CodeChunk] = []
+    stored = set(report.stored_paths)
+    for rel_path in sorted(stored):
+        posix = PurePosixPath(rel_path)
+        name_lower = posix.name.lower()
+        parent_lower = "/".join(p.lower() for p in posix.parts[:-1])
+        full = repo_root / rel_path
+        if not full.exists() or not full.is_file():
+            continue
+        if name_lower.startswith("readme") and posix.suffix.lower() in {".md", ".rst", ".txt", ""}:
+            chunks.append(_chunk_from_file(rel_path, "code_readme", full))
+            continue
+        if posix.suffix.lower() == ".md" and posix.parts and posix.parts[0].lower() in _DOC_DIRS:
+            chunks.append(_chunk_from_file(rel_path, "code_doc", full))
+            continue
+        if (
+            name_lower in _PYTHON_MANIFEST_FILES
+            or _PYTHON_REQUIREMENTS_RE.match(name_lower)
+        ) and parent_lower == "":
+            chunks.append(_chunk_from_file(rel_path, "code_manifest", full))
+            continue
+        if rel_path in report.candidate_entrypoints:
+            chunks.append(_chunk_from_file(rel_path, "code_entrypoint", full))
+            # fall through — .py entrypoints also get a signature chunk
+        if posix.suffix.lower() == ".py":
+            signature_chunk = _signature_chunk(rel_path, full)
+            if signature_chunk is not None:
+                chunks.append(signature_chunk)
+    return chunks
+
+
+def _chunk_from_file(rel_path: str, kind: str, full_path: Path) -> CodeChunk:
+    try:
+        content = full_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:  # pragma: no cover — we just wrote this file, shouldn't fail
+        content = ""
+    return CodeChunk(
+        repo_path=rel_path,
+        chunk_kind=kind,
+        content=_truncate(content),
+    )
+
+
+def _signature_chunk(rel_path: str, full_path: Path) -> CodeChunk | None:
+    """Extract a compact signatures-and-docstrings summary of one Python
+    module so the indexed chunk stays on-topic for implementation queries.
+
+    Returns ``None`` when the file fails to parse (syntax error, BOM
+    glitch, Python 2 source, etc.) — a non-parseable .py is not worth
+    indexing and the classifier has already determined repo eligibility
+    from the broader file tree.
+    """
+    try:
+        source = full_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:  # pragma: no cover
+        return None
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    lines: list[str] = [f"# Module: {rel_path}"]
+    module_doc = ast.get_docstring(tree)
+    if module_doc:
+        lines.append("")
+        lines.append(module_doc.strip())
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            lines.extend(_render_function(node, indent=0))
+        elif isinstance(node, ast.ClassDef):
+            lines.append("")
+            lines.append(f"class {node.name}:")
+            class_doc = ast.get_docstring(node)
+            if class_doc:
+                lines.append(f"    {_indent_doc(class_doc, indent=4)}")
+            for item in node.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    lines.extend(_render_function(item, indent=4))
+    content = "\n".join(lines).strip()
+    if not content:
+        return None
+    return CodeChunk(repo_path=rel_path, chunk_kind="code_signature", content=_truncate(content))
+
+
+def _render_function(
+    node: ast.FunctionDef | ast.AsyncFunctionDef, *, indent: int
+) -> list[str]:
+    prefix = " " * indent
+    try:
+        args = ast.unparse(node.args)
+    except Exception:  # pragma: no cover — defensive: old ast, weird node
+        args = ""
+    returns = ""
+    if node.returns is not None:
+        try:
+            returns = f" -> {ast.unparse(node.returns)}"
+        except Exception:  # pragma: no cover
+            returns = ""
+    kind = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
+    signature = f"{prefix}{kind} {node.name}({args}){returns}:"
+    lines = ["", signature]
+    doc = ast.get_docstring(node)
+    if doc:
+        lines.append(f"{prefix}    {_indent_doc(doc, indent=indent + 4)}")
+    return lines
+
+
+def _indent_doc(doc: str, *, indent: int) -> str:
+    pad = " " * indent
+    stripped = doc.strip().splitlines()
+    if not stripped:
+        return '""""""'
+    if len(stripped) == 1:
+        return f'"""{stripped[0]}"""'
+    joined = ("\n" + pad).join(stripped)
+    return f'"""{joined}"""'
+
+
+def _truncate(text: str) -> str:
+    if len(text) <= _CODE_CHUNK_MAX_CHARS:
+        return text
+    return text[:_CODE_CHUNK_MAX_CHARS].rstrip() + "\n...[truncated]"
+
+
+# --------------------------------------------------------------------------- #
 # Manifest
 # --------------------------------------------------------------------------- #
 
@@ -505,12 +682,15 @@ def skipped_manifest(*, code_url: str, reason: str) -> dict[str, Any]:
 __all__ = [
     "ArchiveFetchError",
     "ArchiveTooLargeError",
+    "CODE_CHUNK_KINDS",
+    "CodeChunk",
     "CodeIngestError",
     "EXCLUDED_DIRS",
     "FetchedArchive",
     "GitHubRepoRef",
     "ScanReport",
     "ScannedFile",
+    "build_code_chunks",
     "build_manifest",
     "classify_python",
     "extract_archive_safely",

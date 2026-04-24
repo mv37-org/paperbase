@@ -31,6 +31,10 @@ from .models import (
     BrowserSessionResponse,
     ChatThreadListResponse,
     ChatThreadResponse,
+    CodeContextResponse,
+    CodeFileListResponse,
+    CodeReadResponse,
+    CodeSearchResponse,
     CreateProjectRequest,
     CreateChatThreadRequest,
     FileContentResponse,
@@ -413,6 +417,73 @@ def get_figure(paper_id: str, figure_id: str, service: PaperbaseService = Depend
 )
 def get_table(paper_id: str, table_id: str, service: PaperbaseService = Depends(get_service)) -> TableResponse:
     return service.get_table(paper_id, table_id)
+
+
+# --------------------------------------------------------------------------- #
+# Paper-code retrieval (#5 PR 2). All four endpoints are paper-scoped and
+# read-only; the service layer gates on ``code_is_python`` and surfaces a
+# structured ``eligibility`` object rather than silently searching.
+# --------------------------------------------------------------------------- #
+
+
+@app.get(
+    "/v1/papers/{paper_id}/code/files",
+    response_model=CodeFileListResponse,
+    dependencies=[Depends(require_bearer_token)],
+)
+def list_code_files(paper_id: str, service: PaperbaseService = Depends(get_service)) -> CodeFileListResponse:
+    response = service.list_paper_code_files(paper_id)
+    if response is None:
+        raise HTTPException(status_code=404, detail=f"Paper {paper_id} not found")
+    return response
+
+
+@app.get(
+    "/v1/papers/{paper_id}/code/files/{repo_path:path}",
+    response_model=CodeReadResponse,
+    dependencies=[Depends(require_bearer_token)],
+)
+def read_code_file(
+    paper_id: str, repo_path: str, service: PaperbaseService = Depends(get_service)
+) -> CodeReadResponse:
+    response = service.read_paper_code_file(paper_id, repo_path)
+    if response is None:
+        raise HTTPException(status_code=404, detail=f"Paper {paper_id} not found")
+    return response
+
+
+@app.get(
+    "/v1/papers/{paper_id}/code/search",
+    response_model=CodeSearchResponse,
+    dependencies=[Depends(require_bearer_token)],
+)
+def search_code(
+    paper_id: str,
+    q: str = "",
+    limit: int = 10,
+    service: PaperbaseService = Depends(get_service),
+) -> CodeSearchResponse:
+    response = service.search_paper_code(paper_id, q, limit=limit)
+    if response is None:
+        raise HTTPException(status_code=404, detail=f"Paper {paper_id} not found")
+    return response
+
+
+@app.get(
+    "/v1/papers/{paper_id}/code/context",
+    response_model=CodeContextResponse,
+    dependencies=[Depends(require_bearer_token)],
+)
+def code_context(
+    paper_id: str,
+    q: str = "",
+    limit: int = 5,
+    service: PaperbaseService = Depends(get_service),
+) -> CodeContextResponse:
+    response = service.get_paper_code_context(paper_id, q, limit=limit)
+    if response is None:
+        raise HTTPException(status_code=404, detail=f"Paper {paper_id} not found")
+    return response
 
 
 @app.post("/v1/search", response_model=SearchResponse, dependencies=[Depends(require_bearer_token)])
