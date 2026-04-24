@@ -1216,6 +1216,12 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     "ON text_chunks USING gin (content gin_trgm_ops)"
                 )
             )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS text_chunks_content_tsv_gin "
+                    "ON text_chunks USING gin (to_tsvector('english', coalesce(content, '')))"
+                )
+            )
             connection.execute(text("CREATE INDEX IF NOT EXISTS paper_refs_dst_arxiv_id ON paper_refs (dst_arxiv_id)"))
             connection.execute(
                 text(
@@ -1982,7 +1988,32 @@ class SqlAlchemyPaperRepository(PaperRepository):
         )
         lexical_params = {"query": query, "candidate_pool": candidate_pool}
 
+        chunk_lexical_sql = text(
+            f"""
+            SELECT {self._SELECT_PAPER_COLUMNS}, scored.chunk_score
+            FROM (
+                SELECT
+                    tc.paper_id AS pid,
+                    MAX(
+                        ts_rank_cd(
+                            to_tsvector('english', coalesce(tc.content, '')),
+                            websearch_to_tsquery('english', :query)
+                        )
+                    ) AS chunk_score
+                FROM text_chunks tc
+                WHERE tc.chunk_kind <> 'full_text'
+                  AND to_tsvector('english', coalesce(tc.content, ''))
+                      @@ websearch_to_tsquery('english', :query)
+                GROUP BY tc.paper_id
+                ORDER BY chunk_score DESC
+                LIMIT :candidate_pool
+            ) scored
+            JOIN papers ON papers.paper_id = scored.pid
+            """
+        )
+
         vector_rows: list[Any] = []
+        chunk_vector_rows: list[Any] = []
         if query_embedding:
             embedding_literal = "[" + ",".join(f"{value:.6f}" for value in query_embedding) + "]"
             vector_sql = text(
@@ -1996,6 +2027,30 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 LIMIT :candidate_pool
                 """
             )
+            chunk_vector_sql = text(
+                f"""
+                SELECT {self._SELECT_PAPER_COLUMNS}, scored.chunk_vector_score
+                FROM (
+                    SELECT
+                        nearest.pid,
+                        MAX(nearest.chunk_vector_score) AS chunk_vector_score
+                    FROM (
+                        SELECT
+                            tc.paper_id AS pid,
+                            1 - (tc.embedding <=> CAST(:query_embedding AS vector))
+                                AS chunk_vector_score
+                        FROM text_chunks tc
+                        WHERE tc.embedding IS NOT NULL
+                          AND tc.chunk_kind <> 'full_text'
+                        ORDER BY tc.embedding <=> CAST(:query_embedding AS vector)
+                        LIMIT :candidate_pool
+                    ) nearest
+                    GROUP BY nearest.pid
+                ) scored
+                JOIN papers ON papers.paper_id = scored.pid
+                ORDER BY scored.chunk_vector_score DESC
+                """
+            )
             with self._session() as session:
                 vector_rows = (
                     session.execute(
@@ -2005,9 +2060,18 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     .mappings()
                     .all()
                 )
+                chunk_vector_rows = (
+                    session.execute(
+                        chunk_vector_sql,
+                        {"query_embedding": embedding_literal, "candidate_pool": candidate_pool},
+                    )
+                    .mappings()
+                    .all()
+                )
 
         with self._session() as session:
             lexical_rows = session.execute(lexical_sql, lexical_params).mappings().all()
+            chunk_lexical_rows = session.execute(chunk_lexical_sql, lexical_params).mappings().all()
 
         row_by_id: dict[str, Any] = {}
         rrf: dict[str, float] = {}
@@ -2020,6 +2084,14 @@ class SqlAlchemyPaperRepository(PaperRepository):
             row_by_id.setdefault(pid, row)
             # slight weighting towards semantic hits
             rrf[pid] = rrf.get(pid, 0.0) + 1.2 / (rrf_k + rank)
+        for rank, row in enumerate(chunk_lexical_rows):
+            pid = row["paper_id"]
+            row_by_id.setdefault(pid, row)
+            rrf[pid] = rrf.get(pid, 0.0) + 0.8 / (rrf_k + rank)
+        for rank, row in enumerate(chunk_vector_rows):
+            pid = row["paper_id"]
+            row_by_id.setdefault(pid, row)
+            rrf[pid] = rrf.get(pid, 0.0) + 0.8 / (rrf_k + rank)
 
         from math import log10
 
@@ -3953,6 +4025,13 @@ class MemoryPaperRepository(PaperRepository):
                 score += 2.0
             if query_lower in self.search_documents.get(paper_id, "").lower():
                 score += 1.0
+            if score == 0:
+                for chunk in self.text_chunks.get(paper_id, []):
+                    if chunk.get("chunk_kind") == "full_text":
+                        continue
+                    if query_lower in (chunk.get("content") or "").lower():
+                        score += 0.8
+                        break
             if score > 0:
                 # Bake citation + recency boosts into the score so the
                 # caller (service.search) can treat MemoryPaperRepository
