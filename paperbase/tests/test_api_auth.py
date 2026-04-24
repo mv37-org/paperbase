@@ -295,6 +295,65 @@ class StubApiService:
         self.calls.append(("record_search_click", (query_id, paper_id)))
         return query_id == "qry_known"
 
+    # Paper-code retrieval stubs (#5 PR 2). Every method returns ``None``
+    # for ``paper_unknown`` so the route-level 404 path is covered.
+    def list_paper_code_files(self, paper_id: str):
+        from paperbase.models import CodeEligibility, CodeFileListResponse, CodeFileSummary
+
+        self.calls.append(("list_paper_code_files", paper_id))
+        if paper_id == "paper_unknown":
+            return None
+        return CodeFileListResponse(
+            paper_id=paper_id,
+            eligibility=CodeEligibility(eligible=True, status="indexed"),
+            resolved_sha="abc123",
+            files=[CodeFileSummary(repo_path="README.md", size_bytes=10, indexed=True)],
+        )
+
+    def read_paper_code_file(self, paper_id: str, repo_path: str):
+        from paperbase.models import CodeEligibility, CodeReadResponse
+
+        self.calls.append(("read_paper_code_file", (paper_id, repo_path)))
+        if paper_id == "paper_unknown":
+            return None
+        return CodeReadResponse(
+            paper_id=paper_id,
+            eligibility=CodeEligibility(eligible=True, status="indexed"),
+            repo_path=repo_path,
+            content="# stub\n",
+            size_bytes=7,
+        )
+
+    def search_paper_code(self, paper_id: str, query: str, *, limit: int = 10):
+        from paperbase.models import CodeEligibility, CodeSearchHit, CodeSearchResponse
+
+        self.calls.append(("search_paper_code", (paper_id, query, limit)))
+        if paper_id == "paper_unknown":
+            return None
+        return CodeSearchResponse(
+            paper_id=paper_id,
+            eligibility=CodeEligibility(eligible=True, status="indexed"),
+            query=query,
+            hits=[
+                CodeSearchHit(
+                    repo_path="README.md", chunk_kind="code_readme", preview="demo", score=0.9
+                )
+            ],
+        )
+
+    def get_paper_code_context(self, paper_id: str, query: str, *, limit: int = 5):
+        from paperbase.models import CodeContextResponse, CodeEligibility
+
+        self.calls.append(("get_paper_code_context", (paper_id, query, limit)))
+        if paper_id == "paper_unknown":
+            return None
+        return CodeContextResponse(
+            paper_id=paper_id,
+            eligibility=CodeEligibility(eligible=True, status="indexed"),
+            query=query,
+            context="### README.md (code_readme)\ndemo",
+        )
+
     def get_current_browser_user(self, raw_token: str | None):
         self.calls.append(("get_current_browser_user", raw_token))
         if raw_token == "browser-session-token":
@@ -1413,3 +1472,73 @@ def test_harvest_endpoint_requires_bearer_token(api_client):
 
     assert missing.status_code == 401
     assert invalid.status_code == 403
+
+
+# --------------------------------------------------------------------------- #
+# Paper-code retrieval endpoints (#5 PR 2)
+# --------------------------------------------------------------------------- #
+
+
+def test_paper_code_endpoints_delegate_to_service(api_client):
+    client, service, settings = api_client
+    headers = {"Authorization": f"Bearer {settings.api_key}"}
+
+    response = client.get("/v1/papers/paper_xyz/code/files", headers=headers)
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["paper_id"] == "paper_xyz"
+    assert payload["eligibility"]["eligible"] is True
+    assert payload["files"][0]["repo_path"] == "README.md"
+    assert ("list_paper_code_files", "paper_xyz") in service.calls
+
+    response = client.get("/v1/papers/paper_xyz/code/files/src/mod.py", headers=headers)
+    assert response.status_code == 200
+    assert response.json()["repo_path"] == "src/mod.py"
+    assert ("read_paper_code_file", ("paper_xyz", "src/mod.py")) in service.calls
+
+    response = client.get(
+        "/v1/papers/paper_xyz/code/search",
+        params={"q": "transformer", "limit": 3},
+        headers=headers,
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["query"] == "transformer"
+    assert payload["hits"][0]["chunk_kind"] == "code_readme"
+    assert ("search_paper_code", ("paper_xyz", "transformer", 3)) in service.calls
+
+    response = client.get(
+        "/v1/papers/paper_xyz/code/context",
+        params={"q": "transformer"},
+        headers=headers,
+    )
+    assert response.status_code == 200
+    assert "README.md" in response.json()["context"]
+    assert ("get_paper_code_context", ("paper_xyz", "transformer", 5)) in service.calls
+
+
+def test_paper_code_endpoints_404_for_unknown_paper(api_client):
+    client, _, settings = api_client
+    headers = {"Authorization": f"Bearer {settings.api_key}"}
+
+    for path in [
+        "/v1/papers/paper_unknown/code/files",
+        "/v1/papers/paper_unknown/code/files/README.md",
+        "/v1/papers/paper_unknown/code/search?q=x",
+        "/v1/papers/paper_unknown/code/context?q=x",
+    ]:
+        response = client.get(path, headers=headers)
+        assert response.status_code == 404, f"{path} should 404 for unknown paper"
+
+
+def test_paper_code_endpoints_require_bearer_auth(api_client):
+    client, _, _ = api_client
+
+    for path in [
+        "/v1/papers/paper_xyz/code/files",
+        "/v1/papers/paper_xyz/code/files/README.md",
+        "/v1/papers/paper_xyz/code/search?q=x",
+        "/v1/papers/paper_xyz/code/context?q=x",
+    ]:
+        response = client.get(path)
+        assert response.status_code == 401, f"{path} must require bearer token"

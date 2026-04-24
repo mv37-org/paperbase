@@ -4098,3 +4098,337 @@ def test_enqueue_ingest_repo_job_records_payload(service: PaperbaseService) -> N
     job = service.enqueue_ingest_repo_job(paper_id, force=True)
     assert job.job_type == "ingest_repo"
     assert job.payload == {"paper_id": paper_id, "force": True}
+
+
+# --------------------------------------------------------------------------- #
+# Paper-code retrieval primitives (#5 PR 2)
+# --------------------------------------------------------------------------- #
+
+
+def _build_tarball_with(files: dict[str, bytes]) -> bytes:
+    """Mini helper: build a GitHub-shaped tarball from a name→bytes map."""
+    import io as _io
+    import tarfile as _tar
+
+    buf = _io.BytesIO()
+    with _tar.open(fileobj=buf, mode="w:gz") as tar:
+        for name, data in files.items():
+            info = _tar.TarInfo(name=f"owner-repo-abc/{name}")
+            info.size = len(data)
+            info.mode = 0o644
+            tar.addfile(info, _io.BytesIO(data))
+    return buf.getvalue()
+
+
+def _ingest_python_repo(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch, *, files: dict[str, bytes]
+) -> str:
+    """Seed a paper, stub the fetcher, and run ``ingest_repo`` end-to-end.
+    Returns the paper_id so the caller can exercise the retrieval surface.
+    """
+    from paperbase import code_ingest as ci
+
+    paper_id = _seed_paper_with_code_url(service, code_url="https://github.com/owner/repo")
+
+    def fake_fetch(ref, *, token, max_bytes, **_kwargs):
+        return ci.FetchedArchive(
+            data=_build_tarball_with(files), resolved_sha="code2sha" + "0" * 32, etag=None
+        )
+
+    monkeypatch.setattr("paperbase.service.code_ingest.fetch_github_archive", fake_fetch)
+    result = service.ingest_repo(paper_id)
+    assert result is not None
+    return paper_id
+
+
+def test_list_paper_code_files_returns_files_for_eligible_repo(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paper_id = _ingest_python_repo(
+        service,
+        monkeypatch,
+        files={
+            "README.md": b"# Demo\npip install foo\n",
+            "pyproject.toml": b"[project]\nname='foo'\n",
+            "main.py": b'"""Entry."""\nprint(1)\n',
+        },
+    )
+    response = service.list_paper_code_files(paper_id)
+    assert response is not None
+    assert response.eligibility.eligible is True
+    assert response.eligibility.status == "indexed"
+    assert response.resolved_sha is not None
+    paths = {f.repo_path for f in response.files}
+    assert {"README.md", "pyproject.toml", "main.py"} <= paths
+    indexed = {f.repo_path for f in response.files if f.indexed}
+    assert {"README.md", "pyproject.toml", "main.py"} <= indexed
+
+
+def test_list_paper_code_files_ineligible_for_non_python(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paper_id = _ingest_python_repo(
+        service,
+        monkeypatch,
+        files={
+            "README.md": b"# JS project\n",
+            "package.json": b"{}\n",
+        },
+    )
+    response = service.list_paper_code_files(paper_id)
+    assert response is not None
+    assert response.eligibility.eligible is False
+    # Classifier landed on no_python_sources; status stays 'indexed' because
+    # the repo WAS ingested — it just isn't Python.
+    assert response.eligibility.reason == "no_python_sources"
+    assert response.files == []
+
+
+def test_read_paper_code_file_returns_content_for_indexed_file(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paper_id = _ingest_python_repo(
+        service,
+        monkeypatch,
+        files={
+            "README.md": b"# Hello\n",
+            "pyproject.toml": b"[project]\nname='x'\n",
+            "src/mod.py": b"x = 1\n",
+        },
+    )
+    response = service.read_paper_code_file(paper_id, "src/mod.py")
+    assert response is not None
+    assert response.eligibility.eligible is True
+    assert response.content == "x = 1\n"
+    assert response.size_bytes == len(b"x = 1\n")
+    assert response.repo_path == "src/mod.py"
+
+
+def test_read_paper_code_file_rejects_path_traversal(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paper_id = _ingest_python_repo(
+        service,
+        monkeypatch,
+        files={
+            "README.md": b"# Hello\n",
+            "pyproject.toml": b"[project]\n",
+            "main.py": b"print(1)\n",
+        },
+    )
+    for evil in ("../etc/passwd", "/absolute/path", "sub/../../evil.py"):
+        response = service.read_paper_code_file(paper_id, evil)
+        assert response is not None
+        # Normalized path should not equal the raw traversal attempt and
+        # content should be empty (no file served for rejected paths).
+        assert response.content == ""
+
+
+def test_normalize_code_path_rejects_absolute_and_drive_prefixes() -> None:
+    """Regression test for the PR #44 review: ``_normalize_code_path``
+    previously called ``lstrip("/")`` before the absolute-path check, which
+    silently turned ``/absolute/path`` into ``absolute/path`` — the read
+    endpoint would then serve it if a matching stored file happened to
+    exist. Rejecting absolute paths before stripping is the fix; this
+    lock-in prevents a regression via path-reconstruction refactors.
+
+    Also locks in the narrower drive-prefix check from the follow-up review
+    (``^[A-Za-z]:[/\\\\]`` rather than any second-character colon) so a file
+    legitimately named ``a:b.txt`` remains readable.
+    """
+    normalize = PaperbaseService._normalize_code_path
+    for evil in [
+        "/absolute/path",
+        "//server/share",
+        "\\windows\\path",
+        "C:/windows",
+        "C:\\windows",
+        "c:/lower",
+        "../escape",
+        "sub/../../escape",
+        "./hidden",
+        "",
+        "   ",
+    ]:
+        assert normalize(evil) is None, f"{evil!r} must be rejected"
+    assert normalize("README.md") == "README.md"
+    assert normalize("src/mod.py") == "src/mod.py"
+    assert normalize("  scripts/train.py  ") == "scripts/train.py"
+    # Legitimate filenames whose second character is ``:`` must NOT be
+    # rejected — GitHub / Git allow them and narrowing the drive-prefix
+    # check from ``raw[1] == ':'`` to ``^[A-Za-z]:[/\\]`` is the point
+    # of the follow-up review.
+    for ok in ["a:b.txt", "v:1/notes.md", "docs/x:y.md"]:
+        assert normalize(ok) == ok, f"{ok!r} must be accepted"
+
+
+def test_read_paper_code_file_rejects_absolute_even_when_file_exists(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Concrete-layout version of the path-traversal lock-in. Drops a
+    blob at the exact object-store key a pre-fix ``lstrip`` would have
+    constructed, then asserts the read primitive refuses to serve it —
+    proving the input is rejected upstream rather than by accident."""
+    paper_id = _ingest_python_repo(
+        service,
+        monkeypatch,
+        files={
+            "README.md": b"# Hello\n",
+            "pyproject.toml": b"[project]\n",
+            "main.py": b"print(1)\n",
+        },
+    )
+    service.object_store.put_bytes(
+        f"papers/{paper_id}/code/files/absolute/path",
+        b"this should never be served",
+    )
+    response = service.read_paper_code_file(paper_id, "/absolute/path")
+    assert response is not None
+    assert response.content == ""
+    assert response.size_bytes == 0
+
+
+def test_list_paper_code_files_uses_metadata_not_content_reads(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for the PR #44 review: the previous implementation
+    called ``object_store.get_bytes()`` per file just to populate
+    ``size_bytes``, making the list endpoint O(total repo bytes) of
+    network I/O on GCS. The fix routes through ``list_prefix`` metadata,
+    so ``get_bytes`` must never be touched during listing."""
+    paper_id = _ingest_python_repo(
+        service,
+        monkeypatch,
+        files={
+            "README.md": b"# Demo\n",
+            "pyproject.toml": b"[project]\nname='x'\n",
+            "main.py": b'"""x."""\nprint(1)\n',
+        },
+    )
+
+    real_get_bytes = service.object_store.get_bytes
+    calls: list[str] = []
+
+    def tracking_get_bytes(path: str) -> bytes:
+        calls.append(path)
+        return real_get_bytes(path)
+
+    monkeypatch.setattr(service.object_store, "get_bytes", tracking_get_bytes)
+    response = service.list_paper_code_files(paper_id)
+    assert response is not None
+    assert response.eligibility.eligible is True
+    assert len(response.files) >= 3
+    assert all(f.size_bytes > 0 for f in response.files), (
+        f"every listed file should carry size metadata; got {[f for f in response.files]}"
+    )
+    code_file_reads = [p for p in calls if p.startswith(f"papers/{paper_id}/code/files/")]
+    assert code_file_reads == [], (
+        f"listing must not download code/files/* blobs; got {code_file_reads}"
+    )
+
+
+def test_read_paper_code_file_ineligible_for_non_python(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paper_id = _ingest_python_repo(
+        service,
+        monkeypatch,
+        files={"README.md": b"# JS\n", "package.json": b"{}\n"},
+    )
+    response = service.read_paper_code_file(paper_id, "README.md")
+    assert response is not None
+    assert response.eligibility.eligible is False
+    assert response.content == ""
+
+
+def test_search_paper_code_returns_readme_and_signature_hits(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paper_id = _ingest_python_repo(
+        service,
+        monkeypatch,
+        files={
+            "README.md": b"# Demo\nThis project trains a transformer model on IMDB.\n",
+            "pyproject.toml": b"[project]\nname='demo'\n",
+            "main.py": b'"""Run demo."""\n\ndef train_transformer(x):\n    """Train a transformer."""\n    return x\n',
+        },
+    )
+    response = service.search_paper_code(paper_id, "transformer", limit=10)
+    assert response is not None
+    assert response.eligibility.eligible is True
+    # At least the README and the signature chunk should hit "transformer".
+    kinds = {h.chunk_kind for h in response.hits}
+    assert "code_readme" in kinds
+    assert "code_signature" in kinds
+    # repo_path is the clean repo-relative path, stripped of any
+    # "code/files/" storage prefix.
+    assert all(not h.repo_path.startswith("code/files/") for h in response.hits)
+
+
+def test_search_paper_code_ineligible_for_non_python(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paper_id = _ingest_python_repo(
+        service,
+        monkeypatch,
+        files={"README.md": b"# JS\n", "package.json": b"{}\n"},
+    )
+    response = service.search_paper_code(paper_id, "anything")
+    assert response is not None
+    assert response.eligibility.eligible is False
+    assert response.hits == []
+
+
+def test_get_paper_code_context_concatenates_top_chunks(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paper_id = _ingest_python_repo(
+        service,
+        monkeypatch,
+        files={
+            "README.md": b"# Demo\nTrains a small transformer.\n",
+            "pyproject.toml": b"[project]\nname='demo'\n",
+            "main.py": b'"""Entry."""\n\ndef train_transformer():\n    """Train it."""\n    pass\n',
+        },
+    )
+    response = service.get_paper_code_context(paper_id, "transformer", limit=3)
+    assert response is not None
+    assert response.eligibility.eligible is True
+    assert "### README.md" in response.context or "### main.py" in response.context
+    assert len(response.hits) >= 1
+
+
+def test_paper_section_search_excludes_code_chunks(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for the PR 2 namespace split: a token that appears in
+    an indexed README must NOT surface in paper-section search, otherwise a
+    user asking for a paper concept gets polluted by linked-repo code."""
+    paper_id = _ingest_python_repo(
+        service,
+        monkeypatch,
+        files={
+            "README.md": b"# UniqueReadmeToken\nThis README mentions UniqueReadmeToken prominently.\n",
+            "pyproject.toml": b"[project]\nname='demo'\n",
+            "main.py": b"def f():\n    pass\n",
+        },
+    )
+    # Sanity: the token IS in the indexed code chunks.
+    code_response = service.search_paper_code(paper_id, "UniqueReadmeToken", limit=5)
+    assert code_response is not None and code_response.hits, "expected code hit for the sentinel"
+
+    # Paper-section search must not return it because it is only in code chunks.
+    section_rows = service.repository.search_sections(
+        "UniqueReadmeToken", limit=10
+    )
+    assert section_rows == [], (
+        "paper-section search leaked code chunks: "
+        f"{[(r.chunk_kind, r.path) for r in section_rows]}"
+    )
+
+
+def test_list_and_read_return_none_for_missing_paper(service: PaperbaseService) -> None:
+    assert service.list_paper_code_files("paper_does_not_exist") is None
+    assert service.read_paper_code_file("paper_does_not_exist", "README.md") is None
+    assert service.search_paper_code("paper_does_not_exist", "x") is None
+    assert service.get_paper_code_context("paper_does_not_exist", "x") is None

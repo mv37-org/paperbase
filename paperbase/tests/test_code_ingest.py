@@ -457,3 +457,117 @@ def test_fetch_github_archive_sends_auth_header_when_token_given() -> None:
         http_get=http_get,
     )
     assert captured["headers"]["Authorization"] == "Bearer gho_test"
+
+
+# --------------------------------------------------------------------------- #
+# Code chunk extraction (PR 2)
+# --------------------------------------------------------------------------- #
+
+
+def _extract_for_chunks(tmp_path: Path, entries: list[tuple[str, bytes | str | None, str]]) -> tuple[Path, ScanReport]:
+    archive = _build_tarball(entries)
+    dest = tmp_path / "repo"
+    report = extract_archive_safely(
+        archive, dest, max_stored_file_bytes=1 << 20, max_scanned_files=1000
+    )
+    return dest, report
+
+
+def test_build_code_chunks_emits_readme_and_docs(tmp_path: Path) -> None:
+    root, report = _extract_for_chunks(
+        tmp_path,
+        [
+            ("owner-repo-abc/README.md", "# Demo\nUseful.\n", "file"),
+            ("owner-repo-abc/docs/guide.md", "# Guide\nContent.\n", "file"),
+            ("owner-repo-abc/src/mod.py", "x = 1\n", "file"),
+        ],
+    )
+    chunks = code_ingest.build_code_chunks(root, report)
+    by_kind: dict[str, list[code_ingest.CodeChunk]] = {}
+    for c in chunks:
+        by_kind.setdefault(c.chunk_kind, []).append(c)
+    assert {c.repo_path for c in by_kind["code_readme"]} == {"README.md"}
+    assert {c.repo_path for c in by_kind["code_doc"]} == {"docs/guide.md"}
+
+
+def test_build_code_chunks_emits_manifests(tmp_path: Path) -> None:
+    root, report = _extract_for_chunks(
+        tmp_path,
+        [
+            ("owner-repo-abc/pyproject.toml", "[project]\nname='x'\n", "file"),
+            ("owner-repo-abc/requirements.txt", "torch\n", "file"),
+            ("owner-repo-abc/setup.py", "from setuptools import setup\n", "file"),
+        ],
+    )
+    chunks = code_ingest.build_code_chunks(root, report)
+    manifests = {c.repo_path for c in chunks if c.chunk_kind == "code_manifest"}
+    assert manifests == {"pyproject.toml", "requirements.txt", "setup.py"}
+
+
+def test_build_code_chunks_emits_entrypoints_and_signatures(tmp_path: Path) -> None:
+    root, report = _extract_for_chunks(
+        tmp_path,
+        [
+            (
+                "owner-repo-abc/main.py",
+                '"""Entry.\n\nLong module doc."""\n\n'
+                "def run(x: int = 1) -> bool:\n"
+                '    """Runs the demo."""\n'
+                "    return True\n"
+                "\n"
+                "class Worker:\n"
+                '    """Orchestrates."""\n'
+                "    def work(self, task):\n"
+                '        """Do one task."""\n'
+                "        return task\n",
+                "file",
+            ),
+            ("owner-repo-abc/scripts/train.py", "def train():\n    pass\n", "file"),
+        ],
+    )
+    chunks = code_ingest.build_code_chunks(root, report)
+    entrypoints = [c for c in chunks if c.chunk_kind == "code_entrypoint"]
+    signatures = [c for c in chunks if c.chunk_kind == "code_signature"]
+    assert {c.repo_path for c in entrypoints} == {"main.py", "scripts/train.py"}
+    main_sig = next(c for c in signatures if c.repo_path == "main.py")
+    # Signature chunk must capture: module docstring, fn signature + doc,
+    # class signature + doc, method signature + doc.
+    assert "def run(x: int=1) -> bool:" in main_sig.content
+    assert "Runs the demo" in main_sig.content
+    assert "class Worker:" in main_sig.content
+    assert "Orchestrates" in main_sig.content
+    assert "def work(self, task):" in main_sig.content
+    assert "Do one task" in main_sig.content
+
+
+def test_build_code_chunks_truncates_oversized_content(tmp_path: Path) -> None:
+    huge_readme = "a" * 10_000
+    root, report = _extract_for_chunks(
+        tmp_path,
+        [
+            ("owner-repo-abc/README.md", huge_readme, "file"),
+        ],
+    )
+    chunks = code_ingest.build_code_chunks(root, report)
+    readme = next(c for c in chunks if c.chunk_kind == "code_readme")
+    assert len(readme.content) < len(huge_readme)
+    assert readme.content.endswith("[truncated]")
+
+
+def test_build_code_chunks_skips_unparseable_python(tmp_path: Path) -> None:
+    root, report = _extract_for_chunks(
+        tmp_path,
+        [
+            ("owner-repo-abc/good.py", "def ok():\n    pass\n", "file"),
+            ("owner-repo-abc/broken.py", "def not python syntax at all: [\n", "file"),
+        ],
+    )
+    # extract_archive_safely only populates candidate_entrypoints for names
+    # matching the entrypoint hint; signature chunks are produced for any
+    # stored .py regardless. Confirm broken.py yields no signature chunk.
+    # We also confirm good.py is unaffected.
+    report.candidate_entrypoints.clear()  # isolate to the signature path
+    chunks = code_ingest.build_code_chunks(root, report)
+    sig_paths = {c.repo_path for c in chunks if c.chunk_kind == "code_signature"}
+    assert "good.py" in sig_paths
+    assert "broken.py" not in sig_paths
