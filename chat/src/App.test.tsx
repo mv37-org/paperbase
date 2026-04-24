@@ -567,8 +567,8 @@ describe("App", () => {
     fireEvent.click(screen.getAllByText("General")[0]!);
 
     await waitFor(() => {
-      expect(apiMocks.loadProjectItems).toHaveBeenCalledWith("proj_1", 25, 0, "python_file");
-      expect(apiMocks.loadProjectItems).toHaveBeenCalledWith("proj_1", 25, 0, "thread");
+      expect(apiMocks.loadProjectItems).toHaveBeenCalledWith("proj_1", 5, 0, "python_file");
+      expect(apiMocks.loadProjectItems).toHaveBeenCalledWith("proj_1", 5, 0, "thread");
     });
     await waitFor(() => {
       expect(screen.getByText("Recovered thread")).toBeTruthy();
@@ -606,11 +606,15 @@ describe("App", () => {
         const allItems =
           itemKind === "python_file"
             ? [
-                projectItemFile("file_1", "analysis.py", projectId),
-                projectItemFile("file_2", "eval.py", projectId),
+                projectItemFile("file_1", "analysis-1.py", projectId),
+                projectItemFile("file_2", "analysis-2.py", projectId),
+                projectItemFile("file_3", "analysis-3.py", projectId),
+                projectItemFile("file_4", "analysis-4.py", projectId),
+                projectItemFile("file_5", "analysis-5.py", projectId),
+                projectItemFile("file_6", "analysis-6.py", projectId),
               ]
             : [projectItemThread("thread_1", "Recovered thread", projectId)];
-        const pageItems = allItems.slice(offset, offset + 1);
+        const pageItems = allItems.slice(offset, offset + limit);
         return {
           ...projectItemsPage(projectId, pageItems),
           offset,
@@ -632,15 +636,61 @@ describe("App", () => {
     expect(repoLink.getAttribute("href")).toBe(
       "https://github.com/octocat/paperbase-general-123abc",
     );
-    expect(await screen.findByText("analysis.py")).toBeTruthy();
-    expect(screen.queryByText("eval.py")).toBeNull();
+    expect(await screen.findByText("analysis-1.py")).toBeTruthy();
+    expect(screen.getByText("analysis-5.py")).toBeTruthy();
+    expect(screen.queryByText("analysis-6.py")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Show more" }));
 
     await waitFor(() => {
-      expect(apiMocks.loadProjectItems).toHaveBeenCalledWith("proj_1", 25, 1, "python_file");
+      expect(apiMocks.loadProjectItems).toHaveBeenCalledWith("proj_1", 5, 5, "python_file");
     });
-    expect(await screen.findByText("eval.py")).toBeTruthy();
+    expect(await screen.findByText("analysis-6.py")).toBeTruthy();
+  });
+
+  it("paginates project sessions inside the sessions section", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.loadProjectItems.mockImplementation(
+      async (projectId: string, limit = 25, offset = 0, itemKind?: "thread" | "python_file") => {
+        const allItems =
+          itemKind === "thread"
+            ? [
+                projectItemThread("thread_1", "Session 1", projectId),
+                projectItemThread("thread_2", "Session 2", projectId),
+                projectItemThread("thread_3", "Session 3", projectId),
+                projectItemThread("thread_4", "Session 4", projectId),
+                projectItemThread("thread_5", "Session 5", projectId),
+                projectItemThread("thread_6", "Session 6", projectId),
+              ]
+            : [projectItemFile("file_1", "analysis.py", projectId)];
+        const pageItems = allItems.slice(offset, offset + limit);
+        return {
+          ...projectItemsPage(projectId, pageItems),
+          offset,
+          limit,
+          total_count: allItems.length,
+          has_more: offset + pageItems.length < allItems.length,
+        };
+      },
+    );
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+    fireEvent.click(screen.getAllByText("General")[0]!);
+
+    expect(await screen.findByText("Session 1")).toBeTruthy();
+    expect(screen.getByText("Session 5")).toBeTruthy();
+    expect(screen.queryByText("Session 6")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show more" }));
+
+    await waitFor(() => {
+      expect(apiMocks.loadProjectItems).toHaveBeenCalledWith("proj_1", 5, 5, "thread");
+    });
+    expect(await screen.findByText("Session 6")).toBeTruthy();
   });
 
   it("creates a project from the sidebar modal", async () => {
@@ -1305,7 +1355,7 @@ describe("App", () => {
     fireEvent.click(screen.getAllByText("General")[0]!);
 
     await waitFor(() => {
-      expect(apiMocks.loadProjectItems).toHaveBeenCalledWith("proj_1", 25, 0, "thread");
+      expect(apiMocks.loadProjectItems).toHaveBeenCalledWith("proj_1", 5, 0, "thread");
       expect(screen.getByText("Recovered thread")).toBeTruthy();
     });
 
