@@ -4432,3 +4432,300 @@ def test_list_and_read_return_none_for_missing_paper(service: PaperbaseService) 
     assert service.read_paper_code_file("paper_does_not_exist", "README.md") is None
     assert service.search_paper_code("paper_does_not_exist", "x") is None
     assert service.get_paper_code_context("paper_does_not_exist", "x") is None
+
+
+# --------------------------------------------------------------------------- #
+# code_url 3-layer decision (#46): admin > PWC > ranker
+# --------------------------------------------------------------------------- #
+
+
+def _seed_code_url_paper(
+    service: PaperbaseService,
+    *,
+    arxiv_id: str = "2401.99999",
+    code_url: str | None = None,
+    code_url_source: str | None = None,
+) -> str:
+    from datetime import UTC, datetime as _datetime
+
+    paper = PaperMetadata(
+        arxiv_id=arxiv_id,
+        title="Test Paper",
+        authors="Alice, Bob",
+        abstract="x",
+        categories="cs.AI",
+        primary_category="cs.AI",
+        published="2024-01-01",
+        updated="2024-01-01",
+        code_url=code_url,
+        code_url_source=code_url_source,
+        index_status="indexed",
+        indexed_at=_datetime(2024, 1, 1, tzinfo=UTC),
+    )
+    stored = service.repository.upsert_paper(paper, search_document="x", embedding=None)
+    return stored.paper_id
+
+
+def test_set_admin_code_url_pins_and_rejects_unsupported(service: PaperbaseService) -> None:
+    paper_id = _seed_code_url_paper(service)
+    pinned = service.set_admin_code_url(paper_id, code_url="https://github.com/owner/official")
+    assert pinned is not None
+    assert pinned.code_url == "https://github.com/owner/official"
+    assert pinned.code_url_source == "admin"
+
+    cleared = service.set_admin_code_url(paper_id, code_url=None)
+    assert cleared is not None
+    assert cleared.code_url is None
+    assert cleared.code_url_source is None
+
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as excinfo:
+        service.set_admin_code_url(paper_id, code_url="https://gitlab.com/x/y")
+    assert excinfo.value.status_code == 400
+
+    assert service.set_admin_code_url("paper_unknown", code_url="https://github.com/a/b") is None
+
+
+def test_admin_pin_survives_reindex_in_index_arxiv_paper(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 3-layer decision in ``index_arxiv_paper`` must leave a paper's
+    admin-pinned ``code_url`` untouched, even when the paper text
+    contains a different high-confidence candidate (#46 sticky rule)."""
+    paper_id = _seed_code_url_paper(service)
+    service.set_admin_code_url(paper_id, code_url="https://github.com/admin/pinned")
+
+    from paperbase import sources
+    from paperbase.extractors import ExtractionOutput
+
+    def fake_get_paper_details(arxiv_id: str):
+        return PaperMetadata(
+            arxiv_id=arxiv_id,
+            title="Test Paper Refresh",
+            authors="Alice, Bob",
+            abstract="We release code at https://github.com/text/advertised.",
+            categories="cs.AI",
+            primary_category="cs.AI",
+            published="2024-01-01",
+            updated="2024-01-01",
+        )
+
+    monkeypatch.setattr(sources, "get_paper_details", fake_get_paper_details)
+    monkeypatch.setattr(sources, "enrich_with_semantic_scholar", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda metadata: ExtractionOutput(
+            source_type="abstract-only",
+            text_markdown="# Test\n\nSee https://github.com/text/advertised for details.\n",
+        ),
+    )
+
+    refreshed = service.index_arxiv_paper("2401.99999", force=True)
+    assert refreshed.code_url == "https://github.com/admin/pinned"
+    assert refreshed.code_url_source == "admin"
+
+
+def test_index_arxiv_paper_prefers_pwc_over_ranker(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the PWC crosslink is enabled and returns an official repo,
+    the ranker's choice is overridden — PWC's human-curated
+    ``is_official`` flag is the authoritative signal (#46 layer 1)."""
+    _seed_code_url_paper(service)
+
+    from paperbase import sources
+    from paperbase.extractors import ExtractionOutput
+
+    service.settings.fetch_code_crosslinks_at_index = True
+
+    monkeypatch.setattr(
+        sources,
+        "get_paper_details",
+        lambda aid: PaperMetadata(
+            arxiv_id=aid,
+            title="T",
+            authors="A",
+            abstract="",
+            categories="cs.AI",
+            primary_category="cs.AI",
+            published="2024-01-01",
+            updated="2024-01-01",
+        ),
+    )
+    monkeypatch.setattr(sources, "enrich_with_semantic_scholar", lambda *a, **k: None)
+    monkeypatch.setattr(
+        sources, "fetch_papers_with_code_repo", lambda _aid: "https://github.com/pwc/official"
+    )
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda metadata: ExtractionOutput(
+            source_type="abstract-only",
+            text_markdown="See https://github.com/text/ranker for code.\n",
+        ),
+    )
+
+    refreshed = service.index_arxiv_paper("2401.99999", force=True)
+    assert refreshed.code_url == "https://github.com/pwc/official"
+    assert refreshed.code_url_source == "pwc"
+    assert refreshed.code_url_candidates is not None
+    assert any("text/ranker" in c for c in refreshed.code_url_candidates)
+
+
+def test_index_arxiv_paper_falls_back_to_ranker_when_pwc_empty(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With PWC enabled but returning no official match, the ranker
+    picks the in-text winner (#46 layer 2)."""
+    _seed_code_url_paper(service)
+
+    from paperbase import sources
+    from paperbase.extractors import ExtractionOutput
+
+    service.settings.fetch_code_crosslinks_at_index = True
+
+    monkeypatch.setattr(
+        sources,
+        "get_paper_details",
+        lambda aid: PaperMetadata(
+            arxiv_id=aid,
+            title="T",
+            authors="A",
+            abstract="",
+            categories="cs.AI",
+            primary_category="cs.AI",
+            published="2024-01-01",
+            updated="2024-01-01",
+        ),
+    )
+    monkeypatch.setattr(sources, "enrich_with_semantic_scholar", lambda *a, **k: None)
+    monkeypatch.setattr(sources, "fetch_papers_with_code_repo", lambda _aid: None)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda metadata: ExtractionOutput(
+            source_type="abstract-only",
+            text_markdown="Code at https://github.com/text/winner.\n",
+        ),
+    )
+
+    refreshed = service.index_arxiv_paper("2401.99999", force=True)
+    assert refreshed.code_url == "https://github.com/text/winner"
+    assert refreshed.code_url_source == "extracted"
+
+
+def test_index_arxiv_paper_returns_none_on_ambiguity(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two candidates near-tie under the ranker's ``min_margin``:
+    ``code_url`` must resolve to ``None`` so ``ingest_repo`` is not
+    auto-enqueued against an uncertain repo. This is arslnb's
+    "ambiguity → None" rule from the PR #45 review."""
+    _seed_code_url_paper(service)
+
+    from paperbase import sources
+    from paperbase.extractors import ExtractionOutput
+
+    service.settings.fetch_code_crosslinks_at_index = False
+
+    monkeypatch.setattr(
+        sources,
+        "get_paper_details",
+        lambda aid: PaperMetadata(
+            arxiv_id=aid,
+            title="T",
+            authors="A",
+            abstract="",
+            categories="cs.AI",
+            primary_category="cs.AI",
+            published="2024-01-01",
+            updated="2024-01-01",
+        ),
+    )
+    monkeypatch.setattr(sources, "enrich_with_semantic_scholar", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda metadata: ExtractionOutput(
+            source_type="abstract-only",
+            text_markdown=(
+                "See https://github.com/owner/dataset and also "
+                "https://github.com/owner/method in the code.\n"
+            ),
+        ),
+    )
+
+    refreshed = service.index_arxiv_paper("2401.99999", force=True)
+    assert refreshed.code_url is None
+    assert refreshed.code_url_source is None
+    assert refreshed.code_url_candidates is not None
+    assert len(refreshed.code_url_candidates) == 2
+
+
+def test_backfill_code_urls_from_pwc_respects_admin_pin(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Core regression: the backfill CLI must never overwrite an
+    operator-pinned ``code_url``, even if PWC has a different repo on
+    file for that paper. Protects admin labor from automated cleanup."""
+    pinned_id = _seed_code_url_paper(
+        service,
+        arxiv_id="2401.00001",
+        code_url="https://github.com/admin/pinned",
+        code_url_source="admin",
+    )
+    extracted_id = _seed_code_url_paper(
+        service,
+        arxiv_id="2401.00002",
+        code_url="https://github.com/regex/guess",
+        code_url_source="extracted",
+    )
+
+    from paperbase import sources
+
+    monkeypatch.setattr(
+        sources,
+        "fetch_papers_with_code_repo",
+        lambda arxiv_id: f"https://github.com/pwc/{arxiv_id.replace('.', '-')}",
+    )
+
+    result = service.backfill_code_urls_from_pwc(limit=10, page_size=10, dry_run=False)
+    # Repo-level filter drops admin rows up front; only the extracted
+    # paper reaches the backfill loop.
+    assert result["scanned"] == 1
+    assert result["updated"] == 1
+
+    pinned = service.repository.get_paper(pinned_id)
+    assert pinned is not None
+    assert pinned.code_url == "https://github.com/admin/pinned"
+    assert pinned.code_url_source == "admin"
+
+    updated = service.repository.get_paper(extracted_id)
+    assert updated is not None
+    assert updated.code_url == "https://github.com/pwc/2401-00002"
+    assert updated.code_url_source == "pwc"
+
+
+def test_backfill_code_urls_dry_run_does_not_write(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--dry-run`` must report the would-be diff count without
+    mutating the paper row — the operator needs to eyeball changes
+    before a real run touches thousands of rows."""
+    paper_id = _seed_code_url_paper(
+        service,
+        code_url="https://github.com/stale/guess",
+        code_url_source="extracted",
+    )
+    from paperbase import sources
+
+    monkeypatch.setattr(
+        sources, "fetch_papers_with_code_repo", lambda _aid: "https://github.com/pwc/new"
+    )
+
+    result = service.backfill_code_urls_from_pwc(limit=10, page_size=10, dry_run=True)
+    assert result["updated"] == 1
+    assert result["dry_run"] is True
+
+    paper = service.repository.get_paper(paper_id)
+    assert paper is not None
+    assert paper.code_url == "https://github.com/stale/guess"
+    assert paper.code_url_source == "extracted"

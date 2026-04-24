@@ -15,6 +15,7 @@ from textwrap import shorten
 import requests
 from bs4 import BeautifulSoup
 
+from . import code_ingest
 from .models import PaperMetadata
 from .preview import generate_first_page_preview
 from .utils import csv_bytes, make_slug, slugify
@@ -34,32 +35,163 @@ _GITHUB_URL_RE = re.compile(
 _GITHUB_URL_TRAILING_JUNK = ".,;:)\"'"
 
 
-def extract_github_url(*texts: str) -> str | None:
-    """Return the first GitHub repo URL found across ``texts`` (searched in
-    order), or ``None``. Trailing punctuation from prose context is stripped.
+@dataclass(frozen=True)
+class GitHubUrlCandidate:
+    """One normalized GitHub repo reference found in paper text (#46).
 
-    The indexer uses this to populate ``papers.code_url`` from a paper's
-    abstract and body so the code-ingest pipeline (#41) can auto-enqueue an
-    ``ingest_repo`` job. Catches the common case where the authors advertise
-    their repo in-text; papers that don't are left as ``code_url=None`` —
-    broader coverage (Papers With Code, crosslink scraping) is a follow-up.
+    ``url`` is the canonical ``https://github.com/{owner}/{repo}`` form,
+    stripped of sub-paths (``/tree``, ``/blob``, ``/commit``) and query
+    parameters — those are preserved as the ``has_subpath`` bit for the
+    ranker to penalize as "less likely to be the paper's primary repo".
     """
-    for text in texts:
-        if not text:
+
+    url: str
+    owner: str
+    repo: str
+    has_subpath: bool = False
+
+
+def extract_github_candidates(abstract: str, body: str) -> list[GitHubUrlCandidate]:
+    """Return all valid, deduped GitHub repo candidates mentioned in the
+    paper (#46 layer-2 input).
+
+    Replaces the previous ``extract_github_url`` first-match-wins behavior,
+    which misfired when a paper cited a dataset / baseline repo before
+    mentioning its own (e.g. CoT's ``chaochun/nlu-asdiv-dataset``). The
+    ranker downstream consumes this list plus the raw texts to pick the
+    paper's primary repo or decline when ambiguous.
+
+    Normalization goes through ``code_ingest.parse_github_url`` so the
+    returned ``url`` field is always the canonical form — callers can
+    persist it to ``papers.code_url`` directly without re-parsing.
+    """
+    seen: dict[str, GitHubUrlCandidate] = {}
+    combined = f"{abstract or ''}\n{body or ''}"
+    for match in _GITHUB_URL_RE.finditer(combined):
+        raw = match.group(0)
+        while raw and raw[-1] in _GITHUB_URL_TRAILING_JUNK:
+            raw = raw[:-1]
+        if raw.endswith(".git"):
+            raw = raw[:-4]
+        ref = code_ingest.parse_github_url(raw)
+        if ref is None:
             continue
-        match = _GITHUB_URL_RE.search(text)
-        if not match:
-            continue
-        url = match.group(0)
-        while url and url[-1] in _GITHUB_URL_TRAILING_JUNK:
-            url = url[:-1]
-        # Strip a trailing ``.git`` so code_ingest sees a canonical
-        # owner/repo path. parse_github_url also handles .git, but keeping
-        # the stored value clean avoids surprising the admin surface.
-        if url.endswith(".git"):
-            url = url[:-4]
-        return url
-    return None
+        # GitHub repo paths are case-insensitive on the server, so ``Owner/Repo``
+        # and ``owner/repo`` are the same resource. Dedupe on the lowercased
+        # form but keep the canonical-cased string that the author used.
+        key = f"{ref.owner.lower()}/{ref.repo.lower()}"
+        canonical = f"https://github.com/{ref.owner}/{ref.repo}"
+        had_subpath = bool(
+            re.search(r"/(?:tree|blob|commit)/", raw) or "?" in raw or "#" in raw
+        )
+        previous = seen.get(key)
+        if previous is None:
+            seen[key] = GitHubUrlCandidate(
+                url=canonical, owner=ref.owner, repo=ref.repo, has_subpath=had_subpath
+            )
+        elif previous.has_subpath and not had_subpath:
+            # Upgrade the record when a later mention is the canonical form.
+            seen[key] = GitHubUrlCandidate(
+                url=canonical, owner=ref.owner, repo=ref.repo, has_subpath=False
+            )
+    return list(seen.values())
+
+
+def rank_github_candidates(
+    candidates: list[GitHubUrlCandidate],
+    *,
+    abstract: str,
+    body: str,
+    authors: str = "",
+    min_margin: float = 0.5,
+) -> GitHubUrlCandidate | None:
+    """Pick the paper's primary repo from a candidate set, or ``None``
+    when the signal is ambiguous (#46 layer 2).
+
+    Precision-first by design: a multi-candidate case where the top score
+    doesn't beat the runner-up by ``min_margin`` resolves to ``None``
+    rather than a best-guess. That matches the review guidance on #45 —
+    an incorrectly-attached repo is worse than no attachment because it
+    would auto-enqueue ``ingest_repo`` and index unrelated code under
+    the paper.
+
+    Scoring (cumulative):
+    - ``+1.0`` canonical form (no ``/tree``, ``/blob``, ``?``, ``#``)
+    - ``+1.5`` owner slug matches an author-affiliation token
+      (``google-research``, ``facebookresearch``, ``microsoft``, …)
+    - ``+1.0`` URL appears in abstract; ``+0.3`` body-only
+    - ``+0.3`` per extra body mention beyond the first (cap ``+0.9``)
+    """
+    if not candidates:
+        return None
+    author_tokens = _author_affinity_tokens(authors)
+    abstract_lower = (abstract or "").lower()
+    body_lower = (body or "").lower()
+    scored: list[tuple[float, GitHubUrlCandidate]] = []
+    for candidate in candidates:
+        score = 0.0
+        if not candidate.has_subpath:
+            score += 1.0
+        if _owner_matches_authors(candidate.owner, author_tokens):
+            score += 1.5
+        pattern = f"github.com/{candidate.owner.lower()}/{candidate.repo.lower()}"
+        if pattern in abstract_lower:
+            score += 1.0
+        elif pattern in body_lower:
+            score += 0.3
+        body_mentions = body_lower.count(pattern)
+        if body_mentions > 1:
+            score += min(0.3 * (body_mentions - 1), 0.9)
+        scored.append((score, candidate))
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    top_score, top_candidate = scored[0]
+    if len(scored) >= 2:
+        runner_up_score, _ = scored[1]
+        if top_score - runner_up_score < min_margin:
+            return None
+    return top_candidate
+
+
+_AFFINITY_TOKEN_RE = re.compile(r"[a-z][a-z0-9\-]{2,}")
+
+
+def _author_affinity_tokens(authors: str) -> set[str]:
+    if not authors:
+        return set()
+    tokens: set[str] = set()
+    for part in _AFFINITY_TOKEN_RE.findall(authors.lower()):
+        if len(part) >= 4:
+            tokens.add(part)
+    return tokens
+
+
+def _owner_matches_authors(owner: str, author_tokens: set[str]) -> bool:
+    if not owner or not author_tokens:
+        return False
+    owner_parts = re.findall(r"[a-z]+", owner.lower())
+    for part in owner_parts:
+        if len(part) >= 4 and part in author_tokens:
+            return True
+    return False
+
+
+def extract_github_url(*texts: str) -> str | None:
+    """DEPRECATED shim for callers that predate #46's candidate ranker.
+
+    Still used by service code that does not yet thread ``authors`` /
+    separate abstract+body. Returns the winner of
+    :func:`rank_github_candidates` on all accumulated text, or ``None``
+    when ambiguous / empty.
+
+    Prefer ``extract_github_candidates`` + ``rank_github_candidates`` in
+    new code — the ranker's precision guarantees depend on separating
+    abstract from body so the position bonus can fire.
+    """
+    joined_abstract = ""
+    joined_body = "\n".join(text or "" for text in texts)
+    candidates = extract_github_candidates(joined_abstract, joined_body)
+    winner = rank_github_candidates(candidates, abstract=joined_abstract, body=joined_body)
+    return winner.url if winner else None
 
 
 logger = logging.getLogger(__name__)

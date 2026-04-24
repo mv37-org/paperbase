@@ -30,7 +30,8 @@ from .config import Settings, get_settings
 from .emailer import EmailSender, ResendEmailSender
 from .extractors import (
     build_manifest,
-    extract_github_url,
+    extract_github_candidates,
+    rank_github_candidates,
     extract_uploaded_document,
     figure_index_payload,
     index_paper_artifacts,
@@ -3419,6 +3420,109 @@ class PaperbaseService:
             )
         return result
 
+    def backfill_code_urls_from_pwc(
+        self, *, limit: int = 100_000, page_size: int = 200, dry_run: bool = False
+    ) -> dict[str, Any]:
+        """Sweep indexed papers, ask Papers With Code for the official repo,
+        and overwrite ``code_url`` where the source is not ``admin`` (#46
+        cleanup story).
+
+        Returns a counts dict so callers (CLI + tests) can verify how
+        many rows were inspected vs changed. ``dry_run=True`` logs the
+        diffs without writing — use that to sanity-check before a real
+        run against 10k+ papers.
+        """
+        total_scanned = 0
+        total_pwc_hits = 0
+        total_updated = 0
+        total_skipped_admin = 0
+        total_unchanged = 0
+        after_paper_id: str | None = None
+        remaining = limit
+        while remaining > 0:
+            batch_size = min(page_size, remaining)
+            batch = self.repository.list_papers_for_code_url_backfill(
+                limit=batch_size, after_paper_id=after_paper_id
+            )
+            if not batch:
+                break
+            for paper in batch:
+                total_scanned += 1
+                if paper.code_url_source == "admin":
+                    # Defensive — the repo method already filters these out,
+                    # but a race during long backfill shouldn't clobber a
+                    # newly-created admin pin.
+                    total_skipped_admin += 1
+                    continue
+                pwc_url = sources.fetch_papers_with_code_repo(paper.arxiv_id)
+                if not pwc_url:
+                    total_unchanged += 1
+                    continue
+                total_pwc_hits += 1
+                if pwc_url == paper.code_url and paper.code_url_source == "pwc":
+                    total_unchanged += 1
+                    continue
+                logger.info(
+                    "Code URL backfill diff",
+                    extra={
+                        "event": "code_url.backfill.diff",
+                        "paper_id": paper.paper_id,
+                        "arxiv_id": paper.arxiv_id,
+                        "old_code_url": paper.code_url,
+                        "old_source": paper.code_url_source,
+                        "new_code_url": pwc_url,
+                        "new_source": "pwc",
+                        "dry_run": dry_run,
+                    },
+                )
+                if not dry_run:
+                    self.repository.update_code_url(
+                        paper.paper_id, code_url=pwc_url, code_url_source="pwc"
+                    )
+                total_updated += 1
+            last = batch[-1]
+            after_paper_id = last.paper_id
+            remaining -= len(batch)
+            if len(batch) < batch_size:
+                break
+        return {
+            "scanned": total_scanned,
+            "pwc_hits": total_pwc_hits,
+            "updated": total_updated,
+            "skipped_admin": total_skipped_admin,
+            "unchanged": total_unchanged,
+            "dry_run": dry_run,
+        }
+
+    def set_admin_code_url(self, paper_id: str, *, code_url: str | None) -> PaperResponse | None:
+        """Pin ``papers.code_url`` to an operator-chosen value (#46 layer 3).
+
+        Passing ``code_url=None`` clears the pin (and any extracted URL
+        alongside it, returning the paper to "no code attached"). Any
+        non-empty value must parse through ``code_ingest.parse_github_url``
+        — unsupported hosts / malformed strings raise ``HTTPException`` so
+        the API surface can return a clean 400. Pins survive re-index
+        runs via the ``code_url_source='admin'`` sticky bit checked in
+        :meth:`index_arxiv_paper`.
+        """
+        paper = self.repository.get_paper(paper_id)
+        if paper is None:
+            return None
+        if code_url is None or not code_url.strip():
+            return self.repository.update_code_url(
+                paper_id, code_url=None, code_url_source=None
+            )
+        ref = code_ingest.parse_github_url(code_url)
+        if ref is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported code_url: {code_url!r}",
+            )
+        canonical = f"https://github.com/{ref.owner}/{ref.repo}"
+        return self.repository.update_code_url(
+            paper_id, code_url=canonical, code_url_source="admin"
+        )
+
     def enqueue_ingest_repo_job(self, paper_id: str, *, force: bool = False) -> JobResponse:
         """Queue an ``ingest_repo`` job for a single paper (#5).
 
@@ -4400,6 +4504,18 @@ class PaperbaseService:
         # the enrich_missing_metadata backfill job will pick this paper up
         # later with aggressive retry.
         sources.enrich_with_semantic_scholar([metadata], max_retries=0)
+        # Snapshot an existing admin pin BEFORE the intermediate upsert so
+        # it flows through every subsequent upsert on this metadata object.
+        # A later ``get_paper_by_arxiv_id`` can't recover the pin because
+        # this upsert would have wiped it onto an empty code_url (#46).
+        existing_for_admin = self.repository.get_paper_by_arxiv_id(metadata.arxiv_id)
+        if (
+            existing_for_admin is not None
+            and existing_for_admin.code_url_source == "admin"
+            and existing_for_admin.code_url
+        ):
+            metadata.code_url = existing_for_admin.code_url
+            metadata.code_url_source = "admin"
         metadata.index_status = "indexing"
         stored = self.repository.upsert_paper(metadata, search_document=metadata.abstract)
         extraction = index_paper_artifacts(metadata)
@@ -4409,17 +4525,48 @@ class PaperbaseService:
         metadata.indexed_at = utcnow()
         metadata.summary_short, metadata.summary_eli5 = build_paper_summaries(metadata, extraction, self.settings)
 
-        # Populate ``code_url`` from the paper text when the author advertises
-        # a GitHub repo in the abstract or body, so the code-ingest pipeline
-        # (#41) can auto-enqueue an ``ingest_repo`` job on the final upsert.
-        # We only set this when it isn't already carried on the metadata —
-        # an admin-set value or an earlier Papers-With-Code crosslink (follow-up)
-        # takes precedence over in-text scraping.
-        if not metadata.code_url:
-            metadata.code_url = extract_github_url(
-                metadata.abstract or "",
-                extraction.text_markdown or "",
-            )
+        # Populate ``code_url`` + ``code_url_source`` with the 3-layer
+        # decision from #46. Priority order:
+        #   1. admin (already on ``metadata`` from a ``set_admin_code_url``
+        #      call or persisted row) — sticky, never overwritten here.
+        #   2. Papers With Code ``is_official`` crosslink, when
+        #      ``fetch_code_crosslinks_at_index`` is enabled.
+        #   3. In-text ranker over all extracted GitHub candidates.
+        # Rejected candidates are always stored in ``code_url_candidates``
+        # so admins + future agent-side logic can revisit them without
+        # re-scanning paper text.
+        candidates = extract_github_candidates(
+            metadata.abstract or "", extraction.text_markdown or ""
+        )
+        metadata.code_url_candidates = [c.url for c in candidates] or None
+        existing = self.repository.get_paper_by_arxiv_id(metadata.arxiv_id)
+        if existing is not None and existing.code_url_source == "admin" and existing.code_url:
+            # Admin pin survives re-index regardless of what's in the paper.
+            metadata.code_url = existing.code_url
+            metadata.code_url_source = "admin"
+        else:
+            pwc_url: str | None = None
+            if self.settings.fetch_code_crosslinks_at_index:
+                pwc_url = sources.fetch_papers_with_code_repo(metadata.arxiv_id)
+            if pwc_url:
+                metadata.code_url = pwc_url
+                metadata.code_url_source = "pwc"
+            else:
+                winner = rank_github_candidates(
+                    candidates,
+                    abstract=metadata.abstract or "",
+                    body=extraction.text_markdown or "",
+                    authors=metadata.authors or "",
+                )
+                if winner is not None:
+                    metadata.code_url = winner.url
+                    metadata.code_url_source = "extracted"
+                else:
+                    # Ambiguous / no candidates: decline rather than best-guess
+                    # so the code-ingest pipeline (#41) does not auto-enqueue
+                    # an ingest job against a repo we are not confident about.
+                    metadata.code_url = None
+                    metadata.code_url_source = None
 
         search_document_parts = [metadata.title, metadata.tldr, metadata.summary_short, extraction.text_markdown]
         search_document = "\n\n".join(part for part in search_document_parts if part)

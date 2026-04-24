@@ -163,6 +163,12 @@ class Settings(BaseSettings):
     # extra S2 call per indexed paper, so turn off for mass harvests and leave
     # on for featured-tier / on-demand indexing.
     fetch_references_at_index: bool = Field(default=False)
+    # Papers With Code crosslink (#46 layer 1): fetch the curated paper->repo
+    # mapping from paperswithcode.com and prefer the ``is_official`` entry
+    # over in-text regex extraction. One extra HTTP call per paper at index
+    # time. Off by default for mass harvests; turn on for on-demand indexing
+    # and for the ``paperbase-dev backfill-code-urls`` cleanup job.
+    fetch_code_crosslinks_at_index: bool = Field(default=False)
     # Paper-code ingestion (#5). github_token is service-level (NOT the user
     # OAuth connection used for project repo sync) and is only used to bump
     # the anonymous 60 req/hr archive-fetch limit to 5000. The caps below

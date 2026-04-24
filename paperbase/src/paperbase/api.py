@@ -380,6 +380,37 @@ def get_paper(paper_id: str, service: PaperbaseService = Depends(get_service)) -
     return service.get_paper(paper_id)
 
 
+class _CodeUrlPatchRequest(_BaseModel):
+    """Body for the admin code_url override (#46)."""
+
+    code_url: str | None = _Field(
+        default=None,
+        description="Canonical GitHub URL (or None to clear). Must parse via code_ingest.parse_github_url.",
+    )
+
+
+@app.patch(
+    "/v1/papers/{paper_id}/code-url",
+    response_model=PaperResponse,
+    dependencies=[Depends(require_bearer_token)],
+)
+def patch_code_url(
+    paper_id: str,
+    request: _CodeUrlPatchRequest,
+    service: PaperbaseService = Depends(get_service),
+) -> PaperResponse:
+    """Pin ``papers.code_url`` to an operator-chosen value (#46 layer 3).
+
+    Pins set through this endpoint survive automatic re-index runs via the
+    sticky ``code_url_source='admin'`` bit. Pass ``code_url=null`` in the
+    body to clear the pin. A malformed / unsupported URL surfaces as 400.
+    """
+    response = service.set_admin_code_url(paper_id, code_url=request.code_url)
+    if response is None:
+        raise HTTPException(status_code=404, detail=f"Paper {paper_id} not found")
+    return response
+
+
 @app.get(
     "/v1/papers/{paper_id}/manifest", response_model=ManifestResponse, dependencies=[Depends(require_bearer_token)]
 )

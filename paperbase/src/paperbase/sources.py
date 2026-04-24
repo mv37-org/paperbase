@@ -177,6 +177,105 @@ def get_paper_details(arxiv_id: str) -> PaperMetadata | None:
 
 
 @dataclass(slots=True)
+class TopCitedCandidate:
+    """Lightweight S2 search result used by the top-cited harvest planner.
+
+    The planner doesn't need a full ``PaperMetadata`` (extraction will
+    refetch arxiv metadata at index time); it only needs enough fields to
+    decide whether the paper passes the AI/ML category filter and to
+    enqueue an indexing chunk.
+    """
+
+    arxiv_id: str
+    semantic_scholar_id: str
+    title: str
+    citation_count: int
+    primary_category: str | None
+    year: int | None
+
+
+def fetch_top_cited_cs(
+    *,
+    min_citations: int,
+    cursor: str | None = None,
+    page_size: int = 1000,
+    fields_of_study: str = "Computer Science",
+    timeout_seconds: int = 30,
+) -> tuple[list[TopCitedCandidate], str | None]:
+    """Page through Semantic Scholar's bulk search ordered by citationCount
+    desc, returning candidates that have an arXiv external id.
+
+    Returns ``(candidates, next_cursor)``. When ``next_cursor`` is ``None``
+    the planner has exhausted the result set; otherwise the caller passes
+    it back to fetch the next page.
+
+    The S2 endpoint returns ~1000 results/page and emits a continuation
+    token. We filter to arxiv-linked papers client-side so the planner
+    can reason about a single id namespace; non-arxiv high-cited CS
+    papers (R, BLAST, SHELX, etc.) are out of scope for the AI/ML
+    corpus this primitive feeds (see issue #39).
+    """
+    if min_citations < 0:
+        raise ValueError(f"min_citations must be >= 0, got {min_citations}")
+    if page_size < 1 or page_size > 1000:
+        raise ValueError(f"page_size must be in [1, 1000], got {page_size}")
+
+    params: dict[str, object] = {
+        "query": "*",
+        "fieldsOfStudy": fields_of_study,
+        "sort": "citationCount:desc",
+        "fields": "paperId,title,citationCount,externalIds,year",
+        "minCitationCount": int(min_citations),
+        "limit": page_size,
+    }
+    if cursor:
+        params["token"] = cursor
+
+    response = SESSION.get(
+        f"{S2_API}/paper/search/bulk",
+        params=params,
+        timeout=timeout_seconds,
+    )
+    if response.status_code != 200:
+        logger.warning(
+            "fetch_top_cited_cs non-200",
+            extra={
+                "event": "sources.top_cited.non_200",
+                "status_code": response.status_code,
+                "min_citations": min_citations,
+                "has_cursor": cursor is not None,
+            },
+        )
+        response.raise_for_status()
+
+    payload = response.json() or {}
+    next_cursor = payload.get("token") or None
+    raw_results = payload.get("data") or []
+
+    candidates: list[TopCitedCandidate] = []
+    for item in raw_results:
+        external_ids = item.get("externalIds") or {}
+        raw_arxiv = external_ids.get("ArXiv")
+        if not raw_arxiv:
+            continue
+        candidates.append(
+            TopCitedCandidate(
+                arxiv_id=canonical_arxiv_id(raw_arxiv),
+                semantic_scholar_id=item.get("paperId") or "",
+                title=item.get("title") or "",
+                citation_count=int(item.get("citationCount") or 0),
+                # S2 doesn't expose arxiv primary_category on bulk search;
+                # the planner does the per-arxiv-id category lookup downstream
+                # if a tighter category gate is needed. None here means
+                # "not yet checked".
+                primary_category=None,
+                year=item.get("year"),
+            )
+        )
+    return candidates, next_cursor
+
+
+@dataclass(slots=True)
 class EnrichmentOutcome:
     """Result of a Semantic Scholar enrichment pass.
 
@@ -462,3 +561,97 @@ def get_related_papers(arxiv_id: str, semantic_scholar_id: str | None, *, limit:
             )
         )
     return results
+
+
+# --------------------------------------------------------------------------- #
+# Papers With Code crosslink (#46 layer 1)
+# --------------------------------------------------------------------------- #
+
+
+PWC_API = "https://paperswithcode.com/api/v1/papers"
+
+
+def fetch_papers_with_code_repo(
+    arxiv_id: str,
+    *,
+    session: requests.Session | None = None,
+    timeout: float = 10.0,
+) -> str | None:
+    """Return the canonical GitHub URL that Papers With Code considers the
+    paper's official implementation, or ``None`` (#46 layer 1).
+
+    Prefers the entry whose ``is_official`` flag is true; if no official
+    entry exists, returns ``None`` rather than falling back to a
+    community reimplementation — that decision belongs to the admin
+    override layer, not the primary signal. Network failures / rate
+    limits / missing papers degrade to ``None`` so index-time callers
+    can proceed with the ranker fallback.
+
+    The endpoint is
+    ``GET {PWC_API}/?arxiv_id=<id>`` which returns a paginated list;
+    the first result is followed via ``{PWC_API}/{id}/repositories/``
+    to enumerate repos with the ``is_official`` flag.
+    """
+    if not arxiv_id:
+        return None
+    client = session or SESSION
+    try:
+        paper_response = client.get(
+            f"{PWC_API}/", params={"arxiv_id": arxiv_id}, timeout=timeout
+        )
+    except requests.RequestException as exc:
+        logger.warning(
+            "Papers With Code lookup failed",
+            extra={"event": "pwc.lookup_failed", "arxiv_id": arxiv_id, "error": str(exc)},
+        )
+        return None
+    if paper_response.status_code == 404:
+        return None
+    if paper_response.status_code != 200:
+        logger.warning(
+            "Papers With Code non-200",
+            extra={
+                "event": "pwc.non_200",
+                "arxiv_id": arxiv_id,
+                "status": paper_response.status_code,
+            },
+        )
+        return None
+    try:
+        paper_body = paper_response.json()
+    except ValueError:
+        return None
+    results = paper_body.get("results") or []
+    if not results:
+        return None
+    paper_id = results[0].get("id")
+    if not paper_id:
+        return None
+    try:
+        repos_response = client.get(
+            f"{PWC_API}/{paper_id}/repositories/", timeout=timeout
+        )
+    except requests.RequestException as exc:
+        logger.warning(
+            "Papers With Code repo fetch failed",
+            extra={
+                "event": "pwc.repos_failed",
+                "arxiv_id": arxiv_id,
+                "paper_id": paper_id,
+                "error": str(exc),
+            },
+        )
+        return None
+    if repos_response.status_code != 200:
+        return None
+    try:
+        repos_body = repos_response.json()
+    except ValueError:
+        return None
+    repo_results = repos_body.get("results") or []
+    for repo in repo_results:
+        if repo.get("is_official") and repo.get("url"):
+            return str(repo["url"])
+    # No official entry: decline rather than guess — the ranker / admin
+    # override is responsible for non-official cases.
+    return None

@@ -13,7 +13,9 @@ from paperbase.extractors import (
     _latex_to_markdown,
     _sanitize_extracted_text,
     build_manifest,
+    extract_github_candidates,
     extract_github_url,
+    rank_github_candidates,
     index_paper_artifacts,
 )
 from paperbase.models import PaperMetadata
@@ -690,6 +692,127 @@ def test_extract_github_url_returns_none_when_no_github_mention():
     assert extract_github_url("No code released; weights are available on request.") is None
     assert extract_github_url("") is None
     assert extract_github_url() is None
+
+
+# --------------------------------------------------------------------------- #
+# Candidate ranker (#46 layer 2)
+# --------------------------------------------------------------------------- #
+
+
+def test_extract_github_candidates_dedupes_and_normalizes():
+    body = (
+        "See https://github.com/Owner/Repo/tree/main for the code. "
+        "We forked from https://github.com/owner/repo.git initially. "
+        "And also mention https://github.com/owner/repo again."
+    )
+    candidates = extract_github_candidates("", body)
+    # Case-insensitive dedup — GitHub repo paths are case-insensitive on the
+    # server, so ``Owner/Repo`` and ``owner/repo`` collapse to one entry.
+    assert len(candidates) == 1
+    # Subpath-to-canonical upgrade brings in the later mention's casing, so
+    # the stored URL ends up lowercased (whichever canonical form appears
+    # last after a subpath-only mention).
+    assert candidates[0].url.lower() == "https://github.com/owner/repo"
+    # The record should upgrade to has_subpath=False because a later
+    # canonical mention was seen.
+    assert candidates[0].has_subpath is False
+
+
+def test_rank_github_candidates_returns_none_when_empty():
+    assert rank_github_candidates([], abstract="", body="") is None
+
+
+def test_rank_github_candidates_picks_abstract_mention_over_body():
+    """Position bonus: a URL advertised in the abstract beats one buried
+    deep in the body by a wider margin than the runner-up's canonical
+    bonus, so the ranker is confident enough to pick it."""
+    abstract = "Code at https://github.com/paper/official."
+    body = (
+        "We compare to https://github.com/baseline/impl (previous work). "
+        "Code at https://github.com/paper/official."
+    )
+    candidates = extract_github_candidates(abstract, body)
+    winner = rank_github_candidates(candidates, abstract=abstract, body=body)
+    assert winner is not None
+    assert winner.url == "https://github.com/paper/official"
+
+
+def test_rank_github_candidates_rejects_ambiguous_ties():
+    """Precision-first: when top score doesn't beat runner-up by the
+    ``min_margin``, return None rather than best-guess. This is the
+    behavior arslnb asked for on PR #45 — a wrong code_url is worse
+    than no code_url because it triggers auto-enqueue of ingest_repo
+    against an unrelated repo.
+    """
+    body = (
+        "See https://github.com/owner/dataset and also "
+        "https://github.com/owner/method referenced in Section 3."
+    )
+    candidates = extract_github_candidates("", body)
+    winner = rank_github_candidates(candidates, abstract="", body=body)
+    assert winner is None
+
+
+def test_rank_github_candidates_author_affinity_tips_the_scale():
+    """If two candidates score identically on canonical/position, the
+    one whose owner slug matches an author-affiliation token wins."""
+    body = (
+        "Baselines from https://github.com/random/user. "
+        "Our implementation at https://github.com/google-research/paper."
+    )
+    authors = "Alice Doe, Bob Researcher (Google Research)"
+    candidates = extract_github_candidates("", body)
+    winner = rank_github_candidates(
+        candidates, abstract="", body=body, authors=authors
+    )
+    assert winner is not None
+    assert winner.url == "https://github.com/google-research/paper"
+
+
+def test_rank_github_candidates_frequency_boost():
+    """Same repo mentioned multiple times in the body outranks a
+    one-off reference elsewhere."""
+    body = (
+        "Our code https://github.com/paper/official handles it. "
+        "See src in https://github.com/paper/official. Also tests in "
+        "https://github.com/paper/official. Contrast with older work at "
+        "https://github.com/other/misc."
+    )
+    candidates = extract_github_candidates("", body)
+    winner = rank_github_candidates(candidates, abstract="", body=body)
+    assert winner is not None
+    assert winner.url == "https://github.com/paper/official"
+
+
+def test_rank_github_candidates_subpath_candidate_still_allowed():
+    """A single in-text candidate that happens to be a /tree/ subpath
+    still wins. Canonical-form bonus is about preferring one candidate
+    over another, not rejecting subpath-only cases."""
+    body = "See https://github.com/owner/repo/tree/main/examples for usage."
+    candidates = extract_github_candidates("", body)
+    assert len(candidates) == 1
+    winner = rank_github_candidates(candidates, abstract="", body=body)
+    assert winner is not None
+    assert winner.url == "https://github.com/owner/repo"
+
+
+def test_extract_github_url_shim_delegates_to_ranker():
+    """The legacy ``extract_github_url`` shim must route through the new
+    ranker so any unverified callsite still benefits from
+    ambiguity-aware behavior. Single-candidate case stays populated."""
+    body = "Code at https://github.com/microsoft/LoRA."
+    assert extract_github_url(body) == "https://github.com/microsoft/LoRA"
+
+
+def test_extract_github_url_shim_returns_none_on_ambiguity():
+    """Multi-candidate tie under the ranker's min_margin must also
+    propagate through the shim — this is the fix for PR #45's
+    first-match-wins regression arslnb flagged."""
+    body = (
+        "See https://github.com/owner/dataset and "
+        "https://github.com/owner/method in the code."
+    )
+    assert extract_github_url(body) is None
 
 
 def test_extract_github_url_ignores_gitlab_bitbucket():

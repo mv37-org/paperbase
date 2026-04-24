@@ -127,3 +127,21 @@ def test_job_orm_carries_priority_for_backfill_starvation_guard():
     assert default_priority("harvest_chunk") == 10
     assert default_priority("harvest_range") == 5
     assert default_priority("brand_new_job_type") == 0
+
+
+def test_paper_schema_carries_code_url_provenance_fields():
+    """Regression test for #46: the 3-layer code_url decision requires
+    ``code_url_source`` (``extracted``/``pwc``/``admin``) and
+    ``code_url_candidates`` (the full ranker input) on the papers table
+    so admin pins survive re-index and a later operator can pick an
+    alternate repo from the rejected candidates."""
+    from paperbase.repository import PaperORM
+
+    for column in ("code_url_source", "code_url_candidates"):
+        assert column in PaperORM.__table__.columns, (
+            f"PaperORM must carry '{column}' for #46 code_url provenance"
+        )
+
+    paper = PaperMetadata(arxiv_id="2401.99999")
+    assert paper.code_url_source is None
+    assert paper.code_url_candidates is None

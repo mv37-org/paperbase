@@ -29,6 +29,13 @@ class PaperMetadata(BaseModel):
     influential_citation_count: int = 0
     semantic_scholar_id: str | None = None
     code_url: str | None = None
+    # Provenance + candidate history for ``code_url`` (#46). See PaperORM
+    # for authoritative column docs; ``code_url_source`` in {None,
+    # "extracted", "pwc", "admin"} tells consumers whether the URL came
+    # from the ranker, Papers With Code, or a human pin. Admin pins must
+    # not be overwritten by automatic re-index runs.
+    code_url_source: str | None = None
+    code_url_candidates: list[str] | None = None
     # Paper-code ingestion state (#5). See PaperORM.code_index_status /
     # code_is_python / code_python_reason / code_manifest for the
     # authoritative column docs.

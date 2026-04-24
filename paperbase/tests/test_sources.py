@@ -167,3 +167,111 @@ def test_get_related_papers_bounds_retry_budget_on_interactive_rate_limit(monkey
 
     assert related == []
     assert post_calls["n"] == 2
+
+
+# --------------------------------------------------------------------------- #
+# Papers With Code crosslink (#46 layer 1)
+# --------------------------------------------------------------------------- #
+
+
+class _StubSession:
+    """Minimal requests.Session stub that replays a per-URL response table.
+
+    Each entry is ``url_prefix -> _FakeResponse``. Matches on startswith
+    so the two-step PWC lookup (paper lookup then repos list) can use
+    different fixtures for each stage."""
+
+    def __init__(self, routes: dict[str, _FakeResponse]) -> None:
+        self.routes = routes
+        self.calls: list[str] = []
+
+    def get(self, url: str, *, params=None, timeout=None):
+        full = url
+        if params:
+            from urllib.parse import urlencode
+
+            sep = "&" if "?" in full else "?"
+            full = f"{full}{sep}{urlencode(params)}"
+        self.calls.append(full)
+        # Sort by prefix length descending so the repos route
+        # (``.../papers/{id}/repositories/``) wins over the paper-lookup
+        # route (``.../papers/``) for the second call.
+        for prefix in sorted(self.routes.keys(), key=len, reverse=True):
+            if url.startswith(prefix):
+                return self.routes[prefix]
+        return _FakeResponse(status_code=404)
+
+
+def test_fetch_papers_with_code_repo_picks_official_entry():
+    """PWC returns multiple repos per paper; only the one flagged
+    ``is_official=True`` should be surfaced. A community reimplementation
+    that happens to rank first must lose to the official entry."""
+    paper_route = _FakeResponse(
+        json_data={"results": [{"id": "paper-xyz"}]},
+    )
+    repos_route = _FakeResponse(
+        json_data={
+            "results": [
+                {"url": "https://github.com/community/reimpl", "is_official": False},
+                {"url": "https://github.com/author/official", "is_official": True},
+                {"url": "https://github.com/another/fork", "is_official": False},
+            ]
+        },
+    )
+    session = _StubSession(
+        {
+            "https://paperswithcode.com/api/v1/papers/": paper_route,
+            "https://paperswithcode.com/api/v1/papers/paper-xyz/repositories/": repos_route,
+        }
+    )
+    url = sources.fetch_papers_with_code_repo("2401.12345", session=session)
+    assert url == "https://github.com/author/official"
+
+
+def test_fetch_papers_with_code_repo_returns_none_when_no_official():
+    """When no repo carries ``is_official=True``, decline rather than
+    fall back to a community reimpl. That decision belongs to the
+    admin override layer, not the primary signal."""
+    paper_route = _FakeResponse(json_data={"results": [{"id": "paper-xyz"}]})
+    repos_route = _FakeResponse(
+        json_data={
+            "results": [
+                {"url": "https://github.com/a/impl", "is_official": False},
+                {"url": "https://github.com/b/impl", "is_official": False},
+            ]
+        },
+    )
+    session = _StubSession(
+        {
+            "https://paperswithcode.com/api/v1/papers/": paper_route,
+            "https://paperswithcode.com/api/v1/papers/paper-xyz/repositories/": repos_route,
+        }
+    )
+    assert sources.fetch_papers_with_code_repo("2401.12345", session=session) is None
+
+
+def test_fetch_papers_with_code_repo_handles_404_and_empty_results():
+    """PWC 404s (paper not in their database) and empty results sets both
+    degrade to None so index-time callers can proceed with the ranker
+    fallback."""
+    # 404
+    session = _StubSession({"https://paperswithcode.com/api/v1/papers/?": _FakeResponse(status_code=404)})
+    assert sources.fetch_papers_with_code_repo("nonexistent", session=session) is None
+    # Empty results
+    session = _StubSession(
+        {"https://paperswithcode.com/api/v1/papers/?": _FakeResponse(json_data={"results": []})}
+    )
+    assert sources.fetch_papers_with_code_repo("unknown", session=session) is None
+
+
+def test_fetch_papers_with_code_repo_degrades_gracefully_on_network_error():
+    """Network failures (timeouts, DNS issues, connection refused) must
+    not propagate — the whole point of having a ranker fallback is that
+    index-time indexing can't be blocked on PWC uptime."""
+    import requests
+
+    class FailingSession:
+        def get(self, *args, **kwargs):
+            raise requests.ConnectionError("simulated network failure")
+
+    assert sources.fetch_papers_with_code_repo("2401.12345", session=FailingSession()) is None

@@ -354,6 +354,22 @@ class StubApiService:
             context="### README.md (code_readme)\ndemo",
         )
 
+    def set_admin_code_url(self, paper_id: str, *, code_url):
+        self.calls.append(("set_admin_code_url", (paper_id, code_url)))
+        if paper_id == "paper_unknown":
+            return None
+        if code_url == "https://gitlab.com/x/y":
+            from fastapi import HTTPException
+
+            raise HTTPException(status_code=400, detail="Unsupported code_url")
+        refreshed = _paper("2401.54321")
+        return refreshed.model_copy(
+            update={
+                "code_url": code_url,
+                "code_url_source": "admin" if code_url else None,
+            }
+        )
+
     def get_current_browser_user(self, raw_token: str | None):
         self.calls.append(("get_current_browser_user", raw_token))
         if raw_token == "browser-session-token":
@@ -1542,3 +1558,78 @@ def test_paper_code_endpoints_require_bearer_auth(api_client):
     ]:
         response = client.get(path)
         assert response.status_code == 401, f"{path} must require bearer token"
+
+
+# --------------------------------------------------------------------------- #
+# Admin code_url override (#46 layer 3)
+# --------------------------------------------------------------------------- #
+
+
+def test_patch_code_url_delegates_to_service(api_client):
+    client, service, settings = api_client
+    headers = {"Authorization": f"Bearer {settings.api_key}"}
+
+    response = client.patch(
+        "/v1/papers/paper_xyz/code-url",
+        headers=headers,
+        json={"code_url": "https://github.com/owner/pinned"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["code_url"] == "https://github.com/owner/pinned"
+    assert payload["code_url_source"] == "admin"
+    assert (
+        "set_admin_code_url",
+        ("paper_xyz", "https://github.com/owner/pinned"),
+    ) in service.calls
+
+
+def test_patch_code_url_accepts_null_to_clear_pin(api_client):
+    client, service, settings = api_client
+    headers = {"Authorization": f"Bearer {settings.api_key}"}
+
+    response = client.patch(
+        "/v1/papers/paper_xyz/code-url",
+        headers=headers,
+        json={"code_url": None},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["code_url"] is None
+    assert payload["code_url_source"] is None
+
+
+def test_patch_code_url_404s_on_unknown_paper(api_client):
+    client, _, settings = api_client
+    headers = {"Authorization": f"Bearer {settings.api_key}"}
+
+    response = client.patch(
+        "/v1/papers/paper_unknown/code-url",
+        headers=headers,
+        json={"code_url": "https://github.com/a/b"},
+    )
+    assert response.status_code == 404
+
+
+def test_patch_code_url_400s_on_unsupported_host(api_client):
+    """Admin pin of a non-GitHub URL must surface as 400 at the API,
+    not silently accept and corrupt the paper row."""
+    client, _, settings = api_client
+    headers = {"Authorization": f"Bearer {settings.api_key}"}
+
+    response = client.patch(
+        "/v1/papers/paper_xyz/code-url",
+        headers=headers,
+        json={"code_url": "https://gitlab.com/x/y"},
+    )
+    assert response.status_code == 400
+
+
+def test_patch_code_url_requires_bearer_auth(api_client):
+    client, _, _ = api_client
+
+    response = client.patch(
+        "/v1/papers/paper_xyz/code-url",
+        json={"code_url": "https://github.com/a/b"},
+    )
+    assert response.status_code == 401
