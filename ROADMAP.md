@@ -1,65 +1,68 @@
 # Roadmap
 
-Paperbase is moving from a grounded paper-memory and code-execution tool into a workflow-first research system for ML and AI work.
+This roadmap is intentionally concrete and PyTorch-first.
 
-The core product direction is:
+The product direction is:
 
-- use papers, project context, and user instructions to generate ML workflows
-- represent workflows as typed nodes, not opaque scripts
-- keep the workflow layer above a PyTorch-centric training stack rather than replacing PyTorch itself
-- run workflows on Modal first, with more runtimes later
-- make experiments, comparisons, and promotion first-class
-- keep humans in the approval loop as autonomy increases
+- the agent writes PyTorch-based ML code from paper knowledge and user direction
+- Paperbase visualizes that code as a workflow
+- workflow steps expose checkpoints, telemetry, and benchmarkable artifacts
+- workflows run in Modal first, with more runtimes added later
+- the system infers the intent of workflow components, searches for relevant new papers, and proposes experiments
+- users stay in control of approving, denying, running, and promoting experiments
 
-## Guiding Principles
+## Phase 1: Agent Writes PyTorch Code
 
-- The workflow graph is the source of truth.
-- PyTorch remains a primary execution substrate for training, data, and checkpoints.
-- Paperbase defines higher-level workflow semantics on top of PyTorch and related tooling.
-- Python remains an escape hatch, not the default abstraction.
-- Every step should declare inputs, outputs, parameters, resources, and artifacts.
-- Smoke-test mode must be platform-level, not prompt-only.
-- Autonomy must be eval-driven and budget-governed.
+- Make the agent reliably generate PyTorch-centric code for common ML tasks.
+- Start with a narrow set of workflows that matter most: training, fine-tuning, evaluation, and data preparation.
+- Make the agent parameterize generated code so the same workflow can run in smoke-test mode or full-run mode.
+- Keep the first version biased toward code the system can understand later, not arbitrary free-form scripts.
 
-## Phase 1: Workflow Foundation
+## Phase 2: Visualize PyTorch Code As A Workflow
 
-- Introduce a typed workflow IR and SDK.
-- Start with a small set of node types: data load, transform, train, eval, compare, export, custom Python.
-- Define the initial node implementations around a PyTorch-centric stack, with room for Lightning, Hugging Face, and related training libraries behind the same workflow model.
-- Add workflow visualization in the product so agent-authored code maps cleanly to a graph.
-- Add step-level resource declarations, checkpoint policies, and smoke-test parameters.
+- Build a workflow view that maps generated PyTorch code into a flowchart.
+- Represent major components such as data loading, transforms, training, evaluation, and custom Python steps as nodes.
+- Treat the workflow view as a real product surface, not a decorative graph.
+- Ensure the graph stays aligned with the code the agent writes.
 
-## Phase 2: Execution And Artifacts
+## Phase 3: Add Checkpoints And Telemetry
 
-- Run workflow steps on Modal through a consistent execution layer.
-- Persist logs, metrics, artifacts, and checkpoints per node and per run.
-- Surface checkpoints and run state in the home view.
-- Support retry, resume, cancel, and rerun from checkpoint.
+- Add checkpoints at meaningful stages of the workflow.
+- Add telemetry for metrics, logs, runtime, cost, artifacts, and failures.
+- Make these checkpoints and telemetry outputs visible from the home view.
+- Use this layer to support benchmarking, debugging, and baseline comparison.
 
-## Phase 3: Experiments And Promotion
+## Phase 4: Run Workflows In Modal
 
-- Make baseline workflows and candidate experiments first-class objects.
-- Let users approve or deny experiment runs before execution.
-- Compare candidate vs baseline on metrics, artifacts, cost, runtime, and traces.
-- Let users promote a winning experiment to become the main workflow.
+- Execute workflows in Modal sandboxes first.
+- Support smoke tests, partial runs, retries, resume, and full runs.
+- Persist run state, artifacts, and checkpoint outputs outside the sandbox lifecycle.
+- Keep the runtime layer abstract enough to support additional backends later.
 
-## Phase 4: Paper-Grounded Proposals
+## Phase 5: Infer Component Intent
 
-- Use Paperbase retrieval, latest-paper sync, and project context to generate improvement proposals.
-- Tie every proposal to cited papers plus a concrete workflow diff and eval plan.
-- Rank proposals by expected upside, cost, and risk.
-- Keep execution approval-based by default.
+- Use LLMs to infer the intent of important workflow components and code regions.
+- Identify what each part of the workflow is doing, such as data loading, SFT, evaluation, RL, or post-processing.
+- Use that inferred intent to improve visualization, search, experiment generation, and future automation.
+- Keep intent inference grounded in actual code structure, not just natural-language guesses.
 
-## Phase 5: Broader ML Support
+## Phase 6: Search Papers And Propose Experiments
 
-- Add higher-level workflow templates for SFT, distillation, fine-tuning, RL, and agent eval harnesses, implemented first against the PyTorch ecosystem.
-- Add stronger dataset, model, and checkpoint lineage.
-- Expand beyond Modal to additional runtimes and schedulers.
-- Add richer result inspection for eval failures, slices, and qualitative traces.
+- Use inferred workflow intent to drive targeted paper searches.
+- Search for new papers and methods relevant to specific workflow components and user goals.
+- Turn promising ideas into concrete experiment proposals tied to workflow diffs.
+- Make proposals specific enough to run: what changes, why it might help, and how it will be evaluated.
 
-## Phase 6: Bounded Autonomy
+## Phase 7: Approval, Execution, Comparison, And Promotion
 
-- Allow the system to monitor workflows and generate proposals continuously.
-- Allow low-risk smoke tests to run automatically under explicit budgets and policies.
-- Keep expensive runs, promotions, and production-impacting changes human-approved.
-- Move toward an autonomous research assistant that is grounded in papers, code, experiments, and eval history.
+- Show experiment proposals to the user for approval or denial.
+- If approved, run experiments immediately against the current baseline workflow.
+- Compare experiment checkpoints, telemetry, metrics, artifacts, and outcomes against the baseline.
+- Let the user promote a successful experiment to become the main workflow.
+- Keep the promotion path explicit and reversible.
+
+## Longer-Term Direction
+
+- Expand beyond Modal to more runtimes.
+- Support broader PyTorch-adjacent workflows such as distillation, RL, agent eval harnesses, and more complex fine-tuning setups.
+- Increase autonomy over time, but keep expensive or high-impact changes approval-gated.
