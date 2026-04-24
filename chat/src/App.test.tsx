@@ -592,10 +592,18 @@ describe("App", () => {
     expect(screen.getByText("Data")).toBeTruthy();
     expect(screen.getByText("Sessions")).toBeTruthy();
     expect(screen.getByText("Code")).toBeTruthy();
+    expect(screen.getByLabelText("Collapse all sections in General")).toBeTruthy();
 
     fireEvent.click(screen.getByText("Sessions"));
     expect(screen.queryByText("Recovered thread")).toBeNull();
     fireEvent.click(screen.getByText("Sessions"));
+    expect(await screen.findByText("Recovered thread")).toBeTruthy();
+
+    fireEvent.click(screen.getByLabelText("Collapse all sections in General"));
+    expect(screen.queryByText("Recovered thread")).toBeNull();
+    expect(screen.getByLabelText("Expand all sections in General")).toBeTruthy();
+
+    fireEvent.click(screen.getByLabelText("Expand all sections in General"));
     expect(await screen.findByText("Recovered thread")).toBeTruthy();
 
     fireEvent.click(screen.getByText("Home"));
@@ -1124,6 +1132,10 @@ describe("App", () => {
       expect(screen.getByText("Start new research in")).toBeTruthy();
     });
 
+    fireEvent.click(screen.getAllByText("General")[0]!);
+    await waitFor(() => {
+      expect(screen.getByLabelText("Start chat in General")).toBeTruthy();
+    });
     fireEvent.click(screen.getByLabelText("Start chat in General"));
 
     expect(apiMocks.createThread).toHaveBeenCalledTimes(1);
@@ -1152,6 +1164,10 @@ describe("App", () => {
       expect(screen.getByText("Start new research in")).toBeTruthy();
     });
 
+    fireEvent.click(screen.getAllByText("Agents")[0]!);
+    await waitFor(() => {
+      expect(screen.getByLabelText("Start chat in Agents")).toBeTruthy();
+    });
     fireEvent.click(screen.getByLabelText("Start chat in Agents"));
 
     await waitFor(() => {

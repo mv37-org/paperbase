@@ -243,6 +243,14 @@ const APPEARANCE_OPTIONS: Array<{
 ];
 
 const AUTHENTICATED_DARK_THEME_CLASS = "authenticated-theme-dark";
+const PROJECT_SIDEBAR_CATEGORY_KEYS: ProjectSidebarCategoryKey[] = [
+  "workflows",
+  "experiments",
+  "data",
+  "notes",
+  "sessions",
+  "code",
+];
 const PROJECT_PLACEHOLDER_CATEGORIES = [
   { key: "workflows", label: "Workflows", asset: "workflow.svg", showCount: true },
   { key: "experiments", label: "Experiments", asset: "experiments.svg", showCount: true },
@@ -2684,6 +2692,22 @@ export default function App() {
     [],
   );
 
+  const toggleAllProjectCategories = useCallback((projectId: string) => {
+    setCollapsedProjectCategories((current) => {
+      const projectCategories = current[projectId] ?? {};
+      const allCollapsed = PROJECT_SIDEBAR_CATEGORY_KEYS.every((key) =>
+        Boolean(projectCategories[key]),
+      );
+      const nextCollapsed = !allCollapsed;
+      return {
+        ...current,
+        [projectId]: Object.fromEntries(
+          PROJECT_SIDEBAR_CATEGORY_KEYS.map((key) => [key, nextCollapsed]),
+        ) as Partial<Record<ProjectSidebarCategoryKey, boolean>>,
+      };
+    });
+  }, []);
+
   const loadProjectRepoDetails = useCallback(
     async (owner: string, repo: string, branchOverride?: string) => {
       const ownerLogin = owner.trim();
@@ -3911,6 +3935,9 @@ export default function App() {
                   const sessionsHasMore = Boolean(itemState?.hasMoreByKind?.thread);
                   const codeLoadingMore = Boolean(itemState?.loadingMoreByKind?.python_file);
                   const sessionsLoadingMore = Boolean(itemState?.loadingMoreByKind?.thread);
+                  const allProjectCategoriesCollapsed = PROJECT_SIDEBAR_CATEGORY_KEYS.every((key) =>
+                    Boolean(collapsedCategories[key]),
+                  );
                   return (
                     <div
                       key={project.project_id}
@@ -3946,15 +3973,23 @@ export default function App() {
                           <button
                             type="button"
                             className="sidebar-icon-button project-action-button"
-                            aria-label={`Start chat in ${project.name}`}
+                            aria-label={
+                              allProjectCategoriesCollapsed
+                                ? `Expand all sections in ${project.name}`
+                                : `Collapse all sections in ${project.name}`
+                            }
                             onMouseDown={(event) => event.stopPropagation()}
                             onClick={(event) => {
                               event.stopPropagation();
-                              void handleProjectStartChat(project.project_id);
+                              toggleAllProjectCategories(project.project_id);
                             }}
                           >
                             <AppIcon
-                              src={staticAssetPath("edit.svg")}
+                              src={staticAssetPath(
+                                allProjectCategoriesCollapsed
+                                  ? "expand-projects.svg"
+                                  : "collapse-projects.svg",
+                              )}
                               className="project-action-icon"
                             />
                           </button>
@@ -4072,6 +4107,21 @@ export default function App() {
                                       />
                                       <span>Sessions</span>
                                     </button>
+                                    <div className="project-tree-category-actions">
+                                      <button
+                                        type="button"
+                                        className="sidebar-icon-button project-action-button"
+                                        aria-label={`Start chat in ${project.name}`}
+                                        onClick={() =>
+                                          void handleProjectStartChat(project.project_id)
+                                        }
+                                      >
+                                        <AppIcon
+                                          src={staticAssetPath("edit.svg")}
+                                          className="project-action-icon"
+                                        />
+                                      </button>
+                                    </div>
                                   </div>
                                   {!collapsedCategories.sessions && sessionItems.length > 0 ? (
                                     <div className="thread-list project-thread-list project-category-list">
