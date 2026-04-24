@@ -751,8 +751,8 @@ textarea::placeholder,
   --chat-content-max-width: 800px;
   --chat-fixed-composer-bottom: 24px;
   --chat-fixed-composer-width: min(
-    800px,
-    calc(100vw - var(--chat-sidebar-width) - var(--chat-drawer-width) - 48px)
+    808px,
+    calc(100vw - var(--chat-sidebar-width) - var(--chat-drawer-width) - 40px)
   );
   --chat-fixed-composer-left: calc(
     var(--chat-sidebar-width) + ((100vw - var(--chat-sidebar-width) - var(--chat-drawer-width)) / 2)
@@ -3056,6 +3056,12 @@ textarea {
   padding: 16px;
 }
 
+.project-modal-panel {
+  width: min(560px, calc(100vw - 32px));
+  max-height: min(92vh, 820px);
+  overflow: auto;
+}
+
 .python-save-success {
   text-align: center;
 }
@@ -3078,6 +3084,12 @@ textarea {
 .modal-heading {
   margin-bottom: 12px;
   text-align: center;
+}
+
+.project-modal-panel .modal-heading {
+  margin-bottom: 20px;
+  padding-right: 28px;
+  text-align: left;
 }
 
 .modal-heading-copy {
@@ -3237,9 +3249,533 @@ textarea {
 
 .project-description-input {
   width: 100%;
-  margin-bottom: 15px;
+  margin-bottom: 0;
   border: 1px solid rgba(27, 22, 17, 0.18);
   background: #ffffff;
+}
+
+.project-field {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+.project-field > span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.project-field-disabled {
+  opacity: 0.54;
+}
+
+.project-field-disabled input,
+.project-field-disabled textarea {
+  cursor: not-allowed;
+}
+
+.project-repo-section {
+  display: grid;
+  gap: 12px;
+  padding-top: 2px;
+}
+
+.project-github-heading {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.project-github-icon {
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+}
+
+.project-repo-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 7fr) minmax(140px, 3fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.project-repo-selector-field {
+  position: relative;
+}
+
+.project-repo-dropdown {
+  position: relative;
+  min-width: 0;
+}
+
+.modal-view .stack .project-repo-trigger {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 12px;
+  align-items: center;
+  text-align: left;
+  border: 1px solid rgba(27, 22, 17, 0.18);
+  background: #ffffff;
+  color: var(--text);
+  padding: 0 16px 0 10px;
+}
+
+.project-repo-trigger span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-repo-trigger::after {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg) translateY(-2px);
+  opacity: 0.72;
+}
+
+.project-repo-menu {
+  width: 100%;
+  margin-top: 5px;
+  max-height: 220px;
+  overflow: auto;
+  display: grid;
+  gap: 2px;
+  padding: 6px;
+  border: 1px solid rgba(27, 22, 17, 0.14);
+  border-radius: var(--radius);
+  background: #ffffff;
+  box-shadow: 0 16px 36px rgba(16, 24, 40, 0.16);
+  scrollbar-color: rgba(89, 105, 124, 0.36) transparent;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+}
+
+.project-repo-menu::-webkit-scrollbar {
+  width: 8px;
+}
+
+.project-repo-menu::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.project-repo-menu::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: rgba(89, 105, 124, 0.34);
+  background-clip: content-box;
+}
+
+.project-repo-menu::-webkit-scrollbar-thumb:hover {
+  background: rgba(89, 105, 124, 0.5);
+  background-clip: content-box;
+}
+
+.modal-view .stack .project-repo-option {
+  min-height: 42px;
+  height: auto;
+  max-height: none;
+  display: grid;
+  gap: 2px;
+  justify-items: start;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+.project-repo-option:hover,
+.project-repo-option.active {
+  background: rgba(37, 99, 235, 0.08);
+}
+
+.project-repo-option span {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.project-repo-option small,
+.project-repo-menu-note {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.25;
+}
+
+.project-repo-menu-note {
+  padding: 7px 8px;
+}
+
+.project-repo-existing {
+  display: grid;
+  gap: 8px;
+}
+
+.project-new-repo-field {
+  width: calc((100% - 10px) * 0.7);
+}
+
+.project-branch-field {
+  position: relative;
+}
+
+.project-branch-field::after {
+  content: "";
+  position: absolute;
+  right: 15px;
+  bottom: 12px;
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg);
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.project-repo-branch-select {
+  appearance: none;
+  min-height: 32px;
+  height: 32px;
+  width: 100%;
+  border-radius: var(--radius);
+  border: 1px solid rgba(27, 22, 17, 0.18);
+  background: #ffffff;
+  color: var(--text);
+  padding: 0 34px 0 10px;
+  font-size: 13px;
+}
+
+.project-repo-branch-select:disabled {
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
+.project-repo-status {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.project-repo-import-options {
+  display: grid;
+  gap: 8px;
+}
+
+.project-repo-import-choice {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.project-repo-import-all {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.project-repo-import-all input {
+  flex: 0 0 auto;
+}
+
+.project-repo-import-all span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-repo-info {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.project-repo-info-button {
+  width: 16px;
+  height: 16px;
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  line-height: 1;
+  cursor: default;
+  opacity: 0.56;
+}
+
+.project-repo-info-button:hover,
+.project-repo-info-button:focus-visible {
+  opacity: 0.82;
+}
+
+.project-repo-info-icon {
+  width: 15px;
+  height: 15px;
+  display: block;
+  background: rgba(27, 22, 17, 0.42);
+  mask: var(--icon-url) center / contain no-repeat;
+  -webkit-mask: var(--icon-url) center / contain no-repeat;
+}
+
+.project-repo-info-popover {
+  position: absolute;
+  z-index: 5;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  width: min(260px, calc(100vw - 48px));
+  padding: 9px 10px;
+  border: 1px solid rgba(27, 22, 17, 0.14);
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 16px 36px rgba(16, 24, 40, 0.16);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.35;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, 4px);
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease;
+}
+
+.project-repo-info:hover .project-repo-info-popover,
+.project-repo-info:focus-within .project-repo-info-popover {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+.project-repo-import-list {
+  max-height: 150px;
+  overflow: auto;
+  display: grid;
+  gap: 6px;
+  padding: 6px;
+  border: 1px solid rgba(27, 22, 17, 0.1);
+  border-radius: var(--radius);
+  background: rgba(255, 253, 250, 0.7);
+  scrollbar-color: rgba(89, 105, 124, 0.36) transparent;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+}
+
+.project-repo-import-list::-webkit-scrollbar {
+  width: 8px;
+}
+
+.project-repo-import-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.project-repo-import-list::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: rgba(89, 105, 124, 0.34);
+  background-clip: content-box;
+}
+
+.project-repo-import-list::-webkit-scrollbar-thumb:hover {
+  background: rgba(89, 105, 124, 0.5);
+  background-clip: content-box;
+}
+
+.project-repo-import-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.project-repo-import-item span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-repo-import-item em {
+  color: var(--muted);
+  font-style: normal;
+}
+
+.project-repo-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin-top: -2px;
+}
+
+.modal-view .stack .project-repo-link,
+.project-repo-link {
+  min-height: auto;
+  height: auto;
+  max-height: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.project-repo-link:hover {
+  color: var(--blue);
+}
+
+.project-repo-link:disabled {
+  cursor: wait;
+  opacity: 0.62;
+}
+
+.project-github-required {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(27, 22, 17, 0.1);
+  border-radius: var(--radius);
+  background: rgba(27, 22, 17, 0.02);
+}
+
+.modal-view .stack .project-github-connect-button {
+  margin-top: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.project-github-required-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.project-advanced-section {
+  border-top: 1px solid rgba(27, 22, 17, 0.14);
+  margin-top: 2px;
+  padding-top: 12px;
+}
+
+.modal-view .stack .project-advanced-toggle {
+  min-height: auto;
+  height: auto;
+  max-height: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+}
+
+.project-advanced-chevron {
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg) translateY(-1px);
+  transition: transform 120ms ease;
+}
+
+.project-advanced-toggle[aria-expanded="true"] .project-advanced-chevron {
+  transform: rotate(225deg) translate(-1px, -1px);
+}
+
+.project-advanced-panel {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.project-advanced-tabs {
+  display: inline-flex;
+  width: fit-content;
+  max-width: 100%;
+  padding: 2px;
+  border: 1px solid rgba(27, 22, 17, 0.1);
+  border-radius: 7px;
+  background: rgba(27, 22, 17, 0.03);
+}
+
+.modal-view .stack .project-advanced-tab {
+  min-height: auto;
+  height: 24px;
+  max-height: none;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.modal-view .stack .project-advanced-tab.active {
+  background: #ffffff;
+  box-shadow: 0 1px 4px rgba(16, 24, 40, 0.1);
+  color: var(--text);
+}
+
+.project-advanced-group {
+  display: grid;
+  gap: 8px;
+}
+
+.project-advanced-group h3 {
+  margin: 0 0 7px;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.project-advanced-form {
+  display: grid;
+  gap: 8px;
+}
+
+.modal-view .stack .project-advanced-save {
+  margin-top: 0;
+  width: 100%;
+}
+
+.modal-view .stack .project-submit-button {
+  width: 100%;
 }
 
 .python-conflict-layout {
@@ -4069,6 +4605,13 @@ body.authenticated-theme-dark .paper-drawer-path,
 body.authenticated-theme-dark .paper-drawer-meta,
 body.authenticated-theme-dark .paper-drawer-eyebrow,
 body.authenticated-theme-dark .citation-card-path,
+body.authenticated-theme-dark .project-repo-status,
+body.authenticated-theme-dark .project-repo-import-item em,
+body.authenticated-theme-dark .project-repo-option small,
+body.authenticated-theme-dark .project-repo-menu-note,
+body.authenticated-theme-dark .project-github-required-note,
+body.authenticated-theme-dark .project-field > span,
+body.authenticated-theme-dark .project-repo-info-button,
 body.authenticated-theme-dark .python-conflict-summary span {
   color: var(--muted);
 }
@@ -4090,6 +4633,13 @@ body.authenticated-theme-dark .paper-drawer-title,
 body.authenticated-theme-dark .paper-drawer-body,
 body.authenticated-theme-dark .project-home-header h1,
 body.authenticated-theme-dark .project-home-stat strong,
+body.authenticated-theme-dark .project-field,
+body.authenticated-theme-dark .project-github-heading,
+body.authenticated-theme-dark .project-repo-option,
+body.authenticated-theme-dark .project-repo-import-all,
+body.authenticated-theme-dark .project-repo-import-item,
+body.authenticated-theme-dark .project-repo-info-popover,
+body.authenticated-theme-dark .project-advanced-group h3,
 body.authenticated-theme-dark .python-conflict-summary strong,
 body.authenticated-theme-dark .chat-tab.active .chat-tab-trigger,
 body.authenticated-theme-dark .chat-tab.active .chat-tab-close {
@@ -4174,6 +4724,8 @@ body.authenticated-theme-dark .stack input,
 body.authenticated-theme-dark textarea,
 body.authenticated-theme-dark .chat-empty-project-search,
 body.authenticated-theme-dark .project-description-input,
+body.authenticated-theme-dark .modal-view .stack .project-repo-trigger,
+body.authenticated-theme-dark .project-repo-branch-select,
 body.authenticated-theme-dark .modal-view .stack input,
 body.authenticated-theme-dark .modal-view .stack textarea {
   border-color: rgba(223, 232, 244, 0.14);
@@ -4202,6 +4754,8 @@ body.authenticated-theme-dark .chat-empty-project-picker:focus-within .chat-empt
 body.authenticated-theme-dark .chat-empty-project-option:hover,
 body.authenticated-theme-dark .chat-empty-project-option.active,
 body.authenticated-theme-dark .chat-empty-project-create:hover,
+body.authenticated-theme-dark .project-repo-option:hover,
+body.authenticated-theme-dark .project-repo-option.active,
 body.authenticated-theme-dark .project-menu-item:hover,
 body.authenticated-theme-dark .sidebar-quick-action:hover,
 body.authenticated-theme-dark .project-card:hover,
@@ -4221,10 +4775,75 @@ body.authenticated-theme-dark .paper-drawer-placeholder,
 body.authenticated-theme-dark .paper-drawer-error,
 body.authenticated-theme-dark .citation-card,
 body.authenticated-theme-dark .project-home-stat,
+body.authenticated-theme-dark .project-repo-info-button,
+body.authenticated-theme-dark .project-github-required,
+body.authenticated-theme-dark .project-repo-menu,
+body.authenticated-theme-dark .project-repo-import-list,
+body.authenticated-theme-dark .project-repo-info-popover,
 body.authenticated-theme-dark .modal-flash.warning,
 body.authenticated-theme-dark .python-conflict-file-tab {
   border-color: rgba(223, 232, 244, 0.12);
   background: rgba(255, 255, 255, 0.04);
+}
+
+body.authenticated-theme-dark .project-repo-menu {
+  border-color: rgba(223, 232, 244, 0.16);
+  background: #121a24;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.42);
+  scrollbar-color: rgba(188, 202, 222, 0.34) transparent;
+}
+
+body.authenticated-theme-dark .project-repo-info-popover {
+  background: #121a24;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.42);
+}
+
+body.authenticated-theme-dark .project-repo-info-button {
+  border: 0;
+  background: transparent;
+}
+
+body.authenticated-theme-dark .project-repo-info-icon {
+  background: rgba(223, 232, 244, 0.4);
+}
+
+body.authenticated-theme-dark .project-advanced-section {
+  border-top-color: rgba(223, 232, 244, 0.16);
+}
+
+body.authenticated-theme-dark .project-advanced-tabs {
+  border-color: rgba(223, 232, 244, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+body.authenticated-theme-dark .modal-view .stack .project-advanced-tab.active {
+  background: rgba(255, 255, 255, 0.1);
+  box-shadow: none;
+  color: var(--text);
+}
+
+body.authenticated-theme-dark .project-repo-import-list {
+  scrollbar-color: rgba(188, 202, 222, 0.34) transparent;
+}
+
+body.authenticated-theme-dark .project-repo-menu::-webkit-scrollbar-thumb {
+  background: rgba(188, 202, 222, 0.3);
+  background-clip: content-box;
+}
+
+body.authenticated-theme-dark .project-repo-menu::-webkit-scrollbar-thumb:hover {
+  background: rgba(188, 202, 222, 0.46);
+  background-clip: content-box;
+}
+
+body.authenticated-theme-dark .project-repo-import-list::-webkit-scrollbar-thumb {
+  background: rgba(188, 202, 222, 0.3);
+  background-clip: content-box;
+}
+
+body.authenticated-theme-dark .project-repo-import-list::-webkit-scrollbar-thumb:hover {
+  background: rgba(188, 202, 222, 0.46);
+  background-clip: content-box;
 }
 
 body.authenticated-theme-dark .settings-appearance-option.selected {
@@ -4682,6 +5301,18 @@ body.authenticated-theme-dark .project-menu-item:disabled {
   .composer-status {
     left: 50vw;
     width: calc(100vw - 32px);
+  }
+
+  .project-modal-panel {
+    width: calc(100vw - 32px);
+  }
+
+  .project-repo-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .project-new-repo-field {
+    width: 100%;
   }
 
   .app-shell {

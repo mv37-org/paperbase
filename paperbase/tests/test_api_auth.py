@@ -29,6 +29,12 @@ from paperbase.models import (
     ChatThreadSummary,
     FileListResponse,
     FileObject,
+    GitHubRepoBranchSummary,
+    GitHubRepoImportCandidate,
+    GitHubRepoImportCandidateResponse,
+    GitHubRepoListResponse,
+    GitHubRepoMetadataResponse,
+    GitHubRepoSummary,
     JobResponse,
     PaperPreviewResponse,
     PaperResponse,
@@ -112,6 +118,8 @@ def _project_item(
     thread_id: str | None = "thread_1",
     file_id: str | None = None,
     filename: str = "",
+    file_kind: str = "python",
+    repo_path: str = "",
 ) -> ProjectItemSummary:
     return ProjectItemSummary(
         item_id=item_id,
@@ -124,6 +132,8 @@ def _project_item(
         file_id=file_id,
         last_message_preview="Recent message" if item_kind == "thread" else "",
         filename=filename,
+        file_kind=file_kind,  # type: ignore[arg-type]
+        repo_path=repo_path,
     )
 
 
@@ -133,11 +143,15 @@ def _python_file(
     project_id: str = "proj_1",
     filename: str = "something.py",
     content: str = "",
+    file_kind: str = "python",
+    repo_path: str = "src/something.py",
 ) -> PythonFileResponse:
     return PythonFileResponse(
         file_id=file_id,
         project_id=project_id,
         filename=filename,
+        file_kind=file_kind,  # type: ignore[arg-type]
+        repo_path=repo_path,
         content=content,
         created_at=NOW,
         updated_at=NOW,
@@ -382,8 +396,66 @@ class StubApiService:
             ]
         )
 
+    def get_github_repo_metadata(self, user: BrowserUser, *, owner: str, repo: str) -> GitHubRepoMetadataResponse:
+        self.calls.append(("get_github_repo_metadata", (user.user_id, owner, repo)))
+        return GitHubRepoMetadataResponse(
+            owner=owner,
+            name=repo,
+            html_url=f"https://github.com/{owner}/{repo}",
+            default_branch="main",
+            branches=[
+                GitHubRepoBranchSummary(name="main", commit_sha="abc123", is_default=True),
+                GitHubRepoBranchSummary(name="dev", commit_sha="def456", is_default=False),
+            ],
+        )
+
+    def list_github_repositories(self, user: BrowserUser) -> GitHubRepoListResponse:
+        self.calls.append(("list_github_repositories", user.user_id))
+        return GitHubRepoListResponse(
+            repos=[
+                GitHubRepoSummary(
+                    owner="octocat",
+                    name="existing-repo",
+                    full_name="octocat/existing-repo",
+                    html_url="https://github.com/octocat/existing-repo",
+                    default_branch="main",
+                    private=True,
+                )
+            ]
+        )
+
+    def list_github_repo_import_candidates(
+        self,
+        user: BrowserUser,
+        *,
+        owner: str,
+        repo: str,
+        branch: str,
+    ) -> GitHubRepoImportCandidateResponse:
+        self.calls.append(("list_github_repo_import_candidates", (user.user_id, owner, repo, branch)))
+        return GitHubRepoImportCandidateResponse(
+            owner=owner,
+            name=repo,
+            base_branch=branch,
+            candidates=[
+                GitHubRepoImportCandidate(path="src/analysis.py", file_kind="python", size=18),
+                GitHubRepoImportCandidate(path="notebooks/demo.ipynb", file_kind="notebook", size=128),
+            ],
+        )
+
     def create_project(self, user: BrowserUser, request) -> ProjectResponse:
-        self.calls.append(("create_project", (user.user_id, request.name, request.description)))
+        self.calls.append(
+            (
+                "create_project",
+                (
+                    user.user_id,
+                    request.name,
+                    request.description,
+                    request.github_repo.mode if request.github_repo else None,
+                    request.github_repo.name if request.github_repo else None,
+                ),
+            )
+        )
         return _project(
             "proj_3",
             name=request.name,
@@ -469,6 +541,24 @@ class StubApiService:
     def create_python_file(self, user: BrowserUser, project_id: str) -> PythonFileResponse:
         self.calls.append(("create_python_file", (user.user_id, project_id)))
         return _python_file("file_1", project_id=project_id, filename="something.py")
+
+    def import_project_notebook_upload(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        *,
+        filename: str,
+        data: bytes,
+    ) -> PythonFileResponse:
+        self.calls.append(("import_project_notebook_upload", (user.user_id, project_id, filename, data)))
+        return _python_file(
+            "file_2",
+            project_id=project_id,
+            filename=filename,
+            content="# %%\nprint('notebook')\n",
+            file_kind="notebook",
+            repo_path=f"notebooks/{filename}",
+        )
 
     def get_python_file(self, user: BrowserUser, file_id: str) -> PythonFileResponse:
         self.calls.append(("get_python_file", (user.user_id, file_id)))
@@ -832,6 +922,11 @@ def test_browser_get_routes_accept_session_cookie_without_csrf(api_client):
     thread = client.get("/v1/browser/chats/thread_1")
     projects = client.get("/v1/browser/projects")
     project_sessions = client.get("/v1/browser/projects/proj_1/sessions?limit=5&offset=0")
+    repo_list = client.get("/v1/browser/github/repositories")
+    repo_metadata = client.get("/v1/browser/github/repositories/octocat/existing-repo")
+    import_candidates = client.get(
+        "/v1/browser/github/repositories/octocat/existing-repo/import-candidates?branch=dev"
+    )
 
     assert uploads.status_code == 200
     assert uploads.json()["available_tags"] == ["benchmark"]
@@ -839,9 +934,20 @@ def test_browser_get_routes_accept_session_cookie_without_csrf(api_client):
     assert thread.json()["messages"][0]["content_markdown"] == "Grounded answer"
     assert projects.json()["projects"][0]["name"] == "General"
     assert project_sessions.json()["threads"][0]["project_id"] == "proj_1"
+    assert repo_list.json()["repos"][0]["full_name"] == "octocat/existing-repo"
+    assert repo_list.json()["repos"][0]["private"] is True
+    assert repo_metadata.json()["branches"][0]["name"] == "main"
+    assert repo_metadata.json()["branches"][0]["commit_sha"] == "abc123"
+    assert import_candidates.json()["candidates"][1]["file_kind"] == "notebook"
     assert ("list_uploaded_documents", "user_1") in service.calls
     assert ("list_projects", "user_1") in service.calls
     assert ("list_project_chat_threads", ("user_1", "proj_1", 5, 0)) in service.calls
+    assert ("list_github_repositories", "user_1") in service.calls
+    assert ("get_github_repo_metadata", ("user_1", "octocat", "existing-repo")) in service.calls
+    assert (
+        "list_github_repo_import_candidates",
+        ("user_1", "octocat", "existing-repo", "dev"),
+    ) in service.calls
     assert ("get_chat_thread", ("user_1", "thread_1")) in service.calls
 
 
@@ -919,7 +1025,16 @@ def test_browser_project_and_chat_write_routes_delegate_with_valid_csrf(api_clie
 
     created_project = client.post(
         "/v1/browser/projects",
-        json={"name": "Agents", "description": "Study agent systems"},
+        json={
+            "name": "Agents",
+            "description": "Study agent systems",
+            "github_repo": {
+                "mode": "create",
+                "name": "agent-lab",
+                "base_branch": "main",
+                "import_paths": [],
+            },
+        },
         headers=headers,
     )
     updated_project = client.patch(
@@ -939,6 +1054,11 @@ def test_browser_project_and_chat_write_routes_delegate_with_valid_csrf(api_clie
     )
     created_python_file = client.post(
         "/v1/browser/projects/proj_2/python-files",
+        headers=headers,
+    )
+    imported_notebook = client.post(
+        "/v1/browser/projects/proj_2/notebooks",
+        files={"file": ("demo.ipynb", b'{"nbformat":4}', "application/x-ipynb+json")},
         headers=headers,
     )
     updated_python_file = client.patch(
@@ -968,6 +1088,8 @@ def test_browser_project_and_chat_write_routes_delegate_with_valid_csrf(api_clie
     assert moved_chat.json()["project_id"] == "proj_2"
     assert created_python_file.status_code == 200
     assert created_python_file.json()["filename"] == "something.py"
+    assert imported_notebook.status_code == 200
+    assert imported_notebook.json()["file_kind"] == "notebook"
     assert updated_python_file.status_code == 200
     assert updated_python_file.json()["filename"] == "analysis.py"
     assert ran_python_file.status_code == 200
@@ -976,11 +1098,15 @@ def test_browser_project_and_chat_write_routes_delegate_with_valid_csrf(api_clie
     assert synced_project_repo.json()["github_repo_name"] == "paperbase-general-123abc"
     assert deleted_chat.json() == {"status": "deleted"}
     assert deleted_project.json() == {"status": "deleted"}
-    assert ("create_project", ("user_1", "Agents", "Study agent systems")) in service.calls
+    assert ("create_project", ("user_1", "Agents", "Study agent systems", "create", "agent-lab")) in service.calls
     assert ("update_project", ("user_1", "proj_2", "Agents v2", "Updated instructions")) in service.calls
     assert ("create_chat_thread", ("user_1", "Project chat", "proj_2")) in service.calls
     assert ("move_chat_thread_to_project", ("user_1", "thread_2", "proj_2")) in service.calls
     assert ("create_python_file", ("user_1", "proj_2")) in service.calls
+    assert (
+        "import_project_notebook_upload",
+        ("user_1", "proj_2", "demo.ipynb", b'{"nbformat":4}'),
+    ) in service.calls
     assert ("update_python_file", ("user_1", "file_1", "analysis.py", "print('hello')")) in service.calls
     assert ("run_python_file", ("user_1", "file_1")) in service.calls
     assert ("sync_project_repo", ("user_1", "proj_2", "Save analysis.py")) in service.calls

@@ -225,6 +225,7 @@ class BrowserUserSettingsResponse(BaseModel):
     has_github_connection: bool = False
     github_login: str = ""
     github_oauth_available: bool = False
+    github_manage_access_url: str = "https://github.com/settings/connections/applications"
     weekly_papers_review_email: bool = False
     appearance_theme: Literal["light", "dark"] = "light"
 
@@ -366,9 +367,18 @@ class ProjectResponse(ProjectSummary):
     pass
 
 
+class CreateProjectGitHubRepoRequest(BaseModel):
+    mode: Literal["existing", "create"]
+    owner: str = ""
+    name: str = Field(min_length=1)
+    base_branch: str = ""
+    import_paths: list[str] = Field(default_factory=list)
+
+
 class CreateProjectRequest(BaseModel):
     name: str = Field(min_length=1)
     description: str = ""
+    github_repo: CreateProjectGitHubRepoRequest | None = None
 
 
 class UpdateProjectRequest(BaseModel):
@@ -393,6 +403,8 @@ class PythonFileSummary(BaseModel):
     file_id: str
     project_id: str
     filename: str
+    file_kind: Literal["python", "notebook"] = "python"
+    repo_path: str = ""
     created_at: datetime
     updated_at: datetime
 
@@ -417,6 +429,8 @@ class ProjectItemSummary(BaseModel):
     file_id: str | None = None
     last_message_preview: str = ""
     filename: str = ""
+    file_kind: Literal["python", "notebook"] = "python"
+    repo_path: str = ""
 
 
 class ProjectItemPageResponse(BaseModel):
@@ -438,6 +452,46 @@ class RunPythonFileResponse(BaseModel):
     finished_at: datetime
 
 
+class GitHubRepoBranchSummary(BaseModel):
+    name: str
+    commit_sha: str = ""
+    is_default: bool = False
+
+
+class GitHubRepoSummary(BaseModel):
+    owner: str
+    name: str
+    full_name: str
+    html_url: str = ""
+    default_branch: str = "main"
+    private: bool = False
+
+
+class GitHubRepoListResponse(BaseModel):
+    repos: list[GitHubRepoSummary] = Field(default_factory=list)
+
+
+class GitHubRepoMetadataResponse(BaseModel):
+    owner: str
+    name: str
+    html_url: str = ""
+    default_branch: str = "main"
+    branches: list[GitHubRepoBranchSummary] = Field(default_factory=list)
+
+
+class GitHubRepoImportCandidate(BaseModel):
+    path: str
+    file_kind: Literal["python", "notebook"]
+    size: int = 0
+
+
+class GitHubRepoImportCandidateResponse(BaseModel):
+    owner: str
+    name: str
+    base_branch: str
+    candidates: list[GitHubRepoImportCandidate] = Field(default_factory=list)
+
+
 class ProjectRepoSyncRequest(BaseModel):
     commit_message: str = Field(min_length=1)
     expected_remote_head_sha: str | None = None
@@ -451,6 +505,7 @@ class ProjectRepoConflictResolution(BaseModel):
 
 class ProjectRepoConflictFile(BaseModel):
     path: str
+    file_kind: Literal["python", "notebook"] = "python"
     base_content: str = ""
     local_content: str = ""
     remote_content: str = ""
@@ -461,8 +516,10 @@ class ProjectRepoConflictDetail(BaseModel):
     message: str
     project_id: str
     repo_exists: bool = True
+    github_owner_login: str = ""
     github_repo_name: str = ""
     github_repo_url: str = ""
+    base_branch: str = "main"
     default_branch: str = "main"
     base_commit_sha: str = ""
     remote_head_sha: str = ""
@@ -472,8 +529,10 @@ class ProjectRepoConflictDetail(BaseModel):
 class ProjectRepoSyncResponse(BaseModel):
     project_id: str
     repo_exists: bool = False
+    github_owner_login: str = ""
     github_repo_name: str = ""
     github_repo_url: str = ""
+    base_branch: str = "main"
     default_branch: str = "main"
     last_sync_commit_sha: str = ""
     last_sync_commit_url: str = ""

@@ -340,6 +340,43 @@ def _resolve_unique_python_filename(
     return candidate
 
 
+def _resolve_unique_project_filename(
+    filename: str,
+    existing_filenames: Iterable[str],
+    *,
+    exclude_filename: str | None = None,
+) -> str:
+    taken = {value for value in existing_filenames if value and value != exclude_filename}
+    if filename not in taken:
+        return filename
+    if "." in filename:
+        stem, suffix = filename.rsplit(".", 1)
+        suffix = f".{suffix}"
+    else:
+        stem, suffix = filename, ""
+    index = 2
+    candidate = f"{stem}_{index}{suffix}"
+    while candidate in taken:
+        index += 1
+        candidate = f"{stem}_{index}{suffix}"
+    return candidate
+
+
+def _repo_path_for_filename(filename: str, file_kind: str, repo_path: str | None = None) -> str:
+    if repo_path:
+        return repo_path
+    if file_kind == "notebook":
+        return f"notebooks/{filename}"
+    return f"src/{filename}"
+
+
+def _repo_path_with_filename(repo_path: str, filename: str) -> str:
+    if "/" not in repo_path:
+        return filename
+    prefix = repo_path.rsplit("/", 1)[0]
+    return f"{prefix}/{filename}"
+
+
 class BrowserUserORM(Base):
     __tablename__ = "browser_users"
 
@@ -484,6 +521,8 @@ class PythonFileORM(Base):
     user_id: Mapped[str] = mapped_column(ForeignKey("browser_users.user_id", ondelete="CASCADE"), index=True)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.project_id", ondelete="CASCADE"), index=True)
     filename: Mapped[str] = mapped_column(Text, default="something.py")
+    file_kind: Mapped[str] = mapped_column(String(32), default="python")
+    repo_path: Mapped[str] = mapped_column(Text, default="")
     content: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
@@ -499,8 +538,10 @@ class ProjectRepoSyncORM(Base):
         unique=True,
         index=True,
     )
+    github_owner_login: Mapped[str] = mapped_column(String(255), default="")
     github_repo_name: Mapped[str] = mapped_column(String(255), default="")
     github_repo_url: Mapped[str] = mapped_column(Text, default="")
+    base_branch: Mapped[str] = mapped_column(String(255), default="main")
     default_branch: Mapped[str] = mapped_column(String(255), default="main")
     last_sync_commit_sha: Mapped[str] = mapped_column(String(255), default="")
     last_sync_commit_url: Mapped[str] = mapped_column(Text, default="")
@@ -627,20 +668,28 @@ def _chat_thread_summary_from_orm(row: ChatThreadORM, *, last_message_preview: s
 
 
 def _python_file_summary_from_orm(row: PythonFileORM) -> PythonFileSummary:
+    file_kind = row.file_kind or "python"
+    repo_path = row.repo_path or _repo_path_for_filename(row.filename, file_kind)
     return PythonFileSummary(
         file_id=row.file_id,
         project_id=row.project_id,
         filename=row.filename,
+        file_kind=file_kind,  # type: ignore[arg-type]
+        repo_path=repo_path,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
 
 
 def _python_file_from_orm(row: PythonFileORM) -> PythonFileResponse:
+    file_kind = row.file_kind or "python"
+    repo_path = row.repo_path or _repo_path_for_filename(row.filename, file_kind)
     return PythonFileResponse(
         file_id=row.file_id,
         project_id=row.project_id,
         filename=row.filename,
+        file_kind=file_kind,  # type: ignore[arg-type]
+        repo_path=repo_path,
         content=row.content or "",
         created_at=row.created_at,
         updated_at=row.updated_at,
@@ -657,8 +706,10 @@ def _project_repo_sync_from_orm(
     return ProjectRepoSyncResponse(
         project_id=project_id,
         repo_exists=True,
+        github_owner_login=row.github_owner_login or "",
         github_repo_name=row.github_repo_name or "",
         github_repo_url=row.github_repo_url or "",
+        base_branch=row.base_branch or row.default_branch or "main",
         default_branch=row.default_branch or "main",
         last_sync_commit_sha=row.last_sync_commit_sha or "",
         last_sync_commit_url=row.last_sync_commit_url or "",
@@ -689,6 +740,8 @@ def _project_item_from_python_file(summary: PythonFileSummary) -> ProjectItemSum
         updated_at=summary.updated_at,
         file_id=summary.file_id,
         filename=summary.filename,
+        file_kind=summary.file_kind,
+        repo_path=summary.repo_path,
     )
 
 
@@ -1208,6 +1261,42 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 )
             )
             connection.execute(
+                text("ALTER TABLE IF EXISTS python_files ADD COLUMN IF NOT EXISTS file_kind VARCHAR(32) DEFAULT 'python'")
+            )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS python_files ADD COLUMN IF NOT EXISTS repo_path TEXT DEFAULT ''")
+            )
+            connection.execute(
+                text(
+                    "UPDATE python_files SET file_kind = 'python' "
+                    "WHERE file_kind IS NULL OR file_kind = ''"
+                )
+            )
+            connection.execute(
+                text(
+                    "UPDATE python_files SET repo_path = 'src/' || filename "
+                    "WHERE repo_path IS NULL OR repo_path = ''"
+                )
+            )
+            connection.execute(
+                text(
+                    "ALTER TABLE IF EXISTS project_repo_syncs "
+                    "ADD COLUMN IF NOT EXISTS github_owner_login VARCHAR(255) DEFAULT ''"
+                )
+            )
+            connection.execute(
+                text(
+                    "ALTER TABLE IF EXISTS project_repo_syncs "
+                    "ADD COLUMN IF NOT EXISTS base_branch VARCHAR(255) DEFAULT 'main'"
+                )
+            )
+            connection.execute(
+                text(
+                    "UPDATE project_repo_syncs SET base_branch = default_branch "
+                    "WHERE base_branch IS NULL OR base_branch = ''"
+                )
+            )
+            connection.execute(
                 text("CREATE INDEX IF NOT EXISTS chat_threads_project_id_idx ON chat_threads (project_id)")
             )
             connection.execute(
@@ -1267,6 +1356,12 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 text(
                     "CREATE INDEX IF NOT EXISTS text_chunks_content_trgm "
                     "ON text_chunks USING gin (content gin_trgm_ops)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS text_chunks_content_tsv_gin "
+                    "ON text_chunks USING gin (to_tsvector('english', coalesce(content, '')))"
                 )
             )
             connection.execute(text("CREATE INDEX IF NOT EXISTS paper_refs_dst_arxiv_id ON paper_refs (dst_arxiv_id)"))
@@ -2060,7 +2155,32 @@ class SqlAlchemyPaperRepository(PaperRepository):
         )
         lexical_params = {"query": query, "candidate_pool": candidate_pool}
 
+        chunk_lexical_sql = text(
+            f"""
+            SELECT {self._SELECT_PAPER_COLUMNS}, scored.chunk_score
+            FROM (
+                SELECT
+                    tc.paper_id AS pid,
+                    MAX(
+                        ts_rank_cd(
+                            to_tsvector('english', coalesce(tc.content, '')),
+                            websearch_to_tsquery('english', :query)
+                        )
+                    ) AS chunk_score
+                FROM text_chunks tc
+                WHERE tc.chunk_kind <> 'full_text'
+                  AND to_tsvector('english', coalesce(tc.content, ''))
+                      @@ websearch_to_tsquery('english', :query)
+                GROUP BY tc.paper_id
+                ORDER BY chunk_score DESC
+                LIMIT :candidate_pool
+            ) scored
+            JOIN papers ON papers.paper_id = scored.pid
+            """
+        )
+
         vector_rows: list[Any] = []
+        chunk_vector_rows: list[Any] = []
         if query_embedding:
             embedding_literal = "[" + ",".join(f"{value:.6f}" for value in query_embedding) + "]"
             vector_sql = text(
@@ -2074,6 +2194,30 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 LIMIT :candidate_pool
                 """
             )
+            chunk_vector_sql = text(
+                f"""
+                SELECT {self._SELECT_PAPER_COLUMNS}, scored.chunk_vector_score
+                FROM (
+                    SELECT
+                        nearest.pid,
+                        MAX(nearest.chunk_vector_score) AS chunk_vector_score
+                    FROM (
+                        SELECT
+                            tc.paper_id AS pid,
+                            1 - (tc.embedding <=> CAST(:query_embedding AS vector))
+                                AS chunk_vector_score
+                        FROM text_chunks tc
+                        WHERE tc.embedding IS NOT NULL
+                          AND tc.chunk_kind <> 'full_text'
+                        ORDER BY tc.embedding <=> CAST(:query_embedding AS vector)
+                        LIMIT :candidate_pool
+                    ) nearest
+                    GROUP BY nearest.pid
+                ) scored
+                JOIN papers ON papers.paper_id = scored.pid
+                ORDER BY scored.chunk_vector_score DESC
+                """
+            )
             with self._session() as session:
                 vector_rows = (
                     session.execute(
@@ -2083,9 +2227,18 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     .mappings()
                     .all()
                 )
+                chunk_vector_rows = (
+                    session.execute(
+                        chunk_vector_sql,
+                        {"query_embedding": embedding_literal, "candidate_pool": candidate_pool},
+                    )
+                    .mappings()
+                    .all()
+                )
 
         with self._session() as session:
             lexical_rows = session.execute(lexical_sql, lexical_params).mappings().all()
+            chunk_lexical_rows = session.execute(chunk_lexical_sql, lexical_params).mappings().all()
 
         row_by_id: dict[str, Any] = {}
         rrf: dict[str, float] = {}
@@ -2098,6 +2251,14 @@ class SqlAlchemyPaperRepository(PaperRepository):
             row_by_id.setdefault(pid, row)
             # slight weighting towards semantic hits
             rrf[pid] = rrf.get(pid, 0.0) + 1.2 / (rrf_k + rank)
+        for rank, row in enumerate(chunk_lexical_rows):
+            pid = row["paper_id"]
+            row_by_id.setdefault(pid, row)
+            rrf[pid] = rrf.get(pid, 0.0) + 0.8 / (rrf_k + rank)
+        for rank, row in enumerate(chunk_vector_rows):
+            pid = row["paper_id"]
+            row_by_id.setdefault(pid, row)
+            rrf[pid] = rrf.get(pid, 0.0) + 0.8 / (rrf_k + rank)
 
         from math import log10
 
@@ -2894,6 +3055,8 @@ class SqlAlchemyPaperRepository(PaperRepository):
         project_id: str,
         filename: str,
         content: str = "",
+        file_kind: str = "python",
+        repo_path: str | None = None,
     ) -> PythonFileResponse | None:
         with self._session() as session:
             project = session.scalar(
@@ -2904,12 +3067,18 @@ class SqlAlchemyPaperRepository(PaperRepository):
             existing_filenames = session.scalars(
                 select(PythonFileORM.filename).where(PythonFileORM.project_id == project_id)
             ).all()
-            resolved_filename = _resolve_unique_python_filename(filename, existing_filenames)
+            resolved_filename = (
+                _resolve_unique_python_filename(filename, existing_filenames)
+                if file_kind == "python"
+                else _resolve_unique_project_filename(filename, existing_filenames)
+            )
             row = PythonFileORM(
                 file_id=new_id("pyf"),
                 user_id=user_id,
                 project_id=project_id,
                 filename=resolved_filename,
+                file_kind=file_kind,
+                repo_path=_repo_path_for_filename(resolved_filename, file_kind, repo_path),
                 content=content,
             )
             session.add(row)
@@ -2932,6 +3101,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
         file_id: str,
         filename: str | None = None,
         content: str | None = None,
+        repo_path: str | None = None,
     ) -> PythonFileResponse | None:
         with self._session() as session:
             row = session.scalar(
@@ -2944,11 +3114,25 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 existing_filenames = session.scalars(
                     select(PythonFileORM.filename).where(PythonFileORM.project_id == row.project_id)
                 ).all()
-                row.filename = _resolve_unique_python_filename(
-                    filename,
-                    existing_filenames,
-                    exclude_filename=row.filename,
+                row.filename = (
+                    _resolve_unique_python_filename(
+                        filename,
+                        existing_filenames,
+                        exclude_filename=row.filename,
+                    )
+                    if (row.file_kind or "python") == "python"
+                    else _resolve_unique_project_filename(
+                        filename,
+                        existing_filenames,
+                        exclude_filename=row.filename,
+                    )
                 )
+                row.repo_path = _repo_path_with_filename(
+                    row.repo_path or _repo_path_for_filename(row.filename, row.file_kind or "python"),
+                    row.filename,
+                )
+            if repo_path is not None and repo_path.strip():
+                row.repo_path = repo_path.strip()
             if content is not None:
                 row.content = content
             row.updated_at = updated_at
@@ -2982,7 +3166,9 @@ class SqlAlchemyPaperRepository(PaperRepository):
         default_branch: str,
         last_sync_commit_sha: str,
         last_sync_commit_url: str,
-        last_synced_at: Any,
+        github_owner_login: str = "",
+        base_branch: str | None = None,
+        last_synced_at: Any = None,
     ) -> ProjectRepoSyncResponse | None:
         with self._session() as session:
             project = session.scalar(
@@ -3003,8 +3189,10 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     project_id=project_id,
                 )
                 session.add(row)
+            row.github_owner_login = github_owner_login
             row.github_repo_name = github_repo_name
             row.github_repo_url = github_repo_url
+            row.base_branch = base_branch or default_branch
             row.default_branch = default_branch
             row.last_sync_commit_sha = last_sync_commit_sha
             row.last_sync_commit_url = last_sync_commit_url
@@ -4052,6 +4240,13 @@ class MemoryPaperRepository(PaperRepository):
                 score += 2.0
             if query_lower in self.search_documents.get(paper_id, "").lower():
                 score += 1.0
+            if score == 0:
+                for chunk in self.text_chunks.get(paper_id, []):
+                    if chunk.get("chunk_kind") == "full_text":
+                        continue
+                    if query_lower in (chunk.get("content") or "").lower():
+                        score += 0.8
+                        break
             if score > 0:
                 # Bake citation + recency boosts into the score so the
                 # caller (service.search) can treat MemoryPaperRepository
@@ -4620,6 +4815,8 @@ class MemoryPaperRepository(PaperRepository):
         project_id: str,
         filename: str,
         content: str = "",
+        file_kind: str = "python",
+        repo_path: str | None = None,
     ) -> PythonFileResponse | None:
         project = self.get_project(user_id=user_id, project_id=project_id)
         if project is None:
@@ -4629,12 +4826,18 @@ class MemoryPaperRepository(PaperRepository):
             for file in self.python_files.values()
             if self.python_file_users.get(file.file_id) == user_id and file.project_id == project_id
         ]
-        resolved_filename = _resolve_unique_python_filename(filename, existing)
+        resolved_filename = (
+            _resolve_unique_python_filename(filename, existing)
+            if file_kind == "python"
+            else _resolve_unique_project_filename(filename, existing)
+        )
         now = utcnow()
         file = PythonFileResponse(
             file_id=new_id("pyf"),
             project_id=project_id,
             filename=resolved_filename,
+            file_kind=file_kind,  # type: ignore[arg-type]
+            repo_path=_repo_path_for_filename(resolved_filename, file_kind, repo_path),
             content=content,
             created_at=now,
             updated_at=now,
@@ -4656,6 +4859,7 @@ class MemoryPaperRepository(PaperRepository):
         file_id: str,
         filename: str | None = None,
         content: str | None = None,
+        repo_path: str | None = None,
     ) -> PythonFileResponse | None:
         current = self.get_python_file(user_id=user_id, file_id=file_id)
         if current is None:
@@ -4667,15 +4871,29 @@ class MemoryPaperRepository(PaperRepository):
                 for file in self.python_files.values()
                 if self.python_file_users.get(file.file_id) == user_id and file.project_id == current.project_id
             ]
-            next_filename = _resolve_unique_python_filename(
-                filename,
-                existing,
-                exclude_filename=current.filename,
+            next_filename = (
+                _resolve_unique_python_filename(
+                    filename,
+                    existing,
+                    exclude_filename=current.filename,
+                )
+                if current.file_kind == "python"
+                else _resolve_unique_project_filename(
+                    filename,
+                    existing,
+                    exclude_filename=current.filename,
+                )
             )
+        next_repo_path = current.repo_path
+        if filename is not None and filename.strip():
+            next_repo_path = _repo_path_with_filename(current.repo_path or _repo_path_for_filename(current.filename, current.file_kind), next_filename)
+        if repo_path is not None and repo_path.strip():
+            next_repo_path = repo_path.strip()
         updated_at = utcnow()
         updated = current.model_copy(
             update={
                 "filename": next_filename,
+                "repo_path": next_repo_path,
                 "content": current.content if content is None else content,
                 "updated_at": updated_at,
             }
@@ -4704,15 +4922,19 @@ class MemoryPaperRepository(PaperRepository):
         default_branch: str,
         last_sync_commit_sha: str,
         last_sync_commit_url: str,
-        last_synced_at: Any,
+        github_owner_login: str = "",
+        base_branch: str | None = None,
+        last_synced_at: Any = None,
     ) -> ProjectRepoSyncResponse | None:
         if self.get_project(user_id=user_id, project_id=project_id) is None:
             return None
         response = ProjectRepoSyncResponse(
             project_id=project_id,
             repo_exists=True,
+            github_owner_login=github_owner_login,
             github_repo_name=github_repo_name,
             github_repo_url=github_repo_url,
+            base_branch=base_branch or default_branch,
             default_branch=default_branch,
             last_sync_commit_sha=last_sync_commit_sha,
             last_sync_commit_url=last_sync_commit_url,

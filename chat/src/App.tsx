@@ -17,8 +17,12 @@ import {
   getProjectRepoSync,
   getPythonFile,
   githubLoginUrl,
+  importProjectNotebook,
   getThread,
   googleLoginUrl,
+  loadGitHubRepositories,
+  loadGitHubRepoImportCandidates,
+  loadGitHubRepoMetadata,
   loadProjectItems,
   loadProjects,
   loadSession,
@@ -50,7 +54,11 @@ import type {
   ChatThreadSummary,
   FigureResponse,
   FileContentResponse,
+  GitHubRepoImportCandidate,
+  GitHubRepoMetadataResponse,
+  GitHubRepoSummary,
   PaperResponse,
+  ProjectFileKind,
   ProjectRepoConflictDetail,
   ProjectRepoConflictFile,
   ProjectRepoConflictResolution,
@@ -65,6 +73,7 @@ import type {
 
 const OPEN_TABS_KEY = "paperbase-open-tabs";
 const PENDING_PROMPT_KEY = "paperbase-pending-prompt";
+const RESUME_PROJECT_MODAL_KEY = "paperbase-resume-new-project";
 const SIDEBAR_COLLAPSED_KEY = "paperbase-sidebar-collapsed";
 const MAX_OPEN_TABS = 8;
 const MESSAGE_LIST_BOTTOM_THRESHOLD = 40;
@@ -161,6 +170,7 @@ const DEFAULT_BROWSER_SETTINGS: NonNullable<BrowserSessionResponse["settings"]> 
   has_github_connection: false,
   github_login: "",
   github_oauth_available: false,
+  github_manage_access_url: "https://github.com/settings/connections/applications",
   weekly_papers_review_email: false,
   appearance_theme: "light",
 };
@@ -316,8 +326,8 @@ function staticAssetPath(name: string) {
   return `${import.meta.env.BASE_URL}${name.replace(/^\/+/, "")}`;
 }
 
-function pythonRepoPathForFilename(filename: string) {
-  return `src/${filename}`;
+function pythonRepoPathForFile(file: Pick<PythonFileResponse, "filename" | "repo_path">) {
+  return file.repo_path || `src/${file.filename}`;
 }
 
 function pythonFilenameFromRepoPath(path: string) {
@@ -636,6 +646,8 @@ function projectItemFromThread(thread: ChatThreadResponse): ProjectItemSummary {
     file_id: null,
     last_message_preview: summary.last_message_preview,
     filename: "",
+    file_kind: "python",
+    repo_path: "",
   };
 }
 
@@ -651,6 +663,8 @@ function projectItemFromPythonFile(file: PythonFileResponse): ProjectItemSummary
     file_id: file.file_id,
     last_message_preview: "",
     filename: file.filename,
+    file_kind: file.file_kind ?? "python",
+    repo_path: file.repo_path ?? `src/${file.filename}`,
   };
 }
 
@@ -665,6 +679,10 @@ function upsertProjectItem(
 
 function displayPythonFilename(filename: string) {
   return filename.trim() || "something.py";
+}
+
+function projectFileKindLabel(fileKind: ProjectFileKind | undefined) {
+  return fileKind === "notebook" ? "Notebook" : "Python";
 }
 
 function GoogleButton() {
@@ -747,6 +765,34 @@ export default function App() {
   const [projectFormName, setProjectFormName] = useState("");
   const [projectFormDescription, setProjectFormDescription] = useState("");
   const [projectFormError, setProjectFormError] = useState("");
+  const [projectRepoMode, setProjectRepoMode] = useState<"" | "create" | "existing">("");
+  const [projectRepoOwner, setProjectRepoOwner] = useState("");
+  const [projectRepoName, setProjectRepoName] = useState("");
+  const [projectRepoBranch, setProjectRepoBranch] = useState("main");
+  const [projectRepoMetadata, setProjectRepoMetadata] = useState<GitHubRepoMetadataResponse | null>(
+    null,
+  );
+  const [projectRepoCandidates, setProjectRepoCandidates] = useState<GitHubRepoImportCandidate[]>(
+    [],
+  );
+  const [projectRepoSelectedPaths, setProjectRepoSelectedPaths] = useState<string[]>([]);
+  const [projectRepoImportAll, setProjectRepoImportAll] = useState(true);
+  const [projectRepoList, setProjectRepoList] = useState<GitHubRepoSummary[]>([]);
+  const [projectRepoLoading, setProjectRepoLoading] = useState(false);
+  const [projectRepoListLoading, setProjectRepoListLoading] = useState(false);
+  const [projectRepoStatus, setProjectRepoStatus] = useState("");
+  const [projectRepoDropdownOpen, setProjectRepoDropdownOpen] = useState(false);
+  const [projectAdvancedOpen, setProjectAdvancedOpen] = useState(false);
+  const [projectAdvancedTab, setProjectAdvancedTab] = useState<"inference" | "sandbox">(
+    "inference",
+  );
+  const [projectAdvancedStatus, setProjectAdvancedStatus] = useState("");
+  const [projectAnthropicKey, setProjectAnthropicKey] = useState("");
+  const [projectModalTokenId, setProjectModalTokenId] = useState("");
+  const [projectModalTokenSecret, setProjectModalTokenSecret] = useState("");
+  const [projectAdvancedSaving, setProjectAdvancedSaving] = useState<
+    "inference" | "sandbox" | null
+  >(null);
   const [deleteModalState, setDeleteModalState] = useState<DeleteModalState>(null);
   const [saveModalState, setSaveModalState] = useState<SaveModalState>(null);
   const [syncConflictState, setSyncConflictState] = useState<SyncConflictState>(null);
@@ -767,6 +813,7 @@ export default function App() {
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [emptyStateProjectPickerOpen, setEmptyStateProjectPickerOpen] = useState(false);
   const [emptyStateProjectSearch, setEmptyStateProjectSearch] = useState("");
+  const notebookUploadInputRef = useRef<HTMLInputElement | null>(null);
   const [streamingThreadId, setStreamingThreadId] = useState<string | null>(null);
   const [threadStreamStates, setThreadStreamStates] = useState<Record<string, ThreadStreamState>>(
     {},
@@ -2250,6 +2297,30 @@ export default function App() {
       const nextSession = await loadSession();
       setSession(nextSession);
       setAuthReady(true);
+      if (
+        authStatus === "github_connected" &&
+        sessionStorage.getItem(RESUME_PROJECT_MODAL_KEY) === "1" &&
+        nextSession.settings?.has_github_connection
+      ) {
+        sessionStorage.removeItem(RESUME_PROJECT_MODAL_KEY);
+        setAuthModalOpen(false);
+        setProjectModalState({ mode: "create" });
+        setProjectRepoMode("");
+        setProjectRepoOwner(nextSession.settings.github_login || "");
+        setProjectRepoName("");
+        setProjectRepoBranch("");
+        setProjectRepoListLoading(true);
+        try {
+          const response = await loadGitHubRepositories();
+          setProjectRepoList(response.repos);
+        } catch (error) {
+          setProjectRepoStatus(
+            error instanceof Error ? error.message : "GitHub repositories could not be loaded.",
+          );
+        } finally {
+          setProjectRepoListLoading(false);
+        }
+      }
       if (nextSession.authenticated) {
         await bootstrapAuthenticatedUi();
       }
@@ -2486,15 +2557,158 @@ export default function App() {
     [],
   );
 
+  const loadProjectRepoDetails = useCallback(
+    async (owner: string, repo: string, branchOverride?: string) => {
+      const ownerLogin = owner.trim();
+      const repoName = repo.trim();
+      if (!ownerLogin || !repoName) {
+        setProjectRepoStatus("Choose a GitHub repository.");
+        return;
+      }
+      setProjectRepoLoading(true);
+      setProjectRepoStatus("");
+      try {
+        const metadata = await loadGitHubRepoMetadata(ownerLogin, repoName);
+        const desiredBranch =
+          branchOverride?.trim() || metadata.default_branch || projectRepoBranch.trim();
+        const selectedBranch = metadata.branches.some((branch) => branch.name === desiredBranch)
+          ? desiredBranch
+          : metadata.default_branch || metadata.branches[0]?.name || "main";
+        setProjectRepoMetadata(metadata);
+        setProjectRepoBranch(selectedBranch);
+        const candidates = await loadGitHubRepoImportCandidates(
+          ownerLogin,
+          repoName,
+          selectedBranch,
+        );
+        const candidatePaths = candidates.candidates.map((candidate) => candidate.path);
+        setProjectRepoCandidates(candidates.candidates);
+        setProjectRepoSelectedPaths((current) =>
+          projectRepoImportAll
+            ? candidatePaths
+            : current.length
+              ? current.filter((path) => candidatePaths.includes(path))
+              : candidatePaths,
+        );
+        setProjectRepoStatus(
+          candidates.candidates.length ? "" : "No importable Python or notebook files found.",
+        );
+      } catch (error) {
+        setProjectRepoMetadata(null);
+        setProjectRepoCandidates([]);
+        setProjectRepoSelectedPaths([]);
+        setProjectRepoStatus(
+          error instanceof Error ? error.message : "Repository could not be loaded.",
+        );
+      } finally {
+        setProjectRepoLoading(false);
+      }
+    },
+    [projectRepoBranch, projectRepoImportAll],
+  );
+
+  const refreshProjectRepositories = useCallback(
+    async (refreshSelected = true) => {
+      if (!sessionSettings.has_github_connection) {
+        return;
+      }
+      setProjectRepoListLoading(true);
+      setProjectRepoStatus("Refreshing GitHub repositories...");
+      try {
+        const response = await loadGitHubRepositories();
+        setProjectRepoList(response.repos);
+        if (
+          refreshSelected &&
+          projectRepoMode === "existing" &&
+          projectRepoOwner.trim() &&
+          projectRepoName.trim()
+        ) {
+          await loadProjectRepoDetails(projectRepoOwner, projectRepoName, projectRepoBranch);
+        } else {
+          setProjectRepoStatus(
+            response.repos.length
+              ? `${response.repos.length} repositories available.`
+              : "No accessible repositories found. Create a new repo to continue.",
+          );
+        }
+      } catch (error) {
+        setProjectRepoStatus(
+          error instanceof Error ? error.message : "GitHub repositories could not be loaded.",
+        );
+      } finally {
+        setProjectRepoListLoading(false);
+      }
+    },
+    [
+      loadProjectRepoDetails,
+      projectRepoBranch,
+      projectRepoMode,
+      projectRepoName,
+      projectRepoOwner,
+      sessionSettings.has_github_connection,
+    ],
+  );
+
+  const selectProjectRepo = useCallback(
+    (repo: GitHubRepoSummary | null) => {
+      setProjectRepoDropdownOpen(false);
+      setProjectRepoSelectedPaths([]);
+      setProjectRepoImportAll(true);
+      if (repo === null) {
+        setProjectRepoMode("create");
+        setProjectRepoOwner(sessionSettings.github_login || "");
+        if (projectRepoMode !== "create") {
+          setProjectRepoName("");
+        }
+        setProjectRepoBranch("main");
+        setProjectRepoMetadata(null);
+        setProjectRepoCandidates([]);
+        setProjectRepoStatus("");
+        return;
+      }
+      setProjectRepoMode("existing");
+      setProjectRepoOwner(repo.owner);
+      setProjectRepoName(repo.name);
+      setProjectRepoBranch(repo.default_branch || "main");
+      void loadProjectRepoDetails(repo.owner, repo.name, repo.default_branch || "main");
+    },
+    [loadProjectRepoDetails, projectRepoMode, sessionSettings.github_login],
+  );
+
   const openCreateProjectModal = useCallback(() => {
     setProjectModalState({ mode: "create" });
     setProjectFormName("");
     setProjectFormDescription("");
     setProjectFormError("");
+    setProjectRepoMode("");
+    setProjectRepoOwner(sessionSettings.github_login || "");
+    setProjectRepoName("");
+    setProjectRepoBranch("");
+    setProjectRepoMetadata(null);
+    setProjectRepoCandidates([]);
+    setProjectRepoSelectedPaths([]);
+    setProjectRepoImportAll(true);
+    setProjectRepoLoading(false);
+    setProjectRepoDropdownOpen(false);
+    setProjectAdvancedOpen(false);
+    setProjectAdvancedTab("inference");
+    setProjectAdvancedStatus("");
+    setProjectAnthropicKey("");
+    setProjectModalTokenId("");
+    setProjectModalTokenSecret("");
+    setProjectAdvancedSaving(null);
+    setProjectRepoStatus("");
     setProjectMenuProjectId(null);
     setEmptyStateProjectPickerOpen(false);
     setEmptyStateProjectSearch("");
-  }, []);
+    if (sessionSettings.has_github_connection) {
+      void refreshProjectRepositories(false);
+    }
+  }, [
+    refreshProjectRepositories,
+    sessionSettings.github_login,
+    sessionSettings.has_github_connection,
+  ]);
 
   const openEditProjectModal = useCallback(
     (projectId: string) => {
@@ -2506,6 +2720,7 @@ export default function App() {
       setProjectFormName(project.name);
       setProjectFormDescription(project.description);
       setProjectFormError("");
+      setProjectRepoStatus("");
       setProjectMenuProjectId(null);
     },
     [projects],
@@ -2516,7 +2731,32 @@ export default function App() {
     setProjectFormName("");
     setProjectFormDescription("");
     setProjectFormError("");
+    setProjectRepoMode("");
+    setProjectRepoOwner("");
+    setProjectRepoName("");
+    setProjectRepoBranch("");
+    setProjectRepoMetadata(null);
+    setProjectRepoCandidates([]);
+    setProjectRepoSelectedPaths([]);
+    setProjectRepoImportAll(true);
+    setProjectRepoLoading(false);
+    setProjectRepoDropdownOpen(false);
+    setProjectAdvancedOpen(false);
+    setProjectAdvancedTab("inference");
+    setProjectAdvancedStatus("");
+    setProjectAnthropicKey("");
+    setProjectModalTokenId("");
+    setProjectModalTokenSecret("");
+    setProjectAdvancedSaving(null);
+    setProjectRepoStatus("");
   }, []);
+
+  const loadExistingProjectRepo = useCallback(
+    async (branchOverride?: string) => {
+      await loadProjectRepoDetails(projectRepoOwner, projectRepoName, branchOverride);
+    },
+    [loadProjectRepoDetails, projectRepoName, projectRepoOwner],
+  );
 
   const submitProjectModal = useCallback(async () => {
     const name = projectFormName.trim();
@@ -2529,7 +2769,42 @@ export default function App() {
     }
     try {
       if (projectModalState.mode === "create") {
-        const project = await createProject(name, projectFormDescription.trim());
+        if (!sessionSettings.has_github_connection) {
+          setProjectFormError("Connect GitHub before creating a project.");
+          return;
+        }
+        if (!projectRepoMode) {
+          setProjectFormError("Choose a GitHub repository.");
+          return;
+        }
+        const repoName = projectRepoName.trim();
+        const existingRepoImportPaths = projectRepoImportAll
+          ? projectRepoCandidates.map((candidate) => candidate.path)
+          : projectRepoSelectedPaths;
+        const githubRepo =
+          projectRepoMode === "create"
+            ? {
+                mode: "create" as const,
+                name: repoName,
+                base_branch: "main",
+                import_paths: [],
+              }
+            : {
+                mode: "existing" as const,
+                owner: projectRepoOwner.trim(),
+                name: repoName,
+                base_branch: projectRepoBranch.trim(),
+                import_paths: existingRepoImportPaths,
+              };
+        if (!githubRepo.name) {
+          setProjectFormError("GitHub repository name is required.");
+          return;
+        }
+        if (githubRepo.mode === "existing" && (!githubRepo.owner || !githubRepo.base_branch)) {
+          setProjectFormError("Existing repositories require an owner and base branch.");
+          return;
+        }
+        const project = await createProject(name, projectFormDescription.trim(), githubRepo);
         await refreshProjects();
         setSelectedProjectId(project.project_id);
         setExpandedProjectIds((current) =>
@@ -2550,8 +2825,69 @@ export default function App() {
     projectFormDescription,
     projectFormName,
     projectModalState,
+    projectRepoBranch,
+    projectRepoCandidates,
+    projectRepoImportAll,
+    projectRepoMode,
+    projectRepoName,
+    projectRepoOwner,
+    projectRepoSelectedPaths,
     refreshProjects,
+    sessionSettings.has_github_connection,
   ]);
+
+  const saveProjectInferenceKey = useCallback(async () => {
+    const apiKey = projectAnthropicKey.trim();
+    if (!apiKey) {
+      setProjectAdvancedStatus("Enter an Anthropic API key.");
+      return;
+    }
+    setProjectAdvancedSaving("inference");
+    setProjectAdvancedStatus("");
+    try {
+      const nextSession = await api<BrowserSessionResponse>("/v1/browser/settings/anthropic-key", {
+        method: "PUT",
+        body: JSON.stringify({ api_key: apiKey }),
+      });
+      setSession(nextSession);
+      setProjectAnthropicKey("");
+      setProjectAdvancedStatus("Inference key saved.");
+    } catch (error) {
+      setProjectAdvancedStatus(error instanceof Error ? error.message : "Saving API key failed.");
+    } finally {
+      setProjectAdvancedSaving(null);
+    }
+  }, [projectAnthropicKey]);
+
+  const saveProjectModalCredentials = useCallback(async () => {
+    const tokenId = projectModalTokenId.trim();
+    const tokenSecret = projectModalTokenSecret.trim();
+    if (!tokenId || !tokenSecret) {
+      setProjectAdvancedStatus("Enter both Modal credential fields.");
+      return;
+    }
+    setProjectAdvancedSaving("sandbox");
+    setProjectAdvancedStatus("");
+    try {
+      const nextSession = await api<BrowserSessionResponse>(
+        "/v1/browser/settings/modal-credentials",
+        {
+          method: "PUT",
+          body: JSON.stringify({ token_id: tokenId, token_secret: tokenSecret }),
+        },
+      );
+      setSession(nextSession);
+      setProjectModalTokenId("");
+      setProjectModalTokenSecret("");
+      setProjectAdvancedStatus("Sandbox credentials saved.");
+    } catch (error) {
+      setProjectAdvancedStatus(
+        error instanceof Error ? error.message : "Saving Modal credentials failed.",
+      );
+    } finally {
+      setProjectAdvancedSaving(null);
+    }
+  }, [projectModalTokenId, projectModalTokenSecret]);
 
   const openDeleteProjectModal = useCallback((projectId: string, name: string) => {
     setDeleteModalState({ kind: "project", projectId, name });
@@ -2735,6 +3071,56 @@ export default function App() {
     upsertPythonFileIntoProjectItems,
   ]);
 
+  const handleImportNotebookUpload = useCallback(
+    async (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0] ?? null;
+      event.target.value = "";
+      if (!file) {
+        return;
+      }
+      if (!sessionSettings.has_github_connection) {
+        showErrorFlash("Connect GitHub before importing notebooks.");
+        openAuthModal("settings", "version-control");
+        return;
+      }
+      const projectId = selectedProjectIdRef.current ?? projectsRef.current[0]?.project_id;
+      if (!projectId) {
+        setComposerStatus("Create a project before importing a notebook.");
+        return;
+      }
+      try {
+        const imported = await importProjectNotebook(projectId, file);
+        setPythonFileMap((current) => ({ ...current, [imported.file_id]: imported }));
+        setPythonFileDrafts((current) => ({
+          ...current,
+          [imported.file_id]: { content: imported.content, dirty: false },
+        }));
+        setPythonFileRuns((current) => ({
+          ...current,
+          [imported.file_id]: { running: false, result: null, error: "" },
+        }));
+        upsertPythonFileIntoProjectItems(imported);
+        setOpenTabs((current) =>
+          appendOpenTab(current, { kind: "python_file", id: imported.file_id }),
+        );
+        setActiveTab({ kind: "python_file", id: imported.file_id });
+        setSelectedProjectId(imported.project_id);
+        await refreshProjects();
+      } catch (error) {
+        setComposerStatus(
+          error instanceof Error ? error.message : "Notebook could not be imported.",
+        );
+      }
+    },
+    [
+      openAuthModal,
+      refreshProjects,
+      sessionSettings.has_github_connection,
+      showErrorFlash,
+      upsertPythonFileIntoProjectItems,
+    ],
+  );
+
   const persistPythonFile = useCallback(
     async (fileId: string, content: string) => {
       const updated = await updatePythonFile(fileId, { content });
@@ -2765,9 +3151,7 @@ export default function App() {
           if (pythonFile.project_id !== projectId) {
             continue;
           }
-          const resolvedContent = resolutionsByPath.get(
-            pythonRepoPathForFilename(pythonFile.filename),
-          );
+          const resolvedContent = resolutionsByPath.get(pythonRepoPathForFile(pythonFile));
           if (resolvedContent == null || resolvedContent === pythonFile.content) {
             continue;
           }
@@ -2788,9 +3172,7 @@ export default function App() {
           if (!pythonFile || pythonFile.project_id !== projectId) {
             continue;
           }
-          const resolvedContent = resolutionsByPath.get(
-            pythonRepoPathForFilename(pythonFile.filename),
-          );
+          const resolvedContent = resolutionsByPath.get(pythonRepoPathForFile(pythonFile));
           if (resolvedContent == null) {
             continue;
           }
@@ -3205,6 +3587,21 @@ export default function App() {
     />
   );
 
+  const projectCreateBlocked =
+    projectModalState?.mode === "create" && !sessionSettings.has_github_connection;
+  const selectedRepoFullName =
+    projectRepoMode === "existing" && projectRepoOwner && projectRepoName
+      ? `${projectRepoOwner}/${projectRepoName}`
+      : "";
+  const projectRepoSelectorLabel =
+    projectRepoMode === "create" ? "Create new repo" : selectedRepoFullName || "Select repository";
+  const projectRepoBranchOptions =
+    projectRepoMode === "create"
+      ? [{ name: "main", commit_sha: "", is_default: true }]
+      : projectRepoMode === "existing" && projectRepoMetadata?.branches.length
+        ? projectRepoMetadata.branches
+        : [{ name: "", commit_sha: "", is_default: false }];
+
   return (
     <>
       {!authenticated ? (
@@ -3537,7 +3934,11 @@ export default function App() {
                                           >
                                             <div className="thread-card-copy python-file-card-copy">
                                               <AppIcon
-                                                src={staticAssetPath("python.svg")}
+                                                src={staticAssetPath(
+                                                  item.file_kind === "notebook"
+                                                    ? "note.svg"
+                                                    : "python.svg",
+                                                )}
                                                 className="python-file-card-icon"
                                               />
                                               <strong className="thread-card-title">{title}</strong>
@@ -4103,6 +4504,16 @@ export default function App() {
                         </span>
                         <span className="chat-empty-action-label">Add python file</span>
                       </button>
+                      <button
+                        type="button"
+                        className="chat-empty-action-tag notes"
+                        onClick={() => notebookUploadInputRef.current?.click()}
+                      >
+                        <span className="chat-empty-action-icon" aria-hidden="true">
+                          <EmptyStateActionIcon asset="note.svg" />
+                        </span>
+                        <span className="chat-empty-action-label">Import notebook</span>
+                      </button>
                       <button type="button" className="chat-empty-action-tag notes">
                         <span className="chat-empty-action-icon" aria-hidden="true">
                           <EmptyStateActionIcon asset="note.svg" />
@@ -4304,6 +4715,14 @@ export default function App() {
               className="hidden-file-input"
               type="file"
               onChange={onUploadChange}
+            />
+            <input
+              ref={notebookUploadInputRef}
+              id="project-notebook-upload-file"
+              className="hidden-file-input"
+              type="file"
+              accept=".ipynb,application/x-ipynb+json,application/json"
+              onChange={handleImportNotebookUpload}
             />
           </section>
 
@@ -4650,7 +5069,7 @@ export default function App() {
         aria-modal="true"
       >
         <div className="modal-backdrop" onClick={closeProjectModal} />
-        <div className="modal-panel">
+        <div className="modal-panel project-modal-panel">
           <button className="modal-close" type="button" onClick={closeProjectModal}>
             ×
           </button>
@@ -4675,25 +5094,446 @@ export default function App() {
                 void submitProjectModal();
               }}
             >
-              <input
-                id="project-name-input"
-                name="name"
-                type="text"
-                placeholder="Project name"
-                value={projectFormName}
-                onChange={(event) => setProjectFormName(event.target.value)}
-                required
-              />
-              <textarea
-                id="project-description-input"
-                name="description"
-                className="project-description-input"
-                placeholder="Description, goal, or custom instructions"
-                value={projectFormDescription}
-                onChange={(event) => setProjectFormDescription(event.target.value)}
-                rows={4}
-              />
-              <button className="primary-button" type="submit">
+              <label
+                className={`project-field${projectCreateBlocked ? " project-field-disabled" : ""}`}
+                htmlFor="project-name-input"
+              >
+                <span>Project name</span>
+                <input
+                  id="project-name-input"
+                  name="name"
+                  type="text"
+                  placeholder="Project name"
+                  value={projectFormName}
+                  onChange={(event) => setProjectFormName(event.target.value)}
+                  disabled={projectCreateBlocked}
+                  required
+                />
+              </label>
+              <label
+                className={`project-field${projectCreateBlocked ? " project-field-disabled" : ""}`}
+                htmlFor="project-description-input"
+              >
+                <span>Description</span>
+                <textarea
+                  id="project-description-input"
+                  name="description"
+                  className="project-description-input"
+                  placeholder="Description, goal, or custom instructions"
+                  value={projectFormDescription}
+                  onChange={(event) => setProjectFormDescription(event.target.value)}
+                  disabled={projectCreateBlocked}
+                  rows={4}
+                />
+              </label>
+              {projectModalState?.mode === "create" ? (
+                sessionSettings.has_github_connection ? (
+                  <div className="project-repo-section">
+                    <div className="project-github-heading">
+                      <AppIcon
+                        src={staticAssetPath("github.svg")}
+                        className="project-github-icon"
+                      />
+                      <span>GitHub repository</span>
+                    </div>
+                    <div className="project-repo-grid">
+                      <div className="project-field project-repo-selector-field">
+                        <span>Repository</span>
+                        <div className="project-repo-dropdown">
+                          <button
+                            type="button"
+                            className="project-repo-trigger"
+                            aria-label="Repository"
+                            aria-haspopup="listbox"
+                            aria-expanded={projectRepoDropdownOpen}
+                            onClick={() => setProjectRepoDropdownOpen((open) => !open)}
+                          >
+                            <span>{projectRepoSelectorLabel}</span>
+                          </button>
+                          {projectRepoDropdownOpen ? (
+                            <div className="project-repo-menu" role="listbox">
+                              <button
+                                type="button"
+                                role="option"
+                                aria-selected={projectRepoMode === "create"}
+                                className={`project-repo-option${projectRepoMode === "create" ? " active" : ""}`}
+                                onClick={() => selectProjectRepo(null)}
+                              >
+                                <span>Create new repo</span>
+                                <small>
+                                  Private repository under {sessionSettings.github_login}
+                                </small>
+                              </button>
+                              {projectRepoList.map((repo) => (
+                                <button
+                                  key={repo.full_name}
+                                  type="button"
+                                  role="option"
+                                  aria-selected={
+                                    projectRepoMode === "existing" &&
+                                    selectedRepoFullName === repo.full_name
+                                  }
+                                  className={`project-repo-option${
+                                    projectRepoMode === "existing" &&
+                                    selectedRepoFullName === repo.full_name
+                                      ? " active"
+                                      : ""
+                                  }`}
+                                  onClick={() => selectProjectRepo(repo)}
+                                >
+                                  <span>{repo.full_name}</span>
+                                  <small>
+                                    {repo.private ? "Private" : "Public"} · default{" "}
+                                    {repo.default_branch || "main"}
+                                  </small>
+                                </button>
+                              ))}
+                              {projectRepoListLoading ? (
+                                <div className="project-repo-menu-note">
+                                  Loading repositories...
+                                </div>
+                              ) : null}
+                              {!projectRepoListLoading && projectRepoList.length === 0 ? (
+                                <div className="project-repo-menu-note">
+                                  No accessible repositories found.
+                                </div>
+                              ) : null}
+                            </div>
+                          ) : null}
+                        </div>
+                      </div>
+                      <label
+                        className="project-field project-branch-field"
+                        htmlFor="project-repo-branch-select"
+                      >
+                        <span>Base branch</span>
+                        <select
+                          id="project-repo-branch-select"
+                          className="project-repo-branch-select"
+                          aria-label="Base branch"
+                          value={
+                            projectRepoMode === "create"
+                              ? "main"
+                              : projectRepoMode === "existing"
+                                ? projectRepoBranch
+                                : ""
+                          }
+                          disabled={
+                            !projectRepoMode ||
+                            projectRepoMode === "create" ||
+                            projectRepoLoading ||
+                            (projectRepoMode === "existing" && !projectRepoMetadata)
+                          }
+                          onChange={(event) => {
+                            const nextBranch = event.target.value;
+                            setProjectRepoBranch(nextBranch);
+                            void loadExistingProjectRepo(nextBranch);
+                          }}
+                        >
+                          {projectRepoBranchOptions.map((branch) => (
+                            <option key={branch.name} value={branch.name}>
+                              {branch.name || "Select repo first"}
+                              {branch.is_default ? " (default)" : ""}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    </div>
+                    {projectRepoMode === "create" ? (
+                      <label
+                        className="project-field project-new-repo-field"
+                        htmlFor="project-repo-name-input"
+                      >
+                        <span>New repo name</span>
+                        <input
+                          id="project-repo-name-input"
+                          name="repo_name"
+                          type="text"
+                          placeholder="New GitHub repo name"
+                          value={projectRepoName}
+                          onChange={(event) => setProjectRepoName(event.target.value)}
+                          required
+                        />
+                      </label>
+                    ) : projectRepoMode === "existing" ? (
+                      <div className="project-repo-existing">
+                        {projectRepoStatus ? (
+                          <div className="project-repo-status">{projectRepoStatus}</div>
+                        ) : null}
+                        {projectRepoCandidates.length > 0 ? (
+                          <div className="project-repo-import-options">
+                            <div className="project-repo-import-choice">
+                              <label className="project-repo-import-all">
+                                <input
+                                  type="checkbox"
+                                  checked={projectRepoImportAll}
+                                  onChange={(event) => {
+                                    const checked = event.target.checked;
+                                    setProjectRepoImportAll(checked);
+                                    if (checked || projectRepoSelectedPaths.length === 0) {
+                                      setProjectRepoSelectedPaths(
+                                        projectRepoCandidates.map((candidate) => candidate.path),
+                                      );
+                                    }
+                                  }}
+                                />
+                                <span>
+                                  Import all {projectRepoCandidates.length} relevant{" "}
+                                  {projectRepoCandidates.length === 1 ? "file" : "files"}
+                                </span>
+                              </label>
+                              <span className="project-repo-info">
+                                <button
+                                  type="button"
+                                  className="project-repo-info-button"
+                                  aria-label="Relevant file types"
+                                >
+                                  <MaskedAssetIcon
+                                    asset="info.svg"
+                                    className="project-repo-info-icon"
+                                  />
+                                </button>
+                                <span className="project-repo-info-popover" role="tooltip">
+                                  Relevant files are the files Paperbase can currently import from
+                                  GitHub: Python scripts and Jupyter notebooks (.py, .ipynb).
+                                </span>
+                              </span>
+                            </div>
+                            {projectRepoImportAll ? null : (
+                              <div className="project-repo-import-list">
+                                {projectRepoCandidates.map((candidate) => {
+                                  const selected = projectRepoSelectedPaths.includes(
+                                    candidate.path,
+                                  );
+                                  return (
+                                    <label
+                                      key={candidate.path}
+                                      className="project-repo-import-item"
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        checked={selected}
+                                        onChange={(event) => {
+                                          setProjectRepoSelectedPaths((current) =>
+                                            event.target.checked
+                                              ? [...new Set([...current, candidate.path])]
+                                              : current.filter((path) => path !== candidate.path),
+                                          );
+                                        }}
+                                      />
+                                      <span>{candidate.path}</span>
+                                      <em>{projectFileKindLabel(candidate.file_kind)}</em>
+                                    </label>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
+                    {projectRepoMode === "create" && projectRepoStatus ? (
+                      <div className="project-repo-status">{projectRepoStatus}</div>
+                    ) : null}
+                    <div className="project-repo-links">
+                      <button
+                        type="button"
+                        className="project-repo-link"
+                        disabled={projectRepoListLoading}
+                        onClick={() => void refreshProjectRepositories()}
+                      >
+                        {projectRepoListLoading ? "Refreshing..." : "Refresh"}
+                      </button>
+                      <a
+                        className="project-repo-link"
+                        href={sessionSettings.github_manage_access_url}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Manage Paperbase access
+                      </a>
+                    </div>
+                    <div className="project-advanced-section">
+                      <button
+                        type="button"
+                        className="project-advanced-toggle"
+                        aria-expanded={projectAdvancedOpen}
+                        onClick={() => setProjectAdvancedOpen((open) => !open)}
+                      >
+                        Advanced
+                        <span className="project-advanced-chevron" aria-hidden="true" />
+                      </button>
+                      {projectAdvancedOpen ? (
+                        <div className="project-advanced-panel">
+                          <div
+                            className="project-advanced-tabs"
+                            role="tablist"
+                            aria-label="Advanced project settings"
+                          >
+                            <button
+                              type="button"
+                              role="tab"
+                              aria-selected={projectAdvancedTab === "inference"}
+                              className={`project-advanced-tab${
+                                projectAdvancedTab === "inference" ? " active" : ""
+                              }`}
+                              onClick={() => setProjectAdvancedTab("inference")}
+                            >
+                              Inference
+                            </button>
+                            <button
+                              type="button"
+                              role="tab"
+                              aria-selected={projectAdvancedTab === "sandbox"}
+                              className={`project-advanced-tab${
+                                projectAdvancedTab === "sandbox" ? " active" : ""
+                              }`}
+                              onClick={() => setProjectAdvancedTab("sandbox")}
+                            >
+                              Sandbox
+                            </button>
+                          </div>
+                          {projectAdvancedTab === "inference" ? (
+                            <section className="project-advanced-group" role="tabpanel">
+                              {sessionSummary?.hasAnthropicApiKey ? (
+                                <div className="settings-secret-row">
+                                  <div className="settings-secret-copy">
+                                    <div className="settings-secret-label">Anthropic API key</div>
+                                    <div className="settings-secret-value">
+                                      {sessionSettings.anthropic_api_key_hint || "Saved"}
+                                    </div>
+                                  </div>
+                                </div>
+                              ) : (
+                                <div className="project-advanced-form">
+                                  <label className="project-field" htmlFor="project-anthropic-key">
+                                    <span>Anthropic API key</span>
+                                    <input
+                                      id="project-anthropic-key"
+                                      name="project_anthropic_key"
+                                      type="password"
+                                      autoComplete="new-password"
+                                      placeholder="Anthropic API key"
+                                      value={projectAnthropicKey}
+                                      onChange={(event) =>
+                                        setProjectAnthropicKey(event.target.value)
+                                      }
+                                    />
+                                  </label>
+                                  <button
+                                    type="button"
+                                    className="secondary-button project-advanced-save"
+                                    disabled={projectAdvancedSaving === "inference"}
+                                    onClick={() => void saveProjectInferenceKey()}
+                                  >
+                                    {projectAdvancedSaving === "inference"
+                                      ? "Saving..."
+                                      : "Save key"}
+                                  </button>
+                                </div>
+                              )}
+                            </section>
+                          ) : (
+                            <section className="project-advanced-group" role="tabpanel">
+                              {sessionSettings.has_modal_credentials ? (
+                                <div className="settings-secret-row">
+                                  <div className="settings-secret-copy">
+                                    <div className="settings-secret-label">Modal token ID</div>
+                                    <div className="settings-secret-value">
+                                      {sessionSettings.modal_token_id_hint || "Saved"}
+                                    </div>
+                                  </div>
+                                </div>
+                              ) : (
+                                <div className="project-advanced-form">
+                                  <label className="project-field" htmlFor="project-modal-token-id">
+                                    <span>Modal token ID</span>
+                                    <input
+                                      id="project-modal-token-id"
+                                      name="project_modal_token_id"
+                                      type="password"
+                                      autoComplete="new-password"
+                                      placeholder="Modal token ID"
+                                      value={projectModalTokenId}
+                                      onChange={(event) =>
+                                        setProjectModalTokenId(event.target.value)
+                                      }
+                                    />
+                                  </label>
+                                  <label
+                                    className="project-field"
+                                    htmlFor="project-modal-token-secret"
+                                  >
+                                    <span>Modal token secret</span>
+                                    <input
+                                      id="project-modal-token-secret"
+                                      name="project_modal_token_secret"
+                                      type="password"
+                                      autoComplete="new-password"
+                                      placeholder="Modal token secret"
+                                      value={projectModalTokenSecret}
+                                      onChange={(event) =>
+                                        setProjectModalTokenSecret(event.target.value)
+                                      }
+                                    />
+                                  </label>
+                                  <button
+                                    type="button"
+                                    className="secondary-button project-advanced-save"
+                                    disabled={projectAdvancedSaving === "sandbox"}
+                                    onClick={() => void saveProjectModalCredentials()}
+                                  >
+                                    {projectAdvancedSaving === "sandbox"
+                                      ? "Saving..."
+                                      : "Save credentials"}
+                                  </button>
+                                </div>
+                              )}
+                            </section>
+                          )}
+                          {projectAdvancedStatus ? (
+                            <div className="project-repo-status" role="status">
+                              {projectAdvancedStatus}
+                            </div>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="project-github-required">
+                    <button
+                      className="primary-button project-github-connect-button"
+                      type="button"
+                      disabled={!sessionSettings.github_oauth_available}
+                      onClick={() => {
+                        sessionStorage.setItem(RESUME_PROJECT_MODAL_KEY, "1");
+                        window.location.href = githubLoginUrl();
+                      }}
+                    >
+                      <AppIcon
+                        src={staticAssetPath("github.svg")}
+                        className="project-github-icon"
+                      />
+                      Connect GitHub account
+                    </button>
+                    <p className="project-github-required-note">
+                      You need to connect GitHub before creating a project. GitHub is the source of
+                      truth for project files, and every change is committed there.
+                    </p>
+                    {!sessionSettings.github_oauth_available ? (
+                      <div className="project-repo-status">
+                        GitHub OAuth is not configured in this environment yet.
+                      </div>
+                    ) : null}
+                  </div>
+                )
+              ) : null}
+              <button
+                className="primary-button project-submit-button"
+                type="submit"
+                disabled={projectCreateBlocked}
+              >
                 {projectModalState?.mode === "edit" ? "Save project" : "Create project"}
               </button>
             </form>
