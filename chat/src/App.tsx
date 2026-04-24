@@ -220,6 +220,11 @@ const APPEARANCE_OPTIONS: Array<{
 ];
 
 const AUTHENTICATED_DARK_THEME_CLASS = "authenticated-theme-dark";
+const PROJECT_PLACEHOLDER_CATEGORIES = [
+  { label: "Notes", asset: "notes.svg" },
+  { label: "Data", asset: "data.svg" },
+  { label: "Experiments", asset: "experiments.svg" },
+] as const;
 
 function SettingsSectionHeading({ title, caption }: { title: string; caption: string }) {
   return (
@@ -3468,6 +3473,10 @@ export default function App() {
                               <div className="project-tree">
                                 <div className="project-tree-category">
                                   <div className="project-tree-category-label">
+                                    <MaskedAssetIcon
+                                      asset="code.svg"
+                                      className="project-tree-category-icon"
+                                    />
                                     <span>Code</span>
                                     <em>{codeItems.length}</em>
                                   </div>
@@ -3528,6 +3537,10 @@ export default function App() {
                                 </div>
                                 <div className="project-tree-category">
                                   <div className="project-tree-category-label">
+                                    <MaskedAssetIcon
+                                      asset="sessions.svg"
+                                      className="project-tree-category-icon"
+                                    />
                                     <span>Sessions</span>
                                     <em>{sessionItems.length}</em>
                                   </div>
@@ -3584,10 +3597,14 @@ export default function App() {
                                     <div className="project-tree-empty">No sessions yet.</div>
                                   )}
                                 </div>
-                                {["Notes", "Data", "Experiments"].map((category) => (
-                                  <div key={category} className="project-tree-category">
+                                {PROJECT_PLACEHOLDER_CATEGORIES.map((category) => (
+                                  <div key={category.label} className="project-tree-category">
                                     <div className="project-tree-category-label">
-                                      <span>{category}</span>
+                                      <MaskedAssetIcon
+                                        asset={category.asset}
+                                        className="project-tree-category-icon"
+                                      />
+                                      <span>{category.label}</span>
                                       <em>0</em>
                                     </div>
                                     <div className="project-tree-empty">Empty</div>
@@ -3598,7 +3615,11 @@ export default function App() {
                                   className={`project-tree-home${activeProjectHomeId === project.project_id ? " active" : ""}`}
                                   onClick={() => openProjectHome(project.project_id)}
                                 >
-                                  Home
+                                  <MaskedAssetIcon
+                                    asset="home.svg"
+                                    className="project-tree-category-icon"
+                                  />
+                                  <span>Home</span>
                                 </button>
                               </div>
                               {itemState.hasMore ? (

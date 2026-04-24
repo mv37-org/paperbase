@@ -1203,8 +1203,9 @@ textarea::placeholder,
 .project-tree-category-label {
   min-height: 26px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
+  gap: 7px;
   border-radius: var(--radius);
   color: var(--text);
   font-size: 12px;
@@ -1246,6 +1247,15 @@ textarea::placeholder,
   font-size: 11px;
   font-style: normal;
   font-weight: 500;
+}
+
+.project-tree-category-icon {
+  width: 13px;
+  height: 13px;
+  display: block;
+  background: rgba(27, 22, 17, 0.36);
+  mask: var(--icon-url) center / contain no-repeat;
+  -webkit-mask: var(--icon-url) center / contain no-repeat;
 }
 
 .project-category-list {
@@ -4061,6 +4071,10 @@ body.authenticated-theme-dark .project-card.active:hover,
 body.authenticated-theme-dark .project-tree-home.active:hover,
 body.authenticated-theme-dark .thread-card.active:hover {
   background: rgba(255, 255, 255, 0.08);
+}
+
+body.authenticated-theme-dark .project-tree-category-icon {
+  background: rgba(223, 232, 244, 0.36);
 }
 
 body.authenticated-theme-dark .chat-tab {
