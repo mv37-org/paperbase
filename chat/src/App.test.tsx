@@ -223,13 +223,14 @@ function authenticatedSession(
   };
 }
 
-function projectSummary(projectId: string, name: string, sessionCount = 1) {
+function projectSummary(projectId: string, name: string, sessionCount = 1, githubRepoUrl = "") {
   return {
     project_id: projectId,
     name,
     description: "",
     is_default: name === "General",
     session_count: sessionCount,
+    github_repo_url: githubRepoUrl,
     created_at: "2026-04-21T00:00:00Z",
     updated_at: "2026-04-21T00:00:00Z",
   };
@@ -415,8 +416,21 @@ describe("App", () => {
     apiMocks.loadProjects.mockResolvedValue({
       projects: [projectSummary("proj_1", "General")],
     });
-    apiMocks.loadProjectItems.mockResolvedValue(
-      projectItemsPage("proj_1", [projectItemThread("thread_1", "Recovered thread")]),
+    apiMocks.loadProjectItems.mockImplementation(
+      async (projectId: string, limit = 25, offset = 0, itemKind?: "thread" | "python_file") => {
+        const allItems = [projectItemThread("thread_1", "Recovered thread", projectId)];
+        const filteredItems = itemKind
+          ? allItems.filter((item) => item.item_kind === itemKind)
+          : allItems;
+        const pageItems = filteredItems.slice(offset, offset + limit);
+        return {
+          ...projectItemsPage(projectId, pageItems),
+          offset,
+          limit,
+          total_count: filteredItems.length,
+          has_more: offset + pageItems.length < filteredItems.length,
+        };
+      },
     );
     apiMocks.createProject.mockResolvedValue(projectSummary("proj_2", "Agents", 0));
     apiMocks.createThread.mockResolvedValue(threadResponse("thread_2", "New chat"));
@@ -553,7 +567,8 @@ describe("App", () => {
     fireEvent.click(screen.getAllByText("General")[0]!);
 
     await waitFor(() => {
-      expect(apiMocks.loadProjectItems).toHaveBeenCalledWith("proj_1", 25, 0);
+      expect(apiMocks.loadProjectItems).toHaveBeenCalledWith("proj_1", 25, 0, "python_file");
+      expect(apiMocks.loadProjectItems).toHaveBeenCalledWith("proj_1", 25, 0, "thread");
     });
     await waitFor(() => {
       expect(screen.getByText("Recovered thread")).toBeTruthy();
@@ -572,6 +587,60 @@ describe("App", () => {
 
     fireEvent.click(screen.getByText("Home"));
     expect(await screen.findByText("Project Home")).toBeTruthy();
+  });
+
+  it("paginates project sidebar code inside the code section and links to GitHub", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.loadProjects.mockResolvedValue({
+      projects: [
+        projectSummary(
+          "proj_1",
+          "General",
+          3,
+          "https://github.com/octocat/paperbase-general-123abc",
+        ),
+      ],
+    });
+    apiMocks.loadProjectItems.mockImplementation(
+      async (projectId: string, limit = 25, offset = 0, itemKind?: "thread" | "python_file") => {
+        const allItems =
+          itemKind === "python_file"
+            ? [
+                projectItemFile("file_1", "analysis.py", projectId),
+                projectItemFile("file_2", "eval.py", projectId),
+              ]
+            : [projectItemThread("thread_1", "Recovered thread", projectId)];
+        const pageItems = allItems.slice(offset, offset + 1);
+        return {
+          ...projectItemsPage(projectId, pageItems),
+          offset,
+          limit,
+          total_count: allItems.length,
+          has_more: offset + pageItems.length < allItems.length,
+        };
+      },
+    );
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+    fireEvent.click(screen.getAllByText("General")[0]!);
+
+    const repoLink = await screen.findByLabelText("Open GitHub repository for General");
+    expect(repoLink.getAttribute("href")).toBe(
+      "https://github.com/octocat/paperbase-general-123abc",
+    );
+    expect(await screen.findByText("analysis.py")).toBeTruthy();
+    expect(screen.queryByText("eval.py")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show more" }));
+
+    await waitFor(() => {
+      expect(apiMocks.loadProjectItems).toHaveBeenCalledWith("proj_1", 25, 1, "python_file");
+    });
+    expect(await screen.findByText("eval.py")).toBeTruthy();
   });
 
   it("creates a project from the sidebar modal", async () => {
@@ -1236,7 +1305,7 @@ describe("App", () => {
     fireEvent.click(screen.getAllByText("General")[0]!);
 
     await waitFor(() => {
-      expect(apiMocks.loadProjectItems).toHaveBeenCalledWith("proj_1", 25, 0);
+      expect(apiMocks.loadProjectItems).toHaveBeenCalledWith("proj_1", 25, 0, "thread");
       expect(screen.getByText("Recovered thread")).toBeTruthy();
     });
 

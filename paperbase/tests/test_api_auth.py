@@ -510,31 +510,35 @@ class StubApiService:
         *,
         limit: int = 25,
         offset: int = 0,
+        item_kind: str | None = None,
     ) -> ProjectItemPageResponse:
-        self.calls.append(("list_project_items", (user.user_id, project_id, limit, offset)))
+        self.calls.append(("list_project_items", (user.user_id, project_id, limit, offset, item_kind)))
+        items = [
+            _project_item(
+                "thread_1",
+                item_kind="thread",
+                project_id=project_id,
+                title="Open Thread",
+                thread_id="thread_1",
+            ),
+            _project_item(
+                "file_1",
+                item_kind="python_file",
+                project_id=project_id,
+                title="something.py",
+                thread_id=None,
+                file_id="file_1",
+                filename="something.py",
+            ),
+        ]
+        if item_kind:
+            items = [item for item in items if item.item_kind == item_kind]
         return ProjectItemPageResponse(
             project_id=project_id,
-            items=[
-                _project_item(
-                    "thread_1",
-                    item_kind="thread",
-                    project_id=project_id,
-                    title="Open Thread",
-                    thread_id="thread_1",
-                ),
-                _project_item(
-                    "file_1",
-                    item_kind="python_file",
-                    project_id=project_id,
-                    title="something.py",
-                    thread_id=None,
-                    file_id="file_1",
-                    filename="something.py",
-                ),
-            ],
+            items=items,
             offset=offset,
             limit=limit,
-            total_count=2,
+            total_count=len(items),
             has_more=False,
         )
 
@@ -1136,18 +1140,17 @@ def test_browser_project_item_routes_delegate_to_service(api_client):
     client, service, settings = api_client
     client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
 
-    items = client.get("/v1/browser/projects/proj_1/items?limit=25&offset=0")
+    items = client.get("/v1/browser/projects/proj_1/items?limit=25&offset=0&item_kind=python_file")
     python_file = client.get("/v1/browser/python-files/file_1")
     repo_sync = client.get("/v1/browser/projects/proj_1/repo-sync")
 
     assert items.status_code == 200
-    assert items.json()["items"][0]["item_kind"] == "thread"
-    assert items.json()["items"][1]["item_kind"] == "python_file"
+    assert items.json()["items"][0]["item_kind"] == "python_file"
     assert python_file.status_code == 200
     assert python_file.json()["content"] == "print('hello')"
     assert repo_sync.status_code == 200
     assert repo_sync.json()["repo_exists"] is False
-    assert ("list_project_items", ("user_1", "proj_1", 25, 0)) in service.calls
+    assert ("list_project_items", ("user_1", "proj_1", 25, 0, "python_file")) in service.calls
     assert ("get_python_file", ("user_1", "file_1")) in service.calls
     assert ("get_project_repo_sync", ("user_1", "proj_1")) in service.calls
 

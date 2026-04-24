@@ -1229,8 +1229,15 @@ textarea::placeholder,
   gap: 2px;
 }
 
+.project-tree-category-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px;
+}
+
 .project-tree-category-label {
-  grid-template-columns: auto auto minmax(0, 1fr) auto;
+  grid-template-columns: auto auto minmax(0, 1fr);
   width: 100%;
   padding: 0 6px;
   border: 0;
@@ -1252,7 +1259,13 @@ textarea::placeholder,
   white-space: nowrap;
 }
 
-.project-tree-category-label em {
+.project-tree-category-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.project-tree-category-count {
   min-width: 16px;
   height: 16px;
   padding: 0 4px;
@@ -1266,6 +1279,29 @@ textarea::placeholder,
   font-style: normal;
   font-weight: 500;
   line-height: 1;
+}
+
+.project-tree-repo-link {
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.project-tree-repo-link:hover {
+  background: rgba(27, 22, 17, 0.045);
+}
+
+.project-tree-repo-icon {
+  width: 12px;
+  height: 12px;
+  display: block;
+  background: rgba(27, 22, 17, 0.34);
+  mask: var(--icon-url) center / contain no-repeat;
+  -webkit-mask: var(--icon-url) center / contain no-repeat;
 }
 
 .project-tree-category-chevron {
@@ -1318,7 +1354,7 @@ textarea::placeholder,
   color: var(--muted);
   text-align: left;
   font-size: 12px;
-  padding: 4px 6px;
+  padding: 3px 6px 4px 16px;
   cursor: pointer;
 }
 
@@ -4593,7 +4629,7 @@ body.authenticated-theme-dark .chat-tab-close,
 body.authenticated-theme-dark .project-show-more,
 body.authenticated-theme-dark .project-session-state,
 body.authenticated-theme-dark .project-tree-category-label,
-body.authenticated-theme-dark .project-tree-category-label em,
+body.authenticated-theme-dark .project-tree-category-count,
 body.authenticated-theme-dark .project-tree-empty,
 body.authenticated-theme-dark .project-home-header span,
 body.authenticated-theme-dark .project-home-header p,
@@ -4662,11 +4698,19 @@ body.authenticated-theme-dark .project-tree-category-icon {
   background: rgba(223, 232, 244, 0.36);
 }
 
+body.authenticated-theme-dark .project-tree-repo-icon {
+  background: rgba(223, 232, 244, 0.34);
+}
+
 body.authenticated-theme-dark .project-tree-category-label:hover {
   background: rgba(255, 255, 255, 0.045);
 }
 
-body.authenticated-theme-dark .project-tree-category-label em {
+body.authenticated-theme-dark .project-tree-repo-link:hover {
+  background: rgba(255, 255, 255, 0.055);
+}
+
+body.authenticated-theme-dark .project-tree-category-count {
   border-color: rgba(223, 232, 244, 0.1);
   background: rgba(255, 255, 255, 0.055);
 }

@@ -1494,7 +1494,7 @@ class PaperbaseService:
             )
             if imported is None:
                 raise HTTPException(status_code=500, detail=f"Repository path '{repo_path}' could not be imported")
-        return project
+        return self.repository.get_project(user_id=user.user_id, project_id=project.project_id) or project  # type: ignore[attr-defined]
 
     def update_project(self, user: BrowserUser, project_id: str, request: UpdateProjectRequest) -> ProjectResponse:
         name = request.name.strip()
@@ -1545,12 +1545,14 @@ class PaperbaseService:
         *,
         limit: int = 25,
         offset: int = 0,
+        item_kind: str | None = None,
     ) -> ProjectItemPageResponse:
         page = self.repository.list_project_items(  # type: ignore[attr-defined]
             user_id=user.user_id,
             project_id=project_id,
             limit=limit,
             offset=offset,
+            item_kind=item_kind,
         )
         if page is None:
             raise HTTPException(status_code=404, detail="Project not found")

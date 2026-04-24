@@ -359,6 +359,7 @@ class ProjectSummary(BaseModel):
     description: str = ""
     is_default: bool = False
     session_count: int = 0
+    github_repo_url: str = ""
     created_at: datetime
     updated_at: datetime
 

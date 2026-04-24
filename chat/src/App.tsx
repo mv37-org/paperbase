@@ -59,10 +59,11 @@ import type {
   GitHubRepoSummary,
   PaperResponse,
   ProjectFileKind,
+  ProjectItemKind,
+  ProjectItemSummary,
   ProjectRepoConflictDetail,
   ProjectRepoConflictFile,
   ProjectRepoConflictResolution,
-  ProjectItemSummary,
   ProjectRepoSyncResponse,
   ProjectSummary,
   PythonFileResponse,
@@ -77,6 +78,8 @@ const RESUME_PROJECT_MODAL_KEY = "paperbase-resume-new-project";
 const SIDEBAR_COLLAPSED_KEY = "paperbase-sidebar-collapsed";
 const MAX_OPEN_TABS = 8;
 const MESSAGE_LIST_BOTTOM_THRESHOLD = 40;
+const PROJECT_ITEM_PAGE_SIZE = 25;
+const PROJECT_SIDEBAR_ITEM_KINDS: ProjectItemKind[] = ["python_file", "thread"];
 type ModalFlashKind = "error" | "note";
 type PaperDrawerState = { paperId: string; path: string } | null;
 type PaperDrawerContent =
@@ -92,9 +95,12 @@ type ProjectItemState = {
   items: ProjectItemSummary[];
   totalCount: number;
   hasMore: boolean;
+  hasMoreByKind?: Partial<Record<ProjectItemKind, boolean>>;
   loaded: boolean;
   loading: boolean;
   loadingMore: boolean;
+  loadingMoreByKind?: Partial<Record<ProjectItemKind, boolean>>;
+  totalCountByKind?: Partial<Record<ProjectItemKind, number>>;
   error: string;
 };
 type PythonFileDraft = {
@@ -675,6 +681,23 @@ function upsertProjectItem(
   return [item, ...current.filter((entry) => entry.item_id !== item.item_id)].sort(
     (left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at),
   );
+}
+
+function mergeProjectItems(
+  current: ProjectItemSummary[],
+  incoming: ProjectItemSummary[],
+): ProjectItemSummary[] {
+  const itemsById = new Map(current.map((item) => [item.item_id, item]));
+  for (const item of incoming) {
+    itemsById.set(item.item_id, item);
+  }
+  return [...itemsById.values()].sort(
+    (left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at),
+  );
+}
+
+function projectItemKindCount(items: ProjectItemSummary[], itemKind: ProjectItemKind) {
+  return items.filter((item) => item.item_kind === itemKind).length;
 }
 
 function displayPythonFilename(filename: string) {
@@ -1596,12 +1619,26 @@ export default function App() {
             (item) => item.item_kind !== "thread" || !ids.has(item.thread_id ?? ""),
           );
           const removedCount = current.items.length - nextItems.length;
+          const totalCountByKind = { ...current.totalCountByKind };
+          const nextThreadTotal = Math.max(
+            0,
+            (totalCountByKind.thread ?? projectItemKindCount(current.items, "thread")) -
+              removedCount,
+          );
+          totalCountByKind.thread = nextThreadTotal;
           return {
             ...current,
             items: nextItems,
             totalCount: Math.max(0, current.totalCount - removedCount),
+            totalCountByKind,
             hasMore:
               current.hasMore || nextItems.length < Math.max(0, current.totalCount - removedCount),
+            hasMoreByKind: {
+              ...current.hasMoreByKind,
+              thread:
+                Boolean(current.hasMoreByKind?.thread) ||
+                projectItemKindCount(nextItems, "thread") < nextThreadTotal,
+            },
           };
         });
       }
@@ -1610,48 +1647,96 @@ export default function App() {
   );
 
   const fetchProjectItems = useCallback(
-    async (projectId: string, append = false) => {
+    async (projectId: string, append = false, itemKind?: ProjectItemKind) => {
       const existing = projectItemsRef.current[projectId];
-      const offset = append ? (existing?.items.length ?? 0) : 0;
+      const itemKinds = itemKind ? [itemKind] : PROJECT_SIDEBAR_ITEM_KINDS;
+      const offsets = new Map(
+        itemKinds.map((kind) => [
+          kind,
+          append ? projectItemKindCount(existing?.items ?? [], kind) : 0,
+        ]),
+      );
       updateProjectItemCache(projectId, (current) => ({
         items: current?.items ?? [],
         totalCount: current?.totalCount ?? 0,
         hasMore: current?.hasMore ?? false,
+        hasMoreByKind: current?.hasMoreByKind,
         loaded: current?.loaded ?? false,
-        loading: append ? false : true,
+        loading: append || itemKind ? false : true,
         loadingMore: append,
+        loadingMoreByKind: itemKind
+          ? {
+              ...current?.loadingMoreByKind,
+              [itemKind]: append,
+            }
+          : current?.loadingMoreByKind,
+        totalCountByKind: current?.totalCountByKind,
         error: "",
       }));
       try {
-        const page = await loadProjectItems(projectId, 25, offset);
+        const pages = await Promise.all(
+          itemKinds.map(async (kind) => ({
+            kind,
+            page: await loadProjectItems(
+              projectId,
+              PROJECT_ITEM_PAGE_SIZE,
+              offsets.get(kind) ?? 0,
+              kind,
+            ),
+          })),
+        );
         updateProjectItemCache(projectId, (current) => {
-          const items = append
-            ? [
-                ...(current?.items ?? []),
-                ...page.items.filter(
-                  (item) => !(current?.items ?? []).some((entry) => entry.item_id === item.item_id),
-                ),
-              ]
-            : page.items;
+          const currentItems = current?.items ?? [];
+          const targetKinds = new Set(itemKinds);
+          const retainedItems = append
+            ? currentItems
+            : currentItems.filter((item) => !targetKinds.has(item.item_kind));
+          const items = mergeProjectItems(
+            retainedItems,
+            pages.flatMap(({ page }) => page.items),
+          );
+          const totalCountByKind = { ...current?.totalCountByKind };
+          const hasMoreByKind = { ...current?.hasMoreByKind };
+          const loadingMoreByKind = { ...current?.loadingMoreByKind };
+          for (const { kind, page } of pages) {
+            totalCountByKind[kind] = page.total_count;
+            hasMoreByKind[kind] = page.has_more;
+            loadingMoreByKind[kind] = false;
+          }
+          const knownTotalCount = PROJECT_SIDEBAR_ITEM_KINDS.reduce(
+            (sum, kind) => sum + (totalCountByKind[kind] ?? projectItemKindCount(items, kind)),
+            0,
+          );
           return {
             items,
-            totalCount: page.total_count,
-            hasMore: page.has_more,
+            totalCount: Math.max(knownTotalCount, items.length),
+            hasMore: PROJECT_SIDEBAR_ITEM_KINDS.some((kind) => Boolean(hasMoreByKind[kind])),
+            hasMoreByKind,
             loaded: true,
             loading: false,
             loadingMore: false,
+            loadingMoreByKind,
+            totalCountByKind,
             error: "",
           };
         });
-        return page;
+        return pages[0]?.page ?? null;
       } catch (error) {
         updateProjectItemCache(projectId, (current) => ({
           items: current?.items ?? [],
           totalCount: current?.totalCount ?? 0,
           hasMore: current?.hasMore ?? false,
+          hasMoreByKind: current?.hasMoreByKind,
           loaded: current?.loaded ?? false,
           loading: false,
           loadingMore: false,
+          loadingMoreByKind: itemKind
+            ? {
+                ...current?.loadingMoreByKind,
+                [itemKind]: false,
+              }
+            : current?.loadingMoreByKind,
+          totalCountByKind: current?.totalCountByKind,
           error: error instanceof Error ? error.message : "Project items could not be loaded.",
         }));
         throw error;
@@ -1666,11 +1751,17 @@ export default function App() {
         if (!current?.loaded) {
           return current;
         }
+        const existed = current.items.some((item) => item.thread_id === thread.thread_id);
         const items = upsertProjectItem(current.items, projectItemFromThread(thread));
+        const totalCountByKind = { ...current.totalCountByKind };
+        totalCountByKind.thread = existed
+          ? (totalCountByKind.thread ?? projectItemKindCount(items, "thread"))
+          : (totalCountByKind.thread ?? projectItemKindCount(items, "thread") - 1) + 1;
         return {
           ...current,
           items,
           totalCount: Math.max(current.totalCount, items.length),
+          totalCountByKind,
           hasMore: Math.max(current.totalCount, items.length) > items.length || current.hasMore,
         };
       });
@@ -1684,11 +1775,17 @@ export default function App() {
         if (!current?.loaded) {
           return current;
         }
+        const existed = current.items.some((item) => item.file_id === file.file_id);
         const items = upsertProjectItem(current.items, projectItemFromPythonFile(file));
+        const totalCountByKind = { ...current.totalCountByKind };
+        totalCountByKind.python_file = existed
+          ? (totalCountByKind.python_file ?? projectItemKindCount(items, "python_file"))
+          : (totalCountByKind.python_file ?? projectItemKindCount(items, "python_file") - 1) + 1;
         return {
           ...current,
           items,
           totalCount: Math.max(current.totalCount, items.length),
+          totalCountByKind,
           hasMore: Math.max(current.totalCount, items.length) > items.length || current.hasMore,
         };
       });
@@ -1705,12 +1802,25 @@ export default function App() {
           }
           const nextItems = current.items.filter((item) => item.thread_id !== thread.thread_id);
           const removed = nextItems.length !== current.items.length ? 1 : 0;
+          const totalCountByKind = { ...current.totalCountByKind };
+          const nextThreadTotal = Math.max(
+            0,
+            (totalCountByKind.thread ?? projectItemKindCount(current.items, "thread")) - removed,
+          );
+          totalCountByKind.thread = nextThreadTotal;
           return {
             ...current,
             items: nextItems,
             totalCount: Math.max(0, current.totalCount - removed),
+            totalCountByKind,
             hasMore:
               current.hasMore || nextItems.length < Math.max(0, current.totalCount - removed),
+            hasMoreByKind: {
+              ...current.hasMoreByKind,
+              thread:
+                Boolean(current.hasMoreByKind?.thread) ||
+                projectItemKindCount(nextItems, "thread") < nextThreadTotal,
+            },
           };
         });
       }
@@ -1723,10 +1833,15 @@ export default function App() {
         const totalCount = existed
           ? current.totalCount
           : Math.max(current.totalCount + 1, items.length);
+        const totalCountByKind = { ...current.totalCountByKind };
+        totalCountByKind.thread = existed
+          ? (totalCountByKind.thread ?? projectItemKindCount(items, "thread"))
+          : (totalCountByKind.thread ?? projectItemKindCount(items, "thread") - 1) + 1;
         return {
           ...current,
           items,
           totalCount,
+          totalCountByKind,
           hasMore: current.hasMore || totalCount > items.length,
         };
       });
@@ -3019,8 +3134,8 @@ export default function App() {
   );
 
   const handleLoadMoreItems = useCallback(
-    async (projectId: string) => {
-      await fetchProjectItems(projectId, true);
+    async (projectId: string, itemKind: ProjectItemKind) => {
+      await fetchProjectItems(projectId, true, itemKind);
     },
     [fetchProjectItems],
   );
@@ -3780,6 +3895,12 @@ export default function App() {
                       last_message_preview: item.last_message_preview,
                     });
                   });
+                  const codeCount = itemState?.totalCountByKind?.python_file ?? codeItems.length;
+                  const sessionCount = itemState?.totalCountByKind?.thread ?? sessionItems.length;
+                  const codeHasMore = Boolean(itemState?.hasMoreByKind?.python_file);
+                  const sessionsHasMore = Boolean(itemState?.hasMoreByKind?.thread);
+                  const codeLoadingMore = Boolean(itemState?.loadingMoreByKind?.python_file);
+                  const sessionsLoadingMore = Boolean(itemState?.loadingMoreByKind?.thread);
                   return (
                     <div
                       key={project.project_id}
@@ -3890,25 +4011,45 @@ export default function App() {
                             <>
                               <div className="project-tree">
                                 <div className="project-tree-category">
-                                  <button
-                                    type="button"
-                                    className="project-tree-category-label"
-                                    aria-expanded={!collapsedCategories.code}
-                                    onClick={() =>
-                                      toggleProjectCategory(project.project_id, "code")
-                                    }
-                                  >
-                                    <span
-                                      className="project-tree-category-chevron"
-                                      aria-hidden="true"
-                                    />
-                                    <MaskedAssetIcon
-                                      asset="code.svg"
-                                      className="project-tree-category-icon"
-                                    />
-                                    <span>Code</span>
-                                    <em>{codeItems.length}</em>
-                                  </button>
+                                  <div className="project-tree-category-header">
+                                    <button
+                                      type="button"
+                                      className="project-tree-category-label"
+                                      aria-expanded={!collapsedCategories.code}
+                                      onClick={() =>
+                                        toggleProjectCategory(project.project_id, "code")
+                                      }
+                                    >
+                                      <span
+                                        className="project-tree-category-chevron"
+                                        aria-hidden="true"
+                                      />
+                                      <MaskedAssetIcon
+                                        asset="code.svg"
+                                        className="project-tree-category-icon"
+                                      />
+                                      <span>Code</span>
+                                    </button>
+                                    <div className="project-tree-category-actions">
+                                      {project.github_repo_url ? (
+                                        <a
+                                          href={project.github_repo_url}
+                                          target="_blank"
+                                          rel="noreferrer"
+                                          className="project-tree-repo-link"
+                                          aria-label={`Open GitHub repository for ${project.name}`}
+                                          title="Open GitHub repository"
+                                          onClick={(event) => event.stopPropagation()}
+                                        >
+                                          <MaskedAssetIcon
+                                            asset="git.svg"
+                                            className="project-tree-repo-icon"
+                                          />
+                                        </a>
+                                      ) : null}
+                                      <em className="project-tree-category-count">{codeCount}</em>
+                                    </div>
+                                  </div>
                                   {!collapsedCategories.code && codeItems.length > 0 ? (
                                     <div className="thread-list project-thread-list project-category-list">
                                       {codeItems.map((item) => {
@@ -3967,27 +4108,45 @@ export default function App() {
                                   ) : !collapsedCategories.code ? (
                                     <div className="project-tree-empty">No code files yet.</div>
                                   ) : null}
+                                  {!collapsedCategories.code && codeHasMore ? (
+                                    <button
+                                      type="button"
+                                      className="project-show-more"
+                                      disabled={codeLoadingMore}
+                                      onClick={() =>
+                                        void handleLoadMoreItems(project.project_id, "python_file")
+                                      }
+                                    >
+                                      {codeLoadingMore ? "Loading…" : "Show more"}
+                                    </button>
+                                  ) : null}
                                 </div>
                                 <div className="project-tree-category">
-                                  <button
-                                    type="button"
-                                    className="project-tree-category-label"
-                                    aria-expanded={!collapsedCategories.sessions}
-                                    onClick={() =>
-                                      toggleProjectCategory(project.project_id, "sessions")
-                                    }
-                                  >
-                                    <span
-                                      className="project-tree-category-chevron"
-                                      aria-hidden="true"
-                                    />
-                                    <MaskedAssetIcon
-                                      asset="sessions.svg"
-                                      className="project-tree-category-icon"
-                                    />
-                                    <span>Sessions</span>
-                                    <em>{sessionItems.length}</em>
-                                  </button>
+                                  <div className="project-tree-category-header">
+                                    <button
+                                      type="button"
+                                      className="project-tree-category-label"
+                                      aria-expanded={!collapsedCategories.sessions}
+                                      onClick={() =>
+                                        toggleProjectCategory(project.project_id, "sessions")
+                                      }
+                                    >
+                                      <span
+                                        className="project-tree-category-chevron"
+                                        aria-hidden="true"
+                                      />
+                                      <MaskedAssetIcon
+                                        asset="sessions.svg"
+                                        className="project-tree-category-icon"
+                                      />
+                                      <span>Sessions</span>
+                                    </button>
+                                    <div className="project-tree-category-actions">
+                                      <em className="project-tree-category-count">
+                                        {sessionCount}
+                                      </em>
+                                    </div>
+                                  </div>
                                   {!collapsedCategories.sessions && sessionItems.length > 0 ? (
                                     <div className="thread-list project-thread-list project-category-list">
                                       {sessionItems.map((item) => {
@@ -4040,28 +4199,44 @@ export default function App() {
                                   ) : !collapsedCategories.sessions ? (
                                     <div className="project-tree-empty">No sessions yet.</div>
                                   ) : null}
+                                  {!collapsedCategories.sessions && sessionsHasMore ? (
+                                    <button
+                                      type="button"
+                                      className="project-show-more"
+                                      disabled={sessionsLoadingMore}
+                                      onClick={() =>
+                                        void handleLoadMoreItems(project.project_id, "thread")
+                                      }
+                                    >
+                                      {sessionsLoadingMore ? "Loading…" : "Show more"}
+                                    </button>
+                                  ) : null}
                                 </div>
                                 {PROJECT_PLACEHOLDER_CATEGORIES.map((category) => (
                                   <div key={category.label} className="project-tree-category">
-                                    <button
-                                      type="button"
-                                      className="project-tree-category-label"
-                                      aria-expanded={!collapsedCategories[category.key]}
-                                      onClick={() =>
-                                        toggleProjectCategory(project.project_id, category.key)
-                                      }
-                                    >
-                                      <span
-                                        className="project-tree-category-chevron"
-                                        aria-hidden="true"
-                                      />
-                                      <MaskedAssetIcon
-                                        asset={category.asset}
-                                        className="project-tree-category-icon"
-                                      />
-                                      <span>{category.label}</span>
-                                      <em>0</em>
-                                    </button>
+                                    <div className="project-tree-category-header">
+                                      <button
+                                        type="button"
+                                        className="project-tree-category-label"
+                                        aria-expanded={!collapsedCategories[category.key]}
+                                        onClick={() =>
+                                          toggleProjectCategory(project.project_id, category.key)
+                                        }
+                                      >
+                                        <span
+                                          className="project-tree-category-chevron"
+                                          aria-hidden="true"
+                                        />
+                                        <MaskedAssetIcon
+                                          asset={category.asset}
+                                          className="project-tree-category-icon"
+                                        />
+                                        <span>{category.label}</span>
+                                      </button>
+                                      <div className="project-tree-category-actions">
+                                        <em className="project-tree-category-count">0</em>
+                                      </div>
+                                    </div>
                                     {!collapsedCategories[category.key] ? (
                                       <div className="project-tree-empty">Empty</div>
                                     ) : null}
@@ -4079,16 +4254,6 @@ export default function App() {
                                   <span>Home</span>
                                 </button>
                               </div>
-                              {itemState.hasMore ? (
-                                <button
-                                  type="button"
-                                  className="project-show-more"
-                                  disabled={itemState.loadingMore}
-                                  onClick={() => void handleLoadMoreItems(project.project_id)}
-                                >
-                                  {itemState.loadingMore ? "Loading…" : "Show more"}
-                                </button>
-                              ) : null}
                             </>
                           ) : null}
                         </div>

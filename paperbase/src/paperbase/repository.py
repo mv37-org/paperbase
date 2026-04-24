@@ -644,13 +644,19 @@ def _uploaded_document_from_orm(row: UploadedDocumentORM) -> UploadedDocumentRes
     )
 
 
-def _project_from_orm(row: ProjectORM, *, session_count: int = 0) -> ProjectSummary:
+def _project_from_orm(
+    row: ProjectORM,
+    *,
+    session_count: int = 0,
+    github_repo_url: str = "",
+) -> ProjectSummary:
     return ProjectSummary(
         project_id=row.project_id,
         name=row.name,
         description=row.description or "",
         is_default=bool(row.is_default),
         session_count=session_count,
+        github_repo_url=github_repo_url,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -2856,11 +2862,26 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     .group_by(PythonFileORM.project_id)
                 ).all()
             }
+            project_ids = [project.project_id for project in projects]
+            repo_urls = (
+                {
+                    project_id: repo_url
+                    for project_id, repo_url in session.execute(
+                        select(ProjectRepoSyncORM.project_id, ProjectRepoSyncORM.github_repo_url).where(
+                            ProjectRepoSyncORM.user_id == user_id,
+                            ProjectRepoSyncORM.project_id.in_(project_ids),
+                        )
+                    ).all()
+                }
+                if project_ids
+                else {}
+            )
         return [
             _project_from_orm(
                 project,
                 session_count=int(thread_counts.get(project.project_id, 0))
                 + int(file_counts.get(project.project_id, 0)),
+                github_repo_url=repo_urls.get(project.project_id, "") or "",
             )
             for project in projects
         ]
@@ -2884,7 +2905,22 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 )
                 or 0
             )
-        return ProjectResponse(**_project_from_orm(project, session_count=thread_count + file_count).model_dump())
+            repo_url = (
+                session.scalar(
+                    select(ProjectRepoSyncORM.github_repo_url).where(
+                        ProjectRepoSyncORM.project_id == project_id,
+                        ProjectRepoSyncORM.user_id == user_id,
+                    )
+                )
+                or ""
+            )
+        return ProjectResponse(
+            **_project_from_orm(
+                project,
+                session_count=thread_count + file_count,
+                github_repo_url=repo_url,
+            ).model_dump()
+        )
 
     def create_project(self, *, user_id: str, name: str, description: str) -> ProjectResponse:
         row = ProjectORM(
@@ -2984,6 +3020,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
         project_id: str,
         limit: int,
         offset: int,
+        item_kind: str | None = None,
     ) -> ProjectItemPageResponse | None:
         with self._session() as session:
             project = session.scalar(
@@ -3018,6 +3055,8 @@ class SqlAlchemyPaperRepository(PaperRepository):
             ).all()
             items.extend(_project_item_from_python_file(_python_file_summary_from_orm(row)) for row in file_rows)
 
+        if item_kind:
+            items = [item for item in items if item.item_kind == item_kind]
         items.sort(key=lambda item: (item.updated_at, item.created_at), reverse=True)
         page = items[offset : offset + limit]
         return ProjectItemPageResponse(
@@ -4646,8 +4685,16 @@ class MemoryPaperRepository(PaperRepository):
                 if self.python_file_users.get(python_file.file_id) == user_id
                 and python_file.project_id == project.project_id
             )
+            sync = self.project_repo_syncs.get(project.project_id)
             summaries.append(
-                ProjectSummary(**project.model_copy(update={"session_count": thread_count + file_count}).model_dump())
+                ProjectSummary(
+                    **project.model_copy(
+                        update={
+                            "session_count": thread_count + file_count,
+                            "github_repo_url": sync.github_repo_url if sync else "",
+                        }
+                    ).model_dump()
+                )
             )
         summaries.sort(
             key=lambda item: (not item.is_default, -item.updated_at.timestamp(), item.created_at.timestamp())
@@ -4670,7 +4717,13 @@ class MemoryPaperRepository(PaperRepository):
             for python_file in self.python_files.values()
             if self.python_file_users.get(python_file.file_id) == user_id and python_file.project_id == project_id
         )
-        return project.model_copy(update={"session_count": thread_count + file_count})
+        sync = self.project_repo_syncs.get(project_id)
+        return project.model_copy(
+            update={
+                "session_count": thread_count + file_count,
+                "github_repo_url": sync.github_repo_url if sync else "",
+            }
+        )
 
     def create_project(self, *, user_id: str, name: str, description: str) -> ProjectResponse:
         self._ensure_default_project(user_id)
@@ -4755,6 +4808,7 @@ class MemoryPaperRepository(PaperRepository):
         project_id: str,
         limit: int,
         offset: int,
+        item_kind: str | None = None,
     ) -> ProjectItemPageResponse | None:
         project = self.get_project(user_id=user_id, project_id=project_id)
         if project is None:
@@ -4781,6 +4835,8 @@ class MemoryPaperRepository(PaperRepository):
             for file in self.python_files.values()
             if self.python_file_users.get(file.file_id) == user_id and file.project_id == project_id
         )
+        if item_kind:
+            items = [item for item in items if item.item_kind == item_kind]
         items.sort(key=lambda item: (item.updated_at, item.created_at), reverse=True)
         page = items[offset : offset + limit]
         return ProjectItemPageResponse(
