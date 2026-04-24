@@ -13,6 +13,7 @@ from paperbase.extractors import (
     _latex_to_markdown,
     _sanitize_extracted_text,
     build_manifest,
+    extract_github_url,
     index_paper_artifacts,
 )
 from paperbase.models import PaperMetadata
@@ -86,7 +87,7 @@ def test_index_paper_artifacts_splits_html_into_real_sections(monkeypatch):
     monkeypatch.setattr("paperbase.extractors.fetch_html", lambda arxiv_id: html)
     monkeypatch.setattr("paperbase.extractors.fetch_source", lambda arxiv_id: None)
     monkeypatch.setattr("paperbase.extractors.fetch_pdf", lambda arxiv_id, pdf_url=None: None)
-    monkeypatch.setattr("paperbase.extractors._extract_figures_from_html", lambda html: [])
+    monkeypatch.setattr("paperbase.extractors._extract_figures_from_html", lambda html, *, arxiv_id=None: [])
     monkeypatch.setattr("paperbase.extractors._extract_tables_from_html", lambda html: [])
 
     extraction = index_paper_artifacts(_sample_paper())
@@ -417,7 +418,7 @@ def _install_preview_monkeypatches(
     monkeypatch.setattr("paperbase.extractors.fetch_html", _fetch_html)
     monkeypatch.setattr("paperbase.extractors.fetch_source", _fetch_source)
     monkeypatch.setattr("paperbase.extractors.fetch_pdf", _fetch_pdf)
-    monkeypatch.setattr("paperbase.extractors._extract_figures_from_html", lambda _html: [])
+    monkeypatch.setattr("paperbase.extractors._extract_figures_from_html", lambda _html, *, arxiv_id=None: [])
     monkeypatch.setattr("paperbase.extractors._extract_tables_from_html", lambda _html: [])
     if with_docling:
         # Leave docling's real behavior alone.
@@ -555,3 +556,154 @@ def test_manifest_always_carries_preview_key(monkeypatch):
 
     assert "preview" in manifest["available_artifacts"]
     assert manifest["available_artifacts"]["preview"] == PREVIEW_ARTIFACT_PATH
+
+
+def test_extract_figures_from_html_handles_pre_pathed_srcs_without_base_tag(monkeypatch):
+    """Real-world shape from arxiv HTML on papers like 1706.03762
+    (Attention Is All You Need): NO ``<base>`` tag, and ``<img>`` srcs
+    come pre-pathed with ``<arxiv_id>v<N>/Figures/...``. The extractor
+    must use ``https://arxiv.org/html/`` as the base so urljoin
+    produces the correct absolute URL — NOT
+    ``https://arxiv.org/html/<arxiv_id>/`` which would duplicate the
+    id and 404.
+    """
+    from paperbase.extractors import _extract_figures_from_html, SESSION
+
+    html = """
+    <html><body>
+      <figure>
+        <img src="1706.03762v7/Figures/ModalNet-21.png"/>
+        <figcaption>Fig 1.</figcaption>
+      </figure>
+      <figure>
+        <img src="1706.03762v7/x1.png"/>
+        <figcaption>Fig 2.</figcaption>
+      </figure>
+    </body></html>
+    """.strip()
+
+    fetched_urls: list[str] = []
+
+    class _Resp:
+        status_code = 200
+        headers = {"content-type": "image/png"}
+        content = b"PNG"
+
+    monkeypatch.setattr(SESSION, "get", lambda url, *a, **k: fetched_urls.append(url) or _Resp())
+
+    figures = _extract_figures_from_html(html, arxiv_id="1706.03762")
+
+    assert len(figures) == 2
+    assert figures[0].source_url == "https://arxiv.org/html/1706.03762v7/Figures/ModalNet-21.png"
+    assert figures[1].source_url == "https://arxiv.org/html/1706.03762v7/x1.png"
+    assert all(f.image_bytes == b"PNG" for f in figures)
+
+
+def test_extract_figures_from_html_resolves_bare_srcs_via_root_relative_base_tag(monkeypatch):
+    """Real-world shape from arxiv HTML on papers like 2106.09685 (LoRA)
+    and 2305.10601 (Tree of Thoughts): a ROOT-RELATIVE
+    ``<base href="/html/<id>v<N>/">`` tag plus bare ``<img src="x1.png">``.
+
+    The extractor must:
+      1. Pick up the ``<base>`` tag so bare srcs resolve correctly,
+      2. Qualify its root-relative href against ``https://arxiv.org``
+         so the result is absolute (otherwise the HTTP GET raises
+         ``MissingSchema`` on ``/html/<id>v<N>/x1.png``).
+
+    Also covers a full external ``https://`` src passing through.
+    """
+    from paperbase.extractors import _extract_figures_from_html, SESSION
+
+    html = """
+    <html><head><base href="/html/2106.09685v2/"/></head>
+    <body>
+      <figure>
+        <img src="x1.png"/>
+        <figcaption>Fig 1.</figcaption>
+      </figure>
+      <figure>
+        <img src="Figures/arch.png"/>
+        <figcaption>Fig 2.</figcaption>
+      </figure>
+      <figure>
+        <img src="https://cdn.example/external.png"/>
+        <figcaption>External.</figcaption>
+      </figure>
+    </body></html>
+    """.strip()
+
+    fetched_urls: list[str] = []
+
+    class _Resp:
+        status_code = 200
+        headers = {"content-type": "image/png"}
+        content = b"PNG"
+
+    monkeypatch.setattr(SESSION, "get", lambda url, *a, **k: fetched_urls.append(url) or _Resp())
+
+    figures = _extract_figures_from_html(html, arxiv_id="2106.09685")
+
+    assert len(figures) == 3
+    # Bare relative → resolved against the per-paper base derived from <base>.
+    assert figures[0].source_url == "https://arxiv.org/html/2106.09685v2/x1.png"
+    assert figures[1].source_url == "https://arxiv.org/html/2106.09685v2/Figures/arch.png"
+    # Full external URL is left alone.
+    assert figures[2].source_url == "https://cdn.example/external.png"
+    assert all(f.image_bytes == b"PNG" for f in figures)
+    assert fetched_urls == [f.source_url for f in figures]
+
+
+# --- code_url extraction for #41 auto-enqueue ------------------------------
+
+
+def test_extract_github_url_picks_up_in_abstract_with_trailing_period():
+    """Common arxiv-abstract shape: ``code is available at https://github.com/foo/bar.``
+    Trailing period from sentence context must be stripped so the stored
+    code_url is canonical."""
+    abstract = (
+        "We propose LoRA, a low-rank adaptation method. We release "
+        "our code at https://github.com/microsoft/LoRA."
+    )
+    assert extract_github_url(abstract) == "https://github.com/microsoft/LoRA"
+
+
+def test_extract_github_url_searches_body_when_abstract_is_bare():
+    """If the abstract doesn't mention code, the helper falls through to
+    the full body text (first-found wins) so papers that only advertise
+    their repo in an 'Implementation' section still get picked up."""
+    abstract = "We present a model."
+    body = "Our code is released at https://github.com/facebookresearch/llama and pre-trained weights..."
+    assert extract_github_url(abstract, body) == "https://github.com/facebookresearch/llama"
+
+
+def test_extract_github_url_strips_git_suffix():
+    """Git clone URLs sometimes leak into paper text; the canonical
+    stored form uses the web URL without ``.git``."""
+    body = "git clone https://github.com/owner/repo.git"
+    assert extract_github_url(body) == "https://github.com/owner/repo"
+
+
+def test_extract_github_url_returns_none_when_no_github_mention():
+    """Papers without any GitHub reference (ResNet, GPT-3, etc.) must
+    get ``None`` so the downstream code-ingest auto-enqueue is
+    correctly skipped."""
+    assert extract_github_url("No code released; weights are available on request.") is None
+    assert extract_github_url("") is None
+    assert extract_github_url() is None
+
+
+def test_extract_github_url_ignores_gitlab_bitbucket():
+    """v1 only supports github.com (per ``code_ingest.parse_github_url``).
+    Other hosts must return None so we don't store an un-ingestable URL."""
+    assert extract_github_url("code at https://gitlab.com/foo/bar") is None
+    assert extract_github_url("https://bitbucket.org/foo/bar for artifacts") is None
+
+
+def test_extract_github_url_keeps_subpath_for_code_ingest_to_normalize():
+    """If the URL includes a ``/tree/<ref>`` subpath, keep it — ``code_ingest.parse_github_url``
+    handles normalization downstream and may use the ref hint.
+    """
+    body = "See https://github.com/owner/repo/tree/v1.2 for the pinned release."
+    url = extract_github_url(body)
+    assert url is not None
+    assert url.startswith("https://github.com/owner/repo")

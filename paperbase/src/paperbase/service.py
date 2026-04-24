@@ -30,6 +30,7 @@ from .config import Settings, get_settings
 from .emailer import EmailSender, ResendEmailSender
 from .extractors import (
     build_manifest,
+    extract_github_url,
     extract_uploaded_document,
     figure_index_payload,
     index_paper_artifacts,
@@ -4407,6 +4408,18 @@ class PaperbaseService:
         metadata.index_status = "indexed"
         metadata.indexed_at = utcnow()
         metadata.summary_short, metadata.summary_eli5 = build_paper_summaries(metadata, extraction, self.settings)
+
+        # Populate ``code_url`` from the paper text when the author advertises
+        # a GitHub repo in the abstract or body, so the code-ingest pipeline
+        # (#41) can auto-enqueue an ``ingest_repo`` job on the final upsert.
+        # We only set this when it isn't already carried on the metadata —
+        # an admin-set value or an earlier Papers-With-Code crosslink (follow-up)
+        # takes precedence over in-text scraping.
+        if not metadata.code_url:
+            metadata.code_url = extract_github_url(
+                metadata.abstract or "",
+                extraction.text_markdown or "",
+            )
 
         search_document_parts = [metadata.title, metadata.tldr, metadata.summary_short, extraction.text_markdown]
         search_document = "\n\n".join(part for part in search_document_parts if part)

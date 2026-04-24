@@ -21,6 +21,47 @@ from .utils import csv_bytes, make_slug, slugify
 
 PREVIEW_ARTIFACT_PATH = "preview/first-page-top.webp"
 
+# GitHub URL detection for populating ``papers.code_url`` from paper text
+# (abstract / body). Covers the common in-text form where authors write
+# "code is available at https://github.com/owner/repo" or trailing the
+# url with a period / paren / quote. ``code_ingest.parse_github_url``
+# does the canonical normalization downstream so we can be lenient here.
+_GITHUB_URL_RE = re.compile(
+    r"https?://github\.com/[\w\.\-]+/[\w\.\-]+(?:/[\w\.\-/#?=&]+)?",
+    re.IGNORECASE,
+)
+# Punctuation that prose commonly pastes onto the end of a URL.
+_GITHUB_URL_TRAILING_JUNK = ".,;:)\"'"
+
+
+def extract_github_url(*texts: str) -> str | None:
+    """Return the first GitHub repo URL found across ``texts`` (searched in
+    order), or ``None``. Trailing punctuation from prose context is stripped.
+
+    The indexer uses this to populate ``papers.code_url`` from a paper's
+    abstract and body so the code-ingest pipeline (#41) can auto-enqueue an
+    ``ingest_repo`` job. Catches the common case where the authors advertise
+    their repo in-text; papers that don't are left as ``code_url=None`` —
+    broader coverage (Papers With Code, crosslink scraping) is a follow-up.
+    """
+    for text in texts:
+        if not text:
+            continue
+        match = _GITHUB_URL_RE.search(text)
+        if not match:
+            continue
+        url = match.group(0)
+        while url and url[-1] in _GITHUB_URL_TRAILING_JUNK:
+            url = url[:-1]
+        # Strip a trailing ``.git`` so code_ingest sees a canonical
+        # owner/repo path. parse_github_url also handles .git, but keeping
+        # the stored value clean avoids surprising the admin surface.
+        if url.endswith(".git"):
+            url = url[:-4]
+        return url
+    return None
+
+
 logger = logging.getLogger(__name__)
 
 SESSION = requests.Session()
@@ -377,18 +418,44 @@ def _download_image(url: str) -> tuple[bytes | None, str | None, str]:
     return response.content, content_type, extension
 
 
-def _extract_figures_from_html(html: str) -> list[FigureArtifact]:
+def _extract_figures_from_html(html: str, *, arxiv_id: str | None = None) -> list[FigureArtifact]:
+    from urllib.parse import urljoin
+
     soup = BeautifulSoup(html, "html.parser")
+    # arXiv's HTML comes in two shapes and the image URL pattern differs:
+    #
+    # 1. Pre-pathed (e.g. 1706.03762 Attention): NO ``<base>`` tag, and
+    #    ``<img>`` srcs include the arxiv id + version —
+    #    ``1706.03762v7/Figures/ModalNet-21.png``. Base must be
+    #    ``https://arxiv.org/html/`` so urljoin produces the full URL.
+    #
+    # 2. Per-paper-base (e.g. 2106.09685 LoRA): a root-relative
+    #    ``<base href="/html/<id>v<N>/">`` tag and bare ``<img>`` srcs
+    #    like ``x1.png``. Qualifying the root-relative base against
+    #    ``https://arxiv.org`` gives a full URL that correctly resolves
+    #    bare srcs.
+    #
+    # Prior to this, a bare fallback of ``https://arxiv.org/html/`` was
+    # used unconditionally which produced 404s on shape (2). An
+    # arxiv-id-scoped fallback produced duplicated paths on shape (1).
+    # Deriving the base from the ``<base>`` tag when present and using
+    # ``/html/`` otherwise handles both.
+    base_tag = soup.find("base", href=True)
+    if base_tag and base_tag.get("href"):
+        base_url = urljoin("https://arxiv.org/", base_tag["href"])
+    else:
+        base_url = "https://arxiv.org/html/"
     figures: list[FigureArtifact] = []
     for index, figure in enumerate(soup.find_all("figure"), start=1):
         image = figure.find("img")
         if image is None or not image.get("src"):
             continue
-        source_url = image["src"]
-        if source_url.startswith("/"):
-            source_url = f"https://arxiv.org{source_url}"
-        elif not source_url.startswith("http"):
-            source_url = f"https://arxiv.org/html/{source_url}"
+        raw_src = image["src"]
+        # ``urljoin`` with an absolute base correctly handles:
+        #   - full URLs (``http://...``) → passed through
+        #   - root-relative (``/html/abs.png``) → joined against host
+        #   - bare relative (``x1.png``) → joined against per-paper base
+        source_url = urljoin(base_url, raw_src)
         caption_tag = figure.find("figcaption")
         caption = caption_tag.get_text(" ", strip=True) if caption_tag else ""
         image_bytes, content_type, extension = _download_image(source_url)
@@ -792,7 +859,7 @@ def index_paper_artifacts(paper: PaperMetadata) -> ExtractionOutput:
             source_type="html",
             text_markdown=markdown,
             sections=sections or _extract_sections(markdown),
-            figures=_extract_figures_from_html(html),
+            figures=_extract_figures_from_html(html, arxiv_id=paper.arxiv_id),
             tables=_extract_tables_from_html(html),
             raw_artifacts=raw_artifacts,
         )
