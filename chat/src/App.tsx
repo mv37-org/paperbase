@@ -2264,10 +2264,9 @@ export default function App() {
                 isError: payload.is_error,
               });
               if (
-                !payload.is_error &&
-                (payload.tool_name === "project_touch" ||
-                  payload.tool_name === "project_edit" ||
-                  payload.tool_name === "project_delete")
+                payload.tool_name === "project_touch" ||
+                payload.tool_name === "project_edit" ||
+                payload.tool_name === "project_delete"
               ) {
                 void refreshLoadedProjectCodeItems(fallbackProjectId);
               }
