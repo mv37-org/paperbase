@@ -242,6 +242,7 @@ _PROJECT_CODE_WRITE_ACTION_RE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+_PROJECT_CODE_DELETE_ACTION_RE = re.compile(r"\b(delete|remove|rename|move)\b", re.IGNORECASE)
 _PROJECT_CODE_TARGET_RE = re.compile(
     r"\b("
     r"code|python|pytorch|torch|script|module|file|files|function|class|train(?:ing)?|eval(?:uation)?|workflow|repo|project"
@@ -894,6 +895,16 @@ def _should_require_project_code_write(question: str, *, thread: ChatThreadRespo
     if _PROJECT_CODE_WRITE_TOOL_RE.search(question):
         return True
     return bool(_PROJECT_CODE_WRITE_ACTION_RE.search(question) and _PROJECT_CODE_TARGET_RE.search(question))
+
+
+def _should_allow_project_code_delete(question: str, *, thread: ChatThreadResponse | None) -> bool:
+    if not _should_offer_project_code_tools(question, thread=thread):
+        return False
+    if re.search(r"\bproject_delete\b", question, re.IGNORECASE):
+        return True
+    if _PROJECT_CODE_PATH_HINT_RE.search(question) and _PROJECT_CODE_DELETE_ACTION_RE.search(question):
+        return True
+    return bool(_PROJECT_CODE_DELETE_ACTION_RE.search(question) and _PROJECT_CODE_TARGET_RE.search(question))
 
 
 def _should_offer_chat_tools(question: str, request: SendChatMessageRequest, *, thread: ChatThreadResponse | None) -> bool:
@@ -2339,7 +2350,7 @@ class PaperbaseService:
                 "Structure new files as importable modules with named functions, classes, or constants that other files can import; avoid putting all logic in top-level script bodies. "
                 "Keep entrypoint-only behavior under if __name__ == '__main__': when needed. "
                 "Use exact-match edits with project_edit, choose unique snippets, and set replace_all=true only when every match should change. "
-                "Delete files only when the user explicitly asks or when a rename/move cleanup is clearly required. "
+                "project_delete is only for explicit delete, remove, rename, or move requests. Never delete a file you just created or edited on an ordinary create/update turn. "
                 "Generated runnable code should support --run-mode smoke|full. Use project_run with mode=smoke for fast validation and mode=full for the normal workflow."
             )
         parts.append(
@@ -2753,6 +2764,7 @@ class PaperbaseService:
                 ]
             )
         if include_project_code_tools:
+            allow_project_delete = _should_allow_project_code_delete(request.content, thread=thread)
             tools.extend(
                 [
                     {
@@ -2814,15 +2826,6 @@ class PaperbaseService:
                         },
                     },
                     {
-                        "name": "project_delete",
-                        "description": "Delete one managed Python file from the current project by exact repo-relative path.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {"repo_path": {"type": "string"}},
-                            "required": ["repo_path"],
-                        },
-                    },
-                    {
                         "name": "project_run",
                         "description": "Run one managed Python file from the current project with run mode smoke or full. Prefer smoke for quick validation and full for the normal workflow.",
                         "input_schema": {
@@ -2836,6 +2839,18 @@ class PaperbaseService:
                     },
                 ]
             )
+            if allow_project_delete:
+                tools.append(
+                    {
+                        "name": "project_delete",
+                        "description": "Delete one managed Python file from the current project by exact repo-relative path. Only use this for explicit delete, remove, rename, or move requests.",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {"repo_path": {"type": "string"}},
+                            "required": ["repo_path"],
+                        },
+                    }
+                )
         return tools
 
     def _paper_path_citation(
@@ -2886,6 +2901,7 @@ class PaperbaseService:
         user: BrowserUser,
         citation_registry: ChatCitationRegistry,
         project_id: str | None = None,
+        allow_project_delete: bool = False,
     ) -> dict[str, Any]:
         if tool_name == "paperbase_search":
             query = str(tool_input.get("query") or "").strip()
@@ -3243,6 +3259,14 @@ class PaperbaseService:
                 }
 
             if tool_name == "project_delete":
+                if not allow_project_delete:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "project_delete is only available when the user explicitly asked to "
+                            "delete, remove, rename, or move a project file"
+                        ),
+                    )
                 return self.delete_project_code_file(
                     user,
                     project_id,
@@ -3327,6 +3351,7 @@ class PaperbaseService:
         user: BrowserUser,
         citation_registry: ChatCitationRegistry,
         project_id: str | None = None,
+        allow_project_delete: bool = False,
     ) -> tuple[dict[str, Any], bool]:
         if index >= _CHAT_TOOL_MAX_CALLS_PER_ROUND:
             return {"error": "Too many tool calls requested in one round"}, True
@@ -3337,6 +3362,7 @@ class PaperbaseService:
                 user=user,
                 citation_registry=citation_registry,
                 project_id=project_id,
+                allow_project_delete=allow_project_delete,
             )
             return payload, False
         except HTTPException as exc:
@@ -3355,6 +3381,7 @@ class PaperbaseService:
         user: BrowserUser,
         citation_registry: ChatCitationRegistry,
         project_id: str | None = None,
+        allow_project_delete: bool = False,
     ) -> list[dict[str, Any]]:
         blocks: list[dict[str, Any]] = []
         for index, tool_use in enumerate(tool_uses):
@@ -3368,6 +3395,7 @@ class PaperbaseService:
                 user=user,
                 citation_registry=citation_registry,
                 project_id=project_id,
+                allow_project_delete=allow_project_delete,
             )
             block = {
                 "type": "tool_result",
@@ -3388,6 +3416,10 @@ class PaperbaseService:
     ) -> tuple[ChatTurnContext, ChatCitationRegistry]:
         context = self._chat_turn_context(prepared)
         citation_registry = ChatCitationRegistry()
+        allow_project_delete = _should_allow_project_code_delete(
+            prepared.user_message.content_markdown,
+            thread=prepared.thread,
+        )
         tools = self._chat_tool_definitions(request, thread=prepared.thread)
         if not tools:
             return context, citation_registry
@@ -3446,6 +3478,7 @@ class PaperbaseService:
                         user=user,
                         citation_registry=citation_registry,
                         project_id=prepared.thread.project_id,
+                        allow_project_delete=allow_project_delete,
                     ),
                 }
             )
@@ -3460,6 +3493,10 @@ class PaperbaseService:
     ) -> Generator[tuple[str, dict[str, Any]], None, tuple[ChatTurnContext, ChatCitationRegistry]]:
         context = self._chat_turn_context(prepared)
         citation_registry = ChatCitationRegistry()
+        allow_project_delete = _should_allow_project_code_delete(
+            prepared.user_message.content_markdown,
+            thread=prepared.thread,
+        )
         tools = self._chat_tool_definitions(request, thread=prepared.thread)
         if not tools:
             return context, citation_registry
@@ -3536,6 +3573,7 @@ class PaperbaseService:
                     user=user,
                     citation_registry=citation_registry,
                     project_id=prepared.thread.project_id,
+                    allow_project_delete=allow_project_delete,
                 )
                 yield (
                     "tool_done",

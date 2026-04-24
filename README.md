@@ -112,7 +112,7 @@ The browser chat experience is project-based:
 - the sidebar lazily loads mixed project items per project, so chats, Python files, and imported notebooks appear together
 - project descriptions are snapped onto new sessions as per-session prompt context, so later project edits do not rewrite existing chats
 - Python and notebook files are project-scoped tabs backed by Monaco in a high-contrast Python editor view
-- project chats can invoke a project-scoped coding tool surface against Paperbase-managed `.py` files, including list/read/grep/touch/edit/delete/run operations instead of raw repo-shell access
+- project chats can invoke a project-scoped coding tool surface against Paperbase-managed `.py` files, including list/read/grep/touch/edit/run operations by default and delete only on explicit delete/rename requests, instead of raw repo-shell access
 - coding turns auto-persist dirty project Python drafts before the agent runs tools, so the backend tool view stays aligned with Monaco edits
 - duplicate Python basenames are disambiguated with repo-path context in the sidebar and tab strip
 - streamed and finished chat code blocks use matching light/dark editor-style themes, show line numbers, and let longer snippets collapse in place with a compact chevron control
