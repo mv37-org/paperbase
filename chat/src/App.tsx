@@ -2263,6 +2263,13 @@ export default function App() {
               completeToolActivity(threadId, payload.tool_call_id, {
                 isError: payload.is_error,
               });
+              if (
+                payload.tool_name === "project_touch" ||
+                payload.tool_name === "project_edit" ||
+                payload.tool_name === "project_delete"
+              ) {
+                void refreshLoadedProjectCodeItems(fallbackProjectId);
+              }
               return;
             }
 

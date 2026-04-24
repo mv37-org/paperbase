@@ -1771,6 +1771,101 @@ def test_project_chat_tools_are_advertised_for_coding_turns(browser_service):
     )
     assert "writing managed project Python files" in prompt
     assert "appear in later project_list_files results" in prompt
+    assert "do not stop tool use until the relevant managed project Python files have actually been created or updated" in prompt
+
+
+def test_project_code_turn_forces_tools_until_a_write_occurs():
+    class ProjectWriteChatModel(FakeChatModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.round_index = 0
+
+        def create_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+            self.create_calls.append(
+                {
+                    "api_key": api_key,
+                    "messages": messages,
+                    "system_prompt": system_prompt,
+                    "tools": tools,
+                    "tool_choice": tool_choice,
+                }
+            )
+            if tools:
+                if self.round_index == 0:
+                    self.round_index += 1
+                    return {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "toolu_list_files",
+                                "name": "project_list_files",
+                                "input": {},
+                            }
+                        ],
+                        "stop_reason": "tool_use",
+                    }
+                if self.round_index == 1:
+                    self.round_index += 1
+                    return {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "toolu_touch_file",
+                                "name": "project_touch",
+                                "input": {
+                                    "repo_path": "src/train.py",
+                                    "content": "def train():\n    return 1\n",
+                                },
+                            }
+                        ],
+                        "stop_reason": "tool_use",
+                    }
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Saved the training module to `src/train.py`.",
+                    }
+                ],
+                "stop_reason": "end_turn",
+            }
+
+    chat_model = ProjectWriteChatModel()
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=chat_model,
+        github_repo_manager=FakeGitHubRepoManager(),
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="project-write@example.com", password="topsecret123", display_name="Project Write")
+    )
+    assert session.user is not None
+    _connect_github(service, session.user)
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="Project chat"))
+
+    response = service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="Create a PyTorch training script for this project"),
+    )
+
+    assert response.assistant_message is not None
+    assert service.repository.get_project_python_file_by_path(  # type: ignore[attr-defined]
+        user_id=session.user.user_id,
+        project_id=thread.project_id,
+        repo_path="src/train.py",
+    )
+    assert chat_model.create_calls[0]["tool_choice"] == {"type": "any"}
+    assert chat_model.create_calls[1]["tool_choice"] == {"type": "any"}
+    assert chat_model.create_calls[2]["tool_choice"] == {"type": "auto"}
 
 
 def test_python_file_sync_project_repo_writes_metadata_and_files():

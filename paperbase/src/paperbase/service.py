@@ -236,6 +236,12 @@ _PROJECT_CODE_ACTION_RE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+_PROJECT_CODE_WRITE_ACTION_RE = re.compile(
+    r"\b("
+    r"write|create|make|add|implement|edit|modify|update|refactor|fix|rename|delete|remove"
+    r")\b",
+    re.IGNORECASE,
+)
 _PROJECT_CODE_TARGET_RE = re.compile(
     r"\b("
     r"code|python|pytorch|torch|script|module|file|files|function|class|train(?:ing)?|eval(?:uation)?|workflow|repo|project"
@@ -243,6 +249,8 @@ _PROJECT_CODE_TARGET_RE = re.compile(
     re.IGNORECASE,
 )
 _PROJECT_CODE_PATH_HINT_RE = re.compile(r"(?:^|[\s`'\"])([A-Za-z0-9_./-]+\.py)(?:$|[\s`'\",.:;!?])")
+_PROJECT_CODE_WRITE_TOOL_RE = re.compile(r"\b(project_(?:touch|edit|delete))\b", re.IGNORECASE)
+_PROJECT_CODE_WRITE_TOOL_NAMES = {"project_touch", "project_edit", "project_delete"}
 
 _INLINE_SOURCE_ID_RE = re.compile(r"\[(S\d+)\]")
 _PYTHON_FILENAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -878,6 +886,14 @@ def _should_offer_project_code_tools(question: str, *, thread: ChatThreadRespons
     if thread is None or not thread.project_id:
         return False
     return _question_has_project_code_intent(question)
+
+
+def _should_require_project_code_write(question: str, *, thread: ChatThreadResponse | None) -> bool:
+    if not _should_offer_project_code_tools(question, thread=thread):
+        return False
+    if _PROJECT_CODE_WRITE_TOOL_RE.search(question):
+        return True
+    return bool(_PROJECT_CODE_WRITE_ACTION_RE.search(question) and _PROJECT_CODE_TARGET_RE.search(question))
 
 
 def _should_offer_chat_tools(question: str, request: SendChatMessageRequest, *, thread: ChatThreadResponse | None) -> bool:
@@ -2317,6 +2333,7 @@ class PaperbaseService:
                 "When the user asks you to create, inspect, change, delete, or run project code, use the project_* tools instead of guessing. "
                 "Before writing new code, inspect the existing project with project_list_files, project_grep, and project_read_file so you reuse what is already there instead of rewriting it. "
                 "Files you create with project_touch become part of the project and will appear in later project_list_files results and in the project's Code section. "
+                "If the user asked you to create or change code, do not stop tool use until the relevant managed project Python files have actually been created or updated. "
                 "Read files before editing them. Prefer small PyTorch-first modules and scripts. "
                 "When a distinct code unit or reusable snippet is needed, put it in a project Python file so it shows up in the project's Code section instead of living only in chat text. "
                 "Structure new files as importable modules with named functions, classes, or constants that other files can import; avoid putting all logic in top-level script bodies. "
@@ -3386,8 +3403,16 @@ class PaperbaseService:
             request,
             thread=prepared.thread,
         )
+        require_project_code_write = _should_require_project_code_write(
+            prepared.user_message.content_markdown,
+            thread=prepared.thread,
+        )
+        project_write_tool_used = False
         for round_index in range(_CHAT_TOOL_MAX_ROUNDS):
-            tool_choice = {"type": "any"} if round_index == 0 and force_first_tool else {"type": "auto"}
+            must_use_tool_this_round = (round_index == 0 and force_first_tool) or (
+                require_project_code_write and not project_write_tool_used
+            )
+            tool_choice = {"type": "any"} if must_use_tool_this_round else {"type": "auto"}
             context, _events = self._ensure_chat_context_budget(
                 prepared=prepared,
                 context=context,
@@ -3407,6 +3432,11 @@ class PaperbaseService:
             tool_uses = [block for block in assistant_content if block.get("type") == "tool_use"]
             if not tool_uses:
                 break
+            project_write_tool_used = project_write_tool_used or any(
+                str(block.get("name") or "").strip().lower() in _PROJECT_CODE_WRITE_TOOL_NAMES
+                for block in tool_uses
+                if isinstance(block, dict)
+            )
             context.messages.append({"role": "assistant", "content": assistant_content})
             context.messages.append(
                 {
@@ -3445,8 +3475,16 @@ class PaperbaseService:
             request,
             thread=prepared.thread,
         )
+        require_project_code_write = _should_require_project_code_write(
+            prepared.user_message.content_markdown,
+            thread=prepared.thread,
+        )
+        project_write_tool_used = False
         for round_index in range(_CHAT_TOOL_MAX_ROUNDS):
-            tool_choice = {"type": "any"} if round_index == 0 and force_first_tool else {"type": "auto"}
+            must_use_tool_this_round = (round_index == 0 and force_first_tool) or (
+                require_project_code_write and not project_write_tool_used
+            )
+            tool_choice = {"type": "any"} if must_use_tool_this_round else {"type": "auto"}
             context = yield from self._ensure_chat_context_budget_stream(
                 prepared=prepared,
                 context=context,
@@ -3466,6 +3504,11 @@ class PaperbaseService:
             tool_uses = [block for block in assistant_content if block.get("type") == "tool_use"]
             if not tool_uses:
                 break
+            project_write_tool_used = project_write_tool_used or any(
+                str(block.get("name") or "").strip().lower() in _PROJECT_CODE_WRITE_TOOL_NAMES
+                for block in tool_uses
+                if isinstance(block, dict)
+            )
             usage = response_usage(response)
             if usage is not None:
                 yield ("usage", self._chat_usage_payload(usage))

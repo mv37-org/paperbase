@@ -97,7 +97,6 @@ export function extractStreamingPythonPreview(markdown: string): StreamingCodePr
   let fence: string | null = null;
   let language = "";
   let buffer: string[] = [];
-  let lastBlock: { language: string; code: string } | null = null;
 
   for (const line of lines) {
     if (!fence) {
@@ -111,7 +110,6 @@ export function extractStreamingPythonPreview(markdown: string): StreamingCodePr
     }
 
     if (line.trim() === fence) {
-      lastBlock = { language, code: buffer.join("\n") };
       fence = null;
       language = "";
       buffer = [];
@@ -121,21 +119,16 @@ export function extractStreamingPythonPreview(markdown: string): StreamingCodePr
     buffer.push(line);
   }
 
-  if (fence) {
-    lastBlock = { language, code: buffer.join("\n") };
-  }
-  if (!lastBlock) {
+  if (!fence) {
     return null;
   }
 
-  const code = lastBlock.code.replace(/\s+$/, "");
+  const code = buffer.join("\n").replace(/\s+$/, "");
   if (!code.trim()) {
     return null;
   }
 
-  return normalizeCodeLanguage(lastBlock.language, code) === "python"
-    ? { language: "python", code }
-    : null;
+  return normalizeCodeLanguage(language, code) === "python" ? { language: "python", code } : null;
 }
 
 export function flattenCodeChildren(children: unknown): string {

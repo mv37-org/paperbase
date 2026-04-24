@@ -1915,6 +1915,88 @@ describe("App", () => {
     });
   });
 
+  it("hides the live code preview once the fenced block closes during the stream", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.createThread.mockResolvedValue(emptyThreadResponse("thread_2"));
+
+    let allowFenceClose: (() => void) | null = null;
+    const waitForFenceClose = new Promise<void>((resolve) => {
+      allowFenceClose = resolve;
+    });
+    let releaseStream: (() => void) | null = null;
+    const streamDone = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+
+    apiMocks.sendThreadMessageStream.mockImplementation(
+      async (
+        _threadId: string,
+        _payload: unknown,
+        onEvent: (eventName: string, payload: unknown) => void,
+      ) => {
+        onEvent("assistant_start", {
+          assistant_message: {
+            message_id: "msg_2",
+            role: "assistant",
+            content_markdown: "",
+            citations: [],
+            created_at: "2026-04-21T00:00:00Z",
+            status: "streaming",
+          },
+        });
+        onEvent("delta", {
+          message_id: "msg_2",
+          delta: "```python\ndef train():\n    return 1\n",
+        });
+        await waitForFenceClose;
+        onEvent("delta", {
+          message_id: "msg_2",
+          delta: "```\n\nThis script is ready to run.",
+        });
+        await streamDone;
+        onEvent("done", {
+          assistant_message: {
+            message_id: "msg_2",
+            role: "assistant",
+            content_markdown:
+              "```python\ndef train():\n    return 1\n```\n\nThis script is ready to run.",
+            citations: [],
+            created_at: "2026-04-21T00:00:00Z",
+            status: "completed",
+          },
+          remaining_free_responses: 2,
+          has_anthropic_api_key: false,
+          state: "completed",
+        });
+      },
+    );
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Start new research in")).toBeTruthy();
+    });
+    fireEvent.change(screen.getByLabelText("mention-input-chat"), {
+      target: { value: "write a training script with a short explanation" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    const preview = await screen.findByTestId("streaming-code-preview");
+    expect(preview.textContent).toContain("def train():");
+
+    await act(async () => {
+      allowFenceClose?.();
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("streaming-code-preview")).toBeNull();
+    });
+
+    await act(async () => {
+      releaseStream?.();
+    });
+  });
+
   it("refreshes project code items after coding-tool turns complete", async () => {
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());
     apiMocks.createThread.mockResolvedValue(emptyThreadResponse("thread_2"));
