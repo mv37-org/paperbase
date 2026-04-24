@@ -1255,6 +1255,7 @@ textarea::placeholder,
 .project-tree-category-label em {
   min-width: 16px;
   height: 16px;
+  padding: 0 4px;
   display: inline-grid;
   place-items: center;
   border: 1px solid rgba(27, 22, 17, 0.08);
@@ -1330,6 +1331,8 @@ textarea::placeholder,
   margin: 42px auto;
   display: grid;
   gap: 24px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  letter-spacing: 0;
 }
 
 .project-home-header {
