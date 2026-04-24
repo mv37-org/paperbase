@@ -3624,10 +3624,14 @@ class PaperbaseService:
     def list_paper_code_files(self, paper_id: str) -> CodeFileListResponse | None:
         """List repo files stored under ``papers/{paper_id}/code/files/``.
 
-        Manifest is source-of-truth for what got ingested; this method does
-        not walk the object store to preserve a stable ordering. Non-Python
-        repos surface a structured ineligible response — callers branch on
-        ``eligibility.eligible`` rather than empty-list vs populated-list.
+        Manifest is source-of-truth for which files got ingested, but sizes
+        come from a single ``object_store.list_prefix()`` call — the GCS
+        backend returns blob metadata (including size) without downloading
+        content, so listing a 100-file repo stays O(one paginated list) of
+        network I/O instead of O(total repo bytes) full-blob reads.
+        Non-Python repos surface a structured ineligible response — callers
+        branch on ``eligibility.eligible`` rather than empty-list vs
+        populated-list.
         """
         paper = self.repository.get_paper(paper_id)
         if paper is None:
@@ -3640,26 +3644,28 @@ class PaperbaseService:
                 paper_id=paper_id, eligibility=eligibility, resolved_sha=resolved_sha, files=[]
             )
         indexed = set(manifest.get("indexed_paths") or [])
+        files_prefix = f"papers/{paper_id}/code/files/"
+        try:
+            stored_objects = self.object_store.list_prefix(files_prefix)
+        except Exception:  # pragma: no cover — listing failure falls back to manifest-only
+            stored_objects = []
+        size_by_path: dict[str, int] = {}
+        for obj in stored_objects:
+            rel = obj.path.removeprefix(files_prefix)
+            if rel:
+                size_by_path[rel] = int(obj.size or 0)
         files: list[CodeFileSummary] = []
         for rel_path in manifest.get("stored_paths") or []:
-            stored = self._stat_code_file(paper_id, rel_path)
             files.append(
                 CodeFileSummary(
                     repo_path=rel_path,
-                    size_bytes=stored,
+                    size_bytes=size_by_path.get(rel_path, 0),
                     indexed=rel_path in indexed,
                 )
             )
         return CodeFileListResponse(
             paper_id=paper_id, eligibility=eligibility, resolved_sha=resolved_sha, files=files
         )
-
-    def _stat_code_file(self, paper_id: str, rel_path: str) -> int:
-        try:
-            data = self.object_store.get_bytes(f"papers/{paper_id}/code/files/{rel_path}")
-        except Exception:  # pragma: no cover — file evicted between manifest write and read
-            return 0
-        return len(data)
 
     def read_paper_code_file(self, paper_id: str, repo_path: str) -> CodeReadResponse | None:
         """Stream a single repo file back as text.
@@ -3692,8 +3698,27 @@ class PaperbaseService:
 
     @staticmethod
     def _normalize_code_path(raw: str) -> str | None:
-        raw = (raw or "").strip().lstrip("/")
+        """Return a safe repo-relative path, or ``None`` if the input is
+        unsafe or empty.
+
+        Rejects absolute paths (``/etc/passwd``, ``\\absolute``), Windows-
+        drive prefixes, ``..`` / ``.`` segments, and empty segments. Must
+        NOT strip a leading slash before the absolute-path check — doing
+        so lets ``/absolute/path`` slip through as ``absolute/path`` and
+        the read endpoint would then happily serve it if such a stored
+        file existed.
+        """
+        raw = (raw or "").strip()
         if not raw:
+            return None
+        if raw.startswith("/") or raw.startswith("\\"):
+            return None
+        if PurePosixPath(raw).is_absolute():
+            return None
+        # Reject Windows drive letters (``C:\\...``, ``C:/...``) early;
+        # the backing GCS layout is POSIX so a drive-letter input is
+        # always malformed.
+        if len(raw) >= 2 and raw[1] == ":":
             return None
         parts = raw.split("/")
         if any(segment in {"", "..", "."} for segment in parts):

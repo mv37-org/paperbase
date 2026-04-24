@@ -4180,6 +4180,98 @@ def test_read_paper_code_file_rejects_path_traversal(
         assert response.content == ""
 
 
+def test_normalize_code_path_rejects_absolute_and_drive_prefixes() -> None:
+    """Regression test for the PR #44 review: ``_normalize_code_path``
+    previously called ``lstrip("/")`` before the absolute-path check, which
+    silently turned ``/absolute/path`` into ``absolute/path`` — the read
+    endpoint would then serve it if a matching stored file happened to
+    exist. Rejecting absolute paths before stripping is the fix; this
+    lock-in prevents a regression via path-reconstruction refactors.
+    """
+    normalize = PaperbaseService._normalize_code_path
+    for evil in [
+        "/absolute/path",
+        "//server/share",
+        "\\windows\\path",
+        "C:/windows",
+        "C:\\windows",
+        "../escape",
+        "sub/../../escape",
+        "./hidden",
+        "",
+        "   ",
+    ]:
+        assert normalize(evil) is None, f"{evil!r} must be rejected"
+    assert normalize("README.md") == "README.md"
+    assert normalize("src/mod.py") == "src/mod.py"
+    assert normalize("  scripts/train.py  ") == "scripts/train.py"
+
+
+def test_read_paper_code_file_rejects_absolute_even_when_file_exists(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Concrete-layout version of the path-traversal lock-in. Drops a
+    blob at the exact object-store key a pre-fix ``lstrip`` would have
+    constructed, then asserts the read primitive refuses to serve it —
+    proving the input is rejected upstream rather than by accident."""
+    paper_id = _ingest_python_repo(
+        service,
+        monkeypatch,
+        files={
+            "README.md": b"# Hello\n",
+            "pyproject.toml": b"[project]\n",
+            "main.py": b"print(1)\n",
+        },
+    )
+    service.object_store.put_bytes(
+        f"papers/{paper_id}/code/files/absolute/path",
+        b"this should never be served",
+    )
+    response = service.read_paper_code_file(paper_id, "/absolute/path")
+    assert response is not None
+    assert response.content == ""
+    assert response.size_bytes == 0
+
+
+def test_list_paper_code_files_uses_metadata_not_content_reads(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for the PR #44 review: the previous implementation
+    called ``object_store.get_bytes()`` per file just to populate
+    ``size_bytes``, making the list endpoint O(total repo bytes) of
+    network I/O on GCS. The fix routes through ``list_prefix`` metadata,
+    so ``get_bytes`` must never be touched during listing."""
+    paper_id = _ingest_python_repo(
+        service,
+        monkeypatch,
+        files={
+            "README.md": b"# Demo\n",
+            "pyproject.toml": b"[project]\nname='x'\n",
+            "main.py": b'"""x."""\nprint(1)\n',
+        },
+    )
+
+    real_get_bytes = service.object_store.get_bytes
+    calls: list[str] = []
+
+    def tracking_get_bytes(path: str) -> bytes:
+        calls.append(path)
+        return real_get_bytes(path)
+
+    monkeypatch.setattr(service.object_store, "get_bytes", tracking_get_bytes)
+    response = service.list_paper_code_files(paper_id)
+    assert response is not None
+    assert response.eligibility.eligible is True
+    assert len(response.files) >= 3
+    assert all(f.size_bytes > 0 for f in response.files), (
+        f"every listed file should carry size metadata; got {[f for f in response.files]}"
+    )
+    code_file_reads = [p for p in calls if p.startswith(f"papers/{paper_id}/code/files/")]
+    assert code_file_reads == [], (
+        f"listing must not download code/files/* blobs; got {code_file_reads}"
+    )
+
+
 def test_read_paper_code_file_ineligible_for_non_python(
     service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
