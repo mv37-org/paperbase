@@ -223,13 +223,14 @@ function authenticatedSession(
   };
 }
 
-function projectSummary(projectId: string, name: string, sessionCount = 1) {
+function projectSummary(projectId: string, name: string, sessionCount = 1, githubRepoUrl = "") {
   return {
     project_id: projectId,
     name,
     description: "",
     is_default: name === "General",
     session_count: sessionCount,
+    github_repo_url: githubRepoUrl,
     created_at: "2026-04-21T00:00:00Z",
     updated_at: "2026-04-21T00:00:00Z",
   };
@@ -415,8 +416,21 @@ describe("App", () => {
     apiMocks.loadProjects.mockResolvedValue({
       projects: [projectSummary("proj_1", "General")],
     });
-    apiMocks.loadProjectItems.mockResolvedValue(
-      projectItemsPage("proj_1", [projectItemThread("thread_1", "Recovered thread")]),
+    apiMocks.loadProjectItems.mockImplementation(
+      async (projectId: string, limit = 25, offset = 0, itemKind?: "thread" | "python_file") => {
+        const allItems = [projectItemThread("thread_1", "Recovered thread", projectId)];
+        const filteredItems = itemKind
+          ? allItems.filter((item) => item.item_kind === itemKind)
+          : allItems;
+        const pageItems = filteredItems.slice(offset, offset + limit);
+        return {
+          ...projectItemsPage(projectId, pageItems),
+          offset,
+          limit,
+          total_count: filteredItems.length,
+          has_more: offset + pageItems.length < filteredItems.length,
+        };
+      },
     );
     apiMocks.createProject.mockResolvedValue(projectSummary("proj_2", "Agents", 0));
     apiMocks.createThread.mockResolvedValue(threadResponse("thread_2", "New chat"));
@@ -553,11 +567,168 @@ describe("App", () => {
     fireEvent.click(screen.getAllByText("General")[0]!);
 
     await waitFor(() => {
-      expect(apiMocks.loadProjectItems).toHaveBeenCalledWith("proj_1", 25, 0);
+      expect(apiMocks.loadProjectItems).toHaveBeenCalledWith("proj_1", 5, 0, "python_file");
+      expect(apiMocks.loadProjectItems).toHaveBeenCalledWith("proj_1", 5, 0, "thread");
     });
     await waitFor(() => {
       expect(screen.getByText("Recovered thread")).toBeTruthy();
     });
+    const categoryLabels = [
+      ...document.querySelectorAll<HTMLElement>(".project-tree-category-label"),
+    ].map((element) => element.textContent?.trim());
+    expect(categoryLabels).toEqual([
+      "Workflows",
+      "Experiments",
+      "Data",
+      "Notes",
+      "Sessions",
+      "Code",
+    ]);
+    expect(document.querySelectorAll(".project-tree-category-count")).toHaveLength(2);
+    expect(screen.getByText("Home")).toBeTruthy();
+    expect(screen.getByText("Workflows")).toBeTruthy();
+    expect(screen.getByText("Experiments")).toBeTruthy();
+    expect(screen.getByText("Notes")).toBeTruthy();
+    expect(screen.getByText("Data")).toBeTruthy();
+    expect(screen.getByText("Sessions")).toBeTruthy();
+    expect(screen.getByText("Code")).toBeTruthy();
+    expect(screen.getByLabelText("Collapse all sections in General")).toBeTruthy();
+
+    fireEvent.click(screen.getByText("Sessions"));
+    expect(screen.queryByText("Recovered thread")).toBeNull();
+    fireEvent.click(screen.getByText("Sessions"));
+    expect(await screen.findByText("Recovered thread")).toBeTruthy();
+
+    fireEvent.click(screen.getByLabelText("Collapse all sections in General"));
+    expect(screen.queryByText("Recovered thread")).toBeNull();
+    expect(screen.queryByText("Workflows")).toBeNull();
+    expect(screen.queryByText("Home")).toBeNull();
+    expect(screen.getByLabelText("Expand all sections in General")).toBeTruthy();
+
+    fireEvent.click(screen.getByLabelText("Expand all sections in General"));
+    expect(await screen.findByText("Workflows")).toBeTruthy();
+    expect(await screen.findByText("Recovered thread")).toBeTruthy();
+
+    fireEvent.click(screen.getByText("Home"));
+    expect(await screen.findByText("Project Home")).toBeTruthy();
+  });
+
+  it("paginates project sidebar code inside the code section and links to GitHub", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.loadProjects.mockResolvedValue({
+      projects: [
+        projectSummary(
+          "proj_1",
+          "General",
+          3,
+          "https://github.com/octocat/paperbase-general-123abc",
+        ),
+      ],
+    });
+    apiMocks.loadProjectItems.mockImplementation(
+      async (projectId: string, limit = 25, offset = 0, itemKind?: "thread" | "python_file") => {
+        const allItems =
+          itemKind === "python_file"
+            ? [
+                projectItemFile("file_1", "analysis-1.py", projectId),
+                projectItemFile("file_2", "analysis-2.py", projectId),
+                projectItemFile("file_3", "analysis-3.py", projectId),
+                projectItemFile("file_4", "analysis-4.py", projectId),
+                projectItemFile("file_5", "analysis-5.py", projectId),
+                projectItemFile("file_6", "analysis-6.py", projectId),
+              ]
+            : [projectItemThread("thread_1", "Recovered thread", projectId)];
+        const pageItems = allItems.slice(offset, offset + limit);
+        return {
+          ...projectItemsPage(projectId, pageItems),
+          offset,
+          limit,
+          total_count: allItems.length,
+          has_more: offset + pageItems.length < allItems.length,
+        };
+      },
+    );
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+    fireEvent.click(screen.getAllByText("General")[0]!);
+
+    const repoLink = await screen.findByLabelText("Open GitHub repository for General");
+    expect(repoLink.getAttribute("href")).toBe(
+      "https://github.com/octocat/paperbase-general-123abc",
+    );
+    expect(await screen.findByText("analysis-1.py")).toBeTruthy();
+    expect(screen.getByText("analysis-5.py")).toBeTruthy();
+    expect(screen.queryByText("analysis-6.py")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show more" }));
+
+    await waitFor(() => {
+      expect(apiMocks.loadProjectItems).toHaveBeenCalledWith("proj_1", 5, 5, "python_file");
+    });
+    expect(await screen.findByText("analysis-6.py")).toBeTruthy();
+  });
+
+  it("paginates project sessions inside the sessions section", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.loadProjectItems.mockImplementation(
+      async (projectId: string, limit = 25, offset = 0, itemKind?: "thread" | "python_file") => {
+        const allItems =
+          itemKind === "thread"
+            ? [
+                projectItemThread("thread_1", "Session 1", projectId),
+                projectItemThread("thread_2", "Session 2", projectId),
+                projectItemThread("thread_3", "Session 3", projectId),
+                projectItemThread("thread_4", "Session 4", projectId),
+                projectItemThread("thread_5", "Session 5", projectId),
+                projectItemThread("thread_6", "Session 6", projectId),
+              ]
+            : [projectItemFile("file_1", "analysis.py", projectId)];
+        const pageItems = allItems.slice(offset, offset + limit);
+        return {
+          ...projectItemsPage(projectId, pageItems),
+          offset,
+          limit,
+          total_count: allItems.length,
+          has_more: offset + pageItems.length < allItems.length,
+        };
+      },
+    );
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+    fireEvent.click(screen.getAllByText("General")[0]!);
+
+    expect(await screen.findByText("Session 1")).toBeTruthy();
+    expect(screen.getByText("Session 5")).toBeTruthy();
+    expect(screen.queryByText("Session 6")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show more" }));
+
+    await waitFor(() => {
+      expect(apiMocks.loadProjectItems).toHaveBeenCalledWith("proj_1", 5, 5, "thread");
+    });
+    expect(await screen.findByText("Session 6")).toBeTruthy();
+  });
+
+  it("cache-busts public icon asset urls", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Open settings")).toBeTruthy();
+    });
+
+    const settingsButton = screen.getByLabelText("Open settings");
+    const settingsIcon = settingsButton.querySelector("img");
+    expect(settingsIcon?.getAttribute("src")).toMatch(/\/settings\.svg\?v=pb-/);
   });
 
   it("creates a project from the sidebar modal", async () => {
@@ -978,6 +1149,10 @@ describe("App", () => {
       expect(screen.getByText("Start new research in")).toBeTruthy();
     });
 
+    fireEvent.click(screen.getAllByText("General")[0]!);
+    await waitFor(() => {
+      expect(screen.getByLabelText("Start chat in General")).toBeTruthy();
+    });
     fireEvent.click(screen.getByLabelText("Start chat in General"));
 
     expect(apiMocks.createThread).toHaveBeenCalledTimes(1);
@@ -1006,6 +1181,10 @@ describe("App", () => {
       expect(screen.getByText("Start new research in")).toBeTruthy();
     });
 
+    fireEvent.click(screen.getAllByText("Agents")[0]!);
+    await waitFor(() => {
+      expect(screen.getByLabelText("Start chat in Agents")).toBeTruthy();
+    });
     fireEvent.click(screen.getByLabelText("Start chat in Agents"));
 
     await waitFor(() => {
@@ -1222,7 +1401,7 @@ describe("App", () => {
     fireEvent.click(screen.getAllByText("General")[0]!);
 
     await waitFor(() => {
-      expect(apiMocks.loadProjectItems).toHaveBeenCalledWith("proj_1", 25, 0);
+      expect(apiMocks.loadProjectItems).toHaveBeenCalledWith("proj_1", 5, 0, "thread");
       expect(screen.getByText("Recovered thread")).toBeTruthy();
     });
 

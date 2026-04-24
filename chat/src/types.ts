@@ -144,6 +144,7 @@ export interface ProjectSummary {
   description: string;
   is_default: boolean;
   session_count: number;
+  github_repo_url: string;
   created_at: string;
   updated_at: string;
 }
@@ -187,9 +188,11 @@ export interface PythonFileResponse extends PythonFileSummary {
   content: string;
 }
 
+export type ProjectItemKind = "thread" | "python_file";
+
 export interface ProjectItemSummary {
   item_id: string;
-  item_kind: "thread" | "python_file";
+  item_kind: ProjectItemKind;
   project_id: string;
   title: string;
   created_at: string;

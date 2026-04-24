@@ -2541,6 +2541,7 @@ def test_project_defaults_and_thread_snapshots(browser_service):
         session.user,
         _create_repo_project_request("Agents", "Use grounded citations only."),
     )
+    assert project.github_repo_url == "https://github.com/octocat/agents"
     thread = service.create_chat_thread(
         session.user,
         CreateChatThreadRequest(title="Agent chat", project_id=project.project_id),
@@ -2553,6 +2554,7 @@ def test_project_defaults_and_thread_snapshots(browser_service):
     projects_after_thread = service.list_projects(session.user).projects
     agents_project = next(item for item in projects_after_thread if item.project_id == project.project_id)
     assert agents_project.session_count == 1
+    assert agents_project.github_repo_url == "https://github.com/octocat/agents"
 
     service.update_project(
         session.user,
@@ -2611,6 +2613,48 @@ def test_project_session_paging_and_thread_deletion(browser_service):
         item for item in service.list_projects(session.user).projects if item.project_id == project.project_id
     )
     assert remaining_project.session_count == 5
+
+
+def test_project_items_can_page_by_kind(browser_service):
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="item-kinds@example.com", password="topsecret123", display_name="Item Kind User")
+    )
+    assert session.user is not None
+    _connect_github(service, session.user)
+
+    project = service.create_project(
+        session.user,
+        _create_repo_project_request("Mixed Items", "Track files and sessions"),
+    )
+    service.create_chat_thread(
+        session.user,
+        CreateChatThreadRequest(title="Session 1", project_id=project.project_id),
+    )
+    service.create_python_file(session.user, project.project_id)
+    service.create_python_file(session.user, project.project_id)
+
+    code_page = service.list_project_items(
+        session.user,
+        project.project_id,
+        limit=1,
+        offset=0,
+        item_kind="python_file",
+    )
+    session_page = service.list_project_items(
+        session.user,
+        project.project_id,
+        limit=25,
+        offset=0,
+        item_kind="thread",
+    )
+
+    assert code_page.total_count == 2
+    assert code_page.has_more is True
+    assert len(code_page.items) == 1
+    assert all(item.item_kind == "python_file" for item in code_page.items)
+    assert session_page.total_count == 1
+    assert session_page.items[0].item_kind == "thread"
 
 
 def test_chat_answer_prompt_requires_strict_markdown(browser_service):

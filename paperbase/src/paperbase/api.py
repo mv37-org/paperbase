@@ -994,10 +994,11 @@ def browser_list_project_items(
     project_id: str,
     limit: int = Query(25, ge=1, le=100),
     offset: int = Query(0, ge=0),
+    item_kind: str | None = Query(None, pattern="^(thread|python_file)$"),
     user=Depends(require_browser_user),
     service: PaperbaseService = Depends(get_service),
 ) -> ProjectItemPageResponse:
-    return service.list_project_items(user, project_id, limit=limit, offset=offset)
+    return service.list_project_items(user, project_id, limit=limit, offset=offset, item_kind=item_kind)
 
 
 @app.post("/v1/browser/projects/{project_id}/notebooks", response_model=PythonFileResponse)

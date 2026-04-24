@@ -11,6 +11,7 @@ import type {
   GitHubRepoMetadataResponse,
   MentionSuggestionResult,
   PaperResponse,
+  ProjectItemKind,
   ProjectItemPageResponse,
   ProjectRepoConflictResolution,
   ProjectRepoSyncResponse,
@@ -338,11 +339,19 @@ export function loadProjectSessions(projectId: string, limit = 5, offset = 0) {
   );
 }
 
-export function loadProjectItems(projectId: string, limit = 25, offset = 0) {
+export function loadProjectItems(
+  projectId: string,
+  limit = 25,
+  offset = 0,
+  itemKind?: ProjectItemKind,
+) {
   const params = new URLSearchParams({
     limit: String(limit),
     offset: String(offset),
   });
+  if (itemKind) {
+    params.set("item_kind", itemKind);
+  }
   return api<ProjectItemPageResponse>(
     `/v1/browser/projects/${projectId}/items?${params.toString()}`,
     { method: "GET" },

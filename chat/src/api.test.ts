@@ -300,6 +300,7 @@ describe("chat api", () => {
               description: "",
               is_default: true,
               session_count: 1,
+              github_repo_url: "https://github.com/octocat/general",
               created_at: "2026-04-21T00:00:00Z",
               updated_at: "2026-04-21T00:00:00Z",
             },
@@ -327,6 +328,7 @@ describe("chat api", () => {
           description: "Agent eval work",
           is_default: false,
           session_count: 0,
+          github_repo_url: "https://github.com/octocat/agent-evals",
           created_at: "2026-04-21T00:00:00Z",
           updated_at: "2026-04-21T00:00:00Z",
         }),
@@ -360,6 +362,32 @@ describe("chat api", () => {
     expect(projects.projects[0]?.project_id).toBe("proj_1");
     expect(repos.repos[0]?.full_name).toBe("octocat/existing-repo");
     expect(created.project_id).toBe("proj_2");
+  });
+
+  it("passes project item kind filters", async () => {
+    const fetchMock = vi
+      .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          project_id: "proj_1",
+          items: [],
+          offset: 25,
+          limit: 25,
+          total_count: 40,
+          has_more: false,
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await loadApiModule();
+
+    await api.loadProjectItems("proj_1", 25, 25, "python_file");
+
+    const [path, init] = fetchMock.mock.calls[0] as FetchCall;
+    expect(requestPath(path)).toBe("/v1/browser/projects/proj_1/items");
+    expect(new URL(String(path), "http://localhost").searchParams.get("item_kind")).toBe(
+      "python_file",
+    );
+    expect(init?.method).toBe("GET");
   });
 
   it("sends structured GitHub sync payloads for project saves", async () => {

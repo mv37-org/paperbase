@@ -1194,6 +1194,150 @@ textarea::placeholder,
   padding-left: 22px;
 }
 
+.project-tree {
+  display: grid;
+  gap: 6px;
+}
+
+.project-tree-home,
+.project-tree-category-label {
+  min-height: 26px;
+  display: grid;
+  align-items: center;
+  gap: 7px;
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.project-tree-home {
+  grid-template-columns: auto minmax(0, 1fr);
+  width: 100%;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.project-tree-home.active {
+  background: var(--accent-soft);
+}
+
+.project-tree-category {
+  display: grid;
+  gap: 2px;
+}
+
+.project-tree-category-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px;
+}
+
+.project-tree-category-label {
+  grid-template-columns: auto auto minmax(0, 1fr);
+  width: 100%;
+  padding: 0 6px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.project-tree-category-label:hover {
+  background: rgba(27, 22, 17, 0.035);
+}
+
+.project-tree-category-label span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-tree-category-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.project-tree-category-count {
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid rgba(27, 22, 17, 0.08);
+  border-radius: 999px;
+  background: rgba(27, 22, 17, 0.035);
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 500;
+  line-height: 1;
+}
+
+.project-tree-repo-link {
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.project-tree-repo-link:hover {
+  background: rgba(27, 22, 17, 0.045);
+}
+
+.project-tree-repo-icon {
+  width: 12px;
+  height: 12px;
+  display: block;
+  background: rgba(27, 22, 17, 0.34);
+  mask: var(--icon-url) center / contain no-repeat;
+  -webkit-mask: var(--icon-url) center / contain no-repeat;
+}
+
+.project-tree-category-chevron {
+  width: 6px;
+  height: 6px;
+  border-right: 1.4px solid currentColor;
+  border-bottom: 1.4px solid currentColor;
+  opacity: 0.58;
+  transform: rotate(45deg) translateY(-1px);
+  transition: transform 120ms ease;
+}
+
+.project-tree-category-label[aria-expanded="false"] .project-tree-category-chevron {
+  transform: rotate(-45deg);
+}
+
+.project-tree-category-icon {
+  width: 13px;
+  height: 13px;
+  display: block;
+  background: rgba(27, 22, 17, 0.36);
+  mask: var(--icon-url) center / contain no-repeat;
+  -webkit-mask: var(--icon-url) center / contain no-repeat;
+}
+
+.project-category-list {
+  padding-left: 10px;
+}
+
+.project-tree-empty {
+  padding: 2px 6px 4px 16px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.3;
+}
+
 .project-session-state {
   padding: 4px 6px;
   color: var(--muted);
@@ -1210,12 +1354,76 @@ textarea::placeholder,
   color: var(--muted);
   text-align: left;
   font-size: 12px;
-  padding: 4px 6px;
+  padding: 3px 6px 4px 16px;
   cursor: pointer;
 }
 
 .project-show-more:hover {
   color: var(--text);
+}
+
+.project-home-page {
+  width: min(760px, calc(100% - 48px));
+  margin: 42px auto;
+  display: grid;
+  gap: 24px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  letter-spacing: 0;
+}
+
+.project-home-header {
+  display: grid;
+  gap: 8px;
+}
+
+.project-home-header span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.project-home-header h1 {
+  margin: 0;
+  color: var(--text);
+  font-size: 30px;
+  line-height: 1.12;
+  letter-spacing: 0;
+}
+
+.project-home-header p {
+  max-width: 620px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.project-home-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px;
+}
+
+.project-home-stat {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid rgba(27, 22, 17, 0.08);
+  border-radius: var(--radius);
+  background: rgba(255, 253, 250, 0.78);
+}
+
+.project-home-stat span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.project-home-stat strong {
+  color: var(--text);
+  font-size: 22px;
+  line-height: 1;
 }
 
 .project-menu-wrap {
@@ -4277,6 +4485,7 @@ textarea {
 }
 
 .project-card:hover,
+.project-tree-home:hover,
 .thread-card:hover {
   background: rgba(27, 22, 17, 0.04);
   border-color: transparent;
@@ -4284,6 +4493,7 @@ textarea {
 }
 
 .project-card.active:hover,
+.project-tree-home.active:hover,
 .thread-card.active:hover {
   background: var(--accent-soft);
 }
@@ -4319,6 +4529,7 @@ textarea:hover,
 .oauth-button,
 .example-pill,
 .project-card,
+.project-tree-home,
 .thread-card,
 .tab,
 .chat-tab,
@@ -4417,6 +4628,12 @@ body.authenticated-theme-dark .chat-tab-trigger,
 body.authenticated-theme-dark .chat-tab-close,
 body.authenticated-theme-dark .project-show-more,
 body.authenticated-theme-dark .project-session-state,
+body.authenticated-theme-dark .project-tree-category-label,
+body.authenticated-theme-dark .project-tree-category-count,
+body.authenticated-theme-dark .project-tree-empty,
+body.authenticated-theme-dark .project-home-header span,
+body.authenticated-theme-dark .project-home-header p,
+body.authenticated-theme-dark .project-home-stat span,
 body.authenticated-theme-dark .tool-activity-label,
 body.authenticated-theme-dark .modal-caption,
 body.authenticated-theme-dark .settings-inline-note,
@@ -4442,6 +4659,7 @@ body.authenticated-theme-dark .sidebar-title,
 body.authenticated-theme-dark .sidebar-section-label,
 body.authenticated-theme-dark .account-menu-item,
 body.authenticated-theme-dark .project-card-title,
+body.authenticated-theme-dark .project-tree-home,
 body.authenticated-theme-dark .thread-card-title,
 body.authenticated-theme-dark .thread-card.active .thread-card-age,
 body.authenticated-theme-dark .thread-card.active .thread-card-rename,
@@ -4452,6 +4670,8 @@ body.authenticated-theme-dark .citation-card-title,
 body.authenticated-theme-dark .citation-card-excerpt,
 body.authenticated-theme-dark .paper-drawer-title,
 body.authenticated-theme-dark .paper-drawer-body,
+body.authenticated-theme-dark .project-home-header h1,
+body.authenticated-theme-dark .project-home-stat strong,
 body.authenticated-theme-dark .project-field,
 body.authenticated-theme-dark .project-github-heading,
 body.authenticated-theme-dark .project-repo-option,
@@ -4466,10 +4686,33 @@ body.authenticated-theme-dark .chat-tab.active .chat-tab-close {
 }
 
 body.authenticated-theme-dark .project-card.active,
+body.authenticated-theme-dark .project-tree-home.active,
 body.authenticated-theme-dark .thread-card.active,
 body.authenticated-theme-dark .project-card.active:hover,
+body.authenticated-theme-dark .project-tree-home.active:hover,
 body.authenticated-theme-dark .thread-card.active:hover {
   background: rgba(255, 255, 255, 0.08);
+}
+
+body.authenticated-theme-dark .project-tree-category-icon {
+  background: rgba(223, 232, 244, 0.36);
+}
+
+body.authenticated-theme-dark .project-tree-repo-icon {
+  background: rgba(223, 232, 244, 0.34);
+}
+
+body.authenticated-theme-dark .project-tree-category-label:hover {
+  background: rgba(255, 255, 255, 0.045);
+}
+
+body.authenticated-theme-dark .project-tree-repo-link:hover {
+  background: rgba(255, 255, 255, 0.055);
+}
+
+body.authenticated-theme-dark .project-tree-category-count {
+  border-color: rgba(223, 232, 244, 0.1);
+  background: rgba(255, 255, 255, 0.055);
 }
 
 body.authenticated-theme-dark .chat-tab {
@@ -4563,6 +4806,7 @@ body.authenticated-theme-dark .project-repo-option.active,
 body.authenticated-theme-dark .project-menu-item:hover,
 body.authenticated-theme-dark .sidebar-quick-action:hover,
 body.authenticated-theme-dark .project-card:hover,
+body.authenticated-theme-dark .project-tree-home:hover,
 body.authenticated-theme-dark .thread-card:hover,
 body.authenticated-theme-dark .assistant-copy-button:hover,
 body.authenticated-theme-dark .api-key-delete-button:hover {
@@ -4577,6 +4821,7 @@ body.authenticated-theme-dark .settings-appearance-option,
 body.authenticated-theme-dark .paper-drawer-placeholder,
 body.authenticated-theme-dark .paper-drawer-error,
 body.authenticated-theme-dark .citation-card,
+body.authenticated-theme-dark .project-home-stat,
 body.authenticated-theme-dark .project-repo-info-button,
 body.authenticated-theme-dark .project-github-required,
 body.authenticated-theme-dark .project-repo-menu,

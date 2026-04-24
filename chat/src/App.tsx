@@ -59,10 +59,11 @@ import type {
   GitHubRepoSummary,
   PaperResponse,
   ProjectFileKind,
+  ProjectItemKind,
+  ProjectItemSummary,
   ProjectRepoConflictDetail,
   ProjectRepoConflictFile,
   ProjectRepoConflictResolution,
-  ProjectItemSummary,
   ProjectRepoSyncResponse,
   ProjectSummary,
   PythonFileResponse,
@@ -77,20 +78,35 @@ const RESUME_PROJECT_MODAL_KEY = "paperbase-resume-new-project";
 const SIDEBAR_COLLAPSED_KEY = "paperbase-sidebar-collapsed";
 const MAX_OPEN_TABS = 8;
 const MESSAGE_LIST_BOTTOM_THRESHOLD = 40;
+const PROJECT_ITEM_PAGE_SIZE = 5;
+const PROJECT_SIDEBAR_ITEM_KINDS: ProjectItemKind[] = ["python_file", "thread"];
 type ModalFlashKind = "error" | "note";
 type PaperDrawerState = { paperId: string; path: string } | null;
 type PaperDrawerContent =
   | { kind: "markdown"; path: string; file: FileContentResponse }
   | { kind: "figure"; path: string; figure: FigureResponse }
   | { kind: "table"; path: string; table: TableResponse };
-type OpenTab = { kind: "thread"; id: string } | { kind: "python_file"; id: string };
+type OpenTab =
+  | { kind: "thread"; id: string }
+  | { kind: "python_file"; id: string }
+  | { kind: "project_home"; id: string };
+type ProjectSidebarCategoryKey =
+  | "workflows"
+  | "experiments"
+  | "data"
+  | "notes"
+  | "sessions"
+  | "code";
 type ProjectItemState = {
   items: ProjectItemSummary[];
   totalCount: number;
   hasMore: boolean;
+  hasMoreByKind?: Partial<Record<ProjectItemKind, boolean>>;
   loaded: boolean;
   loading: boolean;
   loadingMore: boolean;
+  loadingMoreByKind?: Partial<Record<ProjectItemKind, boolean>>;
+  totalCountByKind?: Partial<Record<ProjectItemKind, number>>;
   error: string;
 };
 type PythonFileDraft = {
@@ -227,6 +243,30 @@ const APPEARANCE_OPTIONS: Array<{
 ];
 
 const AUTHENTICATED_DARK_THEME_CLASS = "authenticated-theme-dark";
+const PROJECT_SIDEBAR_CATEGORY_KEYS: ProjectSidebarCategoryKey[] = [
+  "workflows",
+  "experiments",
+  "data",
+  "notes",
+  "sessions",
+  "code",
+];
+const PUBLIC_ASSET_CACHE_KEY = `pb-${Date.now().toString(36)}`;
+const buildProjectCategoryCollapseState = (collapsed: boolean) =>
+  Object.fromEntries(PROJECT_SIDEBAR_CATEGORY_KEYS.map((key) => [key, collapsed])) as Partial<
+    Record<ProjectSidebarCategoryKey, boolean>
+  >;
+const PROJECT_PLACEHOLDER_CATEGORIES = [
+  { key: "workflows", label: "Workflows", asset: "workflow.svg", showCount: true },
+  { key: "experiments", label: "Experiments", asset: "experiments.svg", showCount: true },
+  { key: "data", label: "Data", asset: "data.svg", showCount: false },
+  { key: "notes", label: "Notes", asset: "notes.svg", showCount: false },
+] satisfies Array<{
+  key: ProjectSidebarCategoryKey;
+  label: string;
+  asset: string;
+  showCount: boolean;
+}>;
 
 function SettingsSectionHeading({ title, caption }: { title: string; caption: string }) {
   return (
@@ -314,7 +354,8 @@ const THINKING_WORDS = [
 ];
 
 function staticAssetPath(name: string) {
-  return `${import.meta.env.BASE_URL}${name.replace(/^\/+/, "")}`;
+  const path = `${import.meta.env.BASE_URL}${name.replace(/^\/+/, "")}`;
+  return `${path}${path.includes("?") ? "&" : "?"}v=${PUBLIC_ASSET_CACHE_KEY}`;
 }
 
 function pythonRepoPathForFile(file: Pick<PythonFileResponse, "filename" | "repo_path">) {
@@ -428,7 +469,9 @@ function restoreTabs() {
         typeof value === "object" &&
         "kind" in value &&
         "id" in value &&
-        (value.kind === "thread" || value.kind === "python_file") &&
+        (value.kind === "thread" ||
+          value.kind === "python_file" ||
+          value.kind === "project_home") &&
         typeof value.id === "string"
       ) {
         restored.push({ kind: value.kind, id: value.id });
@@ -666,6 +709,23 @@ function upsertProjectItem(
   );
 }
 
+function mergeProjectItems(
+  current: ProjectItemSummary[],
+  incoming: ProjectItemSummary[],
+): ProjectItemSummary[] {
+  const itemsById = new Map(current.map((item) => [item.item_id, item]));
+  for (const item of incoming) {
+    itemsById.set(item.item_id, item);
+  }
+  return [...itemsById.values()].sort(
+    (left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at),
+  );
+}
+
+function projectItemKindCount(items: ProjectItemSummary[], itemKind: ProjectItemKind) {
+  return items.filter((item) => item.item_kind === itemKind).length;
+}
+
 function displayPythonFilename(filename: string) {
   return filename.trim() || "something.py";
 }
@@ -740,6 +800,9 @@ export default function App() {
   const [projectItems, setProjectItems] = useState<Record<string, ProjectItemState>>({});
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [expandedProjectIds, setExpandedProjectIds] = useState<string[]>([]);
+  const [collapsedProjectCategories, setCollapsedProjectCategories] = useState<
+    Record<string, Partial<Record<ProjectSidebarCategoryKey, boolean>>>
+  >({});
   const [threadMap, setThreadMap] = useState<Record<string, ChatThreadResponse>>({});
   const [pythonFileMap, setPythonFileMap] = useState<Record<string, PythonFileResponse>>({});
   const [pythonFileDrafts, setPythonFileDrafts] = useState<Record<string, PythonFileDraft>>({});
@@ -984,8 +1047,12 @@ export default function App() {
   const authenticated = Boolean(session?.authenticated);
   const activeThreadId = activeTab?.kind === "thread" ? activeTab.id : null;
   const activePythonFileId = activeTab?.kind === "python_file" ? activeTab.id : null;
+  const activeProjectHomeId = activeTab?.kind === "project_home" ? activeTab.id : null;
   const activeThread = activeThreadId ? (threadMap[activeThreadId] ?? null) : null;
   const activePythonFile = activePythonFileId ? (pythonFileMap[activePythonFileId] ?? null) : null;
+  const activeProjectHome = activeProjectHomeId
+    ? (projects.find((project) => project.project_id === activeProjectHomeId) ?? null)
+    : null;
   const activePythonDraft = activePythonFileId
     ? (pythonFileDrafts[activePythonFileId] ?? null)
     : null;
@@ -993,6 +1060,15 @@ export default function App() {
     ? (pythonFileRuns[activePythonFileId] ?? { running: false, result: null, error: "" })
     : { running: false, result: null, error: "" };
   const activePythonContent = activePythonDraft?.content ?? activePythonFile?.content ?? "";
+  const activeProjectHomeItems = activeProjectHomeId
+    ? (projectItems[activeProjectHomeId]?.items ?? [])
+    : [];
+  const activeProjectHomeCodeCount = activeProjectHomeItems.filter(
+    (item) => item.item_kind === "python_file",
+  ).length;
+  const activeProjectHomeSessionCount = activeProjectHomeItems.filter(
+    (item) => item.item_kind === "thread",
+  ).length;
   const selectedSyncConflict = syncConflictState
     ? (syncConflictState.conflicts.find(
         (conflict) => conflict.path === syncConflictState.selectedPath,
@@ -1040,6 +1116,17 @@ export default function App() {
             tabTitle: truncateTabTitle(title),
           };
         }
+        if (tab.kind === "project_home") {
+          const project = projects.find((item) => item.project_id === tab.id);
+          const title = project ? `${project.name} Home` : "Project Home";
+          return {
+            key: `project_home:${tab.id}`,
+            kind: tab.kind,
+            id: tab.id,
+            title,
+            tabTitle: truncateTabTitle(title),
+          };
+        }
         const loadedFile = pythonFileMap[tab.id];
         const title = displayPythonFilename(loadedFile?.filename ?? "something.py");
         return {
@@ -1050,7 +1137,7 @@ export default function App() {
           tabTitle: truncateTabTitle(title),
         };
       }),
-    [openTabs, pythonFileMap, threadMap],
+    [openTabs, projects, pythonFileMap, threadMap],
   );
   const hasOpenTabs = openTabItems.length > 0;
   const tabStripStyle = useMemo(
@@ -1558,12 +1645,26 @@ export default function App() {
             (item) => item.item_kind !== "thread" || !ids.has(item.thread_id ?? ""),
           );
           const removedCount = current.items.length - nextItems.length;
+          const totalCountByKind = { ...current.totalCountByKind };
+          const nextThreadTotal = Math.max(
+            0,
+            (totalCountByKind.thread ?? projectItemKindCount(current.items, "thread")) -
+              removedCount,
+          );
+          totalCountByKind.thread = nextThreadTotal;
           return {
             ...current,
             items: nextItems,
             totalCount: Math.max(0, current.totalCount - removedCount),
+            totalCountByKind,
             hasMore:
               current.hasMore || nextItems.length < Math.max(0, current.totalCount - removedCount),
+            hasMoreByKind: {
+              ...current.hasMoreByKind,
+              thread:
+                Boolean(current.hasMoreByKind?.thread) ||
+                projectItemKindCount(nextItems, "thread") < nextThreadTotal,
+            },
           };
         });
       }
@@ -1572,48 +1673,96 @@ export default function App() {
   );
 
   const fetchProjectItems = useCallback(
-    async (projectId: string, append = false) => {
+    async (projectId: string, append = false, itemKind?: ProjectItemKind) => {
       const existing = projectItemsRef.current[projectId];
-      const offset = append ? (existing?.items.length ?? 0) : 0;
+      const itemKinds = itemKind ? [itemKind] : PROJECT_SIDEBAR_ITEM_KINDS;
+      const offsets = new Map(
+        itemKinds.map((kind) => [
+          kind,
+          append ? projectItemKindCount(existing?.items ?? [], kind) : 0,
+        ]),
+      );
       updateProjectItemCache(projectId, (current) => ({
         items: current?.items ?? [],
         totalCount: current?.totalCount ?? 0,
         hasMore: current?.hasMore ?? false,
+        hasMoreByKind: current?.hasMoreByKind,
         loaded: current?.loaded ?? false,
-        loading: append ? false : true,
+        loading: append || itemKind ? false : true,
         loadingMore: append,
+        loadingMoreByKind: itemKind
+          ? {
+              ...current?.loadingMoreByKind,
+              [itemKind]: append,
+            }
+          : current?.loadingMoreByKind,
+        totalCountByKind: current?.totalCountByKind,
         error: "",
       }));
       try {
-        const page = await loadProjectItems(projectId, 25, offset);
+        const pages = await Promise.all(
+          itemKinds.map(async (kind) => ({
+            kind,
+            page: await loadProjectItems(
+              projectId,
+              PROJECT_ITEM_PAGE_SIZE,
+              offsets.get(kind) ?? 0,
+              kind,
+            ),
+          })),
+        );
         updateProjectItemCache(projectId, (current) => {
-          const items = append
-            ? [
-                ...(current?.items ?? []),
-                ...page.items.filter(
-                  (item) => !(current?.items ?? []).some((entry) => entry.item_id === item.item_id),
-                ),
-              ]
-            : page.items;
+          const currentItems = current?.items ?? [];
+          const targetKinds = new Set(itemKinds);
+          const retainedItems = append
+            ? currentItems
+            : currentItems.filter((item) => !targetKinds.has(item.item_kind));
+          const items = mergeProjectItems(
+            retainedItems,
+            pages.flatMap(({ page }) => page.items),
+          );
+          const totalCountByKind = { ...current?.totalCountByKind };
+          const hasMoreByKind = { ...current?.hasMoreByKind };
+          const loadingMoreByKind = { ...current?.loadingMoreByKind };
+          for (const { kind, page } of pages) {
+            totalCountByKind[kind] = page.total_count;
+            hasMoreByKind[kind] = page.has_more;
+            loadingMoreByKind[kind] = false;
+          }
+          const knownTotalCount = PROJECT_SIDEBAR_ITEM_KINDS.reduce(
+            (sum, kind) => sum + (totalCountByKind[kind] ?? projectItemKindCount(items, kind)),
+            0,
+          );
           return {
             items,
-            totalCount: page.total_count,
-            hasMore: page.has_more,
+            totalCount: Math.max(knownTotalCount, items.length),
+            hasMore: PROJECT_SIDEBAR_ITEM_KINDS.some((kind) => Boolean(hasMoreByKind[kind])),
+            hasMoreByKind,
             loaded: true,
             loading: false,
             loadingMore: false,
+            loadingMoreByKind,
+            totalCountByKind,
             error: "",
           };
         });
-        return page;
+        return pages[0]?.page ?? null;
       } catch (error) {
         updateProjectItemCache(projectId, (current) => ({
           items: current?.items ?? [],
           totalCount: current?.totalCount ?? 0,
           hasMore: current?.hasMore ?? false,
+          hasMoreByKind: current?.hasMoreByKind,
           loaded: current?.loaded ?? false,
           loading: false,
           loadingMore: false,
+          loadingMoreByKind: itemKind
+            ? {
+                ...current?.loadingMoreByKind,
+                [itemKind]: false,
+              }
+            : current?.loadingMoreByKind,
+          totalCountByKind: current?.totalCountByKind,
           error: error instanceof Error ? error.message : "Project items could not be loaded.",
         }));
         throw error;
@@ -1628,11 +1777,17 @@ export default function App() {
         if (!current?.loaded) {
           return current;
         }
+        const existed = current.items.some((item) => item.thread_id === thread.thread_id);
         const items = upsertProjectItem(current.items, projectItemFromThread(thread));
+        const totalCountByKind = { ...current.totalCountByKind };
+        totalCountByKind.thread = existed
+          ? (totalCountByKind.thread ?? projectItemKindCount(items, "thread"))
+          : (totalCountByKind.thread ?? projectItemKindCount(items, "thread") - 1) + 1;
         return {
           ...current,
           items,
           totalCount: Math.max(current.totalCount, items.length),
+          totalCountByKind,
           hasMore: Math.max(current.totalCount, items.length) > items.length || current.hasMore,
         };
       });
@@ -1646,11 +1801,17 @@ export default function App() {
         if (!current?.loaded) {
           return current;
         }
+        const existed = current.items.some((item) => item.file_id === file.file_id);
         const items = upsertProjectItem(current.items, projectItemFromPythonFile(file));
+        const totalCountByKind = { ...current.totalCountByKind };
+        totalCountByKind.python_file = existed
+          ? (totalCountByKind.python_file ?? projectItemKindCount(items, "python_file"))
+          : (totalCountByKind.python_file ?? projectItemKindCount(items, "python_file") - 1) + 1;
         return {
           ...current,
           items,
           totalCount: Math.max(current.totalCount, items.length),
+          totalCountByKind,
           hasMore: Math.max(current.totalCount, items.length) > items.length || current.hasMore,
         };
       });
@@ -1667,12 +1828,25 @@ export default function App() {
           }
           const nextItems = current.items.filter((item) => item.thread_id !== thread.thread_id);
           const removed = nextItems.length !== current.items.length ? 1 : 0;
+          const totalCountByKind = { ...current.totalCountByKind };
+          const nextThreadTotal = Math.max(
+            0,
+            (totalCountByKind.thread ?? projectItemKindCount(current.items, "thread")) - removed,
+          );
+          totalCountByKind.thread = nextThreadTotal;
           return {
             ...current,
             items: nextItems,
             totalCount: Math.max(0, current.totalCount - removed),
+            totalCountByKind,
             hasMore:
               current.hasMore || nextItems.length < Math.max(0, current.totalCount - removed),
+            hasMoreByKind: {
+              ...current.hasMoreByKind,
+              thread:
+                Boolean(current.hasMoreByKind?.thread) ||
+                projectItemKindCount(nextItems, "thread") < nextThreadTotal,
+            },
           };
         });
       }
@@ -1685,10 +1859,15 @@ export default function App() {
         const totalCount = existed
           ? current.totalCount
           : Math.max(current.totalCount + 1, items.length);
+        const totalCountByKind = { ...current.totalCountByKind };
+        totalCountByKind.thread = existed
+          ? (totalCountByKind.thread ?? projectItemKindCount(items, "thread"))
+          : (totalCountByKind.thread ?? projectItemKindCount(items, "thread") - 1) + 1;
         return {
           ...current,
           items,
           totalCount,
+          totalCountByKind,
           hasMore: current.hasMore || totalCount > items.length,
         };
       });
@@ -1741,6 +1920,15 @@ export default function App() {
     },
     [fetchAndStorePythonFile],
   );
+
+  const openProjectHome = useCallback((projectId: string) => {
+    if (!projectsRef.current.some((project) => project.project_id === projectId)) {
+      return;
+    }
+    setOpenTabs((current) => appendOpenTab(current, { kind: "project_home", id: projectId }));
+    setActiveTab({ kind: "project_home", id: projectId });
+    setSelectedProjectId(projectId);
+  }, []);
 
   const createNewThread = useCallback(
     async (title = "", explicitProjectId?: string) => {
@@ -2156,8 +2344,10 @@ export default function App() {
       try {
         if (tab.kind === "thread") {
           await fetchAndStoreThread(tab.id);
-        } else {
+        } else if (tab.kind === "python_file") {
           await fetchAndStorePythonFile(tab.id);
+        } else if (!loadedProjects.some((project) => project.project_id === tab.id)) {
+          continue;
         }
         validRestoredTabs.push(tab);
       } catch (error) {
@@ -2491,6 +2681,56 @@ export default function App() {
         .map((projectId) => fetchProjectItems(projectId)),
     );
   }, [allProjectsExpanded, fetchProjectItems, projects]);
+
+  const toggleProjectCategory = useCallback(
+    (projectId: string, category: ProjectSidebarCategoryKey) => {
+      setCollapsedProjectCategories((current) => {
+        const projectCategories = current[projectId] ?? {};
+        return {
+          ...current,
+          [projectId]: {
+            ...projectCategories,
+            [category]: !projectCategories[category],
+          },
+        };
+      });
+    },
+    [],
+  );
+
+  const toggleAllProjectCategories = useCallback(
+    async (projectId: string) => {
+      const expanded = expandedProjectIds.includes(projectId);
+      const projectCategories = collapsedProjectCategories[projectId] ?? {};
+      const allCollapsed = PROJECT_SIDEBAR_CATEGORY_KEYS.every((key) =>
+        Boolean(projectCategories[key]),
+      );
+
+      if (!expanded || allCollapsed) {
+        setExpandedProjectIds((current) =>
+          current.includes(projectId) ? current : [...current, projectId],
+        );
+        setCollapsedProjectCategories((current) => ({
+          ...current,
+          [projectId]: buildProjectCategoryCollapseState(false),
+        }));
+        if (
+          !projectItemsRef.current[projectId]?.loaded &&
+          !projectItemsRef.current[projectId]?.loading
+        ) {
+          await fetchProjectItems(projectId);
+        }
+        return;
+      }
+
+      setCollapsedProjectCategories((current) => ({
+        ...current,
+        [projectId]: buildProjectCategoryCollapseState(true),
+      }));
+      setExpandedProjectIds((current) => current.filter((value) => value !== projectId));
+    },
+    [collapsedProjectCategories, expandedProjectIds, fetchProjectItems],
+  );
 
   const loadProjectRepoDetails = useCallback(
     async (owner: string, repo: string, branchOverride?: string) => {
@@ -2954,8 +3194,8 @@ export default function App() {
   );
 
   const handleLoadMoreItems = useCallback(
-    async (projectId: string) => {
-      await fetchProjectItems(projectId, true);
+    async (projectId: string, itemKind: ProjectItemKind) => {
+      await fetchProjectItems(projectId, true, itemKind);
     },
     [fetchProjectItems],
   );
@@ -3697,6 +3937,32 @@ export default function App() {
                 {projects.map((project) => {
                   const expanded = expandedProjectIds.includes(project.project_id);
                   const itemState = projectItems[project.project_id];
+                  const collapsedCategories = collapsedProjectCategories[project.project_id] ?? {};
+                  const visibleProjectItems = itemState?.items ?? [];
+                  const codeItems = visibleProjectItems.filter(
+                    (item) => item.item_kind === "python_file",
+                  );
+                  const sessionItems = visibleProjectItems.filter((item) => {
+                    if (item.item_kind !== "thread") {
+                      return false;
+                    }
+                    return shouldShowThreadInSidebar({
+                      thread_id: item.thread_id ?? "",
+                      project_id: item.project_id,
+                      title: item.title,
+                      created_at: item.created_at,
+                      updated_at: item.updated_at,
+                      last_message_preview: item.last_message_preview,
+                    });
+                  });
+                  const codeHasMore = Boolean(itemState?.hasMoreByKind?.python_file);
+                  const sessionsHasMore = Boolean(itemState?.hasMoreByKind?.thread);
+                  const codeLoadingMore = Boolean(itemState?.loadingMoreByKind?.python_file);
+                  const sessionsLoadingMore = Boolean(itemState?.loadingMoreByKind?.thread);
+                  const allProjectCategoriesCollapsed = PROJECT_SIDEBAR_CATEGORY_KEYS.every((key) =>
+                    Boolean(collapsedCategories[key]),
+                  );
+                  const expandProjectSections = !expanded || allProjectCategoriesCollapsed;
                   return (
                     <div
                       key={project.project_id}
@@ -3732,15 +3998,23 @@ export default function App() {
                           <button
                             type="button"
                             className="sidebar-icon-button project-action-button"
-                            aria-label={`Start chat in ${project.name}`}
+                            aria-label={
+                              expandProjectSections
+                                ? `Expand all sections in ${project.name}`
+                                : `Collapse all sections in ${project.name}`
+                            }
                             onMouseDown={(event) => event.stopPropagation()}
                             onClick={(event) => {
                               event.stopPropagation();
-                              void handleProjectStartChat(project.project_id);
+                              void toggleAllProjectCategories(project.project_id);
                             }}
                           >
                             <AppIcon
-                              src={staticAssetPath("edit.svg")}
+                              src={staticAssetPath(
+                                expandProjectSections
+                                  ? "expand-projects.svg"
+                                  : "collapse-projects.svg",
+                              )}
                               className="project-action-icon"
                             />
                           </button>
@@ -3805,132 +4079,262 @@ export default function App() {
                           ) : null}
                           {itemState?.loaded ? (
                             <>
-                              {itemState.items.length > 0 ? (
-                                <div className="thread-list project-thread-list">
-                                  {itemState.items.map((item) => {
-                                    if (item.item_kind === "thread") {
-                                      if (
-                                        !shouldShowThreadInSidebar({
-                                          thread_id: item.thread_id ?? "",
-                                          project_id: item.project_id,
-                                          title: item.title,
-                                          created_at: item.created_at,
-                                          updated_at: item.updated_at,
-                                          last_message_preview: item.last_message_preview,
-                                        })
-                                      ) {
-                                        return null;
+                              <div className="project-tree">
+                                {PROJECT_PLACEHOLDER_CATEGORIES.map((category) => (
+                                  <div key={category.label} className="project-tree-category">
+                                    <div className="project-tree-category-header">
+                                      <button
+                                        type="button"
+                                        className="project-tree-category-label"
+                                        aria-expanded={!collapsedCategories[category.key]}
+                                        onClick={() =>
+                                          toggleProjectCategory(project.project_id, category.key)
+                                        }
+                                      >
+                                        <span
+                                          className="project-tree-category-chevron"
+                                          aria-hidden="true"
+                                        />
+                                        <MaskedAssetIcon
+                                          asset={category.asset}
+                                          className="project-tree-category-icon"
+                                        />
+                                        <span>{category.label}</span>
+                                      </button>
+                                      {category.showCount ? (
+                                        <div className="project-tree-category-actions">
+                                          <em className="project-tree-category-count">0</em>
+                                        </div>
+                                      ) : null}
+                                    </div>
+                                    {!collapsedCategories[category.key] ? (
+                                      <div className="project-tree-empty">Empty</div>
+                                    ) : null}
+                                  </div>
+                                ))}
+                                <div className="project-tree-category">
+                                  <div className="project-tree-category-header">
+                                    <button
+                                      type="button"
+                                      className="project-tree-category-label"
+                                      aria-expanded={!collapsedCategories.sessions}
+                                      onClick={() =>
+                                        toggleProjectCategory(project.project_id, "sessions")
                                       }
-                                      const title = displayThreadTitle(item.title);
-                                      return (
-                                        <div
-                                          key={item.item_id}
-                                          role="button"
-                                          tabIndex={0}
-                                          className={`thread-card${activeThreadId === item.thread_id ? " active" : ""}`}
-                                          title={title}
-                                          onClick={() =>
-                                            void handleThreadSelection(item.thread_id ?? "")
-                                          }
-                                          onKeyDown={(event) => {
-                                            if (event.key === "Enter" || event.key === " ") {
-                                              event.preventDefault();
-                                              void handleThreadSelection(item.thread_id ?? "");
+                                    >
+                                      <span
+                                        className="project-tree-category-chevron"
+                                        aria-hidden="true"
+                                      />
+                                      <MaskedAssetIcon
+                                        asset="sessions.svg"
+                                        className="project-tree-category-icon"
+                                      />
+                                      <span>Sessions</span>
+                                    </button>
+                                    <div className="project-tree-category-actions">
+                                      <button
+                                        type="button"
+                                        className="sidebar-icon-button project-action-button"
+                                        aria-label={`Start chat in ${project.name}`}
+                                        onClick={() =>
+                                          void handleProjectStartChat(project.project_id)
+                                        }
+                                      >
+                                        <AppIcon
+                                          src={staticAssetPath("edit.svg")}
+                                          className="project-action-icon"
+                                        />
+                                      </button>
+                                    </div>
+                                  </div>
+                                  {!collapsedCategories.sessions && sessionItems.length > 0 ? (
+                                    <div className="thread-list project-thread-list project-category-list">
+                                      {sessionItems.map((item) => {
+                                        const title = displayThreadTitle(item.title);
+                                        return (
+                                          <div
+                                            key={item.item_id}
+                                            role="button"
+                                            tabIndex={0}
+                                            className={`thread-card${activeThreadId === item.thread_id ? " active" : ""}`}
+                                            title={title}
+                                            onClick={() =>
+                                              void handleThreadSelection(item.thread_id ?? "")
                                             }
-                                          }}
-                                        >
-                                          <div className="thread-card-copy">
-                                            <strong className="thread-card-title">{title}</strong>
-                                          </div>
-                                          <span className="thread-card-age">
-                                            {formatThreadAge(item.updated_at)}
-                                          </span>
-                                          <button
-                                            type="button"
-                                            className="thread-card-delete"
-                                            aria-label={`Delete ${title}`}
-                                            onClick={(event) => {
-                                              event.stopPropagation();
-                                              openDeleteThreadModal(
-                                                project.project_id,
-                                                item.thread_id ?? "",
-                                                title,
-                                              );
+                                            onKeyDown={(event) => {
+                                              if (event.key === "Enter" || event.key === " ") {
+                                                event.preventDefault();
+                                                void handleThreadSelection(item.thread_id ?? "");
+                                              }
                                             }}
                                           >
-                                            <AppIcon
-                                              src={staticAssetPath("delete-session.svg")}
-                                              className="thread-card-delete-icon"
-                                            />
-                                          </button>
-                                        </div>
-                                      );
-                                    }
-                                    const title = displayPythonFilename(
-                                      item.filename || item.title,
-                                    );
-                                    return (
-                                      <div
-                                        key={item.item_id}
-                                        role="button"
-                                        tabIndex={0}
-                                        className={`thread-card python-file-card${activePythonFileId === item.file_id ? " active" : ""}`}
-                                        title={title}
-                                        onClick={() =>
-                                          void handlePythonFileSelection(item.file_id ?? "")
-                                        }
-                                        onKeyDown={(event) => {
-                                          if (event.key === "Enter" || event.key === " ") {
-                                            event.preventDefault();
-                                            void handlePythonFileSelection(item.file_id ?? "");
-                                          }
-                                        }}
-                                      >
-                                        <div className="thread-card-copy python-file-card-copy">
-                                          <AppIcon
-                                            src={staticAssetPath(
-                                              item.file_kind === "notebook"
-                                                ? "note.svg"
-                                                : "python.svg",
-                                            )}
-                                            className="python-file-card-icon"
-                                          />
-                                          <strong className="thread-card-title">{title}</strong>
-                                        </div>
-                                        <span className="thread-card-age">
-                                          {formatThreadAge(item.updated_at)}
-                                        </span>
-                                        <button
-                                          type="button"
-                                          className="thread-card-delete thread-card-rename"
-                                          aria-label={`Rename ${title}`}
-                                          onClick={(event) => {
-                                            event.stopPropagation();
-                                            void handleRenamePythonFile(item.file_id ?? "");
-                                          }}
-                                        >
-                                          <AppIcon
-                                            src={staticAssetPath("edit.svg")}
-                                            className="thread-card-delete-icon"
-                                          />
-                                        </button>
-                                      </div>
-                                    );
-                                  })}
+                                            <div className="thread-card-copy">
+                                              <strong className="thread-card-title">{title}</strong>
+                                            </div>
+                                            <span className="thread-card-age">
+                                              {formatThreadAge(item.updated_at)}
+                                            </span>
+                                            <button
+                                              type="button"
+                                              className="thread-card-delete"
+                                              aria-label={`Delete ${title}`}
+                                              onClick={(event) => {
+                                                event.stopPropagation();
+                                                openDeleteThreadModal(
+                                                  project.project_id,
+                                                  item.thread_id ?? "",
+                                                  title,
+                                                );
+                                              }}
+                                            >
+                                              <AppIcon
+                                                src={staticAssetPath("delete-session.svg")}
+                                                className="thread-card-delete-icon"
+                                              />
+                                            </button>
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  ) : !collapsedCategories.sessions ? (
+                                    <div className="project-tree-empty">No sessions yet.</div>
+                                  ) : null}
+                                  {!collapsedCategories.sessions && sessionsHasMore ? (
+                                    <button
+                                      type="button"
+                                      className="project-show-more"
+                                      disabled={sessionsLoadingMore}
+                                      onClick={() =>
+                                        void handleLoadMoreItems(project.project_id, "thread")
+                                      }
+                                    >
+                                      {sessionsLoadingMore ? "Loading..." : "Show more"}
+                                    </button>
+                                  ) : null}
                                 </div>
-                              ) : (
-                                <div className="project-session-state">No items yet.</div>
-                              )}
-                              {itemState.hasMore ? (
+                                <div className="project-tree-category">
+                                  <div className="project-tree-category-header">
+                                    <button
+                                      type="button"
+                                      className="project-tree-category-label"
+                                      aria-expanded={!collapsedCategories.code}
+                                      onClick={() =>
+                                        toggleProjectCategory(project.project_id, "code")
+                                      }
+                                    >
+                                      <span
+                                        className="project-tree-category-chevron"
+                                        aria-hidden="true"
+                                      />
+                                      <MaskedAssetIcon
+                                        asset="code.svg"
+                                        className="project-tree-category-icon"
+                                      />
+                                      <span>Code</span>
+                                    </button>
+                                    <div className="project-tree-category-actions">
+                                      {project.github_repo_url ? (
+                                        <a
+                                          href={project.github_repo_url}
+                                          target="_blank"
+                                          rel="noreferrer"
+                                          className="project-tree-repo-link"
+                                          aria-label={`Open GitHub repository for ${project.name}`}
+                                          title="Open GitHub repository"
+                                          onClick={(event) => event.stopPropagation()}
+                                        >
+                                          <MaskedAssetIcon
+                                            asset="git.svg"
+                                            className="project-tree-repo-icon"
+                                          />
+                                        </a>
+                                      ) : null}
+                                    </div>
+                                  </div>
+                                  {!collapsedCategories.code && codeItems.length > 0 ? (
+                                    <div className="thread-list project-thread-list project-category-list">
+                                      {codeItems.map((item) => {
+                                        const title = displayPythonFilename(
+                                          item.filename || item.title,
+                                        );
+                                        return (
+                                          <div
+                                            key={item.item_id}
+                                            role="button"
+                                            tabIndex={0}
+                                            className={`thread-card python-file-card${activePythonFileId === item.file_id ? " active" : ""}`}
+                                            title={title}
+                                            onClick={() =>
+                                              void handlePythonFileSelection(item.file_id ?? "")
+                                            }
+                                            onKeyDown={(event) => {
+                                              if (event.key === "Enter" || event.key === " ") {
+                                                event.preventDefault();
+                                                void handlePythonFileSelection(item.file_id ?? "");
+                                              }
+                                            }}
+                                          >
+                                            <div className="thread-card-copy python-file-card-copy">
+                                              <AppIcon
+                                                src={staticAssetPath(
+                                                  item.file_kind === "notebook"
+                                                    ? "note.svg"
+                                                    : "python.svg",
+                                                )}
+                                                className="python-file-card-icon"
+                                              />
+                                              <strong className="thread-card-title">{title}</strong>
+                                            </div>
+                                            <span className="thread-card-age">
+                                              {formatThreadAge(item.updated_at)}
+                                            </span>
+                                            <button
+                                              type="button"
+                                              className="thread-card-delete thread-card-rename"
+                                              aria-label={`Rename ${title}`}
+                                              onClick={(event) => {
+                                                event.stopPropagation();
+                                                void handleRenamePythonFile(item.file_id ?? "");
+                                              }}
+                                            >
+                                              <AppIcon
+                                                src={staticAssetPath("edit.svg")}
+                                                className="thread-card-delete-icon"
+                                              />
+                                            </button>
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  ) : !collapsedCategories.code ? (
+                                    <div className="project-tree-empty">No code files yet.</div>
+                                  ) : null}
+                                  {!collapsedCategories.code && codeHasMore ? (
+                                    <button
+                                      type="button"
+                                      className="project-show-more"
+                                      disabled={codeLoadingMore}
+                                      onClick={() =>
+                                        void handleLoadMoreItems(project.project_id, "python_file")
+                                      }
+                                    >
+                                      {codeLoadingMore ? "Loading..." : "Show more"}
+                                    </button>
+                                  ) : null}
+                                </div>
                                 <button
                                   type="button"
-                                  className="project-show-more"
-                                  disabled={itemState.loadingMore}
-                                  onClick={() => void handleLoadMoreItems(project.project_id)}
+                                  className={`project-tree-home${activeProjectHomeId === project.project_id ? " active" : ""}`}
+                                  onClick={() => openProjectHome(project.project_id)}
                                 >
-                                  {itemState.loadingMore ? "Loading…" : "Show more"}
+                                  <MaskedAssetIcon
+                                    asset="home.svg"
+                                    className="project-tree-category-icon"
+                                  />
+                                  <span>Home</span>
                                 </button>
-                              ) : null}
+                              </div>
                             </>
                           ) : null}
                         </div>
@@ -4039,8 +4443,10 @@ export default function App() {
                             event.preventDefault();
                             if (tab.kind === "thread") {
                               void handleThreadSelection(tab.id);
-                            } else {
+                            } else if (tab.kind === "python_file") {
                               void handlePythonFileSelection(tab.id);
+                            } else {
+                              openProjectHome(tab.id);
                             }
                           }
                         }}
@@ -4052,8 +4458,10 @@ export default function App() {
                           onClick={() => {
                             if (tab.kind === "thread") {
                               void handleThreadSelection(tab.id);
-                            } else {
+                            } else if (tab.kind === "python_file") {
                               void handlePythonFileSelection(tab.id);
+                            } else {
+                              openProjectHome(tab.id);
                             }
                           }}
                         >
@@ -4082,7 +4490,48 @@ export default function App() {
               className={`chat-message-list${isChatEmpty ? " empty" : ""}${activeTab?.kind === "python_file" ? " python-file-view" : ""}`}
               onScroll={handleMessageListScroll}
             >
-              {activeTab?.kind === "python_file" ? (
+              {activeTab?.kind === "project_home" ? (
+                activeProjectHome ? (
+                  <div className="project-home-page">
+                    <div className="project-home-header">
+                      <span>Project Home</span>
+                      <h1>{activeProjectHome.name}</h1>
+                      <p>
+                        {activeProjectHome.description || "No project summary has been added yet."}
+                      </p>
+                    </div>
+                    <div className="project-home-grid">
+                      <div className="project-home-stat">
+                        <span>Code</span>
+                        <strong>{activeProjectHomeCodeCount}</strong>
+                      </div>
+                      <div className="project-home-stat">
+                        <span>Sessions</span>
+                        <strong>{activeProjectHomeSessionCount}</strong>
+                      </div>
+                      <div className="project-home-stat">
+                        <span>Notes</span>
+                        <strong>0</strong>
+                      </div>
+                      <div className="project-home-stat">
+                        <span>Data</span>
+                        <strong>0</strong>
+                      </div>
+                      <div className="project-home-stat">
+                        <span>Experiments</span>
+                        <strong>0</strong>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="project-home-page">
+                    <div className="project-home-header">
+                      <span>Project Home</span>
+                      <h1>Project not found</h1>
+                    </div>
+                  </div>
+                )
+              ) : activeTab?.kind === "python_file" ? (
                 activePythonFile ? (
                   <div className="python-file-stage">
                     <div className="python-editor-shell">
