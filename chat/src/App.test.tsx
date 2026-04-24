@@ -514,6 +514,15 @@ describe("App", () => {
     await waitFor(() => {
       expect(screen.getByText("Recovered thread")).toBeTruthy();
     });
+    expect(screen.getByText("Home")).toBeTruthy();
+    expect(screen.getByText("Code")).toBeTruthy();
+    expect(screen.getByText("Sessions")).toBeTruthy();
+    expect(screen.getByText("Notes")).toBeTruthy();
+    expect(screen.getByText("Data")).toBeTruthy();
+    expect(screen.getByText("Experiments")).toBeTruthy();
+
+    fireEvent.click(screen.getByText("Home"));
+    expect(await screen.findByText("Project Home")).toBeTruthy();
   });
 
   it("creates a project from the sidebar modal", async () => {

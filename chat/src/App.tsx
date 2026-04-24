@@ -74,7 +74,10 @@ type PaperDrawerContent =
   | { kind: "markdown"; path: string; file: FileContentResponse }
   | { kind: "figure"; path: string; figure: FigureResponse }
   | { kind: "table"; path: string; table: TableResponse };
-type OpenTab = { kind: "thread"; id: string } | { kind: "python_file"; id: string };
+type OpenTab =
+  | { kind: "thread"; id: string }
+  | { kind: "python_file"; id: string }
+  | { kind: "project_home"; id: string };
 type ProjectItemState = {
   items: ProjectItemSummary[];
   totalCount: number;
@@ -418,7 +421,9 @@ function restoreTabs() {
         typeof value === "object" &&
         "kind" in value &&
         "id" in value &&
-        (value.kind === "thread" || value.kind === "python_file") &&
+        (value.kind === "thread" ||
+          value.kind === "python_file" ||
+          value.kind === "project_home") &&
         typeof value.id === "string"
       ) {
         restored.push({ kind: value.kind, id: value.id });
@@ -937,8 +942,12 @@ export default function App() {
   const authenticated = Boolean(session?.authenticated);
   const activeThreadId = activeTab?.kind === "thread" ? activeTab.id : null;
   const activePythonFileId = activeTab?.kind === "python_file" ? activeTab.id : null;
+  const activeProjectHomeId = activeTab?.kind === "project_home" ? activeTab.id : null;
   const activeThread = activeThreadId ? (threadMap[activeThreadId] ?? null) : null;
   const activePythonFile = activePythonFileId ? (pythonFileMap[activePythonFileId] ?? null) : null;
+  const activeProjectHome = activeProjectHomeId
+    ? (projects.find((project) => project.project_id === activeProjectHomeId) ?? null)
+    : null;
   const activePythonDraft = activePythonFileId
     ? (pythonFileDrafts[activePythonFileId] ?? null)
     : null;
@@ -946,6 +955,15 @@ export default function App() {
     ? (pythonFileRuns[activePythonFileId] ?? { running: false, result: null, error: "" })
     : { running: false, result: null, error: "" };
   const activePythonContent = activePythonDraft?.content ?? activePythonFile?.content ?? "";
+  const activeProjectHomeItems = activeProjectHomeId
+    ? (projectItems[activeProjectHomeId]?.items ?? [])
+    : [];
+  const activeProjectHomeCodeCount = activeProjectHomeItems.filter(
+    (item) => item.item_kind === "python_file",
+  ).length;
+  const activeProjectHomeSessionCount = activeProjectHomeItems.filter(
+    (item) => item.item_kind === "thread",
+  ).length;
   const selectedSyncConflict = syncConflictState
     ? (syncConflictState.conflicts.find(
         (conflict) => conflict.path === syncConflictState.selectedPath,
@@ -993,6 +1011,17 @@ export default function App() {
             tabTitle: truncateTabTitle(title),
           };
         }
+        if (tab.kind === "project_home") {
+          const project = projects.find((item) => item.project_id === tab.id);
+          const title = project ? `${project.name} Home` : "Project Home";
+          return {
+            key: `project_home:${tab.id}`,
+            kind: tab.kind,
+            id: tab.id,
+            title,
+            tabTitle: truncateTabTitle(title),
+          };
+        }
         const loadedFile = pythonFileMap[tab.id];
         const title = displayPythonFilename(loadedFile?.filename ?? "something.py");
         return {
@@ -1003,7 +1032,7 @@ export default function App() {
           tabTitle: truncateTabTitle(title),
         };
       }),
-    [openTabs, pythonFileMap, threadMap],
+    [openTabs, projects, pythonFileMap, threadMap],
   );
   const hasOpenTabs = openTabItems.length > 0;
   const tabStripStyle = useMemo(
@@ -1695,6 +1724,15 @@ export default function App() {
     [fetchAndStorePythonFile],
   );
 
+  const openProjectHome = useCallback((projectId: string) => {
+    if (!projectsRef.current.some((project) => project.project_id === projectId)) {
+      return;
+    }
+    setOpenTabs((current) => appendOpenTab(current, { kind: "project_home", id: projectId }));
+    setActiveTab({ kind: "project_home", id: projectId });
+    setSelectedProjectId(projectId);
+  }, []);
+
   const createNewThread = useCallback(
     async (title = "", explicitProjectId?: string) => {
       const projectId =
@@ -2109,8 +2147,10 @@ export default function App() {
       try {
         if (tab.kind === "thread") {
           await fetchAndStoreThread(tab.id);
-        } else {
+        } else if (tab.kind === "python_file") {
           await fetchAndStorePythonFile(tab.id);
+        } else if (!loadedProjects.some((project) => project.project_id === tab.id)) {
+          continue;
         }
         validRestoredTabs.push(tab);
       } catch (error) {
@@ -3300,6 +3340,23 @@ export default function App() {
                 {projects.map((project) => {
                   const expanded = expandedProjectIds.includes(project.project_id);
                   const itemState = projectItems[project.project_id];
+                  const visibleProjectItems = itemState?.items ?? [];
+                  const codeItems = visibleProjectItems.filter(
+                    (item) => item.item_kind === "python_file",
+                  );
+                  const sessionItems = visibleProjectItems.filter((item) => {
+                    if (item.item_kind !== "thread") {
+                      return false;
+                    }
+                    return shouldShowThreadInSidebar({
+                      thread_id: item.thread_id ?? "",
+                      project_id: item.project_id,
+                      title: item.title,
+                      created_at: item.created_at,
+                      updated_at: item.updated_at,
+                      last_message_preview: item.last_message_preview,
+                    });
+                  });
                   return (
                     <div
                       key={project.project_id}
@@ -3408,118 +3465,142 @@ export default function App() {
                           ) : null}
                           {itemState?.loaded ? (
                             <>
-                              {itemState.items.length > 0 ? (
-                                <div className="thread-list project-thread-list">
-                                  {itemState.items.map((item) => {
-                                    if (item.item_kind === "thread") {
-                                      if (
-                                        !shouldShowThreadInSidebar({
-                                          thread_id: item.thread_id ?? "",
-                                          project_id: item.project_id,
-                                          title: item.title,
-                                          created_at: item.created_at,
-                                          updated_at: item.updated_at,
-                                          last_message_preview: item.last_message_preview,
-                                        })
-                                      ) {
-                                        return null;
-                                      }
-                                      const title = displayThreadTitle(item.title);
-                                      return (
-                                        <div
-                                          key={item.item_id}
-                                          role="button"
-                                          tabIndex={0}
-                                          className={`thread-card${activeThreadId === item.thread_id ? " active" : ""}`}
-                                          title={title}
-                                          onClick={() =>
-                                            void handleThreadSelection(item.thread_id ?? "")
-                                          }
-                                          onKeyDown={(event) => {
-                                            if (event.key === "Enter" || event.key === " ") {
-                                              event.preventDefault();
-                                              void handleThreadSelection(item.thread_id ?? "");
+                              <div className="project-tree">
+                                <div className="project-tree-category">
+                                  <div className="project-tree-category-label">
+                                    <span>Code</span>
+                                    <em>{codeItems.length}</em>
+                                  </div>
+                                  {codeItems.length > 0 ? (
+                                    <div className="thread-list project-thread-list project-category-list">
+                                      {codeItems.map((item) => {
+                                        const title = displayPythonFilename(
+                                          item.filename || item.title,
+                                        );
+                                        return (
+                                          <div
+                                            key={item.item_id}
+                                            role="button"
+                                            tabIndex={0}
+                                            className={`thread-card python-file-card${activePythonFileId === item.file_id ? " active" : ""}`}
+                                            title={title}
+                                            onClick={() =>
+                                              void handlePythonFileSelection(item.file_id ?? "")
                                             }
-                                          }}
-                                        >
-                                          <div className="thread-card-copy">
-                                            <strong className="thread-card-title">{title}</strong>
-                                          </div>
-                                          <span className="thread-card-age">
-                                            {formatThreadAge(item.updated_at)}
-                                          </span>
-                                          <button
-                                            type="button"
-                                            className="thread-card-delete"
-                                            aria-label={`Delete ${title}`}
-                                            onClick={(event) => {
-                                              event.stopPropagation();
-                                              openDeleteThreadModal(
-                                                project.project_id,
-                                                item.thread_id ?? "",
-                                                title,
-                                              );
+                                            onKeyDown={(event) => {
+                                              if (event.key === "Enter" || event.key === " ") {
+                                                event.preventDefault();
+                                                void handlePythonFileSelection(item.file_id ?? "");
+                                              }
                                             }}
                                           >
-                                            <AppIcon
-                                              src={staticAssetPath("delete-session.svg")}
-                                              className="thread-card-delete-icon"
-                                            />
-                                          </button>
-                                        </div>
-                                      );
-                                    }
-                                    const title = displayPythonFilename(
-                                      item.filename || item.title,
-                                    );
-                                    return (
-                                      <div
-                                        key={item.item_id}
-                                        role="button"
-                                        tabIndex={0}
-                                        className={`thread-card python-file-card${activePythonFileId === item.file_id ? " active" : ""}`}
-                                        title={title}
-                                        onClick={() =>
-                                          void handlePythonFileSelection(item.file_id ?? "")
-                                        }
-                                        onKeyDown={(event) => {
-                                          if (event.key === "Enter" || event.key === " ") {
-                                            event.preventDefault();
-                                            void handlePythonFileSelection(item.file_id ?? "");
-                                          }
-                                        }}
-                                      >
-                                        <div className="thread-card-copy python-file-card-copy">
-                                          <AppIcon
-                                            src={staticAssetPath("python.svg")}
-                                            className="python-file-card-icon"
-                                          />
-                                          <strong className="thread-card-title">{title}</strong>
-                                        </div>
-                                        <span className="thread-card-age">
-                                          {formatThreadAge(item.updated_at)}
-                                        </span>
-                                        <button
-                                          type="button"
-                                          className="thread-card-delete thread-card-rename"
-                                          aria-label={`Rename ${title}`}
-                                          onClick={(event) => {
-                                            event.stopPropagation();
-                                            void handleRenamePythonFile(item.file_id ?? "");
-                                          }}
-                                        >
-                                          <AppIcon
-                                            src={staticAssetPath("edit.svg")}
-                                            className="thread-card-delete-icon"
-                                          />
-                                        </button>
-                                      </div>
-                                    );
-                                  })}
+                                            <div className="thread-card-copy python-file-card-copy">
+                                              <AppIcon
+                                                src={staticAssetPath("python.svg")}
+                                                className="python-file-card-icon"
+                                              />
+                                              <strong className="thread-card-title">{title}</strong>
+                                            </div>
+                                            <span className="thread-card-age">
+                                              {formatThreadAge(item.updated_at)}
+                                            </span>
+                                            <button
+                                              type="button"
+                                              className="thread-card-delete thread-card-rename"
+                                              aria-label={`Rename ${title}`}
+                                              onClick={(event) => {
+                                                event.stopPropagation();
+                                                void handleRenamePythonFile(item.file_id ?? "");
+                                              }}
+                                            >
+                                              <AppIcon
+                                                src={staticAssetPath("edit.svg")}
+                                                className="thread-card-delete-icon"
+                                              />
+                                            </button>
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  ) : (
+                                    <div className="project-tree-empty">No code files yet.</div>
+                                  )}
                                 </div>
-                              ) : (
-                                <div className="project-session-state">No items yet.</div>
-                              )}
+                                <div className="project-tree-category">
+                                  <div className="project-tree-category-label">
+                                    <span>Sessions</span>
+                                    <em>{sessionItems.length}</em>
+                                  </div>
+                                  {sessionItems.length > 0 ? (
+                                    <div className="thread-list project-thread-list project-category-list">
+                                      {sessionItems.map((item) => {
+                                        const title = displayThreadTitle(item.title);
+                                        return (
+                                          <div
+                                            key={item.item_id}
+                                            role="button"
+                                            tabIndex={0}
+                                            className={`thread-card${activeThreadId === item.thread_id ? " active" : ""}`}
+                                            title={title}
+                                            onClick={() =>
+                                              void handleThreadSelection(item.thread_id ?? "")
+                                            }
+                                            onKeyDown={(event) => {
+                                              if (event.key === "Enter" || event.key === " ") {
+                                                event.preventDefault();
+                                                void handleThreadSelection(item.thread_id ?? "");
+                                              }
+                                            }}
+                                          >
+                                            <div className="thread-card-copy">
+                                              <strong className="thread-card-title">{title}</strong>
+                                            </div>
+                                            <span className="thread-card-age">
+                                              {formatThreadAge(item.updated_at)}
+                                            </span>
+                                            <button
+                                              type="button"
+                                              className="thread-card-delete"
+                                              aria-label={`Delete ${title}`}
+                                              onClick={(event) => {
+                                                event.stopPropagation();
+                                                openDeleteThreadModal(
+                                                  project.project_id,
+                                                  item.thread_id ?? "",
+                                                  title,
+                                                );
+                                              }}
+                                            >
+                                              <AppIcon
+                                                src={staticAssetPath("delete-session.svg")}
+                                                className="thread-card-delete-icon"
+                                              />
+                                            </button>
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  ) : (
+                                    <div className="project-tree-empty">No sessions yet.</div>
+                                  )}
+                                </div>
+                                {["Notes", "Data", "Experiments"].map((category) => (
+                                  <div key={category} className="project-tree-category">
+                                    <div className="project-tree-category-label">
+                                      <span>{category}</span>
+                                      <em>0</em>
+                                    </div>
+                                    <div className="project-tree-empty">Empty</div>
+                                  </div>
+                                ))}
+                                <button
+                                  type="button"
+                                  className={`project-tree-home${activeProjectHomeId === project.project_id ? " active" : ""}`}
+                                  onClick={() => openProjectHome(project.project_id)}
+                                >
+                                  Home
+                                </button>
+                              </div>
                               {itemState.hasMore ? (
                                 <button
                                   type="button"
@@ -3638,8 +3719,10 @@ export default function App() {
                             event.preventDefault();
                             if (tab.kind === "thread") {
                               void handleThreadSelection(tab.id);
-                            } else {
+                            } else if (tab.kind === "python_file") {
                               void handlePythonFileSelection(tab.id);
+                            } else {
+                              openProjectHome(tab.id);
                             }
                           }
                         }}
@@ -3651,8 +3734,10 @@ export default function App() {
                           onClick={() => {
                             if (tab.kind === "thread") {
                               void handleThreadSelection(tab.id);
-                            } else {
+                            } else if (tab.kind === "python_file") {
                               void handlePythonFileSelection(tab.id);
+                            } else {
+                              openProjectHome(tab.id);
                             }
                           }}
                         >
@@ -3681,7 +3766,48 @@ export default function App() {
               className={`chat-message-list${isChatEmpty ? " empty" : ""}${activeTab?.kind === "python_file" ? " python-file-view" : ""}`}
               onScroll={handleMessageListScroll}
             >
-              {activeTab?.kind === "python_file" ? (
+              {activeTab?.kind === "project_home" ? (
+                activeProjectHome ? (
+                  <div className="project-home-page">
+                    <div className="project-home-header">
+                      <span>Project Home</span>
+                      <h1>{activeProjectHome.name}</h1>
+                      <p>
+                        {activeProjectHome.description || "No project summary has been added yet."}
+                      </p>
+                    </div>
+                    <div className="project-home-grid">
+                      <div className="project-home-stat">
+                        <span>Code</span>
+                        <strong>{activeProjectHomeCodeCount}</strong>
+                      </div>
+                      <div className="project-home-stat">
+                        <span>Sessions</span>
+                        <strong>{activeProjectHomeSessionCount}</strong>
+                      </div>
+                      <div className="project-home-stat">
+                        <span>Notes</span>
+                        <strong>0</strong>
+                      </div>
+                      <div className="project-home-stat">
+                        <span>Data</span>
+                        <strong>0</strong>
+                      </div>
+                      <div className="project-home-stat">
+                        <span>Experiments</span>
+                        <strong>0</strong>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="project-home-page">
+                    <div className="project-home-header">
+                      <span>Project Home</span>
+                      <h1>Project not found</h1>
+                    </div>
+                  </div>
+                )
+              ) : activeTab?.kind === "python_file" ? (
                 activePythonFile ? (
                   <div className="python-file-stage">
                     <div className="python-editor-shell">
