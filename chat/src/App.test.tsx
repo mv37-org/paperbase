@@ -717,6 +717,20 @@ describe("App", () => {
     expect(await screen.findByText("Session 6")).toBeTruthy();
   });
 
+  it("cache-busts public icon asset urls", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Open settings")).toBeTruthy();
+    });
+
+    const settingsButton = screen.getByLabelText("Open settings");
+    const settingsIcon = settingsButton.querySelector("img");
+    expect(settingsIcon?.getAttribute("src")).toMatch(/\/settings\.svg\?v=pb-/);
+  });
+
   it("creates a project from the sidebar modal", async () => {
     apiMocks.loadSession.mockResolvedValue(
       authenticatedSession({ settings: { has_github_connection: true, github_login: "octocat" } }),

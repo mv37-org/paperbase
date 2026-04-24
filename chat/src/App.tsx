@@ -251,6 +251,7 @@ const PROJECT_SIDEBAR_CATEGORY_KEYS: ProjectSidebarCategoryKey[] = [
   "sessions",
   "code",
 ];
+const PUBLIC_ASSET_CACHE_KEY = `pb-${Date.now().toString(36)}`;
 const buildProjectCategoryCollapseState = (collapsed: boolean) =>
   Object.fromEntries(PROJECT_SIDEBAR_CATEGORY_KEYS.map((key) => [key, collapsed])) as Partial<
     Record<ProjectSidebarCategoryKey, boolean>
@@ -353,7 +354,8 @@ const THINKING_WORDS = [
 ];
 
 function staticAssetPath(name: string) {
-  return `${import.meta.env.BASE_URL}${name.replace(/^\/+/, "")}`;
+  const path = `${import.meta.env.BASE_URL}${name.replace(/^\/+/, "")}`;
+  return `${path}${path.includes("?") ? "&" : "?"}v=${PUBLIC_ASSET_CACHE_KEY}`;
 }
 
 function pythonRepoPathForFile(file: Pick<PythonFileResponse, "filename" | "repo_path">) {
