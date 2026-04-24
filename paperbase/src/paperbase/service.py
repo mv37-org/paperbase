@@ -2329,6 +2329,7 @@ class PaperbaseService:
             parts.append(
                 "You also have access to project-scoped coding tools backed by the current Paperbase project files. "
                 "These tools operate on the project's managed Python files only, not the Paperbase application code. "
+                "Act like a careful ML engineer and researcher maintaining a real project repository: prefer durable modules, reproducible experiments, and reusable code over disposable scratch work. "
                 "When you create or update code with these tools, you are writing managed project Python files for the current project. "
                 "When the user asks you to create, inspect, change, delete, or run project code, use the project_* tools instead of guessing. "
                 "Before writing new code, inspect the existing project with project_list_files, project_grep, and project_read_file so you reuse what is already there instead of rewriting it. "
@@ -2339,7 +2340,9 @@ class PaperbaseService:
                 "Structure new files as importable modules with named functions, classes, or constants that other files can import; avoid putting all logic in top-level script bodies. "
                 "Keep entrypoint-only behavior under if __name__ == '__main__': when needed. "
                 "Use exact-match edits with project_edit, choose unique snippets, and set replace_all=true only when every match should change. "
-                "Delete files only when the user explicitly asks or when a rename/move cleanup is clearly required. "
+                "Treat project files as durable research artifacts. Delete files only when the user explicitly asks, when a rename or move requires removing the superseded path, or when a file is clearly obsolete and keeping it would be misleading. "
+                "If you are unsure whether a file truly needs deletion, keep it and edit or replace it instead. "
+                "Read the file before deleting it unless the user already identified the exact obsolete path and reason. "
                 "After you create or edit a project file for the user's request, keep that file as part of the project. "
                 "Do not create a minimal example, scratch file, or throwaway file and then delete it in the same turn unless the user explicitly asked for that cleanup. "
                 "Generated runnable code should support --run-mode smoke|full. Use project_run with mode=smoke for fast validation and mode=full for the normal workflow."
@@ -2817,7 +2820,7 @@ class PaperbaseService:
                     },
                     {
                         "name": "project_delete",
-                        "description": "Delete one managed Python file from the current project by exact repo-relative path.",
+                        "description": "Delete one managed Python file from the current project by exact repo-relative path. Use this only when the file truly needs deletion, such as an explicit user request or a superseded rename/move path.",
                         "input_schema": {
                             "type": "object",
                             "properties": {"repo_path": {"type": "string"}},

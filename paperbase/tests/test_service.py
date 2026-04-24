@@ -1763,6 +1763,7 @@ def test_project_chat_tools_are_advertised_for_coding_turns(browser_service):
     }.issubset(tool_names)
     assert "created earlier in this chat" in tools_by_name["project_list_files"]["description"]
     assert "appear in later project_list_files results" in tools_by_name["project_touch"]["description"]
+    assert "truly needs deletion" in tools_by_name["project_delete"]["description"]
 
     prompt = service._chat_tool_system_prompt(
         thread,
@@ -1772,6 +1773,9 @@ def test_project_chat_tools_are_advertised_for_coding_turns(browser_service):
     assert "writing managed project Python files" in prompt
     assert "appear in later project_list_files results" in prompt
     assert "do not stop tool use until the relevant managed project Python files have actually been created or updated" in prompt
+    assert "Act like a careful ML engineer and researcher maintaining a real project repository" in prompt
+    assert "Treat project files as durable research artifacts" in prompt
+    assert "If you are unsure whether a file truly needs deletion, keep it and edit or replace it instead" in prompt
     assert "Do not create a minimal example, scratch file, or throwaway file and then delete it in the same turn" in prompt
 
 
