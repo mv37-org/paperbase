@@ -1750,6 +1750,7 @@ def test_project_chat_tools_are_advertised_for_coding_turns(browser_service):
         thread=thread,
     )
     tool_names = {tool["name"] for tool in tools}
+    tools_by_name = {tool["name"]: tool for tool in tools}
 
     assert {
         "project_list_files",
@@ -1760,6 +1761,16 @@ def test_project_chat_tools_are_advertised_for_coding_turns(browser_service):
         "project_delete",
         "project_run",
     }.issubset(tool_names)
+    assert "created earlier in this chat" in tools_by_name["project_list_files"]["description"]
+    assert "appear in later project_list_files results" in tools_by_name["project_touch"]["description"]
+
+    prompt = service._chat_tool_system_prompt(
+        thread,
+        include_research_tools=False,
+        include_project_code_tools=True,
+    )
+    assert "writing managed project Python files" in prompt
+    assert "appear in later project_list_files results" in prompt
 
 
 def test_python_file_sync_project_repo_writes_metadata_and_files():

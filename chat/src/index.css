@@ -2109,12 +2109,12 @@ textarea::placeholder,
 .code-snippet-shell {
   width: min(100%, 100%);
   display: grid;
-  gap: 8px;
-  padding: 10px 12px 12px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 12px;
-  background: #0b0d10;
-  box-shadow: 0 18px 36px rgba(0, 0, 0, 0.22);
+  gap: 6px;
+  padding: 8px 10px 10px;
+  border: 1px solid rgba(151, 164, 184, 0.28);
+  border-radius: 4px;
+  background: #f7f9fc;
+  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.06);
 }
 
 .code-snippet-shell.preview {
@@ -2144,23 +2144,42 @@ textarea::placeholder,
   line-height: 1.2;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: rgba(232, 238, 247, 0.92);
+  color: rgba(31, 41, 55, 0.92);
 }
 
 .code-snippet-meta {
   font-size: 11px;
   line-height: 1.2;
-  color: rgba(180, 193, 208, 0.72);
+  color: rgba(71, 85, 105, 0.78);
 }
 
 .code-snippet-toggle {
+  width: 20px;
+  height: 20px;
   padding: 0;
-  border: 0;
-  background: transparent;
-  color: #8cc8ff;
-  font-size: 11px;
+  border: 1px solid rgba(151, 164, 184, 0.32);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.8);
+  color: #475569;
   line-height: 1.2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   cursor: pointer;
+}
+
+.code-snippet-toggle-icon {
+  width: 14px;
+  height: 14px;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  fill: none;
+  transform: rotate(0deg);
+  transition: transform 140ms ease;
+}
+
+.code-snippet-toggle-icon.collapsed {
+  transform: rotate(180deg);
 }
 
 .code-snippet-body {
@@ -2171,8 +2190,8 @@ textarea::placeholder,
   font-family:
     ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New",
     monospace;
-  font-size: 12px;
-  line-height: 1.6;
+  font-size: 11.5px;
+  line-height: 1.55;
 }
 
 .code-snippet-line {
@@ -2185,34 +2204,34 @@ textarea::placeholder,
   padding-right: 10px;
   text-align: right;
   user-select: none;
-  color: rgba(139, 153, 168, 0.78);
+  color: rgba(100, 116, 139, 0.78);
 }
 
 .code-snippet-line-content {
   min-width: 0;
   white-space: pre-wrap;
   word-break: break-word;
-  color: #e8eef7;
+  color: #0f172a;
 }
 
 .code-snippet-token.keyword {
-  color: #8cc8ff;
+  color: #2563eb;
 }
 
 .code-snippet-token.string {
-  color: #9ad17d;
+  color: #15803d;
 }
 
 .code-snippet-token.comment {
-  color: #8b99a8;
+  color: #64748b;
 }
 
 .code-snippet-token.decorator {
-  color: #ffb86c;
+  color: #c2410c;
 }
 
 .code-snippet-token.number {
-  color: #6ee7d8;
+  color: #0f766e;
 }
 
 .context-usage-menu {
@@ -5096,11 +5115,66 @@ body.authenticated-theme-dark .markdown-table-wrap {
   background: #0d141c;
 }
 
-body.authenticated-theme-dark .code-snippet-toggle:hover,
-body.authenticated-theme-dark .code-snippet-toggle:focus-visible,
+body.authenticated-theme-dark .code-snippet-shell {
+  border-color: rgba(255, 255, 255, 0.08);
+  background: #0b0d10;
+  box-shadow: 0 18px 36px rgba(0, 0, 0, 0.22);
+}
+
+body.authenticated-theme-dark .code-snippet-title {
+  color: rgba(232, 238, 247, 0.92);
+}
+
+body.authenticated-theme-dark .code-snippet-meta {
+  color: rgba(180, 193, 208, 0.72);
+}
+
+body.authenticated-theme-dark .code-snippet-toggle {
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: #8cc8ff;
+}
+
 .code-snippet-toggle:hover,
 .code-snippet-toggle:focus-visible {
+  color: #1d4ed8;
+  border-color: rgba(59, 130, 246, 0.36);
+  background: #ffffff;
+}
+
+body.authenticated-theme-dark .code-snippet-toggle:hover,
+body.authenticated-theme-dark .code-snippet-toggle:focus-visible {
   color: #b7ddff;
+  border-color: rgba(183, 221, 255, 0.2);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+body.authenticated-theme-dark .code-snippet-line-number {
+  color: rgba(139, 153, 168, 0.78);
+}
+
+body.authenticated-theme-dark .code-snippet-line-content {
+  color: #e8eef7;
+}
+
+body.authenticated-theme-dark .code-snippet-token.keyword {
+  color: #8cc8ff;
+}
+
+body.authenticated-theme-dark .code-snippet-token.string {
+  color: #9ad17d;
+}
+
+body.authenticated-theme-dark .code-snippet-token.comment {
+  color: #8b99a8;
+}
+
+body.authenticated-theme-dark .code-snippet-token.decorator {
+  color: #ffb86c;
+}
+
+body.authenticated-theme-dark .code-snippet-token.number {
+  color: #6ee7d8;
 }
 
 body.authenticated-theme-dark .message-markdown :not(pre) > code,

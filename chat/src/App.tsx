@@ -1925,6 +1925,20 @@ export default function App() {
     [updateProjectItemCache],
   );
 
+  const refreshLoadedProjectCodeItems = useCallback(
+    async (projectId: string) => {
+      if (!projectItemsRef.current[projectId]?.loaded) {
+        return;
+      }
+      try {
+        await fetchProjectItems(projectId, false, "python_file");
+      } catch (error) {
+        console.error(error);
+      }
+    },
+    [fetchProjectItems],
+  );
+
   const moveThreadBetweenProjectItems = useCallback(
     (thread: ChatThreadResponse, previousProjectId: string) => {
       if (previousProjectId && previousProjectId !== thread.project_id) {
@@ -2147,6 +2161,7 @@ export default function App() {
         "";
       const fallbackProjectInstructions = fallbackThread?.project_instructions ?? "";
       let assistantStarted = false;
+      let turnUsedProjectCodeTools = false;
       let donePayload: ChatStreamDoneEvent | null = null;
       let gatingPayload: SendChatMessageResponse | null = null;
       let streamError: string | null = null;
@@ -2228,6 +2243,9 @@ export default function App() {
             }
 
             if (eventName === "tool_start") {
+              if (String(payload.tool_name ?? "").startsWith("project_")) {
+                turnUsedProjectCodeTools = true;
+              }
               upsertToolActivity(threadId, {
                 id: payload.tool_call_id,
                 turnIndex,
@@ -2385,6 +2403,9 @@ export default function App() {
           );
           setComposerStatus("");
           await refreshProjects();
+          if (messageHasProjectCodeIntent(content)) {
+            await refreshLoadedProjectCodeItems(payload.thread.project_id);
+          }
           if (payload.state === "api_key_required" || payload.state === "api_key_invalid") {
             showErrorFlash(apiKeyStateMessage(payload.state));
             setAuthView("settings");
@@ -2438,6 +2459,9 @@ export default function App() {
         );
         setComposerStatus("");
         await refreshProjects();
+        if (turnUsedProjectCodeTools) {
+          await refreshLoadedProjectCodeItems(gatingPayload.thread.project_id);
+        }
         showErrorFlash(apiKeyStateMessage(gatingPayload.state));
         setAuthView("settings");
         setAuthModalOpen(true);
@@ -2449,6 +2473,9 @@ export default function App() {
         const refreshedThread = await fetchAndStoreThread(threadId);
         upsertThreadIntoProjectItems(refreshedThread);
         await refreshProjects();
+        if (turnUsedProjectCodeTools) {
+          await refreshLoadedProjectCodeItems(refreshedThread.project_id);
+        }
         return null;
       }
 
@@ -2466,6 +2493,9 @@ export default function App() {
         const refreshedThread = await fetchAndStoreThread(threadId);
         upsertThreadIntoProjectItems(refreshedThread);
         await refreshProjects();
+        if (turnUsedProjectCodeTools) {
+          await refreshLoadedProjectCodeItems(refreshedThread.project_id);
+        }
         return donePayload;
       }
 
@@ -2482,6 +2512,7 @@ export default function App() {
       includeUploads,
       markThreadAssistantStarted,
       persistDirtyProjectDrafts,
+      refreshLoadedProjectCodeItems,
       refreshProjects,
       setThreadUsageSnapshot,
       showErrorFlash,

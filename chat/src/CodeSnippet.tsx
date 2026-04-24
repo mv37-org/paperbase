@@ -158,6 +158,19 @@ export function flattenCodeChildren(children: unknown): string {
   return "";
 }
 
+function CodeSnippetChevron({ collapsed }: { collapsed: boolean }) {
+  return (
+    <svg
+      className={`code-snippet-toggle-icon${collapsed ? " collapsed" : ""}`}
+      viewBox="0 0 16 16"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="M4.5 10 8 6.5 11.5 10" />
+    </svg>
+  );
+}
+
 export function CodeSnippet({
   code,
   language,
@@ -175,6 +188,7 @@ export function CodeSnippet({
   const title = headerTitle ?? resolvedLanguage;
   const meta = headerMeta ?? `${lines.length} line${lines.length === 1 ? "" : "s"}`;
   const shellClassName = ["code-snippet-shell", className].filter(Boolean).join(" ");
+  const toggleLabel = collapsed ? "Expand code block" : "Collapse code block";
 
   return (
     <div className={shellClassName} data-testid={dataTestId}>
@@ -188,9 +202,11 @@ export function CodeSnippet({
             type="button"
             className="code-snippet-toggle"
             aria-expanded={!collapsed}
+            aria-label={toggleLabel}
+            title={toggleLabel}
             onClick={() => setCollapsed((current) => !current)}
           >
-            {collapsed ? "Show code" : "Hide code"}
+            <CodeSnippetChevron collapsed={collapsed} />
           </button>
         ) : null}
       </div>

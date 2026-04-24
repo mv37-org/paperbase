@@ -2313,8 +2313,10 @@ class PaperbaseService:
             parts.append(
                 "You also have access to project-scoped coding tools backed by the current Paperbase project files. "
                 "These tools operate on the project's managed Python files only, not the Paperbase application code. "
+                "When you create or update code with these tools, you are writing managed project Python files for the current project. "
                 "When the user asks you to create, inspect, change, delete, or run project code, use the project_* tools instead of guessing. "
                 "Before writing new code, inspect the existing project with project_list_files, project_grep, and project_read_file so you reuse what is already there instead of rewriting it. "
+                "Files you create with project_touch become part of the project and will appear in later project_list_files results and in the project's Code section. "
                 "Read files before editing them. Prefer small PyTorch-first modules and scripts. "
                 "When a distinct code unit or reusable snippet is needed, put it in a project Python file so it shows up in the project's Code section instead of living only in chat text. "
                 "Structure new files as importable modules with named functions, classes, or constants that other files can import; avoid putting all logic in top-level script bodies. "
@@ -2738,7 +2740,7 @@ class PaperbaseService:
                 [
                     {
                         "name": "project_list_files",
-                        "description": "List the current project's managed Python files. Use this before edits when you need to discover which files already exist.",
+                        "description": "List the current project's managed Python files, including files you created earlier in this chat. Use this before edits when you need to discover which files already exist.",
                         "input_schema": {"type": "object", "properties": {}},
                     },
                     {
@@ -2770,7 +2772,7 @@ class PaperbaseService:
                     },
                     {
                         "name": "project_touch",
-                        "description": "Create a new managed Python file at an exact safe repo-relative .py path. Fails if that path already exists.",
+                        "description": "Create a new managed Python file at an exact safe repo-relative .py path. After creation it will appear in later project_list_files results and in the project's Code section. Fails if that path already exists.",
                         "input_schema": {
                             "type": "object",
                             "properties": {

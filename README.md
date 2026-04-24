@@ -115,7 +115,8 @@ The browser chat experience is project-based:
 - project chats can invoke a project-scoped coding tool surface against Paperbase-managed `.py` files, including list/read/grep/touch/edit/delete/run operations instead of raw repo-shell access
 - coding turns auto-persist dirty project Python drafts before the agent runs tools, so the backend tool view stays aligned with Monaco edits
 - duplicate Python basenames are disambiguated with repo-path context in the sidebar and tab strip
-- streamed and finished chat code blocks use the same dark editor-style theme, show line numbers, and let longer snippets collapse in place
+- streamed and finished chat code blocks use matching light/dark editor-style themes, show line numbers, and let longer snippets collapse in place with a compact chevron control
+- project Python files written by coding-tool turns refresh back into the sidebar Code section once the turn completes
 - notebooks are converted with Jupytext to `py:percent` source for editing/running, then regenerated back to `.ipynb` when saved to GitHub
 - signed-in pages support a persisted appearance setting, so the sidebar, chat shell, markdown surfaces, drawers, and modals can switch between light and dark mode without affecting the public landing page
 - creating, importing, or saving project files requires a connected GitHub account with repo access

@@ -1915,6 +1915,80 @@ describe("App", () => {
     });
   });
 
+  it("refreshes project code items after coding-tool turns complete", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.createThread.mockResolvedValue(emptyThreadResponse("thread_2"));
+    apiMocks.getThread.mockResolvedValue(threadResponse("thread_2", "New chat", "Created trainer"));
+
+    let pythonItems: Array<ReturnType<typeof projectItemFile>> = [];
+    apiMocks.loadProjectItems.mockImplementation(
+      async (projectId: string, limit = 25, offset = 0, itemKind?: "thread" | "python_file") => {
+        const allItems = [
+          projectItemThread("thread_1", "Recovered thread", projectId),
+          ...pythonItems,
+        ];
+        const filteredItems = itemKind
+          ? allItems.filter((item) => item.item_kind === itemKind)
+          : allItems;
+        const pageItems = filteredItems.slice(offset, offset + limit);
+        return {
+          ...projectItemsPage(projectId, pageItems),
+          offset,
+          limit,
+          total_count: filteredItems.length,
+          has_more: offset + pageItems.length < filteredItems.length,
+        };
+      },
+    );
+    apiMocks.sendThreadMessageStream.mockImplementation(
+      async (
+        _threadId: string,
+        _payload: unknown,
+        onEvent: (eventName: string, payload: unknown) => void,
+      ) => {
+        onEvent("tool_start", {
+          tool_call_id: "tool_1",
+          tool_name: "project_touch",
+          label: 'project file create for "src/trainer.py"',
+        });
+        pythonItems = [projectItemFile("file_2", "trainer.py", "proj_1", "src/trainer.py")];
+        onEvent("done", {
+          assistant_message: {
+            message_id: "msg_2",
+            role: "assistant",
+            content_markdown: "Created trainer.py",
+            citations: [],
+            created_at: "2026-04-21T00:00:00Z",
+            status: "completed",
+          },
+          remaining_free_responses: 2,
+          has_anthropic_api_key: false,
+          state: "completed",
+        });
+      },
+    );
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+    fireEvent.click(screen.getAllByText("General")[0]!);
+
+    await waitFor(() => {
+      expect(screen.getByText("No code files yet.")).toBeTruthy();
+    });
+
+    fireEvent.change(screen.getByLabelText("mention-input-chat"), {
+      target: { value: "create a trainer module" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("trainer.py")).toBeTruthy();
+    });
+  });
+
   it("keeps the context usage control in the composer after streaming completes", async () => {
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());
     apiMocks.createThread.mockResolvedValue(emptyThreadResponse("thread_2"));

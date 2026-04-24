@@ -34,11 +34,11 @@ describe("MarkdownRenderer", () => {
       (element) => element.textContent,
     );
     expect(lineNumbers).toEqual(["1", "2"]);
-    expect(screen.getByText("Hide code")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Collapse code block" })).toBeTruthy();
     expect(document.querySelector(".code-snippet-token.keyword")?.textContent).toBe("def");
 
-    fireEvent.click(screen.getByRole("button", { name: "Hide code" }));
-    expect(screen.getByRole("button", { name: "Show code" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Collapse code block" }));
+    expect(screen.getByRole("button", { name: "Expand code block" })).toBeTruthy();
     expect(screen.queryByText("def")).toBeNull();
   });
 
