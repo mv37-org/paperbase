@@ -89,6 +89,17 @@ class PaperORM(Base):
     influential_citation_count: Mapped[int] = mapped_column(Integer, default=0)
     semantic_scholar_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     code_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Paper-code ingestion state (#5). code_index_status transitions through
+    # none → pending → indexing → indexed / skipped / failed / stale as the
+    # ingest_repo worker processes the paper's code_url. code_is_python is
+    # the Python-eligibility verdict from paperbase.code_ingest; None means
+    # the repo has not yet been classified. code_manifest carries the full
+    # manifest dict (scanned paths, entrypoints, classification reason, etc.)
+    # so later tools do not have to re-scan the archive.
+    code_index_status: Mapped[str] = mapped_column(String(16), default="none")
+    code_is_python: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    code_python_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    code_manifest: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     source_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     index_status: Mapped[str] = mapped_column(String(32), default="discovered")
     search_document: Mapped[str] = mapped_column(Text, default="")
@@ -536,6 +547,10 @@ def _paper_from_orm(row: PaperORM) -> PaperResponse:
         influential_citation_count=row.influential_citation_count,
         semantic_scholar_id=row.semantic_scholar_id,
         code_url=row.code_url,
+        code_index_status=row.code_index_status or "none",
+        code_is_python=row.code_is_python,
+        code_python_reason=row.code_python_reason,
+        code_manifest=row.code_manifest,
         source_type=row.source_type,
         index_status=row.index_status,
         indexed_at=row.indexed_at,
@@ -731,6 +746,29 @@ class PaperRepository(ABC):
 
     @abstractmethod
     def update_summaries(self, paper_id: str, *, summary_short: str, summary_eli5: str) -> PaperResponse | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def update_code_ingest_state(
+        self,
+        paper_id: str,
+        *,
+        status: str,
+        is_python: bool | None = None,
+        python_reason: str | None = None,
+        manifest: dict[str, Any] | None = None,
+    ) -> PaperResponse | None:
+        """Persist a transition of the paper-code ingestion state (#5).
+
+        Used by ``PaperbaseService.ingest_repo`` to move a paper through
+        ``none`` → ``pending`` → ``indexing`` → ``indexed`` / ``skipped`` /
+        ``failed`` / ``stale`` as the ``ingest_repo`` worker processes it.
+
+        Fields are optional so intermediate transitions (for example, just
+        flipping ``status`` to ``indexing`` before the fetch starts) don't
+        clobber the classification verdict from a prior run. Returns the
+        refreshed paper row, or ``None`` if the paper disappeared mid-job.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -1048,6 +1086,21 @@ class SqlAlchemyPaperRepository(PaperRepository):
             )
             connection.execute(text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS tldr TEXT DEFAULT ''"))
             connection.execute(text(f"ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS embedding {vector_type}"))
+            connection.execute(
+                text(
+                    "ALTER TABLE IF EXISTS papers "
+                    "ADD COLUMN IF NOT EXISTS code_index_status VARCHAR(16) DEFAULT 'none'"
+                )
+            )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS code_is_python BOOLEAN")
+            )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS code_python_reason TEXT")
+            )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS code_manifest JSONB")
+            )
             connection.execute(
                 text(f"ALTER TABLE IF EXISTS text_chunks ADD COLUMN IF NOT EXISTS embedding {vector_type}")
             )
@@ -1413,6 +1466,31 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 return None
             row.summary_short = summary_short
             row.summary_eli5 = summary_eli5
+            row.updated_at = utcnow()
+            session.flush()
+            return _paper_from_orm(row)
+
+    def update_code_ingest_state(
+        self,
+        paper_id: str,
+        *,
+        status: str,
+        is_python: bool | None = None,
+        python_reason: str | None = None,
+        manifest: dict[str, Any] | None = None,
+    ) -> PaperResponse | None:
+        with self._session() as session:
+            row = session.get(PaperORM, paper_id)
+            if row is None:
+                return None
+            row.code_index_status = status
+            # Only overwrite verdict fields when the caller supplied them so
+            # intermediate transitions (e.g. flipping to ``indexing`` before
+            # the fetch) don't wipe a prior run's classification.
+            if is_python is not None or python_reason is not None or manifest is not None:
+                row.code_is_python = is_python
+                row.code_python_reason = python_reason
+                row.code_manifest = manifest
             row.updated_at = utcnow()
             session.flush()
             return _paper_from_orm(row)
@@ -3708,6 +3786,27 @@ class MemoryPaperRepository(PaperRepository):
         if existing is None:
             return None
         updated = existing.model_copy(update={"summary_short": summary_short, "summary_eli5": summary_eli5})
+        self.papers[paper_id] = updated
+        return updated
+
+    def update_code_ingest_state(
+        self,
+        paper_id: str,
+        *,
+        status: str,
+        is_python: bool | None = None,
+        python_reason: str | None = None,
+        manifest: dict[str, Any] | None = None,
+    ) -> PaperResponse | None:
+        existing = self.papers.get(paper_id)
+        if existing is None:
+            return None
+        updates: dict[str, Any] = {"code_index_status": status}
+        if is_python is not None or python_reason is not None or manifest is not None:
+            updates["code_is_python"] = is_python
+            updates["code_python_reason"] = python_reason
+            updates["code_manifest"] = manifest
+        updated = existing.model_copy(update=updates)
         self.papers[paper_id] = updated
         return updated
 

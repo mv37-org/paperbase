@@ -3316,3 +3316,222 @@ def test_search_log_does_not_persist_auth_tokens_or_secrets():
     }
     for forbidden in ("api_key", "token", "authorization", "bearer", "secret"):
         assert forbidden not in persisted, f"{forbidden!r} must never appear in search_logs"
+
+
+# --------------------------------------------------------------------------- #
+# Paper-code ingestion (#5) — worker dispatch + force / url-change refresh.
+# --------------------------------------------------------------------------- #
+
+
+def _seed_paper_with_code_url(service: PaperbaseService, *, code_url: str) -> str:
+    paper = PaperMetadata(
+        arxiv_id="2401.12345",
+        title="Paper With Code",
+        authors="A",
+        abstract="x",
+        categories="cs.AI",
+        primary_category="cs.AI",
+        published="2024-01-01",
+        updated="2024-01-01",
+        code_url=code_url,
+        index_status="indexed",
+    )
+    stored = service.repository.upsert_paper(paper, search_document="x", embedding=None)
+    return stored.paper_id
+
+
+def _build_python_tarball() -> bytes:
+    import io as _io
+    import tarfile as _tar
+
+    buf = _io.BytesIO()
+    with _tar.open(fileobj=buf, mode="w:gz") as tar:
+        prefix = "owner-repo-abc123/"
+        for name, payload in [
+            (prefix + "README.md", b"# demo\npip install foo\n"),
+            (prefix + "pyproject.toml", b"[project]\nname = 'foo'\n"),
+            (prefix + "main.py", b"print('hi')\n"),
+            (prefix + "src/mod.py", b"x = 1\n"),
+        ]:
+            info = _tar.TarInfo(name=name)
+            info.size = len(payload)
+            info.mode = 0o644
+            tar.addfile(info, _io.BytesIO(payload))
+    return buf.getvalue()
+
+
+def test_ingest_repo_skips_when_code_url_is_missing(service: PaperbaseService) -> None:
+    paper_id = _seed_paper_with_code_url(service, code_url="")
+    result = service.ingest_repo(paper_id)
+    assert result is not None
+    assert result.code_index_status == "skipped"
+    assert result.code_python_reason == "no_code_url"
+    assert result.code_is_python is None
+
+
+def test_ingest_repo_skips_unsupported_host(service: PaperbaseService) -> None:
+    paper_id = _seed_paper_with_code_url(service, code_url="https://gitlab.com/x/y")
+    result = service.ingest_repo(paper_id)
+    assert result is not None
+    assert result.code_index_status == "skipped"
+    assert result.code_python_reason == "unsupported_host"
+    assert result.code_manifest is not None
+    assert result.code_manifest["source_kind"] == "unsupported"
+
+
+def test_ingest_repo_writes_manifest_and_files_on_happy_path(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paper_id = _seed_paper_with_code_url(service, code_url="https://github.com/owner/repo")
+
+    from paperbase import code_ingest as ci
+
+    def fake_fetch(ref, *, token, max_bytes, **_kwargs):
+        return ci.FetchedArchive(data=_build_python_tarball(), resolved_sha="abc123" + "0" * 34, etag=None)
+
+    monkeypatch.setattr("paperbase.service.code_ingest.fetch_github_archive", fake_fetch)
+
+    result = service.ingest_repo(paper_id)
+    assert result is not None
+    assert result.code_index_status == "indexed"
+    assert result.code_is_python is True
+    assert result.code_python_reason == "python_source_with_manifest"
+    manifest = result.code_manifest
+    assert manifest is not None
+    assert manifest["owner"] == "owner"
+    assert manifest["repo"] == "repo"
+    assert "main.py" in manifest["candidate_entrypoints"]
+    assert "pyproject.toml" in manifest["detected_manifests"]
+    assert "README.md" in manifest["readme_paths"]
+
+    # Manifest and raw tarball must both land in the object store under the
+    # paper's namespace so PR 2 can index without re-fetching.
+    stored_paths = {obj.path for obj in service.object_store.list_prefix(f"papers/{paper_id}/code/")}
+    assert f"papers/{paper_id}/code/manifest.json" in stored_paths
+    assert f"papers/{paper_id}/code/raw/source.tar.gz" in stored_paths
+    assert f"papers/{paper_id}/code/files/README.md" in stored_paths
+    assert f"papers/{paper_id}/code/files/main.py" in stored_paths
+
+
+def test_ingest_repo_short_circuits_on_matching_sha(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paper_id = _seed_paper_with_code_url(service, code_url="https://github.com/owner/repo")
+    sha = "abc123" + "0" * 34
+
+    from paperbase import code_ingest as ci
+
+    calls = {"fetch": 0, "extract": 0}
+
+    def fake_fetch(ref, *, token, max_bytes, **_kwargs):
+        calls["fetch"] += 1
+        return ci.FetchedArchive(data=_build_python_tarball(), resolved_sha=sha, etag=None)
+
+    real_extract = ci.extract_archive_safely
+
+    def counting_extract(*args, **kwargs):
+        calls["extract"] += 1
+        return real_extract(*args, **kwargs)
+
+    monkeypatch.setattr("paperbase.service.code_ingest.fetch_github_archive", fake_fetch)
+    monkeypatch.setattr("paperbase.service.code_ingest.extract_archive_safely", counting_extract)
+
+    first = service.ingest_repo(paper_id)
+    assert first is not None
+    assert first.code_index_status == "indexed"
+    assert calls["extract"] == 1
+
+    second = service.ingest_repo(paper_id)
+    assert second is not None
+    # No re-extract: same URL + same SHA + already indexed = no-op.
+    assert second.code_index_status == "indexed"
+    assert calls["extract"] == 1
+    assert calls["fetch"] == 2  # fetch still happens to learn the SHA
+    persisted = service.repository.get_paper(paper_id)
+    assert persisted is not None
+    assert persisted.code_index_status == "indexed"
+
+
+def test_ingest_repo_force_refreshes_even_when_sha_matches(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paper_id = _seed_paper_with_code_url(service, code_url="https://github.com/owner/repo")
+    sha = "abc123" + "0" * 34
+
+    from paperbase import code_ingest as ci
+
+    calls = {"extract": 0}
+    real_extract = ci.extract_archive_safely
+
+    def fake_fetch(ref, *, token, max_bytes, **_kwargs):
+        return ci.FetchedArchive(data=_build_python_tarball(), resolved_sha=sha, etag=None)
+
+    def counting_extract(*args, **kwargs):
+        calls["extract"] += 1
+        return real_extract(*args, **kwargs)
+
+    monkeypatch.setattr("paperbase.service.code_ingest.fetch_github_archive", fake_fetch)
+    monkeypatch.setattr("paperbase.service.code_ingest.extract_archive_safely", counting_extract)
+
+    service.ingest_repo(paper_id)
+    service.ingest_repo(paper_id, force=True)
+    # force=True must re-extract regardless of SHA match.
+    assert calls["extract"] == 2
+
+
+def test_ingest_repo_records_failed_status_on_unexpected_error(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paper_id = _seed_paper_with_code_url(service, code_url="https://github.com/owner/repo")
+
+    from paperbase import code_ingest as ci
+
+    def fake_fetch(ref, *, token, max_bytes, **_kwargs):
+        return ci.FetchedArchive(data=_build_python_tarball(), resolved_sha="abc123" + "0" * 34, etag=None)
+
+    def broken_extract(*args, **kwargs):
+        raise RuntimeError("bad archive")
+
+    monkeypatch.setattr("paperbase.service.code_ingest.fetch_github_archive", fake_fetch)
+    monkeypatch.setattr("paperbase.service.code_ingest.extract_archive_safely", broken_extract)
+
+    result = service.ingest_repo(paper_id)
+    assert result is not None
+    assert result.code_index_status == "failed"
+    assert result.code_python_reason == "ingest_failed:RuntimeError"
+    assert result.code_manifest is not None
+    assert result.code_manifest["code_python_reason"] == "ingest_failed:RuntimeError"
+
+    persisted = service.repository.get_paper(paper_id)
+    assert persisted is not None
+    assert persisted.code_index_status == "failed"
+
+
+def test_process_next_job_dispatches_ingest_repo(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paper_id = _seed_paper_with_code_url(service, code_url="https://github.com/owner/repo")
+
+    from paperbase import code_ingest as ci
+
+    def fake_fetch(ref, *, token, max_bytes, **_kwargs):
+        return ci.FetchedArchive(data=_build_python_tarball(), resolved_sha="sha-x" + "0" * 35, etag=None)
+
+    monkeypatch.setattr("paperbase.service.code_ingest.fetch_github_archive", fake_fetch)
+
+    job = service.enqueue_ingest_repo_job(paper_id)
+    completed = service.process_next_job()
+    assert completed is not None
+    assert completed.job_id == job.job_id
+    assert completed.status == "completed"
+
+    refreshed = service.repository.get_paper(paper_id)
+    assert refreshed is not None
+    assert refreshed.code_index_status == "indexed"
+
+
+def test_enqueue_ingest_repo_job_records_payload(service: PaperbaseService) -> None:
+    paper_id = _seed_paper_with_code_url(service, code_url="https://github.com/owner/repo")
+    job = service.enqueue_ingest_repo_job(paper_id, force=True)
+    assert job.job_type == "ingest_repo"
+    assert job.payload == {"paper_id": paper_id, "force": True}

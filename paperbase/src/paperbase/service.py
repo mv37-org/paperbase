@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import tempfile
 from collections.abc import Generator, Iterator
 from dataclasses import dataclass
 from dataclasses import field
@@ -12,6 +13,8 @@ from datetime import timedelta
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+
+from . import code_ingest
 
 from fastapi import HTTPException
 from cryptography.fernet import InvalidToken
@@ -3007,6 +3010,174 @@ class PaperbaseService:
             )
         return result
 
+    def enqueue_ingest_repo_job(self, paper_id: str, *, force: bool = False) -> JobResponse:
+        """Queue an ``ingest_repo`` job for a single paper (#5).
+
+        Called automatically from :meth:`index_arxiv_paper` when the indexed
+        paper carries a GitHub ``code_url``, and exposed on the public
+        service surface so the dev CLI / admin API can trigger a re-ingest
+        without re-running full paper indexing.
+        """
+        job = self.repository.create_job(
+            "ingest_repo",
+            {"paper_id": paper_id, "force": force},
+        )
+        logger.info(
+            "Created ingest_repo job",
+            extra={
+                "event": "jobs.ingest_repo.created",
+                "job_id": job.job_id,
+                "paper_id": paper_id,
+                "force": force,
+            },
+        )
+        return job
+
+    def ingest_repo(self, paper_id: str, *, force: bool = False) -> PaperResponse | None:
+        """Fetch, extract, classify, and persist the paper's linked GitHub
+        repo artifacts (#5).
+
+        Transitions ``code_index_status`` through ``indexing`` → one of
+        ``indexed`` / ``skipped`` / ``failed``. Short-circuits to a no-op
+        when a prior manifest already records the same ``code_url`` and a
+        matching ``resolved_sha``, unless ``force`` is set. This is the
+        read-only ingestion foundation; indexing the extracted files into
+        ``text_chunks`` is PR 2 scope.
+        """
+        paper = self.repository.get_paper(paper_id)
+        if paper is None:
+            return None
+        code_url = (paper.code_url or "").strip()
+        if not code_url:
+            manifest = code_ingest.skipped_manifest(code_url="", reason="no_code_url")
+            return self.repository.update_code_ingest_state(
+                paper_id,
+                status="skipped",
+                is_python=None,
+                python_reason="no_code_url",
+                manifest=manifest,
+            )
+        ref = code_ingest.parse_github_url(code_url)
+        if ref is None:
+            manifest = code_ingest.skipped_manifest(code_url=code_url, reason="unsupported_host")
+            return self.repository.update_code_ingest_state(
+                paper_id,
+                status="skipped",
+                is_python=None,
+                python_reason="unsupported_host",
+                manifest=manifest,
+            )
+        self.repository.update_code_ingest_state(paper_id, status="indexing")
+        try:
+            archive = code_ingest.fetch_github_archive(
+                ref,
+                token=self.settings.github_token,
+                max_bytes=self.settings.code_repo_max_archive_bytes,
+            )
+            prev_manifest = paper.code_manifest or {}
+            if (
+                not force
+                and archive.resolved_sha
+                and prev_manifest.get("resolved_sha") == archive.resolved_sha
+                and prev_manifest.get("code_url") == code_url
+                and paper.code_index_status == "indexed"
+            ):
+                # Same commit as last time — restore the terminal state after
+                # the transient indexing marker and skip re-extracting.
+                return self.repository.update_code_ingest_state(
+                    paper_id,
+                    status="indexed",
+                    is_python=paper.code_is_python,
+                    python_reason=paper.code_python_reason,
+                    manifest=paper.code_manifest,
+                )
+            with tempfile.TemporaryDirectory() as tmp:
+                scratch = Path(tmp) / "repo"
+                report = code_ingest.extract_archive_safely(
+                    archive.data,
+                    scratch,
+                    max_stored_file_bytes=self.settings.code_repo_max_stored_file_bytes,
+                    max_scanned_files=self.settings.code_repo_max_scanned_files,
+                )
+                is_python, reason = code_ingest.classify_python(report)
+                manifest = code_ingest.build_manifest(
+                    code_url=code_url,
+                    ref=ref,
+                    resolved_sha=archive.resolved_sha,
+                    report=report,
+                    is_python=is_python,
+                    python_reason=reason,
+                )
+                code_prefix = f"papers/{paper_id}/code"
+                self.object_store.delete_prefix(f"{code_prefix}/")
+                self.object_store.put_bytes(
+                    f"{code_prefix}/raw/source.tar.gz",
+                    archive.data,
+                    content_type="application/gzip",
+                )
+                self.object_store.put_text(
+                    f"{code_prefix}/manifest.json",
+                    json.dumps(manifest, indent=2),
+                    content_type="application/json",
+                )
+                for rel in report.stored_paths:
+                    source = scratch / rel
+                    if not source.exists():
+                        continue
+                    self.object_store.put_bytes(f"{code_prefix}/files/{rel}", source.read_bytes())
+            logger.info(
+                "Completed code ingest",
+                extra={
+                    "event": "code_ingest.completed",
+                    "paper_id": paper_id,
+                    "owner": ref.owner,
+                    "repo": ref.repo,
+                    "resolved_sha": archive.resolved_sha,
+                    "python_file_count": report.python_file_count,
+                    "notebook_count": report.notebook_count,
+                    "is_python": is_python,
+                    "python_reason": reason,
+                    "stored_file_count": len(report.stored_paths),
+                    "scanned_file_count": len(report.scanned_paths),
+                },
+            )
+            return self.repository.update_code_ingest_state(
+                paper_id,
+                status="indexed",
+                is_python=is_python,
+                python_reason=reason,
+                manifest=manifest,
+            )
+        except code_ingest.CodeIngestError as exc:
+            reason = f"fetch_failed:{type(exc).__name__}"
+            logger.warning(
+                "Code ingest fetch failed",
+                extra={
+                    "event": "code_ingest.fetch_failed",
+                    "paper_id": paper_id,
+                    "code_url": code_url,
+                    "error": str(exc),
+                },
+            )
+        except Exception as exc:
+            reason = f"ingest_failed:{type(exc).__name__}"
+            logger.exception(
+                "Code ingest failed",
+                extra={
+                    "event": "code_ingest.failed",
+                    "paper_id": paper_id,
+                    "code_url": code_url,
+                },
+            )
+        manifest = code_ingest.skipped_manifest(code_url=code_url, reason=reason)
+        return self.repository.update_code_ingest_state(
+            paper_id,
+            status="failed",
+            is_python=None,
+            python_reason=reason,
+            manifest=manifest,
+        )
+
     def enqueue_summarize_top_cited_job(self, *, limit: int = 500_000) -> JobResponse:
         job = self.repository.create_job("summarize_top_cited", {"limit": limit})
         logger.info(
@@ -3469,6 +3640,11 @@ class PaperbaseService:
                     min_age_seconds=int(job.payload.get("min_age_seconds", 3600)),
                     raise_on_failed_batches=True,
                 )
+            elif job.job_type == "ingest_repo":
+                self.ingest_repo(
+                    job.payload["paper_id"],
+                    force=bool(job.payload.get("force")),
+                )
             else:
                 raise ValueError(f"Unsupported job type: {job.job_type}")
             self.repository.mark_job_completed(job.job_id)
@@ -3760,6 +3936,16 @@ class PaperbaseService:
                 "raw_artifact_count": len(extraction.raw_artifacts),
             },
         )
+        # Paper-code ingestion (#5): auto-enqueue ingest_repo when the paper
+        # ships a GitHub code_url. We enqueue unconditionally — the worker
+        # itself short-circuits on matching resolved_sha, so repeated
+        # indexing of the same commit is cheap. force=True here mirrors the
+        # caller's intent to refresh all artifacts.
+        if stored.code_url and code_ingest.parse_github_url(stored.code_url) is not None:
+            prev_url = (stored.code_manifest or {}).get("code_url")
+            url_changed = prev_url is not None and prev_url != stored.code_url
+            if force or url_changed or stored.code_index_status in {"none", "stale"}:
+                self.enqueue_ingest_repo_job(stored.paper_id, force=force or url_changed)
         return stored
 
     def search(self, request: SearchRequest, *, user_id: str | None = None) -> SearchResponse:

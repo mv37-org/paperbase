@@ -88,6 +88,28 @@ def test_build_manifest_includes_preview_key_in_available_artifacts():
     assert manifest["available_artifacts"]["preview"] is None
 
 
+def test_paper_schema_carries_code_ingestion_fields():
+    """Regression test for #5: the paper-code ingestion feature requires four
+    new columns on the papers table plus matching Pydantic-model fields so
+    API consumers can read the classification verdict and manifest. Locks
+    the contract so a future migration can't accidentally drop the
+    code-ingestion fields."""
+    from paperbase.repository import PaperORM
+
+    for column in ("code_index_status", "code_is_python", "code_python_reason", "code_manifest"):
+        assert column in PaperORM.__table__.columns, (
+            f"PaperORM must carry '{column}' for paper-code ingestion (#5)"
+        )
+
+    paper = PaperMetadata(arxiv_id="2401.99999")
+    # Defaults match the "not yet classified" state — a fresh paper should
+    # neither be flagged Python nor carry a stale manifest.
+    assert paper.code_index_status == "none"
+    assert paper.code_is_python is None
+    assert paper.code_python_reason is None
+    assert paper.code_manifest is None
+
+
 def test_job_orm_carries_priority_for_backfill_starvation_guard():
     """Regression test for #33: harvest jobs must run at lower priority than
     interactive on-demand work so a multi-year backfill cannot starve
