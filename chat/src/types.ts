@@ -14,6 +14,7 @@ export interface BrowserUserSettingsResponse {
   has_github_connection: boolean;
   github_login: string;
   github_oauth_available: boolean;
+  github_manage_access_url: string;
   weekly_papers_review_email: boolean;
   appearance_theme: "light" | "dark";
 }
@@ -149,6 +150,16 @@ export interface ProjectSummary {
 
 export interface ProjectResponse extends ProjectSummary {}
 
+export type ProjectFileKind = "python" | "notebook";
+
+export interface CreateProjectGitHubRepoPayload {
+  mode: "existing" | "create";
+  owner?: string;
+  name: string;
+  base_branch?: string;
+  import_paths?: string[];
+}
+
 export interface ProjectListResponse {
   projects: ProjectSummary[];
 }
@@ -166,6 +177,8 @@ export interface PythonFileSummary {
   file_id: string;
   project_id: string;
   filename: string;
+  file_kind: ProjectFileKind;
+  repo_path: string;
   created_at: string;
   updated_at: string;
 }
@@ -185,6 +198,8 @@ export interface ProjectItemSummary {
   file_id?: string | null;
   last_message_preview: string;
   filename: string;
+  file_kind: ProjectFileKind;
+  repo_path: string;
 }
 
 export interface ProjectItemPageResponse {
@@ -213,6 +228,7 @@ export interface ProjectRepoConflictResolution {
 
 export interface ProjectRepoConflictFile {
   path: string;
+  file_kind: ProjectFileKind;
   base_content: string;
   local_content: string;
   remote_content: string;
@@ -223,8 +239,10 @@ export interface ProjectRepoConflictDetail {
   message: string;
   project_id: string;
   repo_exists: boolean;
+  github_owner_login: string;
   github_repo_name: string;
   github_repo_url: string;
+  base_branch: string;
   default_branch: string;
   base_commit_sha: string;
   remote_head_sha: string;
@@ -234,12 +252,54 @@ export interface ProjectRepoConflictDetail {
 export interface ProjectRepoSyncResponse {
   project_id: string;
   repo_exists: boolean;
+  github_owner_login: string;
   github_repo_name: string;
   github_repo_url: string;
+  base_branch: string;
   default_branch: string;
   last_sync_commit_sha: string;
   last_sync_commit_url: string;
   last_synced_at?: string | null;
+}
+
+export interface GitHubRepoBranchSummary {
+  name: string;
+  commit_sha: string;
+  is_default: boolean;
+}
+
+export interface GitHubRepoSummary {
+  owner: string;
+  name: string;
+  full_name: string;
+  html_url: string;
+  default_branch: string;
+  private: boolean;
+}
+
+export interface GitHubRepoListResponse {
+  repos: GitHubRepoSummary[];
+}
+
+export interface GitHubRepoMetadataResponse {
+  owner: string;
+  name: string;
+  html_url: string;
+  default_branch: string;
+  branches: GitHubRepoBranchSummary[];
+}
+
+export interface GitHubRepoImportCandidate {
+  path: string;
+  file_kind: ProjectFileKind;
+  size: number;
+}
+
+export interface GitHubRepoImportCandidateResponse {
+  owner: string;
+  name: string;
+  base_branch: string;
+  candidates: GitHubRepoImportCandidate[];
 }
 
 export interface SendChatMessageResponse {

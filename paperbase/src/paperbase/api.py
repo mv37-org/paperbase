@@ -36,6 +36,9 @@ from .models import (
     FileContentResponse,
     FileListResponse,
     ForgotPasswordRequest,
+    GitHubRepoImportCandidateResponse,
+    GitHubRepoListResponse,
+    GitHubRepoMetadataResponse,
     GrepRequest,
     GrepResponse,
     IntegrationProbeResponse,
@@ -914,6 +917,38 @@ def browser_list_projects(
     return service.list_projects(user)
 
 
+@app.get("/v1/browser/github/repositories", response_model=GitHubRepoListResponse)
+def browser_list_github_repositories(
+    user=Depends(require_browser_user),
+    service: PaperbaseService = Depends(get_service),
+) -> GitHubRepoListResponse:
+    return service.list_github_repositories(user)
+
+
+@app.get("/v1/browser/github/repositories/{owner}/{repo}", response_model=GitHubRepoMetadataResponse)
+def browser_get_github_repo_metadata(
+    owner: str,
+    repo: str,
+    user=Depends(require_browser_user),
+    service: PaperbaseService = Depends(get_service),
+) -> GitHubRepoMetadataResponse:
+    return service.get_github_repo_metadata(user, owner=owner, repo=repo)
+
+
+@app.get(
+    "/v1/browser/github/repositories/{owner}/{repo}/import-candidates",
+    response_model=GitHubRepoImportCandidateResponse,
+)
+def browser_list_github_repo_import_candidates(
+    owner: str,
+    repo: str,
+    branch: str = Query(..., min_length=1),
+    user=Depends(require_browser_user),
+    service: PaperbaseService = Depends(get_service),
+) -> GitHubRepoImportCandidateResponse:
+    return service.list_github_repo_import_candidates(user, owner=owner, repo=repo, branch=branch)
+
+
 @app.post("/v1/browser/projects", response_model=ProjectResponse)
 def browser_create_project(
     request: CreateProjectRequest,
@@ -963,6 +998,22 @@ def browser_list_project_items(
     service: PaperbaseService = Depends(get_service),
 ) -> ProjectItemPageResponse:
     return service.list_project_items(user, project_id, limit=limit, offset=offset)
+
+
+@app.post("/v1/browser/projects/{project_id}/notebooks", response_model=PythonFileResponse)
+async def browser_import_project_notebook(
+    project_id: str,
+    file: UploadFile = File(...),
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> PythonFileResponse:
+    data = await file.read()
+    return service.import_project_notebook_upload(
+        user,
+        project_id,
+        filename=file.filename or "notebook.ipynb",
+        data=data,
+    )
 
 
 @app.post("/v1/browser/projects/{project_id}/python-files", response_model=PythonFileResponse)
