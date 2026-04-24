@@ -4187,6 +4187,10 @@ def test_normalize_code_path_rejects_absolute_and_drive_prefixes() -> None:
     endpoint would then serve it if a matching stored file happened to
     exist. Rejecting absolute paths before stripping is the fix; this
     lock-in prevents a regression via path-reconstruction refactors.
+
+    Also locks in the narrower drive-prefix check from the follow-up review
+    (``^[A-Za-z]:[/\\\\]`` rather than any second-character colon) so a file
+    legitimately named ``a:b.txt`` remains readable.
     """
     normalize = PaperbaseService._normalize_code_path
     for evil in [
@@ -4195,6 +4199,7 @@ def test_normalize_code_path_rejects_absolute_and_drive_prefixes() -> None:
         "\\windows\\path",
         "C:/windows",
         "C:\\windows",
+        "c:/lower",
         "../escape",
         "sub/../../escape",
         "./hidden",
@@ -4205,6 +4210,12 @@ def test_normalize_code_path_rejects_absolute_and_drive_prefixes() -> None:
     assert normalize("README.md") == "README.md"
     assert normalize("src/mod.py") == "src/mod.py"
     assert normalize("  scripts/train.py  ") == "scripts/train.py"
+    # Legitimate filenames whose second character is ``:`` must NOT be
+    # rejected — GitHub / Git allow them and narrowing the drive-prefix
+    # check from ``raw[1] == ':'`` to ``^[A-Za-z]:[/\\]`` is the point
+    # of the follow-up review.
+    for ok in ["a:b.txt", "v:1/notes.md", "docs/x:y.md"]:
+        assert normalize(ok) == ok, f"{ok!r} must be accepted"
 
 
 def test_read_paper_code_file_rejects_absolute_even_when_file_exists(

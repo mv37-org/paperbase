@@ -127,6 +127,11 @@ logger = logging.getLogger(__name__)
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
+# Windows drive-letter prefix for `_normalize_code_path` (#5 PR 2 review).
+# Matches ``C:/...`` / ``C:\...`` / ``c:/...`` but deliberately NOT bare
+# ``a:b.txt`` or ``v:1/notes.md``, which are valid GitHub filenames.
+_DRIVE_PREFIX_RE = re.compile(r"^[A-Za-z]:[\\/]")
+
 
 def _validate_date(value: str, *, name: str) -> None:
     """Raise PermanentError if ``value`` is not ``YYYY-MM-DD``.
@@ -3702,11 +3707,11 @@ class PaperbaseService:
         unsafe or empty.
 
         Rejects absolute paths (``/etc/passwd``, ``\\absolute``), Windows-
-        drive prefixes, ``..`` / ``.`` segments, and empty segments. Must
-        NOT strip a leading slash before the absolute-path check — doing
-        so lets ``/absolute/path`` slip through as ``absolute/path`` and
-        the read endpoint would then happily serve it if such a stored
-        file existed.
+        drive prefixes (``C:/...``, ``C:\\...``), ``..`` / ``.`` segments,
+        and empty segments. Must NOT strip a leading slash before the
+        absolute-path check — doing so lets ``/absolute/path`` slip
+        through as ``absolute/path`` and the read endpoint would then
+        happily serve it if such a stored file existed.
         """
         raw = (raw or "").strip()
         if not raw:
@@ -3715,10 +3720,11 @@ class PaperbaseService:
             return None
         if PurePosixPath(raw).is_absolute():
             return None
-        # Reject Windows drive letters (``C:\\...``, ``C:/...``) early;
-        # the backing GCS layout is POSIX so a drive-letter input is
-        # always malformed.
-        if len(raw) >= 2 and raw[1] == ":":
+        # Reject true Windows drive prefixes (``C:/...``, ``C:\\...``) only
+        # — NOT any second-character ``:``. Valid GitHub filenames can
+        # contain a colon (e.g. ``a:b.txt``, ``v:1/notes.md``), so a broad
+        # ``raw[1] == ':'`` guard would make those unreadable.
+        if _DRIVE_PREFIX_RE.match(raw):
             return None
         parts = raw.split("/")
         if any(segment in {"", "..", "."} for segment in parts):
