@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { Children, isValidElement, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -183,6 +183,34 @@ function flattenMarkdownCodeChildren(children: ReactNode) {
   return flattenCodeChildren(children);
 }
 
+function extractMarkdownCodeBlock(children: ReactNode) {
+  let codeChild: { className?: string; children?: ReactNode } | null = null;
+
+  for (const childNode of Children.toArray(children)) {
+    if (typeof childNode === "string") {
+      if (childNode.trim() === "") {
+        continue;
+      }
+      return null;
+    }
+    if (!isValidElement<{ className?: string; children?: ReactNode }>(childNode)) {
+      return null;
+    }
+    if (codeChild) {
+      return null;
+    }
+    codeChild = childNode.props;
+  }
+
+  if (!codeChild) {
+    return null;
+  }
+  return {
+    className: codeChild.className,
+    code: flattenMarkdownCodeChildren(codeChild.children).replace(/\n$/, ""),
+  };
+}
+
 export function MarkdownRenderer({
   markdown,
   className,
@@ -221,17 +249,16 @@ export function MarkdownRenderer({
               <table>{children}</table>
             </div>
           ),
-          pre: ({ children }) => <>{children}</>,
-          code: ({ inline, className, children }) => {
-            if (inline) {
-              return <code className={className}>{children}</code>;
+          pre: ({ children }) => {
+            const codeBlock = extractMarkdownCodeBlock(children);
+            if (!codeBlock) {
+              return <pre>{children}</pre>;
             }
-            const languageMatch = /language-([A-Za-z0-9_+-]+)/.exec(className ?? "");
-            const code = flattenMarkdownCodeChildren(children).replace(/\n$/, "");
-            const lines = code.replace(/\r\n?/g, "\n").split("\n");
+            const languageMatch = /language-([A-Za-z0-9_+-]+)/.exec(codeBlock.className ?? "");
+            const lines = codeBlock.code.replace(/\r\n?/g, "\n").split("\n");
             return (
               <CodeSnippet
-                code={code}
+                code={codeBlock.code}
                 language={languageMatch?.[1]}
                 className="message-code-snippet"
                 collapsible
@@ -239,6 +266,7 @@ export function MarkdownRenderer({
               />
             );
           },
+          code: ({ className, children }) => <code className={className}>{children}</code>,
         }}
       >
         {normalizedMarkdown}

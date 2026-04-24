@@ -41,4 +41,12 @@ describe("MarkdownRenderer", () => {
     expect(screen.getByRole("button", { name: "Show code" })).toBeTruthy();
     expect(screen.queryByText("def")).toBeNull();
   });
+
+  it("keeps inline code snippets as inline markdown", () => {
+    render(<MarkdownRenderer markdown={"Use `torch.nn.Linear` here."} />);
+
+    expect(document.querySelector(".code-snippet-shell")).toBeNull();
+    const inlineCode = document.querySelector("code");
+    expect(inlineCode?.textContent).toBe("torch.nn.Linear");
+  });
 });
