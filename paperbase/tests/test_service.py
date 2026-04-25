@@ -1763,6 +1763,7 @@ def test_project_chat_tools_are_advertised_for_coding_turns(browser_service):
     }.issubset(tool_names)
     assert "created earlier in this chat" in tools_by_name["project_list_files"]["description"]
     assert "appear in later project_list_files results" in tools_by_name["project_touch"]["description"]
+    assert "meaningful initial code content" in tools_by_name["project_touch"]["description"]
     assert "truly needs deletion" in tools_by_name["project_delete"]["description"]
 
     prompt = service._chat_tool_system_prompt(
@@ -1772,6 +1773,7 @@ def test_project_chat_tools_are_advertised_for_coding_turns(browser_service):
     )
     assert "writing managed project Python files" in prompt
     assert "appear in later project_list_files results" in prompt
+    assert "do not leave the requested file empty" in prompt
     assert "do not stop tool use until the relevant managed project Python files have actually been created or updated" in prompt
     assert "Act like a careful ML engineer and researcher maintaining a real project repository" in prompt
     assert "Treat project files as durable research artifacts" in prompt
@@ -1816,6 +1818,22 @@ def test_project_code_turn_forces_tools_until_a_write_occurs():
                             {
                                 "type": "tool_use",
                                 "id": "toolu_touch_file",
+                                "name": "project_touch",
+                                "input": {
+                                    "repo_path": "src/draft_train.py",
+                                    "content": "",
+                                },
+                            }
+                        ],
+                        "stop_reason": "tool_use",
+                    }
+                if self.round_index == 2:
+                    self.round_index += 1
+                    return {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "toolu_touch_real_file",
                                 "name": "project_touch",
                                 "input": {
                                     "repo_path": "src/train.py",
@@ -1870,7 +1888,95 @@ def test_project_code_turn_forces_tools_until_a_write_occurs():
     )
     assert chat_model.create_calls[0]["tool_choice"] == {"type": "any"}
     assert chat_model.create_calls[1]["tool_choice"] == {"type": "any"}
-    assert chat_model.create_calls[2]["tool_choice"] == {"type": "auto"}
+    assert chat_model.create_calls[2]["tool_choice"] == {"type": "any"}
+    assert chat_model.create_calls[3]["tool_choice"] == {"type": "auto"}
+
+
+def test_project_code_confirmation_turn_inherits_tool_context():
+    class ProjectConfirmationChatModel(FakeChatModel):
+        def create_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+            self.create_calls.append(
+                {
+                    "api_key": api_key,
+                    "messages": messages,
+                    "system_prompt": system_prompt,
+                    "tools": tools,
+                    "tool_choice": tool_choice,
+                }
+            )
+            if tools:
+                return {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_touch_file",
+                            "name": "project_touch",
+                            "input": {
+                                "repo_path": "src/linear_gd.py",
+                                "content": "def train_linear_gd():\n    return 1\n",
+                            },
+                        }
+                    ],
+                    "stop_reason": "tool_use",
+                }
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Saved the module to `src/linear_gd.py`.",
+                    }
+                ],
+                "stop_reason": "end_turn",
+            }
+
+    chat_model = ProjectConfirmationChatModel()
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=chat_model,
+        github_repo_manager=FakeGitHubRepoManager(),
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="project-confirm@example.com", password="topsecret123", display_name="Project Confirm")
+    )
+    assert session.user is not None
+    _connect_github(service, session.user)
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="Project chat"))
+    service.repository.add_chat_message(  # type: ignore[attr-defined]
+        thread_id=thread.thread_id,
+        role="user",
+        content_markdown="Write some code to train a small linear gradient descent with pytorch",
+    )
+    service.repository.add_chat_message(  # type: ignore[attr-defined]
+        thread_id=thread.thread_id,
+        role="assistant",
+        content_markdown="Want me to save this into your project (e.g. as src/linear_gd.py)?",
+    )
+
+    response = service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="yes"),
+    )
+
+    saved_file = service.repository.get_project_python_file_by_path(  # type: ignore[attr-defined]
+        user_id=session.user.user_id,
+        project_id=thread.project_id,
+        repo_path="src/linear_gd.py",
+    )
+    assert response.assistant_message is not None
+    assert saved_file is not None
+    assert saved_file.content == "def train_linear_gd():\n    return 1\n"
+    assert chat_model.create_calls[0]["tool_choice"] == {"type": "any"}
+    tool_names = {tool["name"] for tool in chat_model.create_calls[0]["tools"]}
+    assert "project_touch" in tool_names
 
 
 def test_python_file_sync_project_repo_writes_metadata_and_files():

@@ -232,13 +232,13 @@ _FORCE_TOOL_QUERY_RE = re.compile(
 _PROJECT_CODE_DIRECT_TOOL_RE = re.compile(r"\b(project_(?:list_files|read_file|grep|touch|edit|delete|run))\b", re.IGNORECASE)
 _PROJECT_CODE_ACTION_RE = re.compile(
     r"\b("
-    r"write|create|make|add|implement|edit|modify|update|refactor|fix|rename|delete|remove|read|show|open|grep|search|run"
+    r"write|save|create|make|add|implement|edit|modify|update|refactor|fix|rename|delete|remove|read|show|open|grep|search|run"
     r")\b",
     re.IGNORECASE,
 )
 _PROJECT_CODE_WRITE_ACTION_RE = re.compile(
     r"\b("
-    r"write|create|make|add|implement|edit|modify|update|refactor|fix|rename|delete|remove"
+    r"write|save|create|make|add|implement|edit|modify|update|refactor|fix|rename|delete|remove"
     r")\b",
     re.IGNORECASE,
 )
@@ -250,7 +250,18 @@ _PROJECT_CODE_TARGET_RE = re.compile(
 )
 _PROJECT_CODE_PATH_HINT_RE = re.compile(r"(?:^|[\s`'\"])([A-Za-z0-9_./-]+\.py)(?:$|[\s`'\",.:;!?])")
 _PROJECT_CODE_WRITE_TOOL_RE = re.compile(r"\b(project_(?:touch|edit|delete))\b", re.IGNORECASE)
-_PROJECT_CODE_WRITE_TOOL_NAMES = {"project_touch", "project_edit", "project_delete"}
+_PROJECT_CODE_CONFIRMATION_RE = re.compile(
+    r"^\s*(?:"
+    r"yes|yeah|yep|yup|sure|ok(?:ay)?|please|please do|go ahead|do it|do that|"
+    r"save it|save that|write it|write that|create it|create that|make it|make that|"
+    r"edit it|edit that|update it|update that|run it|run that"
+    r")\s*[.!?]*\s*$",
+    re.IGNORECASE,
+)
+_PROJECT_CODE_FOLLOWUP_PROMPT_RE = re.compile(
+    r"\b(want me to|should i|would you like me to|i can|if you want|if you'd like)\b",
+    re.IGNORECASE,
+)
 
 _INLINE_SOURCE_ID_RE = re.compile(r"\[(S\d+)\]")
 _PYTHON_FILENAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -870,6 +881,63 @@ def _question_has_project_code_intent(question: str) -> bool:
     return bool(_PROJECT_CODE_ACTION_RE.search(question) and _PROJECT_CODE_TARGET_RE.search(question))
 
 
+def _question_is_project_code_confirmation(question: str) -> bool:
+    return bool(_PROJECT_CODE_CONFIRMATION_RE.match(question.strip()))
+
+
+def _last_pending_project_code_followup(thread: ChatThreadResponse | None) -> ChatMessageResponse | None:
+    if thread is None or not thread.messages:
+        return None
+    assistant_index: int | None = None
+    for index in range(len(thread.messages) - 1, -1, -1):
+        message = thread.messages[index]
+        if message.kind == "compaction" or not message.content_markdown.strip():
+            continue
+        if message.role == "assistant":
+            assistant_index = index
+            break
+        if message.role == "user":
+            return None
+    if assistant_index is None:
+        return None
+    assistant_message = thread.messages[assistant_index]
+    prior_user_message = next(
+        (
+            message
+            for message in reversed(thread.messages[:assistant_index])
+            if message.role == "user" and message.kind != "compaction" and message.content_markdown.strip()
+        ),
+        None,
+    )
+    if prior_user_message is None or not _question_has_project_code_intent(prior_user_message.content_markdown):
+        return None
+    assistant_text = assistant_message.content_markdown.strip()
+    lowered = assistant_text.lower()
+    if not (_PROJECT_CODE_FOLLOWUP_PROMPT_RE.search(assistant_text) or assistant_text.endswith("?")):
+        return None
+    if _PROJECT_CODE_ACTION_RE.search(assistant_text) and (
+        _PROJECT_CODE_TARGET_RE.search(assistant_text)
+        or _PROJECT_CODE_PATH_HINT_RE.search(assistant_text)
+        or "project" in lowered
+    ):
+        return assistant_message
+    if _PROJECT_CODE_PATH_HINT_RE.search(assistant_text) and "project" in lowered:
+        return assistant_message
+    return None
+
+
+def _question_confirms_pending_project_code_followup(question: str, *, thread: ChatThreadResponse | None) -> bool:
+    return _question_is_project_code_confirmation(question) and _last_pending_project_code_followup(thread) is not None
+
+
+def _pending_project_code_followup_requires_write(thread: ChatThreadResponse | None) -> bool:
+    assistant_message = _last_pending_project_code_followup(thread)
+    if assistant_message is None:
+        return False
+    assistant_text = assistant_message.content_markdown.strip()
+    return bool(_PROJECT_CODE_WRITE_ACTION_RE.search(assistant_text) or "into your project" in assistant_text.lower())
+
+
 def _should_offer_research_chat_tools(question: str, request: SendChatMessageRequest) -> bool:
     if not (request.include_papers or request.include_uploads):
         return False
@@ -885,15 +953,30 @@ def _should_offer_research_chat_tools(question: str, request: SendChatMessageReq
 def _should_offer_project_code_tools(question: str, *, thread: ChatThreadResponse | None) -> bool:
     if thread is None or not thread.project_id:
         return False
-    return _question_has_project_code_intent(question)
+    return _question_has_project_code_intent(question) or _question_confirms_pending_project_code_followup(
+        question,
+        thread=thread,
+    )
 
 
 def _should_require_project_code_write(question: str, *, thread: ChatThreadResponse | None) -> bool:
     if not _should_offer_project_code_tools(question, thread=thread):
         return False
+    if _question_confirms_pending_project_code_followup(question, thread=thread):
+        return _pending_project_code_followup_requires_write(thread)
     if _PROJECT_CODE_WRITE_TOOL_RE.search(question):
         return True
     return bool(_PROJECT_CODE_WRITE_ACTION_RE.search(question) and _PROJECT_CODE_TARGET_RE.search(question))
+
+
+def _project_code_tool_use_completed_write(tool_use: dict[str, Any]) -> bool:
+    tool_name = str(tool_use.get("name") or "").strip().lower()
+    if tool_name == "project_touch":
+        tool_input = tool_use.get("input")
+        if not isinstance(tool_input, dict):
+            return False
+        return bool(str(tool_input.get("content") or "").strip())
+    return tool_name in {"project_edit", "project_delete"}
 
 
 def _should_offer_chat_tools(question: str, request: SendChatMessageRequest, *, thread: ChatThreadResponse | None) -> bool:
@@ -2334,6 +2417,7 @@ class PaperbaseService:
                 "When the user asks you to create, inspect, change, delete, or run project code, use the project_* tools instead of guessing. "
                 "Before writing new code, inspect the existing project with project_list_files, project_grep, and project_read_file so you reuse what is already there instead of rewriting it. "
                 "Files you create with project_touch become part of the project and will appear in later project_list_files results and in the project's Code section. "
+                "When creating a file for the user's request, include meaningful initial code in project_touch or follow immediately with project_edit; do not leave the requested file empty. "
                 "If the user asked you to create or change code, do not stop tool use until the relevant managed project Python files have actually been created or updated. "
                 "Read files before editing them. Prefer small PyTorch-first modules and scripts. "
                 "When a distinct code unit or reusable snippet is needed, put it in a project Python file so it shows up in the project's Code section instead of living only in chat text. "
@@ -2794,7 +2878,7 @@ class PaperbaseService:
                     },
                     {
                         "name": "project_touch",
-                        "description": "Create a new managed Python file at an exact safe repo-relative .py path. After creation it will appear in later project_list_files results and in the project's Code section. Fails if that path already exists.",
+                        "description": "Create a new managed Python file at an exact safe repo-relative .py path. After creation it will appear in later project_list_files results and in the project's Code section. When creating a file for the user's request, include meaningful initial code content or follow immediately with project_edit. Fails if that path already exists.",
                         "input_schema": {
                             "type": "object",
                             "properties": {
@@ -3438,9 +3522,7 @@ class PaperbaseService:
             if not tool_uses:
                 break
             project_write_tool_used = project_write_tool_used or any(
-                str(block.get("name") or "").strip().lower() in _PROJECT_CODE_WRITE_TOOL_NAMES
-                for block in tool_uses
-                if isinstance(block, dict)
+                _project_code_tool_use_completed_write(block) for block in tool_uses if isinstance(block, dict)
             )
             context.messages.append({"role": "assistant", "content": assistant_content})
             context.messages.append(
@@ -3510,9 +3592,7 @@ class PaperbaseService:
             if not tool_uses:
                 break
             project_write_tool_used = project_write_tool_used or any(
-                str(block.get("name") or "").strip().lower() in _PROJECT_CODE_WRITE_TOOL_NAMES
-                for block in tool_uses
-                if isinstance(block, dict)
+                _project_code_tool_use_completed_write(block) for block in tool_uses if isinstance(block, dict)
             )
             usage = response_usage(response)
             if usage is not None:
