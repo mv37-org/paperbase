@@ -195,6 +195,7 @@ _JOB_TYPE_MAX_ATTEMPTS: dict[str, int] = {
     "summarize_top_cited": 2,
     "harvest_range": 3,
     "harvest_chunk": 5,
+    "harvest_top_cited": 3,  # planner — paginates S2, enqueues harvest_chunk per batch
 }
 
 
@@ -214,6 +215,7 @@ _JOB_TYPE_PRIORITY: dict[str, int] = {
     "summarize_top_cited": 0,
     "harvest_range": 5,
     "harvest_chunk": 10,
+    "harvest_top_cited": 5,  # planner; same priority tier as harvest_range
 }
 
 

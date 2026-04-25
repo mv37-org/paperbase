@@ -4179,6 +4179,205 @@ class PaperbaseService:
             "enqueued_continuation": enqueued_continuation,
         }
 
+    # --- Top-cited harvest (#39 PR A) ----------------------------------- #
+
+    def enqueue_harvest_top_cited_job(
+        self,
+        *,
+        min_citations: int = 100,
+        max_papers: int | None = None,
+        categories: list[str] | None = None,
+        chunk_size: int = 50,
+    ) -> JobResponse:
+        """Queue a ``harvest_top_cited`` planner job.
+
+        Planner paginates Semantic Scholar's bulk search ordered by
+        ``citationCount:desc``, filters to arxiv-linked papers in the
+        target categories, and enqueues ``harvest_chunk`` jobs (one per
+        ``chunk_size`` arxiv ids) with ``source='s2_top_cited'``. Workers
+        index each id; existing priority + retry + dedupe machinery from
+        the date-range harvest applies unchanged.
+        """
+        if min_citations < 0:
+            raise PermanentError("min_citations must be >= 0")
+        if max_papers is not None and max_papers < 1:
+            raise PermanentError("max_papers must be >= 1 when provided")
+        if chunk_size < 1 or chunk_size > 500:
+            raise PermanentError("chunk_size must be in [1, 500]")
+        resolved_categories = list(categories) if categories else list(self.settings.arxiv_categories)
+        if not resolved_categories:
+            raise PermanentError("categories must not be empty")
+        job = self.repository.create_job(
+            "harvest_top_cited",
+            {
+                "min_citations": int(min_citations),
+                "max_papers": max_papers,
+                "categories": resolved_categories,
+                "chunk_size": int(chunk_size),
+            },
+        )
+        logger.info(
+            "Created harvest_top_cited job",
+            extra={
+                "event": "jobs.harvest_top_cited.created",
+                "job_id": job.job_id,
+                "min_citations": min_citations,
+                "max_papers": max_papers,
+                "category_count": len(resolved_categories),
+                "chunk_size": chunk_size,
+            },
+        )
+        return job
+
+    def run_harvest_top_cited(
+        self,
+        *,
+        min_citations: int,
+        max_papers: int | None,
+        categories: list[str],
+        chunk_size: int,
+        harvest_id: str | None = None,
+    ) -> dict[str, int]:
+        """Planner: stream S2 bulk-search pages and enqueue
+        ``harvest_chunk`` jobs in ``chunk_size`` arxiv-id batches.
+
+        Each enqueued chunk carries ``source='s2_top_cited'`` and a list
+        of ``arxiv_ids``; the chunk worker then iterates and calls
+        ``index_arxiv_paper`` per id. Per-id ``PermanentError`` (e.g. a
+        404 on arxiv) is swallowed so one bad id doesn't kill the chunk.
+
+        Per-paper category filtering happens at index time when the arxiv
+        feed gives us the full ``primary_category`` — bulk search doesn't
+        expose it. The ``categories`` list is therefore validated in the
+        planner (must be non-empty) and persisted to the chunk payload so
+        a future tightening of the gate has somewhere to read it.
+        """
+        if min_citations < 0:
+            raise PermanentError("min_citations must be >= 0")
+        if max_papers is not None and max_papers < 1:
+            raise PermanentError("max_papers must be >= 1 when provided")
+        if chunk_size < 1 or chunk_size > 500:
+            raise PermanentError("chunk_size must be in [1, 500]")
+        if not categories:
+            raise PermanentError("categories must not be empty")
+
+        run_harvest_id = harvest_id or new_id("harvest")
+        cursor: str | None = None
+        chunks_created = 0
+        candidates_emitted = 0
+        pages_fetched = 0
+        pending_batch: list[str] = []
+
+        def _flush_batch() -> None:
+            nonlocal chunks_created, pending_batch
+            if not pending_batch:
+                return
+            self.repository.create_job(
+                "harvest_chunk",
+                {
+                    "harvest_id": run_harvest_id,
+                    "source": "s2_top_cited",
+                    "arxiv_ids": list(pending_batch),
+                    "categories": list(categories),
+                    "min_citations": int(min_citations),
+                },
+                dedupe_key=(
+                    f"harvest_chunk:{run_harvest_id}:s2_top_cited:"
+                    f"{pending_batch[0]}-{pending_batch[-1]}-{len(pending_batch)}"
+                ),
+            )
+            chunks_created += 1
+            pending_batch = []
+
+        while True:
+            if max_papers is not None and candidates_emitted >= max_papers:
+                break
+            page, next_cursor = sources.fetch_top_cited_cs(
+                min_citations=min_citations,
+                cursor=cursor,
+            )
+            pages_fetched += 1
+            if not page:
+                break
+            for candidate in page:
+                if max_papers is not None and candidates_emitted >= max_papers:
+                    break
+                pending_batch.append(candidate.arxiv_id)
+                candidates_emitted += 1
+                if len(pending_batch) >= chunk_size:
+                    _flush_batch()
+            if next_cursor is None:
+                break
+            cursor = next_cursor
+        _flush_batch()
+
+        logger.info(
+            "harvest_top_cited planner enqueued chunks",
+            extra={
+                "event": "harvest_top_cited.planned",
+                "harvest_id": run_harvest_id,
+                "chunks_created": chunks_created,
+                "candidates_emitted": candidates_emitted,
+                "pages_fetched": pages_fetched,
+                "min_citations": min_citations,
+                "max_papers": max_papers,
+            },
+        )
+        return {
+            "chunks_created": chunks_created,
+            "candidates_emitted": candidates_emitted,
+            "pages_fetched": pages_fetched,
+        }
+
+    def run_harvest_chunk_top_cited(
+        self,
+        *,
+        arxiv_ids: list[str],
+        categories: list[str] | None = None,
+        min_citations: int = 0,
+        harvest_id: str | None = None,
+    ) -> dict[str, int]:
+        """Chunk worker for ``source='s2_top_cited'``.
+
+        Iterates ``arxiv_ids`` and calls ``index_arxiv_paper`` per id.
+        Per-id ``PermanentError`` is swallowed so a 404 doesn't fail the
+        whole chunk; the retry policy still catches transient failures
+        on the chunk as a whole. ``categories`` and ``min_citations`` are
+        carried for observability / future filtering and are not used to
+        gate ingestion in v1 (server-side bulk search already filtered
+        by citation count, and arxiv feed-time gating is a follow-up).
+        """
+        if not arxiv_ids:
+            return {"requested": 0, "indexed": 0, "skipped": 0}
+        run_harvest_id = harvest_id or new_id("harvest")
+        indexed = 0
+        skipped = 0
+        for arxiv_id in arxiv_ids:
+            if not arxiv_id:
+                skipped += 1
+                continue
+            try:
+                self.index_arxiv_paper(arxiv_id, force=False)
+                indexed += 1
+            except PermanentError:
+                skipped += 1
+                continue
+        logger.info(
+            "harvest_top_cited chunk completed",
+            extra={
+                "event": "harvest_top_cited.chunk_completed",
+                "harvest_id": run_harvest_id,
+                "requested": len(arxiv_ids),
+                "indexed": indexed,
+                "skipped": skipped,
+            },
+        )
+        return {
+            "requested": len(arxiv_ids),
+            "indexed": indexed,
+            "skipped": skipped,
+        }
+
     def enqueue_latest_sync_job(self) -> JobResponse:
         job = self.repository.create_job(
             "sync_latest",
@@ -4242,15 +4441,36 @@ class PaperbaseService:
                     chunk_months=int(job.payload.get("chunk_months", 3)),
                 )
             elif job.job_type == "harvest_chunk":
-                self.run_harvest_chunk(
-                    source=str(job.payload.get("source", "arxiv")),
+                source = str(job.payload.get("source", "arxiv"))
+                if source == "s2_top_cited":
+                    # New chunk shape from #39 PR A: arxiv_ids list,
+                    # not category/window. Routed to its own handler;
+                    # priority + retry come from the shared harvest_chunk
+                    # job-type wiring.
+                    self.run_harvest_chunk_top_cited(
+                        arxiv_ids=list(job.payload.get("arxiv_ids", [])),
+                        categories=list(job.payload.get("categories") or []),
+                        min_citations=int(job.payload.get("min_citations", 0)),
+                        harvest_id=str(job.payload.get("harvest_id") or job.job_id),
+                    )
+                else:
+                    self.run_harvest_chunk(
+                        source=source,
+                        harvest_id=str(job.payload.get("harvest_id") or job.job_id),
+                        category=str(job.payload["category"]),
+                        start_date=str(job.payload["start_date"]),
+                        end_date=str(job.payload["end_date"]),
+                        limit=job.payload.get("limit"),
+                        cursor=int(job.payload.get("cursor", 0)),
+                        fetched=int(job.payload.get("fetched", 0)),
+                    )
+            elif job.job_type == "harvest_top_cited":
+                self.run_harvest_top_cited(
+                    min_citations=int(job.payload.get("min_citations", 0)),
+                    max_papers=job.payload.get("max_papers"),
+                    categories=list(job.payload.get("categories") or self.settings.arxiv_categories),
+                    chunk_size=int(job.payload.get("chunk_size", 50)),
                     harvest_id=str(job.payload.get("harvest_id") or job.job_id),
-                    category=str(job.payload["category"]),
-                    start_date=str(job.payload["start_date"]),
-                    end_date=str(job.payload["end_date"]),
-                    limit=job.payload.get("limit"),
-                    cursor=int(job.payload.get("cursor", 0)),
-                    fetched=int(job.payload.get("fetched", 0)),
                 )
             elif job.job_type in {"reindex_embeddings", "reindex_missing_embeddings"}:
                 self.reindex_embeddings(

@@ -330,6 +330,49 @@ def harvest_range(
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+class HarvestTopCitedRequest(_BaseModel):
+    # Citation floor on Semantic Scholar's bulk search. From measurement:
+    # ≥100 cs cites yields ~106k arxiv-linked papers; ≥25 yields ~470k —
+    # close to the 500k AI/ML target after the per-paper category gate.
+    min_citations: int = _Field(default=100, ge=0, le=1_000_000)
+    # Stop after this many candidates; ``None`` means "until S2 is exhausted".
+    max_papers: int | None = _Field(default=None, ge=1, le=10_000_000)
+    # When omitted, defaults to the configured AI/ML arxiv categories.
+    categories: list[str] = _Field(default_factory=list)
+    # arxiv_ids per harvest_chunk; smaller chunks let interactive work
+    # cut in faster, larger chunks cut planner overhead. 50 is a balance.
+    chunk_size: int = _Field(default=50, ge=1, le=500)
+
+
+@app.post(
+    "/v1/index/harvest-top-cited",
+    response_model=JobResponse,
+    dependencies=[Depends(require_bearer_token)],
+)
+def harvest_top_cited(
+    request: HarvestTopCitedRequest,
+    service: PaperbaseService = Depends(get_service),
+) -> JobResponse:
+    """Queue a ``harvest_top_cited`` planner job. The planner streams
+    Semantic Scholar's bulk search ordered by citationCount desc,
+    filters to arxiv-linked papers, and enqueues ``harvest_chunk`` jobs
+    (``source='s2_top_cited'``) in fixed-size arxiv-id batches. Chunks
+    run at the same low priority as ``harvest_range`` so an on-demand
+    ``index_paper`` always cuts in front."""
+    from .errors import PermanentError
+
+    categories = request.categories or list(get_settings().arxiv_categories)
+    try:
+        return service.enqueue_harvest_top_cited_job(
+            min_citations=request.min_citations,
+            max_papers=request.max_papers,
+            categories=categories,
+            chunk_size=request.chunk_size,
+        )
+    except PermanentError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @app.post("/v1/index/summarize-top-cited", response_model=JobResponse, dependencies=[Depends(require_bearer_token)])
 def summarize_top_cited(
     limit: int = Query(default=500_000, ge=1, le=5_000_000),
