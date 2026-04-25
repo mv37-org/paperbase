@@ -31,20 +31,48 @@ from paperbase.extractors import (  # noqa: E402
 )
 
 
-# Ground truth from issue #46 (canonical repo per paper, ``None`` = no
-# code released by the authors). Stored as `lowercase` for case-insensitive
-# match — GitHub paths are case-insensitive on the server.
+# Ground truth (canonical repo per paper, ``None`` = no canonical official
+# code released by the authors). Lowercased for case-insensitive match —
+# GitHub repo paths are case-insensitive on the server.
+#
+# The first 10 are the issue #46 landmark fixture. The next 20 are
+# additional well-known ML papers picked for varied difficulty: clear
+# single-repo cases, multi-affiliation papers (FAIR, Google, OpenAI),
+# and papers that genuinely have no official repo (commonly community
+# reimpls only) — useful for stress-testing the precision-first rule.
 GROUND_TRUTH: dict[str, str | None] = {
-    "1706.03762": "tensorflow/tensor2tensor",
-    "1810.04805": "google-research/bert",
-    "2005.14165": "openai/gpt-3",
-    "2010.11929": "google-research/vision_transformer",
-    "2106.09685": "microsoft/lora",
-    "2201.11903": None,  # CoT — no official code
-    "2302.13971": "facebookresearch/llama",
-    "2305.10601": "princeton-nlp/tree-of-thought-llm",
-    "2307.09288": "facebookresearch/llama",
-    "1512.03385": None,  # ResNet — community-maintained reimpls only
+    # ---------- issue #46 landmark fixture (10) ----------
+    "1706.03762": "tensorflow/tensor2tensor",       # Attention Is All You Need
+    "1810.04805": "google-research/bert",           # BERT
+    "2005.14165": "openai/gpt-3",                   # GPT-3
+    "2010.11929": "google-research/vision_transformer",  # ViT
+    "2106.09685": "microsoft/lora",                 # LoRA
+    "2201.11903": None,                             # CoT — no official code
+    "2302.13971": "facebookresearch/llama",         # LLaMA
+    "2305.10601": "princeton-nlp/tree-of-thought-llm",   # Tree of Thoughts
+    "2307.09288": "facebookresearch/llama",         # Llama 2
+    "1512.03385": None,                             # ResNet — community reimpls only
+    # ---------- additional 20 well-known ML papers ----------
+    "1506.02640": "pjreddie/darknet",               # YOLO v1
+    "1611.07004": "phillipi/pix2pix",               # pix2pix
+    "1703.06870": "facebookresearch/detectron",     # Mask R-CNN
+    "1707.06347": "openai/baselines",               # PPO
+    "1709.01507": "hujie-frank/senet",              # Squeeze-and-Excitation
+    "1611.05431": "facebookresearch/resnext",       # ResNeXt
+    "2002.05709": "google-research/simclr",         # SimCLR
+    "2103.00020": "openai/clip",                    # CLIP
+    "2105.04906": "facebookresearch/barlowtwins",   # Barlow Twins
+    "2111.06377": "facebookresearch/mae",           # Masked Autoencoders (MAE)
+    "2006.11239": "hojonathanho/diffusion",         # DDPM
+    "2010.02502": "ermongroup/ddim",                # DDIM
+    "1606.03657": "openai/infogan",                 # InfoGAN
+    "1801.07829": "wangyueft/dgcnn",                # Dynamic Graph CNN
+    "1706.02216": "williamleif/graphsage",          # GraphSAGE
+    "1502.03167": None,                             # Batch Norm — no canonical
+    "1503.02531": None,                             # Knowledge Distillation — no canonical
+    "1409.0473": None,                              # Bahdanau attention — no canonical
+    "1505.04597": None,                             # U-Net — no canonical official
+    "1502.04623": None,                             # DRAW — no canonical
 }
 
 
@@ -105,6 +133,72 @@ def _load_inputs(arxiv_id: str) -> tuple[str, str, str] | None:
         except json.JSONDecodeError:
             pass
     body = body_path.read_text(encoding="utf-8") if body_path.exists() else ""
+    return abstract, body, authors
+
+
+def _bench_cache_dir() -> Path:
+    """On-disk cache for paper text fetched live so the benchmark stays
+    repeatable without re-hitting arxiv. Lives outside the indexed corpus
+    so the indexer doesn't pick it up."""
+    cache = _REPO_ROOT / ".paperbase-data" / "_benchmark_cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    return cache
+
+
+def _fetch_live(arxiv_id: str) -> tuple[str, str, str] | None:
+    """Fetch abstract + body markdown directly from arxiv when the local
+    indexed corpus does not have the paper. Caches the result under
+    ``.paperbase-data/_benchmark_cache/`` so re-runs are offline.
+
+    Uses the same ``fetch_html``/``_clean_html_to_markdown`` plumbing the
+    indexer relies on for HTML papers; falls back to the LaTeX source
+    extractor if the HTML view isn't available. Abstract + authors come
+    from arxiv's atom feed via ``sources.get_paper_details``.
+    """
+    cache_dir = _bench_cache_dir() / arxiv_id
+    meta_path = cache_dir / "meta.json"
+    body_path = cache_dir / "body.md"
+    if meta_path.exists() and body_path.exists():
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        return (
+            meta.get("abstract") or "",
+            body_path.read_text(encoding="utf-8"),
+            meta.get("authors") or "",
+        )
+
+    # Lazy imports — keep the offline path import-cheap.
+    from paperbase import sources
+    from paperbase.extractors import (
+        _clean_html_to_markdown,
+        _extract_latex_text,
+        _latex_to_markdown,
+        fetch_html,
+        fetch_source,
+    )
+
+    paper = sources.get_paper_details(arxiv_id)
+    if paper is None:
+        return None
+    abstract = paper.abstract or ""
+    authors = paper.authors or ""
+
+    body = ""
+    html = fetch_html(arxiv_id)
+    if html:
+        body = _clean_html_to_markdown(html)
+    if not body:
+        source_bytes = fetch_source(arxiv_id)
+        if source_bytes:
+            latex_text = _extract_latex_text(source_bytes)
+            if latex_text:
+                body = _latex_to_markdown(latex_text)
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    meta_path.write_text(
+        json.dumps({"abstract": abstract, "authors": authors}, indent=2),
+        encoding="utf-8",
+    )
+    body_path.write_text(body, encoding="utf-8")
     return abstract, body, authors
 
 
@@ -219,6 +313,15 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Probe Papers With Code for layer-1 results (real network call).",
     )
+    parser.add_argument(
+        "--fetch-missing",
+        action="store_true",
+        help=(
+            "Fetch paper text from arXiv when missing from the local indexed "
+            "corpus. Caches results under .paperbase-data/_benchmark_cache/ "
+            "so re-runs stay offline."
+        ),
+    )
     args = parser.parse_args(argv)
 
     rows: list[Verdict] = []
@@ -230,6 +333,9 @@ def main(argv: list[str] | None = None) -> int:
 
     for arxiv_id, truth in GROUND_TRUTH.items():
         loaded = _load_inputs(arxiv_id)
+        if loaded is None and args.fetch_missing:
+            print(f"[fetch] {arxiv_id}: pulling from arxiv...", flush=True)
+            loaded = _fetch_live(arxiv_id)
         if loaded is None:
             print(f"[skip] {arxiv_id}: no local data")
             continue
