@@ -794,6 +794,50 @@ function messageHasProjectCodeIntent(content: string) {
   return PROJECT_CODE_ACTION_RE.test(content) && PROJECT_CODE_TARGET_RE.test(content);
 }
 
+function isLocalDebugHost() {
+  try {
+    const { hostname } = new URL(window.location.href);
+    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+  } catch {
+    return false;
+  }
+}
+
+function latestThreadMessageId(
+  thread: ChatThreadResponse,
+  predicate: (message: ChatMessageResponse) => boolean,
+) {
+  for (let index = thread.messages.length - 1; index >= 0; index -= 1) {
+    const message = thread.messages[index];
+    if (message && predicate(message)) {
+      return message.message_id;
+    }
+  }
+  return null;
+}
+
+function buildThreadDebugBundle(thread: ChatThreadResponse, userId: string | null) {
+  const latestMessage = thread.messages[thread.messages.length - 1] ?? null;
+  return {
+    user_id: userId,
+    project_id: thread.project_id,
+    project_name: thread.project_name,
+    thread_id: thread.thread_id,
+    thread_title: thread.title,
+    message_count: thread.messages.length,
+    latest_message_id: latestMessage?.message_id ?? null,
+    latest_user_message_id: latestThreadMessageId(thread, (message) => message.role === "user"),
+    latest_assistant_message_id: latestThreadMessageId(
+      thread,
+      (message) => message.role === "assistant" && message.kind !== "compaction",
+    ),
+    latest_compaction_message_id: latestThreadMessageId(
+      thread,
+      (message) => message.kind === "compaction",
+    ),
+  };
+}
+
 function quotedToolActivityTarget(label: string) {
   return label.match(TOOL_ACTIVITY_TARGET_RE)?.[1] ?? "";
 }
@@ -1142,6 +1186,7 @@ export default function App() {
 
   const authCopy = AUTH_VIEW_COPY[authView];
   const authenticated = Boolean(session?.authenticated);
+  const localThreadDebugEnabled = useMemo(() => isLocalDebugHost(), []);
   const activeThreadId = activeTab?.kind === "thread" ? activeTab.id : null;
   const activePythonFileId = activeTab?.kind === "python_file" ? activeTab.id : null;
   const activeProjectHomeId = activeTab?.kind === "project_home" ? activeTab.id : null;
@@ -1156,6 +1201,13 @@ export default function App() {
   const activePythonRun = activePythonFileId
     ? (pythonFileRuns[activePythonFileId] ?? { running: false, result: null, error: "" })
     : { running: false, result: null, error: "" };
+  const activeThreadDebugBundle = useMemo(
+    () =>
+      activeThread && localThreadDebugEnabled
+        ? buildThreadDebugBundle(activeThread, session?.user?.user_id ?? null)
+        : null,
+    [activeThread, localThreadDebugEnabled, session?.user?.user_id],
+  );
   const activePythonContent = activePythonDraft?.content ?? activePythonFile?.content ?? "";
   const activeProjectHomeItems = activeProjectHomeId
     ? (projectItems[activeProjectHomeId]?.items ?? [])
@@ -2125,6 +2177,18 @@ export default function App() {
       console.error(error);
     }
   }, []);
+
+  const copyThreadDebugBundle = useCallback(
+    async (bundle: ReturnType<typeof buildThreadDebugBundle>) => {
+      try {
+        await navigator.clipboard.writeText(JSON.stringify(bundle, null, 2));
+        showNoteFlash("Copied chat debug bundle.");
+      } catch (error) {
+        console.error(error);
+      }
+    },
+    [showNoteFlash],
+  );
 
   const sendMessage = useCallback(
     async (threadId: string, content: string) => {
@@ -4700,6 +4764,29 @@ export default function App() {
               className={`chat-message-list${isChatEmpty ? " empty" : ""}${activeTab?.kind === "python_file" ? " python-file-view" : ""}`}
               onScroll={handleMessageListScroll}
             >
+              {activeTab?.kind === "thread" && activeThreadDebugBundle ? (
+                <div className="chat-thread-debug-strip" data-testid="thread-debug-strip">
+                  <div className="chat-thread-debug-copy-row">
+                    <span className="chat-thread-debug-label">Debug IDs</span>
+                    <button
+                      type="button"
+                      className="chat-thread-debug-copy-button"
+                      aria-label="Copy chat debug bundle"
+                      title="Copy chat debug bundle"
+                      onClick={() => void copyThreadDebugBundle(activeThreadDebugBundle)}
+                    >
+                      Copy
+                    </button>
+                  </div>
+                  <div className="chat-thread-debug-values">
+                    <span>{`user ${activeThreadDebugBundle.user_id ?? "none"}`}</span>
+                    <span>{`project ${activeThreadDebugBundle.project_id}`}</span>
+                    <span>{`thread ${activeThreadDebugBundle.thread_id}`}</span>
+                    <span>{`last ${activeThreadDebugBundle.latest_message_id ?? "none"}`}</span>
+                    <span>{`assistant ${activeThreadDebugBundle.latest_assistant_message_id ?? "none"}`}</span>
+                  </div>
+                </div>
+              ) : null}
               {activeTab?.kind === "project_home" ? (
                 activeProjectHome ? (
                   <div className="project-home-page">

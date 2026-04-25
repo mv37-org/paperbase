@@ -566,6 +566,12 @@ describe("App", () => {
     );
     expect(restoredTab?.querySelector(".chat-tab-thread-indicator")).toBeTruthy();
     expect(document.querySelectorAll(".chat-tab-thread-indicator")).toHaveLength(1);
+    const debugStrip = screen.getByTestId("thread-debug-strip");
+    expect(debugStrip.textContent).toContain("user user_1");
+    expect(debugStrip.textContent).toContain("project proj_1");
+    expect(debugStrip.textContent).toContain("thread thread_1");
+    expect(debugStrip.textContent).toContain("assistant msg_1");
+    expect(screen.getByRole("button", { name: "Copy chat debug bundle" })).toBeTruthy();
   });
 
   it("loads project sessions lazily when a project is expanded", async () => {

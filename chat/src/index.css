@@ -2045,6 +2045,56 @@ textarea::placeholder,
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
+.chat-thread-debug-strip {
+  width: min(var(--chat-content-max-width), 100%);
+  max-width: 100%;
+  margin: 0 auto 18px;
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid rgba(111, 93, 76, 0.18);
+  border-radius: 8px;
+  background: rgba(251, 247, 241, 0.86);
+  color: #4b4339;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.chat-thread-debug-copy-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.chat-thread-debug-label {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.chat-thread-debug-copy-button {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  opacity: 0.8;
+}
+
+.chat-thread-debug-copy-button:hover,
+.chat-thread-debug-copy-button:focus-visible {
+  opacity: 1;
+}
+
+.chat-thread-debug-values {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+}
+
 .message-row {
   display: grid;
   gap: 6px;
@@ -5128,6 +5178,12 @@ body.authenticated-theme-dark .message-bubble.user {
 body.authenticated-theme-dark .message-bubble.compaction {
   border-color: rgba(223, 232, 244, 0.12);
   background: rgba(255, 255, 255, 0.05);
+}
+
+body.authenticated-theme-dark .chat-thread-debug-strip {
+  border-color: rgba(223, 232, 244, 0.12);
+  background: rgba(12, 18, 25, 0.88);
+  color: rgba(223, 232, 244, 0.82);
 }
 
 body.authenticated-theme-dark .message-markdown blockquote,
