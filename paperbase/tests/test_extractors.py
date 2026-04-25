@@ -737,20 +737,43 @@ def test_rank_github_candidates_picks_abstract_mention_over_body():
     assert winner.url == "https://github.com/paper/official"
 
 
-def test_rank_github_candidates_rejects_ambiguous_ties():
-    """Precision-first: when top score doesn't beat runner-up by the
-    ``min_margin``, return None rather than best-guess. This is the
-    behavior arslnb asked for on PR #45 — a wrong code_url is worse
-    than no code_url because it triggers auto-enqueue of ingest_repo
-    against an unrelated repo.
+def test_rank_github_candidates_rejects_three_way_tie():
+    """Precision-first: when 3+ candidates cluster at the top score,
+    there is no honest tiebreaker and the ranker resolves to ``None``.
+    This is arslnb's "ambiguity → None" rule from PR #45 — a wrong
+    code_url triggers auto-enqueue of ingest_repo against unrelated
+    code, which is worse than no attachment. Locks the post-tuning
+    behavior: 2-way ties get a first-mention tiebreaker (see
+    ``test_rank_github_candidates_breaks_two_way_tie_by_first_mention``)
+    but 3+ ways stay None.
     """
     body = (
-        "See https://github.com/owner/dataset and also "
+        "See https://github.com/owner/datasetA, "
+        "https://github.com/owner/datasetB, and "
         "https://github.com/owner/method referenced in Section 3."
     )
     candidates = extract_github_candidates("", body)
     winner = rank_github_candidates(candidates, abstract="", body=body)
     assert winner is None
+
+
+def test_rank_github_candidates_breaks_two_way_tie_by_first_mention():
+    """Post-tuning behavior (#46 follow-up): a 2-candidate tie at the
+    top score is broken by which candidate appears earliest in the
+    body. Empirically the paper's own repo is mentioned first in a
+    page-1 footnote, with citations to other repos coming later, so
+    "earliest mention wins" recovers BERT / ViT / LLaMA-style cases
+    without resurrecting the CoT first-match-wins regression
+    (which is a 3-way tie and stays None).
+    """
+    body = (
+        "Our implementation at https://github.com/author/own appears here. "
+        "We compare to https://github.com/baseline/impl in Section 4."
+    )
+    candidates = extract_github_candidates("", body)
+    winner = rank_github_candidates(candidates, abstract="", body=body)
+    assert winner is not None
+    assert winner.url == "https://github.com/author/own"
 
 
 def test_rank_github_candidates_author_affinity_tips_the_scale():
@@ -804,12 +827,16 @@ def test_extract_github_url_shim_delegates_to_ranker():
     assert extract_github_url(body) == "https://github.com/microsoft/LoRA"
 
 
-def test_extract_github_url_shim_returns_none_on_ambiguity():
-    """Multi-candidate tie under the ranker's min_margin must also
-    propagate through the shim — this is the fix for PR #45's
-    first-match-wins regression arslnb flagged."""
+def test_extract_github_url_shim_returns_none_on_three_way_tie():
+    """3+ candidate clusters under the ranker stay None even through
+    the shim — that's the case PR #45's first-match-wins blew on
+    (CoT-shaped papers with many cited dataset/baseline repos).
+    2-candidate ties now resolve via the first-mention tiebreaker;
+    see ``test_rank_github_candidates_breaks_two_way_tie_by_first_mention``.
+    """
     body = (
-        "See https://github.com/owner/dataset and "
+        "See https://github.com/owner/datasetA, "
+        "https://github.com/owner/datasetB, and "
         "https://github.com/owner/method in the code."
     )
     assert extract_github_url(body) is None

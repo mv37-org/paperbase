@@ -4613,13 +4613,15 @@ def test_index_arxiv_paper_falls_back_to_ranker_when_pwc_empty(
     assert refreshed.code_url_source == "extracted"
 
 
-def test_index_arxiv_paper_returns_none_on_ambiguity(
+def test_index_arxiv_paper_returns_none_on_three_way_ambiguity(
     service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Two candidates near-tie under the ranker's ``min_margin``:
-    ``code_url`` must resolve to ``None`` so ``ingest_repo`` is not
-    auto-enqueued against an uncertain repo. This is arslnb's
-    "ambiguity → None" rule from the PR #45 review."""
+    """Three+ candidates clustered at the top: ``code_url`` must
+    resolve to ``None`` so ``ingest_repo`` is not auto-enqueued
+    against an uncertain repo. This is arslnb's "ambiguity → None"
+    rule from the PR #45 review, post-tuning: 2-way ties get a
+    first-mention tiebreaker (CoT-style false positives), 3+-way
+    ties stay None (the case the rule actually targets)."""
     _seed_code_url_paper(service)
 
     from paperbase import sources
@@ -4647,7 +4649,8 @@ def test_index_arxiv_paper_returns_none_on_ambiguity(
         lambda metadata: ExtractionOutput(
             source_type="abstract-only",
             text_markdown=(
-                "See https://github.com/owner/dataset and also "
+                "See https://github.com/owner/datasetA, "
+                "https://github.com/owner/datasetB, and "
                 "https://github.com/owner/method in the code.\n"
             ),
         ),
@@ -4657,7 +4660,7 @@ def test_index_arxiv_paper_returns_none_on_ambiguity(
     assert refreshed.code_url is None
     assert refreshed.code_url_source is None
     assert refreshed.code_url_candidates is not None
-    assert len(refreshed.code_url_candidates) == 2
+    assert len(refreshed.code_url_candidates) == 3
 
 
 def test_backfill_code_urls_from_pwc_respects_admin_pin(

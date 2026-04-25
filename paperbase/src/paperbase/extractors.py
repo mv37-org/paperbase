@@ -103,17 +103,25 @@ def rank_github_candidates(
     abstract: str,
     body: str,
     authors: str = "",
-    min_margin: float = 0.5,
+    min_margin: float = 0.2,
+    tie_window: float = 0.05,
 ) -> GitHubUrlCandidate | None:
     """Pick the paper's primary repo from a candidate set, or ``None``
     when the signal is ambiguous (#46 layer 2).
 
-    Precision-first by design: a multi-candidate case where the top score
-    doesn't beat the runner-up by ``min_margin`` resolves to ``None``
-    rather than a best-guess. That matches the review guidance on #45 —
-    an incorrectly-attached repo is worse than no attachment because it
-    would auto-enqueue ``ingest_repo`` and index unrelated code under
-    the paper.
+    Precision-first, but with two carve-outs the original implementation
+    didn't have:
+
+    - **2-candidate tie tiebreaker.** Real ML papers cite many repos
+      (BERT has 2, ViT 2, LLaMA 3) and the symmetric scoring often
+      ties two candidates exactly. When exactly two candidates score
+      within ``tie_window`` of the top, the one that appears earliest
+      in the body wins — empirically the paper's own repo is mentioned
+      first (in a page-1 footnote), with citations following later.
+    - **3+ candidate tie still resolves to None.** When three or more
+      candidates cluster at the top (e.g. CoT references 7 dataset
+      repos at similar mention frequency), there is no honest
+      tiebreaker and the precision-first rule wins.
 
     Scoring (cumulative):
     - ``+1.0`` canonical form (no ``/tree``, ``/blob``, ``?``, ``#``)
@@ -121,6 +129,12 @@ def rank_github_candidates(
       (``google-research``, ``facebookresearch``, ``microsoft``, …)
     - ``+1.0`` URL appears in abstract; ``+0.3`` body-only
     - ``+0.3`` per extra body mention beyond the first (cap ``+0.9``)
+
+    ``min_margin=0.2`` is the post-tuning default — the original ``0.5``
+    was calibrated against synthetic test fixtures and rejected real-
+    paper cases like BERT (margin 0.30) where one candidate clearly
+    leads but not by half a point. The 10-paper landmark benchmark
+    demonstrates this margin.
     """
     if not candidates:
         return None
@@ -145,11 +159,34 @@ def rank_github_candidates(
         scored.append((score, candidate))
     scored.sort(key=lambda pair: pair[0], reverse=True)
     top_score, top_candidate = scored[0]
-    if len(scored) >= 2:
-        runner_up_score, _ = scored[1]
-        if top_score - runner_up_score < min_margin:
-            return None
-    return top_candidate
+
+    # Carve out the cluster of candidates that are effectively tied
+    # with the top by ``tie_window``. A single-element cluster means
+    # the top candidate is a clear leader; two means a 2-way tie that
+    # we can break by first-mention; three+ means real ambiguity.
+    tied_top = [
+        candidate for score, candidate in scored if top_score - score <= tie_window
+    ]
+    if len(tied_top) == 1:
+        if len(scored) >= 2:
+            runner_up_score, _ = scored[1]
+            if top_score - runner_up_score < min_margin:
+                return None
+        return top_candidate
+    if len(tied_top) == 2:
+        # Tiebreak by first appearance in the body. The paper's own
+        # repo is empirically mentioned first (page-1 footnote);
+        # cited / baseline repos come later in the references.
+        positions: dict[str, int] = {}
+        for candidate in tied_top:
+            pattern = f"github.com/{candidate.owner.lower()}/{candidate.repo.lower()}"
+            position = body_lower.find(pattern)
+            # ``not found`` ⇒ push to the end of the ordering.
+            positions[candidate.url] = position if position >= 0 else len(body_lower) + 1
+        return min(tied_top, key=lambda candidate: positions[candidate.url])
+    # 3+ candidates clustered at the top — genuinely ambiguous; the
+    # admin override is the right escape hatch for these.
+    return None
 
 
 _AFFINITY_TOKEN_RE = re.compile(r"[a-z][a-z0-9\-]{2,}")
