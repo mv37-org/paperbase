@@ -1737,6 +1737,41 @@ def test_project_code_read_grep_edit_and_delete(browser_service):
     }
 
 
+def test_project_code_edit_can_populate_an_existing_empty_file(browser_service):
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="empty-edit@example.com", password="topsecret123", display_name="Empty Edit")
+    )
+    assert session.user is not None
+    service.save_github_connection(
+        session.user,
+        github_user_id="42",
+        github_login="octocat",
+        access_token="github-access-token",
+        scope="repo,read:user",
+    )
+
+    project_id = service.list_projects(session.user).projects[0].project_id
+    created = service.create_project_python_file(
+        session.user,
+        project_id,
+        repo_path="src/linear_gd.py",
+        content="",
+    )
+
+    edited = service.edit_project_code_file(
+        session.user,
+        project_id,
+        repo_path="src/linear_gd.py",
+        old_string="",
+        new_string="def train_linear_gd():\n    return 1\n",
+    )
+
+    assert edited["file_id"] == created.file_id
+    assert edited["match_count"] == 1
+    assert edited["content"] == "def train_linear_gd():\n    return 1\n"
+
+
 def test_project_chat_tools_are_advertised_for_coding_turns(browser_service):
     service, _, _ = browser_service
     session, _ = service.register_browser_user(
@@ -1764,6 +1799,7 @@ def test_project_chat_tools_are_advertised_for_coding_turns(browser_service):
     assert "created earlier in this chat" in tools_by_name["project_list_files"]["description"]
     assert "appear in later project_list_files results" in tools_by_name["project_touch"]["description"]
     assert "meaningful initial code content" in tools_by_name["project_touch"]["description"]
+    assert "old_string=''" in tools_by_name["project_edit"]["description"]
     assert "truly needs deletion" in tools_by_name["project_delete"]["description"]
 
     prompt = service._chat_tool_system_prompt(
@@ -1774,6 +1810,8 @@ def test_project_chat_tools_are_advertised_for_coding_turns(browser_service):
     assert "writing managed project Python files" in prompt
     assert "appear in later project_list_files results" in prompt
     assert "do not leave the requested file empty" in prompt
+    assert "If the target file already exists, update it with project_edit" in prompt
+    assert 'old_string=""' in prompt
     assert "do not stop tool use until the relevant managed project Python files have actually been created or updated" in prompt
     assert "Act like a careful ML engineer and researcher maintaining a real project repository" in prompt
     assert "Treat project files as durable research artifacts" in prompt
@@ -1890,6 +1928,112 @@ def test_project_code_turn_forces_tools_until_a_write_occurs():
     assert chat_model.create_calls[1]["tool_choice"] == {"type": "any"}
     assert chat_model.create_calls[2]["tool_choice"] == {"type": "any"}
     assert chat_model.create_calls[3]["tool_choice"] == {"type": "auto"}
+
+
+def test_project_code_turn_retries_after_failed_touch_and_fills_empty_file():
+    class FailedTouchThenEditChatModel(FakeChatModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.round_index = 0
+
+        def create_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+            self.create_calls.append(
+                {
+                    "api_key": api_key,
+                    "messages": messages,
+                    "system_prompt": system_prompt,
+                    "tools": tools,
+                    "tool_choice": tool_choice,
+                }
+            )
+            if tools:
+                if self.round_index == 0:
+                    self.round_index += 1
+                    return {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "toolu_bad_touch",
+                                "name": "project_touch",
+                                "input": {
+                                    "repo_path": "src/linear_gd.py",
+                                    "content": "def train_linear_gd():\n    return 1\n",
+                                },
+                            }
+                        ],
+                        "stop_reason": "tool_use",
+                    }
+                if self.round_index == 1:
+                    self.round_index += 1
+                    return {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "toolu_fill_empty_file",
+                                "name": "project_edit",
+                                "input": {
+                                    "repo_path": "src/linear_gd.py",
+                                    "old_string": "",
+                                    "new_string": "def train_linear_gd():\n    return 1\n",
+                                },
+                            }
+                        ],
+                        "stop_reason": "tool_use",
+                    }
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Saved the module to `src/linear_gd.py`.",
+                    }
+                ],
+                "stop_reason": "end_turn",
+            }
+
+    chat_model = FailedTouchThenEditChatModel()
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=chat_model,
+        github_repo_manager=FakeGitHubRepoManager(),
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="failed-touch@example.com", password="topsecret123", display_name="Failed Touch")
+    )
+    assert session.user is not None
+    _connect_github(service, session.user)
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="Project chat"))
+    service.create_project_python_file(
+        session.user,
+        thread.project_id,
+        repo_path="src/linear_gd.py",
+        content="",
+    )
+
+    response = service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="Write some code to train a small linear gradient descent with pytorch"),
+    )
+
+    saved_file = service.repository.get_project_python_file_by_path(  # type: ignore[attr-defined]
+        user_id=session.user.user_id,
+        project_id=thread.project_id,
+        repo_path="src/linear_gd.py",
+    )
+    assert response.assistant_message is not None
+    assert saved_file is not None
+    assert saved_file.content == "def train_linear_gd():\n    return 1\n"
+    assert chat_model.create_calls[0]["tool_choice"] == {"type": "any"}
+    assert chat_model.create_calls[1]["tool_choice"] == {"type": "any"}
+    assert chat_model.create_calls[2]["tool_choice"] == {"type": "auto"}
 
 
 def test_project_code_confirmation_turn_inherits_tool_context():

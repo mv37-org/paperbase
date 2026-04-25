@@ -969,7 +969,9 @@ def _should_require_project_code_write(question: str, *, thread: ChatThreadRespo
     return bool(_PROJECT_CODE_WRITE_ACTION_RE.search(question) and _PROJECT_CODE_TARGET_RE.search(question))
 
 
-def _project_code_tool_use_completed_write(tool_use: dict[str, Any]) -> bool:
+def _project_code_tool_use_completed_write(tool_use: dict[str, Any], *, is_error: bool) -> bool:
+    if is_error:
+        return False
     tool_name = str(tool_use.get("name") or "").strip().lower()
     if tool_name == "project_touch":
         tool_input = tool_use.get("input")
@@ -977,6 +979,23 @@ def _project_code_tool_use_completed_write(tool_use: dict[str, Any]) -> bool:
             return False
         return bool(str(tool_input.get("content") or "").strip())
     return tool_name in {"project_edit", "project_delete"}
+
+
+def _project_code_write_retry_prompt() -> str:
+    return (
+        "No managed project Python file has been updated yet. "
+        "This turn still requires successful project_* tool calls before any user-facing narrative text. "
+        "If the target file already exists, update it with project_edit instead of claiming success. "
+        "If the target file exists and is empty, you may populate it with project_edit using old_string=\"\"."
+    )
+
+
+def _project_code_write_failure_prompt() -> str:
+    return (
+        "No managed project Python file was successfully updated during the tool phase. "
+        "In your final answer, clearly say that no project file was changed, do not claim the code was saved, "
+        "and ask the user to retry if they want you to persist the code."
+    )
 
 
 def _should_offer_chat_tools(question: str, request: SendChatMessageRequest, *, thread: ChatThreadResponse | None) -> bool:
@@ -1923,22 +1942,26 @@ class PaperbaseService:
         replace_all: bool = False,
     ) -> dict[str, Any]:
         self._get_github_connection(user)
-        if not old_string:
-            raise HTTPException(status_code=422, detail="old_string is required")
         project_file = self._get_project_code_file(user, project_id, repo_path)
-        match_count = project_file.content.count(old_string)
-        if match_count == 0:
-            raise HTTPException(status_code=409, detail=f"Exact text was not found in '{project_file.repo_path}'")
-        if match_count > 1 and not replace_all:
-            raise HTTPException(
-                status_code=409,
-                detail=f"Exact text matched {match_count} times in '{project_file.repo_path}'. Read the file and retry with a unique snippet or replace_all=true.",
+        if old_string == "":
+            if project_file.content != "":
+                raise HTTPException(status_code=422, detail="old_string is required unless the file is empty")
+            match_count = 1
+            updated_content = new_string
+        else:
+            match_count = project_file.content.count(old_string)
+            if match_count == 0:
+                raise HTTPException(status_code=409, detail=f"Exact text was not found in '{project_file.repo_path}'")
+            if match_count > 1 and not replace_all:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Exact text matched {match_count} times in '{project_file.repo_path}'. Read the file and retry with a unique snippet or replace_all=true.",
+                )
+            updated_content = (
+                project_file.content.replace(old_string, new_string)
+                if replace_all
+                else project_file.content.replace(old_string, new_string, 1)
             )
-        updated_content = (
-            project_file.content.replace(old_string, new_string)
-            if replace_all
-            else project_file.content.replace(old_string, new_string, 1)
-        )
         updated = self.repository.update_python_file(  # type: ignore[attr-defined]
             user_id=user.user_id,
             file_id=project_file.file_id,
@@ -2420,6 +2443,8 @@ class PaperbaseService:
                 "When creating a file for the user's request, include meaningful initial code in project_touch or follow immediately with project_edit; do not leave the requested file empty. "
                 "If the user asked you to create or change code, do not stop tool use until the relevant managed project Python files have actually been created or updated. "
                 "Read files before editing them. Prefer small PyTorch-first modules and scripts. "
+                "If the target file already exists, update it with project_edit instead of calling project_touch on the same path. "
+                "If the target file exists and is empty, you may populate it with project_edit using old_string=\"\". "
                 "When a distinct code unit or reusable snippet is needed, put it in a project Python file so it shows up in the project's Code section instead of living only in chat text. "
                 "Structure new files as importable modules with named functions, classes, or constants that other files can import; avoid putting all logic in top-level script bodies. "
                 "Keep entrypoint-only behavior under if __name__ == '__main__': when needed. "
@@ -2890,7 +2915,7 @@ class PaperbaseService:
                     },
                     {
                         "name": "project_edit",
-                        "description": "Apply an exact-match text edit to one managed Python file. Fails if the old text is missing or ambiguous unless replace_all=true.",
+                        "description": "Apply an exact-match text edit to one managed Python file. Fails if the old text is missing or ambiguous unless replace_all=true. If the file already exists and is empty, you may use old_string='' once to populate it.",
                         "input_schema": {
                             "type": "object",
                             "properties": {
@@ -3444,19 +3469,26 @@ class PaperbaseService:
         user: BrowserUser,
         citation_registry: ChatCitationRegistry,
         project_id: str | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], bool]:
         blocks: list[dict[str, Any]] = []
+        project_write_completed = False
         for index, tool_use in enumerate(tool_uses):
             tool_use_id = str(tool_use.get("id") or "").strip()
             if not tool_use_id:
                 continue
+            tool_name = str(tool_use.get("name") or "").strip()
+            tool_input = tool_use.get("input") if isinstance(tool_use.get("input"), dict) else {}
             payload, is_error = self._run_single_chat_tool(
                 index=index,
-                tool_name=str(tool_use.get("name") or "").strip(),
-                tool_input=tool_use.get("input") if isinstance(tool_use.get("input"), dict) else {},
+                tool_name=tool_name,
+                tool_input=tool_input,
                 user=user,
                 citation_registry=citation_registry,
                 project_id=project_id,
+            )
+            project_write_completed = project_write_completed or _project_code_tool_use_completed_write(
+                {"name": tool_name, "input": tool_input},
+                is_error=is_error,
             )
             block = {
                 "type": "tool_result",
@@ -3466,7 +3498,7 @@ class PaperbaseService:
             if is_error:
                 block["is_error"] = True
             blocks.append(block)
-        return blocks
+        return blocks, project_write_completed
 
     def _run_chat_tool_rounds(
         self,
@@ -3520,22 +3552,26 @@ class PaperbaseService:
             assistant_content = [block for block in (response.get("content") or []) if isinstance(block, dict)]
             tool_uses = [block for block in assistant_content if block.get("type") == "tool_use"]
             if not tool_uses:
+                if require_project_code_write and not project_write_tool_used and must_use_tool_this_round:
+                    context.messages.append({"role": "user", "content": _project_code_write_retry_prompt()})
+                    continue
                 break
-            project_write_tool_used = project_write_tool_used or any(
-                _project_code_tool_use_completed_write(block) for block in tool_uses if isinstance(block, dict)
+            blocks, completed_write_this_round = self._tool_result_blocks(
+                tool_uses=tool_uses,
+                user=user,
+                citation_registry=citation_registry,
+                project_id=prepared.thread.project_id,
             )
+            project_write_tool_used = project_write_tool_used or completed_write_this_round
             context.messages.append({"role": "assistant", "content": assistant_content})
             context.messages.append(
                 {
                     "role": "user",
-                    "content": self._tool_result_blocks(
-                        tool_uses=tool_uses,
-                        user=user,
-                        citation_registry=citation_registry,
-                        project_id=prepared.thread.project_id,
-                    ),
+                    "content": blocks,
                 }
             )
+        if require_project_code_write and not project_write_tool_used:
+            context.messages.append({"role": "user", "content": _project_code_write_failure_prompt()})
         return context, citation_registry
 
     def _run_chat_tool_rounds_stream(
@@ -3589,16 +3625,17 @@ class PaperbaseService:
             )
             assistant_content = [block for block in (response.get("content") or []) if isinstance(block, dict)]
             tool_uses = [block for block in assistant_content if block.get("type") == "tool_use"]
-            if not tool_uses:
-                break
-            project_write_tool_used = project_write_tool_used or any(
-                _project_code_tool_use_completed_write(block) for block in tool_uses if isinstance(block, dict)
-            )
             usage = response_usage(response)
             if usage is not None:
                 yield ("usage", self._chat_usage_payload(usage))
+            if not tool_uses:
+                if require_project_code_write and not project_write_tool_used and must_use_tool_this_round:
+                    context.messages.append({"role": "user", "content": _project_code_write_retry_prompt()})
+                    continue
+                break
             context.messages.append({"role": "assistant", "content": assistant_content})
             blocks: list[dict[str, Any]] = []
+            completed_write_this_round = False
             for index, tool_use in enumerate(tool_uses):
                 tool_use_id = str(tool_use.get("id") or "").strip()
                 if not tool_use_id:
@@ -3622,6 +3659,10 @@ class PaperbaseService:
                     citation_registry=citation_registry,
                     project_id=prepared.thread.project_id,
                 )
+                completed_write_this_round = completed_write_this_round or _project_code_tool_use_completed_write(
+                    {"name": tool_name, "input": tool_input},
+                    is_error=is_error,
+                )
                 yield (
                     "tool_done",
                     {
@@ -3639,7 +3680,10 @@ class PaperbaseService:
                 if is_error:
                     block["is_error"] = True
                 blocks.append(block)
+            project_write_tool_used = project_write_tool_used or completed_write_this_round
             context.messages.append({"role": "user", "content": blocks})
+        if require_project_code_write and not project_write_tool_used:
+            context.messages.append({"role": "user", "content": _project_code_write_failure_prompt()})
         return context, citation_registry
 
     def _api_key_required_response(
