@@ -2248,6 +2248,103 @@ def test_project_code_confirmation_turn_inherits_tool_context():
     assert "project_touch" in tool_names
 
 
+def test_project_code_retry_turn_inherits_tool_context_after_failed_persist_message():
+    class ProjectRetryChatModel(FakeChatModel):
+        def create_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+            self.create_calls.append(
+                {
+                    "api_key": api_key,
+                    "messages": messages,
+                    "system_prompt": system_prompt,
+                    "tools": tools,
+                    "tool_choice": tool_choice,
+                }
+            )
+            if tools:
+                return {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_fill_empty_file",
+                            "name": "project_edit",
+                            "input": {
+                                "repo_path": "src/linear_gd.py",
+                                "old_string": "",
+                                "new_string": "def train_linear_gd():\n    return 1\n",
+                            },
+                        }
+                    ],
+                    "stop_reason": "tool_use",
+                }
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Saved the module to `src/linear_gd.py`.",
+                    }
+                ],
+                "stop_reason": "end_turn",
+            }
+
+    chat_model = ProjectRetryChatModel()
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=chat_model,
+        github_repo_manager=FakeGitHubRepoManager(),
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="project-retry@example.com", password="topsecret123", display_name="Project Retry")
+    )
+    assert session.user is not None
+    _connect_github(service, session.user)
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="Project chat"))
+    service.repository.add_chat_message(  # type: ignore[attr-defined]
+        thread_id=thread.thread_id,
+        role="user",
+        content_markdown="Write some code to train a small linear gradient descent with pytorch",
+    )
+    service.repository.add_chat_message(  # type: ignore[attr-defined]
+        thread_id=thread.thread_id,
+        role="assistant",
+        content_markdown=(
+            "I wasn't able to persist code into a managed project Python file in this turn, "
+            "so no project file was changed. Please retry, or tell me the exact file you want updated."
+        ),
+    )
+    service.create_project_python_file(
+        session.user,
+        thread.project_id,
+        repo_path="src/linear_gd.py",
+        content="",
+    )
+
+    response = service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="try again"),
+    )
+
+    saved_file = service.repository.get_project_python_file_by_path(  # type: ignore[attr-defined]
+        user_id=session.user.user_id,
+        project_id=thread.project_id,
+        repo_path="src/linear_gd.py",
+    )
+    assert response.assistant_message is not None
+    assert saved_file is not None
+    assert saved_file.content == "def train_linear_gd():\n    return 1\n"
+    assert chat_model.create_calls[0]["tool_choice"] == {"type": "any"}
+    tool_names = {tool["name"] for tool in chat_model.create_calls[0]["tools"]}
+    assert "project_edit" in tool_names
+
+
 def test_python_file_sync_project_repo_writes_metadata_and_files():
     repo_manager = FakeGitHubRepoManager()
     service = PaperbaseService(

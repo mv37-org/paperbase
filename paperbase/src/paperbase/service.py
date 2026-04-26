@@ -258,8 +258,16 @@ _PROJECT_CODE_CONFIRMATION_RE = re.compile(
     r")\s*[.!?]*\s*$",
     re.IGNORECASE,
 )
+_PROJECT_CODE_RETRY_RE = re.compile(
+    r"^\s*(?:try again|retry|please retry|again|one more time|try it again|retry that)\s*[.!?]*\s*$",
+    re.IGNORECASE,
+)
 _PROJECT_CODE_FOLLOWUP_PROMPT_RE = re.compile(
     r"\b(want me to|should i|would you like me to|i can|if you want|if you'd like)\b",
+    re.IGNORECASE,
+)
+_PROJECT_CODE_FAILURE_FOLLOWUP_RE = re.compile(
+    r"\b(wasn't able to persist code|no project file was changed|tell me the exact file|please retry)\b",
     re.IGNORECASE,
 )
 
@@ -885,6 +893,10 @@ def _question_is_project_code_confirmation(question: str) -> bool:
     return bool(_PROJECT_CODE_CONFIRMATION_RE.match(question.strip()))
 
 
+def _question_is_project_code_retry(question: str) -> bool:
+    return bool(_PROJECT_CODE_RETRY_RE.match(question.strip()))
+
+
 def _last_pending_project_code_followup(thread: ChatThreadResponse | None) -> ChatMessageResponse | None:
     if thread is None or not thread.messages:
         return None
@@ -913,6 +925,8 @@ def _last_pending_project_code_followup(thread: ChatThreadResponse | None) -> Ch
         return None
     assistant_text = assistant_message.content_markdown.strip()
     lowered = assistant_text.lower()
+    if _PROJECT_CODE_FAILURE_FOLLOWUP_RE.search(assistant_text):
+        return assistant_message
     if not (_PROJECT_CODE_FOLLOWUP_PROMPT_RE.search(assistant_text) or assistant_text.endswith("?")):
         return None
     if _PROJECT_CODE_ACTION_RE.search(assistant_text) and (
@@ -927,7 +941,10 @@ def _last_pending_project_code_followup(thread: ChatThreadResponse | None) -> Ch
 
 
 def _question_confirms_pending_project_code_followup(question: str, *, thread: ChatThreadResponse | None) -> bool:
-    return _question_is_project_code_confirmation(question) and _last_pending_project_code_followup(thread) is not None
+    return (
+        (_question_is_project_code_confirmation(question) or _question_is_project_code_retry(question))
+        and _last_pending_project_code_followup(thread) is not None
+    )
 
 
 def _pending_project_code_followup_requires_write(thread: ChatThreadResponse | None) -> bool:
