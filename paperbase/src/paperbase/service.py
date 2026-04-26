@@ -990,11 +990,10 @@ def _project_code_write_retry_prompt() -> str:
     )
 
 
-def _project_code_write_failure_prompt() -> str:
+def _project_code_write_failure_answer() -> str:
     return (
-        "No managed project Python file was successfully updated during the tool phase. "
-        "In your final answer, clearly say that no project file was changed, do not claim the code was saved, "
-        "and ask the user to retry if they want you to persist the code."
+        "I wasn't able to persist code into a managed project Python file in this turn, so no project file was changed. "
+        "Please retry, or tell me the exact file you want updated."
     )
 
 
@@ -1130,6 +1129,14 @@ class ChatTurnContext:
     messages: list[dict[str, Any]]
     active_message_ids: list[str]
     compactions_used: int = 0
+
+
+@dataclass
+class ChatToolRoundsResult:
+    context: ChatTurnContext
+    citation_registry: ChatCitationRegistry
+    require_project_code_write: bool = False
+    project_write_completed: bool = False
 
 
 class PaperbaseService:
@@ -1944,6 +1951,8 @@ class PaperbaseService:
         self._get_github_connection(user)
         project_file = self._get_project_code_file(user, project_id, repo_path)
         if old_string == "":
+            if not new_string.strip():
+                raise HTTPException(status_code=422, detail="new_string must be non-empty when populating an empty file")
             if project_file.content != "":
                 raise HTTPException(status_code=422, detail="old_string is required unless the file is empty")
             match_count = 1
@@ -1962,6 +1971,8 @@ class PaperbaseService:
                 if replace_all
                 else project_file.content.replace(old_string, new_string, 1)
             )
+        if updated_content == project_file.content:
+            raise HTTPException(status_code=409, detail=f"Edit did not change '{project_file.repo_path}'")
         updated = self.repository.update_python_file(  # type: ignore[attr-defined]
             user_id=user.user_id,
             file_id=project_file.file_id,
@@ -3506,12 +3517,12 @@ class PaperbaseService:
         prepared: PreparedChatGeneration,
         user: BrowserUser,
         request: SendChatMessageRequest,
-    ) -> tuple[ChatTurnContext, ChatCitationRegistry]:
+    ) -> ChatToolRoundsResult:
         context = self._chat_turn_context(prepared)
         citation_registry = ChatCitationRegistry()
         tools = self._chat_tool_definitions(request, thread=prepared.thread)
         if not tools:
-            return context, citation_registry
+            return ChatToolRoundsResult(context=context, citation_registry=citation_registry)
 
         tool_names = {tool.get("name") for tool in tools if isinstance(tool, dict)}
         tool_system_prompt = self._chat_tool_system_prompt(
@@ -3570,9 +3581,12 @@ class PaperbaseService:
                     "content": blocks,
                 }
             )
-        if require_project_code_write and not project_write_tool_used:
-            context.messages.append({"role": "user", "content": _project_code_write_failure_prompt()})
-        return context, citation_registry
+        return ChatToolRoundsResult(
+            context=context,
+            citation_registry=citation_registry,
+            require_project_code_write=require_project_code_write,
+            project_write_completed=project_write_tool_used,
+        )
 
     def _run_chat_tool_rounds_stream(
         self,
@@ -3580,12 +3594,12 @@ class PaperbaseService:
         prepared: PreparedChatGeneration,
         user: BrowserUser,
         request: SendChatMessageRequest,
-    ) -> Generator[tuple[str, dict[str, Any]], None, tuple[ChatTurnContext, ChatCitationRegistry]]:
+    ) -> Generator[tuple[str, dict[str, Any]], None, ChatToolRoundsResult]:
         context = self._chat_turn_context(prepared)
         citation_registry = ChatCitationRegistry()
         tools = self._chat_tool_definitions(request, thread=prepared.thread)
         if not tools:
-            return context, citation_registry
+            return ChatToolRoundsResult(context=context, citation_registry=citation_registry)
 
         tool_names = {tool.get("name") for tool in tools if isinstance(tool, dict)}
         tool_system_prompt = self._chat_tool_system_prompt(
@@ -3682,9 +3696,12 @@ class PaperbaseService:
                 blocks.append(block)
             project_write_tool_used = project_write_tool_used or completed_write_this_round
             context.messages.append({"role": "user", "content": blocks})
-        if require_project_code_write and not project_write_tool_used:
-            context.messages.append({"role": "user", "content": _project_code_write_failure_prompt()})
-        return context, citation_registry
+        return ChatToolRoundsResult(
+            context=context,
+            citation_registry=citation_registry,
+            require_project_code_write=require_project_code_write,
+            project_write_completed=project_write_tool_used,
+        )
 
     def _api_key_required_response(
         self,
@@ -3732,11 +3749,31 @@ class PaperbaseService:
                 state=prepared.api_key_state,
             )
 
-        conversation_context, citation_registry = self._run_chat_tool_rounds(
+        tool_rounds = self._run_chat_tool_rounds(
             prepared=prepared,
             user=user,
             request=request,
         )
+        if tool_rounds.require_project_code_write and not tool_rounds.project_write_completed:
+            assistant_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
+                thread_id=thread_id,
+                role="assistant",
+                content_markdown=_project_code_write_failure_answer(),
+            )
+            resolved_user = prepared.resolved_user
+            if prepared.using_free_tier:
+                resolved_user = self.repository.increment_free_responses_used(user.user_id) or resolved_user  # type: ignore[attr-defined]
+            refreshed = self.get_chat_thread(user, thread_id)
+            return SendChatMessageResponse(
+                thread=refreshed,
+                assistant_message=assistant_message,
+                remaining_free_responses=self._remaining_free_responses(resolved_user),
+                has_anthropic_api_key=self.repository.get_anthropic_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
+                state="completed",
+            )
+
+        conversation_context = tool_rounds.context
+        citation_registry = tool_rounds.citation_registry
         current_turn_citations = citation_registry.citations
         answer_system_prompt = self._chat_answer_system_prompt(
             thread=prepared.thread,
@@ -3800,9 +3837,36 @@ class PaperbaseService:
             try:
                 event_name, payload = next(tool_rounds)
             except StopIteration as stop:
-                conversation_context, citation_registry = stop.value
+                tool_rounds_result = stop.value
                 break
             yield (event_name, payload)
+        if tool_rounds_result.require_project_code_write and not tool_rounds_result.project_write_completed:
+            failure_text = _project_code_write_failure_answer()
+            assistant_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
+                thread_id=thread_id,
+                role="assistant",
+                content_markdown=failure_text,
+                status="completed",
+            )
+            yield ("assistant_start", {"assistant_message": assistant_message.model_dump(mode="json")})
+            yield ("delta", {"message_id": assistant_message.message_id, "delta": failure_text})
+            resolved_user = prepared.resolved_user
+            if prepared.using_free_tier:
+                resolved_user = self.repository.increment_free_responses_used(user.user_id) or resolved_user  # type: ignore[attr-defined]
+            yield (
+                "done",
+                {
+                    "assistant_message": assistant_message.model_dump(mode="json"),
+                    "remaining_free_responses": self._remaining_free_responses(resolved_user),
+                    "has_anthropic_api_key": self.repository.get_anthropic_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
+                    "state": "completed",
+                    "usage": None,
+                },
+            )
+            return
+
+        conversation_context = tool_rounds_result.context
+        citation_registry = tool_rounds_result.citation_registry
         current_turn_citations = citation_registry.citations
         answer_system_prompt = self._chat_answer_system_prompt(
             thread=prepared.thread,

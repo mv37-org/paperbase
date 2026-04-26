@@ -1772,6 +1772,40 @@ def test_project_code_edit_can_populate_an_existing_empty_file(browser_service):
     assert edited["content"] == "def train_linear_gd():\n    return 1\n"
 
 
+def test_project_code_edit_rejects_empty_population_with_empty_new_string(browser_service):
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="empty-edit-reject@example.com", password="topsecret123", display_name="Empty Reject")
+    )
+    assert session.user is not None
+    service.save_github_connection(
+        session.user,
+        github_user_id="42",
+        github_login="octocat",
+        access_token="github-access-token",
+        scope="repo,read:user",
+    )
+
+    project_id = service.list_projects(session.user).projects[0].project_id
+    service.create_project_python_file(
+        session.user,
+        project_id,
+        repo_path="src/linear_gd.py",
+        content="",
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        service.edit_project_code_file(
+            session.user,
+            project_id,
+            repo_path="src/linear_gd.py",
+            old_string="",
+            new_string="",
+        )
+
+    assert exc_info.value.status_code == 422
+
+
 def test_project_chat_tools_are_advertised_for_coding_turns(browser_service):
     service, _, _ = browser_service
     session, _ = service.register_browser_user(
@@ -2034,6 +2068,97 @@ def test_project_code_turn_retries_after_failed_touch_and_fills_empty_file():
     assert chat_model.create_calls[0]["tool_choice"] == {"type": "any"}
     assert chat_model.create_calls[1]["tool_choice"] == {"type": "any"}
     assert chat_model.create_calls[2]["tool_choice"] == {"type": "auto"}
+
+
+def test_project_code_turn_failed_write_returns_backend_failure_message():
+    class FailedWriteChatModel(FakeChatModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.round_index = 0
+
+        def create_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+            self.create_calls.append(
+                {
+                    "api_key": api_key,
+                    "messages": messages,
+                    "system_prompt": system_prompt,
+                    "tools": tools,
+                    "tool_choice": tool_choice,
+                }
+            )
+            if tools:
+                self.round_index += 1
+                return {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": f"toolu_bad_edit_{self.round_index}",
+                            "name": "project_edit",
+                            "input": {
+                                "repo_path": "src/linear_gd.py",
+                                "old_string": "",
+                                "new_string": "",
+                            },
+                        }
+                    ],
+                    "stop_reason": "tool_use",
+                }
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Saved the module to `src/linear_gd.py`.",
+                    }
+                ],
+                "stop_reason": "end_turn",
+            }
+
+    chat_model = FailedWriteChatModel()
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=chat_model,
+        github_repo_manager=FakeGitHubRepoManager(),
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="failed-write@example.com", password="topsecret123", display_name="Failed Write")
+    )
+    assert session.user is not None
+    _connect_github(service, session.user)
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="Project chat"))
+    service.create_project_python_file(
+        session.user,
+        thread.project_id,
+        repo_path="src/linear_gd.py",
+        content="",
+    )
+
+    response = service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="Write some code to train a small linear gradient descent with pytorch"),
+    )
+
+    saved_file = service.repository.get_project_python_file_by_path(  # type: ignore[attr-defined]
+        user_id=session.user.user_id,
+        project_id=thread.project_id,
+        repo_path="src/linear_gd.py",
+    )
+    assert response.assistant_message is not None
+    assert response.assistant_message.content_markdown == (
+        "I wasn't able to persist code into a managed project Python file in this turn, so no project file was changed. "
+        "Please retry, or tell me the exact file you want updated."
+    )
+    assert saved_file is not None
+    assert saved_file.content == ""
+    assert len(chat_model.create_calls) == 4
 
 
 def test_project_code_confirmation_turn_inherits_tool_context():
@@ -3469,6 +3594,102 @@ def test_browser_chat_stream_marks_partial_failure(monkeypatch, browser_service)
     refreshed = client.get(f"/v1/browser/chats/{thread_id}").json()
     assert refreshed["messages"][-1]["status"] == "failed"
     assert refreshed["messages"][-1]["content_markdown"] == "Grounded"
+
+    app.dependency_overrides.clear()
+
+
+def test_browser_chat_stream_failed_project_write_emits_backend_failure(browser_service):
+    class FailedWriteChatModel(FakeChatModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.round_index = 0
+
+        def create_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+            self.create_calls.append(
+                {
+                    "api_key": api_key,
+                    "messages": messages,
+                    "system_prompt": system_prompt,
+                    "tools": tools,
+                    "tool_choice": tool_choice,
+                }
+            )
+            if tools:
+                self.round_index += 1
+                return {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": f"toolu_bad_edit_{self.round_index}",
+                            "name": "project_edit",
+                            "input": {
+                                "repo_path": "src/linear_gd.py",
+                                "old_string": "",
+                                "new_string": "",
+                            },
+                        }
+                    ],
+                    "stop_reason": "tool_use",
+                }
+            raise AssertionError("Final assistant model call should be skipped when no project file was changed")
+
+        def stream_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+            raise AssertionError("Streaming answer model call should be skipped when no project file was changed")
+
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=FailedWriteChatModel(),
+        github_repo_manager=FakeGitHubRepoManager(),
+    )
+    app.dependency_overrides[get_service] = lambda: service
+    client = TestClient(app)
+
+    signup = client.post(
+        "/v1/browser/auth/signup",
+        json={"email": "stream-code-fail@example.com", "password": "topsecret123", "display_name": "Stream Code Fail"},
+    )
+    assert signup.status_code == 200
+    csrf_headers = {"X-Paperbase-CSRF": signup.json()["csrf_token"]}
+    thread = client.post("/v1/browser/chats", json={"title": "New chat"}, headers=csrf_headers).json()
+    thread_id = thread["thread_id"]
+    project_id = thread["project_id"]
+    user_id = signup.json()["user"]["user_id"]
+    user = service.repository.get_browser_user_by_id(user_id)  # type: ignore[attr-defined]
+    assert user is not None
+    _connect_github(service, user)
+    service.create_project_python_file(
+        user,
+        project_id,
+        repo_path="src/linear_gd.py",
+        content="",
+    )
+
+    with client.stream(
+        "POST",
+        f"/v1/browser/chats/{thread_id}/messages/stream",
+        json={"content": "Write some code to train a small linear gradient descent with pytorch", "tag_filters": []},
+        headers=csrf_headers,
+    ) as response:
+        assert response.status_code == 200
+        events = _parse_sse_events("".join(response.iter_text()))
+
+    event_names = [event_name for event_name, _ in events]
+    assert "assistant_start" in event_names
+    assert event_names[-1] == "done"
+    assert events[-1][1]["assistant_message"]["content_markdown"] == (
+        "I wasn't able to persist code into a managed project Python file in this turn, so no project file was changed. "
+        "Please retry, or tell me the exact file you want updated."
+    )
+    refreshed = client.get(f"/v1/browser/chats/{thread_id}").json()
+    assert refreshed["messages"][-1]["content_markdown"] == events[-1][1]["assistant_message"]["content_markdown"]
 
     app.dependency_overrides.clear()
 

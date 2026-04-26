@@ -795,7 +795,11 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Show more" }));
 
     await waitFor(() => {
-      expect(apiMocks.loadProjectItems).toHaveBeenCalledWith("proj_1", 5, 5, "thread");
+      expect(
+        apiMocks.loadProjectItems.mock.calls.some(
+          (call) => call[0] === "proj_1" && call[1] === 5 && call[2] === 5 && call[3] === "thread",
+        ),
+      ).toBe(true);
     });
     expect(await screen.findByText("Session 6")).toBeTruthy();
   });
