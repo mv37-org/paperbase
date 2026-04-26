@@ -655,3 +655,103 @@ def fetch_papers_with_code_repo(
     # No official entry: decline rather than guess — the ranker / admin
     # override is responsible for non-official cases.
     return None
+
+
+# --------------------------------------------------------------------------- #
+# GitHub README verifier (#46 follow-up — alternative to PWC)
+# --------------------------------------------------------------------------- #
+
+
+_GITHUB_API_BASE = "https://api.github.com"
+
+
+def verify_repo_owns_paper(
+    owner: str,
+    repo: str,
+    arxiv_id: str,
+    *,
+    title: str | None = None,
+    token: str | None = None,
+    session: requests.Session | None = None,
+    timeout: float = 10.0,
+) -> bool:
+    """Return True iff the repo's README references the paper.
+
+    Replaces the PWC primary signal — PWC's REST API was deprecated
+    between #46 filing and merge, leaving the architecture without a
+    curated paper→repo mapping. GitHub's own README endpoint is
+    rate-limited but free (5000 req/hr with a service token), and the
+    verification heuristic is precise: an arxiv id, an arxiv URL, or
+    the exact paper title appearing in the README is a near-zero-false-
+    positive signal that the repo is the paper's official code.
+
+    A 404 (repo does not exist) → False, which weeds out malformed
+    candidates like ``openai/gpt-3supplemental`` that the regex picked
+    up from a text-layout corruption. Network failures degrade to
+    False so callers can fall through to admin override.
+    """
+    if not owner or not repo or not arxiv_id:
+        return False
+    client = session or SESSION
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "paperbase-code-verify",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        response = client.get(
+            f"{_GITHUB_API_BASE}/repos/{owner}/{repo}/readme",
+            headers=headers,
+            timeout=timeout,
+        )
+    except requests.RequestException as exc:
+        logger.warning(
+            "GitHub README verifier failed",
+            extra={
+                "event": "code_verify.failed",
+                "owner": owner,
+                "repo": repo,
+                "arxiv_id": arxiv_id,
+                "error": str(exc),
+            },
+        )
+        return False
+    if response.status_code == 404:
+        return False
+    if response.status_code != 200:
+        logger.info(
+            "GitHub README verifier non-200",
+            extra={
+                "event": "code_verify.non_200",
+                "owner": owner,
+                "repo": repo,
+                "status": response.status_code,
+            },
+        )
+        return False
+    try:
+        payload = response.json()
+    except ValueError:
+        return False
+    content_b64 = payload.get("content", "")
+    if not content_b64:
+        return False
+    import base64
+
+    try:
+        readme = base64.b64decode(content_b64).decode("utf-8", errors="replace")
+    except Exception:  # pragma: no cover — malformed base64
+        return False
+    readme_lower = readme.lower()
+    # Primary signal: arxiv id verbatim or in an ``arxiv.org/abs/<id>`` URL.
+    if arxiv_id in readme:
+        return True
+    if f"arxiv.org/abs/{arxiv_id}" in readme_lower:
+        return True
+    # Secondary signal: exact paper title (case-insensitive). Long-enough
+    # titles are unique to one paper; short titles like "BERT" would fire
+    # too easily, so require the title length floor.
+    if title and len(title) >= 20 and title.lower() in readme_lower:
+        return True
+    return False

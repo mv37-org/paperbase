@@ -4613,6 +4613,99 @@ def test_index_arxiv_paper_falls_back_to_ranker_when_pwc_empty(
     assert refreshed.code_url_source == "extracted"
 
 
+def test_index_arxiv_paper_verifier_demotes_unverified_pick(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for the #46 follow-up GitHub README verifier:
+    when ``verify_code_url_via_github_readme`` is on and the verifier
+    rejects the ranker's pick (README does not reference the arxiv id
+    or title), ``code_url`` must demote to ``None`` rather than stick
+    with an unverified guess. This is the precision-filter behavior
+    measured at 0/30 wrong on the landmark benchmark."""
+    _seed_code_url_paper(service)
+
+    from paperbase import sources
+    from paperbase.extractors import ExtractionOutput
+
+    service.settings.fetch_code_crosslinks_at_index = False
+    service.settings.verify_code_url_via_github_readme = True
+
+    monkeypatch.setattr(
+        sources,
+        "get_paper_details",
+        lambda aid: PaperMetadata(
+            arxiv_id=aid,
+            title="T",
+            authors="A",
+            abstract="",
+            categories="cs.AI",
+            primary_category="cs.AI",
+            published="2024-01-01",
+            updated="2024-01-01",
+        ),
+    )
+    monkeypatch.setattr(sources, "enrich_with_semantic_scholar", lambda *a, **k: None)
+    # Stub the verifier to always reject — simulates the GPT-3
+    # ``gpt-3supplemental`` 404 case or the ``tensorflow/models`` /
+    # GraphSAGE case where the README does not mention the paper.
+    monkeypatch.setattr(sources, "verify_repo_owns_paper", lambda *a, **k: False)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda metadata: ExtractionOutput(
+            source_type="abstract-only",
+            text_markdown="Code at https://github.com/text/winner.\n",
+        ),
+    )
+
+    refreshed = service.index_arxiv_paper("2401.99999", force=True)
+    assert refreshed.code_url is None
+    assert refreshed.code_url_source is None
+    # Candidate set is still preserved for admin / future agent use.
+    assert refreshed.code_url_candidates == ["https://github.com/text/winner"]
+
+
+def test_index_arxiv_paper_verifier_keeps_verified_pick(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifier accepting the ranker's pick must leave it intact —
+    the precision filter only kicks out unverified picks."""
+    _seed_code_url_paper(service)
+
+    from paperbase import sources
+    from paperbase.extractors import ExtractionOutput
+
+    service.settings.fetch_code_crosslinks_at_index = False
+    service.settings.verify_code_url_via_github_readme = True
+
+    monkeypatch.setattr(
+        sources,
+        "get_paper_details",
+        lambda aid: PaperMetadata(
+            arxiv_id=aid,
+            title="T",
+            authors="A",
+            abstract="",
+            categories="cs.AI",
+            primary_category="cs.AI",
+            published="2024-01-01",
+            updated="2024-01-01",
+        ),
+    )
+    monkeypatch.setattr(sources, "enrich_with_semantic_scholar", lambda *a, **k: None)
+    monkeypatch.setattr(sources, "verify_repo_owns_paper", lambda *a, **k: True)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda metadata: ExtractionOutput(
+            source_type="abstract-only",
+            text_markdown="Code at https://github.com/text/winner.\n",
+        ),
+    )
+
+    refreshed = service.index_arxiv_paper("2401.99999", force=True)
+    assert refreshed.code_url == "https://github.com/text/winner"
+    assert refreshed.code_url_source == "extracted"
+
+
 def test_index_arxiv_paper_returns_none_on_three_way_ambiguity(
     service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -169,6 +169,16 @@ class Settings(BaseSettings):
     # time. Off by default for mass harvests; turn on for on-demand indexing
     # and for the ``paperbase-dev backfill-code-urls`` cleanup job.
     fetch_code_crosslinks_at_index: bool = Field(default=False)
+    # GitHub README verifier (#46 follow-up). When the ranker's pick lands,
+    # fetch the repo's README and confirm it references the arxiv id, the
+    # arxiv URL, or the paper title. Demotes unverified picks to None.
+    # Trade-off measured on the 30-paper landmark benchmark: wrong rate
+    # 5/30 → 0/30, strict precision 14/30 → 11/30 (LLaMA / Llama 2 READMEs
+    # don't carry the arxiv id, so they fail verification despite being
+    # correct). Default off so on-demand indexing isn't gated on a
+    # second GitHub round-trip; turn on for backfill / featured-tier work
+    # where precision dominates and the GitHub token has enough budget.
+    verify_code_url_via_github_readme: bool = Field(default=False)
     # Paper-code ingestion (#5). github_token is service-level (NOT the user
     # OAuth connection used for project repo sync) and is only used to bump
     # the anonymous 60 req/hr archive-fetch limit to 5000. The caps below

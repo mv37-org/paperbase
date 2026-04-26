@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from dataclasses import dataclass, field
@@ -223,6 +224,7 @@ class Verdict:
     legacy: str | None
     new_ranker: str | None
     new_pwc: str | None  # populated only when --with-pwc
+    new_verified: str | None = None  # populated only when --with-verifier
 
     @staticmethod
     def _classify(picked: str | None, truth: str | None) -> str:
@@ -243,6 +245,9 @@ class Verdict:
 
     def new_pwc_status(self) -> str:
         return self._classify(self.new_pwc, self.truth)
+
+    def new_verified_status(self) -> str:
+        return self._classify(self.new_verified, self.truth)
 
 
 def _score(rows: list[Verdict], picker) -> dict[str, int]:
@@ -322,14 +327,31 @@ def main(argv: list[str] | None = None) -> int:
             "so re-runs stay offline."
         ),
     )
+    parser.add_argument(
+        "--with-verifier",
+        action="store_true",
+        help=(
+            "Verify the ranker's pick by fetching the candidate repo's README "
+            "from GitHub and checking it references the arxiv id / paper "
+            "title. Demotes unverified picks to None — precision filter."
+        ),
+    )
     args = parser.parse_args(argv)
 
     rows: list[Verdict] = []
     pwc_lookup = None
+    verifier = None
+    github_token = os.environ.get("PAPERBASE_GITHUB_TOKEN") or os.environ.get(
+        "GITHUB_TOKEN"
+    )
     if args.with_pwc:
         from paperbase import sources
 
         pwc_lookup = sources.fetch_papers_with_code_repo
+    if args.with_verifier:
+        from paperbase import sources
+
+        verifier = sources.verify_repo_owns_paper
 
     for arxiv_id, truth in GROUND_TRUTH.items():
         loaded = _load_inputs(arxiv_id)
@@ -355,6 +377,24 @@ def main(argv: list[str] | None = None) -> int:
                 # Fall back to ranker when PWC has no official entry — the
                 # production decision flow does the same.
                 new_pwc = new_ranker.url
+
+        # Verifier post-filter: take the ranker's pick and confirm via
+        # GitHub README that the repo actually references the paper.
+        # Demote to None when the README check fails (404 / no arxiv id /
+        # no title match). Same input, different precision.
+        new_verified: str | None = None
+        if verifier is not None and new_ranker is not None:
+            try:
+                ok = verifier(
+                    new_ranker.owner,
+                    new_ranker.repo,
+                    arxiv_id,
+                    token=github_token,
+                )
+            except Exception:
+                ok = False
+            if ok:
+                new_verified = new_ranker.url
         rows.append(
             Verdict(
                 arxiv_id=arxiv_id,
@@ -362,6 +402,7 @@ def main(argv: list[str] | None = None) -> int:
                 legacy=legacy,
                 new_ranker=new_ranker.url if new_ranker else None,
                 new_pwc=new_pwc,
+                new_verified=new_verified,
             )
         )
 
@@ -378,6 +419,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.with_pwc:
         pwc_scores = _score(rows, lambda r: r.new_pwc)
         _print_summary("New: PWC + ranker fallback", pwc_scores)
+    if args.with_verifier:
+        verified_scores = _score(rows, lambda r: r.new_verified)
+        _print_summary("New: ranker + GitHub README verifier", verified_scores)
     return 0
 
 

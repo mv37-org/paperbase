@@ -4568,6 +4568,27 @@ class PaperbaseService:
                     metadata.code_url = None
                     metadata.code_url_source = None
 
+                # GitHub README verifier (#46 follow-up). PWC's REST API is
+                # gone, so the only remaining external precision signal is
+                # to fetch the candidate repo's README and confirm it
+                # references the paper. Off by default — see config docs
+                # for the precision/recall tradeoff measured on the
+                # 30-paper benchmark.
+                if (
+                    winner is not None
+                    and self.settings.verify_code_url_via_github_readme
+                ):
+                    verified = sources.verify_repo_owns_paper(
+                        winner.owner,
+                        winner.repo,
+                        metadata.arxiv_id,
+                        title=metadata.title or None,
+                        token=self.settings.github_token,
+                    )
+                    if not verified:
+                        metadata.code_url = None
+                        metadata.code_url_source = None
+
         search_document_parts = [metadata.title, metadata.tldr, metadata.summary_short, extraction.text_markdown]
         search_document = "\n\n".join(part for part in search_document_parts if part)
 

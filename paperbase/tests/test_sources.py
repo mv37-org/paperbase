@@ -185,7 +185,7 @@ class _StubSession:
         self.routes = routes
         self.calls: list[str] = []
 
-    def get(self, url: str, *, params=None, timeout=None):
+    def get(self, url: str, *, params=None, timeout=None, **_kwargs):
         full = url
         if params:
             from urllib.parse import urlencode
@@ -275,3 +275,120 @@ def test_fetch_papers_with_code_repo_degrades_gracefully_on_network_error():
             raise requests.ConnectionError("simulated network failure")
 
     assert sources.fetch_papers_with_code_repo("2401.12345", session=FailingSession()) is None
+
+
+# --------------------------------------------------------------------------- #
+# GitHub README verifier (#46 follow-up)
+# --------------------------------------------------------------------------- #
+
+
+def _readme_response(content: str) -> _FakeResponse:
+    """Build a GitHub-shaped README response. Real GitHub returns the
+    README content base64-encoded under the ``content`` key."""
+    import base64
+
+    return _FakeResponse(
+        json_data={"content": base64.b64encode(content.encode("utf-8")).decode("ascii")}
+    )
+
+
+def test_verify_repo_owns_paper_accepts_arxiv_id_match():
+    """Primary signal: README mentions the arxiv id verbatim. That's
+    what BERT's ``google-research/bert`` README does, and what
+    arslnb's PR #45 review proposed as the deterministic check."""
+    session = _StubSession(
+        {
+            "https://api.github.com/repos/google-research/bert/readme": _readme_response(
+                "# BERT\n\nPaper: https://arxiv.org/abs/1810.04805"
+            )
+        }
+    )
+    assert sources.verify_repo_owns_paper(
+        "google-research", "bert", "1810.04805", session=session
+    )
+
+
+def test_verify_repo_owns_paper_accepts_long_title_match():
+    """Secondary signal: a sufficiently-long paper title appearing
+    verbatim in the README. The 20-char floor prevents short titles
+    like ``BERT`` from firing on unrelated repos."""
+    session = _StubSession(
+        {
+            "https://api.github.com/repos/owner/repo/readme": _readme_response(
+                "Implementation of Some Long Distinctive Paper Title here."
+            )
+        }
+    )
+    assert sources.verify_repo_owns_paper(
+        "owner",
+        "repo",
+        "2401.99999",
+        title="Some Long Distinctive Paper Title",
+        session=session,
+    )
+
+
+def test_verify_repo_owns_paper_rejects_unrelated_readme():
+    """README mentions neither the arxiv id nor the title — this is
+    the case that catches CoT's ``chaochun/nlu-asdiv-dataset`` (README
+    about the dataset, not the paper) and the ``tensorflow/models`` /
+    GraphSAGE mismatch from the 30-paper benchmark."""
+    session = _StubSession(
+        {
+            "https://api.github.com/repos/owner/dataset/readme": _readme_response(
+                "Generic dataset README with no paper references."
+            )
+        }
+    )
+    assert not sources.verify_repo_owns_paper(
+        "owner", "dataset", "1810.04805", session=session
+    )
+
+
+def test_verify_repo_owns_paper_rejects_404_repo():
+    """A 404 means the repo doesn't exist — happens when the regex
+    captured a malformed URL like ``openai/gpt-3supplemental`` from
+    a text-layout corruption. Verifier must return False so the
+    candidate gets demoted to None rather than hitting auto-enqueue."""
+    session = _StubSession(
+        {
+            "https://api.github.com/repos/openai/gpt-3supplemental/readme": _FakeResponse(
+                status_code=404
+            )
+        }
+    )
+    assert not sources.verify_repo_owns_paper(
+        "openai", "gpt-3supplemental", "2005.14165", session=session
+    )
+
+
+def test_verify_repo_owns_paper_short_title_does_not_fire():
+    """Short title (<20 chars) must NOT be used as a verification
+    signal — common-name overlaps would yield false positives.
+    ``BERT`` is the canonical example: many unrelated repos mention
+    BERT in their README without being the paper's repo."""
+    session = _StubSession(
+        {
+            "https://api.github.com/repos/random/repo/readme": _readme_response(
+                "We use BERT embeddings extensively in this codebase."
+            )
+        }
+    )
+    assert not sources.verify_repo_owns_paper(
+        "random", "repo", "1810.04805", title="BERT", session=session
+    )
+
+
+def test_verify_repo_owns_paper_degrades_gracefully_on_network_error():
+    """Same robustness contract as the PWC adapter — index-time
+    indexing must not be blocked on GitHub uptime. Network
+    exceptions return False so the caller can fall through."""
+    import requests
+
+    class FailingSession:
+        def get(self, *args, **kwargs):
+            raise requests.ConnectionError("simulated")
+
+    assert not sources.verify_repo_owns_paper(
+        "owner", "repo", "1810.04805", session=FailingSession()
+    )
