@@ -650,6 +650,15 @@ class StubApiService:
             content=content or "",
         )
 
+    def delete_python_file(self, user: BrowserUser, file_id: str) -> dict[str, object]:
+        self.calls.append(("delete_python_file", (user.user_id, file_id)))
+        return {
+            "file_id": file_id,
+            "project_id": "proj_1",
+            "filename": "something.py",
+            "deleted": True,
+        }
+
     def run_python_file(self, user: BrowserUser, file_id: str, *, mode: str = "full") -> RunPythonFileResponse:
         self.calls.append(("run_python_file", (user.user_id, file_id, mode)))
         return RunPythonFileResponse(
@@ -1137,6 +1146,10 @@ def test_browser_project_and_chat_write_routes_delegate_with_valid_csrf(api_clie
         json={"filename": "analysis.py", "content": "print('hello')"},
         headers=headers,
     )
+    deleted_python_file = client.delete(
+        "/v1/browser/python-files/file_1",
+        headers=headers,
+    )
     ran_python_file = client.post(
         "/v1/browser/python-files/file_1/run",
         json={"mode": "smoke"},
@@ -1164,6 +1177,8 @@ def test_browser_project_and_chat_write_routes_delegate_with_valid_csrf(api_clie
     assert imported_notebook.json()["file_kind"] == "notebook"
     assert updated_python_file.status_code == 200
     assert updated_python_file.json()["filename"] == "analysis.py"
+    assert deleted_python_file.status_code == 200
+    assert deleted_python_file.json()["deleted"] is True
     assert ran_python_file.status_code == 200
     assert ran_python_file.json()["stdout"] == "runner output"
     assert synced_project_repo.status_code == 200
@@ -1180,6 +1195,7 @@ def test_browser_project_and_chat_write_routes_delegate_with_valid_csrf(api_clie
         ("user_1", "proj_2", "demo.ipynb", b'{"nbformat":4}'),
     ) in service.calls
     assert ("update_python_file", ("user_1", "file_1", "analysis.py", "print('hello')")) in service.calls
+    assert ("delete_python_file", ("user_1", "file_1")) in service.calls
     assert ("run_python_file", ("user_1", "file_1", "smoke")) in service.calls
     assert ("sync_project_repo", ("user_1", "proj_2", "Save analysis.py")) in service.calls
     assert ("delete_chat_thread", ("user_1", "thread_1")) in service.calls

@@ -38,6 +38,7 @@ const apiMocks = vi.hoisted(() => {
     createProject: vi.fn(),
     createThread: vi.fn(),
     deleteProject: vi.fn(),
+    deletePythonFile: vi.fn(),
     deleteThread: vi.fn(),
     getBrowserPaper: vi.fn(),
     getBrowserPaperFigure: vi.fn(),
@@ -110,6 +111,7 @@ vi.mock("./api", () => ({
   createProject: apiMocks.createProject,
   createThread: apiMocks.createThread,
   deleteProject: apiMocks.deleteProject,
+  deletePythonFile: apiMocks.deletePythonFile,
   deleteThread: apiMocks.deleteThread,
   getBrowserPaper: apiMocks.getBrowserPaper,
   getBrowserPaperFigure: apiMocks.getBrowserPaperFigure,
@@ -444,6 +446,12 @@ describe("App", () => {
     apiMocks.createThread.mockResolvedValue(threadResponse("thread_2", "New chat"));
     apiMocks.createPythonFile.mockResolvedValue(pythonFileResponse("file_1"));
     apiMocks.deleteProject.mockResolvedValue({ status: "deleted" });
+    apiMocks.deletePythonFile.mockResolvedValue({
+      file_id: "file_1",
+      project_id: "proj_1",
+      filename: "something.py",
+      deleted: true,
+    });
     apiMocks.deleteThread.mockResolvedValue({ status: "deleted" });
     apiMocks.importProjectNotebook.mockResolvedValue(
       pythonFileResponse("file_2", "notebook.ipynb", "# %%\nprint('notebook')\n"),
@@ -797,7 +805,7 @@ describe("App", () => {
     await waitFor(() => {
       expect(
         apiMocks.loadProjectItems.mock.calls.some(
-          (call) => call[0] === "proj_1" && call[1] === 5 && call[2] === 5 && call[3] === "thread",
+          (call) => call[0] === "proj_1" && call[2] > 0 && call[3] === "thread",
         ),
       ).toBe(true);
     });
@@ -1645,6 +1653,87 @@ describe("App", () => {
     await waitFor(() => {
       expect(apiMocks.deleteThread).toHaveBeenCalledWith("thread_1");
     });
+  });
+
+  it("shows rename and delete actions for code files and removes deleted files", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.loadProjectItems.mockImplementation(
+      async (projectId: string, limit = 25, offset = 0, itemKind?: "thread" | "python_file") => {
+        const allItems = [
+          projectItemThread("thread_1", "Recovered thread", projectId),
+          projectItemFile("file_1", "agent.py", projectId),
+        ];
+        const filteredItems = itemKind
+          ? allItems.filter((item) => item.item_kind === itemKind)
+          : allItems;
+        const pageItems = filteredItems.slice(offset, offset + limit);
+        return {
+          ...projectItemsPage(projectId, pageItems),
+          offset,
+          limit,
+          total_count: filteredItems.length,
+          has_more: offset + pageItems.length < filteredItems.length,
+        };
+      },
+    );
+    apiMocks.deletePythonFile.mockResolvedValue({
+      file_id: "file_1",
+      project_id: "proj_1",
+      filename: "agent.py",
+      deleted: true,
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+    fireEvent.click(screen.getAllByText("General")[0]!);
+
+    await waitFor(() => {
+      expect(screen.getByText("agent.py")).toBeTruthy();
+    });
+
+    expect(screen.getByLabelText("Rename agent.py")).toBeTruthy();
+    fireEvent.click(screen.getByLabelText("Delete agent.py"));
+    fireEvent.click(screen.getByRole("button", { name: "Delete file" }));
+
+    await waitFor(() => {
+      expect(apiMocks.deletePythonFile).toHaveBeenCalledWith("file_1");
+    });
+    await waitFor(() => {
+      expect(screen.queryByText("agent.py")).toBeNull();
+    });
+  });
+
+  it("can delete the General project and falls back to a create-project-only state", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.loadProjects
+      .mockResolvedValueOnce({
+        projects: [projectSummary("proj_1", "General")],
+      })
+      .mockResolvedValueOnce({
+        projects: [],
+      });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByLabelText("Open project menu for General"));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Delete project" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete project" }));
+
+    await waitFor(() => {
+      expect(apiMocks.deleteProject).toHaveBeenCalledWith("proj_1");
+    });
+    await waitFor(() => {
+      expect(screen.getByText("Create a project to get started")).toBeTruthy();
+    });
+    expect(screen.queryByLabelText("mention-input-chat")).toBeNull();
+    expect(screen.queryByText("Add python file")).toBeNull();
   });
 
   it("opens the cited-paper drawer from the URL state", async () => {

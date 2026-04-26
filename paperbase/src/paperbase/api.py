@@ -1198,6 +1198,15 @@ def browser_update_python_file(
     )
 
 
+@app.delete("/v1/browser/python-files/{file_id}", response_model=dict[str, object])
+def browser_delete_python_file(
+    file_id: str,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> dict[str, object]:
+    return service.delete_python_file(user, file_id)
+
+
 @app.post("/v1/browser/python-files/{file_id}/run", response_model=RunPythonFileResponse)
 def browser_run_python_file(
     file_id: str,

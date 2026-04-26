@@ -1104,6 +1104,18 @@ textarea::placeholder,
   overflow: visible;
 }
 
+.project-list-empty {
+  display: grid;
+  gap: 8px;
+  padding: 10px 6px 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.project-list-empty p {
+  margin: 0;
+}
+
 .project-group {
   display: grid;
   gap: 4px;
@@ -1550,7 +1562,7 @@ textarea::placeholder,
 }
 
 .python-file-card {
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
   min-height: 38px;
   max-height: none;
   height: auto;
@@ -2805,6 +2817,30 @@ textarea::placeholder,
   font-size: 22px;
   line-height: 1.05;
   letter-spacing: -0.03em;
+}
+
+.chat-empty-projectless-state {
+  max-width: 520px;
+  gap: 14px;
+}
+
+.chat-empty-projectless-title {
+  margin: 0;
+  font-size: 28px;
+  line-height: 1.02;
+  letter-spacing: -0.04em;
+  font-weight: 500;
+}
+
+.chat-empty-projectless-copy {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.chat-empty-projectless-action {
+  margin-top: 4px;
 }
 
 .chat-empty-project-row {

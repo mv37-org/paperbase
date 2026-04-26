@@ -3522,7 +3522,7 @@ def test_empty_chat_can_move_between_projects(browser_service):
     assert exc.value.status_code == 409
 
 
-def test_delete_project_cascades_threads_and_protects_default(browser_service):
+def test_delete_project_cascades_threads_files_and_allows_default_removal(browser_service):
     service, _, _ = browser_service
     session, _ = service.register_browser_user(
         SignupRequest(email="cascade@example.com", password="topsecret123", display_name="Cascade User")
@@ -3531,26 +3531,38 @@ def test_delete_project_cascades_threads_and_protects_default(browser_service):
     _connect_github(service, session.user)
 
     default_project = service.list_projects(session.user).projects[0]
-    with pytest.raises(HTTPException) as default_exc:
-        service.delete_project(session.user, default_project.project_id)
-    assert default_exc.value.status_code == 400
-
-    project = service.create_project(
-        session.user,
-        _create_repo_project_request("Archive", "Delete me"),
-    )
     thread = service.create_chat_thread(
         session.user,
-        CreateChatThreadRequest(title="Disposable thread", project_id=project.project_id),
+        CreateChatThreadRequest(title="Disposable thread", project_id=default_project.project_id),
     )
+    python_file = service.create_python_file(session.user, default_project.project_id)
 
-    service.delete_project(session.user, project.project_id)
+    service.delete_project(session.user, default_project.project_id)
 
-    remaining_project_ids = {item.project_id for item in service.list_projects(session.user).projects}
-    assert project.project_id not in remaining_project_ids
+    assert service.list_projects(session.user).projects == []
     with pytest.raises(HTTPException) as thread_exc:
         service.get_chat_thread(session.user, thread.thread_id)
     assert thread_exc.value.status_code == 404
+    with pytest.raises(HTTPException) as file_exc:
+        service.get_python_file(session.user, python_file.file_id)
+    assert file_exc.value.status_code == 404
+    with pytest.raises(HTTPException) as create_exc:
+        service.create_chat_thread(
+            session.user,
+            CreateChatThreadRequest(title="Need a project"),
+        )
+    assert create_exc.value.status_code == 409
+
+    replacement_project = service.create_project(
+        session.user,
+        _create_repo_project_request("Replacement", "Rebuild workspace"),
+    )
+    replacement_thread = service.create_chat_thread(
+        session.user,
+        CreateChatThreadRequest(title="Recovered chat"),
+    )
+
+    assert replacement_thread.project_id == replacement_project.project_id
 
 
 def test_browser_chat_stream_emits_citations_and_completion(monkeypatch, browser_service):

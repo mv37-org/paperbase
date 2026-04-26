@@ -3139,7 +3139,6 @@ class SqlAlchemyPaperRepository(PaperRepository):
 
     def list_projects(self, user_id: str) -> list[ProjectSummary]:
         with self._session() as session:
-            self._ensure_default_project_row(session, user_id)
             projects = session.scalars(
                 select(ProjectORM)
                 .where(ProjectORM.user_id == user_id)
@@ -3230,7 +3229,6 @@ class SqlAlchemyPaperRepository(PaperRepository):
             is_default=False,
         )
         with self._session() as session:
-            self._ensure_default_project_row(session, user_id)
             session.add(row)
         return ProjectResponse(**_project_from_orm(row).model_dump())
 
@@ -3251,7 +3249,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
             project = session.scalar(
                 select(ProjectORM).where(ProjectORM.project_id == project_id, ProjectORM.user_id == user_id)
             )
-            if project is None or project.is_default:
+            if project is None:
                 return False
             session.execute(
                 delete(ChatThreadORM).where(ChatThreadORM.user_id == user_id, ChatThreadORM.project_id == project_id)
@@ -5072,7 +5070,6 @@ class MemoryPaperRepository(PaperRepository):
         return self.get_project(user_id=user_id, project_id=project_id)
 
     def list_projects(self, user_id: str) -> list[ProjectSummary]:
-        self._ensure_default_project(user_id)
         summaries: list[ProjectSummary] = []
         for project in self.projects.values():
             if self.project_users.get(project.project_id) != user_id:
@@ -5129,7 +5126,6 @@ class MemoryPaperRepository(PaperRepository):
         )
 
     def create_project(self, *, user_id: str, name: str, description: str) -> ProjectResponse:
-        self._ensure_default_project(user_id)
         now = utcnow()
         project = ProjectResponse(
             project_id=new_id("proj"),
@@ -5154,7 +5150,7 @@ class MemoryPaperRepository(PaperRepository):
 
     def delete_project(self, *, user_id: str, project_id: str) -> bool:
         project = self.get_project(user_id=user_id, project_id=project_id)
-        if project is None or project.is_default:
+        if project is None:
             return False
         for thread_id, thread in list(self.chat_threads.items()):
             if self.chat_thread_users.get(thread_id) == user_id and thread.project_id == project_id:
@@ -5165,6 +5161,8 @@ class MemoryPaperRepository(PaperRepository):
                 self.python_files.pop(file_id, None)
                 self.python_file_users.pop(file_id, None)
         self.project_repo_syncs.pop(project_id, None)
+        if self.default_projects_by_user.get(user_id) == project_id:
+            self.default_projects_by_user.pop(user_id, None)
         self.projects.pop(project_id, None)
         self.project_users.pop(project_id, None)
         return True

@@ -1228,6 +1228,7 @@ class PaperbaseService:
             display_name=request.display_name.strip(),
             password_hash=hash_password(request.password),
         )
+        self.repository.ensure_default_project(user.user_id)  # type: ignore[attr-defined]
         session_token = self._create_browser_session(user.user_id)
         return self._browser_session_response(user), session_token
 
@@ -1478,7 +1479,6 @@ class PaperbaseService:
         return ChatThreadListResponse(threads=self.repository.list_chat_threads(user.user_id))  # type: ignore[attr-defined]
 
     def list_projects(self, user: BrowserUser) -> ProjectListResponse:
-        self.repository.ensure_default_project(user.user_id)  # type: ignore[attr-defined]
         return ProjectListResponse(projects=self.repository.list_projects(user.user_id))  # type: ignore[attr-defined]
 
     def _github_access(self, user: BrowserUser) -> tuple[dict[str, str], str]:
@@ -1714,8 +1714,6 @@ class PaperbaseService:
         project = self.repository.get_project(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
         if project is None:
             raise HTTPException(status_code=404, detail="Project not found")
-        if project.is_default:
-            raise HTTPException(status_code=400, detail="Default project cannot be deleted")
         deleted = self.repository.delete_project(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
         if not deleted:
             raise HTTPException(status_code=404, detail="Project not found")
@@ -2039,6 +2037,22 @@ class PaperbaseService:
             raise HTTPException(status_code=404, detail="Python file not found")
         return python_file
 
+    def delete_python_file(self, user: BrowserUser, file_id: str) -> dict[str, Any]:
+        self._get_github_connection(user)
+        project_file = self.repository.get_python_file(user_id=user.user_id, file_id=file_id)  # type: ignore[attr-defined]
+        if project_file is None:
+            raise HTTPException(status_code=404, detail="Python file not found")
+        deleted = self.repository.delete_python_file(user_id=user.user_id, file_id=file_id)  # type: ignore[attr-defined]
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Python file not found")
+        return {
+            "file_id": project_file.file_id,
+            "project_id": project_file.project_id,
+            "repo_path": project_file.repo_path,
+            "filename": project_file.filename,
+            "deleted": True,
+        }
+
     def get_project_repo_sync(self, user: BrowserUser, project_id: str) -> ProjectRepoSyncResponse:
         sync = self.repository.get_project_repo_sync(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
         if sync is None:
@@ -2340,7 +2354,14 @@ class PaperbaseService:
         else:
             project = self.repository.get_default_project(user.user_id)  # type: ignore[attr-defined]
             if project is None:
-                project = self.repository.ensure_default_project(user.user_id)  # type: ignore[attr-defined]
+                first_project = next(iter(self.repository.list_projects(user.user_id)), None)  # type: ignore[attr-defined]
+                if first_project is not None:
+                    project = self.repository.get_project(  # type: ignore[attr-defined]
+                        user_id=user.user_id,
+                        project_id=first_project.project_id,
+                    )
+            if project is None:
+                raise HTTPException(status_code=409, detail="Create a project before starting a chat")
         summary = self.repository.create_chat_thread(  # type: ignore[attr-defined]
             user_id=user.user_id,
             title=request.title.strip() or "New chat",
