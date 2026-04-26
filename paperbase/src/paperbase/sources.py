@@ -211,9 +211,15 @@ def fetch_top_cited_cs(
         raise ValueError(f"min_citations must be >= 0, got {min_citations}")
     if page_size < 1 or page_size > 1000:
         raise ValueError(f"page_size must be in [1, 1000], got {page_size}")
+    # S2 bulk search rejects unbounded queries with "too many hits" (>10M cap)
+    # — passing minCitationCount server-side narrows the result set under the
+    # cap AND saves bandwidth vs filtering client-side. Falls back to a tiny
+    # floor of 1 when caller asks for "all" so the bulk endpoint still accepts
+    # the request.
+    server_min = max(1, min_citations) if min_citations > 0 else 1
     params: dict[str, str | int] = {
-        "query": "*",
         "fieldsOfStudy": fields_of_study,
+        "minCitationCount": server_min,
         "fields": "externalIds,title,citationCount,year,s2FieldsOfStudy",
         "sort": "citationCount:desc",
         "limit": page_size,
