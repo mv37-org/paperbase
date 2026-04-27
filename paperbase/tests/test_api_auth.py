@@ -289,6 +289,10 @@ class StubApiService:
         self.calls.append(("enqueue_harvest_top_cited_job", kwargs))
         return _job("harvest_top_cited", payload=kwargs)
 
+    def enqueue_harvest_venue_job(self, **kwargs):
+        self.calls.append(("enqueue_harvest_venue_job", kwargs))
+        return _job("harvest_venue", payload=kwargs)
+
     def retry_dead_job(self, job_id: str):
         self.calls.append(("retry_dead_job", job_id))
         if job_id == "job_nonexistent":
@@ -1534,6 +1538,71 @@ def test_harvest_top_cited_endpoint_requires_bearer_token(api_client):
     missing = client.post("/v1/index/harvest-top-cited", json=body)
     invalid = client.post(
         "/v1/index/harvest-top-cited",
+        headers={"Authorization": "Bearer wrong"},
+        json=body,
+    )
+
+    assert missing.status_code == 401
+    assert invalid.status_code == 403
+
+
+def test_harvest_venue_endpoint_delegates_to_service(api_client):
+    """``POST /v1/index/harvest-venue`` forwards request fields to
+    ``service.enqueue_harvest_venue_job`` and returns the planner job."""
+    client, service, settings = api_client
+    headers = {"Authorization": f"Bearer {settings.api_key}"}
+
+    response = client.post(
+        "/v1/index/harvest-venue",
+        headers=headers,
+        json={
+            "venue": "ICLR",
+            "year": 2024,
+            "max_papers": 1000,
+            "chunk_size": 50,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["job_type"] == "harvest_venue"
+    enqueue_calls = [c for c in service.calls if c[0] == "enqueue_harvest_venue_job"]
+    assert len(enqueue_calls) == 1
+    kw = enqueue_calls[0][1]
+    assert kw["venue"] == "ICLR"
+    assert kw["year"] == 2024
+    assert kw["max_papers"] == 1000
+    assert kw["chunk_size"] == 50
+
+
+def test_harvest_venue_endpoint_rejects_missing_venue(api_client):
+    """Missing or empty ``venue`` is a 422 — Pydantic enforces min_length."""
+    client, _, settings = api_client
+    headers = {"Authorization": f"Bearer {settings.api_key}"}
+
+    missing_venue = client.post(
+        "/v1/index/harvest-venue",
+        headers=headers,
+        json={"year": 2024},
+    )
+    assert missing_venue.status_code == 422
+
+    bad_year = client.post(
+        "/v1/index/harvest-venue",
+        headers=headers,
+        json={"venue": "ICLR", "year": 1800},
+    )
+    assert bad_year.status_code == 422
+
+
+def test_harvest_venue_endpoint_requires_bearer_token(api_client):
+    """Bulk harvest is admin-only. No auth → 401 / invalid auth → 403."""
+    client, _, _ = api_client
+
+    body = {"venue": "ICLR", "year": 2024}
+    missing = client.post("/v1/index/harvest-venue", json=body)
+    invalid = client.post(
+        "/v1/index/harvest-venue",
         headers={"Authorization": "Bearer wrong"},
         json=body,
     )

@@ -110,6 +110,26 @@ def test_paper_schema_carries_code_ingestion_fields():
     assert paper.code_manifest is None
 
 
+def test_paper_schema_carries_venue_signal_fields():
+    """Regression test for #39 PR B: peer-review venue signal needs three
+    new columns (venue / venue_year / venue_source) so retrieval can
+    boost peer-reviewed work over preprints. Locks the contract so a
+    future migration can't accidentally drop them."""
+    from paperbase.repository import PaperORM
+
+    for column in ("venue", "venue_year", "venue_source"):
+        assert column in PaperORM.__table__.columns, (
+            f"PaperORM must carry '{column}' for venue signal (#39 PR B)"
+        )
+
+    paper = PaperMetadata(arxiv_id="2401.99999")
+    # Defaults are None — a fresh paper has no venue stamp until the
+    # harvest_venue chunk worker runs ``set_paper_venue``.
+    assert paper.venue is None
+    assert paper.venue_year is None
+    assert paper.venue_source is None
+
+
 def test_job_orm_carries_priority_for_backfill_starvation_guard():
     """Regression test for #33: harvest jobs must run at lower priority than
     interactive on-demand work so a multi-year backfill cannot starve

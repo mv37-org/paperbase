@@ -373,6 +373,44 @@ def harvest_top_cited(
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+class HarvestVenueRequest(_BaseModel):
+    # Conference venue name; S2 accepts both short ("ICLR") and long
+    # ("International Conference on Learning Representations") forms.
+    venue: str = _Field(..., min_length=1, max_length=200)
+    # 4-digit conference year.
+    year: int = _Field(..., ge=1900, le=2100)
+    # Stop after this many candidates; ``None`` means "until S2 exhausts".
+    max_papers: int | None = _Field(default=None, ge=1, le=10_000_000)
+    # arxiv_ids per harvest_chunk; smaller = finer interactive priority.
+    chunk_size: int = _Field(default=50, ge=1, le=500)
+
+
+@app.post(
+    "/v1/index/harvest-venue",
+    response_model=JobResponse,
+    dependencies=[Depends(require_bearer_token)],
+)
+def harvest_venue(
+    request: HarvestVenueRequest,
+    service: PaperbaseService = Depends(get_service),
+) -> JobResponse:
+    """Queue a ``harvest_venue`` planner job (#39 PR B). Pages
+    Semantic Scholar's bulk search filtered by venue + year, enqueues
+    ``harvest_chunk`` jobs (``source='s2_venue'``); the chunk worker
+    indexes each paper and stamps the ``venue`` columns."""
+    from .errors import PermanentError
+
+    try:
+        return service.enqueue_harvest_venue_job(
+            venue=request.venue,
+            year=request.year,
+            max_papers=request.max_papers,
+            chunk_size=request.chunk_size,
+        )
+    except PermanentError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @app.post("/v1/index/summarize-top-cited", response_model=JobResponse, dependencies=[Depends(require_bearer_token)])
 def summarize_top_cited(
     limit: int = Query(default=500_000, ge=1, le=5_000_000),

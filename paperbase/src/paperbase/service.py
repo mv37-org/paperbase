@@ -4378,6 +4378,221 @@ class PaperbaseService:
             "skipped": skipped,
         }
 
+    # --- Venue-accepted harvest (#39 PR B) ------------------------------ #
+
+    def enqueue_harvest_venue_job(
+        self,
+        *,
+        venue: str,
+        year: int,
+        max_papers: int | None = None,
+        chunk_size: int = 50,
+    ) -> JobResponse:
+        """Queue a ``harvest_venue`` planner job.
+
+        Planner pages Semantic Scholar's bulk search filtered by
+        ``venue`` + ``year``, batches arxiv-linked candidates into
+        ``chunk_size`` groups, and enqueues ``harvest_chunk`` jobs with
+        ``source='s2_venue'``. The chunk worker indexes each paper and
+        stamps the ``venue`` / ``venue_year`` / ``venue_source`` columns
+        on the resulting row.
+        """
+        if not venue or not venue.strip():
+            raise PermanentError("venue must not be empty")
+        if year < 1900 or year > 2100:
+            raise PermanentError("year must be a 4-digit year")
+        if max_papers is not None and max_papers < 1:
+            raise PermanentError("max_papers must be >= 1 when provided")
+        if chunk_size < 1 or chunk_size > 500:
+            raise PermanentError("chunk_size must be in [1, 500]")
+        job = self.repository.create_job(
+            "harvest_venue",
+            {
+                "venue": venue,
+                "year": int(year),
+                "max_papers": max_papers,
+                "chunk_size": int(chunk_size),
+            },
+        )
+        logger.info(
+            "Created harvest_venue job",
+            extra={
+                "event": "jobs.harvest_venue.created",
+                "job_id": job.job_id,
+                "venue": venue,
+                "year": year,
+                "max_papers": max_papers,
+                "chunk_size": chunk_size,
+            },
+        )
+        return job
+
+    def run_harvest_venue(
+        self,
+        *,
+        venue: str,
+        year: int,
+        max_papers: int | None,
+        chunk_size: int,
+        harvest_id: str | None = None,
+    ) -> dict[str, int]:
+        """Planner: page S2 bulk-search by ``venue`` + ``year`` and
+        enqueue ``harvest_chunk`` jobs (``source='s2_venue'``) in
+        ``chunk_size`` batches.
+
+        Each chunk payload carries a list of dicts with ``arxiv_id`` +
+        ``venue`` (the canonical S2 venue string per paper) so the
+        chunk worker can stamp the row without re-querying S2.
+        """
+        if not venue or not venue.strip():
+            raise PermanentError("venue must not be empty")
+        if year < 1900 or year > 2100:
+            raise PermanentError("year must be a 4-digit year")
+        if max_papers is not None and max_papers < 1:
+            raise PermanentError("max_papers must be >= 1 when provided")
+        if chunk_size < 1 or chunk_size > 500:
+            raise PermanentError("chunk_size must be in [1, 500]")
+
+        run_harvest_id = harvest_id or new_id("harvest")
+        cursor: str | None = None
+        chunks_created = 0
+        candidates_emitted = 0
+        pages_fetched = 0
+        pending_batch: list[dict[str, Any]] = []
+
+        def _flush_batch() -> None:
+            nonlocal chunks_created, pending_batch
+            if not pending_batch:
+                return
+            first_id = pending_batch[0]["arxiv_id"]
+            last_id = pending_batch[-1]["arxiv_id"]
+            self.repository.create_job(
+                "harvest_chunk",
+                {
+                    "harvest_id": run_harvest_id,
+                    "source": "s2_venue",
+                    "papers": list(pending_batch),
+                    "venue": venue,
+                    "year": int(year),
+                },
+                dedupe_key=(
+                    f"harvest_chunk:{run_harvest_id}:s2_venue:"
+                    f"{first_id}-{last_id}-{len(pending_batch)}"
+                ),
+            )
+            chunks_created += 1
+            pending_batch = []
+
+        while True:
+            if max_papers is not None and candidates_emitted >= max_papers:
+                break
+            page, next_cursor = sources.fetch_venue_accepted(
+                venue=venue,
+                year=year,
+                cursor=cursor,
+            )
+            pages_fetched += 1
+            if not page:
+                break
+            for candidate in page:
+                if max_papers is not None and candidates_emitted >= max_papers:
+                    break
+                pending_batch.append({
+                    "arxiv_id": candidate.arxiv_id,
+                    "venue": candidate.venue_string,
+                    "year": candidate.year,
+                })
+                candidates_emitted += 1
+                if len(pending_batch) >= chunk_size:
+                    _flush_batch()
+            if next_cursor is None:
+                break
+            cursor = next_cursor
+        _flush_batch()
+
+        logger.info(
+            "harvest_venue planner enqueued chunks",
+            extra={
+                "event": "harvest_venue.planned",
+                "harvest_id": run_harvest_id,
+                "venue": venue,
+                "year": year,
+                "chunks_created": chunks_created,
+                "candidates_emitted": candidates_emitted,
+                "pages_fetched": pages_fetched,
+                "max_papers": max_papers,
+            },
+        )
+        return {
+            "chunks_created": chunks_created,
+            "candidates_emitted": candidates_emitted,
+            "pages_fetched": pages_fetched,
+        }
+
+    def run_harvest_chunk_venue(
+        self,
+        *,
+        papers: list[dict[str, Any]],
+        venue: str | None = None,
+        year: int | None = None,
+        harvest_id: str | None = None,
+    ) -> dict[str, int]:
+        """Chunk worker for ``source='s2_venue'``.
+
+        Iterates ``papers`` (each a dict of ``arxiv_id`` + ``venue`` +
+        ``year``), calls ``index_arxiv_paper`` to ingest, then
+        ``set_paper_venue`` to stamp the venue columns. Per-id
+        ``PermanentError`` is swallowed so a 404 doesn't fail the chunk;
+        retry policy still catches transient failures on the chunk as a
+        whole.
+        """
+        if not papers:
+            return {"requested": 0, "indexed": 0, "stamped": 0, "skipped": 0}
+        run_harvest_id = harvest_id or new_id("harvest")
+        indexed = 0
+        stamped = 0
+        skipped = 0
+        for entry in papers:
+            arxiv_id = (entry or {}).get("arxiv_id") or ""
+            if not arxiv_id:
+                skipped += 1
+                continue
+            try:
+                stored = self.index_arxiv_paper(arxiv_id, force=False)
+                indexed += 1
+            except PermanentError:
+                skipped += 1
+                continue
+            paper_venue = entry.get("venue") or venue
+            paper_year = entry.get("year") or year
+            updated = self.repository.set_paper_venue(
+                stored.paper_id,
+                venue=paper_venue,
+                venue_year=int(paper_year) if paper_year is not None else None,
+                venue_source="s2_bulk",
+            )
+            if updated is not None:
+                stamped += 1
+        logger.info(
+            "harvest_venue chunk completed",
+            extra={
+                "event": "harvest_venue.chunk_completed",
+                "harvest_id": run_harvest_id,
+                "venue": venue,
+                "year": year,
+                "requested": len(papers),
+                "indexed": indexed,
+                "stamped": stamped,
+                "skipped": skipped,
+            },
+        )
+        return {
+            "requested": len(papers),
+            "indexed": indexed,
+            "stamped": stamped,
+            "skipped": skipped,
+        }
+
     def enqueue_latest_sync_job(self) -> JobResponse:
         job = self.repository.create_job(
             "sync_latest",
@@ -4453,6 +4668,14 @@ class PaperbaseService:
                         min_citations=int(job.payload.get("min_citations", 0)),
                         harvest_id=str(job.payload.get("harvest_id") or job.job_id),
                     )
+                elif source == "s2_venue":
+                    # #39 PR B: list of {arxiv_id, venue, year} dicts.
+                    self.run_harvest_chunk_venue(
+                        papers=list(job.payload.get("papers", [])),
+                        venue=job.payload.get("venue"),
+                        year=job.payload.get("year"),
+                        harvest_id=str(job.payload.get("harvest_id") or job.job_id),
+                    )
                 else:
                     self.run_harvest_chunk(
                         source=source,
@@ -4469,6 +4692,14 @@ class PaperbaseService:
                     min_citations=int(job.payload.get("min_citations", 0)),
                     max_papers=job.payload.get("max_papers"),
                     categories=list(job.payload.get("categories") or self.settings.arxiv_categories),
+                    chunk_size=int(job.payload.get("chunk_size", 50)),
+                    harvest_id=str(job.payload.get("harvest_id") or job.job_id),
+                )
+            elif job.job_type == "harvest_venue":
+                self.run_harvest_venue(
+                    venue=str(job.payload["venue"]),
+                    year=int(job.payload["year"]),
+                    max_papers=job.payload.get("max_papers"),
                     chunk_size=int(job.payload.get("chunk_size", 50)),
                     harvest_id=str(job.payload.get("harvest_id") or job.job_id),
                 )
