@@ -945,6 +945,52 @@ def test_run_harvest_venue_handles_empty_first_page(monkeypatch):
     assert chunks == []
 
 
+def test_run_harvest_venue_continues_through_empty_filtered_pages(monkeypatch):
+    """Regression for PR #52 review: ``fetch_venue_accepted`` filters out
+    papers without arXiv IDs client-side but still returns the upstream
+    pagination token. The planner must keep paging until S2 itself
+    signals end-of-stream (next_cursor is None), not stop on the first
+    empty filtered page — for venues with many non-arxiv papers (e.g.
+    CVPR, where workshop papers / tech reports often lack arxiv links)
+    that would truncate the harvest badly."""
+    from paperbase.sources import VenueCandidate
+
+    service = _service()
+    call_count = {"n": 0}
+
+    def stub(*, venue, year, cursor=None, page_size=1000, timeout_seconds=30):
+        idx = call_count["n"]
+        call_count["n"] += 1
+        # Page 0: real data. Page 1: empty (all filtered out client-side)
+        # but next_cursor is still set. Page 2: more real data, then EOF.
+        if idx == 0:
+            return [
+                VenueCandidate(arxiv_id="2020.00001", semantic_scholar_id="s1", title="P1", venue_string="ICLR canonical", year=2024),
+            ], "token-0"
+        if idx == 1:
+            return [], "token-1"  # empty filtered page, but more remains
+        if idx == 2:
+            return [
+                VenueCandidate(arxiv_id="2020.00002", semantic_scholar_id="s2", title="P2", venue_string="ICLR canonical", year=2024),
+            ], None
+        return [], None
+
+    monkeypatch.setattr("paperbase.service.sources.fetch_venue_accepted", stub)
+
+    result = service.run_harvest_venue(
+        venue="ICLR",
+        year=2024,
+        max_papers=None,
+        chunk_size=50,
+    )
+
+    # Both real candidates collected — the planner did NOT stop on the
+    # empty page 1.
+    assert result["candidates_emitted"] == 2
+    assert result["pages_fetched"] == 3
+    assert call_count["n"] == 3
+
+
 def test_run_harvest_chunk_venue_indexes_and_stamps_venue(monkeypatch):
     """The chunk worker for ``source='s2_venue'`` calls
     ``index_arxiv_paper`` per id, then stamps venue/venue_year/

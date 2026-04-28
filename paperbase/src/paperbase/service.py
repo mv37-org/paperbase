@@ -4492,8 +4492,6 @@ class PaperbaseService:
                 cursor=cursor,
             )
             pages_fetched += 1
-            if not page:
-                break
             for candidate in page:
                 if max_papers is not None and candidates_emitted >= max_papers:
                     break
@@ -4505,6 +4503,10 @@ class PaperbaseService:
                 candidates_emitted += 1
                 if len(pending_batch) >= chunk_size:
                     _flush_batch()
+            # Keep paging until S2 itself signals last page (PR #52 review).
+            # An empty filtered ``page`` does NOT mean end-of-stream — bulk
+            # search may return pages where every result is non-arxiv and
+            # gets filtered out client-side.
             if next_cursor is None:
                 break
             cursor = next_cursor
