@@ -78,10 +78,50 @@ const OPEN_TABS_KEY = "paperbase-open-tabs";
 const PENDING_PROMPT_KEY = "paperbase-pending-prompt";
 const RESUME_PROJECT_MODAL_KEY = "paperbase-resume-new-project";
 const SIDEBAR_COLLAPSED_KEY = "paperbase-sidebar-collapsed";
+const SELECTED_PROJECT_KEY = "paperbase-selected-project";
 const MAX_OPEN_TABS = 8;
 const MESSAGE_LIST_BOTTOM_THRESHOLD = 40;
 const PROJECT_ITEM_PAGE_SIZE = 5;
 const PROJECT_SIDEBAR_ITEM_KINDS: ProjectItemKind[] = ["python_file", "thread"];
+const CHAT_TITLE_STOP_WORDS = new Set([
+  "a",
+  "an",
+  "and",
+  "are",
+  "as",
+  "at",
+  "be",
+  "but",
+  "by",
+  "can",
+  "could",
+  "for",
+  "from",
+  "help",
+  "i",
+  "if",
+  "in",
+  "into",
+  "is",
+  "it",
+  "me",
+  "my",
+  "of",
+  "on",
+  "or",
+  "our",
+  "please",
+  "show",
+  "tell",
+  "that",
+  "the",
+  "this",
+  "to",
+  "us",
+  "we",
+  "with",
+  "would",
+]);
 type ModalFlashKind = "error" | "note";
 type PaperDrawerState = { paperId: string; path: string } | null;
 type PaperDrawerContent =
@@ -514,6 +554,46 @@ function restoreSidebarCollapsed() {
   return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "true";
 }
 
+function restoreSelectedProjectId() {
+  const value = localStorage.getItem(SELECTED_PROJECT_KEY)?.trim();
+  return value ? value : null;
+}
+
+function formatChatTitleWord(word: string) {
+  if (!word) {
+    return word;
+  }
+  if (word === word.toUpperCase()) {
+    return word;
+  }
+  if (/[A-Z]/.test(word.slice(1))) {
+    return word;
+  }
+  return `${word[0]?.toUpperCase() ?? ""}${word.slice(1).toLowerCase()}`;
+}
+
+function summarizeThreadTitle(content: string) {
+  const tokens = content.match(/[A-Za-z0-9]+(?:['-][A-Za-z0-9]+)*/g) ?? [];
+  if (tokens.length === 0) {
+    return "New chat";
+  }
+  const informativeTokens = tokens.filter(
+    (token) => !CHAT_TITLE_STOP_WORDS.has(token.toLowerCase()),
+  );
+  const sourceTokens = informativeTokens.length >= 3 ? informativeTokens : tokens;
+  const desiredCount = Math.min(5, Math.max(3, sourceTokens.length));
+  let selectedTokens = sourceTokens.slice(0, desiredCount);
+  if (selectedTokens.length < 3 && tokens.length >= 3) {
+    selectedTokens = tokens.slice(0, 3);
+  }
+  return (
+    selectedTokens
+      .map((token) => formatChatTitleWord(token))
+      .join(" ")
+      .trim() || "New chat"
+  );
+}
+
 function displayThreadTitle(title: string) {
   return title.trim() || "New chat";
 }
@@ -941,8 +1021,13 @@ export default function App() {
   const [session, setSession] = useState<BrowserSessionResponse | null>(null);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [projectItems, setProjectItems] = useState<Record<string, ProjectItemState>>({});
-  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
-  const [expandedProjectIds, setExpandedProjectIds] = useState<string[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(() =>
+    restoreSelectedProjectId(),
+  );
+  const [expandedProjectIds, setExpandedProjectIds] = useState<string[]>(() => {
+    const restoredProjectId = restoreSelectedProjectId();
+    return restoredProjectId ? [restoredProjectId] : [];
+  });
   const [collapsedProjectCategories, setCollapsedProjectCategories] = useState<
     Record<string, Partial<Record<ProjectSidebarCategoryKey, boolean>>>
   >({});
@@ -1026,7 +1111,7 @@ export default function App() {
 
   const sessionRef = useRef<BrowserSessionResponse | null>(null);
   const projectsRef = useRef<ProjectSummary[]>([]);
-  const selectedProjectIdRef = useRef<string | null>(null);
+  const selectedProjectIdRef = useRef<string | null>(restoreSelectedProjectId());
   const projectItemsRef = useRef<Record<string, ProjectItemState>>({});
   const threadMapRef = useRef<Record<string, ChatThreadResponse>>({});
   const pythonFileMapRef = useRef<Record<string, PythonFileResponse>>({});
@@ -1055,6 +1140,14 @@ export default function App() {
 
   useEffect(() => {
     selectedProjectIdRef.current = selectedProjectId;
+  }, [selectedProjectId]);
+
+  useEffect(() => {
+    if (selectedProjectId) {
+      localStorage.setItem(SELECTED_PROJECT_KEY, selectedProjectId);
+      return;
+    }
+    localStorage.removeItem(SELECTED_PROJECT_KEY);
   }, [selectedProjectId]);
 
   useEffect(() => {
@@ -1270,6 +1363,7 @@ export default function App() {
           key: `thread:${tab.id}`,
           kind: tab.kind,
           id: tab.id,
+          isStreaming: streamingThreadId === tab.id,
           title: displayThreadTitle(title),
           tabTitle: truncateTabTitle(title),
         };
@@ -1281,6 +1375,7 @@ export default function App() {
           key: `project_home:${tab.id}`,
           kind: tab.kind,
           id: tab.id,
+          isStreaming: false,
           title,
           tabTitle: truncateTabTitle(title),
         };
@@ -1295,11 +1390,12 @@ export default function App() {
         key: `python_file:${tab.id}`,
         kind: tab.kind,
         id: tab.id,
+        isStreaming: false,
         title,
         tabTitle: truncateTabTitle(title),
       };
     });
-  }, [openTabs, projects, pythonFileMap, threadMap]);
+  }, [openTabs, projects, pythonFileMap, streamingThreadId, threadMap]);
   const hasOpenTabs = openTabItems.length > 0;
   const tabStripStyle = useMemo(
     () =>
@@ -2130,10 +2226,12 @@ export default function App() {
   );
 
   const fetchAndStoreThread = useCallback(
-    async (threadId: string) => {
+    async (threadId: string, selectProject = true) => {
       const thread = await getThread(threadId);
       setThreadMap((current) => ({ ...current, [thread.thread_id]: thread }));
-      setSelectedProjectId(thread.project_id);
+      if (selectProject) {
+        setSelectedProjectId(thread.project_id);
+      }
       upsertThreadIntoProjectItems(thread);
       return thread;
     },
@@ -2151,10 +2249,12 @@ export default function App() {
   );
 
   const fetchAndStorePythonFile = useCallback(
-    async (fileId: string) => {
+    async (fileId: string, selectProject = true) => {
       const file = await getPythonFile(fileId);
       setPythonFileMap((current) => ({ ...current, [file.file_id]: file }));
-      setSelectedProjectId(file.project_id);
+      if (selectProject) {
+        setSelectedProjectId(file.project_id);
+      }
       setPythonFileDrafts((current) => ({
         ...current,
         [file.file_id]: current[file.file_id] ?? { content: file.content, dirty: false },
@@ -2313,6 +2413,7 @@ export default function App() {
       let streamError: string | null = null;
       let streamingMessageId: string | null = null;
       const streamAbortController = new AbortController();
+      const optimisticTitle = summarizeThreadTitle(content);
 
       updateThread(threadId, (thread) => ({
         thread_id: thread?.thread_id ?? threadId,
@@ -2321,7 +2422,7 @@ export default function App() {
         project_instructions: thread?.project_instructions ?? fallbackProjectInstructions,
         title:
           (thread?.title ?? "New chat") === "New chat"
-            ? content.slice(0, 60)
+            ? optimisticTitle
             : (thread?.title ?? "New chat"),
         created_at: thread?.created_at ?? now,
         updated_at: now,
@@ -2351,7 +2452,7 @@ export default function App() {
                   project_id: fallbackProjectId,
                   project_name: fallbackProjectName,
                   project_instructions: fallbackProjectInstructions,
-                  title: content.slice(0, 60),
+                  title: optimisticTitle,
                   created_at: now,
                   updated_at: now,
                   messages: [],
@@ -2377,7 +2478,7 @@ export default function App() {
                   project_id: fallbackProjectId,
                   project_name: fallbackProjectName,
                   project_instructions: fallbackProjectInstructions,
-                  title: content.slice(0, 60),
+                  title: optimisticTitle,
                   created_at: now,
                   updated_at: now,
                   messages: [],
@@ -2429,7 +2530,7 @@ export default function App() {
                   project_id: fallbackProjectId,
                   project_name: fallbackProjectName,
                   project_instructions: fallbackProjectInstructions,
-                  title: content.slice(0, 60),
+                  title: optimisticTitle,
                   created_at: now,
                   updated_at: now,
                   messages: [],
@@ -2453,7 +2554,7 @@ export default function App() {
                   project_id: fallbackProjectId,
                   project_name: fallbackProjectName,
                   project_instructions: fallbackProjectInstructions,
-                  title: content.slice(0, 60),
+                  title: optimisticTitle,
                   created_at: now,
                   updated_at: now,
                   messages: [],
@@ -2483,7 +2584,7 @@ export default function App() {
                   project_id: fallbackProjectId,
                   project_name: fallbackProjectName,
                   project_instructions: fallbackProjectInstructions,
-                  title: content.slice(0, 60),
+                  title: optimisticTitle,
                   created_at: now,
                   updated_at: now,
                   messages: [],
@@ -2519,7 +2620,7 @@ export default function App() {
                 project_id: fallbackProjectId,
                 project_name: fallbackProjectName,
                 project_instructions: fallbackProjectInstructions,
-                title: content.slice(0, 60),
+                title: optimisticTitle,
                 created_at: now,
                 updated_at: now,
                 messages: [],
@@ -2575,7 +2676,7 @@ export default function App() {
               project_id: fallbackProjectId,
               project_name: fallbackProjectName,
               project_instructions: fallbackProjectInstructions,
-              title: content.slice(0, 60),
+              title: optimisticTitle,
               created_at: now,
               updated_at: now,
               messages: [],
@@ -2680,14 +2781,31 @@ export default function App() {
   const bootstrapAuthenticatedUi = useCallback(async () => {
     await refreshUploads();
     const loadedProjects = await refreshProjects();
+    const persistedSelectedProjectId = restoreSelectedProjectId();
+    const restoredSelectedProjectId =
+      persistedSelectedProjectId &&
+      loadedProjects.some((project) => project.project_id === persistedSelectedProjectId)
+        ? persistedSelectedProjectId
+        : null;
+    const selectedProjectId = restoredSelectedProjectId ?? loadedProjects[0]?.project_id ?? null;
+    selectedProjectIdRef.current = selectedProjectId;
+    setSelectedProjectId(selectedProjectId);
+    setExpandedProjectIds(restoredSelectedProjectId ? [restoredSelectedProjectId] : []);
+    if (
+      restoredSelectedProjectId &&
+      !projectItemsRef.current[restoredSelectedProjectId]?.loaded &&
+      !projectItemsRef.current[restoredSelectedProjectId]?.loading
+    ) {
+      await fetchProjectItems(restoredSelectedProjectId);
+    }
     const restoredTabs = restoreTabs();
     const validRestoredTabs: OpenTab[] = [];
     for (const tab of restoredTabs) {
       try {
         if (tab.kind === "thread") {
-          await fetchAndStoreThread(tab.id);
+          await fetchAndStoreThread(tab.id, false);
         } else if (tab.kind === "python_file") {
-          await fetchAndStorePythonFile(tab.id);
+          await fetchAndStorePythonFile(tab.id, false);
         } else if (!loadedProjects.some((project) => project.project_id === tab.id)) {
           continue;
         }
@@ -2700,7 +2818,7 @@ export default function App() {
 
     const pendingPrompt = consumePendingPrompt().trim();
     if (pendingPrompt) {
-      const thread = await createNewThread("", loadedProjects[0]?.project_id);
+      const thread = await createNewThread("", selectedProjectId ?? loadedProjects[0]?.project_id);
       setLandingPrompt("");
       await sendMessage(thread.thread_id, pendingPrompt);
       return;
@@ -2709,21 +2827,11 @@ export default function App() {
     const firstOpen = validRestoredTabs[0];
     if (firstOpen) {
       setActiveTab(firstOpen);
-      setSelectedProjectId(
-        firstOpen.kind === "thread"
-          ? (threadMapRef.current[firstOpen.id]?.project_id ??
-              loadedProjects[0]?.project_id ??
-              null)
-          : (pythonFileMapRef.current[firstOpen.id]?.project_id ??
-              loadedProjects[0]?.project_id ??
-              null),
-      );
-    } else if (loadedProjects[0]) {
-      setSelectedProjectId(loadedProjects[0].project_id);
     }
   }, [
     createNewThread,
     fetchAndStorePythonFile,
+    fetchProjectItems,
     fetchAndStoreThread,
     refreshProjects,
     refreshUploads,
@@ -2995,11 +3103,11 @@ export default function App() {
     async (projectId: string) => {
       setSelectedProjectId(projectId);
       const expanded = expandedProjectIds.includes(projectId);
-      if (expanded) {
-        setExpandedProjectIds((current) => current.filter((value) => value !== projectId));
+      if (expanded && expandedProjectIds.length === 1) {
+        setExpandedProjectIds([]);
         return;
       }
-      setExpandedProjectIds((current) => [...current, projectId]);
+      setExpandedProjectIds([projectId]);
       if (
         !projectItemsRef.current[projectId]?.loaded &&
         !projectItemsRef.current[projectId]?.loading
@@ -4850,7 +4958,7 @@ export default function App() {
                           }}
                         >
                           <span className="chat-tab-label">
-                            {tab.kind === "thread" ? (
+                            {tab.kind === "thread" && tab.isStreaming ? (
                               <span className="chat-tab-thread-indicator" aria-hidden="true" />
                             ) : null}
                             <span className="chat-tab-title">{tab.tabTitle}</span>

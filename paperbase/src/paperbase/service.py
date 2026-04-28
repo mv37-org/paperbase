@@ -229,6 +229,47 @@ _FORCE_TOOL_QUERY_RE = re.compile(
     re.IGNORECASE,
 )
 
+_CHAT_TITLE_TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:['-][A-Za-z0-9]+)*")
+_CHAT_TITLE_STOP_WORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "but",
+    "by",
+    "can",
+    "could",
+    "for",
+    "from",
+    "help",
+    "i",
+    "if",
+    "in",
+    "into",
+    "is",
+    "it",
+    "me",
+    "my",
+    "of",
+    "on",
+    "or",
+    "our",
+    "please",
+    "show",
+    "tell",
+    "that",
+    "the",
+    "this",
+    "to",
+    "us",
+    "we",
+    "with",
+    "would",
+}
+
 _PROJECT_CODE_DIRECT_TOOL_RE = re.compile(r"\b(project_(?:list_files|read_file|grep|touch|edit|delete|run))\b", re.IGNORECASE)
 _PROJECT_CODE_ACTION_RE = re.compile(
     r"\b("
@@ -884,6 +925,29 @@ def _query_variants(question: str) -> list[str]:
     return deduped[:5]
 
 
+def _format_chat_title_word(word: str) -> str:
+    if not word:
+        return word
+    if word.isupper():
+        return word
+    if any(char.isupper() for char in word[1:]):
+        return word
+    return word.capitalize()
+
+
+def _summarize_chat_title(content: str) -> str:
+    tokens = _CHAT_TITLE_TOKEN_RE.findall(content)
+    if not tokens:
+        return "New chat"
+    informative_tokens = [token for token in tokens if token.lower() not in _CHAT_TITLE_STOP_WORDS]
+    source_tokens = informative_tokens if len(informative_tokens) >= 3 else tokens
+    desired_count = min(5, max(3, len(source_tokens)))
+    selected_tokens = source_tokens[:desired_count]
+    if len(selected_tokens) < 3 and len(tokens) >= 3:
+        selected_tokens = tokens[:3]
+    return " ".join(_format_chat_title_word(token) for token in selected_tokens).strip() or "New chat"
+
+
 def _question_mentions_uploads(question: str) -> bool:
     lowered = question.lower()
     return any(token in lowered for token in ("upload", "uploaded", "document", "documents", "docs", "notes", "note"))
@@ -976,24 +1040,11 @@ def _pending_project_code_followup_requires_write(thread: ChatThreadResponse | N
 
 
 def _should_offer_research_chat_tools(question: str, request: SendChatMessageRequest) -> bool:
-    if not (request.include_papers or request.include_uploads):
-        return False
-    if request.tag_filters:
-        return True
-    if request.include_uploads and _question_mentions_uploads(question):
-        return True
-    if request.include_papers and _GROUNDING_INTENT_RE.search(question):
-        return True
-    return False
+    return True
 
 
 def _should_offer_project_code_tools(question: str, *, thread: ChatThreadResponse | None) -> bool:
-    if thread is None or not thread.project_id:
-        return False
-    return _question_has_project_code_intent(question) or _question_confirms_pending_project_code_followup(
-        question,
-        thread=thread,
-    )
+    return bool(thread and thread.project_id)
 
 
 def _should_require_project_code_write(question: str, *, thread: ChatThreadResponse | None) -> bool:
@@ -1072,15 +1123,7 @@ def _should_offer_chat_tools(question: str, request: SendChatMessageRequest, *, 
 
 
 def _should_force_chat_tool_use(question: str, request: SendChatMessageRequest, *, thread: ChatThreadResponse | None) -> bool:
-    if _should_offer_project_code_tools(question, thread=thread):
-        return True
-    if not _should_offer_research_chat_tools(question, request):
-        return False
-    if request.tag_filters:
-        return True
-    if _query_signals_recency(question):
-        return True
-    return bool(_FORCE_TOOL_QUERY_RE.search(question))
+    return _should_offer_chat_tools(question, request, thread=thread)
 
 
 def _sanitize_inline_citations(answer: str, citations: list[ChatCitation]) -> str:
@@ -2493,7 +2536,10 @@ class PaperbaseService:
             content_markdown=content,
         )
         if thread.title == "New chat":
-            self.repository.rename_chat_thread(thread_id=thread_id, title=content[:60])  # type: ignore[attr-defined]
+            self.repository.rename_chat_thread(  # type: ignore[attr-defined]
+                thread_id=thread_id,
+                title=_summarize_chat_title(content),
+            )
         resolved_user = self.repository.get_browser_user_by_id(user.user_id) or user  # type: ignore[attr-defined]
         api_key_value, using_free_tier, api_key_state = self._choose_anthropic_api_key(resolved_user)
         return PreparedChatGeneration(
@@ -2528,7 +2574,9 @@ class PaperbaseService:
         if include_research_tools:
             parts.append(
                 "You have access to Paperbase research tools that can search papers, sections, files, figures, tables, references, related papers, and the user's uploaded documents. "
-                "Use tools aggressively for research-oriented turns. If the user asks about papers, references, findings, comparisons, methods, figures, tables, benchmarks, uploaded notes, or asks for links, do not rely on parametric memory when Paperbase tools can answer. "
+                "Every tool-enabled turn must begin by leveraging these research tools. "
+                "Use them aggressively, including on code turns when papers or uploaded documents can inform the work. "
+                "Do not rely on parametric memory when Paperbase tools can answer. "
                 "Start with discovery tools to find the right papers, then follow up with evidence tools before making specific factual claims. "
                 "Broad discovery tools like paperbase_search, paperbase_get_results, paperbase_get_paper, paperbase_get_related_papers, and paperbase_get_references are for candidate discovery and metadata only. "
                 "They are not citable evidence by themselves. Before making specific factual claims, follow up with evidence tools like paperbase_search_sections, paperbase_read_file, paperbase_get_figure, paperbase_get_table, or paperbase_search_uploaded_sections. "
@@ -2542,6 +2590,7 @@ class PaperbaseService:
                 "When you create or update code with these tools, you are writing managed project Python files for the current project. "
                 "When the user asks you to create, inspect, change, delete, or run project code, use the project_* tools instead of guessing. "
                 "Before writing new code, inspect the existing project with project_list_files, project_grep, and project_read_file so you reuse what is already there instead of rewriting it. "
+                "When the user asks for code, decide from the prompt whether to edit an existing project file or create a new one; do not ask a follow-up question just to decide between those two paths when the prompt and project state are sufficient. "
                 "Files you create with project_touch become part of the project and will appear in later project_list_files results and in the project's Code section. "
                 "When creating a file for the user's request, include meaningful initial code in project_touch or follow immediately with project_edit; do not leave the requested file empty. "
                 "If the user asked you to create or change code, do not stop tool use until the relevant managed project Python files have actually been created or updated. "
@@ -2822,7 +2871,7 @@ class PaperbaseService:
         include_project_code_tools = _should_offer_project_code_tools(request.content, thread=thread)
         if not (include_research_tools or include_project_code_tools):
             return tools
-        if request.include_papers and include_research_tools:
+        if include_research_tools:
             tools.extend(
                 [
                     {
@@ -2954,7 +3003,7 @@ class PaperbaseService:
                     },
                 ]
             )
-        if request.include_uploads and include_research_tools:
+        if include_research_tools:
             tools.extend(
                 [
                     {

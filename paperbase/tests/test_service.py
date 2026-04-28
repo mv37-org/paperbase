@@ -1822,6 +1822,10 @@ def test_project_chat_tools_are_advertised_for_coding_turns(browser_service):
     tools_by_name = {tool["name"]: tool for tool in tools}
 
     assert {
+        "paperbase_search",
+        "paperbase_search_sections",
+        "paperbase_list_uploaded_documents",
+        "paperbase_search_uploaded_sections",
         "project_list_files",
         "project_read_file",
         "project_grep",
@@ -1838,10 +1842,13 @@ def test_project_chat_tools_are_advertised_for_coding_turns(browser_service):
 
     prompt = service._chat_tool_system_prompt(
         thread,
-        include_research_tools=False,
+        include_research_tools=True,
         include_project_code_tools=True,
     )
+    assert "Every tool-enabled turn must begin by leveraging these research tools" in prompt
+    assert "Use them aggressively, including on code turns when papers or uploaded documents can inform the work" in prompt
     assert "writing managed project Python files" in prompt
+    assert "decide from the prompt whether to edit an existing project file or create a new one" in prompt
     assert "appear in later project_list_files results" in prompt
     assert "do not leave the requested file empty" in prompt
     assert "If the target file already exists, update it with project_edit" in prompt
@@ -2322,7 +2329,16 @@ def test_project_thread_replaces_unsaved_python_answer_with_failure_message():
                     "tool_choice": tool_choice,
                 }
             )
-            assert tools is None
+            if tools is not None:
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "No tool use needed.",
+                        }
+                    ],
+                    "stop_reason": "end_turn",
+                }
             return {
                 "content": [
                     {
@@ -2363,6 +2379,7 @@ def test_project_thread_replaces_unsaved_python_answer_with_failure_message():
         "I wasn't able to persist code into a managed project Python file in this turn, so no project file was changed. "
         "Please retry, or tell me the exact file you want updated."
     )
+    assert len(service.chat_model.create_calls) == 2
 
 
 def test_project_thread_allows_python_answer_after_reading_existing_file():
@@ -3398,7 +3415,7 @@ def test_browser_uploads_and_chat_require_api_key_after_free_quota(monkeypatch, 
     app.dependency_overrides.clear()
 
 
-def test_non_grounded_chat_skips_tools_and_citations(browser_service):
+def test_non_grounded_chat_still_forces_research_tools_without_citations(browser_service):
     service, _, chat_model = browser_service
     session, _ = service.register_browser_user(
         SignupRequest(email="casual@example.com", password="topsecret123", display_name="Casual User")
@@ -3415,9 +3432,46 @@ def test_non_grounded_chat_skips_tools_and_citations(browser_service):
     assert response.assistant_message is not None
     assert response.assistant_message.citations == []
     assert "[S" not in response.assistant_message.content_markdown
-    assert len(chat_model.create_calls) == 1
-    assert chat_model.create_calls[0]["tools"] is None
-    assert "do not invent source ids" in str(chat_model.create_calls[0]["system_prompt"])
+    assert len(chat_model.create_calls) == 3
+    first_call = chat_model.create_calls[0]
+    assert first_call["tool_choice"] == {"type": "any"}
+    assert first_call["tools"]
+    first_tool_names = {
+        tool["name"] for tool in first_call["tools"] if isinstance(tool, dict) and "name" in tool
+    }
+    assert "paperbase_search_sections" in first_tool_names
+    assert "paperbase_search_uploaded_sections" in first_tool_names
+    assert "Every tool-enabled turn must begin by leveraging these research tools" in str(
+        first_call["system_prompt"]
+    )
+    assert chat_model.create_calls[1]["tools"]
+    assert chat_model.create_calls[1]["tool_choice"] == {"type": "auto"}
+    assert "do not invent source ids" in str(chat_model.create_calls[-1]["system_prompt"])
+
+
+def test_first_prompt_renames_new_chat_to_short_summary(browser_service):
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="title@example.com", password="topsecret123", display_name="Title User")
+    )
+    assert session.user is not None
+
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
+    first_response = service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="Help me brainstorm a short product name"),
+    )
+
+    assert first_response.thread.title == "Brainstorm Short Product Name"
+
+    second_response = service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="Now focus on a whimsical version"),
+    )
+
+    assert second_response.thread.title == "Brainstorm Short Product Name"
 
 
 def test_chat_context_uses_full_active_thread_history(browser_service):
@@ -3444,9 +3498,10 @@ def test_chat_context_uses_full_active_thread_history(browser_service):
     answer_call = chat_model.create_calls[-1]
     sent_messages = answer_call["messages"]
     assert isinstance(sent_messages, list)
-    assert len(sent_messages) == 9
+    assert len(sent_messages) == 11
     assert sent_messages[0]["content"] == "Historical message 0"
-    assert sent_messages[-1]["content"] == "Help me brainstorm a short product name"
+    assert sent_messages[7]["content"] == "Historical message 7"
+    assert sent_messages[8]["content"] == "Help me brainstorm a short product name"
 
 
 def test_stream_chat_compacts_mid_turn_after_tool_results(monkeypatch, browser_service):

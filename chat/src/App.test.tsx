@@ -180,6 +180,7 @@ import App from "./App";
 
 const OPEN_TABS_KEY = "paperbase-open-tabs";
 const PENDING_PROMPT_KEY = "paperbase-pending-prompt";
+const SELECTED_PROJECT_KEY = "paperbase-selected-project";
 
 function authenticatedSession(
   overrides: Partial<{
@@ -572,14 +573,68 @@ describe("App", () => {
     const restoredTab = tabElements.find((element) =>
       element.textContent?.includes("Restored research thread"),
     );
-    expect(restoredTab?.querySelector(".chat-tab-thread-indicator")).toBeTruthy();
-    expect(document.querySelectorAll(".chat-tab-thread-indicator")).toHaveLength(1);
+    expect(restoredTab?.querySelector(".chat-tab-thread-indicator")).toBeNull();
+    expect(document.querySelectorAll(".chat-tab-thread-indicator")).toHaveLength(0);
     const debugStrip = screen.getByTestId("thread-debug-strip");
     expect(debugStrip.textContent).toContain("user user_1");
     expect(debugStrip.textContent).toContain("project proj_1");
     expect(debugStrip.textContent).toContain("thread thread_1");
     expect(debugStrip.textContent).toContain("assistant msg_1");
     expect(screen.getByRole("button", { name: "Copy chat debug bundle" })).toBeTruthy();
+  });
+
+  it("restores the previously selected project and keeps only that tree expanded", async () => {
+    localStorage.setItem(SELECTED_PROJECT_KEY, "proj_2");
+    localStorage.setItem(OPEN_TABS_KEY, JSON.stringify(["thread_1"]));
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.loadProjects.mockResolvedValue({
+      projects: [projectSummary("proj_1", "General"), projectSummary("proj_2", "Agents", 0)],
+    });
+    apiMocks.getThread.mockResolvedValue(
+      threadResponse(
+        "thread_1",
+        "Restored research thread",
+        "Grounded answer",
+        "proj_1",
+        "General",
+      ),
+    );
+    apiMocks.loadProjectItems.mockImplementation(
+      async (projectId: string, limit = 25, offset = 0, itemKind?: "thread" | "python_file") => {
+        const allItems =
+          projectId === "proj_2"
+            ? [projectItemThread("thread_2", "Agents thread", projectId)]
+            : [projectItemThread("thread_1", "General thread", projectId)];
+        const filteredItems = itemKind
+          ? allItems.filter((item) => item.item_kind === itemKind)
+          : allItems;
+        const pageItems = filteredItems.slice(offset, offset + limit);
+        return {
+          ...projectItemsPage(projectId, pageItems),
+          offset,
+          limit,
+          total_count: filteredItems.length,
+          has_more: offset + pageItems.length < filteredItems.length,
+        };
+      },
+    );
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Agents thread")).toBeTruthy();
+    });
+    expect(screen.queryByText("General thread")).toBeNull();
+    expect(apiMocks.loadProjectItems).toHaveBeenCalledWith("proj_2", 5, 0, "python_file");
+    expect(apiMocks.loadProjectItems).toHaveBeenCalledWith("proj_2", 5, 0, "thread");
+    expect(apiMocks.loadProjectItems).not.toHaveBeenCalledWith("proj_1", 5, 0, "python_file");
+    expect(apiMocks.loadProjectItems).not.toHaveBeenCalledWith("proj_1", 5, 0, "thread");
+
+    const activeProject = document.querySelector<HTMLElement>(".project-card.active");
+    expect(activeProject?.textContent).toContain("Agents");
+    const expandedProjects = [...document.querySelectorAll<HTMLElement>(".project-group.expanded")];
+    expect(expandedProjects).toHaveLength(1);
+    expect(expandedProjects[0]?.textContent).toContain("Agents");
   });
 
   it("loads project sessions lazily when a project is expanded", async () => {
@@ -1890,6 +1945,9 @@ describe("App", () => {
       expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
     });
     await waitFor(() => {
+      expect(document.querySelectorAll(".chat-tab-thread-indicator")).toHaveLength(1);
+    });
+    await waitFor(() => {
       expect(screen.getByText('Did paper search for "grounding"')).toBeTruthy();
     });
     await waitFor(() => {
@@ -1922,6 +1980,10 @@ describe("App", () => {
     await act(async () => {
       releaseStream?.();
       await streamDone;
+    });
+
+    await waitFor(() => {
+      expect(document.querySelectorAll(".chat-tab-thread-indicator")).toHaveLength(0);
     });
     randomSpy.mockRestore();
   });
