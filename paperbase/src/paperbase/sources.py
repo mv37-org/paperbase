@@ -909,14 +909,24 @@ def verify_repo_owns_paper(
         repo_full = repo.lower()
 
         def _matches(candidate: str) -> bool:
-            """Token equality OR prefix-match where the matching prefix
-            is at least 4 chars. Lets ``barlow`` (title) prefix-match
-            ``barlowtwins`` (repo), or vice versa, while keeping shorter
-            ambiguous overlaps from firing."""
+            """Match a candidate token to the repo name. Token-membership
+            check fires only for single-token repos (``mae`` matches
+            ``mae``); multi-token repos (``intrinsic-private-sgd``)
+            require the candidate to either equal the full repo name or
+            prefix-match it from the start. Without this restriction,
+            generic acronyms like ``SGD`` would match any repo whose
+            name happens to contain ``-sgd-`` as one of several tokens
+            (the ResNet → ``microsoft/intrinsic-private-sgd`` false
+            positive from the 30-paper benchmark)."""
             if not candidate or len(candidate) < 3:
                 return False
             cand = candidate.lower()
-            if cand in repo_tokens:
+            # Token-membership only when the repo is a single token —
+            # the candidate IS the entire repo name.
+            if len(repo_tokens) == 1 and cand in repo_tokens:
+                return True
+            # Full repo-name equality.
+            if cand == repo_full:
                 return True
             # Prefix-match either direction with a 4-char floor on the
             # shorter side so ``se`` doesn't match ``senet`` accidentally
@@ -1014,7 +1024,7 @@ def find_official_repo_via_affiliation(
                 response = client.get(
                     f"{_GITHUB_API_BASE}/search/repositories",
                     params={
-                        "q": f"{query} org:{org} in:name",
+                        "q": f"{query} org:{org} in:name,description",
                         "sort": "stars",
                         "order": "desc",
                         "per_page": 5,
