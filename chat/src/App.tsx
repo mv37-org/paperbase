@@ -196,6 +196,8 @@ type ToolActivityEntry = {
   turnIndex: number;
   toolName?: string;
   label: string;
+  command: string | null;
+  output: string | null;
   status: "running" | "completed";
   startedAt: string;
   finishedAt: string | null;
@@ -951,6 +953,10 @@ function formatToolActivityText(
     default:
       return running ? `Doing ${activity.label}...` : `Did ${activity.label}`;
   }
+}
+
+function toolActivityHasDetails(activity: Pick<ToolActivityEntry, "command" | "output">) {
+  return Boolean(activity.command || activity.output);
 }
 
 function projectFileKindLabel(fileKind: ProjectFileKind | undefined) {
@@ -1742,7 +1748,9 @@ export default function App() {
     (
       threadId: string,
       toolId: string,
-      updates: Partial<Pick<ToolActivityEntry, "finishedAt" | "isError">> = {},
+      updates: Partial<
+        Pick<ToolActivityEntry, "finishedAt" | "isError" | "command" | "output">
+      > = {},
     ) => {
       setToolActivities((current) => {
         const existingEntries = current[threadId] ?? [];
@@ -1757,6 +1765,8 @@ export default function App() {
                   ...entry,
                   status: "completed",
                   finishedAt: updates.finishedAt ?? new Date().toISOString(),
+                  command: updates.command ?? entry.command,
+                  output: updates.output ?? entry.output,
                   isError: updates.isError ?? entry.isError,
                 }
               : entry,
@@ -2498,6 +2508,8 @@ export default function App() {
                 turnIndex,
                 toolName: payload.tool_name,
                 label: payload.label,
+                command: payload.command ?? null,
+                output: null,
                 status: "running",
                 startedAt: new Date().toISOString(),
                 finishedAt: null,
@@ -2508,6 +2520,8 @@ export default function App() {
 
             if (eventName === "tool_done") {
               completeToolActivity(threadId, payload.tool_call_id, {
+                command: payload.command ?? null,
+                output: payload.output ?? null,
                 isError: payload.is_error,
               });
               if (
@@ -5471,11 +5485,44 @@ export default function App() {
                               key={activity.id}
                               className={`tool-activity-row status-${activity.status}${activity.isError ? " error" : ""}`}
                             >
-                              <span
-                                className={`tool-activity-label${activity.status === "running" ? " thinking-shimmer" : ""}`}
-                              >
-                                {formatToolActivityText(activity)}
-                              </span>
+                              {toolActivityHasDetails(activity) ? (
+                                <details className="tool-activity-details">
+                                  <summary className="tool-activity-summary">
+                                    <span
+                                      className={`tool-activity-label${activity.status === "running" ? " thinking-shimmer" : ""}`}
+                                    >
+                                      {formatToolActivityText(activity)}
+                                    </span>
+                                    <span className="tool-activity-summary-hint">
+                                      Command{activity.output ? " and output" : ""}
+                                    </span>
+                                  </summary>
+                                  <div className="tool-activity-content">
+                                    {activity.command ? (
+                                      <div className="tool-activity-detail-block">
+                                        <span className="tool-activity-detail-label">Command</span>
+                                        <pre className="tool-activity-detail-payload">
+                                          {activity.command}
+                                        </pre>
+                                      </div>
+                                    ) : null}
+                                    {activity.output ? (
+                                      <div className="tool-activity-detail-block">
+                                        <span className="tool-activity-detail-label">Output</span>
+                                        <pre className="tool-activity-detail-payload">
+                                          {activity.output}
+                                        </pre>
+                                      </div>
+                                    ) : null}
+                                  </div>
+                                </details>
+                              ) : (
+                                <span
+                                  className={`tool-activity-label${activity.status === "running" ? " thinking-shimmer" : ""}`}
+                                >
+                                  {formatToolActivityText(activity)}
+                                </span>
+                              )}
                             </div>
                           ))}
                           {showThinkingPlaceholder ? (

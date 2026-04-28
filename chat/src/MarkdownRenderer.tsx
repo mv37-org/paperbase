@@ -260,14 +260,12 @@ export function MarkdownRenderer({
               return <pre>{children}</pre>;
             }
             const languageMatch = /language-([A-Za-z0-9_+-]+)/.exec(codeBlock.className ?? "");
-            const lines = codeBlock.code.replace(/\r\n?/g, "\n").split("\n");
             return (
               <CodeSnippet
                 code={codeBlock.code}
                 language={languageMatch?.[1]}
                 className="message-code-snippet"
                 collapsible
-                defaultCollapsed={lines.length > 12}
               />
             );
           },

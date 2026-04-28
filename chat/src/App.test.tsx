@@ -1920,11 +1920,14 @@ describe("App", () => {
           tool_call_id: "tool_1",
           tool_name: "paperbase_search",
           label: 'paper search for "grounding"',
+          command: 'paperbase_search({\n  "query": "grounding"\n})',
         });
         onEvent("tool_done", {
           tool_call_id: "tool_1",
           tool_name: "paperbase_search",
           label: 'paper search for "grounding"',
+          command: 'paperbase_search({\n  "query": "grounding"\n})',
+          output: '{\n  "result_set_id": "rs_1"\n}',
           is_error: false,
         });
         await streamDone;
@@ -1950,6 +1953,15 @@ describe("App", () => {
     await waitFor(() => {
       expect(screen.getByText('Did paper search for "grounding"')).toBeTruthy();
     });
+    const toolActivitySummary = screen
+      .getByText('Did paper search for "grounding"')
+      .closest("summary");
+    expect(toolActivitySummary?.textContent).toContain("Command and output");
+    fireEvent.click(toolActivitySummary!);
+    expect(screen.getByText("Command")).toBeTruthy();
+    expect(screen.getByText("Output")).toBeTruthy();
+    expect(screen.getByText(/paperbase_search\(\{/)).toBeTruthy();
+    expect(screen.getByText(/"result_set_id": "rs_1"/)).toBeTruthy();
     await waitFor(() => {
       expect(
         screen.getByRole("button", {

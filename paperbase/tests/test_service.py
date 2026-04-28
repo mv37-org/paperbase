@@ -3936,6 +3936,10 @@ def test_browser_chat_stream_emits_citations_and_completion(monkeypatch, browser
     event_names = [event_name for event_name, _ in events]
     assert event_names[:3] == ["usage", "tool_start", "tool_done"]
     assert events[1][1]["label"]
+    assert events[1][1]["command"].startswith("paperbase_search_sections(")
+    assert '"query": "grounding"' in events[1][1]["command"]
+    assert events[2][1]["command"].startswith("paperbase_search_sections(")
+    assert '"sections": [' in events[2][1]["output"]
     assert "assistant_start" in event_names
     assert "usage" in event_names
     assert "delta" in event_names

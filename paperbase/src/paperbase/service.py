@@ -3592,6 +3592,15 @@ class PaperbaseService:
             return f'project run for "{path}"' if path else "project run"
         return "tool call"
 
+    def _chat_tool_activity_command(self, *, tool_name: str, tool_input: dict[str, Any]) -> str:
+        rendered_input = json.dumps(tool_input, ensure_ascii=False, indent=2)
+        return f"{tool_name}({rendered_input})"
+
+    def _chat_tool_activity_output(self, payload: Any) -> str:
+        if isinstance(payload, (dict, list)):
+            return json.dumps(payload, ensure_ascii=False, indent=2)
+        return str(payload)
+
     def _run_single_chat_tool(
         self,
         *,
@@ -3816,12 +3825,14 @@ class PaperbaseService:
                 tool_name = str(tool_use.get("name") or "").strip()
                 tool_input = tool_use.get("input") if isinstance(tool_use.get("input"), dict) else {}
                 label = self._chat_tool_activity_label(tool_name=tool_name, tool_input=tool_input)
+                command = self._chat_tool_activity_command(tool_name=tool_name, tool_input=tool_input)
                 yield (
                     "tool_start",
                     {
                         "tool_call_id": tool_use_id,
                         "tool_name": tool_name,
                         "label": label,
+                        "command": command,
                     },
                 )
                 payload, is_error = self._run_single_chat_tool(
@@ -3846,6 +3857,8 @@ class PaperbaseService:
                         "tool_call_id": tool_use_id,
                         "tool_name": tool_name,
                         "label": label,
+                        "command": command,
+                        "output": self._chat_tool_activity_output(payload),
                         "is_error": is_error,
                     },
                 )

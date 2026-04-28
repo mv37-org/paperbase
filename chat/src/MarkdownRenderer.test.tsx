@@ -42,6 +42,16 @@ describe("MarkdownRenderer", () => {
     expect(screen.queryByText("def")).toBeNull();
   });
 
+  it("keeps longer Python blocks expanded by default", () => {
+    const lines = Array.from({ length: 18 }, (_, index) => `print(${index})`).join("\n");
+
+    render(<MarkdownRenderer markdown={`\`\`\`python\n${lines}\n\`\`\``} />);
+
+    expect(screen.getByRole("button", { name: "Collapse code block" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Expand code block" })).toBeNull();
+    expect(document.querySelector(".code-snippet-body")?.textContent).toContain("print(17)");
+  });
+
   it("keeps inline code snippets as inline markdown", () => {
     render(<MarkdownRenderer markdown={"Use `torch.nn.Linear` here."} />);
 
