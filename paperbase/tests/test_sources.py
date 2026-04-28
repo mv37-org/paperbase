@@ -360,6 +360,50 @@ def test_verify_repo_owns_paper_rejects_bare_title_match_without_corroboration()
     )
 
 
+def test_verify_repo_owns_paper_accepts_title_in_first_heading():
+    """The README's first H1 heading IS the paper title — strongest
+    standalone evidence the repo is the paper's implementation, since
+    the heading reflects the project's identity. Closes the SENet
+    (``hujie-frank/senet``) recall gap: the repo name "senet" doesn't
+    match any title token ("Squeeze", "Excitation", "Networks"), but
+    the README heading is the title verbatim."""
+    session = _StubSession(
+        {
+            "https://api.github.com/repos/owner/acronym/readme": _readme_response(
+                "# Some Very Long Distinctive Paper Title\n\nProject body here."
+            )
+        }
+    )
+    assert sources.verify_repo_owns_paper(
+        "owner",
+        "acronym",
+        "2401.99999",
+        title="Some Very Long Distinctive Paper Title",
+        session=session,
+    )
+
+
+def test_verify_repo_owns_paper_rejects_unofficial_heading_match():
+    """Heading match must NOT fire when the heading is marked as a
+    third-party reimplementation. ``# Unofficial PyTorch implementation
+    of <title>`` should not earn the same score as the official repo's
+    plain title heading."""
+    session = _StubSession(
+        {
+            "https://api.github.com/repos/random/unofficial-impl/readme": _readme_response(
+                "# Unofficial PyTorch implementation of Some Very Long Distinctive Paper Title\n\nBody."
+            )
+        }
+    )
+    assert not sources.verify_repo_owns_paper(
+        "random",
+        "unofficial-impl",
+        "2401.99999",
+        title="Some Very Long Distinctive Paper Title",
+        session=session,
+    )
+
+
 def test_verify_repo_owns_paper_rejects_unrelated_readme():
     """README mentions neither the arxiv id nor the title — this is
     the case that catches CoT's ``chaochun/nlu-asdiv-dataset`` (README

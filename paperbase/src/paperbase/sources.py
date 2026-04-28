@@ -789,6 +789,29 @@ def detect_paper_affiliations(text: str) -> list[str]:
     return matched
 
 
+# Markers that indicate a README's main heading describes a third-party
+# reimplementation rather than the paper's own code. Used by
+# verify_repo_owns_paper to gate the heading-match signal — a heading
+# like "Unofficial PyTorch implementation of <paper title>" otherwise
+# fires the same +2 as the official repo's heading.
+_UNOFFICIAL_HEADING_RE = re.compile(
+    r"^\s*(?:un[\s\-]?official|re[\s\-]?implementation|third[\s\-]?party"
+    r"|reimpl|reproduction|port\b|fork\b|implementation\s+of)",
+    re.IGNORECASE,
+)
+
+
+def _first_h1(readme: str) -> str:
+    """Return the first ``# `` (level-1) heading line of a README, or
+    the empty string when the README has no H1. Used by the verifier's
+    heading-match signal."""
+    for line in readme.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("# ") and not stripped.startswith("## "):
+            return stripped[2:].strip()
+    return ""
+
+
 def _fetch_readme(
     owner: str,
     repo: str,
@@ -956,6 +979,22 @@ def verify_repo_owns_paper(
     # from citation ("README mentions paper but repo is unrelated").
     if title_in_readme and (repo_overlap_strong or repo_overlap_weak):
         score += 2
+    # README first-heading match. A repo's main README heading reflects
+    # its identity. When the heading contains the full paper title and
+    # is not marked as a third-party reimplementation, that is strong
+    # standalone evidence the repo IS the paper's implementation —
+    # independent of repo-name overlap. Closes the SENet
+    # (``hujie-frank/senet``) recall gap: the repo name is an acronym
+    # the verifier can't relate to the title tokens "Squeeze",
+    # "Excitation", "Networks", but the README heading IS the title.
+    # Does not re-introduce the ResNet → ``microsoft/intrinsic-priva``
+    # false positive: that repo's first heading is "Introduction", not
+    # the ResNet title.
+    if title and len(title) >= 20:
+        first_heading = _first_h1(readme)
+        if first_heading and title.lower() in first_heading.lower():
+            if not _UNOFFICIAL_HEADING_RE.match(first_heading):
+                score += 2
     # Owner-affiliation affinity: repo owner is a known ML lab AND that
     # lab appears in the paper authors/abstract.
     if owner.lower() in _LAB_AFFILIATIONS:
