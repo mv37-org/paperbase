@@ -62,7 +62,7 @@ GROUND_TRUTH: dict[str, str | None] = {
     "1611.05431": "facebookresearch/resnext",       # ResNeXt
     "2002.05709": "google-research/simclr",         # SimCLR
     "2103.00020": "openai/clip",                    # CLIP
-    "2105.04906": "facebookresearch/barlowtwins",   # Barlow Twins
+    "2103.03230": "facebookresearch/barlowtwins",   # Barlow Twins (corrected; 2105.04906 is VICReg)
     "2111.06377": "facebookresearch/mae",           # Masked Autoencoders (MAE)
     "2006.11239": "hojonathanho/diffusion",         # DDPM
     "2010.02502": "ermongroup/ddim",                # DDIM
@@ -118,7 +118,7 @@ def _paper_dir(arxiv_id: str) -> Path:
     return _REPO_ROOT / ".paperbase-data" / "papers" / f"arxiv:{arxiv_id}"
 
 
-def _load_inputs(arxiv_id: str) -> tuple[str, str, str] | None:
+def _load_inputs(arxiv_id: str) -> tuple[str, str, str, str] | None:
     paper_dir = _paper_dir(arxiv_id)
     if not paper_dir.exists():
         return None
@@ -126,15 +126,17 @@ def _load_inputs(arxiv_id: str) -> tuple[str, str, str] | None:
     body_path = paper_dir / "text" / "full.md"
     abstract = ""
     authors = ""
+    title = ""
     if meta_path.exists():
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
             abstract = meta.get("abstract") or ""
             authors = meta.get("authors") or ""
+            title = meta.get("title") or ""
         except json.JSONDecodeError:
             pass
     body = body_path.read_text(encoding="utf-8") if body_path.exists() else ""
-    return abstract, body, authors
+    return abstract, body, authors, title
 
 
 def _bench_cache_dir() -> Path:
@@ -146,25 +148,64 @@ def _bench_cache_dir() -> Path:
     return cache
 
 
-def _fetch_live(arxiv_id: str) -> tuple[str, str, str] | None:
-    """Fetch abstract + body markdown directly from arxiv when the local
-    indexed corpus does not have the paper. Caches the result under
-    ``.paperbase-data/_benchmark_cache/`` so re-runs are offline.
+_README_CACHE_FILE = "readme_cache.json"
 
-    Uses the same ``fetch_html``/``_clean_html_to_markdown`` plumbing the
-    indexer relies on for HTML papers; falls back to the LaTeX source
-    extractor if the HTML view isn't available. Abstract + authors come
-    from arxiv's atom feed via ``sources.get_paper_details``.
+
+def _load_readme_cache() -> dict[str, str]:
+    """Persistent cache for GitHub README fetches keyed by ``owner/repo``.
+
+    GitHub's anonymous rate limit (60 req/hr) burns out fast on iterated
+    benchmark runs. Caching the README content on disk lets us re-run
+    the verifier with different scoring rules without burning budget.
+    Set ``PAPERBASE_GITHUB_TOKEN`` to lift to 5000/hr if available."""
+    path = _bench_cache_dir() / _README_CACHE_FILE
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def _save_readme_cache(cache: dict[str, str]) -> None:
+    path = _bench_cache_dir() / _README_CACHE_FILE
+    path.write_text(json.dumps(cache, indent=2), encoding="utf-8")
+
+
+def _fetch_live(arxiv_id: str) -> tuple[str, str, str, str] | None:
+    """Fetch abstract + body + authors + title directly from arxiv when
+    the local indexed corpus does not have the paper. Caches the result
+    under ``.paperbase-data/_benchmark_cache/`` so re-runs are offline.
+
+    Returns ``(abstract, body, authors, title)``. The title was added in
+    a follow-up — older cache entries may lack it; we re-fetch from
+    arxiv when missing so the verifier always has a paper title to
+    reason about.
     """
     cache_dir = _bench_cache_dir() / arxiv_id
     meta_path = cache_dir / "meta.json"
     body_path = cache_dir / "body.md"
     if meta_path.exists() and body_path.exists():
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        title = meta.get("title") or ""
+        if not title:
+            # Pre-title cache shape — refresh title once via arxiv,
+            # rewrite the cache, and proceed.
+            try:
+                from paperbase import sources
+
+                detail = sources.get_paper_details(arxiv_id)
+                title = detail.title if detail else ""
+            except Exception:
+                title = ""
+            if title:
+                meta["title"] = title
+                meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
         return (
             meta.get("abstract") or "",
             body_path.read_text(encoding="utf-8"),
             meta.get("authors") or "",
+            title,
         )
 
     # Lazy imports — keep the offline path import-cheap.
@@ -177,11 +218,16 @@ def _fetch_live(arxiv_id: str) -> tuple[str, str, str] | None:
         fetch_source,
     )
 
-    paper = sources.get_paper_details(arxiv_id)
+    try:
+        paper = sources.get_paper_details(arxiv_id)
+    except Exception as exc:
+        print(f"  [skip] {arxiv_id}: arxiv fetch failed ({type(exc).__name__})", flush=True)
+        return None
     if paper is None:
         return None
     abstract = paper.abstract or ""
     authors = paper.authors or ""
+    title = paper.title or ""
 
     body = ""
     html = fetch_html(arxiv_id)
@@ -196,11 +242,13 @@ def _fetch_live(arxiv_id: str) -> tuple[str, str, str] | None:
 
     cache_dir.mkdir(parents=True, exist_ok=True)
     meta_path.write_text(
-        json.dumps({"abstract": abstract, "authors": authors}, indent=2),
+        json.dumps(
+            {"abstract": abstract, "authors": authors, "title": title}, indent=2
+        ),
         encoding="utf-8",
     )
     body_path.write_text(body, encoding="utf-8")
-    return abstract, body, authors
+    return abstract, body, authors, title
 
 
 def _normalize_repo(url: str | None) -> str | None:
@@ -225,6 +273,7 @@ class Verdict:
     new_ranker: str | None
     new_pwc: str | None  # populated only when --with-pwc
     new_verified: str | None = None  # populated only when --with-verifier
+    new_combined: str | None = None  # populated only when --with-combined
 
     @staticmethod
     def _classify(picked: str | None, truth: str | None) -> str:
@@ -248,6 +297,9 @@ class Verdict:
 
     def new_verified_status(self) -> str:
         return self._classify(self.new_verified, self.truth)
+
+    def new_combined_status(self) -> str:
+        return self._classify(self.new_combined, self.truth)
 
 
 def _score(rows: list[Verdict], picker) -> dict[str, int]:
@@ -288,10 +340,12 @@ def _print_summary(label: str, scores: dict[str, int]) -> None:
     print(f"  None (where truth was populated):   {scores['none_when_truth_populated']}/{total}")
 
 
-def _print_table(rows: list[Verdict], with_pwc: bool) -> None:
+def _print_table(rows: list[Verdict], with_pwc: bool, with_combined: bool = False) -> None:
     header = f"{'arxiv_id':<12}  {'legacy':<46}  {'new(ranker)':<46}"
     if with_pwc:
         header += f"  {'new(+pwc)':<46}"
+    if with_combined:
+        header += f"  {'new(combined)':<46}"
     header += f"  {'truth':<40}"
     print(header)
     print("-" * len(header))
@@ -303,11 +357,16 @@ def _print_table(rows: list[Verdict], with_pwc: bool) -> None:
         if with_pwc:
             pwc = (row.new_pwc or "—")[:44]
             line += f"  {pwc:<46}"
+        if with_combined:
+            combined = (row.new_combined or "—")[:44]
+            line += f"  {combined:<46}"
         line += f"  {truth:<40}"
         print(line)
         statuses = f"  └─ legacy: {row.legacy_status()}; ranker: {row.new_ranker_status()}"
         if with_pwc:
             statuses += f"; +pwc: {row.new_pwc_status()}"
+        if with_combined:
+            statuses += f"; combined: {row.new_combined_status()}"
         print(statuses)
 
 
@@ -336,6 +395,17 @@ def main(argv: list[str] | None = None) -> int:
             "title. Demotes unverified picks to None — precision filter."
         ),
     )
+    parser.add_argument(
+        "--with-combined",
+        action="store_true",
+        help=(
+            "Multi-evidence verifier (#46 follow-up improvements 1+3) PLUS "
+            "affiliation-based recall booster (improvement 2). When the "
+            "ranker has nothing, search the paper authors' lab GitHub org "
+            "for a repo matching the title keyword. Both pass the same "
+            "score-based verifier."
+        ),
+    )
     args = parser.parse_args(argv)
 
     rows: list[Verdict] = []
@@ -344,6 +414,35 @@ def main(argv: list[str] | None = None) -> int:
     github_token = os.environ.get("PAPERBASE_GITHUB_TOKEN") or os.environ.get(
         "GITHUB_TOKEN"
     )
+    # Persistent README cache. The verifier hits ``/repos/{o}/{r}/readme``
+    # on GitHub and burns through the anonymous 60 req/hr budget fast on
+    # iterated runs. Wrapping ``_fetch_readme`` to consult the cache first
+    # makes re-runs effectively offline once each unique repo has been
+    # fetched once. Set ``PAPERBASE_GITHUB_TOKEN`` to lift the budget.
+    if args.with_verifier or args.with_combined:
+        from paperbase import sources
+
+        readme_cache = _load_readme_cache()
+        original_fetch_readme = sources._fetch_readme
+
+        def cached_fetch_readme(owner, repo, *, token, session, timeout):  # type: ignore[no-redef]
+            key = f"{owner.lower()}/{repo.lower()}"
+            if key in readme_cache:
+                cached = readme_cache[key]
+                if cached:
+                    return cached
+            result = original_fetch_readme(
+                owner, repo, token=token, session=session, timeout=timeout
+            )
+            # Only cache successful fetches; transient failures will
+            # retry on the next run.
+            if result:
+                readme_cache[key] = result
+                _save_readme_cache(readme_cache)
+            return result
+
+        sources._fetch_readme = cached_fetch_readme
+
     if args.with_pwc:
         from paperbase import sources
 
@@ -361,7 +460,7 @@ def main(argv: list[str] | None = None) -> int:
         if loaded is None:
             print(f"[skip] {arxiv_id}: no local data")
             continue
-        abstract, body, authors = loaded
+        abstract, body, authors, paper_title = loaded
         legacy = legacy_extract_github_url(abstract, body)
         candidates = extract_github_candidates(abstract, body)
         new_ranker = rank_github_candidates(
@@ -395,6 +494,53 @@ def main(argv: list[str] | None = None) -> int:
                 ok = False
             if ok:
                 new_verified = new_ranker.url
+
+        # Combined: multi-evidence verifier on the ranker's pick PLUS
+        # affiliation-based search when the ranker has nothing. This is
+        # the production-target tier — predicted on the 30-paper bench
+        # to recover LLaMA / Llama 2 (verifier accepts via repo-name +
+        # affiliation evidence) and PPO / Barlow / MAE / InfoGAN
+        # (affiliation search finds the lab's repo).
+        new_combined: str | None = None
+        if args.with_combined:
+            from paperbase import sources
+
+            # paper_title now comes from the loaded tuple, populated by
+            # _load_inputs (corpus path) or _fetch_live (cached arxiv path).
+            # No additional arxiv hit per-paper unless the cache is older
+            # than the title field (handled inside _fetch_live).
+
+            # Affiliation detection needs the paper's author block, which
+            # arxiv extraction strips from the abstract but keeps near the
+            # top of the body. Concatenate so detect_paper_affiliations
+            # has material to match against.
+            paper_blob = (abstract or "") + "\n" + (body[:5000] if body else "")
+            if new_ranker is not None:
+                try:
+                    if sources.verify_repo_owns_paper(
+                        new_ranker.owner,
+                        new_ranker.repo,
+                        arxiv_id,
+                        title=paper_title or None,
+                        authors=authors or None,
+                        abstract=paper_blob,
+                        token=github_token,
+                    ):
+                        new_combined = new_ranker.url
+                except Exception:
+                    pass
+            if new_combined is None:
+                try:
+                    new_combined = sources.find_official_repo_via_affiliation(
+                        arxiv_id,
+                        title=paper_title,
+                        authors=authors,
+                        abstract=paper_blob,
+                        token=github_token,
+                    )
+                except Exception:
+                    new_combined = None
+
         rows.append(
             Verdict(
                 arxiv_id=arxiv_id,
@@ -403,6 +549,7 @@ def main(argv: list[str] | None = None) -> int:
                 new_ranker=new_ranker.url if new_ranker else None,
                 new_pwc=new_pwc,
                 new_verified=new_verified,
+                new_combined=new_combined,
             )
         )
 
@@ -410,7 +557,7 @@ def main(argv: list[str] | None = None) -> int:
         print("No papers with local data — run `paperbase-dev index` first.")
         return 1
 
-    _print_table(rows, with_pwc=args.with_pwc)
+    _print_table(rows, with_pwc=args.with_pwc, with_combined=args.with_combined)
 
     legacy_scores = _score(rows, lambda r: r.legacy)
     ranker_scores = _score(rows, lambda r: r.new_ranker)
@@ -422,6 +569,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.with_verifier:
         verified_scores = _score(rows, lambda r: r.new_verified)
         _print_summary("New: ranker + GitHub README verifier", verified_scores)
+    if args.with_combined:
+        combined_scores = _score(rows, lambda r: r.new_combined)
+        _print_summary(
+            "New: multi-evidence verifier + affiliation search",
+            combined_scores,
+        )
     return 0
 
 

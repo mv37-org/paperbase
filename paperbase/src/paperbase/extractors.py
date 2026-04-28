@@ -34,6 +34,57 @@ _GITHUB_URL_RE = re.compile(
 # Punctuation that prose commonly pastes onto the end of a URL.
 _GITHUB_URL_TRAILING_JUNK = ".,;:)\"'"
 
+# Body-text mash-up suffixes we strip from the captured repo slug.
+# Arxiv HTML→markdown extraction occasionally drops the whitespace
+# between a URL and the prose that follows, so ``...openai/gpt-3``
+# ``Supplemental Material`` renders as ``openai/gpt-3supplemental``
+# and the regex captures the whole mash-up. The regex itself can't
+# tell where the URL ends, so we post-process by stripping known
+# noise tokens from the trailing edge of the repo slug. Order
+# matters — longer suffixes first so ``supplementary`` doesn't get
+# stripped to ``supplement`` before the longer match runs.
+_REPO_SLUG_NOISE_SUFFIXES: tuple[str, ...] = (
+    "supplementary",
+    "supplemental",
+    "appendix",
+    "section",
+    "material",
+    "license",
+    "readme",
+    "https",
+    "http",
+    "note",
+    "notes",
+    "fig",
+    "figure",
+    "table",
+)
+
+
+def _strip_noise_suffix(slug: str) -> str:
+    """Strip body-text mash-up suffixes from a captured repo name.
+
+    Catches the ``gpt-3supplemental`` / ``simclrhttp`` family of regex
+    captures where extraction lost a whitespace boundary between the
+    URL and the surrounding prose. Only fires when the prefix that
+    remains after stripping looks like a real repo name (4+ chars and
+    doesn't end in a separator) so we don't over-correct legitimate
+    repos that happen to end in one of these tokens.
+    """
+    if not slug:
+        return slug
+    lower = slug.lower()
+    for suffix in _REPO_SLUG_NOISE_SUFFIXES:
+        if lower.endswith(suffix) and len(slug) - len(suffix) >= 4:
+            stripped = slug[: -len(suffix)]
+            # Reject if the prefix ends with a separator — would leave
+            # ``simclr-`` / ``gpt-3-`` style fragments. Trim trailing
+            # separators instead.
+            stripped = stripped.rstrip("-_.")
+            if len(stripped) >= 3:
+                return stripped
+    return slug
+
 
 @dataclass(frozen=True)
 class GitHubUrlCandidate:
@@ -76,6 +127,15 @@ def extract_github_candidates(abstract: str, body: str) -> list[GitHubUrlCandida
         ref = code_ingest.parse_github_url(raw)
         if ref is None:
             continue
+        # Repair body-text mash-ups like ``openai/gpt-3supplemental`` or
+        # ``google-research/simclrhttp`` (regex grabbed the prose tail
+        # because PDF→markdown lost a whitespace boundary). Only the
+        # repo segment is repaired; owner names rarely mash with prose.
+        repaired_repo = _strip_noise_suffix(ref.repo)
+        if repaired_repo != ref.repo:
+            from . import code_ingest as _ci
+
+            ref = _ci.GitHubRepoRef(owner=ref.owner, repo=repaired_repo, ref=ref.ref)
         # GitHub repo paths are case-insensitive on the server, so ``Owner/Repo``
         # and ``owner/repo`` are the same resource. Dedupe on the lowercased
         # form but keep the canonical-cased string that the author used.

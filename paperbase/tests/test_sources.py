@@ -308,20 +308,52 @@ def test_verify_repo_owns_paper_accepts_arxiv_id_match():
     )
 
 
-def test_verify_repo_owns_paper_accepts_long_title_match():
-    """Secondary signal: a sufficiently-long paper title appearing
-    verbatim in the README. The 20-char floor prevents short titles
-    like ``BERT`` from firing on unrelated repos."""
+def test_verify_repo_owns_paper_accepts_title_match_with_repo_corroboration():
+    """Title-in-README only counts when corroborated by repo-name
+    overlap with a title primary keyword or abstract acronym.
+    Without corroboration, famous papers' titles cited as baselines in
+    unrelated repos would falsely accept (the ResNet → ``microsoft/
+    intrinsic-priva`` failure mode from the 30-paper benchmark).
+    """
     session = _StubSession(
         {
-            "https://api.github.com/repos/owner/repo/readme": _readme_response(
+            "https://api.github.com/repos/owner/distinctive/readme": _readme_response(
                 "Implementation of Some Long Distinctive Paper Title here."
             )
         }
     )
+    # Repo name "distinctive" matches the title's primary keyword
+    # "distinctive" — so the corroboration rule fires (+2 repo-overlap
+    # primary, +2 title-corroboration) and the score clears threshold.
     assert sources.verify_repo_owns_paper(
         "owner",
-        "repo",
+        "distinctive",
+        "2401.99999",
+        title="Distinctive Paper Title For Testing",
+        session=session,
+    )
+
+
+def test_verify_repo_owns_paper_rejects_bare_title_match_without_corroboration():
+    """Regression test for the corroboration rule: a README that
+    cites a famous paper's title (e.g. as a baseline reference) but
+    whose repo name has no overlap with the title must NOT accept.
+    This is what kills the ResNet → ``microsoft/intrinsic-priva``
+    false positive — `intrinsic-priva` README mentions ResNet's
+    "Deep Residual Learning for Image Recognition" as a baseline,
+    but the repo isn't ResNet."""
+    session = _StubSession(
+        {
+            "https://api.github.com/repos/random/unrelated/readme": _readme_response(
+                "This work compares against Some Long Distinctive Paper Title as a baseline."
+            )
+        }
+    )
+    # Repo name "unrelated" has no overlap with title primary keyword.
+    # Title-in-README alone is no longer enough → reject.
+    assert not sources.verify_repo_owns_paper(
+        "random",
+        "unrelated",
         "2401.99999",
         title="Some Long Distinctive Paper Title",
         session=session,
