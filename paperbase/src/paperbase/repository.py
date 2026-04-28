@@ -117,6 +117,14 @@ class PaperORM(Base):
     code_is_python: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     code_python_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     code_manifest: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    # Peer-review venue signal (#39 PR B). venue is the S2 canonical venue
+    # string (e.g. "International Conference on Learning Representations").
+    # venue_year is the conference year. venue_source records provenance
+    # ("s2_bulk", "manual", etc.) so a future OpenReview enrichment pass
+    # can know which rows it is allowed to overwrite.
+    venue: Mapped[str | None] = mapped_column(Text, nullable=True)
+    venue_year: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    venue_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
     source_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     index_status: Mapped[str] = mapped_column(String(32), default="discovered")
     search_document: Mapped[str] = mapped_column(Text, default="")
@@ -196,6 +204,7 @@ _JOB_TYPE_MAX_ATTEMPTS: dict[str, int] = {
     "harvest_range": 3,
     "harvest_chunk": 5,
     "harvest_top_cited": 3,  # planner — paginates S2, enqueues harvest_chunk per batch
+    "harvest_venue": 3,  # planner — paginates S2 by venue+year, enqueues harvest_chunk per batch
 }
 
 
@@ -216,6 +225,7 @@ _JOB_TYPE_PRIORITY: dict[str, int] = {
     "harvest_range": 5,
     "harvest_chunk": 10,
     "harvest_top_cited": 5,  # planner; same priority tier as harvest_range
+    "harvest_venue": 5,  # planner; same priority tier as harvest_range
 }
 
 
@@ -611,6 +621,9 @@ def _paper_from_orm(row: PaperORM) -> PaperResponse:
         code_is_python=row.code_is_python,
         code_python_reason=row.code_python_reason,
         code_manifest=row.code_manifest,
+        venue=row.venue,
+        venue_year=row.venue_year,
+        venue_source=row.venue_source,
         source_type=row.source_type,
         index_status=row.index_status,
         indexed_at=row.indexed_at,
@@ -846,6 +859,26 @@ class PaperRepository(ABC):
         flipping ``status`` to ``indexing`` before the fetch starts) don't
         clobber the classification verdict from a prior run. Returns the
         refreshed paper row, or ``None`` if the paper disappeared mid-job.
+        """
+        raise NotImplementedError
+
+    def set_paper_venue(
+        self,
+        paper_id: str,
+        *,
+        venue: str | None,
+        venue_year: int | None,
+        venue_source: str | None,
+    ) -> PaperResponse | None:
+        """Stamp peer-review venue columns on an existing paper (#39 PR B).
+
+        Kept separate from :meth:`upsert_paper` so the venue stamp is not
+        wiped on the next regular re-index — arxiv metadata does not
+        carry venue info, so a re-index from arxiv would leave ``venue``
+        as ``None`` if it were part of the upsert path.
+
+        Returns the refreshed paper row, or ``None`` if the paper does
+        not exist (caller should index it first).
         """
         raise NotImplementedError
 
@@ -1208,6 +1241,16 @@ class SqlAlchemyPaperRepository(PaperRepository):
             )
             connection.execute(
                 text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS code_manifest JSONB")
+            )
+            # #39 PR B: peer-review venue signal
+            connection.execute(
+                text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS venue TEXT")
+            )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS venue_year INTEGER")
+            )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS venue_source VARCHAR(32)")
             )
             connection.execute(
                 text(f"ALTER TABLE IF EXISTS text_chunks ADD COLUMN IF NOT EXISTS embedding {vector_type}")
@@ -1635,6 +1678,25 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 row.code_is_python = is_python
                 row.code_python_reason = python_reason
                 row.code_manifest = manifest
+            row.updated_at = utcnow()
+            session.flush()
+            return _paper_from_orm(row)
+
+    def set_paper_venue(
+        self,
+        paper_id: str,
+        *,
+        venue: str | None,
+        venue_year: int | None,
+        venue_source: str | None,
+    ) -> PaperResponse | None:
+        with self._session() as session:
+            row = session.get(PaperORM, paper_id)
+            if row is None:
+                return None
+            row.venue = venue
+            row.venue_year = venue_year
+            row.venue_source = venue_source
             row.updated_at = utcnow()
             session.flush()
             return _paper_from_orm(row)
@@ -2266,6 +2328,9 @@ class SqlAlchemyPaperRepository(PaperRepository):
         influential_citation_count,
         semantic_scholar_id,
         code_url,
+        venue,
+        venue_year,
+        venue_source,
         source_type,
         index_status,
         indexed_at
@@ -2295,6 +2360,9 @@ class SqlAlchemyPaperRepository(PaperRepository):
             influential_citation_count=row["influential_citation_count"],
             semantic_scholar_id=row["semantic_scholar_id"],
             code_url=row["code_url"],
+            venue=row["venue"],
+            venue_year=row["venue_year"],
+            venue_source=row["venue_source"],
             source_type=row["source_type"],
             index_status=row["index_status"],
             indexed_at=row["indexed_at"],
@@ -4156,6 +4224,25 @@ class MemoryPaperRepository(PaperRepository):
             updates["code_python_reason"] = python_reason
             updates["code_manifest"] = manifest
         updated = existing.model_copy(update=updates)
+        self.papers[paper_id] = updated
+        return updated
+
+    def set_paper_venue(
+        self,
+        paper_id: str,
+        *,
+        venue: str | None,
+        venue_year: int | None,
+        venue_source: str | None,
+    ) -> PaperResponse | None:
+        existing = self.papers.get(paper_id)
+        if existing is None:
+            return None
+        updated = existing.model_copy(update={
+            "venue": venue,
+            "venue_year": venue_year,
+            "venue_source": venue_source,
+        })
         self.papers[paper_id] = updated
         return updated
 

@@ -838,3 +838,301 @@ def test_fetch_top_cited_cs_validates_inputs():
         fetch_top_cited_cs(min_citations=10, page_size=0)
     with pytest.raises(ValueError):
         fetch_top_cited_cs(min_citations=10, page_size=1001)
+
+
+# --- venue-accepted harvest (#39 PR B) --------------------------------------
+
+
+def _fake_venue_pages(pages: list[list[tuple[str, str, int]]]):
+    """Build a sources.fetch_venue_accepted stub that serves successive
+    pages. Each tuple is ``(arxiv_id, venue_string, year)``. Last page
+    returns next_cursor=None so the planner stops."""
+    from paperbase.sources import VenueCandidate
+
+    call_count = {"n": 0}
+    cursors_seen: list[str | None] = []
+
+    def stub(*, venue, year, cursor=None, page_size=1000, timeout_seconds=30):
+        cursors_seen.append(cursor)
+        idx = call_count["n"]
+        call_count["n"] += 1
+        if idx >= len(pages):
+            return [], None
+        page = pages[idx]
+        candidates = [
+            VenueCandidate(
+                arxiv_id=aid,
+                semantic_scholar_id=f"s2-{aid}",
+                title=f"Paper {aid}",
+                venue_string=vs,
+                year=yr,
+            )
+            for aid, vs, yr in page
+        ]
+        next_cursor = None if idx == len(pages) - 1 else f"token-{idx}"
+        return candidates, next_cursor
+
+    return stub, cursors_seen, call_count
+
+
+def test_enqueue_harvest_venue_job_rejects_invalid_inputs():
+    """Operator-supplied payloads must fail fast as PermanentError so the
+    planner job dead-letters rather than retrying garbage."""
+    service = _service()
+    with pytest.raises(PermanentError):
+        service.enqueue_harvest_venue_job(venue="", year=2024)
+    with pytest.raises(PermanentError):
+        service.enqueue_harvest_venue_job(venue="ICLR", year=1899)
+    with pytest.raises(PermanentError):
+        service.enqueue_harvest_venue_job(venue="ICLR", year=2024, max_papers=0)
+    with pytest.raises(PermanentError):
+        service.enqueue_harvest_venue_job(venue="ICLR", year=2024, chunk_size=0)
+    with pytest.raises(PermanentError):
+        service.enqueue_harvest_venue_job(venue="ICLR", year=2024, chunk_size=1000)
+
+
+def test_run_harvest_venue_planner_batches_and_emits_chunks(monkeypatch):
+    """Planner reads pages from S2 and emits ``harvest_chunk`` jobs of
+    up to ``chunk_size`` papers each. The dedupe key carries the
+    first/last id + length so a retried planner doesn't fork duplicate
+    chunks."""
+    service = _service()
+    pages = [
+        [("2020.{:05d}".format(i), "International Conference on Learning Representations", 2024) for i in range(7)],
+        [("2021.{:05d}".format(i), "International Conference on Learning Representations", 2024) for i in range(3)],
+    ]
+    stub, cursors_seen, call_count = _fake_venue_pages(pages)
+    monkeypatch.setattr("paperbase.service.sources.fetch_venue_accepted", stub)
+
+    result = service.run_harvest_venue(
+        venue="ICLR",
+        year=2024,
+        max_papers=None,
+        chunk_size=4,
+    )
+
+    assert result["candidates_emitted"] == 10
+    assert result["pages_fetched"] == 2
+    assert result["chunks_created"] == 3
+    chunks = [j for j in service.repository.jobs.values() if j.job_type == "harvest_chunk"]
+    assert len(chunks) == 3
+    assert all(c.payload["source"] == "s2_venue" for c in chunks)
+    assert all(c.payload["venue"] == "ICLR" for c in chunks)
+    assert all(c.payload["year"] == 2024 for c in chunks)
+    sizes = sorted(len(c.payload["papers"]) for c in chunks)
+    assert sizes == [2, 4, 4]
+    # Per-paper venue strings carried through
+    first_chunk = chunks[0]
+    assert all(p["venue"] == "International Conference on Learning Representations" for p in first_chunk.payload["papers"])
+    assert cursors_seen[0] is None
+    assert cursors_seen[1] == "token-0"
+    assert call_count["n"] == 2
+
+
+def test_run_harvest_venue_respects_max_papers(monkeypatch):
+    """``max_papers`` caps total emitted candidates and stops S2 paging
+    early so we don't fetch a page just to throw its results away."""
+    service = _service()
+    pages = [
+        [("2020.{:05d}".format(i), "ICLR canonical", 2024) for i in range(5)],
+        [("2021.{:05d}".format(i), "ICLR canonical", 2024) for i in range(5)],
+        [("2022.{:05d}".format(i), "ICLR canonical", 2024) for i in range(5)],
+    ]
+    stub, _cursors, call_count = _fake_venue_pages(pages)
+    monkeypatch.setattr("paperbase.service.sources.fetch_venue_accepted", stub)
+
+    result = service.run_harvest_venue(
+        venue="ICLR",
+        year=2024,
+        max_papers=7,
+        chunk_size=10,
+    )
+
+    assert result["candidates_emitted"] == 7
+    assert call_count["n"] == 2
+    assert result["pages_fetched"] == 2
+
+
+def test_run_harvest_venue_handles_empty_first_page(monkeypatch):
+    """Empty S2 result set → no chunks enqueued, planner completes cleanly."""
+    service = _service()
+    stub, _cursors, _calls = _fake_venue_pages([])
+    monkeypatch.setattr("paperbase.service.sources.fetch_venue_accepted", stub)
+
+    result = service.run_harvest_venue(
+        venue="ICLR",
+        year=2099,
+        max_papers=None,
+        chunk_size=50,
+    )
+
+    assert result == {"chunks_created": 0, "candidates_emitted": 0, "pages_fetched": 1}
+    chunks = [j for j in service.repository.jobs.values() if j.job_type == "harvest_chunk"]
+    assert chunks == []
+
+
+def test_run_harvest_venue_continues_through_empty_filtered_pages(monkeypatch):
+    """Regression for PR #52 review: ``fetch_venue_accepted`` filters out
+    papers without arXiv IDs client-side but still returns the upstream
+    pagination token. The planner must keep paging until S2 itself
+    signals end-of-stream (next_cursor is None), not stop on the first
+    empty filtered page — for venues with many non-arxiv papers (e.g.
+    CVPR, where workshop papers / tech reports often lack arxiv links)
+    that would truncate the harvest badly."""
+    from paperbase.sources import VenueCandidate
+
+    service = _service()
+    call_count = {"n": 0}
+
+    def stub(*, venue, year, cursor=None, page_size=1000, timeout_seconds=30):
+        idx = call_count["n"]
+        call_count["n"] += 1
+        # Page 0: real data. Page 1: empty (all filtered out client-side)
+        # but next_cursor is still set. Page 2: more real data, then EOF.
+        if idx == 0:
+            return [
+                VenueCandidate(arxiv_id="2020.00001", semantic_scholar_id="s1", title="P1", venue_string="ICLR canonical", year=2024),
+            ], "token-0"
+        if idx == 1:
+            return [], "token-1"  # empty filtered page, but more remains
+        if idx == 2:
+            return [
+                VenueCandidate(arxiv_id="2020.00002", semantic_scholar_id="s2", title="P2", venue_string="ICLR canonical", year=2024),
+            ], None
+        return [], None
+
+    monkeypatch.setattr("paperbase.service.sources.fetch_venue_accepted", stub)
+
+    result = service.run_harvest_venue(
+        venue="ICLR",
+        year=2024,
+        max_papers=None,
+        chunk_size=50,
+    )
+
+    # Both real candidates collected — the planner did NOT stop on the
+    # empty page 1.
+    assert result["candidates_emitted"] == 2
+    assert result["pages_fetched"] == 3
+    assert call_count["n"] == 3
+
+
+def test_run_harvest_chunk_venue_indexes_and_stamps_venue(monkeypatch):
+    """The chunk worker for ``source='s2_venue'`` calls
+    ``index_arxiv_paper`` per id, then stamps venue/venue_year/
+    venue_source via ``set_paper_venue``. Verifies stamp values."""
+    service = _service()
+
+    # Pre-populate the memory repo so set_paper_venue has rows to update.
+    for aid in ("2020.00001", "2020.00002"):
+        service.repository.upsert_paper(PaperMetadata(arxiv_id=aid, title=f"Paper {aid}"))
+
+    def fake_index(arxiv_id, *, paper=None, force=False):
+        # Return the existing PaperResponse so chunk worker can use paper_id.
+        return service.repository.get_paper_by_arxiv_id(arxiv_id)
+
+    monkeypatch.setattr(service, "index_arxiv_paper", fake_index)
+
+    result = service.run_harvest_chunk_venue(
+        papers=[
+            {"arxiv_id": "2020.00001", "venue": "International Conference on Learning Representations", "year": 2024},
+            {"arxiv_id": "2020.00002", "venue": "International Conference on Learning Representations", "year": 2024},
+        ],
+        venue="ICLR",
+        year=2024,
+    )
+
+    assert result == {"requested": 2, "indexed": 2, "stamped": 2, "skipped": 0}
+    p1 = service.repository.get_paper_by_arxiv_id("2020.00001")
+    assert p1.venue == "International Conference on Learning Representations"
+    assert p1.venue_year == 2024
+    assert p1.venue_source == "s2_bulk"
+
+
+def test_run_harvest_chunk_venue_swallows_per_id_permanent_errors(monkeypatch):
+    """A PermanentError on one arxiv id (e.g. 404 / withdrawn) must not
+    kill the whole chunk — other ids still get indexed and stamped."""
+    service = _service()
+    service.repository.upsert_paper(PaperMetadata(arxiv_id="2020.00001"))
+    service.repository.upsert_paper(PaperMetadata(arxiv_id="2020.00003"))
+
+    def fake_index(arxiv_id, *, paper=None, force=False):
+        if arxiv_id == "2020.bad":
+            raise PermanentError("arxiv 404")
+        return service.repository.get_paper_by_arxiv_id(arxiv_id)
+
+    monkeypatch.setattr(service, "index_arxiv_paper", fake_index)
+
+    result = service.run_harvest_chunk_venue(
+        papers=[
+            {"arxiv_id": "2020.00001", "venue": "ICLR canonical", "year": 2024},
+            {"arxiv_id": "2020.bad", "venue": "ICLR canonical", "year": 2024},
+            {"arxiv_id": "2020.00003", "venue": "ICLR canonical", "year": 2024},
+        ],
+    )
+
+    assert result == {"requested": 3, "indexed": 2, "stamped": 2, "skipped": 1}
+
+
+def test_run_harvest_chunk_venue_handles_empty_payload():
+    """Empty papers list (e.g. corrupt payload from a retry) returns
+    zero counts without raising."""
+    service = _service()
+    assert service.run_harvest_chunk_venue(papers=[]) == {
+        "requested": 0,
+        "indexed": 0,
+        "stamped": 0,
+        "skipped": 0,
+    }
+
+
+def test_default_priority_venue_matches_harvest_range():
+    """Venue planner shares priority tier 5 with harvest_range so
+    interactive ``index_paper`` always cuts in front."""
+    from paperbase.repository import default_max_attempts, default_priority
+
+    assert default_priority("harvest_venue") == 5
+    assert default_priority("harvest_range") == default_priority("harvest_venue")
+    assert default_max_attempts("harvest_venue") == 3
+
+
+def test_fetch_venue_accepted_validates_inputs():
+    """Sources-side guards — surface as ValueError because the planner
+    has already validated and converted to PermanentError on its side."""
+    from paperbase.sources import fetch_venue_accepted
+
+    with pytest.raises(ValueError):
+        fetch_venue_accepted(venue="", year=2024)
+    with pytest.raises(ValueError):
+        fetch_venue_accepted(venue="ICLR", year=1899)
+    with pytest.raises(ValueError):
+        fetch_venue_accepted(venue="ICLR", year=2024, page_size=0)
+    with pytest.raises(ValueError):
+        fetch_venue_accepted(venue="ICLR", year=2024, page_size=1001)
+
+
+def test_set_paper_venue_preserves_other_paper_fields():
+    """The venue setter must update only venue columns — citation_count,
+    title, etc. must be left untouched, otherwise a venue stamp would
+    overwrite the indexed paper's content."""
+    repo = MemoryPaperRepository()
+    p = repo.upsert_paper(PaperMetadata(
+        arxiv_id="2020.00001",
+        title="Original",
+        citation_count=42,
+        abstract="abstract body",
+    ))
+    out = repo.set_paper_venue(p.paper_id, venue="ICLR", venue_year=2024, venue_source="s2_bulk")
+    assert out is not None
+    assert out.title == "Original"
+    assert out.citation_count == 42
+    assert out.abstract == "abstract body"
+    assert out.venue == "ICLR"
+    assert out.venue_year == 2024
+    assert out.venue_source == "s2_bulk"
+
+
+def test_set_paper_venue_returns_none_for_missing_paper():
+    """Missing paper → None (caller is responsible for indexing first)."""
+    repo = MemoryPaperRepository()
+    assert repo.set_paper_venue("paper_does_not_exist", venue="ICLR", venue_year=2024, venue_source="s2_bulk") is None

@@ -264,6 +264,87 @@ def fetch_top_cited_cs(
 
 
 @dataclass(slots=True)
+class VenueCandidate:
+    """One arxiv-resolved row from S2 ``/paper/search/bulk`` filtered by venue.
+
+    The chunk worker uses this to (a) ingest the paper from arxiv via
+    ``index_arxiv_paper`` and (b) stamp the ``venue`` columns on the
+    resulting row. ``venue_string`` is whatever S2 returned in the
+    ``venue`` field (typically the canonical full name, e.g.
+    "International Conference on Learning Representations").
+    """
+
+    arxiv_id: str
+    semantic_scholar_id: str
+    title: str
+    venue_string: str
+    year: int | None
+
+
+def fetch_venue_accepted(
+    *,
+    venue: str,
+    year: int,
+    cursor: str | None = None,
+    page_size: int = 1000,
+    timeout_seconds: int = 30,
+) -> tuple[list[VenueCandidate], str | None]:
+    """Page S2 ``/paper/search/bulk`` for papers accepted at ``venue`` in
+    ``year`` that have an arxiv external id.
+
+    S2's ``venue`` query param accepts both short (``ICLR``) and long
+    (``International Conference on Learning Representations``) forms;
+    the response carries the canonical long form in each row's
+    ``venue`` field, which we propagate so downstream callers can store
+    a stable string.
+
+    Returns ``(candidates, next_token)``. ``next_token`` is ``None``
+    when the bulk response did not include one (last page). Papers
+    without an arxiv id are filtered out client-side — there is nothing
+    we can ingest for them.
+    """
+    if not venue or not venue.strip():
+        raise ValueError("venue must not be empty")
+    if year < 1900 or year > 2100:
+        raise ValueError(f"year must be a 4-digit year, got {year}")
+    if page_size < 1 or page_size > 1000:
+        raise ValueError(f"page_size must be in [1, 1000], got {page_size}")
+    params: dict[str, str | int] = {
+        "venue": venue,
+        "year": year,
+        "fields": "externalIds,title,venue,year",
+        "limit": page_size,
+    }
+    if cursor:
+        params["token"] = cursor
+    response = SESSION.get(
+        f"{S2_API}/paper/search/bulk",
+        params=params,
+        timeout=timeout_seconds,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    raw = payload.get("data") or []
+    next_token = payload.get("token")
+    out: list[VenueCandidate] = []
+    for item in raw:
+        external_ids = item.get("externalIds") or {}
+        arxiv_id = external_ids.get("ArXiv")
+        if not arxiv_id:
+            continue
+        out.append(
+            VenueCandidate(
+                arxiv_id=canonical_arxiv_id(arxiv_id),
+                semantic_scholar_id=item.get("paperId") or "",
+                title=item.get("title") or "",
+                venue_string=item.get("venue") or venue,
+                year=item.get("year"),
+            )
+        )
+    return out, next_token
+
+
+@dataclass(slots=True)
 class EnrichmentOutcome:
     """Result of a Semantic Scholar enrichment pass.
 
