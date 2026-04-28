@@ -1064,3 +1064,332 @@ def test_set_paper_venue_returns_none_for_missing_paper():
     """Missing paper → None (caller is responsible for indexing first)."""
     repo = MemoryPaperRepository()
     assert repo.set_paper_venue("paper_does_not_exist", venue="ICLR", venue_year=2024, venue_source="s2_bulk") is None
+
+
+# --- author-signal harvest (#39 PR C) ---------------------------------------
+
+
+def _fake_author_pages(pages_by_author: dict[str, list[list[tuple[str, int]]]]):
+    """Build a sources.fetch_author_papers stub that serves successive
+    pages keyed by author id. Each tuple is ``(arxiv_id, citation_count)``.
+    Last page returns next_cursor=None."""
+    from paperbase.sources import AuthorPaperCandidate
+
+    state: dict[str, int] = {}
+    cursors_seen: list[tuple[str, int | None]] = []
+
+    def stub(*, s2_author_id, cursor=0, page_size=1000, timeout_seconds=30):
+        cursors_seen.append((s2_author_id, cursor))
+        idx = state.get(s2_author_id, 0)
+        state[s2_author_id] = idx + 1
+        pages = pages_by_author.get(s2_author_id, [])
+        if idx >= len(pages):
+            return [], None
+        page = pages[idx]
+        candidates = [
+            AuthorPaperCandidate(
+                arxiv_id=aid,
+                semantic_scholar_id=f"s2-{aid}",
+                title=f"Paper {aid}",
+                citation_count=cites,
+                year=2020,
+            )
+            for aid, cites in page
+        ]
+        next_cursor = None if idx == len(pages) - 1 else (cursor or 0) + len(page)
+        return candidates, next_cursor
+
+    return stub, cursors_seen
+
+
+def test_enqueue_harvest_author_job_rejects_invalid_inputs():
+    """Operator-supplied payloads must fail fast as PermanentError so
+    the planner job dead-letters rather than retrying garbage."""
+    service = _service()
+    with pytest.raises(PermanentError):
+        service.enqueue_harvest_author_job(min_paper_count=0)
+    with pytest.raises(PermanentError):
+        service.enqueue_harvest_author_job(min_cite_mass=-1)
+    with pytest.raises(PermanentError):
+        service.enqueue_harvest_author_job(max_authors=0)
+    with pytest.raises(PermanentError):
+        service.enqueue_harvest_author_job(max_papers_per_author=0)
+    with pytest.raises(PermanentError):
+        service.enqueue_harvest_author_job(chunk_size=0)
+    with pytest.raises(PermanentError):
+        service.enqueue_harvest_author_job(chunk_size=1000)
+
+
+def test_run_harvest_author_planner_visits_top_authors_and_emits_chunks(monkeypatch):
+    """Planner derives top authors from the indexed corpus, then for
+    each pages S2 and enqueues ``harvest_chunk`` jobs with
+    ``source='s2_author'`` carrying the discovering author's id."""
+    service = _service()
+
+    # Seed corpus: two papers by author A1 (high cite mass), one by A2 (lower).
+    p_high = service.repository.upsert_paper(PaperMetadata(arxiv_id="2020.00001", citation_count=400))
+    p_med = service.repository.upsert_paper(PaperMetadata(arxiv_id="2020.00002", citation_count=100))
+    p_low = service.repository.upsert_paper(PaperMetadata(arxiv_id="2020.00003", citation_count=50))
+    service.repository.replace_paper_authors(p_high.paper_id, authors=[{"s2_id": "A1", "name": "Alice", "position": 1}])
+    service.repository.replace_paper_authors(p_med.paper_id, authors=[{"s2_id": "A1", "name": "Alice", "position": 1}])
+    service.repository.replace_paper_authors(p_low.paper_id, authors=[{"s2_id": "A2", "name": "Bob", "position": 1}])
+
+    pages_by_author = {
+        "A1": [[("2024.{:05d}".format(i), 10) for i in range(5)]],
+        "A2": [[("2025.{:05d}".format(i), 10) for i in range(2)]],
+    }
+    stub, cursors_seen = _fake_author_pages(pages_by_author)
+    monkeypatch.setattr("paperbase.service.sources.fetch_author_papers", stub)
+
+    result = service.run_harvest_author(
+        min_paper_count=1,
+        min_cite_mass=0,
+        max_authors=10,
+        max_papers_per_author=None,
+        chunk_size=4,
+    )
+
+    assert result["authors_visited"] == 2
+    # A1 yielded 5 papers / 4 per chunk = 2 chunks. A2 yielded 2 / 4 = 1 chunk.
+    assert result["chunks_created"] == 3
+    assert result["candidates_emitted"] == 7
+    chunks = [j for j in service.repository.jobs.values() if j.job_type == "harvest_chunk"]
+    assert all(c.payload["source"] == "s2_author" for c in chunks)
+    a1_chunks = [c for c in chunks if c.payload["top_author_s2_id"] == "A1"]
+    a2_chunks = [c for c in chunks if c.payload["top_author_s2_id"] == "A2"]
+    assert len(a1_chunks) == 2
+    assert len(a2_chunks) == 1
+    # Cursors handed back: A1 calls were (cursor=0 first, then next_cursor for second page).
+    a1_cursors = [c[1] for c in cursors_seen if c[0] == "A1"]
+    assert a1_cursors[0] == 0
+
+
+def test_run_harvest_author_respects_max_papers_per_author(monkeypatch):
+    """``max_papers_per_author`` caps per-author paging so a prolific
+    author doesn't monopolize the planner."""
+    service = _service()
+    p = service.repository.upsert_paper(PaperMetadata(arxiv_id="2020.00001", citation_count=10_000))
+    service.repository.replace_paper_authors(p.paper_id, authors=[{"s2_id": "A1", "name": "Alice", "position": 1}])
+
+    pages_by_author = {
+        "A1": [[("2024.{:05d}".format(i), 10) for i in range(5)] for _ in range(3)],
+    }
+    stub, _cursors = _fake_author_pages(pages_by_author)
+    monkeypatch.setattr("paperbase.service.sources.fetch_author_papers", stub)
+
+    result = service.run_harvest_author(
+        min_paper_count=1,
+        min_cite_mass=0,
+        max_authors=10,
+        max_papers_per_author=7,
+        chunk_size=10,
+    )
+
+    assert result["candidates_emitted"] == 7
+    assert result["authors_visited"] == 1
+
+
+def test_run_harvest_author_handles_empty_corpus(monkeypatch):
+    """Empty paper_authors → no top authors, no chunks."""
+    service = _service()
+    # Stub to detect any unexpected S2 calls.
+    called = {"n": 0}
+
+    def stub(**_kw):
+        called["n"] += 1
+        return [], None
+
+    monkeypatch.setattr("paperbase.service.sources.fetch_author_papers", stub)
+
+    result = service.run_harvest_author(
+        min_paper_count=1,
+        min_cite_mass=0,
+        max_authors=10,
+        max_papers_per_author=None,
+        chunk_size=50,
+    )
+
+    assert result == {"authors_visited": 0, "chunks_created": 0, "candidates_emitted": 0}
+    assert called["n"] == 0
+
+
+def test_run_harvest_chunk_author_indexes_and_stamps_top_author(monkeypatch):
+    """Chunk worker for ``source='s2_author'`` indexes each paper and
+    stamps ``top_author_s2_id`` via ``set_paper_top_author``."""
+    service = _service()
+    for aid in ("2020.00001", "2020.00002"):
+        service.repository.upsert_paper(PaperMetadata(arxiv_id=aid))
+
+    def fake_index(arxiv_id, *, paper=None, force=False):
+        return service.repository.get_paper_by_arxiv_id(arxiv_id)
+
+    monkeypatch.setattr(service, "index_arxiv_paper", fake_index)
+
+    result = service.run_harvest_chunk_author(
+        arxiv_ids=["2020.00001", "2020.00002"],
+        top_author_s2_id="A1",
+    )
+
+    assert result == {"requested": 2, "indexed": 2, "stamped": 2, "skipped": 0}
+    p1 = service.repository.get_paper_by_arxiv_id("2020.00001")
+    assert p1.top_author_s2_id == "A1"
+
+
+def test_run_harvest_chunk_author_swallows_per_id_permanent_errors(monkeypatch):
+    """A PermanentError on one arxiv id (e.g. 404) must not kill the
+    whole chunk."""
+    service = _service()
+    service.repository.upsert_paper(PaperMetadata(arxiv_id="2020.00001"))
+    service.repository.upsert_paper(PaperMetadata(arxiv_id="2020.00003"))
+
+    def fake_index(arxiv_id, *, paper=None, force=False):
+        if arxiv_id == "2020.bad":
+            raise PermanentError("arxiv 404")
+        return service.repository.get_paper_by_arxiv_id(arxiv_id)
+
+    monkeypatch.setattr(service, "index_arxiv_paper", fake_index)
+
+    result = service.run_harvest_chunk_author(
+        arxiv_ids=["2020.00001", "2020.bad", "2020.00003"],
+        top_author_s2_id="A1",
+    )
+
+    assert result == {"requested": 3, "indexed": 2, "stamped": 2, "skipped": 1}
+
+
+def test_run_harvest_chunk_author_skips_stamping_when_no_top_author():
+    """When ``top_author_s2_id`` is None (corrupt payload), papers
+    still get indexed but not stamped — defensive in case a bad payload
+    sneaks through."""
+    service = _service()
+    service.repository.upsert_paper(PaperMetadata(arxiv_id="2020.00001"))
+
+    # No monkeypatch needed — the chunk method short-circuits if arxiv_ids
+    # is empty, but with a real index_arxiv_paper call we'd hit the
+    # network. Use empty list to avoid that.
+    result = service.run_harvest_chunk_author(arxiv_ids=[])
+    assert result == {"requested": 0, "indexed": 0, "stamped": 0, "skipped": 0}
+
+
+def test_default_priority_author_matches_harvest_range():
+    """Author planner shares priority tier 5 with harvest_range so
+    interactive ``index_paper`` always cuts in front."""
+    from paperbase.repository import default_max_attempts, default_priority
+
+    assert default_priority("harvest_author") == 5
+    assert default_priority("harvest_range") == default_priority("harvest_author")
+    assert default_max_attempts("harvest_author") == 3
+
+
+def test_fetch_author_papers_validates_inputs():
+    """Sources-side guards on s2_author_id, cursor, page_size."""
+    from paperbase.sources import fetch_author_papers
+
+    with pytest.raises(ValueError):
+        fetch_author_papers(s2_author_id="")
+    with pytest.raises(ValueError):
+        fetch_author_papers(s2_author_id="A1", cursor=-1)
+    with pytest.raises(ValueError):
+        fetch_author_papers(s2_author_id="A1", page_size=0)
+    with pytest.raises(ValueError):
+        fetch_author_papers(s2_author_id="A1", page_size=1001)
+
+
+def test_set_paper_top_author_preserves_other_fields():
+    """The top_author setter must not touch citation_count, title, etc."""
+    repo = MemoryPaperRepository()
+    p = repo.upsert_paper(PaperMetadata(
+        arxiv_id="2020.00001",
+        title="Original",
+        citation_count=42,
+        abstract="abstract body",
+    ))
+    out = repo.set_paper_top_author(p.paper_id, top_author_s2_id="A1")
+    assert out is not None
+    assert out.title == "Original"
+    assert out.citation_count == 42
+    assert out.abstract == "abstract body"
+    assert out.top_author_s2_id == "A1"
+
+
+def test_list_top_authors_aggregation():
+    """list_top_authors aggregates citation_count across an author's
+    papers and sorts by cite mass desc. min_paper_count + min_cite_mass
+    threshold filtering both apply."""
+    repo = MemoryPaperRepository()
+    # A1: 2 papers, total 700 cites
+    p1 = repo.upsert_paper(PaperMetadata(arxiv_id="2020.00001", citation_count=500))
+    p2 = repo.upsert_paper(PaperMetadata(arxiv_id="2020.00002", citation_count=200))
+    repo.replace_paper_authors(p1.paper_id, authors=[{"s2_id": "A1", "name": "Alice", "position": 1}])
+    repo.replace_paper_authors(p2.paper_id, authors=[{"s2_id": "A1", "name": "Alice", "position": 1}])
+    # A2: 1 paper, 1000 cites — wins on cite mass
+    p3 = repo.upsert_paper(PaperMetadata(arxiv_id="2020.00003", citation_count=1000))
+    repo.replace_paper_authors(p3.paper_id, authors=[{"s2_id": "A2", "name": "Bob", "position": 1}])
+    # A3: 1 paper, 5 cites — fails min_cite_mass threshold
+    p4 = repo.upsert_paper(PaperMetadata(arxiv_id="2020.00004", citation_count=5))
+    repo.replace_paper_authors(p4.paper_id, authors=[{"s2_id": "A3", "name": "Carol", "position": 1}])
+
+    # Default: all visible
+    out = repo.list_top_authors(min_paper_count=1, min_cite_mass=0, limit=10)
+    assert [r["author_s2_id"] for r in out] == ["A2", "A1", "A3"]
+    assert out[0]["cite_mass"] == 1000
+    assert out[1]["cite_mass"] == 700
+    assert out[1]["paper_count"] == 2
+
+    # Cite-mass threshold drops A3
+    filtered = repo.list_top_authors(min_paper_count=1, min_cite_mass=100, limit=10)
+    assert [r["author_s2_id"] for r in filtered] == ["A2", "A1"]
+
+    # Paper-count threshold of 2 drops A2 and A3
+    multi = repo.list_top_authors(min_paper_count=2, min_cite_mass=0, limit=10)
+    assert [r["author_s2_id"] for r in multi] == ["A1"]
+
+
+def test_replace_paper_authors_dedupes_and_clears():
+    """Calling with a list dedupes by s2_id; calling with [] clears all
+    rows for the paper."""
+    repo = MemoryPaperRepository()
+    p = repo.upsert_paper(PaperMetadata(arxiv_id="2020.00001"))
+    repo.replace_paper_authors(p.paper_id, authors=[
+        {"s2_id": "A1", "name": "Alice", "position": 1},
+        {"s2_id": "A1", "name": "Alice", "position": 2},  # duplicate s2_id
+        {"s2_id": "", "name": "NoId", "position": 3},  # empty s2_id skipped
+        {"s2_id": "A2", "name": "Bob", "position": 4},
+    ])
+    rows = repo.paper_authors[p.paper_id]
+    assert sorted(r["s2_id"] for r in rows) == ["A1", "A2"]
+
+    repo.replace_paper_authors(p.paper_id, authors=[])
+    assert repo.paper_authors[p.paper_id] == []
+
+
+def test_enrich_with_semantic_scholar_surfaces_author_rows(monkeypatch):
+    """The enrich path populates ``EnrichmentOutcome.authors_by_arxiv``
+    with parsed author rows. Service callers persist these via
+    ``replace_paper_authors``. Stubs the S2 batch response."""
+    from paperbase import sources
+
+    def fake_batch(ids, **_kw):
+        return [
+            {
+                "paperId": "s2-X",
+                "citationCount": 100,
+                "influentialCitationCount": 5,
+                "authors": [
+                    {"authorId": "A1", "name": "Alice"},
+                    {"authorId": "A2", "name": "Bob"},
+                    {"authorId": "", "name": "NoId"},  # filtered out
+                ],
+            }
+            for _ in ids
+        ]
+
+    monkeypatch.setattr("paperbase.sources._s2_batch_with_retry", fake_batch)
+
+    metas = [PaperMetadata(arxiv_id="2020.00001")]
+    outcome = sources.enrich_with_semantic_scholar(metas, max_retries=0)
+    assert outcome.enriched == 1
+    rows = outcome.authors_by_arxiv["2020.00001"]
+    assert [r["s2_id"] for r in rows] == ["A1", "A2"]
+    assert rows[0]["position"] == 1
+    assert rows[1]["position"] == 2

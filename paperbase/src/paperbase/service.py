@@ -3381,6 +3381,11 @@ class PaperbaseService:
                 # semantic_scholar_id / tldr without touching index artifacts.
                 self.repository.upsert_paper_shallow(meta)
                 total_updated += 1
+                # #39 PR C: persist S2 author rows alongside the enrichment.
+                if outcome is not None:
+                    author_rows = outcome.authors_by_arxiv.get(meta.arxiv_id) or []
+                    if author_rows:
+                        self.repository.replace_paper_authors(paper.paper_id, authors=author_rows)
 
             after = batch[-1]
             remaining -= len(batch)
@@ -4593,6 +4598,219 @@ class PaperbaseService:
             "skipped": skipped,
         }
 
+    # --- Author-signal harvest (#39 PR C) -------------------------------- #
+
+    def enqueue_harvest_author_job(
+        self,
+        *,
+        min_paper_count: int = 1,
+        min_cite_mass: int = 5_000,
+        max_authors: int = 100,
+        max_papers_per_author: int | None = None,
+        chunk_size: int = 50,
+    ) -> JobResponse:
+        """Queue a ``harvest_author`` planner job (#39 PR C).
+
+        The planner derives the top-author list from the indexed
+        corpus by aggregating ``paper_authors`` ↔ ``papers``,
+        picks the top ``max_authors`` by cite mass, then for each
+        pages S2's ``/author/{id}/papers`` and enqueues
+        ``harvest_chunk`` jobs (``source='s2_author'``) for the
+        arxiv-linked papers.
+
+        Defaults: ``min_cite_mass=5000`` matches the #39 spec
+        threshold ("≥5000 in Computer Science"). Operators raise
+        the bar for tighter coverage or lower it for wider sweep.
+        """
+        if min_paper_count < 1:
+            raise PermanentError("min_paper_count must be >= 1")
+        if min_cite_mass < 0:
+            raise PermanentError("min_cite_mass must be >= 0")
+        if max_authors < 1:
+            raise PermanentError("max_authors must be >= 1")
+        if max_papers_per_author is not None and max_papers_per_author < 1:
+            raise PermanentError("max_papers_per_author must be >= 1 when provided")
+        if chunk_size < 1 or chunk_size > 500:
+            raise PermanentError("chunk_size must be in [1, 500]")
+        job = self.repository.create_job(
+            "harvest_author",
+            {
+                "min_paper_count": int(min_paper_count),
+                "min_cite_mass": int(min_cite_mass),
+                "max_authors": int(max_authors),
+                "max_papers_per_author": max_papers_per_author,
+                "chunk_size": int(chunk_size),
+            },
+        )
+        logger.info(
+            "Created harvest_author job",
+            extra={
+                "event": "jobs.harvest_author.created",
+                "job_id": job.job_id,
+                "min_paper_count": min_paper_count,
+                "min_cite_mass": min_cite_mass,
+                "max_authors": max_authors,
+                "max_papers_per_author": max_papers_per_author,
+                "chunk_size": chunk_size,
+            },
+        )
+        return job
+
+    def run_harvest_author(
+        self,
+        *,
+        min_paper_count: int,
+        min_cite_mass: int,
+        max_authors: int,
+        max_papers_per_author: int | None,
+        chunk_size: int,
+        harvest_id: str | None = None,
+    ) -> dict[str, int]:
+        """Planner: derive top authors from the indexed corpus, then for
+        each page S2 and enqueue ``harvest_chunk`` jobs
+        (``source='s2_author'``) for arxiv-linked papers.
+
+        The chunk payload carries ``arxiv_ids`` plus the
+        ``top_author_s2_id`` so the chunk worker can stamp the
+        provenance column when it indexes each paper.
+        """
+        if min_paper_count < 1:
+            raise PermanentError("min_paper_count must be >= 1")
+        if min_cite_mass < 0:
+            raise PermanentError("min_cite_mass must be >= 0")
+        if max_authors < 1:
+            raise PermanentError("max_authors must be >= 1")
+        if chunk_size < 1 or chunk_size > 500:
+            raise PermanentError("chunk_size must be in [1, 500]")
+
+        run_harvest_id = harvest_id or new_id("harvest")
+        top_authors = self.repository.list_top_authors(
+            min_paper_count=min_paper_count,
+            min_cite_mass=min_cite_mass,
+            limit=max_authors,
+        )
+        chunks_created = 0
+        candidates_emitted = 0
+        authors_visited = 0
+
+        for top_author in top_authors:
+            author_s2_id = top_author["author_s2_id"]
+            authors_visited += 1
+            cursor: int | None = 0
+            per_author_emitted = 0
+            pending_batch: list[str] = []
+
+            def _flush_batch(author_id: str = author_s2_id) -> None:
+                nonlocal chunks_created, pending_batch
+                if not pending_batch:
+                    return
+                self.repository.create_job(
+                    "harvest_chunk",
+                    {
+                        "harvest_id": run_harvest_id,
+                        "source": "s2_author",
+                        "arxiv_ids": list(pending_batch),
+                        "top_author_s2_id": author_id,
+                    },
+                    dedupe_key=(
+                        f"harvest_chunk:{run_harvest_id}:s2_author:{author_id}:"
+                        f"{pending_batch[0]}-{pending_batch[-1]}-{len(pending_batch)}"
+                    ),
+                )
+                chunks_created += 1
+                pending_batch = []
+
+            while cursor is not None:
+                if max_papers_per_author is not None and per_author_emitted >= max_papers_per_author:
+                    break
+                page, next_cursor = sources.fetch_author_papers(
+                    s2_author_id=author_s2_id,
+                    cursor=cursor,
+                )
+                if not page:
+                    break
+                for candidate in page:
+                    if max_papers_per_author is not None and per_author_emitted >= max_papers_per_author:
+                        break
+                    pending_batch.append(candidate.arxiv_id)
+                    candidates_emitted += 1
+                    per_author_emitted += 1
+                    if len(pending_batch) >= chunk_size:
+                        _flush_batch()
+                cursor = next_cursor
+            _flush_batch()
+
+        logger.info(
+            "harvest_author planner enqueued chunks",
+            extra={
+                "event": "harvest_author.planned",
+                "harvest_id": run_harvest_id,
+                "authors_visited": authors_visited,
+                "chunks_created": chunks_created,
+                "candidates_emitted": candidates_emitted,
+            },
+        )
+        return {
+            "authors_visited": authors_visited,
+            "chunks_created": chunks_created,
+            "candidates_emitted": candidates_emitted,
+        }
+
+    def run_harvest_chunk_author(
+        self,
+        *,
+        arxiv_ids: list[str],
+        top_author_s2_id: str | None = None,
+        harvest_id: str | None = None,
+    ) -> dict[str, int]:
+        """Chunk worker for ``source='s2_author'``.
+
+        Iterates ``arxiv_ids``, calls ``index_arxiv_paper``, and stamps
+        ``top_author_s2_id`` via ``set_paper_top_author``. Per-id
+        ``PermanentError`` is swallowed.
+        """
+        if not arxiv_ids:
+            return {"requested": 0, "indexed": 0, "stamped": 0, "skipped": 0}
+        run_harvest_id = harvest_id or new_id("harvest")
+        indexed = 0
+        stamped = 0
+        skipped = 0
+        for arxiv_id in arxiv_ids:
+            if not arxiv_id:
+                skipped += 1
+                continue
+            try:
+                stored = self.index_arxiv_paper(arxiv_id, force=False)
+                indexed += 1
+            except PermanentError:
+                skipped += 1
+                continue
+            if top_author_s2_id:
+                updated = self.repository.set_paper_top_author(
+                    stored.paper_id,
+                    top_author_s2_id=top_author_s2_id,
+                )
+                if updated is not None:
+                    stamped += 1
+        logger.info(
+            "harvest_author chunk completed",
+            extra={
+                "event": "harvest_author.chunk_completed",
+                "harvest_id": run_harvest_id,
+                "top_author_s2_id": top_author_s2_id,
+                "requested": len(arxiv_ids),
+                "indexed": indexed,
+                "stamped": stamped,
+                "skipped": skipped,
+            },
+        )
+        return {
+            "requested": len(arxiv_ids),
+            "indexed": indexed,
+            "stamped": stamped,
+            "skipped": skipped,
+        }
+
     def enqueue_latest_sync_job(self) -> JobResponse:
         job = self.repository.create_job(
             "sync_latest",
@@ -4676,6 +4894,13 @@ class PaperbaseService:
                         year=job.payload.get("year"),
                         harvest_id=str(job.payload.get("harvest_id") or job.job_id),
                     )
+                elif source == "s2_author":
+                    # #39 PR C: arxiv_ids list + top_author_s2_id stamp.
+                    self.run_harvest_chunk_author(
+                        arxiv_ids=list(job.payload.get("arxiv_ids", [])),
+                        top_author_s2_id=job.payload.get("top_author_s2_id"),
+                        harvest_id=str(job.payload.get("harvest_id") or job.job_id),
+                    )
                 else:
                     self.run_harvest_chunk(
                         source=source,
@@ -4700,6 +4925,15 @@ class PaperbaseService:
                     venue=str(job.payload["venue"]),
                     year=int(job.payload["year"]),
                     max_papers=job.payload.get("max_papers"),
+                    chunk_size=int(job.payload.get("chunk_size", 50)),
+                    harvest_id=str(job.payload.get("harvest_id") or job.job_id),
+                )
+            elif job.job_type == "harvest_author":
+                self.run_harvest_author(
+                    min_paper_count=int(job.payload.get("min_paper_count", 1)),
+                    min_cite_mass=int(job.payload.get("min_cite_mass", 5_000)),
+                    max_authors=int(job.payload.get("max_authors", 100)),
+                    max_papers_per_author=job.payload.get("max_papers_per_author"),
                     chunk_size=int(job.payload.get("chunk_size", 50)),
                     harvest_id=str(job.payload.get("harvest_id") or job.job_id),
                 )
@@ -4849,9 +5083,17 @@ class PaperbaseService:
         # failure here leaves citation_count=0 rather than blocking ingestion;
         # the enrich_missing_metadata backfill job will pick this paper up
         # later with aggressive retry.
-        sources.enrich_with_semantic_scholar([metadata], max_retries=0)
+        enrich_outcome = sources.enrich_with_semantic_scholar([metadata], max_retries=0)
         metadata.index_status = "indexing"
         stored = self.repository.upsert_paper(metadata, search_document=metadata.abstract)
+        # #39 PR C: persist S2 author rows so the top-author discovery
+        # aggregation has data. Skipped silently if enrichment was rate-
+        # limited — the backfill CLI fills in the gap. ``enrich_outcome``
+        # can be None in test contexts that stub the source-layer call.
+        if enrich_outcome is not None:
+            author_rows = enrich_outcome.authors_by_arxiv.get(metadata.arxiv_id) or []
+            if author_rows:
+                self.repository.replace_paper_authors(stored.paper_id, authors=author_rows)
         extraction = index_paper_artifacts(metadata)
 
         metadata.source_type = extraction.source_type

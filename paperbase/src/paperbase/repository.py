@@ -125,6 +125,12 @@ class PaperORM(Base):
     venue: Mapped[str | None] = mapped_column(Text, nullable=True)
     venue_year: Mapped[int | None] = mapped_column(Integer, nullable=True)
     venue_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Author-signal harvest provenance (#39 PR C). When non-null, this
+    # paper was pulled in (or re-stamped) by the harvest_author planner
+    # because it shares an author with a top-cited corpus author. The
+    # value is the Semantic Scholar author id of the discovering author;
+    # the full per-author table lives in ``paper_authors``.
+    top_author_s2_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     source_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     index_status: Mapped[str] = mapped_column(String(32), default="discovered")
     search_document: Mapped[str] = mapped_column(Text, default="")
@@ -168,6 +174,27 @@ class PaperRefORM(Base):
     created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class PaperAuthorORM(Base):
+    """Per-author rows for a paper, keyed by Semantic Scholar author id (#39 PR C).
+
+    Populated by ``enrich_with_semantic_scholar`` and the
+    ``backfill-paper-authors`` CLI. The ``author_s2_id`` index supports
+    the ``list_top_authors`` aggregation query that drives the author
+    harvest planner.
+    """
+
+    __tablename__ = "paper_authors"
+
+    paper_id: Mapped[str] = mapped_column(
+        ForeignKey("papers.paper_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    author_s2_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    author_name: Mapped[str] = mapped_column(Text, default="")
+    author_position: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class ResultSetORM(Base):
     __tablename__ = "result_sets"
 
@@ -205,6 +232,7 @@ _JOB_TYPE_MAX_ATTEMPTS: dict[str, int] = {
     "harvest_chunk": 5,
     "harvest_top_cited": 3,  # planner — paginates S2, enqueues harvest_chunk per batch
     "harvest_venue": 3,  # planner — paginates S2 by venue+year, enqueues harvest_chunk per batch
+    "harvest_author": 3,  # planner — derives top authors from corpus, paginates S2 per author
 }
 
 
@@ -226,6 +254,7 @@ _JOB_TYPE_PRIORITY: dict[str, int] = {
     "harvest_chunk": 10,
     "harvest_top_cited": 5,  # planner; same priority tier as harvest_range
     "harvest_venue": 5,  # planner; same priority tier as harvest_range
+    "harvest_author": 5,  # planner; same priority tier as harvest_range
 }
 
 
@@ -624,6 +653,7 @@ def _paper_from_orm(row: PaperORM) -> PaperResponse:
         venue=row.venue,
         venue_year=row.venue_year,
         venue_source=row.venue_source,
+        top_author_s2_id=row.top_author_s2_id,
         source_type=row.source_type,
         index_status=row.index_status,
         indexed_at=row.indexed_at,
@@ -879,6 +909,57 @@ class PaperRepository(ABC):
 
         Returns the refreshed paper row, or ``None`` if the paper does
         not exist (caller should index it first).
+        """
+        raise NotImplementedError
+
+    def set_paper_top_author(
+        self,
+        paper_id: str,
+        *,
+        top_author_s2_id: str | None,
+    ) -> PaperResponse | None:
+        """Stamp the author-harvest provenance on an existing paper
+        (#39 PR C). Same separation rationale as :meth:`set_paper_venue`
+        — kept out of the upsert path so a regular re-index does not
+        clear it. Returns the refreshed paper row, or ``None`` if the
+        paper does not exist."""
+        raise NotImplementedError
+
+    def replace_paper_authors(
+        self,
+        paper_id: str,
+        *,
+        authors: list[dict[str, Any]],
+    ) -> None:
+        """Replace the per-author rows for a paper (#39 PR C).
+
+        ``authors`` is a list of ``{"s2_id": str, "name": str,
+        "position": int}`` dicts. Empty list clears all rows for the
+        paper. Used by the enrich path (during ``index_arxiv_paper``)
+        and by the ``backfill-paper-authors`` CLI to populate the
+        ``paper_authors`` table that drives top-author discovery.
+        """
+        raise NotImplementedError
+
+    def list_top_authors(
+        self,
+        *,
+        min_paper_count: int = 1,
+        min_cite_mass: int = 0,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Return top authors aggregated over the indexed corpus
+        (#39 PR C planner support).
+
+        Aggregation: for each ``author_s2_id`` in ``paper_authors``, sum
+        ``papers.citation_count`` and count papers. Filter by
+        ``min_paper_count`` and ``min_cite_mass`` thresholds, sort by
+        cite mass desc, return top ``limit``.
+
+        Each result row carries ``author_s2_id``, ``paper_count``,
+        ``cite_mass``, and ``sample_name`` (one author_name string for
+        debugging). Returns an empty list when ``paper_authors`` has
+        not yet been populated.
         """
         raise NotImplementedError
 
@@ -1252,6 +1333,10 @@ class SqlAlchemyPaperRepository(PaperRepository):
             connection.execute(
                 text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS venue_source VARCHAR(32)")
             )
+            # #39 PR C: author-signal harvest provenance + per-author rows
+            connection.execute(
+                text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS top_author_s2_id VARCHAR(64)")
+            )
             connection.execute(
                 text(f"ALTER TABLE IF EXISTS text_chunks ADD COLUMN IF NOT EXISTS embedding {vector_type}")
             )
@@ -1356,6 +1441,14 @@ class SqlAlchemyPaperRepository(PaperRepository):
             connection.execute(
                 text(
                     "CREATE UNIQUE INDEX IF NOT EXISTS projects_default_per_user ON projects (user_id) WHERE is_default"
+                )
+            )
+            # #39 PR C: index for the list_top_authors aggregation query
+            # (GROUP BY author_s2_id over paper_authors JOIN papers).
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS paper_authors_author_s2_id_idx "
+                    "ON paper_authors (author_s2_id)"
                 )
             )
             connection.execute(
@@ -1700,6 +1793,91 @@ class SqlAlchemyPaperRepository(PaperRepository):
             row.updated_at = utcnow()
             session.flush()
             return _paper_from_orm(row)
+
+    def set_paper_top_author(
+        self,
+        paper_id: str,
+        *,
+        top_author_s2_id: str | None,
+    ) -> PaperResponse | None:
+        with self._session() as session:
+            row = session.get(PaperORM, paper_id)
+            if row is None:
+                return None
+            row.top_author_s2_id = top_author_s2_id
+            row.updated_at = utcnow()
+            session.flush()
+            return _paper_from_orm(row)
+
+    def replace_paper_authors(
+        self,
+        paper_id: str,
+        *,
+        authors: list[dict[str, Any]],
+    ) -> None:
+        with self._session() as session:
+            session.execute(
+                delete(PaperAuthorORM).where(PaperAuthorORM.paper_id == paper_id)
+            )
+            seen: set[str] = set()
+            for author in authors:
+                s2_id = (author.get("s2_id") or "").strip()
+                if not s2_id or s2_id in seen:
+                    continue
+                seen.add(s2_id)
+                session.add(
+                    PaperAuthorORM(
+                        paper_id=paper_id,
+                        author_s2_id=s2_id,
+                        author_name=author.get("name") or "",
+                        author_position=int(author.get("position") or 0),
+                    )
+                )
+
+    def list_top_authors(
+        self,
+        *,
+        min_paper_count: int = 1,
+        min_cite_mass: int = 0,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        if limit < 1:
+            return []
+        statement = text(
+            """
+            SELECT
+                pa.author_s2_id AS author_s2_id,
+                COUNT(DISTINCT pa.paper_id) AS paper_count,
+                COALESCE(SUM(p.citation_count), 0) AS cite_mass,
+                MAX(pa.author_name) AS sample_name
+            FROM paper_authors pa
+            JOIN papers p ON pa.paper_id = p.paper_id
+            GROUP BY pa.author_s2_id
+            HAVING
+                COUNT(DISTINCT pa.paper_id) >= :min_paper_count
+                AND COALESCE(SUM(p.citation_count), 0) >= :min_cite_mass
+            ORDER BY cite_mass DESC, paper_count DESC, pa.author_s2_id ASC
+            LIMIT :limit
+            """
+        )
+        with self._session() as session:
+            rows = session.execute(
+                statement,
+                {
+                    "min_paper_count": int(min_paper_count),
+                    "min_cite_mass": int(min_cite_mass),
+                    "limit": int(limit),
+                },
+            ).mappings().all()
+        return [
+            {
+                "author_s2_id": row["author_s2_id"],
+                "paper_count": int(row["paper_count"]),
+                "cite_mass": int(row["cite_mass"]),
+                "sample_name": row["sample_name"] or "",
+            }
+            for row in rows
+        ]
 
     def replace_code_chunks(self, paper_id: str, chunks: list[dict[str, Any]]) -> None:
         with self._session() as session:
@@ -2331,6 +2509,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
         venue,
         venue_year,
         venue_source,
+        top_author_s2_id,
         source_type,
         index_status,
         indexed_at
@@ -2363,6 +2542,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
             venue=row["venue"],
             venue_year=row["venue_year"],
             venue_source=row["venue_source"],
+            top_author_s2_id=row["top_author_s2_id"],
             source_type=row["source_type"],
             index_status=row["index_status"],
             indexed_at=row["indexed_at"],
@@ -4068,6 +4248,8 @@ class MemoryPaperRepository(PaperRepository):
         self.result_sets: dict[str, ResultSetResponse] = {}
         self.jobs: dict[str, JobResponse] = {}
         self.paper_refs: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        # paper_authors mirror for #39 PR C — list of {s2_id, name, position} per paper.
+        self.paper_authors: dict[str, list[dict[str, Any]]] = defaultdict(list)
         # Paper-level embeddings, tracked out-of-band because PaperResponse
         # doesn't carry them on the wire.
         self.paper_embeddings: dict[str, list[float] | None] = {}
@@ -4245,6 +4427,71 @@ class MemoryPaperRepository(PaperRepository):
         })
         self.papers[paper_id] = updated
         return updated
+
+    def set_paper_top_author(
+        self,
+        paper_id: str,
+        *,
+        top_author_s2_id: str | None,
+    ) -> PaperResponse | None:
+        existing = self.papers.get(paper_id)
+        if existing is None:
+            return None
+        updated = existing.model_copy(update={"top_author_s2_id": top_author_s2_id})
+        self.papers[paper_id] = updated
+        return updated
+
+    def replace_paper_authors(
+        self,
+        paper_id: str,
+        *,
+        authors: list[dict[str, Any]],
+    ) -> None:
+        seen: set[str] = set()
+        rows: list[dict[str, Any]] = []
+        for author in authors:
+            s2_id = (author.get("s2_id") or "").strip()
+            if not s2_id or s2_id in seen:
+                continue
+            seen.add(s2_id)
+            rows.append({
+                "s2_id": s2_id,
+                "name": author.get("name") or "",
+                "position": int(author.get("position") or 0),
+            })
+        self.paper_authors[paper_id] = rows
+
+    def list_top_authors(
+        self,
+        *,
+        min_paper_count: int = 1,
+        min_cite_mass: int = 0,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        if limit < 1:
+            return []
+        agg: dict[str, dict[str, Any]] = {}
+        for paper_id, author_rows in self.paper_authors.items():
+            paper = self.papers.get(paper_id)
+            if paper is None:
+                continue
+            cite_count = paper.citation_count or 0
+            for row in author_rows:
+                s2_id = row["s2_id"]
+                bucket = agg.setdefault(
+                    s2_id,
+                    {"author_s2_id": s2_id, "paper_count": 0, "cite_mass": 0, "sample_name": ""},
+                )
+                bucket["paper_count"] += 1
+                bucket["cite_mass"] += cite_count
+                if not bucket["sample_name"]:
+                    bucket["sample_name"] = row.get("name") or ""
+        filtered = [
+            b for b in agg.values()
+            if b["paper_count"] >= min_paper_count and b["cite_mass"] >= min_cite_mass
+        ]
+        filtered.sort(key=lambda r: (-r["cite_mass"], -r["paper_count"], r["author_s2_id"]))
+        return filtered[:limit]
 
     def replace_code_chunks(self, paper_id: str, chunks: list[dict[str, Any]]) -> None:
         existing = self.text_chunks.get(paper_id, [])
