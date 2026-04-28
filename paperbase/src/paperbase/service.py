@@ -4727,8 +4727,6 @@ class PaperbaseService:
                     s2_author_id=author_s2_id,
                     cursor=cursor,
                 )
-                if not page:
-                    break
                 for candidate in page:
                     if max_papers_per_author is not None and per_author_emitted >= max_papers_per_author:
                         break
@@ -4737,6 +4735,11 @@ class PaperbaseService:
                     per_author_emitted += 1
                     if len(pending_batch) >= chunk_size:
                         _flush_batch()
+                # Keep paging until S2 itself signals last page (same shape
+                # as the PR #50 / #52 EOF fixes). ``fetch_author_papers``
+                # filters non-arxiv rows client-side and may return an
+                # empty ``page`` while ``next_cursor`` is still set; only
+                # ``next_cursor is None`` means end-of-stream.
                 cursor = next_cursor
             _flush_batch()
 

@@ -1213,6 +1213,52 @@ def test_run_harvest_author_handles_empty_corpus(monkeypatch):
     assert called["n"] == 0
 
 
+def test_run_harvest_author_continues_through_empty_filtered_pages(monkeypatch):
+    """Same EOF correctness fix as PR #50 / #52: ``fetch_author_papers``
+    filters non-arxiv rows client-side and may return an empty ``page``
+    while ``next_cursor`` is still set. The planner must keep paging
+    until S2 itself signals end-of-stream — not stop on the first
+    empty filtered page (e.g. when an author has a stretch of conf-
+    only papers without arxiv links)."""
+    from paperbase.sources import AuthorPaperCandidate
+
+    service = _service()
+    p = service.repository.upsert_paper(PaperMetadata(arxiv_id="2020.00001", citation_count=10_000))
+    service.repository.replace_paper_authors(p.paper_id, authors=[{"s2_id": "A1", "name": "Alice", "position": 1}])
+
+    call_count = {"n": 0}
+
+    def stub(*, s2_author_id, cursor=0, page_size=1000, timeout_seconds=30):
+        idx = call_count["n"]
+        call_count["n"] += 1
+        if idx == 0:
+            return [
+                AuthorPaperCandidate(arxiv_id="2024.00001", semantic_scholar_id="s1", title="P1", citation_count=5, year=2024),
+            ], 1  # next offset
+        if idx == 1:
+            return [], 2  # empty filtered page, but more remains
+        if idx == 2:
+            return [
+                AuthorPaperCandidate(arxiv_id="2024.00002", semantic_scholar_id="s2", title="P2", citation_count=5, year=2024),
+            ], None  # last page
+        return [], None
+
+    monkeypatch.setattr("paperbase.service.sources.fetch_author_papers", stub)
+
+    result = service.run_harvest_author(
+        min_paper_count=1,
+        min_cite_mass=0,
+        max_authors=1,
+        max_papers_per_author=None,
+        chunk_size=50,
+    )
+
+    # Both real candidates collected — the planner did NOT stop on the
+    # empty page 1.
+    assert result["candidates_emitted"] == 2
+    assert call_count["n"] == 3
+
+
 def test_run_harvest_chunk_author_indexes_and_stamps_top_author(monkeypatch):
     """Chunk worker for ``source='s2_author'`` indexes each paper and
     stamps ``top_author_s2_id`` via ``set_paper_top_author``."""
