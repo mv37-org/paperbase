@@ -254,6 +254,13 @@ _PROJECT_CODE_SNIPPET_RE = re.compile(
     r"\b(snippet|example|sample|template|starter|boilerplate)\b",
     re.IGNORECASE,
 )
+_PROJECT_CODE_BUILD_OBJECT_RE = re.compile(
+    r"\b("
+    r"sgd|adam|optimizer|optimiser|scheduler|model|network|layer|loss|dataset|dataloader|loader|"
+    r"pipeline|trainer|baseline|agent|parser|client|server|api|cli|demo|prototype"
+    r")\b",
+    re.IGNORECASE,
+)
 _PROJECT_CODE_CONFIRMATION_RE = re.compile(
     r"^\s*(?:"
     r"yes|yeah|yep|yup|sure|ok(?:ay)?|please|please do|go ahead|do it|do that|"
@@ -891,7 +898,13 @@ def _question_has_project_code_intent(question: str) -> bool:
         _PROJECT_CODE_ACTION_RE.search(question) or any(token in question.lower() for token in ("read", "edit", "run"))
     ):
         return True
-    if _PROJECT_CODE_SNIPPET_RE.search(question) and _PROJECT_CODE_TARGET_RE.search(question):
+    if _PROJECT_CODE_SNIPPET_RE.search(question) and (
+        _PROJECT_CODE_TARGET_RE.search(question) or _PROJECT_CODE_BUILD_OBJECT_RE.search(question)
+    ):
+        return True
+    if _PROJECT_CODE_ACTION_RE.search(question) and (
+        _PROJECT_CODE_SNIPPET_RE.search(question) or _PROJECT_CODE_BUILD_OBJECT_RE.search(question)
+    ):
         return True
     return bool(_PROJECT_CODE_ACTION_RE.search(question) and _PROJECT_CODE_TARGET_RE.search(question))
 
@@ -990,7 +1003,11 @@ def _should_require_project_code_write(question: str, *, thread: ChatThreadRespo
         return _pending_project_code_followup_requires_write(thread)
     if _PROJECT_CODE_WRITE_TOOL_RE.search(question):
         return True
-    if _PROJECT_CODE_SNIPPET_RE.search(question) and _PROJECT_CODE_TARGET_RE.search(question):
+    if _PROJECT_CODE_SNIPPET_RE.search(question) and (
+        _PROJECT_CODE_TARGET_RE.search(question) or _PROJECT_CODE_BUILD_OBJECT_RE.search(question)
+    ):
+        return True
+    if _PROJECT_CODE_WRITE_ACTION_RE.search(question) and _PROJECT_CODE_BUILD_OBJECT_RE.search(question):
         return True
     return bool(_PROJECT_CODE_WRITE_ACTION_RE.search(question) and _PROJECT_CODE_TARGET_RE.search(question))
 
