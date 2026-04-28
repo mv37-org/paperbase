@@ -1083,6 +1083,24 @@ def find_official_repo_via_affiliation(
                 )
                 continue
             if response.status_code != 200:
+                # 403 with X-RateLimit-Remaining: 0 means we burned the
+                # search-API budget (10 req/min anonymous, 30 with a
+                # token). Surface this distinctly so the benchmark and
+                # operators can tell rate-limit misses from genuine
+                # "no matching repo" misses.
+                rate_remaining = response.headers.get("X-RateLimit-Remaining")
+                rate_reset = response.headers.get("X-RateLimit-Reset")
+                logger.warning(
+                    "GitHub search by affiliation returned non-200",
+                    extra={
+                        "event": "code_verify.search_non_200",
+                        "org": org,
+                        "query": query,
+                        "status": response.status_code,
+                        "rate_remaining": rate_remaining,
+                        "rate_reset": rate_reset,
+                    },
+                )
                 continue
             try:
                 items = response.json().get("items", [])[:5]

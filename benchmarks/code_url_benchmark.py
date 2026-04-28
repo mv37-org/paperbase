@@ -151,6 +151,37 @@ def _bench_cache_dir() -> Path:
 _README_CACHE_FILE = "readme_cache.json"
 
 
+def _check_rate_limit(token: str | None) -> dict[str, int] | None:
+    """Probe ``GET /rate_limit`` so the benchmark prints the remaining
+    REST + Search budget at startup. Returns ``None`` if the probe
+    fails (offline, bad token, etc.)."""
+    import requests
+
+    headers = {"Accept": "application/vnd.github+json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        response = requests.get(
+            "https://api.github.com/rate_limit", headers=headers, timeout=5.0
+        )
+    except requests.RequestException:
+        return None
+    if response.status_code != 200:
+        return None
+    try:
+        data = response.json()
+    except ValueError:
+        return None
+    core = data.get("resources", {}).get("core", {})
+    search = data.get("resources", {}).get("search", {})
+    return {
+        "core_remaining": core.get("remaining", -1),
+        "core_limit": core.get("limit", -1),
+        "search_remaining": search.get("remaining", -1),
+        "search_limit": search.get("limit", -1),
+    }
+
+
 def _load_readme_cache() -> dict[str, str]:
     """Persistent cache for GitHub README fetches keyed by ``owner/repo``.
 
@@ -411,9 +442,32 @@ def main(argv: list[str] | None = None) -> int:
     rows: list[Verdict] = []
     pwc_lookup = None
     verifier = None
+    # Token resolution order: explicit env var first (so a CI run can
+    # override without touching .env), then ``Settings.github_token``
+    # which auto-loads the repo-root ``.env`` via pydantic-settings.
+    # Without a token the benchmark hits the anonymous 60 req/hr REST
+    # cap and 10 req/min Search cap; affiliation-search misses (MAE,
+    # InfoGAN, PPO) are dominated by these caps, not algorithmic gaps.
     github_token = os.environ.get("PAPERBASE_GITHUB_TOKEN") or os.environ.get(
         "GITHUB_TOKEN"
     )
+    if not github_token:
+        try:
+            from paperbase.config import get_settings
+
+            github_token = get_settings().github_token
+        except Exception:
+            github_token = None
+    if github_token:
+        print(f"[token] using GitHub token (...{github_token[-4:]})")
+        rate = _check_rate_limit(github_token)
+        if rate:
+            print(
+                f"[rate]  core: {rate['core_remaining']}/{rate['core_limit']}"
+                f"  search: {rate['search_remaining']}/{rate['search_limit']}"
+            )
+    else:
+        print("[token] no GitHub token — anonymous limits apply (60/hr REST, 10/min Search)")
     # Persistent README cache. The verifier hits ``/repos/{o}/{r}/readme``
     # on GitHub and burns through the anonymous 60 req/hr budget fast on
     # iterated runs. Wrapping ``_fetch_readme`` to consult the cache first
