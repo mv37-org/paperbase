@@ -1112,11 +1112,20 @@ def find_official_repo_via_affiliation(
                 if not owner or not repo:
                     continue
                 # Affiliation search casts a wide net — any repo at the
-                # lab matching a keyword. Require ``threshold=3`` so a
-                # title-as-citation in someone else's README (which
-                # only earns +2) cannot accept. Need an arxiv id (+3)
-                # or repo-name-matches-primary-keyword (+2) plus the
-                # owner-affiliation bump (+1) to clear the bar.
+                # lab matching a keyword. Require ``threshold=4`` so
+                # the weak combo "primary-keyword prefix-match (+2) +
+                # affiliation (+1)" cannot accept on its own. With a
+                # GitHub token raising the rate-limit ceiling, this
+                # combo started firing on the BatchNorm →
+                # ``google-research/batch-ppo`` and ResNet →
+                # ``microsoft/ResiDual`` cases — both are different
+                # papers from the same lab whose names happen to
+                # share a generic ML word with the searched title.
+                # Threshold 4 needs at least one strong, paper-
+                # specific signal: arxiv id in README (+3, the case
+                # that recovers MAE), or title-in-README corroborated
+                # by repo-name overlap (+2 + +2), or first-heading
+                # match (+2) on top of the keyword overlap.
                 if verify_repo_owns_paper(
                     owner,
                     repo,
@@ -1127,7 +1136,7 @@ def find_official_repo_via_affiliation(
                     token=token,
                     session=session,
                     timeout=timeout,
-                    threshold=3,
+                    threshold=4,
                 ):
                     return f"https://github.com/{owner}/{repo}"
     return None
