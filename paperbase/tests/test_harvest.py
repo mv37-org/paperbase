@@ -590,3 +590,251 @@ def test_token_bucket_rejects_bad_config():
         TokenBucketRateLimiter(rate_per_second=0, burst=1)
     with pytest.raises(ValueError):
         TokenBucketRateLimiter(rate_per_second=1, burst=0)
+
+
+# --- top-cited harvest (#39 PR A) -------------------------------------------
+
+
+def _fake_top_cited_pages(pages: list[list[tuple[str, int]]]):
+    """Build a sources.fetch_top_cited_cs stub that serves successive
+    pages. Each tuple is ``(arxiv_id, citation_count)``. The last page
+    returns next_cursor=None so the planner stops; intermediate pages
+    return a fake token."""
+    from paperbase.sources import TopCitedCandidate
+
+    call_count = {"n": 0}
+    cursors_seen: list[str | None] = []
+
+    def stub(*, min_citations, cursor=None, page_size=1000, fields_of_study="Computer Science", timeout_seconds=30):
+        cursors_seen.append(cursor)
+        idx = call_count["n"]
+        call_count["n"] += 1
+        if idx >= len(pages):
+            return [], None
+        page = pages[idx]
+        candidates = [
+            TopCitedCandidate(
+                arxiv_id=aid,
+                semantic_scholar_id=f"s2-{aid}",
+                title=f"Paper {aid}",
+                citation_count=cites,
+                primary_category=None,
+                year=2020,
+            )
+            for aid, cites in page
+        ]
+        next_cursor = None if idx == len(pages) - 1 else f"token-{idx}"
+        return candidates, next_cursor
+
+    return stub, cursors_seen, call_count
+
+
+def test_enqueue_harvest_top_cited_job_rejects_invalid_inputs():
+    """Operator-supplied payloads must fail fast as PermanentError so the
+    planner job dead-letters rather than retrying garbage."""
+    service = _service()
+    with pytest.raises(PermanentError):
+        service.enqueue_harvest_top_cited_job(min_citations=-1)
+    with pytest.raises(PermanentError):
+        service.enqueue_harvest_top_cited_job(max_papers=0)
+    with pytest.raises(PermanentError):
+        service.enqueue_harvest_top_cited_job(chunk_size=0)
+    with pytest.raises(PermanentError):
+        service.enqueue_harvest_top_cited_job(chunk_size=1000)
+
+
+def test_run_harvest_top_cited_planner_batches_into_chunk_size_groups(monkeypatch):
+    """Planner reads pages from S2 and emits ``harvest_chunk`` jobs of
+    up to ``chunk_size`` arxiv ids each. The dedupe key carries the
+    first/last id + length so a retried planner doesn't fork duplicate
+    chunks."""
+    service = _service()
+    pages = [
+        [("2020.{:05d}".format(i), 200 - i) for i in range(7)],
+        [("2021.{:05d}".format(i), 100 - i) for i in range(3)],
+    ]
+    stub, cursors_seen, call_count = _fake_top_cited_pages(pages)
+    monkeypatch.setattr("paperbase.service.sources.fetch_top_cited_cs", stub)
+
+    result = service.run_harvest_top_cited(
+        min_citations=100,
+        max_papers=None,
+        chunk_size=4,
+    )
+
+    assert result["candidates_emitted"] == 10
+    assert result["pages_fetched"] == 2
+    # 10 ids / 4 per chunk → ceil = 3 chunks
+    assert result["chunks_created"] == 3
+    chunks = [j for j in service.repository.jobs.values() if j.job_type == "harvest_chunk"]
+    assert len(chunks) == 3
+    assert all(c.payload["source"] == "s2_top_cited" for c in chunks)
+    sizes = sorted(len(c.payload["arxiv_ids"]) for c in chunks)
+    assert sizes == [2, 4, 4]
+    # Pagination handed cursors back to fetch_top_cited_cs.
+    assert cursors_seen[0] is None  # first call
+    assert cursors_seen[1] == "token-0"  # second page used the prior token
+    assert call_count["n"] == 2
+
+
+def test_run_harvest_top_cited_respects_max_papers(monkeypatch):
+    """``max_papers`` caps total emitted candidates across pages and
+    stops S2 paging early so we don't fetch a third page just to throw
+    its results away."""
+    service = _service()
+    pages = [
+        [("2020.{:05d}".format(i), 200) for i in range(5)],
+        [("2021.{:05d}".format(i), 100) for i in range(5)],
+        [("2022.{:05d}".format(i), 50) for i in range(5)],
+    ]
+    stub, _cursors, call_count = _fake_top_cited_pages(pages)
+    monkeypatch.setattr("paperbase.service.sources.fetch_top_cited_cs", stub)
+
+    result = service.run_harvest_top_cited(
+        min_citations=50,
+        max_papers=7,
+        chunk_size=10,
+    )
+
+    assert result["candidates_emitted"] == 7
+    # First page = 5, second page = 5 (only first 2 used). Third page never fetched.
+    assert call_count["n"] == 2
+    assert result["pages_fetched"] == 2
+
+
+def test_run_harvest_top_cited_handles_empty_first_page(monkeypatch):
+    """Empty S2 result set → no chunks enqueued, planner completes cleanly."""
+    service = _service()
+    stub, _cursors, _calls = _fake_top_cited_pages([])
+    monkeypatch.setattr("paperbase.service.sources.fetch_top_cited_cs", stub)
+
+    result = service.run_harvest_top_cited(
+        min_citations=1_000_000,
+        max_papers=None,
+        chunk_size=50,
+    )
+
+    assert result == {"chunks_created": 0, "candidates_emitted": 0, "pages_fetched": 1}
+    chunks = [j for j in service.repository.jobs.values() if j.job_type == "harvest_chunk"]
+    assert chunks == []
+
+
+def test_run_harvest_top_cited_continues_through_empty_filtered_pages(monkeypatch):
+    """Regression for PR #50 review: ``fetch_top_cited_cs`` filters non-arxiv
+    rows client-side and may return an empty ``page`` while ``next_cursor``
+    is still set. The planner must keep paging until S2 itself signals
+    end-of-stream (next_cursor is None), not stop on the first empty
+    filtered page."""
+    from paperbase.sources import TopCitedCandidate
+
+    service = _service()
+    call_count = {"n": 0}
+
+    def stub(*, min_citations, cursor=None, page_size=1000, fields_of_study="Computer Science", timeout_seconds=30):
+        idx = call_count["n"]
+        call_count["n"] += 1
+        # Page 0: real data. Page 1: empty (all filtered out client-side)
+        # but next_cursor is still set. Page 2: more real data, then EOF.
+        if idx == 0:
+            return [
+                TopCitedCandidate(arxiv_id="2020.00001", semantic_scholar_id="s1", title="P1", citation_count=100, primary_category=None, year=2020),
+            ], "token-0"
+        if idx == 1:
+            return [], "token-1"  # empty filtered page, but more remains
+        if idx == 2:
+            return [
+                TopCitedCandidate(arxiv_id="2020.00002", semantic_scholar_id="s2", title="P2", citation_count=100, primary_category=None, year=2020),
+            ], None
+        return [], None
+
+    monkeypatch.setattr("paperbase.service.sources.fetch_top_cited_cs", stub)
+
+    result = service.run_harvest_top_cited(
+        min_citations=100,
+        max_papers=None,
+        chunk_size=50,
+    )
+
+    # Both real candidates collected — the planner did NOT stop on the
+    # empty page 1.
+    assert result["candidates_emitted"] == 2
+    assert result["pages_fetched"] == 3
+    assert call_count["n"] == 3
+
+
+def test_run_harvest_chunk_top_cited_iterates_arxiv_ids(monkeypatch):
+    """The chunk worker for ``source='s2_top_cited'`` calls
+    ``index_arxiv_paper`` once per id and counts indexed/skipped."""
+    service = _service()
+    indexed_calls: list[str] = []
+
+    def fake_index(arxiv_id, *, paper=None, force=False):
+        indexed_calls.append(arxiv_id)
+
+    monkeypatch.setattr(service, "index_arxiv_paper", fake_index)
+
+    result = service.run_harvest_chunk_top_cited(
+        arxiv_ids=["2020.00001", "2020.00002", "2020.00003"],
+        min_citations=100,
+    )
+
+    assert indexed_calls == ["2020.00001", "2020.00002", "2020.00003"]
+    assert result == {"requested": 3, "indexed": 3, "skipped": 0}
+
+
+def test_run_harvest_chunk_top_cited_swallows_per_id_permanent_errors(monkeypatch):
+    """A PermanentError on one arxiv id (e.g. paper 404 / withdrawn) must
+    not kill the whole chunk — the other ids in the batch still get
+    indexed and the chunk reports correct skip/index counts."""
+    service = _service()
+
+    def fake_index(arxiv_id, *, paper=None, force=False):
+        if arxiv_id == "2020.bad":
+            raise PermanentError("arxiv 404")
+
+    monkeypatch.setattr(service, "index_arxiv_paper", fake_index)
+
+    result = service.run_harvest_chunk_top_cited(
+        arxiv_ids=["2020.00001", "2020.bad", "2020.00003"],
+        min_citations=100,
+    )
+
+    assert result == {"requested": 3, "indexed": 2, "skipped": 1}
+
+
+def test_run_harvest_chunk_top_cited_handles_empty_payload():
+    """Empty arxiv_ids list (e.g. corrupt payload from a retry) returns
+    zero counts without raising."""
+    service = _service()
+    assert service.run_harvest_chunk_top_cited(arxiv_ids=[]) == {
+        "requested": 0,
+        "indexed": 0,
+        "skipped": 0,
+    }
+
+
+def test_default_priority_top_cited_matches_harvest_range():
+    """Top-cited planner shares priority tier 5 with harvest_range so
+    interactive ``index_paper`` (priority -10) always cuts in front,
+    and so neither bulk strategy starves the other."""
+    from paperbase.repository import default_max_attempts, default_priority
+
+    assert default_priority("harvest_top_cited") == 5
+    assert default_priority("index_paper") == -10
+    assert default_priority("harvest_range") == default_priority("harvest_top_cited")
+    assert default_max_attempts("harvest_top_cited") == 3
+
+
+def test_fetch_top_cited_cs_validates_inputs():
+    """Sources-side guards on min_citations and page_size — these errors
+    surface as ValueError rather than PermanentError because the
+    primitive is meant to be called with already-validated inputs from
+    the planner."""
+    from paperbase.sources import fetch_top_cited_cs
+
+    with pytest.raises(ValueError):
+        fetch_top_cited_cs(min_citations=-1)
+    with pytest.raises(ValueError):
+        fetch_top_cited_cs(min_citations=10, page_size=0)
+    with pytest.raises(ValueError):
+        fetch_top_cited_cs(min_citations=10, page_size=1001)

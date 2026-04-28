@@ -285,6 +285,10 @@ class StubApiService:
         self.calls.append(("enqueue_harvest_range_job", kwargs))
         return _job("harvest_range", payload=kwargs)
 
+    def enqueue_harvest_top_cited_job(self, **kwargs):
+        self.calls.append(("enqueue_harvest_top_cited_job", kwargs))
+        return _job("harvest_top_cited", payload=kwargs)
+
     def retry_dead_job(self, job_id: str):
         self.calls.append(("retry_dead_job", job_id))
         if job_id == "job_nonexistent":
@@ -1469,6 +1473,53 @@ def test_harvest_endpoint_requires_bearer_token(api_client):
     }
     missing = client.post("/v1/index/harvest", json=body)
     invalid = client.post("/v1/index/harvest", headers={"Authorization": "Bearer wrong"}, json=body)
+
+    assert missing.status_code == 401
+    assert invalid.status_code == 403
+
+
+def test_harvest_top_cited_endpoint_delegates_to_service(api_client):
+    """``POST /v1/index/harvest-top-cited`` forwards request fields to
+    ``service.enqueue_harvest_top_cited_job`` and returns the planner job."""
+    client, service, settings = api_client
+    headers = {"Authorization": f"Bearer {settings.api_key}"}
+
+    response = client.post(
+        "/v1/index/harvest-top-cited",
+        headers=headers,
+        json={
+            "min_citations": 100,
+            "max_papers": 5000,
+            "chunk_size": 25,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["job_type"] == "harvest_top_cited"
+    enqueue_calls = [c for c in service.calls if c[0] == "enqueue_harvest_top_cited_job"]
+    assert len(enqueue_calls) == 1
+    kw = enqueue_calls[0][1]
+    assert kw["min_citations"] == 100
+    assert kw["max_papers"] == 5000
+    assert kw["chunk_size"] == 25
+    # The unenforced ``categories`` knob was dropped per PR #50 review —
+    # if the endpoint silently re-introduces it the kwargs assertion above
+    # would have to grow, which is enough of a signal.
+    assert "categories" not in kw
+
+
+def test_harvest_top_cited_endpoint_requires_bearer_token(api_client):
+    """Bulk harvest is admin-only. No auth → 401 / invalid auth → 403."""
+    client, _, _ = api_client
+
+    body = {"min_citations": 100}
+    missing = client.post("/v1/index/harvest-top-cited", json=body)
+    invalid = client.post(
+        "/v1/index/harvest-top-cited",
+        headers={"Authorization": "Bearer wrong"},
+        json=body,
+    )
 
     assert missing.status_code == 401
     assert invalid.status_code == 403

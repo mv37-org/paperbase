@@ -177,6 +177,93 @@ def get_paper_details(arxiv_id: str) -> PaperMetadata | None:
 
 
 @dataclass(slots=True)
+class TopCitedCandidate:
+    """One arxiv-resolved row from S2 ``/paper/search/bulk`` sorted by citations."""
+
+    arxiv_id: str
+    semantic_scholar_id: str
+    title: str
+    citation_count: int
+    primary_category: str | None
+    year: int | None
+
+
+def fetch_top_cited_cs(
+    *,
+    min_citations: int,
+    cursor: str | None = None,
+    page_size: int = 1000,
+    fields_of_study: str = "Computer Science",
+    timeout_seconds: int = 30,
+) -> tuple[list[TopCitedCandidate], str | None]:
+    """Page S2 ``/paper/search/bulk`` for top-cited CS papers with arxiv ids.
+
+    Returns ``(candidates, next_token)``. ``next_token`` is ``None`` when the
+    bulk response did not include one (last page). Only papers with both an
+    arxiv id and a citation count >= ``min_citations`` are returned; everything
+    else is filtered out client-side.
+
+    Sorted by ``citationCount:desc`` so paging walks from the most-cited papers
+    downward — the planner stops when it has enough or when ``next_token`` is
+    exhausted.
+    """
+    if min_citations < 0:
+        raise ValueError(f"min_citations must be >= 0, got {min_citations}")
+    if page_size < 1 or page_size > 1000:
+        raise ValueError(f"page_size must be in [1, 1000], got {page_size}")
+    # S2 bulk search rejects unbounded queries with "too many hits" (>10M cap)
+    # — passing minCitationCount server-side narrows the result set under the
+    # cap AND saves bandwidth vs filtering client-side. Falls back to a tiny
+    # floor of 1 when caller asks for "all" so the bulk endpoint still accepts
+    # the request.
+    server_min = max(1, min_citations) if min_citations > 0 else 1
+    params: dict[str, str | int] = {
+        "fieldsOfStudy": fields_of_study,
+        "minCitationCount": server_min,
+        "fields": "externalIds,title,citationCount,year,s2FieldsOfStudy",
+        "sort": "citationCount:desc",
+        "limit": page_size,
+    }
+    if cursor:
+        params["token"] = cursor
+    response = SESSION.get(
+        f"{S2_API}/paper/search/bulk",
+        params=params,
+        timeout=timeout_seconds,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    raw = payload.get("data") or []
+    next_token = payload.get("token")
+    out: list[TopCitedCandidate] = []
+    for item in raw:
+        external_ids = item.get("externalIds") or {}
+        arxiv_id = external_ids.get("ArXiv")
+        if not arxiv_id:
+            continue
+        citation_count = item.get("citationCount") or 0
+        if citation_count < min_citations:
+            continue
+        s2_fields = item.get("s2FieldsOfStudy") or []
+        primary_category: str | None = None
+        if s2_fields and isinstance(s2_fields, list):
+            first = s2_fields[0]
+            if isinstance(first, dict):
+                primary_category = first.get("category")
+        out.append(
+            TopCitedCandidate(
+                arxiv_id=canonical_arxiv_id(arxiv_id),
+                semantic_scholar_id=item.get("paperId") or "",
+                title=item.get("title") or "",
+                citation_count=citation_count,
+                primary_category=primary_category,
+                year=item.get("year"),
+            )
+        )
+    return out, next_token
+
+
+@dataclass(slots=True)
 class EnrichmentOutcome:
     """Result of a Semantic Scholar enrichment pass.
 
