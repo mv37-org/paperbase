@@ -680,16 +680,15 @@ def harvest_top_cited(
     *,
     min_citations: int,
     max_papers: int | None,
-    categories: list[str],
     chunk_size: int,
 ) -> int:
     """Queue a quality-curated harvest by Semantic Scholar citationCount.
 
     The planner streams S2's bulk-search endpoint sorted by
-    ``citationCount:desc``, filters to arxiv-linked papers in the chosen
-    AI/ML categories, and enqueues ``harvest_chunk`` jobs in batches of
-    ``chunk_size`` arxiv ids. Chunks run at the same low priority as the
-    date-range harvest so on-demand ``index_paper`` always cuts in front.
+    ``citationCount:desc``, filters to arxiv-linked papers, and enqueues
+    ``harvest_chunk`` jobs in batches of ``chunk_size`` arxiv ids.
+    Chunks run at the same low priority as the date-range harvest so
+    on-demand ``index_paper`` always cuts in front.
 
     ``min_citations=100`` is a good first run (~106k arxiv-linked CS
     papers); drop to ~25 for full ~500k-paper coverage.
@@ -702,7 +701,6 @@ def harvest_top_cited(
         job = service.enqueue_harvest_top_cited_job(
             min_citations=min_citations,
             max_papers=max_papers,
-            categories=categories,
             chunk_size=chunk_size,
         )
     except PermanentError as exc:
@@ -711,7 +709,7 @@ def harvest_top_cited(
     print(
         f"Queued harvest_top_cited {job.job_id}: "
         f"min_citations={min_citations}, max_papers={max_papers}, "
-        f"categories={len(categories)}, chunk_size={chunk_size}"
+        f"chunk_size={chunk_size}"
     )
     return 0
 
@@ -873,14 +871,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Stop after this many candidates; omit for full sweep until S2 is exhausted.",
     )
     top_cited_parser.add_argument(
-        "--categories",
-        default=None,
-        help=(
-            "Comma-separated arxiv categories to keep (post-filter at index time). "
-            "Defaults to the configured AI/ML category list."
-        ),
-    )
-    top_cited_parser.add_argument(
         "--chunk-size",
         type=int,
         default=50,
@@ -940,14 +930,9 @@ def main(argv: list[str] | None = None) -> int:
             chunk_months=args.chunk_months,
         )
     if args.command == "harvest-top-cited":
-        if args.categories:
-            categories = [cat.strip() for cat in args.categories.split(",") if cat.strip()]
-        else:
-            categories = list(_settings().arxiv_categories)
         return harvest_top_cited(
             min_citations=args.min_citations,
             max_papers=args.max_papers,
-            categories=categories,
             chunk_size=args.chunk_size,
         )
 

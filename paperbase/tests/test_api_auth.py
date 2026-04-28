@@ -1490,7 +1490,6 @@ def test_harvest_top_cited_endpoint_delegates_to_service(api_client):
         json={
             "min_citations": 100,
             "max_papers": 5000,
-            "categories": ["cs.LG", "cs.CL"],
             "chunk_size": 25,
         },
     )
@@ -1503,27 +1502,11 @@ def test_harvest_top_cited_endpoint_delegates_to_service(api_client):
     kw = enqueue_calls[0][1]
     assert kw["min_citations"] == 100
     assert kw["max_papers"] == 5000
-    assert kw["categories"] == ["cs.LG", "cs.CL"]
     assert kw["chunk_size"] == 25
-
-
-def test_harvest_top_cited_endpoint_defaults_to_configured_ai_categories(api_client):
-    """Omitting ``categories`` defers to the configured AI/ML defaults
-    (same product scope guard as ``/v1/index/harvest``)."""
-    client, service, settings = api_client
-    headers = {"Authorization": f"Bearer {settings.api_key}"}
-
-    response = client.post(
-        "/v1/index/harvest-top-cited",
-        headers=headers,
-        json={"min_citations": 100},
-    )
-    assert response.status_code == 200
-    enqueue_calls = [c for c in service.calls if c[0] == "enqueue_harvest_top_cited_job"]
-    assert len(enqueue_calls) == 1
-    used = enqueue_calls[0][1]["categories"]
-    assert used == list(settings.arxiv_categories)
-    assert "cs.LG" in used
+    # The unenforced ``categories`` knob was dropped per PR #50 review —
+    # if the endpoint silently re-introduces it the kwargs assertion above
+    # would have to grow, which is enough of a signal.
+    assert "categories" not in kw
 
 
 def test_harvest_top_cited_endpoint_requires_bearer_token(api_client):

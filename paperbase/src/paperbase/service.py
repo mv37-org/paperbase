@@ -4186,17 +4186,22 @@ class PaperbaseService:
         *,
         min_citations: int = 100,
         max_papers: int | None = None,
-        categories: list[str] | None = None,
         chunk_size: int = 50,
     ) -> JobResponse:
         """Queue a ``harvest_top_cited`` planner job.
 
         Planner paginates Semantic Scholar's bulk search ordered by
-        ``citationCount:desc``, filters to arxiv-linked papers in the
-        target categories, and enqueues ``harvest_chunk`` jobs (one per
-        ``chunk_size`` arxiv ids) with ``source='s2_top_cited'``. Workers
-        index each id; existing priority + retry + dedupe machinery from
-        the date-range harvest applies unchanged.
+        ``citationCount:desc``, filters to arxiv-linked papers, and
+        enqueues ``harvest_chunk`` jobs (one per ``chunk_size`` arxiv
+        ids) with ``source='s2_top_cited'``. Workers index each id;
+        existing priority + retry + dedupe machinery from the date-range
+        harvest applies unchanged.
+
+        ``categories`` is intentionally absent: S2's bulk search does
+        not surface arxiv categories, so any pre-index filter would
+        require a separate per-candidate arxiv lookup that defeats the
+        bulk-fetch advantage. A future PR can add the gate once we have
+        a cheaper signal — see PR #50 review for the rationale.
         """
         if min_citations < 0:
             raise PermanentError("min_citations must be >= 0")
@@ -4204,15 +4209,11 @@ class PaperbaseService:
             raise PermanentError("max_papers must be >= 1 when provided")
         if chunk_size < 1 or chunk_size > 500:
             raise PermanentError("chunk_size must be in [1, 500]")
-        resolved_categories = list(categories) if categories else list(self.settings.arxiv_categories)
-        if not resolved_categories:
-            raise PermanentError("categories must not be empty")
         job = self.repository.create_job(
             "harvest_top_cited",
             {
                 "min_citations": int(min_citations),
                 "max_papers": max_papers,
-                "categories": resolved_categories,
                 "chunk_size": int(chunk_size),
             },
         )
@@ -4223,7 +4224,6 @@ class PaperbaseService:
                 "job_id": job.job_id,
                 "min_citations": min_citations,
                 "max_papers": max_papers,
-                "category_count": len(resolved_categories),
                 "chunk_size": chunk_size,
             },
         )
@@ -4234,7 +4234,6 @@ class PaperbaseService:
         *,
         min_citations: int,
         max_papers: int | None,
-        categories: list[str],
         chunk_size: int,
         harvest_id: str | None = None,
     ) -> dict[str, int]:
@@ -4246,11 +4245,11 @@ class PaperbaseService:
         ``index_arxiv_paper`` per id. Per-id ``PermanentError`` (e.g. a
         404 on arxiv) is swallowed so one bad id doesn't kill the chunk.
 
-        Per-paper category filtering happens at index time when the arxiv
-        feed gives us the full ``primary_category`` — bulk search doesn't
-        expose it. The ``categories`` list is therefore validated in the
-        planner (must be non-empty) and persisted to the chunk payload so
-        a future tightening of the gate has somewhere to read it.
+        Pagination contract (PR #50 review): ``fetch_top_cited_cs`` may
+        return an empty ``page`` while ``next_cursor`` is still set,
+        because non-arxiv rows are filtered out client-side. The planner
+        must keep paging until S2 itself signals end-of-stream (i.e.
+        ``next_cursor is None``) — never break on an empty filtered page.
         """
         if min_citations < 0:
             raise PermanentError("min_citations must be >= 0")
@@ -4258,8 +4257,6 @@ class PaperbaseService:
             raise PermanentError("max_papers must be >= 1 when provided")
         if chunk_size < 1 or chunk_size > 500:
             raise PermanentError("chunk_size must be in [1, 500]")
-        if not categories:
-            raise PermanentError("categories must not be empty")
 
         run_harvest_id = harvest_id or new_id("harvest")
         cursor: str | None = None
@@ -4278,7 +4275,6 @@ class PaperbaseService:
                     "harvest_id": run_harvest_id,
                     "source": "s2_top_cited",
                     "arxiv_ids": list(pending_batch),
-                    "categories": list(categories),
                     "min_citations": int(min_citations),
                 },
                 dedupe_key=(
@@ -4297,8 +4293,6 @@ class PaperbaseService:
                 cursor=cursor,
             )
             pages_fetched += 1
-            if not page:
-                break
             for candidate in page:
                 if max_papers is not None and candidates_emitted >= max_papers:
                     break
@@ -4306,6 +4300,10 @@ class PaperbaseService:
                 candidates_emitted += 1
                 if len(pending_batch) >= chunk_size:
                     _flush_batch()
+            # Keep paging until S2 itself signals last page. An empty
+            # filtered ``page`` does NOT mean end-of-stream — bulk search
+            # often returns pages with all non-arxiv rows that get
+            # filtered to nothing client-side.
             if next_cursor is None:
                 break
             cursor = next_cursor
@@ -4333,7 +4331,6 @@ class PaperbaseService:
         self,
         *,
         arxiv_ids: list[str],
-        categories: list[str] | None = None,
         min_citations: int = 0,
         harvest_id: str | None = None,
     ) -> dict[str, int]:
@@ -4342,10 +4339,9 @@ class PaperbaseService:
         Iterates ``arxiv_ids`` and calls ``index_arxiv_paper`` per id.
         Per-id ``PermanentError`` is swallowed so a 404 doesn't fail the
         whole chunk; the retry policy still catches transient failures
-        on the chunk as a whole. ``categories`` and ``min_citations`` are
-        carried for observability / future filtering and are not used to
-        gate ingestion in v1 (server-side bulk search already filtered
-        by citation count, and arxiv feed-time gating is a follow-up).
+        on the chunk as a whole. ``min_citations`` is carried for
+        observability — server-side bulk search already filtered by
+        citation count.
         """
         if not arxiv_ids:
             return {"requested": 0, "indexed": 0, "skipped": 0}
@@ -4449,7 +4445,6 @@ class PaperbaseService:
                     # job-type wiring.
                     self.run_harvest_chunk_top_cited(
                         arxiv_ids=list(job.payload.get("arxiv_ids", [])),
-                        categories=list(job.payload.get("categories") or []),
                         min_citations=int(job.payload.get("min_citations", 0)),
                         harvest_id=str(job.payload.get("harvest_id") or job.job_id),
                     )
@@ -4468,7 +4463,6 @@ class PaperbaseService:
                 self.run_harvest_top_cited(
                     min_citations=int(job.payload.get("min_citations", 0)),
                     max_papers=job.payload.get("max_papers"),
-                    categories=list(job.payload.get("categories") or self.settings.arxiv_categories),
                     chunk_size=int(job.payload.get("chunk_size", 50)),
                     harvest_id=str(job.payload.get("harvest_id") or job.job_id),
                 )
