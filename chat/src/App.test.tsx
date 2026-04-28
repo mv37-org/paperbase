@@ -895,6 +895,7 @@ describe("App", () => {
     });
     expect(screen.getByRole("button", { name: "Add python file" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Add notes" })).toBeTruthy();
+    expect(screen.queryByTestId("thread-debug-strip")).toBeNull();
 
     fireEvent.click(screen.getByLabelText("Open empty state project picker"));
 

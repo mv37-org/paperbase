@@ -250,6 +250,10 @@ _PROJECT_CODE_TARGET_RE = re.compile(
 )
 _PROJECT_CODE_PATH_HINT_RE = re.compile(r"(?:^|[\s`'\"])([A-Za-z0-9_./-]+\.py)(?:$|[\s`'\",.:;!?])")
 _PROJECT_CODE_WRITE_TOOL_RE = re.compile(r"\b(project_(?:touch|edit|delete))\b", re.IGNORECASE)
+_PROJECT_CODE_SNIPPET_RE = re.compile(
+    r"\b(snippet|example|sample|template|starter|boilerplate)\b",
+    re.IGNORECASE,
+)
 _PROJECT_CODE_CONFIRMATION_RE = re.compile(
     r"^\s*(?:"
     r"yes|yeah|yep|yup|sure|ok(?:ay)?|please|please do|go ahead|do it|do that|"
@@ -270,6 +274,7 @@ _PROJECT_CODE_FAILURE_FOLLOWUP_RE = re.compile(
     r"\b(wasn't able to persist code|no project file was changed|tell me the exact file|please retry)\b",
     re.IGNORECASE,
 )
+_PYTHON_FENCE_RE = re.compile(r"(?ms)(```|~~~)\s*(?:python|py)\s*\n.+?\n\1")
 
 _INLINE_SOURCE_ID_RE = re.compile(r"\[(S\d+)\]")
 _PYTHON_FILENAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -886,6 +891,8 @@ def _question_has_project_code_intent(question: str) -> bool:
         _PROJECT_CODE_ACTION_RE.search(question) or any(token in question.lower() for token in ("read", "edit", "run"))
     ):
         return True
+    if _PROJECT_CODE_SNIPPET_RE.search(question) and _PROJECT_CODE_TARGET_RE.search(question):
+        return True
     return bool(_PROJECT_CODE_ACTION_RE.search(question) and _PROJECT_CODE_TARGET_RE.search(question))
 
 
@@ -983,6 +990,8 @@ def _should_require_project_code_write(question: str, *, thread: ChatThreadRespo
         return _pending_project_code_followup_requires_write(thread)
     if _PROJECT_CODE_WRITE_TOOL_RE.search(question):
         return True
+    if _PROJECT_CODE_SNIPPET_RE.search(question) and _PROJECT_CODE_TARGET_RE.search(question):
+        return True
     return bool(_PROJECT_CODE_WRITE_ACTION_RE.search(question) and _PROJECT_CODE_TARGET_RE.search(question))
 
 
@@ -996,6 +1005,19 @@ def _project_code_tool_use_completed_write(tool_use: dict[str, Any], *, is_error
             return False
         return bool(str(tool_input.get("content") or "").strip())
     return tool_name in {"project_edit", "project_delete"}
+
+
+def _project_code_tool_use_completed_read(tool_use: dict[str, Any], *, is_error: bool) -> bool:
+    if is_error:
+        return False
+    tool_name = str(tool_use.get("name") or "").strip().lower()
+    return tool_name == "project_read_file"
+
+
+def _answer_contains_python_snippet(answer: str) -> bool:
+    if not answer.strip():
+        return False
+    return bool(_PYTHON_FENCE_RE.search(answer))
 
 
 def _project_code_write_retry_prompt() -> str:
@@ -1012,6 +1034,20 @@ def _project_code_write_failure_answer() -> str:
         "I wasn't able to persist code into a managed project Python file in this turn, so no project file was changed. "
         "Please retry, or tell me the exact file you want updated."
     )
+
+
+def _project_code_answer_requires_persisted_python(
+    answer: str,
+    *,
+    thread: ChatThreadResponse | None,
+    project_write_completed: bool,
+    project_read_completed: bool,
+) -> bool:
+    if thread is None or not thread.project_id:
+        return False
+    if not _answer_contains_python_snippet(answer):
+        return False
+    return not (project_write_completed or project_read_completed)
 
 
 def _should_offer_chat_tools(question: str, request: SendChatMessageRequest, *, thread: ChatThreadResponse | None) -> bool:
@@ -1154,6 +1190,7 @@ class ChatToolRoundsResult:
     citation_registry: ChatCitationRegistry
     require_project_code_write: bool = False
     project_write_completed: bool = False
+    project_read_completed: bool = False
 
 
 class PaperbaseService:
@@ -2494,7 +2531,7 @@ class PaperbaseService:
                 "Read files before editing them. Prefer small PyTorch-first modules and scripts. "
                 "If the target file already exists, update it with project_edit instead of calling project_touch on the same path. "
                 "If the target file exists and is empty, you may populate it with project_edit using old_string=\"\". "
-                "When a distinct code unit or reusable snippet is needed, put it in a project Python file so it shows up in the project's Code section instead of living only in chat text. "
+                "Every Python code snippet you generate or revise must live in a managed project Python file in the same turn instead of existing only in chat text. "
                 "Structure new files as importable modules with named functions, classes, or constants that other files can import; avoid putting all logic in top-level script bodies. "
                 "Keep entrypoint-only behavior under if __name__ == '__main__': when needed. "
                 "Use exact-match edits with project_edit, choose unique snippets, and set replace_all=true only when every match should change. "
@@ -2512,6 +2549,12 @@ class PaperbaseService:
         return " ".join(parts) + self._project_prompt_suffix(thread)
 
     def _chat_answer_system_prompt(self, *, thread: ChatThreadResponse, has_evidence_sources: bool) -> str:
+        project_code_suffix = (
+            " In project threads, do not leave fresh Python code only in chat text. "
+            "Persist generated or revised Python into managed project files first, then reference the saved repo path succinctly instead of pasting large unsaved code blocks."
+            if thread.project_id
+            else ""
+        )
         if not has_evidence_sources:
             return (
                 "You are Paperbase Chat. Respond naturally and helpfully in strict GitHub-flavored markdown. "
@@ -2521,6 +2564,7 @@ class PaperbaseService:
                 "and do not bring up papers or research context unless the user explicitly asks for them. "
                 "Treat any citations that appeared in earlier turns as historical context only, not as active sources for this reply. "
                 "For casual turns such as greetings or small talk, answer briefly and conversationally."
+                + project_code_suffix
                 + self._project_prompt_suffix(thread)
             )
         return (
@@ -2532,6 +2576,7 @@ class PaperbaseService:
             "If the user asked for related reading, recommendations, or references, prefer a compact bullet list with paper title plus link before any longer discussion. "
             "Only cite source ids inline like [S1] when those ids came from evidence-bearing tool results such as section hits, file reads, figure captions, tables, or uploaded-document excerpts. "
             "Do not cite broad search results or metadata-only results. If the gathered sources are insufficient, say so plainly."
+            + project_code_suffix
             + self._project_prompt_suffix(thread)
         )
 
@@ -3518,9 +3563,10 @@ class PaperbaseService:
         user: BrowserUser,
         citation_registry: ChatCitationRegistry,
         project_id: str | None = None,
-    ) -> tuple[list[dict[str, Any]], bool]:
+    ) -> tuple[list[dict[str, Any]], bool, bool]:
         blocks: list[dict[str, Any]] = []
         project_write_completed = False
+        project_read_completed = False
         for index, tool_use in enumerate(tool_uses):
             tool_use_id = str(tool_use.get("id") or "").strip()
             if not tool_use_id:
@@ -3539,6 +3585,10 @@ class PaperbaseService:
                 {"name": tool_name, "input": tool_input},
                 is_error=is_error,
             )
+            project_read_completed = project_read_completed or _project_code_tool_use_completed_read(
+                {"name": tool_name, "input": tool_input},
+                is_error=is_error,
+            )
             block = {
                 "type": "tool_result",
                 "tool_use_id": tool_use_id,
@@ -3547,7 +3597,7 @@ class PaperbaseService:
             if is_error:
                 block["is_error"] = True
             blocks.append(block)
-        return blocks, project_write_completed
+        return blocks, project_write_completed, project_read_completed
 
     def _run_chat_tool_rounds(
         self,
@@ -3578,6 +3628,7 @@ class PaperbaseService:
             thread=prepared.thread,
         )
         project_write_tool_used = False
+        project_read_tool_used = False
         for round_index in range(_CHAT_TOOL_MAX_ROUNDS):
             must_use_tool_this_round = (round_index == 0 and force_first_tool) or (
                 require_project_code_write and not project_write_tool_used
@@ -3605,13 +3656,14 @@ class PaperbaseService:
                     context.messages.append({"role": "user", "content": _project_code_write_retry_prompt()})
                     continue
                 break
-            blocks, completed_write_this_round = self._tool_result_blocks(
+            blocks, completed_write_this_round, completed_read_this_round = self._tool_result_blocks(
                 tool_uses=tool_uses,
                 user=user,
                 citation_registry=citation_registry,
                 project_id=prepared.thread.project_id,
             )
             project_write_tool_used = project_write_tool_used or completed_write_this_round
+            project_read_tool_used = project_read_tool_used or completed_read_this_round
             context.messages.append({"role": "assistant", "content": assistant_content})
             context.messages.append(
                 {
@@ -3624,6 +3676,7 @@ class PaperbaseService:
             citation_registry=citation_registry,
             require_project_code_write=require_project_code_write,
             project_write_completed=project_write_tool_used,
+            project_read_completed=project_read_tool_used,
         )
 
     def _run_chat_tool_rounds_stream(
@@ -3655,6 +3708,7 @@ class PaperbaseService:
             thread=prepared.thread,
         )
         project_write_tool_used = False
+        project_read_tool_used = False
         for round_index in range(_CHAT_TOOL_MAX_ROUNDS):
             must_use_tool_this_round = (round_index == 0 and force_first_tool) or (
                 require_project_code_write and not project_write_tool_used
@@ -3688,6 +3742,7 @@ class PaperbaseService:
             context.messages.append({"role": "assistant", "content": assistant_content})
             blocks: list[dict[str, Any]] = []
             completed_write_this_round = False
+            completed_read_this_round = False
             for index, tool_use in enumerate(tool_uses):
                 tool_use_id = str(tool_use.get("id") or "").strip()
                 if not tool_use_id:
@@ -3715,6 +3770,10 @@ class PaperbaseService:
                     {"name": tool_name, "input": tool_input},
                     is_error=is_error,
                 )
+                completed_read_this_round = completed_read_this_round or _project_code_tool_use_completed_read(
+                    {"name": tool_name, "input": tool_input},
+                    is_error=is_error,
+                )
                 yield (
                     "tool_done",
                     {
@@ -3733,12 +3792,14 @@ class PaperbaseService:
                     block["is_error"] = True
                 blocks.append(block)
             project_write_tool_used = project_write_tool_used or completed_write_this_round
+            project_read_tool_used = project_read_tool_used or completed_read_this_round
             context.messages.append({"role": "user", "content": blocks})
         return ChatToolRoundsResult(
             context=context,
             citation_registry=citation_registry,
             require_project_code_write=require_project_code_write,
             project_write_completed=project_write_tool_used,
+            project_read_completed=project_read_tool_used,
         )
 
     def _api_key_required_response(
@@ -3829,6 +3890,13 @@ class PaperbaseService:
             system_prompt=answer_system_prompt,
         )
         answer = _sanitize_inline_citations(_extract_message_text(answer_payload), current_turn_citations)
+        if _project_code_answer_requires_persisted_python(
+            answer,
+            thread=prepared.thread,
+            project_write_completed=tool_rounds.project_write_completed,
+            project_read_completed=tool_rounds.project_read_completed,
+        ):
+            answer = _project_code_write_failure_answer()
         assistant_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
             thread_id=thread_id,
             role="assistant",
@@ -3963,9 +4031,17 @@ class PaperbaseService:
             )
             return
 
+        final_text = _sanitize_inline_citations("".join(chunks).strip(), current_turn_citations)
+        if _project_code_answer_requires_persisted_python(
+            final_text,
+            thread=prepared.thread,
+            project_write_completed=tool_rounds_result.project_write_completed,
+            project_read_completed=tool_rounds_result.project_read_completed,
+        ):
+            final_text = _project_code_write_failure_answer()
         final_message = self.repository.update_chat_message(  # type: ignore[attr-defined]
             assistant_message.message_id,
-            content_markdown=_sanitize_inline_citations("".join(chunks).strip(), current_turn_citations),
+            content_markdown=final_text,
             citations=[citation.model_dump() for citation in current_turn_citations],
             status="completed",
         )

@@ -1847,10 +1847,85 @@ def test_project_chat_tools_are_advertised_for_coding_turns(browser_service):
     assert "If the target file already exists, update it with project_edit" in prompt
     assert 'old_string=""' in prompt
     assert "do not stop tool use until the relevant managed project Python files have actually been created or updated" in prompt
+    assert "Every Python code snippet you generate or revise must live in a managed project Python file" in prompt
     assert "Act like a careful ML engineer and researcher maintaining a real project repository" in prompt
     assert "Treat project files as durable research artifacts" in prompt
     assert "If you are unsure whether a file truly needs deletion, keep it and edit or replace it instead" in prompt
     assert "Do not create a minimal example, scratch file, or throwaway file and then delete it in the same turn" in prompt
+
+
+def test_project_snippet_request_forces_tools_and_persists_file():
+    class ProjectSnippetChatModel(FakeChatModel):
+        def create_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+            self.create_calls.append(
+                {
+                    "api_key": api_key,
+                    "messages": messages,
+                    "system_prompt": system_prompt,
+                    "tools": tools,
+                    "tool_choice": tool_choice,
+                }
+            )
+            if tools:
+                return {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_touch_file",
+                            "name": "project_touch",
+                            "input": {
+                                "repo_path": "src/csv_loader.py",
+                                "content": "import csv\n\n\ndef load_rows(path: str) -> list[dict[str, str]]:\n    with open(path, newline=\"\", encoding=\"utf-8\") as handle:\n        return list(csv.DictReader(handle))\n",
+                            },
+                        }
+                    ],
+                    "stop_reason": "tool_use",
+                }
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Saved the snippet to `src/csv_loader.py`.",
+                    }
+                ],
+                "stop_reason": "end_turn",
+            }
+
+    chat_model = ProjectSnippetChatModel()
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=chat_model,
+        github_repo_manager=FakeGitHubRepoManager(),
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="project-snippet@example.com", password="topsecret123", display_name="Project Snippet")
+    )
+    assert session.user is not None
+    _connect_github(service, session.user)
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="Project chat"))
+
+    response = service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="Give me a Python snippet that loads CSV rows into dictionaries"),
+    )
+
+    saved_file = service.repository.get_project_python_file_by_path(  # type: ignore[attr-defined]
+        user_id=session.user.user_id,
+        project_id=thread.project_id,
+        repo_path="src/csv_loader.py",
+    )
+    assert response.assistant_message is not None
+    assert saved_file is not None
+    assert chat_model.create_calls[0]["tool_choice"] == {"type": "any"}
 
 
 def test_project_code_turn_forces_tools_until_a_write_occurs():
@@ -2159,6 +2234,136 @@ def test_project_code_turn_failed_write_returns_backend_failure_message():
     assert saved_file is not None
     assert saved_file.content == ""
     assert len(chat_model.create_calls) == 4
+
+
+def test_project_thread_replaces_unsaved_python_answer_with_failure_message():
+    class UnsavedPythonAnswerChatModel(FakeChatModel):
+        def create_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+            self.create_calls.append(
+                {
+                    "api_key": api_key,
+                    "messages": messages,
+                    "system_prompt": system_prompt,
+                    "tools": tools,
+                    "tool_choice": tool_choice,
+                }
+            )
+            assert tools is None
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "```python\ndef recurse(items):\n    return items\n```",
+                    }
+                ],
+                "stop_reason": "end_turn",
+            }
+
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=UnsavedPythonAnswerChatModel(),
+        github_repo_manager=FakeGitHubRepoManager(),
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="unsaved-python@example.com", password="topsecret123", display_name="Unsaved Python")
+    )
+    assert session.user is not None
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="Project chat"))
+
+    response = service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="Explain recursion briefly"),
+    )
+
+    assert response.assistant_message is not None
+    assert response.assistant_message.content_markdown == (
+        "I wasn't able to persist code into a managed project Python file in this turn, so no project file was changed. "
+        "Please retry, or tell me the exact file you want updated."
+    )
+
+
+def test_project_thread_allows_python_answer_after_reading_existing_file():
+    class ReadOnlyPythonAnswerChatModel(FakeChatModel):
+        def create_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+            self.create_calls.append(
+                {
+                    "api_key": api_key,
+                    "messages": messages,
+                    "system_prompt": system_prompt,
+                    "tools": tools,
+                    "tool_choice": tool_choice,
+                }
+            )
+            if tools:
+                return {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_read_file",
+                            "name": "project_read_file",
+                            "input": {
+                                "repo_path": "src/train.py",
+                            },
+                        }
+                    ],
+                    "stop_reason": "tool_use",
+                }
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Here is `src/train.py`:\n\n```python\ndef train():\n    return 1\n```",
+                    }
+                ],
+                "stop_reason": "end_turn",
+            }
+
+    chat_model = ReadOnlyPythonAnswerChatModel()
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=chat_model,
+        github_repo_manager=FakeGitHubRepoManager(),
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="read-code@example.com", password="topsecret123", display_name="Read Code")
+    )
+    assert session.user is not None
+    _connect_github(service, session.user)
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="Project chat"))
+    service.create_project_python_file(
+        session.user,
+        thread.project_id,
+        repo_path="src/train.py",
+        content="def train():\n    return 1\n",
+    )
+
+    response = service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="Show me src/train.py"),
+    )
+
+    assert response.assistant_message is not None
+    assert response.assistant_message.content_markdown == (
+        "Here is `src/train.py`:\n\n```python\ndef train():\n    return 1\n```"
+    )
 
 
 def test_project_code_confirmation_turn_inherits_tool_context():
@@ -3793,6 +3998,47 @@ def test_browser_chat_stream_failed_project_write_emits_backend_failure(browser_
     event_names = [event_name for event_name, _ in events]
     assert "assistant_start" in event_names
     assert event_names[-1] == "done"
+    assert events[-1][1]["assistant_message"]["content_markdown"] == (
+        "I wasn't able to persist code into a managed project Python file in this turn, so no project file was changed. "
+        "Please retry, or tell me the exact file you want updated."
+    )
+    refreshed = client.get(f"/v1/browser/chats/{thread_id}").json()
+    assert refreshed["messages"][-1]["content_markdown"] == events[-1][1]["assistant_message"]["content_markdown"]
+
+    app.dependency_overrides.clear()
+
+
+def test_browser_chat_stream_replaces_unsaved_python_answer_with_failure(browser_service):
+    service, _, chat_model = browser_service
+    app.dependency_overrides[get_service] = lambda: service
+    client = TestClient(app)
+
+    signup = client.post(
+        "/v1/browser/auth/signup",
+        json={"email": "stream-unsaved-python@example.com", "password": "topsecret123", "display_name": "Stream Unsaved Python"},
+    )
+    assert signup.status_code == 200
+    csrf_headers = {"X-Paperbase-CSRF": signup.json()["csrf_token"]}
+    chat_model.stream_chunks = [
+        "```python\n",
+        "def recurse(items):\n",
+        "    return items\n",
+        "```",
+    ]
+
+    thread = client.post("/v1/browser/chats", json={"title": "New chat"}, headers=csrf_headers).json()
+    thread_id = thread["thread_id"]
+
+    with client.stream(
+        "POST",
+        f"/v1/browser/chats/{thread_id}/messages/stream",
+        json={"content": "Explain recursion briefly", "tag_filters": []},
+        headers=csrf_headers,
+    ) as response:
+        assert response.status_code == 200
+        events = _parse_sse_events("".join(response.iter_text()))
+
+    assert events[-1][0] == "done"
     assert events[-1][1]["assistant_message"]["content_markdown"] == (
         "I wasn't able to persist code into a managed project Python file in this turn, so no project file was changed. "
         "Please retry, or tell me the exact file you want updated."

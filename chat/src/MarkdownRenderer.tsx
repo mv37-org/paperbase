@@ -1,6 +1,8 @@
 import { Children, isValidElement, type ReactNode } from "react";
+import rehypeKatex from "rehype-katex";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
 
 import { CodeSnippet, flattenCodeChildren } from "./CodeSnippet";
 
@@ -223,7 +225,10 @@ export function MarkdownRenderer({
   return (
     <div className={wrapperClassName}>
       <ReactMarkdown
-        remarkPlugins={interactiveCitations ? [remarkGfm, citationPlugin] : [remarkGfm]}
+        remarkPlugins={
+          interactiveCitations ? [remarkMath, remarkGfm, citationPlugin] : [remarkMath, remarkGfm]
+        }
+        rehypePlugins={[rehypeKatex]}
         components={{
           a: ({ href, children }) => {
             if (href?.startsWith("paperbase-citation:")) {

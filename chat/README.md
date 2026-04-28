@@ -14,8 +14,10 @@ The authenticated sidebar is project-first:
 - existing repo selection includes a branch picker, repo/branch refresh, a GitHub access-management link, and optional `.py`/`.ipynb` imports
 - the modal's advanced section exposes inference and Modal sandbox credential entry points for users who have not configured them yet
 - chat rows expose delete-on-hover actions and only fetch full thread content when opened
+- chat markdown renders inline/block LaTeX formulas, while localhost-only thread debug metadata stays out of the empty-chat landing layout
 - signed-in pages can switch between light and dark mode from Settings → Appearance, and the theme covers the shell, markdown, drawers, icons, and modals without changing the public landing page
 - Python and imported notebook rows open Monaco-backed Python editor tabs with explicit `Save` and `Run` actions
+- project coding turns treat Python snippet/example requests as durable project-file work instead of leaving fresh Python only in chat text
 - `.ipynb` and Colab uploads are converted through Jupytext to `py:percent` source for editing, while GitHub saves regenerate the notebook path
 - project file creation/import/save flows require a connected GitHub account, and `Run` saves to GitHub before executing through Modal
 - project sync writes only `.paperbase` managed paths, and GitHub conflicts reopen inside a Monaco diff-and-merge modal

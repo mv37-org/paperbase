@@ -4879,7 +4879,7 @@ export default function App() {
               className={`chat-message-list${isChatEmpty ? " empty" : ""}${activeTab?.kind === "python_file" ? " python-file-view" : ""}`}
               onScroll={handleMessageListScroll}
             >
-              {activeTab?.kind === "thread" && activeThreadDebugBundle ? (
+              {activeTab?.kind === "thread" && activeThreadDebugBundle && !isChatEmpty ? (
                 <div className="chat-thread-debug-strip" data-testid="thread-debug-strip">
                   <div className="chat-thread-debug-copy-row">
                     <span className="chat-thread-debug-label">Debug IDs</span>

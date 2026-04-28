@@ -49,4 +49,14 @@ describe("MarkdownRenderer", () => {
     const inlineCode = document.querySelector("code");
     expect(inlineCode?.textContent).toBe("torch.nn.Linear");
   });
+
+  it("renders inline and block LaTeX formulas", () => {
+    const { container } = render(
+      <MarkdownRenderer markdown={"Inline math $E=mc^2$ and\n\n$$\n\\int_0^1 x^2 \\, dx\n$$"} />,
+    );
+
+    expect(container.querySelector(".katex")).toBeTruthy();
+    expect(container.querySelector(".katex-display")).toBeTruthy();
+    expect(container.textContent).not.toContain("$E=mc^2$");
+  });
 });

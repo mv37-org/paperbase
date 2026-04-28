@@ -12,11 +12,14 @@
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
+    "katex": "^0.16.11",
     "monaco-editor": "^0.54.0",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "react-markdown": "^10.1.0",
+    "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0",
     "slate": "^0.124.1",
     "slate-react": "^0.124.0"
   },
