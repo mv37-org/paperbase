@@ -1188,6 +1188,73 @@ _CHAT_TOOL_MAX_FILE_LIST = 200
 _CHAT_COMPACTION_THRESHOLD_RATIO = 0.9
 _CHAT_COMPACTION_MAX_PER_TURN = 2
 _CHAT_COMPACTION_PLACEHOLDER = "Compacting conversation..."
+_CHAT_TOOL_DIRECT_EXPOSURE_THRESHOLD = 100
+
+
+@dataclass(frozen=True)
+class ChatSamplingPrompt:
+    input: list[dict[str, Any]]
+    base_instructions: str
+    tools: list[dict[str, Any]] = field(default_factory=list)
+    tool_choice: dict[str, Any] | None = None
+    parallel_tool_calls: bool = False
+
+
+@dataclass(frozen=True)
+class ChatTurnItem:
+    kind: str
+    role: str
+    content: str | list[dict[str, Any]]
+
+    def as_model_input(self) -> dict[str, Any]:
+        return {"role": self.role, "content": self.content}
+
+
+@dataclass(frozen=True)
+class ChatToolSpecEntry:
+    spec: dict[str, Any]
+    supports_parallel: bool = False
+    deferred: bool = False
+
+    @property
+    def name(self) -> str:
+        return str(self.spec.get("name") or "").strip()
+
+
+class ChatToolRouter:
+    def __init__(
+        self,
+        entries: list[ChatToolSpecEntry],
+        *,
+        direct_exposure_threshold: int = _CHAT_TOOL_DIRECT_EXPOSURE_THRESHOLD,
+    ) -> None:
+        direct_entries = [entry for entry in entries if not entry.deferred]
+        optional_entries = [entry for entry in entries if entry.deferred]
+        if len(direct_entries) + len(optional_entries) <= direct_exposure_threshold:
+            direct_entries.extend(optional_entries)
+            optional_entries = []
+        self._direct_entries = direct_entries
+        self._deferred_entries = optional_entries
+        self._by_name = {entry.name: entry for entry in direct_entries + optional_entries}
+
+    def model_visible_specs(self) -> list[dict[str, Any]]:
+        return [entry.spec for entry in self._direct_entries]
+
+    def deferred_specs(self) -> list[dict[str, Any]]:
+        return [entry.spec for entry in self._deferred_entries]
+
+    def find_spec(self, tool_name: str) -> ChatToolSpecEntry | None:
+        return self._by_name.get(tool_name)
+
+    def tool_supports_parallel(self, tool_name: str) -> bool:
+        entry = self.find_spec(tool_name)
+        return bool(entry and entry.supports_parallel)
+
+    def parallel_tool_calls_enabled(self) -> bool:
+        return any(entry.supports_parallel for entry in self._direct_entries)
+
+    def has_tool_prefix(self, prefix: str) -> bool:
+        return any(entry.name.startswith(prefix) for entry in self._direct_entries)
 
 
 @dataclass
@@ -1239,9 +1306,13 @@ class PreparedChatGeneration:
 
 @dataclass
 class ChatTurnContext:
-    messages: list[dict[str, Any]]
+    items: list[ChatTurnItem]
     active_message_ids: list[str]
     compactions_used: int = 0
+
+    @property
+    def messages(self) -> list[dict[str, Any]]:
+        return [item.as_model_input() for item in self.items]
 
 
 @dataclass
@@ -1251,6 +1322,13 @@ class ChatToolRoundsResult:
     require_project_code_write: bool = False
     project_write_completed: bool = False
     project_read_completed: bool = False
+
+
+@dataclass
+class ChatTurnExecutionResult:
+    answer: str
+    citation_registry: ChatCitationRegistry
+    usage: ChatModelUsage | None = None
 
 
 class PaperbaseService:
@@ -2563,6 +2641,43 @@ class PaperbaseService:
             "Treat these instructions as active context for this session."
         )
 
+    def _chat_base_instructions(
+        self,
+        thread: ChatThreadResponse,
+        *,
+        include_research_tools: bool,
+        include_project_code_tools: bool,
+    ) -> str:
+        parts = [
+            "You are Paperbase Chat.",
+            "Respond in strict GitHub-flavored markdown whenever you emit user-facing text.",
+            "Output must be valid markdown that a standard parser can render directly, not markdown-like plain text.",
+            "Use markdown syntax exactly: write emphasis as **text** with no extra inner spaces, keep headings, lists, tables, and fenced code blocks structurally valid, and preserve blank lines where block markdown needs them.",
+            "When tools are still needed, emit tool calls only and do not mix tool calls with user-facing narrative text.",
+            "Once the tool results are sufficient, stop calling tools and answer directly in the same turn.",
+            "Only cite source ids inline like [S1] when those ids came from evidence-bearing tool results such as section hits, file reads, figure captions, tables, or uploaded-document excerpts.",
+            "Do not cite broad search results or metadata-only results, and do not invent source ids when no evidence sources were gathered for the turn.",
+            "For casual or non-evidence turns, answer directly when tools are unnecessary.",
+        ]
+        if include_research_tools:
+            parts.append(
+                "Paperbase research tools can search papers, sections, files, figures, tables, references, related papers, and the user's uploaded documents. "
+                "Use them when they materially help answer the request, especially for research claims, recommendations, comparisons, citations, or uploaded-document questions. "
+                "Broad discovery tools like paperbase_search, paperbase_get_results, paperbase_get_paper, paperbase_get_related_papers, and paperbase_get_references are candidate discovery and metadata only, not citable evidence. "
+                "Before making specific factual claims, follow up with evidence tools like paperbase_search_sections, paperbase_read_file, paperbase_get_figure, paperbase_get_table, or paperbase_search_uploaded_sections. "
+                "When the user asks for paper links or reading lists, gather metadata rich enough to include markdown links using html_url or pdf_url when available."
+            )
+        if include_project_code_tools:
+            parts.append(
+                "Project-scoped coding tools are available for the current thread. These tools operate on the project's managed Python files only, not the Paperbase application code. "
+                "When the user asks you to create, inspect, change, delete, or run project code, use the project_* tools instead of guessing. "
+                "Read existing project files before editing them, reuse what is already there when possible, and prefer durable, importable PyTorch-first modules over disposable scratch work. "
+                "If you create a new project file, include meaningful initial code. If the target file already exists, prefer project_edit. "
+                "Generated runnable code should support --run-mode smoke|full, using smoke for quick validation when project_run is available. "
+                "Do not delete project files unless the user explicitly asked for deletion or the change clearly requires removing a superseded path."
+            )
+        return " ".join(parts) + self._project_prompt_suffix(thread)
+
     def _chat_tool_system_prompt(
         self,
         thread: ChatThreadResponse,
@@ -2570,116 +2685,84 @@ class PaperbaseService:
         include_research_tools: bool,
         include_project_code_tools: bool,
     ) -> str:
-        parts = ["You are Paperbase Chat."]
-        if include_research_tools:
-            parts.append(
-                "You have access to Paperbase research tools that can search papers, sections, files, figures, tables, references, related papers, and the user's uploaded documents. "
-                "Every tool-enabled turn must begin by leveraging these research tools. "
-                "Use them aggressively, including on code turns when papers or uploaded documents can inform the work. "
-                "Do not rely on parametric memory when Paperbase tools can answer. "
-                "Start with discovery tools to find the right papers, then follow up with evidence tools before making specific factual claims. "
-                "Broad discovery tools like paperbase_search, paperbase_get_results, paperbase_get_paper, paperbase_get_related_papers, and paperbase_get_references are for candidate discovery and metadata only. "
-                "They are not citable evidence by themselves. Before making specific factual claims, follow up with evidence tools like paperbase_search_sections, paperbase_read_file, paperbase_get_figure, paperbase_get_table, or paperbase_search_uploaded_sections. "
-                "When a final answer should mention papers, recommendations, or reading lists, gather metadata rich enough to include direct paper links such as html_url or pdf_url when available."
-            )
-        if include_project_code_tools:
-            parts.append(
-                "You also have access to project-scoped coding tools backed by the current Paperbase project files. "
-                "These tools operate on the project's managed Python files only, not the Paperbase application code. "
-                "Act like a careful ML engineer and researcher maintaining a real project repository: prefer durable modules, reproducible experiments, and reusable code over disposable scratch work. "
-                "When you create or update code with these tools, you are writing managed project Python files for the current project. "
-                "When the user asks you to create, inspect, change, delete, or run project code, use the project_* tools instead of guessing. "
-                "Before writing new code, inspect the existing project with project_list_files, project_grep, and project_read_file so you reuse what is already there instead of rewriting it. "
-                "When the user asks for code, decide from the prompt whether to edit an existing project file or create a new one; do not ask a follow-up question just to decide between those two paths when the prompt and project state are sufficient. "
-                "Files you create with project_touch become part of the project and will appear in later project_list_files results and in the project's Code section. "
-                "When creating a file for the user's request, include meaningful initial code in project_touch or follow immediately with project_edit; do not leave the requested file empty. "
-                "If the user asked you to create or change code, do not stop tool use until the relevant managed project Python files have actually been created or updated. "
-                "Read files before editing them. Prefer small PyTorch-first modules and scripts. "
-                "If the target file already exists, update it with project_edit instead of calling project_touch on the same path. "
-                "If the target file exists and is empty, you may populate it with project_edit using old_string=\"\". "
-                "Every Python code snippet you generate or revise must live in a managed project Python file in the same turn instead of existing only in chat text. "
-                "Structure new files as importable modules with named functions, classes, or constants that other files can import; avoid putting all logic in top-level script bodies. "
-                "Keep entrypoint-only behavior under if __name__ == '__main__': when needed. "
-                "Use exact-match edits with project_edit, choose unique snippets, and set replace_all=true only when every match should change. "
-                "Treat project files as durable research artifacts. Delete files only when the user explicitly asks, when a rename or move requires removing the superseded path, or when a file is clearly obsolete and keeping it would be misleading. "
-                "If you are unsure whether a file truly needs deletion, keep it and edit or replace it instead. "
-                "Read the file before deleting it unless the user already identified the exact obsolete path and reason. "
-                "After you create or edit a project file for the user's request, keep that file as part of the project. "
-                "Do not create a minimal example, scratch file, or throwaway file and then delete it in the same turn unless the user explicitly asked for that cleanup. "
-                "Generated runnable code should support --run-mode smoke|full. Use project_run with mode=smoke for fast validation and mode=full for the normal workflow."
-            )
-        parts.append(
-            "On turns where you still need tools, emit tool calls only and do not write any user-facing narrative text. "
-            "Once the tool results are sufficient, stop calling tools. The final answer will be generated in a separate step."
+        return self._chat_base_instructions(
+            thread,
+            include_research_tools=include_research_tools,
+            include_project_code_tools=include_project_code_tools,
         )
-        return " ".join(parts) + self._project_prompt_suffix(thread)
 
     def _chat_answer_system_prompt(self, *, thread: ChatThreadResponse, has_evidence_sources: bool) -> str:
-        project_code_suffix = (
-            " In project threads, do not leave fresh Python code only in chat text. "
-            "Persist generated or revised Python into managed project files first, then reference the saved repo path succinctly instead of pasting large unsaved code blocks."
-            if thread.project_id
-            else ""
-        )
-        if not has_evidence_sources:
-            return (
-                "You are Paperbase Chat. Respond naturally and helpfully in strict GitHub-flavored markdown. "
-                "Output must be valid markdown that a standard parser can render directly, not markdown-like plain text. "
-                "Use markdown syntax exactly: write emphasis as **text** with no extra inner spaces, keep headings/lists/tables on their own lines, and preserve blank lines where block markdown needs them. "
-                "If no evidence sources were gathered for this turn, do not cite sources, do not invent source ids like [S1], "
-                "and do not bring up papers or research context unless the user explicitly asks for them. "
-                "Treat any citations that appeared in earlier turns as historical context only, not as active sources for this reply. "
-                "For casual turns such as greetings or small talk, answer briefly and conversationally."
-                + project_code_suffix
-                + self._project_prompt_suffix(thread)
-            )
-        return (
-            "You are Paperbase Chat. Answer using the gathered Paperbase tool results when possible. "
-            "Respond in strict GitHub-flavored markdown. Output must be valid markdown that a standard parser can render directly, not markdown-like plain text. "
-            "Use headings, bullets, tables, fenced code blocks, and normal markdown links when they clarify the answer, but only with correct markdown syntax. "
-            "Do not put spaces just inside emphasis delimiters, and do not run prose into list or table blocks. "
-            "When you mention specific research papers, include markdown links to the paper pages or PDFs from the gathered tool results whenever those URLs are available. "
-            "If the user asked for related reading, recommendations, or references, prefer a compact bullet list with paper title plus link before any longer discussion. "
-            "Only cite source ids inline like [S1] when those ids came from evidence-bearing tool results such as section hits, file reads, figure captions, tables, or uploaded-document excerpts. "
-            "Do not cite broad search results or metadata-only results. If the gathered sources are insufficient, say so plainly."
-            + project_code_suffix
-            + self._project_prompt_suffix(thread)
+        del has_evidence_sources
+        return self._chat_base_instructions(
+            thread,
+            include_research_tools=True,
+            include_project_code_tools=bool(thread.project_id),
         )
 
-    def _chat_message_for_model(self, message: ChatMessageResponse) -> dict[str, Any]:
+    def _render_compaction_checkpoint(self, message: ChatMessageResponse) -> str:
+        summary = message.content_markdown.strip() or "Conversation compacted."
+        parts = ["Conversation compaction checkpoint.", "", summary]
+        if message.citations:
+            citation_lines = [
+                f"- [{citation.source_id}] {citation.title} ({citation.source_kind}, {citation.path}): {citation.excerpt}"
+                for citation in message.citations
+            ]
+            parts.extend(["", "## Persisted Source IDs", "", *citation_lines])
+        return "\n".join(parts).strip()
+
+    def _chat_turn_item_from_message(self, message: ChatMessageResponse) -> ChatTurnItem:
         if message.kind == "compaction":
-            return {
-                "role": "user",
-                "content": f"Conversation compaction checkpoint:\n\n{message.content_markdown}",
-            }
-        return {"role": message.role, "content": message.content_markdown}
+            return ChatTurnItem(
+                kind="compaction",
+                role="user",
+                content=self._render_compaction_checkpoint(message),
+            )
+        item_kind = "user_text" if message.role == "user" else "assistant_text"
+        return ChatTurnItem(kind=item_kind, role=message.role, content=message.content_markdown)
 
     def _chat_turn_context(self, prepared: PreparedChatGeneration) -> ChatTurnContext:
         active_messages = [*prepared.thread.messages, prepared.user_message]
         return ChatTurnContext(
-            messages=[self._chat_message_for_model(message) for message in active_messages],
+            items=[self._chat_turn_item_from_message(message) for message in active_messages],
             active_message_ids=[message.message_id for message in active_messages],
         )
 
-    def _chat_context_token_count(
-        self,
-        *,
-        api_key: str,
-        messages: list[dict[str, Any]],
-        system_prompt: str,
-        tools: list[dict[str, Any]] | None = None,
-        tool_choice: dict[str, Any] | None = None,
-    ) -> int | None:
+    def _chat_model_create_message(self, *, api_key: str, prompt: ChatSamplingPrompt) -> dict[str, Any]:
+        kwargs = {
+            "api_key": api_key,
+            "messages": prompt.input,
+            "system_prompt": prompt.base_instructions,
+            "tools": prompt.tools or None,
+            "tool_choice": prompt.tool_choice,
+            "parallel_tool_calls": prompt.parallel_tool_calls,
+        }
+        try:
+            return self.chat_model.create_message(**kwargs)
+        except TypeError as exc:
+            if "parallel_tool_calls" not in str(exc):
+                raise
+            kwargs.pop("parallel_tool_calls", None)
+            return self.chat_model.create_message(**kwargs)
+
+    def _chat_model_count_tokens(self, *, api_key: str, prompt: ChatSamplingPrompt) -> int | None:
         count_message_tokens = getattr(self.chat_model, "count_message_tokens", None)
         if count_message_tokens is None:
             return None
-        return count_message_tokens(
-            api_key=api_key,
-            messages=messages,
-            system_prompt=system_prompt,
-            tools=tools,
-            tool_choice=tool_choice,
-        )
+        kwargs = {
+            "api_key": api_key,
+            "messages": prompt.input,
+            "system_prompt": prompt.base_instructions,
+            "tools": prompt.tools or None,
+            "tool_choice": prompt.tool_choice,
+            "parallel_tool_calls": prompt.parallel_tool_calls,
+        }
+        try:
+            return count_message_tokens(**kwargs)
+        except TypeError as exc:
+            if "parallel_tool_calls" not in str(exc):
+                raise
+            kwargs.pop("parallel_tool_calls", None)
+            return count_message_tokens(**kwargs)
 
     def _chat_context_needs_compaction(self, *, token_count: int | None) -> bool:
         if token_count is None:
@@ -2734,15 +2817,17 @@ class PaperbaseService:
         placeholder: ChatMessageResponse,
     ) -> tuple[ChatTurnContext, ChatMessageResponse, ChatThreadResponse]:
         try:
-            payload = self.chat_model.create_message(
+            payload = self._chat_model_create_message(
                 api_key=prepared.api_key_value or "",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": self._chat_compaction_prompt(context.messages, citation_registry.citations),
-                    }
-                ],
-                system_prompt="",
+                prompt=ChatSamplingPrompt(
+                    input=[
+                        {
+                            "role": "user",
+                            "content": self._chat_compaction_prompt(context.messages, citation_registry.citations),
+                        }
+                    ],
+                    base_instructions="",
+                ),
             )
             summary = _extract_message_text(payload).strip()
             if not summary:
@@ -2764,7 +2849,7 @@ class PaperbaseService:
             refreshed = self.get_chat_thread(prepared.resolved_user, prepared.thread.thread_id)
             return (
                 ChatTurnContext(
-                    messages=[self._chat_message_for_model(compaction_message)],
+                    items=[self._chat_turn_item_from_message(compaction_message)],
                     active_message_ids=[compaction_message.message_id],
                     compactions_used=context.compactions_used + 1,
                 ),
@@ -2785,22 +2870,22 @@ class PaperbaseService:
         *,
         prepared: PreparedChatGeneration,
         context: ChatTurnContext,
-        system_prompt: str,
         citation_registry: ChatCitationRegistry,
-        tools: list[dict[str, Any]] | None = None,
-        tool_choice: dict[str, Any] | None = None,
-    ) -> tuple[ChatTurnContext, list[tuple[str, dict[str, Any]]]]:
+        router: ChatToolRouter,
+    ) -> tuple[ChatTurnContext, ChatSamplingPrompt, list[tuple[str, dict[str, Any]]]]:
         events: list[tuple[str, dict[str, Any]]] = []
         while True:
-            token_count = self._chat_context_token_count(
+            prompt = self._chat_sampling_prompt(
+                prepared=prepared,
+                context=context,
+                router=router,
+            )
+            token_count = self._chat_model_count_tokens(
                 api_key=prepared.api_key_value or "",
-                messages=context.messages,
-                system_prompt=system_prompt,
-                tools=tools,
-                tool_choice=tool_choice,
+                prompt=prompt,
             )
             if not self._chat_context_needs_compaction(token_count=token_count):
-                return context, events
+                return context, prompt, events
             if context.compactions_used >= _CHAT_COMPACTION_MAX_PER_TURN:
                 raise RuntimeError("Conversation context is still too large after compaction")
             placeholder = self._create_compaction_placeholder(thread_id=prepared.thread.thread_id)
@@ -2827,38 +2912,283 @@ class PaperbaseService:
         *,
         prepared: PreparedChatGeneration,
         context: ChatTurnContext,
-        system_prompt: str,
         citation_registry: ChatCitationRegistry,
-        tools: list[dict[str, Any]] | None = None,
-        tool_choice: dict[str, Any] | None = None,
-    ) -> Generator[tuple[str, dict[str, Any]], None, ChatTurnContext]:
-        while True:
-            token_count = self._chat_context_token_count(
-                api_key=prepared.api_key_value or "",
-                messages=context.messages,
-                system_prompt=system_prompt,
-                tools=tools,
-                tool_choice=tool_choice,
-            )
-            if not self._chat_context_needs_compaction(token_count=token_count):
-                return context
-            if context.compactions_used >= _CHAT_COMPACTION_MAX_PER_TURN:
-                raise RuntimeError("Conversation context is still too large after compaction")
-            placeholder = self._create_compaction_placeholder(thread_id=prepared.thread.thread_id)
-            yield ("compaction_start", {"compaction_message": placeholder.model_dump(mode="json")})
-            context, compaction_message, refreshed = self._finish_chat_compaction(
-                prepared=prepared,
-                context=context,
-                citation_registry=citation_registry,
-                placeholder=placeholder,
-            )
-            yield (
-                "compaction_done",
-                {
-                    "compaction_message": compaction_message.model_dump(mode="json"),
-                    "messages": [message.model_dump(mode="json") for message in refreshed.messages],
+        router: ChatToolRouter,
+    ) -> Generator[tuple[str, dict[str, Any]], None, tuple[ChatTurnContext, ChatSamplingPrompt]]:
+        context, prompt, events = self._ensure_chat_context_budget(
+            prepared=prepared,
+            context=context,
+            citation_registry=citation_registry,
+            router=router,
+        )
+        for event in events:
+            yield event
+        return context, prompt
+
+    def _research_chat_tool_specs(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": "paperbase_search",
+                "description": "Search Paperbase papers by topic, title, abstract, or author. Use this to find candidate papers and result-set ids before narrowing to sections or specific files. Set rerank=true for a slower, higher-recall deep-search pass that also surfaces body-content matches.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+                        "category": {"type": "string"},
+                        "year": {"type": "string"},
+                        "include_live_sources": {"type": "boolean"},
+                        "rerank": {"type": "boolean"},
+                    },
+                    "required": ["query"],
                 },
-            )
+            },
+            {
+                "name": "paperbase_search_sections",
+                "description": "Search grounded paper sections and captions inside Paperbase. Use this when the user asks about methods, results, experiments, figures, tables, or any specific detail that needs evidence.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 12},
+                        "result_set_id": {"type": "string"},
+                        "paper_ids": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["query"],
+                },
+            },
+            {
+                "name": "paperbase_get_results",
+                "description": "Load a previously saved search result set by id. Use this when you already have a result_set_id from an earlier tool call and need the shortlisted papers again.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"result_set_id": {"type": "string"}},
+                    "required": ["result_set_id"],
+                },
+            },
+            {
+                "name": "paperbase_grep_results",
+                "description": "Filter a saved result set by a literal or regex-like pattern and get matching previews. Use this after search when you need a narrower subset of papers containing a specific phrase.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "result_set_id": {"type": "string"},
+                        "pattern": {"type": "string"},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+                    },
+                    "required": ["result_set_id", "pattern"],
+                },
+            },
+            {
+                "name": "paperbase_get_paper",
+                "description": "Fetch full metadata for a specific paper id. Use this when you need authors, abstract, summary, venue metadata, dates, or citation counts for a paper you already identified.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"paper_id": {"type": "string"}},
+                    "required": ["paper_id"],
+                },
+            },
+            {
+                "name": "paperbase_list_files",
+                "description": "List the extracted files available for a paper. Use this when you need to discover which sections, figure captions, raw files, or tables exist before reading one.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"paper_id": {"type": "string"}},
+                    "required": ["paper_id"],
+                },
+            },
+            {
+                "name": "paperbase_read_file",
+                "description": "Read the textual content of a specific extracted file for a paper. Use this for section markdown, captions, manifests, or other text files when you need exact content.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "paper_id": {"type": "string"},
+                        "path": {"type": "string"},
+                    },
+                    "required": ["paper_id", "path"],
+                },
+            },
+            {
+                "name": "paperbase_get_figure",
+                "description": "Fetch figure caption metadata for a paper figure id. Use this when the user asks about a figure or architecture diagram and the caption is the primary evidence.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "paper_id": {"type": "string"},
+                        "figure_id": {"type": "string"},
+                    },
+                    "required": ["paper_id", "figure_id"],
+                },
+            },
+            {
+                "name": "paperbase_get_table",
+                "description": "Fetch structured table rows and caption metadata for a paper table id. Use this when the user asks for metrics, benchmarks, ablations, or comparisons stored in a table.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "paper_id": {"type": "string"},
+                        "table_id": {"type": "string"},
+                    },
+                    "required": ["paper_id", "table_id"],
+                },
+            },
+            {
+                "name": "paperbase_get_related_papers",
+                "description": "Fetch related papers for a known paper id. Use this when the user wants similar work, follow-ons, or neighboring papers in the citation graph.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"paper_id": {"type": "string"}},
+                    "required": ["paper_id"],
+                },
+            },
+            {
+                "name": "paperbase_get_references",
+                "description": "Fetch the outgoing references for a paper id. Use this when the user asks what a paper cites or wants the citation graph expanded from a known paper.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "paper_id": {"type": "string"},
+                        "refresh": {"type": "boolean"},
+                    },
+                    "required": ["paper_id"],
+                },
+            },
+            {
+                "name": "paperbase_list_uploaded_documents",
+                "description": "List the user's uploaded documents and tags. Use this when you need to discover which uploads are available before searching within them.",
+                "input_schema": {"type": "object", "properties": {}},
+            },
+            {
+                "name": "paperbase_search_uploaded_sections",
+                "description": "Search the user's uploaded documents by content and optional tags. Use this when the question may be answered by uploaded notes, PDFs, or documents rather than indexed papers.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 12},
+                        "tag_filters": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["query"],
+                },
+            },
+        ]
+
+    def _project_chat_tool_specs(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": "project_list_files",
+                "description": "List the current project's managed Python files, including files you created earlier in this chat. Use this before edits when you need to discover which files already exist.",
+                "input_schema": {"type": "object", "properties": {}},
+            },
+            {
+                "name": "project_read_file",
+                "description": "Read a specific managed Python file from the current project, optionally limited to a line range. Read files before editing them.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "repo_path": {"type": "string"},
+                        "start_line": {"type": "integer", "minimum": 1},
+                        "end_line": {"type": "integer", "minimum": 1},
+                    },
+                    "required": ["repo_path"],
+                },
+            },
+            {
+                "name": "project_grep",
+                "description": "Search the current project's managed Python files by regex or literal pattern and return matching lines with paths and line numbers.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": {"type": "string"},
+                        "literal": {"type": "boolean"},
+                        "case_sensitive": {"type": "boolean"},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+                    },
+                    "required": ["pattern"],
+                },
+            },
+            {
+                "name": "project_touch",
+                "description": "Create a new managed Python file at an exact safe repo-relative .py path. After creation it will appear in later project_list_files results and in the project's Code section. When creating a file for the user's request, include meaningful initial code content or follow immediately with project_edit. Fails if that path already exists.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "repo_path": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                    "required": ["repo_path"],
+                },
+            },
+            {
+                "name": "project_edit",
+                "description": "Apply an exact-match text edit to one managed Python file. Fails if the old text is missing or ambiguous unless replace_all=true. If the file already exists and is empty, you may use old_string='' once to populate it.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "repo_path": {"type": "string"},
+                        "old_string": {"type": "string"},
+                        "new_string": {"type": "string"},
+                        "replace_all": {"type": "boolean"},
+                    },
+                    "required": ["repo_path", "old_string", "new_string"],
+                },
+            },
+            {
+                "name": "project_delete",
+                "description": "Delete one managed Python file from the current project by exact repo-relative path. Use this only when the file truly needs deletion, such as an explicit user request or a superseded rename/move path.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"repo_path": {"type": "string"}},
+                    "required": ["repo_path"],
+                },
+            },
+            {
+                "name": "project_run",
+                "description": "Run one managed Python file from the current project with run mode smoke or full. Prefer smoke for quick validation and full for the normal workflow.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "repo_path": {"type": "string"},
+                        "mode": {"type": "string", "enum": ["smoke", "full"]},
+                    },
+                    "required": ["repo_path"],
+                },
+            },
+        ]
+
+    def _chat_tool_router(
+        self,
+        request: SendChatMessageRequest,
+        *,
+        thread: ChatThreadResponse | None = None,
+    ) -> ChatToolRouter:
+        entries: list[ChatToolSpecEntry] = []
+        if _should_offer_research_chat_tools(request.content, request):
+            entries.extend(ChatToolSpecEntry(spec=tool) for tool in self._research_chat_tool_specs())
+        if _should_offer_project_code_tools(request.content, thread=thread):
+            entries.extend(ChatToolSpecEntry(spec=tool) for tool in self._project_chat_tool_specs())
+        return ChatToolRouter(entries)
+
+    def _chat_sampling_prompt(
+        self,
+        *,
+        prepared: PreparedChatGeneration,
+        context: ChatTurnContext,
+        router: ChatToolRouter,
+    ) -> ChatSamplingPrompt:
+        tools = router.model_visible_specs()
+        return ChatSamplingPrompt(
+            input=context.messages,
+            base_instructions=self._chat_base_instructions(
+                prepared.thread,
+                include_research_tools=router.has_tool_prefix("paperbase_"),
+                include_project_code_tools=router.has_tool_prefix("project_"),
+            ),
+            tools=tools,
+            tool_choice={"type": "auto"} if tools else None,
+            parallel_tool_calls=router.parallel_tool_calls_enabled(),
+        )
 
     def _chat_tool_definitions(
         self,
@@ -2866,251 +3196,7 @@ class PaperbaseService:
         *,
         thread: ChatThreadResponse | None = None,
     ) -> list[dict[str, Any]]:
-        tools: list[dict[str, Any]] = []
-        include_research_tools = _should_offer_research_chat_tools(request.content, request)
-        include_project_code_tools = _should_offer_project_code_tools(request.content, thread=thread)
-        if not (include_research_tools or include_project_code_tools):
-            return tools
-        if include_research_tools:
-            tools.extend(
-                [
-                    {
-                        "name": "paperbase_search",
-                        "description": "Search Paperbase papers by topic, title, abstract, or author. Use this to find candidate papers and result-set ids before narrowing to sections or specific files. Set rerank=true for a slower, higher-recall deep-search pass that also surfaces body-content matches.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {
-                                "query": {"type": "string"},
-                                "limit": {"type": "integer", "minimum": 1, "maximum": 20},
-                                "category": {"type": "string"},
-                                "year": {"type": "string"},
-                                "include_live_sources": {"type": "boolean"},
-                                "rerank": {"type": "boolean"},
-                            },
-                            "required": ["query"],
-                        },
-                    },
-                    {
-                        "name": "paperbase_search_sections",
-                        "description": "Search grounded paper sections and captions inside Paperbase. Use this when the user asks about methods, results, experiments, figures, tables, or any specific detail that needs evidence.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {
-                                "query": {"type": "string"},
-                                "limit": {"type": "integer", "minimum": 1, "maximum": 12},
-                                "result_set_id": {"type": "string"},
-                                "paper_ids": {"type": "array", "items": {"type": "string"}},
-                            },
-                            "required": ["query"],
-                        },
-                    },
-                    {
-                        "name": "paperbase_get_results",
-                        "description": "Load a previously saved search result set by id. Use this when you already have a result_set_id from an earlier tool call and need the shortlisted papers again.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {"result_set_id": {"type": "string"}},
-                            "required": ["result_set_id"],
-                        },
-                    },
-                    {
-                        "name": "paperbase_grep_results",
-                        "description": "Filter a saved result set by a literal or regex-like pattern and get matching previews. Use this after search when you need a narrower subset of papers containing a specific phrase.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {
-                                "result_set_id": {"type": "string"},
-                                "pattern": {"type": "string"},
-                                "limit": {"type": "integer", "minimum": 1, "maximum": 50},
-                            },
-                            "required": ["result_set_id", "pattern"],
-                        },
-                    },
-                    {
-                        "name": "paperbase_get_paper",
-                        "description": "Fetch full metadata for a specific paper id. Use this when you need authors, abstract, summary, venue metadata, dates, or citation counts for a paper you already identified.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {"paper_id": {"type": "string"}},
-                            "required": ["paper_id"],
-                        },
-                    },
-                    {
-                        "name": "paperbase_list_files",
-                        "description": "List the extracted files available for a paper. Use this when you need to discover which sections, figure captions, raw files, or tables exist before reading one.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {"paper_id": {"type": "string"}},
-                            "required": ["paper_id"],
-                        },
-                    },
-                    {
-                        "name": "paperbase_read_file",
-                        "description": "Read the textual content of a specific extracted file for a paper. Use this for section markdown, captions, manifests, or other text files when you need exact content.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {
-                                "paper_id": {"type": "string"},
-                                "path": {"type": "string"},
-                            },
-                            "required": ["paper_id", "path"],
-                        },
-                    },
-                    {
-                        "name": "paperbase_get_figure",
-                        "description": "Fetch figure caption metadata for a paper figure id. Use this when the user asks about a figure or architecture diagram and the caption is the primary evidence.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {
-                                "paper_id": {"type": "string"},
-                                "figure_id": {"type": "string"},
-                            },
-                            "required": ["paper_id", "figure_id"],
-                        },
-                    },
-                    {
-                        "name": "paperbase_get_table",
-                        "description": "Fetch structured table rows and caption metadata for a paper table id. Use this when the user asks for metrics, benchmarks, ablations, or comparisons stored in a table.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {
-                                "paper_id": {"type": "string"},
-                                "table_id": {"type": "string"},
-                            },
-                            "required": ["paper_id", "table_id"],
-                        },
-                    },
-                    {
-                        "name": "paperbase_get_related_papers",
-                        "description": "Fetch related papers for a known paper id. Use this when the user wants similar work, follow-ons, or neighboring papers in the citation graph.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {"paper_id": {"type": "string"}},
-                            "required": ["paper_id"],
-                        },
-                    },
-                    {
-                        "name": "paperbase_get_references",
-                        "description": "Fetch the outgoing references for a paper id. Use this when the user asks what a paper cites or wants the citation graph expanded from a known paper.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {
-                                "paper_id": {"type": "string"},
-                                "refresh": {"type": "boolean"},
-                            },
-                            "required": ["paper_id"],
-                        },
-                    },
-                ]
-            )
-        if include_research_tools:
-            tools.extend(
-                [
-                    {
-                        "name": "paperbase_list_uploaded_documents",
-                        "description": "List the user's uploaded documents and tags. Use this when you need to discover which uploads are available before searching within them.",
-                        "input_schema": {"type": "object", "properties": {}},
-                    },
-                    {
-                        "name": "paperbase_search_uploaded_sections",
-                        "description": "Search the user's uploaded documents by content and optional tags. Use this when the question may be answered by uploaded notes, PDFs, or documents rather than indexed papers.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {
-                                "query": {"type": "string"},
-                                "limit": {"type": "integer", "minimum": 1, "maximum": 12},
-                                "tag_filters": {"type": "array", "items": {"type": "string"}},
-                            },
-                            "required": ["query"],
-                        },
-                    },
-                ]
-            )
-        if include_project_code_tools:
-            tools.extend(
-                [
-                    {
-                        "name": "project_list_files",
-                        "description": "List the current project's managed Python files, including files you created earlier in this chat. Use this before edits when you need to discover which files already exist.",
-                        "input_schema": {"type": "object", "properties": {}},
-                    },
-                    {
-                        "name": "project_read_file",
-                        "description": "Read a specific managed Python file from the current project, optionally limited to a line range. Read files before editing them.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {
-                                "repo_path": {"type": "string"},
-                                "start_line": {"type": "integer", "minimum": 1},
-                                "end_line": {"type": "integer", "minimum": 1},
-                            },
-                            "required": ["repo_path"],
-                        },
-                    },
-                    {
-                        "name": "project_grep",
-                        "description": "Search the current project's managed Python files by regex or literal pattern and return matching lines with paths and line numbers.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {
-                                "pattern": {"type": "string"},
-                                "literal": {"type": "boolean"},
-                                "case_sensitive": {"type": "boolean"},
-                                "limit": {"type": "integer", "minimum": 1, "maximum": 50},
-                            },
-                            "required": ["pattern"],
-                        },
-                    },
-                    {
-                        "name": "project_touch",
-                        "description": "Create a new managed Python file at an exact safe repo-relative .py path. After creation it will appear in later project_list_files results and in the project's Code section. When creating a file for the user's request, include meaningful initial code content or follow immediately with project_edit. Fails if that path already exists.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {
-                                "repo_path": {"type": "string"},
-                                "content": {"type": "string"},
-                            },
-                            "required": ["repo_path"],
-                        },
-                    },
-                    {
-                        "name": "project_edit",
-                        "description": "Apply an exact-match text edit to one managed Python file. Fails if the old text is missing or ambiguous unless replace_all=true. If the file already exists and is empty, you may use old_string='' once to populate it.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {
-                                "repo_path": {"type": "string"},
-                                "old_string": {"type": "string"},
-                                "new_string": {"type": "string"},
-                                "replace_all": {"type": "boolean"},
-                            },
-                            "required": ["repo_path", "old_string", "new_string"],
-                        },
-                    },
-                    {
-                        "name": "project_delete",
-                        "description": "Delete one managed Python file from the current project by exact repo-relative path. Use this only when the file truly needs deletion, such as an explicit user request or a superseded rename/move path.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {"repo_path": {"type": "string"}},
-                            "required": ["repo_path"],
-                        },
-                    },
-                    {
-                        "name": "project_run",
-                        "description": "Run one managed Python file from the current project with run mode smoke or full. Prefer smoke for quick validation and full for the normal workflow.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {
-                                "repo_path": {"type": "string"},
-                                "mode": {"type": "string", "enum": ["smoke", "full"]},
-                            },
-                            "required": ["repo_path"],
-                        },
-                    },
-                ]
-            )
-        return tools
+        return self._chat_tool_router(request, thread=thread).model_visible_specs()
 
     def _paper_path_citation(
         self,
@@ -3674,150 +3760,58 @@ class PaperbaseService:
             blocks.append(block)
         return blocks, project_write_completed, project_read_completed
 
-    def _run_chat_tool_rounds(
+    def _chat_runtime_mode(self) -> str:
+        mode = str(getattr(self.settings, "chat_runtime_mode", "codex_kernel") or "codex_kernel").strip().lower()
+        return "legacy" if mode == "legacy" else "codex_kernel"
+
+    def _run_chat_turn_engine(
         self,
         *,
         prepared: PreparedChatGeneration,
         user: BrowserUser,
         request: SendChatMessageRequest,
-    ) -> ChatToolRoundsResult:
+    ) -> Generator[tuple[str, dict[str, Any]], None, ChatTurnExecutionResult]:
         context = self._chat_turn_context(prepared)
         citation_registry = ChatCitationRegistry()
-        tools = self._chat_tool_definitions(request, thread=prepared.thread)
-        if not tools:
-            return ChatToolRoundsResult(context=context, citation_registry=citation_registry)
+        router = self._chat_tool_router(request, thread=prepared.thread)
 
-        tool_names = {tool.get("name") for tool in tools if isinstance(tool, dict)}
-        tool_system_prompt = self._chat_tool_system_prompt(
-            prepared.thread,
-            include_research_tools=any(str(name).startswith("paperbase_") for name in tool_names),
-            include_project_code_tools=any(str(name).startswith("project_") for name in tool_names),
-        )
-        force_first_tool = _should_force_chat_tool_use(
-            prepared.user_message.content_markdown,
-            request,
-            thread=prepared.thread,
-        )
-        require_project_code_write = _should_require_project_code_write(
-            prepared.user_message.content_markdown,
-            thread=prepared.thread,
-        )
-        project_write_tool_used = False
-        project_read_tool_used = False
-        for round_index in range(_CHAT_TOOL_MAX_ROUNDS):
-            must_use_tool_this_round = (round_index == 0 and force_first_tool) or (
-                require_project_code_write and not project_write_tool_used
-            )
-            tool_choice = {"type": "any"} if must_use_tool_this_round else {"type": "auto"}
-            context, _events = self._ensure_chat_context_budget(
+        for _sample_index in range(_CHAT_TOOL_MAX_ROUNDS + 1):
+            context, prompt, compaction_events = self._ensure_chat_context_budget(
                 prepared=prepared,
                 context=context,
-                system_prompt=tool_system_prompt,
                 citation_registry=citation_registry,
-                tools=tools,
-                tool_choice=tool_choice,
+                router=router,
             )
-            response = self.chat_model.create_message(
-                api_key=prepared.api_key_value or "",
-                messages=context.messages,
-                system_prompt=tool_system_prompt,
-                tools=tools,
-                tool_choice=tool_choice,
-            )
-            assistant_content = [block for block in (response.get("content") or []) if isinstance(block, dict)]
-            tool_uses = [block for block in assistant_content if block.get("type") == "tool_use"]
-            if not tool_uses:
-                if require_project_code_write and not project_write_tool_used and must_use_tool_this_round:
-                    context.messages.append({"role": "user", "content": _project_code_write_retry_prompt()})
-                    continue
-                break
-            blocks, completed_write_this_round, completed_read_this_round = self._tool_result_blocks(
-                tool_uses=tool_uses,
-                user=user,
-                citation_registry=citation_registry,
-                project_id=prepared.thread.project_id,
-            )
-            project_write_tool_used = project_write_tool_used or completed_write_this_round
-            project_read_tool_used = project_read_tool_used or completed_read_this_round
-            context.messages.append({"role": "assistant", "content": assistant_content})
-            context.messages.append(
-                {
-                    "role": "user",
-                    "content": blocks,
-                }
-            )
-        return ChatToolRoundsResult(
-            context=context,
-            citation_registry=citation_registry,
-            require_project_code_write=require_project_code_write,
-            project_write_completed=project_write_tool_used,
-            project_read_completed=project_read_tool_used,
-        )
+            for event in compaction_events:
+                yield event
 
-    def _run_chat_tool_rounds_stream(
-        self,
-        *,
-        prepared: PreparedChatGeneration,
-        user: BrowserUser,
-        request: SendChatMessageRequest,
-    ) -> Generator[tuple[str, dict[str, Any]], None, ChatToolRoundsResult]:
-        context = self._chat_turn_context(prepared)
-        citation_registry = ChatCitationRegistry()
-        tools = self._chat_tool_definitions(request, thread=prepared.thread)
-        if not tools:
-            return ChatToolRoundsResult(context=context, citation_registry=citation_registry)
-
-        tool_names = {tool.get("name") for tool in tools if isinstance(tool, dict)}
-        tool_system_prompt = self._chat_tool_system_prompt(
-            prepared.thread,
-            include_research_tools=any(str(name).startswith("paperbase_") for name in tool_names),
-            include_project_code_tools=any(str(name).startswith("project_") for name in tool_names),
-        )
-        force_first_tool = _should_force_chat_tool_use(
-            prepared.user_message.content_markdown,
-            request,
-            thread=prepared.thread,
-        )
-        require_project_code_write = _should_require_project_code_write(
-            prepared.user_message.content_markdown,
-            thread=prepared.thread,
-        )
-        project_write_tool_used = False
-        project_read_tool_used = False
-        for round_index in range(_CHAT_TOOL_MAX_ROUNDS):
-            must_use_tool_this_round = (round_index == 0 and force_first_tool) or (
-                require_project_code_write and not project_write_tool_used
-            )
-            tool_choice = {"type": "any"} if must_use_tool_this_round else {"type": "auto"}
-            context = yield from self._ensure_chat_context_budget_stream(
-                prepared=prepared,
-                context=context,
-                system_prompt=tool_system_prompt,
-                citation_registry=citation_registry,
-                tools=tools,
-                tool_choice=tool_choice,
-            )
-            response = self.chat_model.create_message(
+            response = self._chat_model_create_message(
                 api_key=prepared.api_key_value or "",
-                messages=context.messages,
-                system_prompt=tool_system_prompt,
-                tools=tools,
-                tool_choice=tool_choice,
+                prompt=prompt,
             )
-            assistant_content = [block for block in (response.get("content") or []) if isinstance(block, dict)]
-            tool_uses = [block for block in assistant_content if block.get("type") == "tool_use"]
             usage = response_usage(response)
             if usage is not None:
                 yield ("usage", self._chat_usage_payload(usage))
+
+            assistant_content = [block for block in (response.get("content") or []) if isinstance(block, dict)]
+            tool_uses = [block for block in assistant_content if block.get("type") == "tool_use"]
             if not tool_uses:
-                if require_project_code_write and not project_write_tool_used and must_use_tool_this_round:
-                    context.messages.append({"role": "user", "content": _project_code_write_retry_prompt()})
-                    continue
-                break
-            context.messages.append({"role": "assistant", "content": assistant_content})
-            blocks: list[dict[str, Any]] = []
-            completed_write_this_round = False
-            completed_read_this_round = False
+                answer = _sanitize_inline_citations(_extract_message_text(response), citation_registry.citations)
+                return ChatTurnExecutionResult(
+                    answer=answer,
+                    citation_registry=citation_registry,
+                    usage=usage,
+                )
+
+            context.items.append(
+                ChatTurnItem(
+                    kind="assistant_tool_call",
+                    role="assistant",
+                    content=assistant_content,
+                )
+            )
+
+            tool_result_blocks: list[dict[str, Any]] = []
             for index, tool_use in enumerate(tool_uses):
                 tool_use_id = str(tool_use.get("id") or "").strip()
                 if not tool_use_id:
@@ -3835,22 +3829,18 @@ class PaperbaseService:
                         "command": command,
                     },
                 )
-                payload, is_error = self._run_single_chat_tool(
-                    index=index,
-                    tool_name=tool_name,
-                    tool_input=tool_input,
-                    user=user,
-                    citation_registry=citation_registry,
-                    project_id=prepared.thread.project_id,
-                )
-                completed_write_this_round = completed_write_this_round or _project_code_tool_use_completed_write(
-                    {"name": tool_name, "input": tool_input},
-                    is_error=is_error,
-                )
-                completed_read_this_round = completed_read_this_round or _project_code_tool_use_completed_read(
-                    {"name": tool_name, "input": tool_input},
-                    is_error=is_error,
-                )
+                if router.find_spec(tool_name) is None:
+                    payload = {"error": f"Unknown tool: {tool_name}"}
+                    is_error = True
+                else:
+                    payload, is_error = self._run_single_chat_tool(
+                        index=index,
+                        tool_name=tool_name,
+                        tool_input=tool_input,
+                        user=user,
+                        citation_registry=citation_registry,
+                        project_id=prepared.thread.project_id,
+                    )
                 yield (
                     "tool_done",
                     {
@@ -3869,17 +3859,17 @@ class PaperbaseService:
                 }
                 if is_error:
                     block["is_error"] = True
-                blocks.append(block)
-            project_write_tool_used = project_write_tool_used or completed_write_this_round
-            project_read_tool_used = project_read_tool_used or completed_read_this_round
-            context.messages.append({"role": "user", "content": blocks})
-        return ChatToolRoundsResult(
-            context=context,
-            citation_registry=citation_registry,
-            require_project_code_write=require_project_code_write,
-            project_write_completed=project_write_tool_used,
-            project_read_completed=project_read_tool_used,
-        )
+                tool_result_blocks.append(block)
+
+            context.items.append(
+                ChatTurnItem(
+                    kind="tool_result",
+                    role="user",
+                    content=tool_result_blocks,
+                )
+            )
+
+        raise RuntimeError("Chat turn exceeded the maximum number of sampling steps")
 
     def _api_key_required_response(
         self,
@@ -3927,59 +3917,24 @@ class PaperbaseService:
                 state=prepared.api_key_state,
             )
 
-        tool_rounds = self._run_chat_tool_rounds(
+        _ = self._chat_runtime_mode()
+        turn_engine = self._run_chat_turn_engine(
             prepared=prepared,
             user=user,
             request=request,
         )
-        if tool_rounds.require_project_code_write and not tool_rounds.project_write_completed:
-            assistant_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
-                thread_id=thread_id,
-                role="assistant",
-                content_markdown=_project_code_write_failure_answer(),
-            )
-            resolved_user = prepared.resolved_user
-            if prepared.using_free_tier:
-                resolved_user = self.repository.increment_free_responses_used(user.user_id) or resolved_user  # type: ignore[attr-defined]
-            refreshed = self.get_chat_thread(user, thread_id)
-            return SendChatMessageResponse(
-                thread=refreshed,
-                assistant_message=assistant_message,
-                remaining_free_responses=self._remaining_free_responses(resolved_user),
-                has_anthropic_api_key=self.repository.get_anthropic_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
-                state="completed",
-            )
+        while True:
+            try:
+                next(turn_engine)
+            except StopIteration as stop:
+                turn_result = stop.value
+                break
 
-        conversation_context = tool_rounds.context
-        citation_registry = tool_rounds.citation_registry
-        current_turn_citations = citation_registry.citations
-        answer_system_prompt = self._chat_answer_system_prompt(
-            thread=prepared.thread,
-            has_evidence_sources=bool(current_turn_citations),
-        )
-        conversation_context, _events = self._ensure_chat_context_budget(
-            prepared=prepared,
-            context=conversation_context,
-            system_prompt=answer_system_prompt,
-            citation_registry=citation_registry,
-        )
-        answer_payload = self.chat_model.create_message(
-            api_key=prepared.api_key_value,
-            messages=conversation_context.messages,
-            system_prompt=answer_system_prompt,
-        )
-        answer = _sanitize_inline_citations(_extract_message_text(answer_payload), current_turn_citations)
-        if _project_code_answer_requires_persisted_python(
-            answer,
-            thread=prepared.thread,
-            project_write_completed=tool_rounds.project_write_completed,
-            project_read_completed=tool_rounds.project_read_completed,
-        ):
-            answer = _project_code_write_failure_answer()
+        current_turn_citations = turn_result.citation_registry.citations
         assistant_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
             thread_id=thread_id,
             role="assistant",
-            content_markdown=answer,
+            content_markdown=turn_result.answer,
             citations=[citation.model_dump() for citation in current_turn_citations],
         )
         resolved_user = prepared.resolved_user
@@ -4013,56 +3968,21 @@ class PaperbaseService:
             )
             return
 
-        tool_rounds = self._run_chat_tool_rounds_stream(
+        _ = self._chat_runtime_mode()
+        turn_engine = self._run_chat_turn_engine(
             prepared=prepared,
             user=user,
             request=request,
         )
         while True:
             try:
-                event_name, payload = next(tool_rounds)
+                event_name, payload = next(turn_engine)
             except StopIteration as stop:
-                tool_rounds_result = stop.value
+                turn_result = stop.value
                 break
             yield (event_name, payload)
-        if tool_rounds_result.require_project_code_write and not tool_rounds_result.project_write_completed:
-            failure_text = _project_code_write_failure_answer()
-            assistant_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
-                thread_id=thread_id,
-                role="assistant",
-                content_markdown=failure_text,
-                status="completed",
-            )
-            yield ("assistant_start", {"assistant_message": assistant_message.model_dump(mode="json")})
-            yield ("delta", {"message_id": assistant_message.message_id, "delta": failure_text})
-            resolved_user = prepared.resolved_user
-            if prepared.using_free_tier:
-                resolved_user = self.repository.increment_free_responses_used(user.user_id) or resolved_user  # type: ignore[attr-defined]
-            yield (
-                "done",
-                {
-                    "assistant_message": assistant_message.model_dump(mode="json"),
-                    "remaining_free_responses": self._remaining_free_responses(resolved_user),
-                    "has_anthropic_api_key": self.repository.get_anthropic_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
-                    "state": "completed",
-                    "usage": None,
-                },
-            )
-            return
 
-        conversation_context = tool_rounds_result.context
-        citation_registry = tool_rounds_result.citation_registry
-        current_turn_citations = citation_registry.citations
-        answer_system_prompt = self._chat_answer_system_prompt(
-            thread=prepared.thread,
-            has_evidence_sources=bool(current_turn_citations),
-        )
-        conversation_context = yield from self._ensure_chat_context_budget_stream(
-            prepared=prepared,
-            context=conversation_context,
-            system_prompt=answer_system_prompt,
-            citation_registry=citation_registry,
-        )
+        current_turn_citations = turn_result.citation_registry.citations
         assistant_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
             thread_id=thread_id,
             role="assistant",
@@ -4072,55 +3992,11 @@ class PaperbaseService:
         )
         yield ("assistant_start", {"assistant_message": assistant_message.model_dump(mode="json")})
 
-        chunks: list[str] = []
-        usage_payload: dict[str, Any] | None = None
-        try:
-            for stream_event in self.chat_model.stream_message(
-                api_key=prepared.api_key_value,
-                messages=conversation_context.messages,
-                system_prompt=answer_system_prompt,
-            ):
-                if stream_event.usage is not None:
-                    usage_payload = self._chat_usage_payload(stream_event.usage)
-                    yield ("usage", usage_payload)
-                if not stream_event.text:
-                    continue
-                chunks.append(stream_event.text)
-                yield ("delta", {"message_id": assistant_message.message_id, "delta": stream_event.text})
-        except Exception as exc:
-            failed_message = self.repository.update_chat_message(  # type: ignore[attr-defined]
-                assistant_message.message_id,
-                content_markdown="".join(chunks).strip(),
-                status="failed",
-            )
-            logger.exception(
-                "Streaming chat request failed",
-                extra={
-                    "event": "chat.model.stream.failed",
-                    "thread_id": thread_id,
-                    "message_id": assistant_message.message_id,
-                },
-            )
-            yield (
-                "error",
-                {
-                    "message_id": failed_message.message_id if failed_message else assistant_message.message_id,
-                    "detail": str(exc) or "Streaming request failed",
-                },
-            )
-            return
-
-        final_text = _sanitize_inline_citations("".join(chunks).strip(), current_turn_citations)
-        if _project_code_answer_requires_persisted_python(
-            final_text,
-            thread=prepared.thread,
-            project_write_completed=tool_rounds_result.project_write_completed,
-            project_read_completed=tool_rounds_result.project_read_completed,
-        ):
-            final_text = _project_code_write_failure_answer()
+        if turn_result.answer:
+            yield ("delta", {"message_id": assistant_message.message_id, "delta": turn_result.answer})
         final_message = self.repository.update_chat_message(  # type: ignore[attr-defined]
             assistant_message.message_id,
-            content_markdown=final_text,
+            content_markdown=turn_result.answer,
             citations=[citation.model_dump() for citation in current_turn_citations],
             status="completed",
         )
@@ -4138,7 +4014,7 @@ class PaperbaseService:
                 "remaining_free_responses": self._remaining_free_responses(resolved_user),
                 "has_anthropic_api_key": self.repository.get_anthropic_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
                 "state": "completed",
-                "usage": usage_payload,
+                "usage": self._chat_usage_payload(turn_result.usage) if turn_result.usage is not None else None,
             },
         )
 

@@ -83,6 +83,7 @@ class ChatModelClient(ABC):
         system_prompt: str,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: dict[str, Any] | None = None,
+        parallel_tool_calls: bool | None = None,
     ) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -95,6 +96,7 @@ class ChatModelClient(ABC):
         system_prompt: str,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: dict[str, Any] | None = None,
+        parallel_tool_calls: bool | None = None,
     ) -> Iterator[ChatModelStreamEvent]:
         raise NotImplementedError
 
@@ -106,8 +108,9 @@ class ChatModelClient(ABC):
         system_prompt: str,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: dict[str, Any] | None = None,
+        parallel_tool_calls: bool | None = None,
     ) -> int | None:
-        del api_key, messages, system_prompt, tools, tool_choice
+        del api_key, messages, system_prompt, tools, tool_choice, parallel_tool_calls
         return None
 
     def complete(self, *, api_key: str, prompt: str, system_prompt: str) -> str:
@@ -182,7 +185,9 @@ class AnthropicChatModelClient(ChatModelClient):
         system_prompt: str,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: dict[str, Any] | None = None,
+        parallel_tool_calls: bool | None = None,
     ) -> int | None:
+        del parallel_tool_calls
         response = requests.post(
             f"{self._settings.anthropic_base_url.rstrip('/')}/v1/messages/count_tokens",
             headers={
@@ -209,7 +214,9 @@ class AnthropicChatModelClient(ChatModelClient):
         system_prompt: str,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: dict[str, Any] | None = None,
+        parallel_tool_calls: bool | None = None,
     ) -> dict[str, Any]:
+        del parallel_tool_calls
         response = requests.post(
             f"{self._settings.anthropic_base_url.rstrip('/')}/v1/messages",
             headers={
@@ -246,7 +253,9 @@ class AnthropicChatModelClient(ChatModelClient):
         system_prompt: str,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: dict[str, Any] | None = None,
+        parallel_tool_calls: bool | None = None,
     ) -> Iterator[ChatModelStreamEvent]:
+        del parallel_tool_calls
         response = requests.post(
             f"{self._settings.anthropic_base_url.rstrip('/')}/v1/messages",
             headers={

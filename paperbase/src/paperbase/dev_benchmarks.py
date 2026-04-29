@@ -388,8 +388,9 @@ class _ProfileChatModel:
         system_prompt: str,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: dict[str, str] | None = None,
+        parallel_tool_calls: bool | None = None,
     ) -> dict[str, Any]:
-        del api_key, system_prompt, tool_choice
+        del api_key, system_prompt, tool_choice, parallel_tool_calls
         has_tool_results = any(
             message.get("role") == "user"
             and isinstance(message.get("content"), list)
@@ -421,8 +422,9 @@ class _ProfileChatModel:
         system_prompt: str,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: dict[str, str] | None = None,
+        parallel_tool_calls: bool | None = None,
     ):
-        del api_key, messages, system_prompt, tools, tool_choice
+        del api_key, messages, system_prompt, tools, tool_choice, parallel_tool_calls
         yield "Profiled grounded "
         yield "answer [S1]."
 

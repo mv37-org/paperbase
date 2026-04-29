@@ -1,6 +1,15 @@
 # Codex-Alignment Harness Board
 
-This file is the coordination board for the next harness rewrite wave.
+Status as of April 29, 2026:
+
+- the Codex-style kernel wave has landed in code
+- normal turns now run through one shared sampling loop
+- ordinary turns use `tool_choice=auto`
+- the final answer no longer comes from a separate answer-only model call
+- the browser stream keeps the same event schema while using the same loop under the hood
+- app-side forced project-write policy is removed from the ordinary coding path
+
+This file remains the coordination board for follow-on harness work.
 
 Use it as the single source of truth for:
 
