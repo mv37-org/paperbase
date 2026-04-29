@@ -152,7 +152,7 @@ Status:
 - [x] merge Worker A
 - [x] merge Worker B
 - [ ] merge Worker D
-- [ ] merge Worker C
+- [x] merge Worker C
 - [ ] merge Worker E
 - [ ] run `make test`
 - [ ] final cleanup pass
@@ -292,11 +292,19 @@ Dependencies:
 
 Status:
 
-- [ ] branch created
-- [ ] implementation started
-- [ ] tests updated
-- [ ] local relevant tests run
-- [ ] ready for merge
+- [x] branch created
+- [x] implementation started
+- [x] tests updated
+- [x] local relevant tests run
+- [x] ready for merge
+
+Integration notes:
+
+- landed on `codex/harness-v2-integration` as `fad54f45e02b1c6255c8b9f52f4e078f6c457676`
+- cherry-picked worker commit `0b9dde217f47aee0be355cfade2754dcf8bd4467`
+- resolved overlap in `paperbase/src/paperbase/service.py` and `paperbase/tests/test_service.py` by keeping Worker C's single-loop runtime while preserving Worker A's removal of backend write-enforcement answers and Worker B's unified prompt shape
+- targeted integration validation passed: `paperbase-dev verify-run --mode test` and 10 focused `paperbase/tests/test_service.py` cases covering the single-loop runtime, prompt stability, compaction-mid-turn behavior, and streaming alignment
+- merged ahead of Worker D by coordinator choice; Worker D still has the main remaining overlap in shared research/casual normal-turn prompt text and normal-turn service tests
 
 ### Worker D
 
