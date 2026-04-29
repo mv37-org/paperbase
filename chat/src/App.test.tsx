@@ -185,9 +185,11 @@ const SELECTED_PROJECT_KEY = "paperbase-selected-project";
 function authenticatedSession(
   overrides: Partial<{
     remaining_free_responses: number;
+    has_openai_api_key: boolean;
     has_anthropic_api_key: boolean;
     csrf_token: string | null;
     settings: Partial<{
+      openai_api_key_hint: string;
       anthropic_api_key_hint: string;
       has_modal_credentials: boolean;
       modal_token_id_hint: string;
@@ -209,8 +211,10 @@ function authenticatedSession(
       free_responses_used: 0,
     },
     remaining_free_responses: overrides.remaining_free_responses ?? 3,
+    has_openai_api_key: overrides.has_openai_api_key ?? overrides.has_anthropic_api_key ?? false,
     has_anthropic_api_key: overrides.has_anthropic_api_key ?? false,
     settings: {
+      openai_api_key_hint: "",
       anthropic_api_key_hint: "",
       has_modal_credentials: false,
       modal_token_id_hint: "",
@@ -223,6 +227,70 @@ function authenticatedSession(
       ...overrides.settings,
     },
     csrf_token: overrides.csrf_token ?? "csrf-123",
+  };
+}
+
+function threadItemResponse(
+  itemId: string,
+  itemType: string,
+  role: string,
+  contentText = "",
+  overrides: Partial<{
+    thread_id: string;
+    turn_id: string;
+    phase: "commentary" | "final_answer" | null;
+    call_id: string | null;
+    name: string | null;
+    content_json: unknown;
+    citations: unknown[];
+    created_at: string;
+    status: string;
+  }> = {},
+) {
+  return {
+    item_id: itemId,
+    thread_id: overrides.thread_id ?? "thread_1",
+    turn_id: overrides.turn_id ?? "turn_1",
+    item_type: itemType,
+    role,
+    phase: overrides.phase ?? null,
+    call_id: overrides.call_id ?? null,
+    name: overrides.name ?? null,
+    content_text: contentText,
+    content_json: overrides.content_json,
+    citations: overrides.citations ?? [],
+    created_at: overrides.created_at ?? "2026-04-21T00:00:00Z",
+    status: overrides.status ?? "completed",
+  };
+}
+
+function turnResponse(
+  turnId: string,
+  threadId: string,
+  items: ReturnType<typeof threadItemResponse>[] = [],
+  overrides: Partial<{
+    status: string;
+    provider_response_id: string;
+    started_at: string;
+    completed_at: string | null;
+    usage: Record<string, unknown> | null;
+    diff_summary: string;
+    changed_paths: string[];
+    exec_session_ids: string[];
+  }> = {},
+) {
+  return {
+    turn_id: turnId,
+    thread_id: threadId,
+    status: overrides.status ?? "completed",
+    provider_response_id: overrides.provider_response_id ?? "resp_1",
+    started_at: overrides.started_at ?? "2026-04-21T00:00:00Z",
+    completed_at: overrides.completed_at ?? "2026-04-21T00:00:01Z",
+    usage: overrides.usage ?? null,
+    diff_summary: overrides.diff_summary ?? "",
+    changed_paths: overrides.changed_paths ?? [],
+    exec_session_ids: overrides.exec_session_ids ?? [],
+    items,
   };
 }
 
@@ -246,6 +314,11 @@ function threadResponse(
   projectId = "proj_1",
   projectName = "General",
 ) {
+  const assistantItem = threadItemResponse("msg_1", "assistant_message", "assistant", content, {
+    thread_id: threadId,
+    turn_id: "turn_1",
+    phase: "final_answer",
+  });
   return {
     thread_id: threadId,
     project_id: projectId,
@@ -254,6 +327,8 @@ function threadResponse(
     title,
     created_at: "2026-04-21T00:00:00Z",
     updated_at: "2026-04-21T00:00:00Z",
+    items: [assistantItem],
+    turns: [turnResponse("turn_1", threadId, [assistantItem])],
     messages: [
       {
         message_id: "msg_1",
@@ -394,6 +469,8 @@ function emptyThreadResponse(threadId: string, projectId = "proj_1", projectName
     title: "New chat",
     created_at: "2026-04-21T00:00:00Z",
     updated_at: "2026-04-21T00:00:00Z",
+    items: [],
+    turns: [],
     messages: [],
   };
 }
@@ -1838,7 +1915,7 @@ describe("App", () => {
     });
   });
 
-  it("shows a re-enter-key message when the saved Anthropic key is invalid", async () => {
+  it("shows a re-enter-key message when the saved OpenAI key is invalid", async () => {
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());
     apiMocks.createThread.mockResolvedValue(emptyThreadResponse("thread_2"));
     apiMocks.sendThreadMessageStream.mockImplementation(
@@ -1848,21 +1925,11 @@ describe("App", () => {
         onEvent: (eventName: string, payload: unknown) => void,
       ) => {
         onEvent("api_key_required", {
-          thread: {
-            ...emptyThreadResponse("thread_2"),
-            messages: [
-              {
-                message_id: "msg_user",
-                role: "user",
-                content_markdown: "Need help",
-                citations: [],
-                created_at: "2026-04-21T00:00:00Z",
-                status: "completed",
-              },
-            ],
-          },
-          assistant_message: null,
+          thread: emptyThreadResponse("thread_2"),
+          turn: turnResponse("turn_invalid", "thread_2", [], { status: "failed" }),
+          final_item: null,
           remaining_free_responses: 0,
+          has_openai_api_key: false,
           has_anthropic_api_key: false,
           state: "api_key_invalid",
         });
@@ -1882,7 +1949,7 @@ describe("App", () => {
     await waitFor(() => {
       expect(
         screen.getByText(
-          "Your saved Anthropic API key could not be decrypted. Add it again in Settings.",
+          "Your saved OpenAI API key could not be decrypted. Add it again in Settings.",
         ),
       ).toBeTruthy();
     });
@@ -1907,28 +1974,61 @@ describe("App", () => {
         options?: { signal?: AbortSignal },
       ) => {
         streamSignal = options?.signal;
+        onEvent("turn_started", {
+          turn: turnResponse("turn_2", "thread_2", [], {
+            status: "running",
+            completed_at: null,
+          }),
+        });
         onEvent("usage", {
           model: "claude-opus-4-7",
           input_tokens: 117900,
           output_tokens: 100,
-          cache_creation_input_tokens: 0,
-          cache_read_input_tokens: 0,
           total_tokens: 118000,
           context_window_tokens: 258000,
         });
-        onEvent("tool_start", {
-          tool_call_id: "tool_1",
-          tool_name: "paperbase_search",
-          label: 'paper search for "grounding"',
-          command: 'paperbase_search({\n  "query": "grounding"\n})',
+        onEvent("item_started", {
+          item: threadItemResponse("item_tool_1", "function_call", "assistant", "", {
+            thread_id: "thread_2",
+            turn_id: "turn_2",
+            call_id: "tool_1",
+            name: "paperbase_search",
+            content_json: { query: "grounding" },
+            status: "in_progress",
+          }),
         });
-        onEvent("tool_done", {
-          tool_call_id: "tool_1",
-          tool_name: "paperbase_search",
-          label: 'paper search for "grounding"',
-          command: 'paperbase_search({\n  "query": "grounding"\n})',
-          output: '{\n  "result_set_id": "rs_1"\n}',
-          is_error: false,
+        onEvent("item_completed", {
+          item: threadItemResponse("item_tool_1", "function_call", "assistant", "", {
+            thread_id: "thread_2",
+            turn_id: "turn_2",
+            call_id: "tool_1",
+            name: "paperbase_search",
+            content_json: { query: "grounding" },
+          }),
+        });
+        onEvent("item_started", {
+          item: threadItemResponse("item_tool_1_output", "function_call_output", "tool", "", {
+            thread_id: "thread_2",
+            turn_id: "turn_2",
+            call_id: "tool_1",
+            name: "paperbase_search",
+            status: "in_progress",
+          }),
+        });
+        onEvent("item_completed", {
+          item: threadItemResponse(
+            "item_tool_1_output",
+            "function_call_output",
+            "tool",
+            '{\n  "result_set_id": "rs_1"\n}',
+            {
+              thread_id: "thread_2",
+              turn_id: "turn_2",
+              call_id: "tool_1",
+              name: "paperbase_search",
+              content_json: { result_set_id: "rs_1" },
+            },
+          ),
         });
         await streamDone;
       },
@@ -2018,47 +2118,89 @@ describe("App", () => {
         _payload: unknown,
         onEvent: (eventName: string, payload: unknown) => void,
       ) => {
-        onEvent("tool_start", {
-          tool_call_id: "tool_1",
-          tool_name: "project_apply_patch",
-          label: 'project file patch for "src/train.py"',
-        });
-        onEvent("assistant_start", {
-          assistant_message: {
-            message_id: "msg_2",
-            role: "assistant",
-            content_markdown: "",
-            citations: [],
-            created_at: "2026-04-21T00:00:00Z",
-            status: "streaming",
+        const toolItem = threadItemResponse("item_patch", "function_call", "assistant", "", {
+          thread_id: "thread_2",
+          turn_id: "turn_project_preview",
+          call_id: "tool_1",
+          name: "project_apply_patch",
+          content_json: {
+            repo_path: "src/train.py",
+            old_string: "",
+            new_string: "def train():\n    return 1\n",
           },
+          status: "in_progress",
         });
-        onEvent("delta", {
-          message_id: "msg_2",
+        const assistantItem = threadItemResponse("msg_2", "assistant_message", "assistant", "", {
+          thread_id: "thread_2",
+          turn_id: "turn_project_preview",
+          status: "in_progress",
+        });
+        onEvent("turn_started", {
+          turn: turnResponse("turn_project_preview", "thread_2", [], {
+            status: "running",
+            completed_at: null,
+          }),
+        });
+        onEvent("item_started", { item: toolItem });
+        onEvent("item_started", { item: assistantItem });
+        onEvent("item_delta", {
+          item_id: "msg_2",
           delta: "```python\ndef train():\n    return 1\n",
+          delta_type: "output_text",
         });
         await streamDone;
-        onEvent("tool_done", {
-          tool_call_id: "tool_1",
-          tool_name: "project_apply_patch",
-          label: 'project file patch for "src/train.py"',
-          is_error: false,
+        onEvent("item_completed", {
+          item: { ...toolItem, status: "completed" },
         });
-        onEvent("done", {
-          thread: threadResponse(
-            "thread_2",
-            "New chat",
-            "```python\ndef train():\n    return 1\n```",
+        onEvent("item_started", {
+          item: threadItemResponse("item_patch_output", "function_call_output", "tool", "", {
+            thread_id: "thread_2",
+            turn_id: "turn_project_preview",
+            call_id: "tool_1",
+            name: "project_apply_patch",
+            status: "in_progress",
+          }),
+        });
+        onEvent("item_completed", {
+          item: threadItemResponse(
+            "item_patch_output",
+            "function_call_output",
+            "tool",
+            '{\n  "status": "ok"\n}',
+            {
+              thread_id: "thread_2",
+              turn_id: "turn_project_preview",
+              call_id: "tool_1",
+              name: "project_apply_patch",
+              content_json: { status: "ok" },
+            },
           ),
-          assistant_message: {
-            message_id: "msg_2",
-            role: "assistant",
-            content_markdown: "```python\ndef train():\n    return 1\n```",
-            citations: [],
-            created_at: "2026-04-21T00:00:00Z",
-            status: "completed",
+        });
+        const completedAssistantItem = threadItemResponse(
+          "msg_2",
+          "assistant_message",
+          "assistant",
+          "```python\ndef train():\n    return 1\n```",
+          {
+            thread_id: "thread_2",
+            turn_id: "turn_project_preview",
+            phase: "final_answer",
           },
+        );
+        onEvent("item_completed", {
+          item: completedAssistantItem,
+        });
+        const completedThread = {
+          ...threadResponse("thread_2", "New chat", "```python\ndef train():\n    return 1\n```"),
+          items: [completedAssistantItem],
+          turns: [turnResponse("turn_project_preview", "thread_2", [completedAssistantItem])],
+        };
+        onEvent("turn_completed", {
+          thread: completedThread,
+          turn: turnResponse("turn_project_preview", "thread_2", [completedAssistantItem]),
+          final_item: completedAssistantItem,
           remaining_free_responses: 2,
+          has_openai_api_key: false,
           has_anthropic_api_key: false,
           state: "completed",
         });
@@ -2114,37 +2256,56 @@ describe("App", () => {
         _payload: unknown,
         onEvent: (eventName: string, payload: unknown) => void,
       ) => {
-        onEvent("assistant_start", {
-          assistant_message: {
-            message_id: "msg_2",
-            role: "assistant",
-            content_markdown: "",
-            citations: [],
-            created_at: "2026-04-21T00:00:00Z",
-            status: "streaming",
-          },
+        const assistantItem = threadItemResponse("msg_2", "assistant_message", "assistant", "", {
+          thread_id: "thread_2",
+          turn_id: "turn_fence",
+          status: "in_progress",
         });
-        onEvent("delta", {
-          message_id: "msg_2",
+        onEvent("turn_started", {
+          turn: turnResponse("turn_fence", "thread_2", [], {
+            status: "running",
+            completed_at: null,
+          }),
+        });
+        onEvent("item_started", { item: assistantItem });
+        onEvent("item_delta", {
+          item_id: "msg_2",
           delta: "```python\ndef train():\n    return 1\n",
+          delta_type: "output_text",
         });
         await waitForFenceClose;
-        onEvent("delta", {
-          message_id: "msg_2",
+        onEvent("item_delta", {
+          item_id: "msg_2",
           delta: "```\n\nThis script is ready to run.",
+          delta_type: "output_text",
         });
         await streamDone;
-        onEvent("done", {
-          assistant_message: {
-            message_id: "msg_2",
-            role: "assistant",
-            content_markdown:
-              "```python\ndef train():\n    return 1\n```\n\nThis script is ready to run.",
-            citations: [],
-            created_at: "2026-04-21T00:00:00Z",
-            status: "completed",
+        const completedAssistantItem = threadItemResponse(
+          "msg_2",
+          "assistant_message",
+          "assistant",
+          "```python\ndef train():\n    return 1\n```\n\nThis script is ready to run.",
+          {
+            thread_id: "thread_2",
+            turn_id: "turn_fence",
+            phase: "final_answer",
           },
+        );
+        onEvent("item_completed", { item: completedAssistantItem });
+        onEvent("turn_completed", {
+          thread: {
+            ...threadResponse(
+              "thread_2",
+              "New chat",
+              "```python\ndef train():\n    return 1\n```\n\nThis script is ready to run.",
+            ),
+            items: [completedAssistantItem],
+            turns: [turnResponse("turn_fence", "thread_2", [completedAssistantItem])],
+          },
+          turn: turnResponse("turn_fence", "thread_2", [completedAssistantItem]),
+          final_item: completedAssistantItem,
           remaining_free_responses: 2,
+          has_openai_api_key: false,
           has_anthropic_api_key: false,
           state: "completed",
         });
@@ -2208,22 +2369,71 @@ describe("App", () => {
         _payload: unknown,
         onEvent: (eventName: string, payload: unknown) => void,
       ) => {
-        onEvent("tool_start", {
-          tool_call_id: "tool_1",
-          tool_name: "project_write_file",
-          label: 'project file write for "src/trainer.py"',
+        const toolItem = threadItemResponse("item_write", "function_call", "assistant", "", {
+          thread_id: "thread_2",
+          turn_id: "turn_refresh",
+          call_id: "tool_1",
+          name: "project_write_file",
+          content_json: { repo_path: "src/trainer.py", content: "print('trainer')" },
+          status: "in_progress",
+        });
+        onEvent("turn_started", {
+          turn: turnResponse("turn_refresh", "thread_2", [], {
+            status: "running",
+            completed_at: null,
+          }),
+        });
+        onEvent("item_started", { item: toolItem });
+        onEvent("item_completed", {
+          item: { ...toolItem, status: "completed" },
         });
         pythonItems = [projectItemFile("file_2", "trainer.py", "proj_1", "src/trainer.py")];
-        onEvent("done", {
-          assistant_message: {
-            message_id: "msg_2",
-            role: "assistant",
-            content_markdown: "Created trainer.py",
-            citations: [],
-            created_at: "2026-04-21T00:00:00Z",
-            status: "completed",
+        onEvent("item_started", {
+          item: threadItemResponse("item_write_output", "function_call_output", "tool", "", {
+            thread_id: "thread_2",
+            turn_id: "turn_refresh",
+            call_id: "tool_1",
+            name: "project_write_file",
+            status: "in_progress",
+          }),
+        });
+        onEvent("item_completed", {
+          item: threadItemResponse(
+            "item_write_output",
+            "function_call_output",
+            "tool",
+            '{\n  "repo_path": "src/trainer.py"\n}',
+            {
+              thread_id: "thread_2",
+              turn_id: "turn_refresh",
+              call_id: "tool_1",
+              name: "project_write_file",
+              content_json: { repo_path: "src/trainer.py" },
+            },
+          ),
+        });
+        const finalItem = threadItemResponse(
+          "msg_2",
+          "assistant_message",
+          "assistant",
+          "Created trainer.py",
+          {
+            thread_id: "thread_2",
+            turn_id: "turn_refresh",
+            phase: "final_answer",
           },
+        );
+        onEvent("item_completed", { item: finalItem });
+        onEvent("turn_completed", {
+          thread: {
+            ...threadResponse("thread_2", "New chat", "Created trainer.py"),
+            items: [finalItem],
+            turns: [turnResponse("turn_refresh", "thread_2", [finalItem])],
+          },
+          turn: turnResponse("turn_refresh", "thread_2", [finalItem]),
+          final_item: finalItem,
           remaining_free_responses: 2,
+          has_openai_api_key: false,
           has_anthropic_api_key: false,
           state: "completed",
         });
@@ -2260,43 +2470,64 @@ describe("App", () => {
         _payload: unknown,
         onEvent: (eventName: string, payload: unknown) => void,
       ) => {
-        onEvent("assistant_start", {
-          assistant_message: {
-            message_id: "msg_stream",
-            role: "assistant",
-            content_markdown: "",
-            citations: [],
-            created_at: "2026-04-21T00:00:00Z",
-            status: "streaming",
+        const assistantItem = threadItemResponse(
+          "msg_stream",
+          "assistant_message",
+          "assistant",
+          "",
+          {
+            thread_id: "thread_2",
+            turn_id: "turn_usage",
+            status: "in_progress",
           },
+        );
+        onEvent("turn_started", {
+          turn: turnResponse("turn_usage", "thread_2", [], {
+            status: "running",
+            completed_at: null,
+          }),
         });
+        onEvent("item_started", { item: assistantItem });
         onEvent("usage", {
           model: "claude-opus-4-7",
           input_tokens: 117900,
           output_tokens: 100,
-          cache_creation_input_tokens: 0,
-          cache_read_input_tokens: 0,
           total_tokens: 118000,
           context_window_tokens: 258000,
         });
-        onEvent("done", {
-          assistant_message: {
-            message_id: "msg_stream",
-            role: "assistant",
-            content_markdown: "Grounded streamed answer",
-            citations: [],
-            created_at: "2026-04-21T00:00:00Z",
-            status: "completed",
+        onEvent("item_delta", {
+          item_id: "msg_stream",
+          delta: "Grounded streamed answer",
+          delta_type: "output_text",
+        });
+        const finalItem = threadItemResponse(
+          "msg_stream",
+          "assistant_message",
+          "assistant",
+          "Grounded streamed answer",
+          {
+            thread_id: "thread_2",
+            turn_id: "turn_usage",
+            phase: "final_answer",
           },
+        );
+        onEvent("item_completed", { item: finalItem });
+        onEvent("turn_completed", {
+          thread: {
+            ...threadResponse("thread_2", "New chat", "Grounded streamed answer"),
+            items: [finalItem],
+            turns: [turnResponse("turn_usage", "thread_2", [finalItem])],
+          },
+          turn: turnResponse("turn_usage", "thread_2", [finalItem]),
+          final_item: finalItem,
           remaining_free_responses: 2,
+          has_openai_api_key: false,
           has_anthropic_api_key: false,
           state: "completed",
           usage: {
             model: "claude-opus-4-7",
             input_tokens: 117900,
             output_tokens: 100,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
             total_tokens: 118000,
             context_window_tokens: 258000,
           },
@@ -2343,70 +2574,123 @@ describe("App", () => {
         _payload: unknown,
         onEvent: (eventName: string, payload: unknown) => void,
       ) => {
-        onEvent("compaction_start", {
-          compaction_message: {
-            message_id: "msg_compact",
-            role: "user",
-            kind: "compaction",
-            content_markdown: "Compacting conversation...",
-            citations: [],
-            created_at: "2026-04-21T00:00:00Z",
-            status: "streaming",
+        const compactionItem = threadItemResponse(
+          "msg_compact",
+          "compaction",
+          "assistant",
+          "Compacting conversation...",
+          {
+            thread_id: "thread_compact",
+            turn_id: "turn_compact",
+            status: "in_progress",
           },
+        );
+        onEvent("turn_started", {
+          turn: turnResponse("turn_compact", "thread_compact", [], {
+            status: "running",
+            completed_at: null,
+          }),
         });
-        onEvent("compaction_done", {
-          compaction_message: {
-            message_id: "msg_compact",
-            role: "user",
-            kind: "compaction",
-            content_markdown: "## Compacted Conversation\n\nPreserved the current task.",
-            citations: [],
-            created_at: "2026-04-21T00:00:00Z",
-            status: "completed",
+        onEvent("item_started", { item: compactionItem });
+        const completedCompactionItem = threadItemResponse(
+          "msg_compact",
+          "compaction",
+          "assistant",
+          "## Compacted Conversation\n\nPreserved the current task.",
+          {
+            thread_id: "thread_compact",
+            turn_id: "turn_compact",
           },
-          messages: [
+        );
+        onEvent("item_completed", {
+          item: completedCompactionItem,
+        });
+        const toolItem = threadItemResponse(
+          "item_after_compact",
+          "function_call",
+          "assistant",
+          "",
+          {
+            thread_id: "thread_compact",
+            turn_id: "turn_compact",
+            call_id: "tool_after_compact",
+            name: "paperbase_search",
+            content_json: { query: "context" },
+            status: "in_progress",
+          },
+        );
+        onEvent("item_started", {
+          item: toolItem,
+        });
+        onEvent("item_completed", {
+          item: { ...toolItem, status: "completed" },
+        });
+        onEvent("item_started", {
+          item: threadItemResponse(
+            "item_after_compact_output",
+            "function_call_output",
+            "tool",
+            "",
             {
-              message_id: "msg_compact",
-              role: "user",
-              kind: "compaction",
-              content_markdown: "## Compacted Conversation\n\nPreserved the current task.",
-              citations: [],
-              created_at: "2026-04-21T00:00:00Z",
-              status: "completed",
+              thread_id: "thread_compact",
+              turn_id: "turn_compact",
+              call_id: "tool_after_compact",
+              name: "paperbase_search",
+              status: "in_progress",
             },
-          ],
+          ),
         });
-        onEvent("tool_start", {
-          tool_call_id: "tool_after_compact",
-          tool_name: "paperbase_search",
-          label: 'paper search for "context"',
+        onEvent("item_completed", {
+          item: threadItemResponse(
+            "item_after_compact_output",
+            "function_call_output",
+            "tool",
+            '{\n  "result_set_id": "rs_after_compact"\n}',
+            {
+              thread_id: "thread_compact",
+              turn_id: "turn_compact",
+              call_id: "tool_after_compact",
+              name: "paperbase_search",
+              content_json: { result_set_id: "rs_after_compact" },
+            },
+          ),
         });
-        onEvent("tool_done", {
-          tool_call_id: "tool_after_compact",
-          tool_name: "paperbase_search",
-          label: 'paper search for "context"',
-          is_error: false,
+        onEvent("item_started", {
+          item: threadItemResponse("msg_answer", "assistant_message", "assistant", "", {
+            thread_id: "thread_compact",
+            turn_id: "turn_compact",
+            status: "in_progress",
+          }),
         });
-        onEvent("assistant_start", {
-          assistant_message: {
-            message_id: "msg_answer",
-            role: "assistant",
-            content_markdown: "",
-            citations: [],
-            created_at: "2026-04-21T00:00:01Z",
-            status: "streaming",
+        const finalItem = threadItemResponse(
+          "msg_answer",
+          "assistant_message",
+          "assistant",
+          "Answer after compaction",
+          {
+            thread_id: "thread_compact",
+            turn_id: "turn_compact",
+            phase: "final_answer",
           },
+        );
+        onEvent("item_completed", {
+          item: finalItem,
         });
-        onEvent("done", {
-          assistant_message: {
-            message_id: "msg_answer",
-            role: "assistant",
-            content_markdown: "Answer after compaction",
-            citations: [],
-            created_at: "2026-04-21T00:00:01Z",
-            status: "completed",
+        onEvent("turn_completed", {
+          thread: {
+            ...threadResponse("thread_compact", "New chat", "Answer after compaction"),
+            items: [completedCompactionItem, finalItem],
+            turns: [
+              turnResponse("turn_compact", "thread_compact", [completedCompactionItem, finalItem]),
+            ],
           },
+          turn: turnResponse("turn_compact", "thread_compact", [
+            completedCompactionItem,
+            finalItem,
+          ]),
+          final_item: finalItem,
           remaining_free_responses: 2,
+          has_openai_api_key: false,
           has_anthropic_api_key: false,
           state: "completed",
           usage: null,
@@ -2453,7 +2737,7 @@ describe("App", () => {
     expect(screen.queryByRole("tab", { name: "Notifications" })).toBeNull();
     expect(document.querySelector("#auth-modal-title")).toBeNull();
     expect(document.querySelector(".settings-section-title")?.textContent).toBe("Inference");
-    expect(screen.getAllByText("Manage Anthropic inference API key.")).toHaveLength(1);
+    expect(screen.getAllByText("Manage OpenAI inference API key.")).toHaveLength(1);
 
     fireEvent.click(screen.getByRole("tab", { name: "Sandbox" }));
     expect(document.querySelector(".settings-section-title")?.textContent).toBe("Sandbox");

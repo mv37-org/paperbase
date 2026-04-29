@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field, model_validator
 
 
 class PaperMetadata(BaseModel):
@@ -224,7 +224,7 @@ class BrowserUser(BaseModel):
 
 
 class BrowserUserSettingsResponse(BaseModel):
-    anthropic_api_key_hint: str = ""
+    openai_api_key_hint: str = ""
     has_modal_credentials: bool = False
     modal_token_id_hint: str = ""
     has_github_connection: bool = False
@@ -234,14 +234,38 @@ class BrowserUserSettingsResponse(BaseModel):
     weekly_papers_review_email: bool = False
     appearance_theme: Literal["light", "dark"] = "light"
 
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_legacy_openai_key_hint(cls, value: Any):
+        if isinstance(value, dict) and not value.get("openai_api_key_hint") and value.get("anthropic_api_key_hint"):
+            value = dict(value)
+            value["openai_api_key_hint"] = value.get("anthropic_api_key_hint") or ""
+        return value
+
+    @computed_field
+    def anthropic_api_key_hint(self) -> str:
+        return self.openai_api_key_hint
+
 
 class BrowserSessionResponse(BaseModel):
     authenticated: bool
     user: BrowserUser | None = None
     remaining_free_responses: int = 0
-    has_anthropic_api_key: bool = False
+    has_openai_api_key: bool = False
     settings: BrowserUserSettingsResponse = Field(default_factory=BrowserUserSettingsResponse)
     csrf_token: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_legacy_openai_flag(cls, value: Any):
+        if isinstance(value, dict) and "has_openai_api_key" not in value and "has_anthropic_api_key" in value:
+            value = dict(value)
+            value["has_openai_api_key"] = bool(value.get("has_anthropic_api_key"))
+        return value
+
+    @computed_field
+    def has_anthropic_api_key(self) -> bool:
+        return self.has_openai_api_key
 
 
 class SignupRequest(BaseModel):
@@ -264,8 +288,12 @@ class ResetPasswordRequest(BaseModel):
     password: str = Field(min_length=8)
 
 
-class SaveAnthropicKeyRequest(BaseModel):
+class SaveOpenAIKeyRequest(BaseModel):
     api_key: str = Field(min_length=8)
+
+
+class SaveAnthropicKeyRequest(SaveOpenAIKeyRequest):
+    pass
 
 
 class SaveModalCredentialsRequest(BaseModel):
@@ -329,6 +357,73 @@ class ChatMessageResponse(BaseModel):
     kind: str = "default"
 
 
+class ChatThreadItemResponse(BaseModel):
+    item_id: str
+    thread_id: str
+    turn_id: str
+    item_type: str
+    role: str
+    phase: Literal["commentary", "final_answer"] | None = None
+    call_id: str | None = None
+    name: str | None = None
+    content_text: str = ""
+    content_json: Any | None = None
+    citations: list[ChatCitation] = Field(default_factory=list)
+    created_at: datetime
+    status: str = "completed"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_legacy_message_fields(cls, value: Any):
+        if not isinstance(value, dict) or "item_id" in value or "message_id" not in value:
+            return value
+        kind = str(value.get("kind") or "default")
+        role = str(value.get("role") or "assistant")
+        return {
+            "item_id": value.get("message_id"),
+            "thread_id": value.get("thread_id") or "",
+            "turn_id": value.get("turn_id") or "legacy_turn",
+            "item_type": "compaction" if kind == "compaction" else "assistant_message" if role == "assistant" else "user_message",
+            "role": role,
+            "phase": value.get("phase"),
+            "call_id": value.get("call_id"),
+            "name": value.get("name"),
+            "content_text": value.get("content_markdown") or value.get("content_text") or "",
+            "content_json": value.get("content_json"),
+            "citations": value.get("citations") or [],
+            "created_at": value.get("created_at"),
+            "status": value.get("status") or "completed",
+        }
+
+    @computed_field
+    def message_id(self) -> str:
+        return self.item_id
+
+    @computed_field
+    def content_markdown(self) -> str:
+        return self.content_text
+
+    @computed_field
+    def kind(self) -> str:
+        if self.item_type == "compaction":
+            return "compaction"
+        return "default"
+
+
+class ChatTurnResponse(BaseModel):
+    turn_id: str
+    thread_id: str
+    status: str = "completed"
+    provider_response_id: str = ""
+    started_at: datetime
+    completed_at: datetime | None = None
+    usage: dict[str, Any] | None = None
+    diff_summary: str = ""
+    changed_paths: list[str] = Field(default_factory=list)
+    exec_session_ids: list[str] = Field(default_factory=list)
+    items: list[ChatThreadItemResponse] = Field(default_factory=list)
+
+
 class ChatThreadSummary(BaseModel):
     thread_id: str
     project_id: str
@@ -346,7 +441,61 @@ class ChatThreadResponse(BaseModel):
     title: str
     created_at: datetime
     updated_at: datetime
-    messages: list[ChatMessageResponse] = Field(default_factory=list)
+    items: list[ChatThreadItemResponse] = Field(default_factory=list)
+    turns: list[ChatTurnResponse] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_legacy_messages(cls, value: Any):
+        if not isinstance(value, dict) or value.get("items"):
+            return value
+        raw_messages = value.get("messages")
+        if not isinstance(raw_messages, list):
+            return value
+        thread_id = str(value.get("thread_id") or "")
+        coerced_items: list[dict[str, Any]] = []
+        for index, message in enumerate(raw_messages):
+            if isinstance(message, BaseModel):
+                message = message.model_dump(mode="python")
+            if not isinstance(message, dict):
+                continue
+            kind = str(message.get("kind") or "default")
+            role = str(message.get("role") or "assistant")
+            coerced_items.append(
+                {
+                    "item_id": message.get("message_id") or f"legacy_msg_{index + 1}",
+                    "thread_id": thread_id,
+                    "turn_id": message.get("turn_id") or "legacy_turn",
+                    "item_type": "compaction" if kind == "compaction" else "assistant_message" if role == "assistant" else "user_message",
+                    "role": role,
+                    "content_text": message.get("content_markdown") or "",
+                    "citations": message.get("citations") or [],
+                    "created_at": message.get("created_at"),
+                    "status": message.get("status") or "completed",
+                }
+            )
+        value = dict(value)
+        value["items"] = coerced_items
+        return value
+
+    @computed_field
+    def messages(self) -> list[ChatMessageResponse]:
+        messages: list[ChatMessageResponse] = []
+        for item in self.items:
+            if item.item_type not in {"user_message", "assistant_message", "compaction"}:
+                continue
+            messages.append(
+                ChatMessageResponse(
+                    message_id=item.item_id,
+                    role=item.role,
+                    content_markdown=item.content_text,
+                    citations=item.citations,
+                    created_at=item.created_at,
+                    status=item.status,
+                    kind="compaction" if item.item_type == "compaction" else "default",
+                )
+            )
+        return messages
 
 
 class CreateChatThreadRequest(BaseModel):
@@ -558,10 +707,62 @@ class SendChatMessageRequest(BaseModel):
 
 class SendChatMessageResponse(BaseModel):
     thread: ChatThreadResponse
-    assistant_message: ChatMessageResponse | None = None
+    turn: ChatTurnResponse | None = None
+    final_item: ChatThreadItemResponse | None = None
     remaining_free_responses: int = 0
-    has_anthropic_api_key: bool = False
+    has_openai_api_key: bool = False
     state: str = "completed"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_legacy_send_chat_response(cls, value: Any):
+        if not isinstance(value, dict):
+            return value
+        value = dict(value)
+        if "has_openai_api_key" not in value and "has_anthropic_api_key" in value:
+            value["has_openai_api_key"] = bool(value.get("has_anthropic_api_key"))
+        if value.get("final_item") is None and isinstance(value.get("assistant_message"), dict):
+            assistant_message = dict(value["assistant_message"])
+            kind = str(assistant_message.get("kind") or "default")
+            role = str(assistant_message.get("role") or "assistant")
+            thread_id = ""
+            if isinstance(value.get("thread"), dict):
+                thread_id = str(value["thread"].get("thread_id") or "")
+            value["final_item"] = {
+                "item_id": assistant_message.get("message_id") or "legacy_msg",
+                "thread_id": thread_id,
+                "turn_id": assistant_message.get("turn_id") or "legacy_turn",
+                "item_type": "compaction" if kind == "compaction" else "assistant_message" if role == "assistant" else "user_message",
+                "role": role,
+                "content_text": assistant_message.get("content_markdown") or "",
+                "citations": assistant_message.get("citations") or [],
+                "created_at": assistant_message.get("created_at"),
+                "status": assistant_message.get("status") or "completed",
+            }
+        return value
+
+    @computed_field
+    def assistant_message(self) -> ChatMessageResponse | None:
+        if self.final_item is not None and self.final_item.item_type in {"user_message", "assistant_message", "compaction"}:
+            return ChatMessageResponse(
+                message_id=self.final_item.item_id,
+                role=self.final_item.role,
+                content_markdown=self.final_item.content_text,
+                citations=self.final_item.citations,
+                created_at=self.final_item.created_at,
+                status=self.final_item.status,
+                kind="compaction" if self.final_item.item_type == "compaction" else "default",
+            )
+        assistant_messages = [
+            message
+            for message in self.thread.messages
+            if message.role == "assistant" or message.kind == "compaction"
+        ]
+        return assistant_messages[-1] if assistant_messages else None
+
+    @computed_field
+    def has_anthropic_api_key(self) -> bool:
+        return self.has_openai_api_key
 
 
 class ChatThreadListResponse(BaseModel):

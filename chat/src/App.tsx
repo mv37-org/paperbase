@@ -51,6 +51,7 @@ import type {
   ChatCitation,
   ChatMessageResponse,
   ChatStreamDoneEvent,
+  ChatThreadItemResponse,
   ChatStreamUsageEvent,
   ChatThreadResponse,
   ChatThreadSummary,
@@ -222,6 +223,7 @@ const AUTH_VIEW_COPY: Record<AuthView, { title: string; caption: string }> = {
 };
 
 const DEFAULT_BROWSER_SETTINGS: NonNullable<BrowserSessionResponse["settings"]> = {
+  openai_api_key_hint: "",
   anthropic_api_key_hint: "",
   has_modal_credentials: false,
   modal_token_id_hint: "",
@@ -240,7 +242,7 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; caption: string }> 
   {
     id: "inference",
     label: "Inference",
-    caption: "Manage Anthropic inference API key.",
+    caption: "Manage OpenAI inference API key.",
   },
   {
     id: "sandbox",
@@ -452,6 +454,35 @@ function createLocalMessage(
     citations: options.citations ?? [],
     created_at: new Date().toISOString(),
     status: options.status ?? "completed",
+  };
+}
+
+function messageFromThreadItem(item: ChatThreadItemResponse): ChatMessageResponse | null {
+  if (!["user_message", "assistant_message", "compaction"].includes(item.item_type)) {
+    return null;
+  }
+  return {
+    message_id: item.item_id,
+    role: item.role,
+    content_markdown: item.content_text,
+    citations: item.citations,
+    created_at: item.created_at,
+    status: item.status,
+    kind: item.item_type === "compaction" ? "compaction" : "default",
+  };
+}
+
+function normalizeThreadForState(thread: ChatThreadResponse): ChatThreadResponse {
+  const items = [...(thread.items ?? [])];
+  if (items.length === 0) {
+    return thread;
+  }
+  return {
+    ...thread,
+    items,
+    messages: items
+      .map(messageFromThreadItem)
+      .filter((message): message is ChatMessageResponse => Boolean(message)),
   };
 }
 
@@ -704,9 +735,9 @@ function contextUsageButtonLabel(usage: ChatStreamUsageEvent) {
 
 function apiKeyStateMessage(state: string) {
   if (state === "api_key_invalid") {
-    return "Your saved Anthropic API key could not be decrypted. Add it again in Settings.";
+    return "Your saved OpenAI API key could not be decrypted. Add it again in Settings.";
   }
-  return "You have used your 3 free responses. Add an Anthropic API key to continue.";
+  return "You have used your 3 free responses. Add an OpenAI API key to continue.";
 }
 
 function shouldShowThreadInSidebar(thread: ChatThreadSummary) {
@@ -926,6 +957,160 @@ function quotedToolActivityTarget(label: string) {
   return label.match(TOOL_ACTIVITY_TARGET_RE)?.[1] ?? "";
 }
 
+function toolActivityInputForItem(
+  item: Pick<ChatThreadItemResponse, "content_json" | "content_text">,
+) {
+  if (
+    item.content_json &&
+    typeof item.content_json === "object" &&
+    !Array.isArray(item.content_json)
+  ) {
+    return item.content_json as Record<string, unknown>;
+  }
+  if (item.content_text.trim()) {
+    try {
+      const parsed = JSON.parse(item.content_text);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function toolActivityLabelForItem(
+  item: Pick<ChatThreadItemResponse, "name" | "content_json" | "content_text">,
+) {
+  const toolName = item.name ?? "";
+  const toolInput = toolActivityInputForItem(item);
+  const detail = (value: unknown, limit = 56) => {
+    const text = String(value ?? "").trim();
+    if (!text) {
+      return null;
+    }
+    if (text.length > limit) {
+      return `${text.slice(0, limit - 1).trimEnd()}…`;
+    }
+    return text;
+  };
+
+  const query = detail(toolInput?.query);
+  const path = detail(toolInput?.path) ?? detail(toolInput?.repo_path);
+  const newPath = detail(toolInput?.new_repo_path);
+  const pattern = detail(toolInput?.pattern);
+  const figureId = detail(toolInput?.figure_id);
+  const tableId = detail(toolInput?.table_id);
+  const execId = detail(toolInput?.exec_id);
+
+  if (toolName === "paperbase_search") {
+    return query ? `paper search for "${query}"` : "paper search";
+  }
+  if (toolName === "paperbase_search_sections") {
+    return query ? `section search for "${query}"` : "section search";
+  }
+  if (toolName === "paperbase_get_results") {
+    return "result lookup";
+  }
+  if (toolName === "paperbase_grep_results") {
+    return pattern ? `result filtering for "${pattern}"` : "result filtering";
+  }
+  if (toolName === "paperbase_get_paper") {
+    return "paper lookup";
+  }
+  if (toolName === "paperbase_list_files") {
+    return "file listing";
+  }
+  if (toolName === "paperbase_read_file") {
+    return path ? `file read for "${path}"` : "file read";
+  }
+  if (toolName === "paperbase_get_figure") {
+    return figureId ? `figure lookup for "${figureId}"` : "figure lookup";
+  }
+  if (toolName === "paperbase_get_table") {
+    return tableId ? `table lookup for "${tableId}"` : "table lookup";
+  }
+  if (toolName === "paperbase_get_related_papers") {
+    return "related-paper lookup";
+  }
+  if (toolName === "paperbase_get_references") {
+    return "reference lookup";
+  }
+  if (toolName === "paperbase_list_uploaded_documents") {
+    return "upload listing";
+  }
+  if (toolName === "paperbase_search_uploaded_sections") {
+    return query ? `uploaded-note search for "${query}"` : "uploaded-note search";
+  }
+  if (toolName === "project_list_files") {
+    return "project file listing";
+  }
+  if (toolName === "project_read_file") {
+    return path ? `project file read for "${path}"` : "project file read";
+  }
+  if (toolName === "project_grep") {
+    return pattern ? `project grep for "${pattern}"` : "project grep";
+  }
+  if (toolName === "project_write_file" || toolName === "project_touch") {
+    return path ? `project file write for "${path}"` : "project file write";
+  }
+  if (toolName === "project_apply_patch" || toolName === "project_edit") {
+    return path ? `project file patch for "${path}"` : "project file patch";
+  }
+  if (toolName === "project_move") {
+    if (path && newPath) {
+      return `project file move from "${path}" to "${newPath}"`;
+    }
+    return "project file move";
+  }
+  if (toolName === "project_delete") {
+    return path ? `project file delete for "${path}"` : "project file delete";
+  }
+  if (toolName === "project_git_status") {
+    return "project git status";
+  }
+  if (toolName === "project_git_diff") {
+    return "project git diff";
+  }
+  if (toolName === "project_exec") {
+    return "project exec";
+  }
+  if (toolName === "project_wait") {
+    return execId ? `project exec wait for "${execId}"` : "project exec wait";
+  }
+  if (toolName === "project_cancel") {
+    return execId ? `project exec cancel for "${execId}"` : "project exec cancel";
+  }
+  if (toolName === "project_logs") {
+    return execId ? `project exec logs for "${execId}"` : "project exec logs";
+  }
+  if (toolName === "project_test") {
+    return "project test";
+  }
+  if (toolName === "project_lint") {
+    return "project lint";
+  }
+  if (toolName === "project_run") {
+    return path ? `project run for "${path}"` : "project run";
+  }
+  return toolName || "tool call";
+}
+
+function toolActivityCommandForItem(
+  item: Pick<ChatThreadItemResponse, "name" | "content_json" | "content_text">,
+) {
+  const toolName = item.name ?? "";
+  const toolInput = toolActivityInputForItem(item);
+  if (!toolName) {
+    return item.content_text || null;
+  }
+  if (!toolInput) {
+    return item.content_text || null;
+  }
+  return `${toolName}(${JSON.stringify(toolInput, null, 2)})`;
+}
+
 function formatToolActivityText(
   activity: Pick<ToolActivityEntry, "label" | "status" | "toolName">,
 ) {
@@ -975,6 +1160,10 @@ function formatToolActivityText(
 
 function toolActivityHasDetails(activity: Pick<ToolActivityEntry, "command" | "output">) {
   return Boolean(activity.command || activity.output);
+}
+
+function isStreamingMessageStatus(status: string) {
+  return status === "streaming" || status === "in_progress";
 }
 
 function projectFileKindLabel(fileKind: ProjectFileKind | undefined) {
@@ -1612,7 +1801,7 @@ export default function App() {
     }
     return {
       email: session.user.email,
-      hasAnthropicApiKey: session.has_anthropic_api_key,
+      hasOpenAIApiKey: session.has_openai_api_key ?? session.has_anthropic_api_key ?? false,
       settings: session.settings ?? DEFAULT_BROWSER_SETTINGS,
     };
   }, [session]);
@@ -2463,6 +2652,84 @@ export default function App() {
         messages: [...(thread?.messages ?? []), optimisticUserMessage],
       }));
 
+      const upsertThreadItemState = (
+        thread: ChatThreadResponse | null,
+        item: ChatThreadItemResponse,
+      ): ChatThreadResponse => {
+        const nextThread =
+          thread ??
+          ({
+            thread_id: threadId,
+            project_id: fallbackProjectId,
+            project_name: fallbackProjectName,
+            project_instructions: fallbackProjectInstructions,
+            title: optimisticTitle,
+            created_at: now,
+            updated_at: now,
+            items: [],
+            turns: [],
+            messages: [],
+          } satisfies ChatThreadResponse);
+        const existingItems = nextThread.items ?? [];
+        const nextItems = existingItems.some((existing) => existing.item_id === item.item_id)
+          ? existingItems.map((existing) => (existing.item_id === item.item_id ? item : existing))
+          : [...existingItems, item];
+        const derivedMessage = messageFromThreadItem(item);
+        let nextMessages = nextThread.messages ?? [];
+        if (derivedMessage) {
+          nextMessages = nextMessages.some(
+            (message) => message.message_id === derivedMessage.message_id,
+          )
+            ? nextMessages.map((message) =>
+                message.message_id === derivedMessage.message_id ? derivedMessage : message,
+              )
+            : [...nextMessages, derivedMessage];
+        }
+        return {
+          ...nextThread,
+          updated_at: new Date().toISOString(),
+          items: nextItems,
+          messages: nextMessages,
+        };
+      };
+
+      const appendItemDeltaState = (
+        thread: ChatThreadResponse | null,
+        itemId: string,
+        delta: string,
+      ): ChatThreadResponse => {
+        const nextThread =
+          thread ??
+          ({
+            thread_id: threadId,
+            project_id: fallbackProjectId,
+            project_name: fallbackProjectName,
+            project_instructions: fallbackProjectInstructions,
+            title: optimisticTitle,
+            created_at: now,
+            updated_at: now,
+            items: [],
+            turns: [],
+            messages: [],
+          } satisfies ChatThreadResponse);
+        const nextItems = (nextThread.items ?? []).map((item) =>
+          item.item_id === itemId
+            ? { ...item, content_text: `${item.content_text}${delta}` }
+            : item,
+        );
+        const nextMessages = (nextThread.messages ?? []).map((message) =>
+          message.message_id === itemId
+            ? { ...message, content_markdown: `${message.content_markdown}${delta}` }
+            : message,
+        );
+        return {
+          ...nextThread,
+          updated_at: new Date().toISOString(),
+          items: nextItems,
+          messages: nextMessages,
+        };
+      };
+
       streamAbortControllerRef.current = streamAbortController;
       setStreamingThreadId(threadId);
       clearThreadUsageSnapshot(threadId);
@@ -2479,106 +2746,81 @@ export default function App() {
             include_papers: includePapers,
           },
           (eventName, payload) => {
-            if (eventName === "compaction_start") {
-              updateThread(threadId, (thread) => ({
-                ...(thread ?? {
-                  thread_id: threadId,
-                  project_id: fallbackProjectId,
-                  project_name: fallbackProjectName,
-                  project_instructions: fallbackProjectInstructions,
-                  title: optimisticTitle,
-                  created_at: now,
-                  updated_at: now,
-                  messages: [],
-                }),
-                updated_at: new Date().toISOString(),
-                messages: (thread?.messages ?? []).some(
-                  (message) => message.message_id === payload.compaction_message.message_id,
-                )
-                  ? (thread?.messages ?? []).map((message) =>
-                      message.message_id === payload.compaction_message.message_id
-                        ? payload.compaction_message
-                        : message,
-                    )
-                  : [...(thread?.messages ?? []), payload.compaction_message],
-              }));
+            if (eventName === "turn_started") {
               return;
             }
 
-            if (eventName === "compaction_done") {
-              updateThread(threadId, (thread) => ({
-                ...(thread ?? {
-                  thread_id: threadId,
-                  project_id: fallbackProjectId,
-                  project_name: fallbackProjectName,
-                  project_instructions: fallbackProjectInstructions,
-                  title: optimisticTitle,
-                  created_at: now,
-                  updated_at: now,
-                  messages: [],
-                }),
-                updated_at: new Date().toISOString(),
-                messages: payload.messages,
-              }));
+            if (eventName === "item_started") {
+              updateThread(threadId, (thread) => upsertThreadItemState(thread, payload.item));
+              if (payload.item.item_type === "assistant_message") {
+                assistantStarted = true;
+                streamingMessageId = payload.item.item_id;
+                markThreadAssistantStarted(threadId);
+              }
+              if (
+                payload.item.item_type === "function_call" ||
+                payload.item.item_type === "custom_tool_call"
+              ) {
+                const toolName = payload.item.name ?? "";
+                if (toolName.startsWith("project_")) {
+                  turnUsedProjectCodeTools = true;
+                }
+                const toolLabel = toolActivityLabelForItem(payload.item);
+                upsertToolActivity(threadId, {
+                  id: payload.item.call_id ?? payload.item.item_id,
+                  turnIndex,
+                  toolName,
+                  label: toolLabel,
+                  command: toolActivityCommandForItem(payload.item),
+                  output: null,
+                  status: "running",
+                  startedAt: new Date().toISOString(),
+                  finishedAt: null,
+                  isError: false,
+                });
+              }
               return;
             }
 
-            if (eventName === "tool_start") {
-              if (String(payload.tool_name ?? "").startsWith("project_")) {
+            if (eventName === "item_delta") {
+              updateThread(threadId, (thread) =>
+                appendItemDeltaState(thread, payload.item_id, payload.delta),
+              );
+              return;
+            }
+
+            if (eventName === "item_completed") {
+              updateThread(threadId, (thread) => upsertThreadItemState(thread, payload.item));
+              if (
+                payload.item.item_type === "function_call_output" ||
+                payload.item.item_type === "custom_tool_call_output"
+              ) {
+                const toolName = payload.item.name ?? "";
+                completeToolActivity(threadId, payload.item.call_id ?? payload.item.item_id, {
+                  command: null,
+                  output: payload.item.content_text ?? null,
+                  isError:
+                    typeof payload.item.content_json === "object" &&
+                    payload.item.content_json !== null &&
+                    "error" in (payload.item.content_json as Record<string, unknown>),
+                });
+                if (
+                  toolName === "project_write_file" ||
+                  toolName === "project_apply_patch" ||
+                  toolName === "project_move" ||
+                  toolName === "project_touch" ||
+                  toolName === "project_edit" ||
+                  toolName === "project_delete"
+                ) {
+                  void refreshLoadedProjectCodeItems(fallbackProjectId);
+                }
+              }
+              if (
+                payload.item.item_type === "function_call" &&
+                String(payload.item.name ?? "").startsWith("project_")
+              ) {
                 turnUsedProjectCodeTools = true;
               }
-              upsertToolActivity(threadId, {
-                id: payload.tool_call_id,
-                turnIndex,
-                toolName: payload.tool_name,
-                label: payload.label,
-                command: payload.command ?? null,
-                output: null,
-                status: "running",
-                startedAt: new Date().toISOString(),
-                finishedAt: null,
-                isError: false,
-              });
-              return;
-            }
-
-            if (eventName === "tool_done") {
-              completeToolActivity(threadId, payload.tool_call_id, {
-                command: payload.command ?? null,
-                output: payload.output ?? null,
-                isError: payload.is_error,
-              });
-              if (
-                payload.tool_name === "project_write_file" ||
-                payload.tool_name === "project_apply_patch" ||
-                payload.tool_name === "project_move" ||
-                payload.tool_name === "project_touch" ||
-                payload.tool_name === "project_edit" ||
-                payload.tool_name === "project_delete"
-              ) {
-                void refreshLoadedProjectCodeItems(fallbackProjectId);
-              }
-              return;
-            }
-
-            if (eventName === "assistant_start") {
-              assistantStarted = true;
-              streamingMessageId = payload.assistant_message.message_id;
-              markThreadAssistantStarted(threadId);
-              updateThread(threadId, (thread) => ({
-                ...(thread ?? {
-                  thread_id: threadId,
-                  project_id: fallbackProjectId,
-                  project_name: fallbackProjectName,
-                  project_instructions: fallbackProjectInstructions,
-                  title: optimisticTitle,
-                  created_at: now,
-                  updated_at: now,
-                  messages: [],
-                }),
-                updated_at: now,
-                messages: [...(thread?.messages ?? []), payload.assistant_message],
-              }));
               return;
             }
 
@@ -2588,60 +2830,26 @@ export default function App() {
               return;
             }
 
-            if (eventName === "delta") {
-              updateThread(threadId, (thread) => ({
-                ...(thread ?? {
-                  thread_id: threadId,
-                  project_id: fallbackProjectId,
-                  project_name: fallbackProjectName,
-                  project_instructions: fallbackProjectInstructions,
-                  title: optimisticTitle,
-                  created_at: now,
-                  updated_at: now,
-                  messages: [],
-                }),
-                updated_at: new Date().toISOString(),
-                messages: (thread?.messages ?? []).map((message) =>
-                  message.message_id === payload.message_id
-                    ? {
-                        ...message,
-                        content_markdown: `${message.content_markdown}${payload.delta}`,
-                      }
-                    : message,
-                ),
-              }));
-              return;
-            }
-
-            if (eventName === "done") {
+            if (eventName === "turn_completed") {
               donePayload = payload;
               if (payload.usage) {
                 updateThreadStreamUsage(threadId, payload.usage);
                 setThreadUsageSnapshot(threadId, payload.usage);
               }
-              updateThread(threadId, (thread) => ({
-                ...(thread ?? {
-                  thread_id: threadId,
-                  project_id: fallbackProjectId,
-                  project_name: fallbackProjectName,
-                  project_instructions: fallbackProjectInstructions,
-                  title: optimisticTitle,
-                  created_at: now,
-                  updated_at: now,
-                  messages: [],
-                }),
-                updated_at: new Date().toISOString(),
-                messages: (thread?.messages ?? []).map((message) =>
-                  message.message_id === payload.assistant_message.message_id
-                    ? payload.assistant_message
-                    : message,
-                ),
+              setThreadMap((current) => ({
+                ...current,
+                [threadId]: normalizeThreadForState(payload.thread),
               }));
               return;
             }
 
             if (eventName === "api_key_required") {
               gatingPayload = payload;
+              return;
+            }
+
+            if (eventName === "turn_failed") {
+              streamError = payload.detail;
               return;
             }
 
@@ -2684,22 +2892,26 @@ export default function App() {
             include_uploads: includeUploads,
             include_papers: includePapers,
           });
-          setThreadMap((current) => ({ ...current, [threadId]: payload.thread }));
-          setSelectedProjectId(payload.thread.project_id);
-          upsertThreadIntoProjectItems(payload.thread);
+          const normalizedThread = normalizeThreadForState(payload.thread);
+          setThreadMap((current) => ({ ...current, [threadId]: normalizedThread }));
+          setSelectedProjectId(normalizedThread.project_id);
+          upsertThreadIntoProjectItems(normalizedThread);
           setSession((current) =>
             current
               ? {
                   ...current,
                   remaining_free_responses: payload.remaining_free_responses,
-                  has_anthropic_api_key: payload.has_anthropic_api_key,
+                  has_openai_api_key:
+                    payload.has_openai_api_key ?? payload.has_anthropic_api_key ?? false,
+                  has_anthropic_api_key:
+                    payload.has_openai_api_key ?? payload.has_anthropic_api_key ?? false,
                 }
               : current,
           );
           setComposerStatus("");
           await refreshProjects();
           if (messageHasProjectCodeIntent(content)) {
-            await refreshLoadedProjectCodeItems(payload.thread.project_id);
+            await refreshLoadedProjectCodeItems(normalizedThread.project_id);
           }
           if (payload.state === "api_key_required" || payload.state === "api_key_invalid") {
             showErrorFlash(apiKeyStateMessage(payload.state));
@@ -2740,22 +2952,26 @@ export default function App() {
       }
 
       if (gatingPayload) {
-        setThreadMap((current) => ({ ...current, [threadId]: gatingPayload.thread }));
-        setSelectedProjectId(gatingPayload.thread.project_id);
-        upsertThreadIntoProjectItems(gatingPayload.thread);
+        const normalizedThread = normalizeThreadForState(gatingPayload.thread);
+        setThreadMap((current) => ({ ...current, [threadId]: normalizedThread }));
+        setSelectedProjectId(normalizedThread.project_id);
+        upsertThreadIntoProjectItems(normalizedThread);
         setSession((current) =>
           current
             ? {
                 ...current,
                 remaining_free_responses: gatingPayload.remaining_free_responses,
-                has_anthropic_api_key: gatingPayload.has_anthropic_api_key,
+                has_openai_api_key:
+                  gatingPayload.has_openai_api_key ?? gatingPayload.has_anthropic_api_key ?? false,
+                has_anthropic_api_key:
+                  gatingPayload.has_openai_api_key ?? gatingPayload.has_anthropic_api_key ?? false,
               }
             : current,
         );
         setComposerStatus("");
         await refreshProjects();
         if (turnUsedProjectCodeTools) {
-          await refreshLoadedProjectCodeItems(gatingPayload.thread.project_id);
+          await refreshLoadedProjectCodeItems(normalizedThread.project_id);
         }
         showErrorFlash(apiKeyStateMessage(gatingPayload.state));
         setAuthView("settings");
@@ -2780,7 +2996,10 @@ export default function App() {
             ? {
                 ...current,
                 remaining_free_responses: donePayload.remaining_free_responses,
-                has_anthropic_api_key: donePayload.has_anthropic_api_key,
+                has_openai_api_key:
+                  donePayload.has_openai_api_key ?? donePayload.has_anthropic_api_key ?? false,
+                has_anthropic_api_key:
+                  donePayload.has_openai_api_key ?? donePayload.has_anthropic_api_key ?? false,
               }
             : current,
         );
@@ -3505,13 +3724,13 @@ export default function App() {
   const saveProjectInferenceKey = useCallback(async () => {
     const apiKey = projectAnthropicKey.trim();
     if (!apiKey) {
-      setProjectAdvancedStatus("Enter an Anthropic API key.");
+      setProjectAdvancedStatus("Enter an OpenAI API key.");
       return;
     }
     setProjectAdvancedSaving("inference");
     setProjectAdvancedStatus("");
     try {
-      const nextSession = await api<BrowserSessionResponse>("/v1/browser/settings/anthropic-key", {
+      const nextSession = await api<BrowserSessionResponse>("/v1/browser/settings/openai-key", {
         method: "PUT",
         body: JSON.stringify({ api_key: apiKey }),
       });
@@ -5364,10 +5583,9 @@ export default function App() {
                     let userTurnIndex = 0;
                     return activeThread.messages.map((message) => {
                       const isCompactionMessage = message.kind === "compaction";
+                      const isStreamingMessage = isStreamingMessageStatus(message.status);
                       const streamingCodePreview =
-                        message.role === "assistant" &&
-                        message.status === "streaming" &&
-                        !isCompactionMessage
+                        message.role === "assistant" && isStreamingMessage && !isCompactionMessage
                           ? extractStreamingPythonPreview(message.content_markdown)
                           : null;
                       if (message.role === "user" && !isCompactionMessage) {
@@ -5403,16 +5621,16 @@ export default function App() {
                             {message.status !== "completed" && !isCompactionMessage ? (
                               <div className="message-meta-row">
                                 <span
-                                  className={`message-status-label${message.status === "streaming" ? " thinking-shimmer" : ""}`}
+                                  className={`message-status-label${isStreamingMessage ? " thinking-shimmer" : ""}`}
                                 >
-                                  {message.status === "streaming"
+                                  {isStreamingMessage
                                     ? formatThinkingLabel(activeThreadStreamState?.thinkingWord)
                                     : "Failed"}
                                 </span>
                               </div>
                             ) : null}
                             <div
-                              className={`message-bubble ${isCompactionMessage ? "compaction" : message.role === "assistant" ? "assistant" : "user"}${isCompactionMessage && message.status === "streaming" ? " thinking-shimmer" : ""}`}
+                              className={`message-bubble ${isCompactionMessage ? "compaction" : message.role === "assistant" ? "assistant" : "user"}${isCompactionMessage && isStreamingMessage ? " thinking-shimmer" : ""}`}
                             >
                               {isCompactionMessage ? (
                                 <MarkdownRenderer
@@ -6277,25 +6495,27 @@ export default function App() {
                           </div>
                           {projectAdvancedTab === "inference" ? (
                             <section className="project-advanced-group" role="tabpanel">
-                              {sessionSummary?.hasAnthropicApiKey ? (
+                              {sessionSummary?.hasOpenAIApiKey ? (
                                 <div className="settings-secret-row">
                                   <div className="settings-secret-copy">
-                                    <div className="settings-secret-label">Anthropic API key</div>
+                                    <div className="settings-secret-label">OpenAI API key</div>
                                     <div className="settings-secret-value">
-                                      {sessionSettings.anthropic_api_key_hint || "Saved"}
+                                      {sessionSettings.openai_api_key_hint ||
+                                        sessionSettings.anthropic_api_key_hint ||
+                                        "Saved"}
                                     </div>
                                   </div>
                                 </div>
                               ) : (
                                 <div className="project-advanced-form">
                                   <label className="project-field" htmlFor="project-anthropic-key">
-                                    <span>Anthropic API key</span>
+                                    <span>OpenAI API key</span>
                                     <input
                                       id="project-anthropic-key"
                                       name="project_anthropic_key"
                                       type="password"
                                       autoComplete="new-password"
-                                      placeholder="Anthropic API key"
+                                      placeholder="OpenAI API key"
                                       value={projectAnthropicKey}
                                       onChange={(event) =>
                                         setProjectAnthropicKey(event.target.value)
@@ -6696,30 +6916,32 @@ export default function App() {
                   >
                     <SettingsSectionHeading
                       title="Inference"
-                      caption="Manage Anthropic inference API key."
+                      caption="Manage OpenAI inference API key."
                     />
-                    {sessionSummary?.hasAnthropicApiKey ? (
+                    {sessionSummary?.hasOpenAIApiKey ? (
                       <div className="settings-secret-row">
                         <div className="settings-secret-copy">
-                          <div className="settings-secret-label">Anthropic API key</div>
+                          <div className="settings-secret-label">OpenAI API key</div>
                           <div className="settings-secret-value">
-                            {sessionSettings.anthropic_api_key_hint || "Saved"}
+                            {sessionSettings.openai_api_key_hint ||
+                              sessionSettings.anthropic_api_key_hint ||
+                              "Saved"}
                           </div>
                         </div>
                         <button
                           id="delete-anthropic-key-button"
                           className="api-key-delete-button"
                           type="button"
-                          aria-label="Delete saved Anthropic API key"
-                          title="Delete saved Anthropic API key"
+                          aria-label="Delete saved OpenAI API key"
+                          title="Delete saved OpenAI API key"
                           onClick={async () => {
                             try {
                               const nextSession = await api<BrowserSessionResponse>(
-                                "/v1/browser/settings/anthropic-key",
+                                "/v1/browser/settings/openai-key",
                                 { method: "DELETE" },
                               );
                               setSession(nextSession);
-                              showNoteFlash("Anthropic API key removed.");
+                              showNoteFlash("OpenAI API key removed.");
                             } catch (error) {
                               showErrorFlash(
                                 error instanceof Error ? error.message : "Deleting API key failed",
@@ -6744,14 +6966,14 @@ export default function App() {
                               new FormData(event.currentTarget).entries(),
                             );
                             const nextSession = await api<BrowserSessionResponse>(
-                              "/v1/browser/settings/anthropic-key",
+                              "/v1/browser/settings/openai-key",
                               {
                                 method: "PUT",
                                 body: JSON.stringify(payload),
                               },
                             );
                             setSession(nextSession);
-                            showNoteFlash("Anthropic API key saved.");
+                            showNoteFlash("OpenAI API key saved.");
                           } catch (error) {
                             showErrorFlash(
                               error instanceof Error ? error.message : "Saving API key failed",
@@ -6762,7 +6984,7 @@ export default function App() {
                         <input
                           name="api_key"
                           type="password"
-                          placeholder="Anthropic API key"
+                          placeholder="OpenAI API key"
                           autoComplete="new-password"
                           required
                         />

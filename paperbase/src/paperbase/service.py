@@ -44,15 +44,25 @@ from .extractors import (
     table_index_payload,
     table_json_bytes,
 )
-from .llm import AnthropicChatModelClient, ChatModelClient, ChatModelUsage, response_usage
+from .llm import (
+    OpenAIResponsesChatModelClient,
+    Prompt,
+    ResponseEnvelope,
+    ResponseEvent,
+    ResponseItem,
+    ChatModelClient,
+    ChatModelUsage,
+)
 from .models import (
     BrowserSessionResponse,
     BrowserUser,
     BrowserUserSettingsResponse,
     ChatCitation,
     ChatMessageResponse,
+    ChatThreadItemResponse,
     ChatThreadListResponse,
     ChatThreadResponse,
+    ChatTurnResponse,
     CodeContextResponse,
     CodeEligibility,
     CodeFileListResponse,
@@ -94,7 +104,7 @@ from .models import (
     ResetPasswordRequest,
     ResultSetResponse,
     RunPythonFileResponse,
-    SaveAnthropicKeyRequest,
+    SaveOpenAIKeyRequest,
     SaveModalCredentialsRequest,
     SearchPaperResult,
     SearchRequest,
@@ -1231,6 +1241,18 @@ def _truncate_tool_text(text: str, *, limit: int) -> tuple[str, bool]:
     return f"{clipped}\n\n[truncated]", True
 
 
+def _merge_chat_usage(previous: ChatModelUsage | None, current: ChatModelUsage | None) -> ChatModelUsage | None:
+    if previous is None:
+        return current
+    if current is None:
+        return previous
+    return ChatModelUsage(
+        input_tokens=previous.input_tokens + current.input_tokens,
+        output_tokens=previous.output_tokens + current.output_tokens,
+        total_tokens=previous.total_tokens + current.total_tokens,
+    )
+
+
 def _extract_message_text(payload: dict[str, Any]) -> str:
     parts = [item.get("text", "") for item in payload.get("content", []) if item.get("type") == "text"]
     return "\n".join(part for part in parts if part).strip()
@@ -1241,6 +1263,15 @@ def _anthropic_context_window_tokens(model_name: str) -> int:
     if any(token in normalized for token in ("opus-4-7", "opus-4-6", "sonnet-4-6")):
         return 1_000_000
     return 200_000
+
+
+def _openai_context_window_tokens(model_name: str) -> int:
+    normalized = model_name.strip().lower().replace(".", "-")
+    if normalized.startswith("gpt-5"):
+        return 400_000
+    if normalized.startswith("gpt-4.1") or normalized.startswith("gpt-4o"):
+        return 128_000
+    return 128_000
 
 
 _CHAT_TOOL_MAX_ROUNDS = 4
@@ -1421,6 +1452,17 @@ class ChatCitationRegistry:
     _by_key: dict[tuple[str, str], ChatCitation] = field(default_factory=dict)
     _next_source_index: int = 1
 
+    def seed(self, *, key: tuple[str, str], citation: ChatCitation) -> ChatCitation:
+        existing = self._by_key.get(key)
+        if existing is not None:
+            return existing
+        self._by_key[key] = citation
+        self.citations.append(citation)
+        match = re.fullmatch(r"S(\d+)", citation.source_id)
+        if match is not None:
+            self._next_source_index = max(self._next_source_index, int(match.group(1)) + 1)
+        return citation
+
     def register(
         self,
         *,
@@ -1455,7 +1497,8 @@ class ChatCitationRegistry:
 @dataclass
 class PreparedChatGeneration:
     thread: ChatThreadResponse
-    user_message: ChatMessageResponse
+    turn: ChatTurnResponse
+    user_item: ChatThreadItemResponse
     resolved_user: BrowserUser
     api_key_value: str | None
     using_free_tier: bool
@@ -1464,13 +1507,13 @@ class PreparedChatGeneration:
 
 @dataclass
 class ChatTurnContext:
-    items: list[ChatTurnItem]
-    active_message_ids: list[str]
+    items: list[dict[str, Any]]
+    active_item_ids: list[str]
     compactions_used: int = 0
 
     @property
-    def messages(self) -> list[dict[str, Any]]:
-        return [item.as_model_input() for item in self.items]
+    def prompt_input(self) -> list[dict[str, Any]]:
+        return list(self.items)
 
 
 @dataclass
@@ -1484,7 +1527,8 @@ class ChatToolRoundsResult:
 
 @dataclass
 class ChatTurnExecutionResult:
-    answer: str
+    turn: ChatTurnResponse
+    final_item: ChatThreadItemResponse | None
     citation_registry: ChatCitationRegistry
     usage: ChatModelUsage | None = None
 
@@ -1545,7 +1589,7 @@ class PaperbaseService:
         self.embeddings = OptionalEmbeddingProvider(settings)
         self.reranker = OptionalReranker(settings)
         self.email_sender = email_sender or ResendEmailSender(settings)
-        self.chat_model = chat_model or AnthropicChatModelClient(settings)
+        self.chat_model = chat_model or OpenAIResponsesChatModelClient(settings)
         self.secret_cipher = SecretCipher(settings)
         self.github_repo_manager = github_repo_manager or GitHubProjectRepoManager()
         self.modal_runner = modal_runner or ModalPythonRunner()
@@ -1563,12 +1607,12 @@ class PaperbaseService:
         self,
         user: BrowserUser,
         *,
-        anthropic_api_key_hint: str = "",
+        openai_api_key_hint: str = "",
     ) -> BrowserUserSettingsResponse:
         settings = self.repository.get_browser_user_settings(user.user_id)  # type: ignore[attr-defined]
         return settings.model_copy(
             update={
-                "anthropic_api_key_hint": anthropic_api_key_hint,
+                "openai_api_key_hint": openai_api_key_hint,
                 "github_oauth_available": bool(self.settings.github_client_id and self.settings.github_client_secret),
                 "github_manage_access_url": (
                     f"https://github.com/settings/connections/applications/{self.settings.github_client_id}"
@@ -1581,15 +1625,15 @@ class PaperbaseService:
     def _browser_session_response(self, user: BrowserUser | None) -> BrowserSessionResponse:
         if user is None:
             return BrowserSessionResponse(authenticated=False)
-        api_key_record = self.repository.get_anthropic_api_key_record(user.user_id)  # type: ignore[attr-defined]
+        api_key_record = self.repository.get_openai_api_key_record(user.user_id)  # type: ignore[attr-defined]
         return BrowserSessionResponse(
             authenticated=True,
             user=user,
             remaining_free_responses=self._remaining_free_responses(user),
-            has_anthropic_api_key=api_key_record is not None,
+            has_openai_api_key=api_key_record is not None,
             settings=self._browser_user_settings_response(
                 user,
-                anthropic_api_key_hint=(api_key_record or {}).get("api_key_hint", ""),
+                openai_api_key_hint=(api_key_record or {}).get("api_key_hint", ""),
             ),
         )
 
@@ -1681,17 +1725,23 @@ class PaperbaseService:
         session_token = self._create_browser_session(user.user_id)
         return self._browser_session_response(user), session_token
 
-    def save_user_anthropic_key(self, user: BrowserUser, request: SaveAnthropicKeyRequest) -> BrowserSessionResponse:
-        self.repository.save_anthropic_api_key(  # type: ignore[attr-defined]
+    def save_user_openai_key(self, user: BrowserUser, request: SaveOpenAIKeyRequest) -> BrowserSessionResponse:
+        self.repository.save_openai_api_key(  # type: ignore[attr-defined]
             user_id=user.user_id,
             encrypted_api_key=self.secret_cipher.encrypt(request.api_key.strip()),
             hint=api_key_hint(request.api_key),
         )
         return self._browser_session_response(user)
 
-    def delete_user_anthropic_key(self, user: BrowserUser) -> BrowserSessionResponse:
-        self.repository.delete_anthropic_api_key(user.user_id)  # type: ignore[attr-defined]
+    def delete_user_openai_key(self, user: BrowserUser) -> BrowserSessionResponse:
+        self.repository.delete_openai_api_key(user.user_id)  # type: ignore[attr-defined]
         return self._browser_session_response(user)
+
+    def save_user_anthropic_key(self, user: BrowserUser, request: SaveOpenAIKeyRequest) -> BrowserSessionResponse:
+        return self.save_user_openai_key(user, request)
+
+    def delete_user_anthropic_key(self, user: BrowserUser) -> BrowserSessionResponse:
+        return self.delete_user_openai_key(user)
 
     def save_user_modal_credentials(
         self,
@@ -3293,21 +3343,36 @@ class PaperbaseService:
         if not deleted:
             raise HTTPException(status_code=404, detail="Chat thread not found")
 
-    def _choose_anthropic_api_key(self, user: BrowserUser) -> tuple[str | None, bool, str]:
-        user_key_record = self.repository.get_anthropic_api_key_record(user.user_id)  # type: ignore[attr-defined]
-        if user.free_responses_used < self.settings.free_chat_response_limit and self.settings.anthropic_api_key:
-            return self.settings.anthropic_api_key, True, "completed"
+    def _choose_openai_api_key(self, user: BrowserUser) -> tuple[str | None, bool, str]:
+        user_key_record = self.repository.get_openai_api_key_record(user.user_id)  # type: ignore[attr-defined]
+        product_key = self.settings.openai_api_key or self.settings.anthropic_api_key
+        if user.free_responses_used < self.settings.free_chat_response_limit and product_key:
+            return product_key, True, "completed"
         if user_key_record:
             try:
                 return self.secret_cipher.decrypt(user_key_record["encrypted_api_key"]), False, "completed"
             except InvalidToken:
                 logger.warning(
-                    "Saved Anthropic API key could not be decrypted; deleting stale record",
-                    extra={"event": "browser.auth.anthropic_key.invalid", "user_id": user.user_id},
+                    "Saved OpenAI API key could not be decrypted; deleting stale record",
+                    extra={"event": "browser.auth.openai_key.invalid", "user_id": user.user_id},
+                )
+                self.repository.delete_openai_api_key(user.user_id)  # type: ignore[attr-defined]
+                return None, False, "api_key_invalid"
+        legacy_user_key_record = self.repository.get_anthropic_api_key_record(user.user_id)  # type: ignore[attr-defined]
+        if legacy_user_key_record:
+            try:
+                return self.secret_cipher.decrypt(legacy_user_key_record["encrypted_api_key"]), False, "completed"
+            except InvalidToken:
+                logger.warning(
+                    "Saved legacy Anthropic API key could not be decrypted; deleting stale record",
+                    extra={"event": "browser.auth.openai_key.legacy_invalid", "user_id": user.user_id},
                 )
                 self.repository.delete_anthropic_api_key(user.user_id)  # type: ignore[attr-defined]
                 return None, False, "api_key_invalid"
         return None, False, "api_key_required"
+
+    def _choose_anthropic_api_key(self, user: BrowserUser) -> tuple[str | None, bool, str]:
+        return self._choose_openai_api_key(user)
 
     def _prepare_chat_generation(
         self,
@@ -3318,10 +3383,16 @@ class PaperbaseService:
     ) -> PreparedChatGeneration:
         thread = self.get_chat_thread(user, thread_id)
         content = request.content.strip()
-        user_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
+        turn = self.repository.create_chat_turn(  # type: ignore[attr-defined]
             thread_id=thread_id,
+            status="running",
+        )
+        user_item = self.repository.add_chat_thread_item(  # type: ignore[attr-defined]
+            thread_id=thread_id,
+            turn_id=turn.turn_id,
+            item_type="user_message",
             role="user",
-            content_markdown=content,
+            content_text=content,
         )
         if thread.title == "New chat":
             self.repository.rename_chat_thread(  # type: ignore[attr-defined]
@@ -3329,10 +3400,12 @@ class PaperbaseService:
                 title=_summarize_chat_title(content),
             )
         resolved_user = self.repository.get_browser_user_by_id(user.user_id) or user  # type: ignore[attr-defined]
-        api_key_value, using_free_tier, api_key_state = self._choose_anthropic_api_key(resolved_user)
+        api_key_value, using_free_tier, api_key_state = self._choose_openai_api_key(resolved_user)
+        refreshed = self.get_chat_thread(user, thread_id)
         return PreparedChatGeneration(
-            thread=thread,
-            user_message=user_message,
+            thread=refreshed,
+            turn=turn,
+            user_item=user_item,
             resolved_user=resolved_user,
             api_key_value=api_key_value,
             using_free_tier=using_free_tier,
@@ -3394,92 +3467,75 @@ class PaperbaseService:
             include_project_code_tools=bool(thread.project_id),
         )
 
-    def _render_compaction_checkpoint(self, message: ChatMessageResponse) -> str:
-        summary = message.content_markdown.strip() or "Conversation compacted."
+    def _render_compaction_checkpoint(self, item: ChatThreadItemResponse) -> str:
+        summary = item.content_text.strip() or "Conversation compacted."
         parts = ["Conversation compaction checkpoint.", "", summary]
-        if message.citations:
+        if item.citations:
             citation_lines = [
                 f"- [{citation.source_id}] {citation.title} ({citation.source_kind}, {citation.path}): {citation.excerpt}"
-                for citation in message.citations
+                for citation in item.citations
             ]
             parts.extend(["", "## Persisted Source IDs", "", *citation_lines])
         return "\n".join(parts).strip()
 
-    def _chat_turn_item_from_message(self, message: ChatMessageResponse) -> ChatTurnItem:
-        if message.kind == "compaction":
-            return ChatTurnItem(
-                kind="compaction",
-                role="user",
-                content=self._render_compaction_checkpoint(message),
-            )
-        item_kind = "user_text" if message.role == "user" else "assistant_text"
-        return ChatTurnItem(kind=item_kind, role=message.role, content=message.content_markdown)
+    def _chat_input_item_from_thread_item(self, item: ChatThreadItemResponse) -> dict[str, Any]:
+        if item.item_type == "compaction":
+            return {
+                "type": "message",
+                "role": "developer",
+                "content": self._render_compaction_checkpoint(item),
+            }
+        if item.item_type == "function_call":
+            arguments = item.content_text
+            if not arguments and item.content_json is not None:
+                arguments = json.dumps(item.content_json, ensure_ascii=False)
+            return {
+                "type": "function_call",
+                "id": item.item_id,
+                "call_id": item.call_id or item.item_id,
+                "name": item.name or "",
+                "arguments": arguments,
+            }
+        if item.item_type == "function_call_output":
+            output = item.content_text
+            if not output and item.content_json is not None:
+                output = json.dumps(item.content_json, ensure_ascii=False)
+            return {
+                "type": "function_call_output",
+                "call_id": item.call_id or "",
+                "output": output,
+            }
+        if item.item_type == "reasoning":
+            return {
+                "type": "reasoning",
+                "id": item.item_id,
+                "summary": item.content_json if item.content_json is not None else item.content_text,
+            }
+        return {
+            "type": "message",
+            "role": item.role or "assistant",
+            "content": item.content_text,
+        }
 
     def _chat_turn_context(self, prepared: PreparedChatGeneration) -> ChatTurnContext:
-        active_messages = [*prepared.thread.messages, prepared.user_message]
         return ChatTurnContext(
-            items=[self._chat_turn_item_from_message(message) for message in active_messages],
-            active_message_ids=[message.message_id for message in active_messages],
+            items=[self._chat_input_item_from_thread_item(item) for item in prepared.thread.items],
+            active_item_ids=[item.item_id for item in prepared.thread.items],
         )
 
-    def _chat_model_create_message(self, *, api_key: str, prompt: ChatSamplingPrompt) -> dict[str, Any]:
-        kwargs = {
-            "api_key": api_key,
-            "messages": prompt.input,
-            "system_prompt": prompt.base_instructions,
-            "tools": prompt.tools or None,
-            "tool_choice": prompt.tool_choice,
-            "parallel_tool_calls": prompt.parallel_tool_calls,
-        }
-        try:
-            return self.chat_model.create_message(**kwargs)
-        except TypeError as exc:
-            if "parallel_tool_calls" not in str(exc):
-                raise
-            kwargs.pop("parallel_tool_calls", None)
-            return self.chat_model.create_message(**kwargs)
+    def _chat_model_create_response(self, *, api_key: str, prompt: Prompt) -> ResponseEnvelope:
+        return self.chat_model.create_response(api_key=api_key, prompt=prompt)
 
-    def _chat_model_stream_message(self, *, api_key: str, prompt: ChatSamplingPrompt):
-        kwargs = {
-            "api_key": api_key,
-            "messages": prompt.input,
-            "system_prompt": prompt.base_instructions,
-            "tools": prompt.tools or None,
-            "tool_choice": prompt.tool_choice,
-            "parallel_tool_calls": prompt.parallel_tool_calls,
-        }
-        try:
-            return self.chat_model.stream_message(**kwargs)
-        except TypeError as exc:
-            if "parallel_tool_calls" not in str(exc):
-                raise
-            kwargs.pop("parallel_tool_calls", None)
-            return self.chat_model.stream_message(**kwargs)
+    def _chat_model_stream_response(self, *, api_key: str, prompt: Prompt) -> Iterator[ResponseEvent]:
+        return self.chat_model.stream_response(api_key=api_key, prompt=prompt)
 
-    def _chat_model_count_tokens(self, *, api_key: str, prompt: ChatSamplingPrompt) -> int | None:
-        count_message_tokens = getattr(self.chat_model, "count_message_tokens", None)
-        if count_message_tokens is None:
-            return None
-        kwargs = {
-            "api_key": api_key,
-            "messages": prompt.input,
-            "system_prompt": prompt.base_instructions,
-            "tools": prompt.tools or None,
-            "tool_choice": prompt.tool_choice,
-            "parallel_tool_calls": prompt.parallel_tool_calls,
-        }
-        try:
-            return count_message_tokens(**kwargs)
-        except TypeError as exc:
-            if "parallel_tool_calls" not in str(exc):
-                raise
-            kwargs.pop("parallel_tool_calls", None)
-            return count_message_tokens(**kwargs)
+    def _chat_model_count_tokens(self, *, api_key: str, prompt: Prompt) -> int | None:
+        return self.chat_model.count_prompt_tokens(api_key=api_key, prompt=prompt)
 
     def _chat_context_needs_compaction(self, *, token_count: int | None) -> bool:
         if token_count is None:
             return False
-        context_window = _anthropic_context_window_tokens(self.settings.anthropic_model)
+        context_window = _openai_context_window_tokens(self.settings.openai_model)
         return token_count >= int(context_window * _CHAT_COMPACTION_THRESHOLD_RATIO)
 
     def _render_compaction_source(
@@ -3524,13 +3580,14 @@ class PaperbaseService:
             f"{source}"
         )
 
-    def _create_compaction_placeholder(self, *, thread_id: str) -> ChatMessageResponse:
-        return self.repository.add_chat_message(  # type: ignore[attr-defined]
+    def _create_compaction_placeholder(self, *, thread_id: str, turn_id: str) -> ChatThreadItemResponse:
+        return self.repository.add_chat_thread_item(  # type: ignore[attr-defined]
             thread_id=thread_id,
-            role="user",
-            content_markdown=_CHAT_COMPACTION_PLACEHOLDER,
-            status="streaming",
-            kind="compaction",
+            turn_id=turn_id,
+            item_type="compaction",
+            role="assistant",
+            content_text=_CHAT_COMPACTION_PLACEHOLDER,
+            status="in_progress",
         )
 
     def _finish_chat_compaction(
@@ -3540,17 +3597,17 @@ class PaperbaseService:
         context: ChatTurnContext,
         citation_registry: ChatCitationRegistry,
         turn_state: ChatTurnState,
-        placeholder: ChatMessageResponse,
-    ) -> tuple[ChatTurnContext, ChatMessageResponse, ChatThreadResponse]:
+        placeholder: ChatThreadItemResponse,
+    ) -> tuple[ChatTurnContext, ChatThreadItemResponse, ChatThreadResponse]:
         try:
-            payload = self._chat_model_create_message(
+            payload = self._chat_model_create_response(
                 api_key=prepared.api_key_value or "",
-                prompt=ChatSamplingPrompt(
+                prompt=Prompt(
                     input=[
                         {
                             "role": "user",
                             "content": self._chat_compaction_prompt(
-                                context.messages,
+                                context.prompt_input,
                                 citation_registry.citations,
                                 turn_state,
                             ),
@@ -3559,39 +3616,39 @@ class PaperbaseService:
                     base_instructions="",
                 ),
             )
-            summary = _extract_message_text(payload).strip()
+            summary = "\n\n".join(
+                item.content_text
+                for item in payload.items
+                if item.item_type in {"message", "assistant_message"}
+            ).strip()
             if not summary:
                 summary = "Conversation compacted, but the compaction model returned an empty summary."
-            compaction_message = self.repository.update_chat_message(  # type: ignore[attr-defined]
-                placeholder.message_id,
-                content_markdown=summary,
+            compaction_message = self.repository.update_chat_thread_item(  # type: ignore[attr-defined]
+                placeholder.item_id,
+                item_type="compaction",
+                phase=None,
+                content_text=summary,
                 citations=[citation.model_dump() for citation in citation_registry.citations],
                 status="completed",
-                kind="compaction",
             )
             if compaction_message is None:
                 raise RuntimeError("Compaction checkpoint vanished while updating")
-            self.repository.archive_chat_messages(  # type: ignore[attr-defined]
-                thread_id=prepared.thread.thread_id,
-                message_ids=context.active_message_ids,
-                archived_by_message_id=compaction_message.message_id,
-            )
             refreshed = self.get_chat_thread(prepared.resolved_user, prepared.thread.thread_id)
             return (
                 ChatTurnContext(
-                    items=[self._chat_turn_item_from_message(compaction_message)],
-                    active_message_ids=[compaction_message.message_id],
+                    items=[self._chat_input_item_from_thread_item(compaction_message)],
+                    active_item_ids=[compaction_message.item_id],
                     compactions_used=context.compactions_used + 1,
                 ),
                 compaction_message,
                 refreshed,
             )
         except Exception:
-            self.repository.update_chat_message(  # type: ignore[attr-defined]
-                placeholder.message_id,
-                content_markdown="Conversation compaction failed.",
+            self.repository.update_chat_thread_item(  # type: ignore[attr-defined]
+                placeholder.item_id,
+                item_type="compaction",
+                content_text="Conversation compaction failed.",
                 status="failed",
-                kind="compaction",
             )
             raise
 
@@ -3603,7 +3660,7 @@ class PaperbaseService:
         citation_registry: ChatCitationRegistry,
         turn_state: ChatTurnState,
         router: ChatToolRouter,
-    ) -> tuple[ChatTurnContext, ChatSamplingPrompt, list[tuple[str, dict[str, Any]]]]:
+    ) -> tuple[ChatTurnContext, Prompt, list[tuple[str, dict[str, Any]]]]:
         events: list[tuple[str, dict[str, Any]]] = []
         while True:
             prompt = self._chat_sampling_prompt(
@@ -3620,8 +3677,8 @@ class PaperbaseService:
                 return context, prompt, events
             if context.compactions_used >= _CHAT_COMPACTION_MAX_PER_TURN:
                 raise RuntimeError("Conversation context is still too large after compaction")
-            placeholder = self._create_compaction_placeholder(thread_id=prepared.thread.thread_id)
-            events.append(("compaction_start", {"compaction_message": placeholder.model_dump(mode="json")}))
+            placeholder = self._create_compaction_placeholder(thread_id=prepared.thread.thread_id, turn_id=prepared.turn.turn_id)
+            events.append(("item_started", {"item": placeholder.model_dump(mode="json")}))
             next_context, compaction_message, refreshed = self._finish_chat_compaction(
                 prepared=prepared,
                 context=context,
@@ -3629,15 +3686,8 @@ class PaperbaseService:
                 turn_state=turn_state,
                 placeholder=placeholder,
             )
-            events.append(
-                (
-                    "compaction_done",
-                    {
-                        "compaction_message": compaction_message.model_dump(mode="json"),
-                        "messages": [message.model_dump(mode="json") for message in refreshed.messages],
-                    },
-                )
-            )
+            del refreshed
+            events.append(("item_completed", {"item": compaction_message.model_dump(mode="json")}))
             context = next_context
 
     def _ensure_chat_context_budget_stream(
@@ -3648,7 +3698,7 @@ class PaperbaseService:
         citation_registry: ChatCitationRegistry,
         turn_state: ChatTurnState,
         router: ChatToolRouter,
-    ) -> Generator[tuple[str, dict[str, Any]], None, tuple[ChatTurnContext, ChatSamplingPrompt]]:
+    ) -> Generator[tuple[str, dict[str, Any]], None, tuple[ChatTurnContext, Prompt]]:
         context, prompt, events = self._ensure_chat_context_budget(
             prepared=prepared,
             context=context,
@@ -3995,7 +4045,7 @@ class PaperbaseService:
         context: ChatTurnContext,
         turn_state: ChatTurnState,
         router: ChatToolRouter,
-    ) -> ChatSamplingPrompt:
+    ) -> Prompt:
         tools = router.model_visible_specs()
         base_instructions = self._chat_base_instructions(
             prepared.thread,
@@ -4005,11 +4055,11 @@ class PaperbaseService:
         turn_summary = turn_state.visible_summary().strip()
         if turn_summary and turn_summary != "Current turn state:":
             base_instructions = f"{base_instructions}\n\n{turn_summary}"
-        return ChatSamplingPrompt(
-            input=context.messages,
+        return Prompt(
+            input=context.prompt_input,
             base_instructions=base_instructions,
             tools=tools,
-            tool_choice={"type": "auto"} if tools else None,
+            tool_choice="auto" if tools else None,
             parallel_tool_calls=router.parallel_tool_calls_enabled(),
         )
 
@@ -4801,9 +4851,82 @@ class PaperbaseService:
             if exec_id:
                 turn_state.note_exec_session(exec_id, running=status in {"running", "queued"})
 
+    def _thread_item_type_from_response_item(self, item: ResponseItem) -> str:
+        mapping = {
+            "assistant_message": "assistant_message",
+            "message": "assistant_message",
+            "reasoning": "reasoning",
+            "function_call": "function_call",
+            "function_call_output": "function_call_output",
+            "custom_tool_call": "custom_tool_call",
+            "custom_tool_call_output": "custom_tool_call_output",
+            "tool_search_call": "tool_search_call",
+            "tool_search_output": "tool_search_output",
+            "web_search_call": "web_search_call",
+        }
+        return mapping.get(item.item_type, "other")
+
+    def _thread_item_role_from_response_item(self, item: ResponseItem) -> str:
+        item_type = self._thread_item_type_from_response_item(item)
+        if item_type in {"function_call_output", "custom_tool_call_output"}:
+            return "tool"
+        if item_type in {"function_call", "custom_tool_call", "tool_search_call", "web_search_call"}:
+            return "assistant"
+        return item.role or "assistant"
+
+    def _response_item_to_thread_item_kwargs(self, item: ResponseItem) -> dict[str, Any]:
+        return {
+            "item_type": self._thread_item_type_from_response_item(item),
+            "role": self._thread_item_role_from_response_item(item),
+            "phase": None,
+            "call_id": item.call_id or item.item_id,
+            "name": item.name or None,
+            "content_text": item.content_text,
+            "content_json": item.content_json,
+            "status": item.status or "completed",
+        }
+
     def _chat_runtime_mode(self) -> str:
         mode = str(getattr(self.settings, "chat_runtime_mode", "codex_kernel") or "codex_kernel").strip().lower()
         return "legacy" if mode == "legacy" else "codex_kernel"
+
+    def _citation_registry_key(self, citation: ChatCitation) -> tuple[str, str]:
+        if citation.source_kind == "paperbase_paper":
+            return ("paperbase_paper", f"{citation.paper_id or citation.title}:{citation.path}")
+        if citation.source_kind == "uploaded_document":
+            return ("uploaded_document", f"{citation.document_id or citation.title}:{citation.path}")
+        return (citation.source_kind, f"{citation.title}:{citation.path}:{citation.source_id}")
+
+    def _seed_chat_citation_registry(
+        self,
+        citation_registry: ChatCitationRegistry,
+        *,
+        items: list[ChatThreadItemResponse],
+    ) -> None:
+        for item in items:
+            for citation in item.citations:
+                citation_registry.seed(
+                    key=self._citation_registry_key(citation),
+                    citation=citation,
+                )
+
+    def _persist_response_item(
+        self,
+        *,
+        thread_id: str,
+        turn_id: str,
+        item: ResponseItem,
+        status: str | None = None,
+    ) -> ChatThreadItemResponse:
+        return self.repository.add_chat_thread_item(  # type: ignore[attr-defined]
+            thread_id=thread_id,
+            turn_id=turn_id,
+            item_id=new_id("item"),
+            **{
+                **self._response_item_to_thread_item_kwargs(item),
+                **({"status": status} if status is not None else {}),
+            },
+        )
 
     def _run_chat_turn_engine(
         self,
@@ -4813,10 +4936,13 @@ class PaperbaseService:
         request: SendChatMessageRequest,
         stream_output: bool = False,
     ) -> Generator[tuple[str, dict[str, Any]], None, ChatTurnExecutionResult]:
+        del stream_output
         context = self._chat_turn_context(prepared)
         citation_registry = ChatCitationRegistry()
+        self._seed_chat_citation_registry(citation_registry, items=prepared.thread.items)
         router = self._chat_tool_router(request, thread=prepared.thread)
-        turn_state = ChatTurnState(active_goal=prepared.user_message.content_markdown)
+        turn_state = ChatTurnState(active_goal=prepared.user_item.content_text)
+        aggregated_usage: ChatModelUsage | None = None
 
         for _sample_index in range(_CHAT_TOOL_MAX_ROUNDS + 1):
             context, prompt, compaction_events = self._ensure_chat_context_budget(
@@ -4829,80 +4955,159 @@ class PaperbaseService:
             for event in compaction_events:
                 yield event
 
-            streamed_answer_started = False
-            if stream_output:
-                response: dict[str, Any] | None = None
-                usage = None
-                try:
-                    for event in self._chat_model_stream_message(api_key=prepared.api_key_value or "", prompt=prompt):
-                        if event.usage is not None:
-                            usage = event.usage
-                            yield ("usage", self._chat_usage_payload(event.usage))
-                        if event.text:
-                            streamed_answer_started = True
-                            yield ("assistant_delta", {"delta": event.text})
-                        if event.response is not None:
-                            response = event.response
-                except Exception:
-                    if streamed_answer_started:
-                        raise
-                    response = self._chat_model_create_message(
-                        api_key=prepared.api_key_value or "",
-                        prompt=prompt,
+            response_id = ""
+            step_usage: ChatModelUsage | None = None
+            step_items: dict[str, ChatThreadItemResponse] = {}
+            completed_assistant_item_ids: list[str] = []
+            pending_tool_calls: list[ChatThreadItemResponse] = []
+
+            for event in self._chat_model_stream_response(api_key=prepared.api_key_value or "", prompt=prompt):
+                response_id = response_id or event.response_id
+                if event.type == "response.output_item.added" and event.item is not None:
+                    provider_item_id = event.item.item_id or new_id("item")
+                    persisted_item = self._persist_response_item(
+                        thread_id=prepared.thread.thread_id,
+                        turn_id=prepared.turn.turn_id,
+                        item=event.item,
                     )
-                    usage = response_usage(response)
-                    if usage is not None:
-                        yield ("usage", self._chat_usage_payload(usage))
-                if response is None:
-                    raise RuntimeError("Streaming model call did not yield a terminal response payload")
-                usage = response_usage(response) or usage
-            else:
-                response = self._chat_model_create_message(
-                    api_key=prepared.api_key_value or "",
-                    prompt=prompt,
-                )
-                usage = response_usage(response)
-                if usage is not None:
-                    yield ("usage", self._chat_usage_payload(usage))
-
-            assistant_content = [block for block in (response.get("content") or []) if isinstance(block, dict)]
-            tool_uses = [block for block in assistant_content if block.get("type") == "tool_use"]
-            if not tool_uses:
-                answer = _sanitize_inline_citations(_extract_message_text(response), citation_registry.citations)
-                return ChatTurnExecutionResult(
-                    answer=answer,
-                    citation_registry=citation_registry,
-                    usage=usage,
-                )
-            if streamed_answer_started:
-                raise RuntimeError("Streaming response mixed assistant text with tool calls")
-
-            context.items.append(
-                ChatTurnItem(
-                    kind="assistant_tool_call",
-                    role="assistant",
-                    content=assistant_content,
-                )
-            )
-
-            tool_result_blocks: list[dict[str, Any]] = []
-            for index, tool_use in enumerate(tool_uses):
-                tool_use_id = str(tool_use.get("id") or "").strip()
-                if not tool_use_id:
+                    step_items[provider_item_id] = persisted_item
+                    yield ("item_started", {"item": persisted_item.model_dump(mode="json")})
                     continue
-                tool_name = str(tool_use.get("name") or "").strip()
-                tool_input = tool_use.get("input") if isinstance(tool_use.get("input"), dict) else {}
-                label = self._chat_tool_activity_label(tool_name=tool_name, tool_input=tool_input)
-                command = self._chat_tool_activity_command(tool_name=tool_name, tool_input=tool_input)
-                yield (
-                    "tool_start",
-                    {
-                        "tool_call_id": tool_use_id,
-                        "tool_name": tool_name,
-                        "label": label,
-                        "command": command,
-                    },
+                if event.type in {"response.output_text.delta", "response.function_call_arguments.delta"}:
+                    provider_item_id = event.item_id or new_id("item")
+                    persisted_item = step_items.get(provider_item_id)
+                    if persisted_item is None:
+                        role = "assistant" if event.type == "response.output_text.delta" else "assistant"
+                        item_type = "assistant_message" if event.type == "response.output_text.delta" else "function_call"
+                        persisted_item = self.repository.add_chat_thread_item(  # type: ignore[attr-defined]
+                            thread_id=prepared.thread.thread_id,
+                            turn_id=prepared.turn.turn_id,
+                            item_id=new_id("item"),
+                            item_type=item_type,
+                            role=role,
+                            content_text="",
+                            status="in_progress",
+                        )
+                    updated_item = self.repository.update_chat_thread_item(  # type: ignore[attr-defined]
+                        persisted_item.item_id,
+                        content_text=f"{persisted_item.content_text}{event.delta}",
+                        status="in_progress",
+                    )
+                    if updated_item is None:
+                        raise RuntimeError("Streaming item vanished during update")
+                    step_items[provider_item_id] = updated_item
+                    yield (
+                        "item_delta",
+                        {
+                            "item_id": updated_item.item_id,
+                            "delta": event.delta,
+                            "delta_type": "output_text"
+                            if event.type == "response.output_text.delta"
+                            else "function_call_arguments",
+                        },
+                    )
+                    continue
+                if event.type == "response.output_item.done" and event.item is not None:
+                    provider_item_id = event.item.item_id or new_id("item")
+                    persisted_item = step_items.get(provider_item_id)
+                    if persisted_item is None:
+                        persisted_item = self._persist_response_item(
+                            thread_id=prepared.thread.thread_id,
+                            turn_id=prepared.turn.turn_id,
+                            item=event.item,
+                        )
+                    else:
+                        persisted_item = self.repository.update_chat_thread_item(  # type: ignore[attr-defined]
+                            persisted_item.item_id,
+                            item_type=self._thread_item_type_from_response_item(event.item),
+                            name=event.item.name or persisted_item.name,
+                            call_id=event.item.call_id or persisted_item.call_id,
+                            content_text=event.item.content_text or persisted_item.content_text,
+                            content_json=event.item.content_json,
+                            status=event.item.status or "completed",
+                        )
+                    if persisted_item is None:
+                        raise RuntimeError("Completed output item vanished during persistence")
+                    step_items[provider_item_id] = persisted_item
+                    context.items.append(self._chat_input_item_from_thread_item(persisted_item))
+                    if persisted_item.item_type == "assistant_message":
+                        completed_assistant_item_ids.append(provider_item_id)
+                        continue
+                    if persisted_item.item_type in {"function_call", "custom_tool_call"}:
+                        pending_tool_calls.append(persisted_item)
+                    yield ("item_completed", {"item": persisted_item.model_dump(mode="json")})
+                    continue
+                if event.type == "response.completed":
+                    response_id = response_id or event.response_id
+                    step_usage = _merge_chat_usage(step_usage, event.usage)
+
+            aggregated_usage = _merge_chat_usage(aggregated_usage, step_usage)
+            if step_usage is not None:
+                yield ("usage", self._chat_usage_payload(step_usage))
+
+            completed_assistant_items = [
+                step_items[item_id]
+                for item_id in completed_assistant_item_ids
+                if item_id in step_items
+            ]
+            final_item: ChatThreadItemResponse | None = None
+            if completed_assistant_items:
+                for provider_item_id, item in zip(completed_assistant_item_ids[:-1], completed_assistant_items[:-1], strict=False):
+                    updated_item = self.repository.update_chat_thread_item(  # type: ignore[attr-defined]
+                        item.item_id,
+                        phase="commentary",
+                        content_text=_sanitize_inline_citations(item.content_text, citation_registry.citations),
+                        status="completed",
+                    )
+                    if updated_item is not None:
+                        step_items[provider_item_id] = updated_item
+                        yield ("item_completed", {"item": updated_item.model_dump(mode="json")})
+                last_provider_item_id = completed_assistant_item_ids[-1]
+                last_item = completed_assistant_items[-1]
+                last_phase = "commentary" if pending_tool_calls else "final_answer"
+                updated_last_item = self.repository.update_chat_thread_item(  # type: ignore[attr-defined]
+                    last_item.item_id,
+                    phase=last_phase,
+                    content_text=_sanitize_inline_citations(last_item.content_text, citation_registry.citations),
+                    citations=[citation.model_dump() for citation in citation_registry.citations]
+                    if last_phase == "final_answer"
+                    else [],
+                    status="completed",
                 )
+                if updated_last_item is not None:
+                    step_items[last_provider_item_id] = updated_last_item
+                    yield ("item_completed", {"item": updated_last_item.model_dump(mode="json")})
+                    if last_phase == "final_answer":
+                        final_item = updated_last_item
+
+            if not pending_tool_calls:
+                final_turn = self.repository.update_chat_turn(  # type: ignore[attr-defined]
+                    prepared.turn.turn_id,
+                    status="completed",
+                    provider_response_id=response_id,
+                    completed_at=utcnow(),
+                    usage=self._chat_usage_payload(aggregated_usage) if aggregated_usage is not None else None,
+                    diff_summary=turn_state.diff_tracker.unified_diff(),
+                    changed_paths=turn_state.diff_tracker.changed_files(),
+                    exec_session_ids=sorted(turn_state.running_exec_session_ids),
+                )
+                return ChatTurnExecutionResult(
+                    turn=final_turn or prepared.turn,
+                    final_item=final_item,
+                    citation_registry=citation_registry,
+                    usage=aggregated_usage,
+                )
+
+            for index, tool_item in enumerate(pending_tool_calls):
+                tool_name = tool_item.name or ""
+                tool_input = tool_item.content_json if isinstance(tool_item.content_json, dict) else {}
+                if not tool_input and tool_item.content_text.strip():
+                    try:
+                        parsed_tool_input = json.loads(tool_item.content_text)
+                        if isinstance(parsed_tool_input, dict):
+                            tool_input = parsed_tool_input
+                    except json.JSONDecodeError:
+                        tool_input = {}
                 if router.find_spec(tool_name) is None:
                     payload = {"error": f"Unknown tool: {tool_name}"}
                     is_error = True
@@ -4931,33 +5136,28 @@ class PaperbaseService:
                         project_id=prepared.thread.project_id,
                         turn_state=turn_state,
                     )
-                yield (
-                    "tool_done",
-                    {
-                        "tool_call_id": tool_use_id,
-                        "tool_name": tool_name,
-                        "label": label,
-                        "command": command,
-                        "output": self._chat_tool_activity_output(payload),
-                        "is_error": is_error,
-                    },
+                output_item = self.repository.add_chat_thread_item(  # type: ignore[attr-defined]
+                    thread_id=prepared.thread.thread_id,
+                    turn_id=prepared.turn.turn_id,
+                    item_type="function_call_output",
+                    role="tool",
+                    call_id=tool_item.call_id or tool_item.item_id,
+                    name=tool_name,
+                    content_text="",
+                    status="in_progress",
                 )
-                block = {
-                    "type": "tool_result",
-                    "tool_use_id": tool_use_id,
-                    "content": json.dumps(payload, ensure_ascii=False),
-                }
-                if is_error:
-                    block["is_error"] = True
-                tool_result_blocks.append(block)
-
-            context.items.append(
-                ChatTurnItem(
-                    kind="tool_result",
-                    role="user",
-                    content=tool_result_blocks,
+                yield ("item_started", {"item": output_item.model_dump(mode="json")})
+                output_text = json.dumps(payload, ensure_ascii=False)
+                completed_output_item = self.repository.update_chat_thread_item(  # type: ignore[attr-defined]
+                    output_item.item_id,
+                    content_text=output_text,
+                    content_json=payload,
+                    status="completed",
                 )
-            )
+                if completed_output_item is None:
+                    raise RuntimeError("Tool output item vanished during persistence")
+                context.items.append(self._chat_input_item_from_thread_item(completed_output_item))
+                yield ("item_completed", {"item": completed_output_item.model_dump(mode="json")})
 
         raise RuntimeError("Chat turn exceeded the maximum number of sampling steps")
 
@@ -4972,27 +5172,20 @@ class PaperbaseService:
         refreshed = self.get_chat_thread(user, thread_id)
         return SendChatMessageResponse(
             thread=refreshed,
-            assistant_message=None,
+            turn=None,
+            final_item=None,
             remaining_free_responses=self._remaining_free_responses(resolved_user),
-            has_anthropic_api_key=self.repository.get_anthropic_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
+            has_openai_api_key=self.repository.get_openai_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
             state=state,
         )
 
     def _chat_usage_payload(self, usage: ChatModelUsage) -> dict[str, Any]:
-        total_tokens = (
-            usage.input_tokens
-            + usage.output_tokens
-            + usage.cache_creation_input_tokens
-            + usage.cache_read_input_tokens
-        )
         return {
-            "model": self.settings.anthropic_model,
+            "model": self.settings.openai_model,
             "input_tokens": usage.input_tokens,
             "output_tokens": usage.output_tokens,
-            "cache_creation_input_tokens": usage.cache_creation_input_tokens,
-            "cache_read_input_tokens": usage.cache_read_input_tokens,
-            "total_tokens": total_tokens,
-            "context_window_tokens": _anthropic_context_window_tokens(self.settings.anthropic_model),
+            "total_tokens": usage.total_tokens or (usage.input_tokens + usage.output_tokens),
+            "context_window_tokens": _openai_context_window_tokens(self.settings.openai_model),
         }
 
     def send_chat_message(
@@ -5021,22 +5214,16 @@ class PaperbaseService:
                 turn_result = stop.value
                 break
 
-        current_turn_citations = turn_result.citation_registry.citations
-        assistant_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
-            thread_id=thread_id,
-            role="assistant",
-            content_markdown=turn_result.answer,
-            citations=[citation.model_dump() for citation in current_turn_citations],
-        )
         resolved_user = prepared.resolved_user
         if prepared.using_free_tier:
             resolved_user = self.repository.increment_free_responses_used(user.user_id) or resolved_user  # type: ignore[attr-defined]
         refreshed = self.get_chat_thread(user, thread_id)
         return SendChatMessageResponse(
             thread=refreshed,
-            assistant_message=assistant_message,
+            turn=turn_result.turn,
+            final_item=turn_result.final_item,
             remaining_free_responses=self._remaining_free_responses(resolved_user),
-            has_anthropic_api_key=self.repository.get_anthropic_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
+            has_openai_api_key=self.repository.get_openai_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
             state="completed",
         )
 
@@ -5060,73 +5247,49 @@ class PaperbaseService:
             return
 
         _ = self._chat_runtime_mode()
+        yield ("turn_started", {"turn": prepared.turn.model_dump(mode="json")})
         turn_engine = self._run_chat_turn_engine(
             prepared=prepared,
             user=user,
             request=request,
             stream_output=True,
         )
-        assistant_message: ChatMessageResponse | None = None
-        while True:
-            try:
-                event_name, payload = next(turn_engine)
-            except StopIteration as stop:
-                turn_result = stop.value
-                break
-            if event_name == "assistant_delta":
-                if assistant_message is None:
-                    assistant_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
-                        thread_id=thread_id,
-                        role="assistant",
-                        content_markdown="",
-                        citations=[],
-                        status="streaming",
-                    )
-                    yield ("assistant_start", {"assistant_message": assistant_message.model_dump(mode="json")})
-                if payload.get("delta"):
-                    updated_streaming_message = self.repository.update_chat_message(  # type: ignore[attr-defined]
-                        assistant_message.message_id,
-                        content_markdown=f"{assistant_message.content_markdown}{payload['delta']}",
-                        status="streaming",
-                    )
-                    if updated_streaming_message is None:
-                        raise RuntimeError("Assistant message vanished during streaming")
-                    assistant_message = updated_streaming_message
-                    yield ("delta", {"message_id": assistant_message.message_id, "delta": payload["delta"]})
-                continue
-            yield (event_name, payload)
-
-        current_turn_citations = turn_result.citation_registry.citations
-        if assistant_message is None:
-            assistant_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
-                thread_id=thread_id,
-                role="assistant",
-                content_markdown="",
-                citations=[],
-                status="streaming",
+        try:
+            while True:
+                try:
+                    event_name, payload = next(turn_engine)
+                except StopIteration as stop:
+                    turn_result = stop.value
+                    break
+                yield (event_name, payload)
+        except Exception as exc:
+            failed_turn = self.repository.update_chat_turn(  # type: ignore[attr-defined]
+                prepared.turn.turn_id,
+                status="failed",
+                completed_at=utcnow(),
             )
-            yield ("assistant_start", {"assistant_message": assistant_message.model_dump(mode="json")})
-            if turn_result.answer:
-                yield ("delta", {"message_id": assistant_message.message_id, "delta": turn_result.answer})
-        final_message = self.repository.update_chat_message(  # type: ignore[attr-defined]
-            assistant_message.message_id,
-            content_markdown=turn_result.answer,
-            citations=[citation.model_dump() for citation in current_turn_citations],
-            status="completed",
-        )
-        if final_message is None:
-            raise RuntimeError("Assistant message vanished during streaming")
+            yield (
+                "turn_failed",
+                {
+                    "turn": (failed_turn or prepared.turn).model_dump(mode="json"),
+                    "detail": str(exc),
+                },
+            )
+            return
 
         resolved_user = prepared.resolved_user
         if prepared.using_free_tier:
             resolved_user = self.repository.increment_free_responses_used(user.user_id) or resolved_user  # type: ignore[attr-defined]
+        refreshed = self.get_chat_thread(user, thread_id)
 
         yield (
-            "done",
+            "turn_completed",
             {
-                "assistant_message": final_message.model_dump(mode="json"),
+                "thread": refreshed.model_dump(mode="json"),
+                "turn": turn_result.turn.model_dump(mode="json"),
+                "final_item": turn_result.final_item.model_dump(mode="json") if turn_result.final_item is not None else None,
                 "remaining_free_responses": self._remaining_free_responses(resolved_user),
-                "has_anthropic_api_key": self.repository.get_anthropic_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
+                "has_openai_api_key": self.repository.get_openai_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
                 "state": "completed",
                 "usage": self._chat_usage_payload(turn_result.usage) if turn_result.usage is not None else None,
             },

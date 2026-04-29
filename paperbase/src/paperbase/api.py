@@ -63,7 +63,7 @@ from .models import (
     ResetPasswordRequest,
     ResultSetResponse,
     RunPythonFileResponse,
-    SaveAnthropicKeyRequest,
+    SaveOpenAIKeyRequest,
     SaveModalCredentialsRequest,
     SearchClickRequest,
     SearchPaperResult,
@@ -915,15 +915,19 @@ async def browser_github_callback(
         )
 
 
-@app.put("/v1/browser/settings/anthropic-key", response_model=BrowserSessionResponse)
-def browser_save_anthropic_key(
-    request: SaveAnthropicKeyRequest,
+@app.put("/v1/browser/settings/openai-key", response_model=BrowserSessionResponse)
+@app.put("/v1/browser/settings/anthropic-key", response_model=BrowserSessionResponse, include_in_schema=False)
+def browser_save_openai_key(
+    request: SaveOpenAIKeyRequest,
     http_request: Request,
     response: Response,
     user=Depends(require_browser_write_user),
     service: PaperbaseService = Depends(get_service),
 ) -> BrowserSessionResponse:
-    session_response = service.save_user_anthropic_key(user, request)
+    if hasattr(service, "save_user_openai_key"):
+        session_response = service.save_user_openai_key(user, request)
+    else:
+        session_response = service.save_user_anthropic_key(user, request)
     return _browser_session_response_with_csrf(
         session_response,
         request=http_request,
@@ -931,14 +935,18 @@ def browser_save_anthropic_key(
     )
 
 
-@app.delete("/v1/browser/settings/anthropic-key", response_model=BrowserSessionResponse)
-def browser_delete_anthropic_key(
+@app.delete("/v1/browser/settings/openai-key", response_model=BrowserSessionResponse)
+@app.delete("/v1/browser/settings/anthropic-key", response_model=BrowserSessionResponse, include_in_schema=False)
+def browser_delete_openai_key(
     request: Request,
     response: Response,
     user=Depends(require_browser_write_user),
     service: PaperbaseService = Depends(get_service),
 ) -> BrowserSessionResponse:
-    session_response = service.delete_user_anthropic_key(user)
+    if hasattr(service, "delete_user_openai_key"):
+        session_response = service.delete_user_openai_key(user)
+    else:
+        session_response = service.delete_user_anthropic_key(user)
     return _browser_session_response_with_csrf(
         session_response,
         request=request,

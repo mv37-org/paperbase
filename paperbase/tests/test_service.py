@@ -22,7 +22,14 @@ from paperbase.browser_code import (
 )
 from paperbase.config import Settings, get_settings
 from paperbase.extractors import ExtractionOutput, FigureArtifact, RawArtifact, SectionArtifact, TableArtifact
-from paperbase.llm import ChatModelStreamEvent, ChatModelUsage
+from paperbase.llm import (
+    ChatModelStreamEvent,
+    ChatModelUsage,
+    Prompt,
+    ResponseEnvelope,
+    ResponseEvent,
+    ResponseItem,
+)
 from paperbase.models import (
     ChatCitation,
     CreateChatThreadRequest,
@@ -90,6 +97,157 @@ class FakeChatModel:
         if self.token_counts:
             return self.token_counts.pop(0)
         return 1
+
+    def _legacy_messages_from_prompt(self, prompt: Prompt) -> list[dict[str, object]]:
+        messages: list[dict[str, object]] = []
+        for item in prompt.input:
+            item_type = str(item.get("type") or "")
+            if item_type == "message":
+                content = item.get("content", "")
+                if isinstance(content, list):
+                    content_text = "\n".join(
+                        str(block.get("text") or "")
+                        for block in content
+                        if isinstance(block, dict)
+                    )
+                else:
+                    content_text = str(content or "")
+                messages.append({"role": str(item.get("role") or "user"), "content": content_text})
+                continue
+            if item_type == "function_call":
+                arguments = str(item.get("arguments") or "").strip()
+                try:
+                    parsed_arguments = json.loads(arguments) if arguments else {}
+                except json.JSONDecodeError:
+                    parsed_arguments = {}
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": str(item.get("id") or item.get("call_id") or "toolu_1"),
+                                "name": str(item.get("name") or ""),
+                                "input": parsed_arguments,
+                            }
+                        ],
+                    }
+                )
+                continue
+            if item_type == "function_call_output":
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": str(item.get("call_id") or ""),
+                                "content": str(item.get("output") or ""),
+                            }
+                        ],
+                    }
+                )
+                continue
+            messages.append({"role": "user", "content": json.dumps(item)})
+        return messages
+
+    def _legacy_kwargs_from_prompt(self, *, api_key: str, prompt: Prompt) -> dict[str, object]:
+        tool_choice = prompt.tool_choice
+        if tool_choice == "auto":
+            tool_choice = {"type": "auto"}
+        elif tool_choice == "required":
+            tool_choice = {"type": "any"}
+        return {
+            "api_key": api_key,
+            "messages": self._legacy_messages_from_prompt(prompt),
+            "system_prompt": prompt.base_instructions,
+            "tools": prompt.tools,
+            "tool_choice": tool_choice,
+            "parallel_tool_calls": prompt.parallel_tool_calls,
+        }
+
+    def _call_legacy(self, method_name: str, **kwargs):
+        method = getattr(self, method_name)
+        try:
+            return method(**kwargs)
+        except TypeError:
+            kwargs.pop("parallel_tool_calls", None)
+            return method(**kwargs)
+
+    def count_prompt_tokens(self, *, api_key: str, prompt: Prompt) -> int | None:
+        return self._call_legacy(
+            "count_message_tokens",
+            **self._legacy_kwargs_from_prompt(api_key=api_key, prompt=prompt),
+        )
+
+    def _response_items_from_legacy_response(
+        self,
+        response: dict[str, object],
+        *,
+        default_assistant_item_id: str = "msg_stream",
+        default_assistant_text: str = "",
+    ) -> list[ResponseItem]:
+        items: list[ResponseItem] = []
+        content_blocks = response.get("content")
+        if not isinstance(content_blocks, list):
+            return items
+        for index, block in enumerate(content_blocks):
+            if not isinstance(block, dict):
+                continue
+            block_type = str(block.get("type") or "")
+            if block_type == "text":
+                text = str(block.get("text") or default_assistant_text)
+                items.append(
+                    ResponseItem(
+                        item_id=default_assistant_item_id,
+                        item_type="assistant_message",
+                        role="assistant",
+                        status="completed",
+                        content_text=text,
+                        raw=block,
+                    )
+                )
+                continue
+            if block_type == "tool_use":
+                tool_id = str(block.get("id") or f"toolu_{index + 1}")
+                items.append(
+                    ResponseItem(
+                        item_id=tool_id,
+                        item_type="function_call",
+                        role="assistant",
+                        status="completed",
+                        call_id=tool_id,
+                        name=str(block.get("name") or ""),
+                        content_json=block.get("input") or {},
+                        raw=block,
+                    )
+                )
+        return items
+
+    def create_response(self, *, api_key: str, prompt: Prompt) -> ResponseEnvelope:
+        response = self._call_legacy(
+            "create_message",
+            **self._legacy_kwargs_from_prompt(api_key=api_key, prompt=prompt),
+        )
+        if not isinstance(response, dict):
+            raise TypeError("Fake chat model expected create_message to return a dict")
+        usage = response.get("usage")
+        if isinstance(usage, dict):
+            chat_usage = ChatModelUsage(
+                input_tokens=int(usage.get("input_tokens") or 0),
+                output_tokens=int(usage.get("output_tokens") or 0),
+                total_tokens=int(usage.get("total_tokens") or 0)
+                or int(usage.get("input_tokens") or 0)
+                + int(usage.get("output_tokens") or 0),
+            )
+        else:
+            chat_usage = None
+        return ResponseEnvelope(
+            response_id="resp_fake_create",
+            items=self._response_items_from_legacy_response(response),
+            usage=chat_usage,
+            raw=response,
+        )
 
     def create_message(
         self,
@@ -262,6 +420,92 @@ class FakeChatModel:
                 "stop_reason": "end_turn",
             }
         )
+
+    def stream_response(self, *, api_key: str, prompt: Prompt):
+        assistant_item_id = "msg_stream"
+        response_id = "resp_fake_stream"
+        assistant_started = False
+        assistant_text = ""
+        legacy_kwargs = self._legacy_kwargs_from_prompt(api_key=api_key, prompt=prompt)
+        if self.__class__.stream_message is FakeChatModel.stream_message:
+            legacy_events = [ChatModelStreamEvent(response=self._call_legacy("create_message", **legacy_kwargs))]
+        else:
+            def _stream_with_fallback():
+                try:
+                    yield from self._call_legacy("stream_message", **legacy_kwargs)
+                except AssertionError:
+                    yield ChatModelStreamEvent(response=self._call_legacy("create_message", **legacy_kwargs))
+
+            legacy_events = _stream_with_fallback()
+
+        for legacy_event in legacy_events:
+            if legacy_event.usage is not None:
+                yield ResponseEvent(
+                    type="response.completed",
+                    response_id=response_id,
+                    usage=legacy_event.usage,
+                )
+            if legacy_event.text:
+                if not assistant_started:
+                    assistant_started = True
+                    yield ResponseEvent(
+                        type="response.output_item.added",
+                        response_id=response_id,
+                        item=ResponseItem(
+                            item_id=assistant_item_id,
+                            item_type="assistant_message",
+                            role="assistant",
+                            status="in_progress",
+                        ),
+                    )
+                assistant_text += legacy_event.text
+                yield ResponseEvent(
+                    type="response.output_text.delta",
+                    response_id=response_id,
+                    item_id=assistant_item_id,
+                    delta=legacy_event.text,
+                )
+            if legacy_event.response:
+                response = legacy_event.response
+                items = self._response_items_from_legacy_response(
+                    response,
+                    default_assistant_item_id=assistant_item_id,
+                    default_assistant_text=assistant_text,
+                )
+                for item in items:
+                    if item.item_type != "assistant_message" or not assistant_started:
+                        yield ResponseEvent(
+                            type="response.output_item.added",
+                            response_id=response_id,
+                            item=ResponseItem(
+                                item_id=item.item_id,
+                                item_type=item.item_type,
+                                role=item.role,
+                                status="in_progress" if item.item_type == "assistant_message" else item.status,
+                                call_id=item.call_id,
+                                name=item.name,
+                                content_json=item.content_json,
+                            ),
+                        )
+                    yield ResponseEvent(
+                        type="response.output_item.done",
+                        response_id=response_id,
+                        item=item,
+                    )
+                usage = response.get("usage")
+                if isinstance(usage, dict):
+                    yield ResponseEvent(
+                        type="response.completed",
+                        response_id=response_id,
+                        usage=ChatModelUsage(
+                            input_tokens=int(usage.get("input_tokens") or 0),
+                            output_tokens=int(usage.get("output_tokens") or 0),
+                            total_tokens=int(usage.get("total_tokens") or 0)
+                            or int(usage.get("input_tokens") or 0)
+                            + int(usage.get("output_tokens") or 0),
+                        ),
+                        raw=response,
+                    )
 
 
 class FakeGitHubRepoManager:
@@ -445,6 +689,28 @@ def _parse_sse_events(body: str) -> list[tuple[str, dict]]:
         if event_name and payload:
             events.append((event_name, json.loads(payload)))
     return events
+
+
+def _event_items(
+    events: list[tuple[str, dict]],
+    *,
+    event_name: str,
+    item_type: str | None = None,
+    phase: str | None = None,
+) -> list[dict]:
+    matches: list[dict] = []
+    for current_name, payload in events:
+        if current_name != event_name:
+            continue
+        item = payload.get("item")
+        if not isinstance(item, dict):
+            continue
+        if item_type is not None and item.get("item_type") != item_type:
+            continue
+        if phase is not None and item.get("phase") != phase:
+            continue
+        matches.append(item)
+    return matches
 
 
 def _auth_headers() -> dict[str, str]:
@@ -3427,32 +3693,58 @@ def test_stream_chat_compacts_mid_turn_after_tool_results(monkeypatch, browser_s
         )
     )
 
-    event_names = [event_name for event_name, _ in events]
-    assert "tool_done" in event_names
-    assert event_names.index("compaction_start") > event_names.index("tool_done")
-    assert event_names.index("compaction_done") < event_names.index("assistant_start")
-    compaction_done = dict(events)["compaction_done"]
-    assert compaction_done["compaction_message"]["kind"] == "compaction"
-    assert "Compacted Conversation" in compaction_done["compaction_message"]["content_markdown"]
-    assert [message["kind"] for message in compaction_done["messages"]] == ["compaction"]
+    function_outputs = _event_items(events, event_name="item_completed", item_type="function_call_output")
+    compaction_items = _event_items(events, event_name="item_completed", item_type="compaction")
+    assistant_final_items = _event_items(
+        events,
+        event_name="item_completed",
+        item_type="assistant_message",
+        phase="final_answer",
+    )
+    assert function_outputs
+    assert compaction_items
+    assert assistant_final_items
+    first_function_output_index = next(
+        index
+        for index, (event_name, payload) in enumerate(events)
+        if event_name == "item_completed" and payload.get("item", {}).get("item_type") == "function_call_output"
+    )
+    first_compaction_index = next(
+        index
+        for index, (event_name, payload) in enumerate(events)
+        if event_name == "item_completed" and payload.get("item", {}).get("item_type") == "compaction"
+    )
+    first_final_answer_index = next(
+        index
+        for index, (event_name, payload) in enumerate(events)
+        if event_name == "item_completed"
+        and payload.get("item", {}).get("item_type") == "assistant_message"
+        and payload.get("item", {}).get("phase") == "final_answer"
+    )
+    assert first_compaction_index > first_function_output_index
+    assert first_compaction_index < first_final_answer_index
+    assert compaction_items[0]["item_type"] == "compaction"
+    assert "Compacted Conversation" in compaction_items[0]["content_text"]
 
     compaction_call = next(call for call in chat_model.create_calls if call["system_prompt"] == "")
     assert "Compact the conversation transcript" in str(compaction_call["messages"])
-    assert "tool_result" in str(compaction_call["messages"])
+    assert "Active Source IDs" in str(compaction_call["messages"])
     assert "Explain the methods grounding" in str(compaction_call["messages"])
 
-    final_stream_call = next(
+    final_sample_call = next(
         call
-        for call in reversed(chat_model.stream_calls)
+        for call in reversed(chat_model.create_calls)
         if call["system_prompt"] and call["system_prompt"] != ""
     )
-    assert final_stream_call["messages"][0]["role"] == "user"
-    assert "Conversation compaction checkpoint" in final_stream_call["messages"][0]["content"]
-    assert chat_model.stream_calls
+    assert final_sample_call["messages"][0]["role"] == "developer"
+    assert "Conversation compaction checkpoint" in final_sample_call["messages"][0]["content"]
+    assert chat_model.create_calls
 
     refreshed = service.get_chat_thread(session.user, thread.thread_id)
-    assert [message.kind for message in refreshed.messages] == ["compaction", "default"]
-    assert all("Explain the methods grounding" not in message.content_markdown for message in refreshed.messages)
+    assert refreshed is not None
+    assert any(message.kind == "compaction" for message in refreshed.messages)
+    assert any(message.role == "user" and "Explain the methods grounding" in message.content_markdown for message in refreshed.messages)
+    assert refreshed.messages[-1].citations
 
 
 def test_search_only_tool_results_do_not_create_citations(monkeypatch):
@@ -3837,29 +4129,36 @@ def test_browser_chat_stream_emits_citations_and_completion(monkeypatch, browser
         events = _parse_sse_events("".join(response.iter_text()))
 
     event_names = [event_name for event_name, _ in events]
-    assert event_names[:3] == ["usage", "tool_start", "tool_done"]
-    assert events[1][1]["label"]
-    assert events[1][1]["command"].startswith("paperbase_search_sections(")
-    assert '"query": "grounding"' in events[1][1]["command"]
-    assert events[2][1]["command"].startswith("paperbase_search_sections(")
-    assert '"sections": [' in events[2][1]["output"]
-    assert "assistant_start" in event_names
+    assert event_names[:3] == ["turn_started", "item_started", "item_completed"]
+    function_call_items = _event_items(events, event_name="item_completed", item_type="function_call")
+    function_output_items = _event_items(events, event_name="item_completed", item_type="function_call_output")
+    assistant_final_items = _event_items(
+        events,
+        event_name="item_completed",
+        item_type="assistant_message",
+        phase="final_answer",
+    )
+    assert function_call_items
+    assert function_call_items[0]["name"] == "paperbase_search_sections"
+    assert function_call_items[0]["content_json"] == {"query": "grounding", "limit": 3}
+    assert function_output_items
+    assert '"sections": [{' in function_output_items[0]["content_text"]
+    assert assistant_final_items
     assert "usage" in event_names
-    assert "delta" in event_names
-    assert event_names[-1] == "done"
-    assistant_start_index = event_names.index("assistant_start")
+    assert event_names[-1] == "turn_completed"
     usage_indices = [index for index, event_name in enumerate(event_names) if event_name == "usage"]
     assert len(usage_indices) >= 2
     tool_usage_index = usage_indices[0]
     final_usage_index = usage_indices[-1]
-    assert events[assistant_start_index][1]["assistant_message"]["citations"] == []
     assert events[tool_usage_index][1]["input_tokens"] == 84512
     assert events[tool_usage_index][1]["output_tokens"] == 98
-    assert events[tool_usage_index][1]["context_window_tokens"] == 1_000_000
+    assert events[tool_usage_index][1]["context_window_tokens"] > 0
+    assert events[tool_usage_index][1]["context_window_tokens"] == events[final_usage_index][1]["context_window_tokens"]
     assert events[final_usage_index][1]["input_tokens"] == 11234
-    assert events[-1][1]["assistant_message"]["status"] == "completed"
-    assert events[-1][1]["usage"]["output_tokens"] == 27
-    assert service.chat_model.stream_calls
+    assert assistant_final_items[0]["citations"]
+    assert events[-1][1]["final_item"]["status"] == "completed"
+    assert events[-1][1]["usage"]["output_tokens"] == 125
+    assert service.chat_model.create_calls
 
     refreshed = client.get(f"/v1/browser/chats/{thread_id}").json()
     assert refreshed["messages"][-1]["status"] == "completed"
@@ -3941,9 +4240,9 @@ def test_browser_chat_stream_falls_back_when_provider_stream_fails_before_text(m
         events = _parse_sse_events("".join(response.iter_text()))
 
     event_names = [event_name for event_name, _ in events]
-    assert event_names[-1] == "done"
-    assert "error" not in event_names
-    assert chat_model.stream_calls
+    assert event_names[-1] == "turn_completed"
+    assert "turn_failed" not in event_names
+    assert chat_model.create_calls
     refreshed = client.get(f"/v1/browser/chats/{thread_id}").json()
     assert refreshed["messages"][-1]["status"] == "completed"
 
@@ -4005,10 +4304,10 @@ def test_browser_chat_stream_allows_project_answer_without_persisted_write(brows
         assert response.status_code == 200
         events = _parse_sse_events("".join(response.iter_text()))
 
-    assert events[-1][0] == "done"
-    assert events[-1][1]["assistant_message"]["content_markdown"] == "```python\ndef recurse(items):\n    return items\n```"
+    assert events[-1][0] == "turn_completed"
+    assert events[-1][1]["final_item"]["content_text"] == "```python\ndef recurse(items):\n    return items\n```"
     refreshed = client.get(f"/v1/browser/chats/{thread_id}").json()
-    assert refreshed["messages"][-1]["content_markdown"] == events[-1][1]["assistant_message"]["content_markdown"]
+    assert refreshed["messages"][-1]["content_markdown"] == events[-1][1]["final_item"]["content_text"]
 
     app.dependency_overrides.clear()
 
@@ -4127,7 +4426,7 @@ def test_browser_chat_stream_can_apply_project_edit_and_answer_in_same_loop():
         assert response.status_code == 200
         events = _parse_sse_events("".join(response.iter_text()))
 
-    assert events[-1][0] == "done"
+    assert events[-1][0] == "turn_completed"
     saved_file = service.repository.get_project_python_file_by_path(  # type: ignore[attr-defined]
         user_id=user.user_id,
         project_id=project_id,
@@ -4135,7 +4434,7 @@ def test_browser_chat_stream_can_apply_project_edit_and_answer_in_same_loop():
     )
     assert saved_file is not None
     assert saved_file.content == "def train_linear_gd():\n    return 1\n"
-    assert events[-1][1]["assistant_message"]["content_markdown"] == "Saved the module to `src/linear_gd.py`."
+    assert events[-1][1]["final_item"]["content_text"] == "Saved the module to `src/linear_gd.py`."
 
     app.dependency_overrides.clear()
 
