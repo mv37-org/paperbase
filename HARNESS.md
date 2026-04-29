@@ -1,53 +1,135 @@
-# Codex-Style Harness Task Board
+# Codex-Alignment Harness Board
 
-This file is the parallel execution board for rewriting the Paperbase harness to behave more like the open-source Codex runtime.
+This file is the coordination board for the next harness rewrite wave.
 
-It is meant to be actively used by multiple Codex tabs working on separate branches and separate worktrees.
+Use it as the single source of truth for:
 
-## Target
+- lane ownership
+- branch names
+- write scopes
+- merge order
+- validation expectations
+- worker handoff format
+- copy-paste prompts for workers and the integrator
 
-We are moving Paperbase toward this harness model:
+This board replaces the earlier migration board. The earlier wave already landed in PR #58. This wave covers the remaining gaps between the current Paperbase harness and a more Codex-like runtime.
 
-- one default system prompt for normal turns
+## What PR #58 Already Solved
+
+The first wave already moved Paperbase closer to Codex by landing these changes:
+
+- broad stable core tool exposure
+- `tool_choice=auto` for ordinary tool rounds
+- normalized tool schemas and tool result envelopes
+- compaction that keeps model-visible source ids
+- a simpler normal-turn prompt shape than before
+
+Do not spend worker time redoing that work unless it blocks the goals below.
+
+## What Still Makes Paperbase Different From Codex
+
+These are the main remaining gaps:
+
+- the app still decides that some project turns must persist code
+- the app can still overwrite the model answer with a canned write-failure response
+- normal turns still use a split runtime: tool phase, then separate answer phase
+- normal turns still use separate prompt personalities instead of one stable normal prompt
+- casual turns still inherit a research-first Paperbase posture more often than a Codex-style default would
+- compaction is improved, but the final harness should treat it as the only special case and keep everything else model-visible
+
+## Target Runtime Shape
+
+Move Paperbase toward this model:
+
+- one stable normal-turn system prompt
 - broad stable core tool exposure up front
-- `tool_choice=auto`
-- fixed tool schemas and fixed tool result shapes
-- model-driven tool use
-- deterministic gating only for explicit app surfaces, config allowlists or blocklists, and very large optional tool catalogs
+- model chooses whether to call tools
+- one ordinary turn loop: send messages and tools, append tool results, repeat, stop when the model answers
+- no app-side forced project-write policy for ordinary turns
+- compaction may remain specialized, but it must preserve only model-visible state
+
+This is still not an attempt to copy Codex literally. Keep deterministic behavior only where it is structurally justified.
 
 ## Ground Truth From Codex
 
 Reference implementation:
 
-- prompt assembly: `codex-rs/core/src/session/turn.rs`
-- request builder: `codex-rs/core/src/client.rs`
-- prompt type: `codex-rs/core/src/client_common.rs`
-- tool exposure: `codex-rs/core/src/mcp_tool_exposure.rs`
-- tool registry: `codex-rs/core/src/tools/spec.rs`
+- `codex-rs/core/src/session/turn.rs`
+- `codex-rs/core/src/client.rs`
+- `codex-rs/core/src/client_common.rs`
+- `codex-rs/core/src/mcp_tool_exposure.rs`
+- `codex-rs/core/src/tools/spec.rs`
 
 Relevant Codex properties:
 
-- the model request carries one instruction block, `input`, `tools`, `parallel_tool_calls`, and `tool_choice: "auto"`
+- one main instruction block is carried through normal turns
+- the request carries `input`, `tools`, and `tool_choice: "auto"`
 - core tools are broadly exposed
-- connector and app tools are still filtered deterministically
-- large MCP tool catalogs are deferred behind a search tool rather than exposed wholesale
+- the model decides whether to call tools
+- connector and app tools can still be filtered deterministically
+- very large tool catalogs can still be deferred behind search
 
 ## Hard Rules
 
 - Only one tab owns `HARNESS.md`.
+- Only the coordinator or integrator tab edits `HARNESS.md`.
 - Every worker gets its own branch.
 - Every worker should ideally get its own `git worktree`.
-- Workers must have disjoint write scopes whenever possible.
-- If two workers touch the same file, they must own different functions or sections and merge often.
-- The integration tab is the only tab that merges worker branches into the main line.
+- Workers must not edit this file.
+- Workers must not pick their own lane.
+- Workers must stay inside their write scope.
+- The integrator merges one worker at a time unless reality forces overlap handling.
+- Integrate small batches. Do not let branches drift for long.
 
-## Status Board
+## How To Use This File
 
-`[ ]` not started
-`[-]` in progress
-`[x]` complete
+Coordinator:
 
-## Coordinator Lane
+- creates worktrees and branches
+- assigns one lane per worker tab
+- updates status as work starts, lands, and verifies
+- pastes or summarizes worker handoffs into the integrator tab
+
+Workers:
+
+- read this file before coding
+- use this file for lane boundaries, branch name, write scope, merge order, and done criteria
+- do not edit this file
+- report back in the handoff format below
+
+Integrator:
+
+- reads this file before every merge
+- updates this file after each landed worker
+- keeps merge order and status honest
+
+If a worker prompt and this file disagree, the coordinator updates this file and treats the updated file as the new truth.
+
+## Worktree Setup
+
+Run from the main checkout:
+
+```bash
+git worktree add ../paper-ai-harness-a -b codex/harness-v2-trust-model-project-writes
+git worktree add ../paper-ai-harness-b -b codex/harness-v2-single-normal-prompt
+git worktree add ../paper-ai-harness-c -b codex/harness-v2-single-turn-loop
+git worktree add ../paper-ai-harness-d -b codex/harness-v2-relax-research-posture
+git worktree add ../paper-ai-harness-e -b codex/harness-v2-compaction-visible-state
+git worktree add ../paper-ai-harness-integration -b codex/harness-v2-integration
+```
+
+Recommended tabs:
+
+- Tab 1: coordinator or integrator
+- Tab 2: Worker A
+- Tab 3: Worker B
+- Tab 4: Worker C
+- Tab 5: Worker D
+- Tab 6: Worker E
+
+## Wave 2 Lanes
+
+### Coordinator Lane
 
 Owner:
 
@@ -56,51 +138,53 @@ Owner:
 Responsibilities:
 
 - keep this file current
-- create branches and worktrees
 - assign workers
-- integrate small batches
+- receive worker handoffs
+- merge in order
 - run validation after each merge batch
 - resolve conflicts
+- run final cleanup and `make test`
 
 Status:
 
 - [ ] create worktrees
 - [ ] assign workers
-- [ ] merge worker A
-- [ ] merge worker B
-- [ ] merge worker C
-- [ ] merge worker D
+- [ ] merge Worker A
+- [ ] merge Worker B
+- [ ] merge Worker D
+- [ ] merge Worker C
+- [ ] merge Worker E
 - [ ] run `make test`
 - [ ] final cleanup pass
 
-## Worker A
+### Worker A
 
 Branch:
 
-- `codex/harness-tool-exposure`
+- `codex/harness-v2-trust-model-project-writes`
+
+Mission:
+
+- remove the app-side forced project-write policy for ordinary turns
+- stop deciding through handwritten logic that a project turn had to persist code
+- stop overwriting the model answer with the canned write-failure message
+
+Primary targets:
+
+- `_should_require_project_code_write`
+- `_project_code_write_failure_answer`
+- `_project_code_answer_requires_persisted_python`
+- ordinary non-streaming and streaming answer override paths
 
 Write scope:
 
 - `paperbase/src/paperbase/service.py`
 - `paperbase/tests/test_service.py`
 
-Mission:
-
-- remove keyword-gated core tool exposure
-- stop deciding core tool availability from request content
-- make the normal-turn core Paperbase tool set broadly and stably exposed
-
-Primary targets:
-
-- `_should_offer_research_chat_tools`
-- `_should_offer_project_code_tools`
-- `_should_force_chat_tool_use`
-- `_chat_tool_definitions`
-
 Deliverables:
 
-- code no longer routes core tool exposure through keyword heuristics
-- tests rewritten to assert stable core tool presence
+- project turns can complete normally without an app-enforced write requirement
+- tests no longer encode the forced-write policy
 
 Dependencies:
 
@@ -114,35 +198,36 @@ Status:
 - [ ] local relevant tests run
 - [ ] ready for merge
 
-## Worker B
+### Worker B
 
 Branch:
 
-- `codex/harness-single-prompt`
-
-Write scope:
-
-- `paperbase/src/paperbase/service.py`
-- `paperbase/tests/test_service.py`
+- `codex/harness-v2-single-normal-prompt`
 
 Mission:
 
-- collapse normal-turn tool prompting to one default prompt
-- remove prompt branching used only to compensate for app-side routing
+- collapse normal-turn prompting into one stable base prompt
+- stop using separate normal-turn prompt personalities for tool use and final answer generation
 
 Primary targets:
 
 - `_chat_tool_system_prompt`
-- any helper branches that separate research and code turn prompting for normal turns
+- `_chat_answer_system_prompt`
+- prompt-related helpers and prompt tests
+
+Write scope:
+
+- `paperbase/src/paperbase/service.py`
+- `paperbase/tests/test_service.py`
 
 Deliverables:
 
-- one stable default normal-turn prompt
-- tests proving prompt stability across different user prompts
+- one stable prompt shape for ordinary turns
+- tests prove prompt stability across very different user inputs
 
 Dependencies:
 
-- should rebase on Worker A before final merge
+- should rebase on Worker A if Worker A changes overlapping answer logic
 
 Status:
 
@@ -152,80 +237,41 @@ Status:
 - [ ] local relevant tests run
 - [ ] ready for merge
 
-## Worker C
+### Worker C
 
 Branch:
 
-- `codex/harness-tool-io`
-
-Write scope:
-
-- `paperbase/src/paperbase/service.py`
-- `paperbase/tests/test_service.py`
-- `paperbase-plugin/tests/test_plugin.py` if needed
+- `codex/harness-v2-single-turn-loop`
 
 Mission:
 
-- normalize tool input and output contracts
-- make tool result payloads consistent and model-facing
-- make tool errors structurally consistent
-
-Primary targets:
-
-- tool definitions in `_chat_tool_definitions`
-- payload shapes in `_execute_chat_tool`
-- tool result handling in `_tool_result_blocks`
-
-Deliverables:
-
-- fixed success payload shape per tool
-- fixed error payload shape per tool
-- tests asserting exact shapes
-
-Dependencies:
-
-- none
-
-Status:
-
-- [ ] branch created
-- [ ] implementation started
-- [ ] tests updated
-- [ ] local relevant tests run
-- [ ] ready for merge
-
-## Worker D
-
-Branch:
-
-- `codex/harness-tool-choice-auto`
-
-Write scope:
-
-- `paperbase/src/paperbase/service.py`
-- `paperbase/tests/test_service.py`
-
-Mission:
-
-- remove forced `tool_choice={"type":"any"}` behavior for ordinary turns
-- default to model-driven `auto`
-- delete retry logic that exists only because the app pre-decided the model must write code
+- collapse the split normal-turn runtime into one ordinary loop
+- stop doing a separate final-answer model call for ordinary turns
+- let the model answer directly from the same loop after any tool rounds
 
 Primary targets:
 
 - `_run_chat_tool_rounds`
 - `_run_chat_tool_rounds_stream`
-- any write-forcing retry helpers that no longer make sense
+- `send_chat_message`
+- `send_chat_message_stream`
+
+Write scope:
+
+- `paperbase/src/paperbase/service.py`
+- `paperbase/tests/test_service.py`
 
 Deliverables:
 
-- ordinary turns run with `auto`
-- tests no longer expect `{"type":"any"}` sequences
+- one ordinary turn loop for normal turns
+- streaming and non-streaming paths stay aligned
+- tests prove the final answer no longer comes from a separate normal-turn model call
 
 Dependencies:
 
 - should rebase on Worker A
-- should rebase on Worker B if prompt logic changes touch the same code path
+- should rebase on Worker B
+- should rebase on Worker D if Worker D lands first and changes the same normal-turn tests
 
 Status:
 
@@ -235,37 +281,78 @@ Status:
 - [ ] local relevant tests run
 - [ ] ready for merge
 
-## Worker E
+### Worker D
 
 Branch:
 
-- `codex/harness-compaction-alignment`
+- `codex/harness-v2-relax-research-posture`
+
+Mission:
+
+- stop forcing a research-first Paperbase posture on casual or non-evidence turns
+- keep tools available when appropriate, but let the default harness feel more like Codex and less like a mandatory research flow
+
+Primary targets:
+
+- `_should_offer_research_chat_tools`
+- `_should_offer_chat_tools` if needed
+- normal-turn prompt text that hardcodes research-first behavior
+- casual-turn tests
 
 Write scope:
 
 - `paperbase/src/paperbase/service.py`
-- compaction-related tests
+- `paperbase/tests/test_service.py`
+
+Deliverables:
+
+- casual and brainstorm turns can stay simple
+- tests no longer encode mandatory research posture for small-talk or naming turns
+
+Dependencies:
+
+- should rebase on Worker B if prompt text moves
+
+Status:
+
+- [ ] branch created
+- [ ] implementation started
+- [ ] tests updated
+- [ ] local relevant tests run
+- [ ] ready for merge
+
+### Worker E
+
+Branch:
+
+- `codex/harness-v2-compaction-visible-state`
 
 Mission:
 
-- keep compaction specialized if needed
-- ensure compaction remains model-visible and compatible with the simplified harness
-- avoid hidden handwritten app-side state that the model cannot see
+- keep compaction as the only special-case runtime path
+- ensure compacted history preserves enough visible state for the model to continue naturally
+- avoid hidden handwritten obligations that survive outside the model-visible transcript
 
 Primary targets:
 
 - `_ensure_chat_context_budget`
 - `_ensure_chat_context_budget_stream`
-- compaction prompt and compaction tests
+- compaction prompt and checkpoint rendering
+- compaction continuity tests
+
+Write scope:
+
+- `paperbase/src/paperbase/service.py`
+- compaction-related tests only
 
 Deliverables:
 
-- compaction still works after the harness simplification
-- tests prove continuity across compacted conversations
+- compaction remains compatible with the simplified normal-turn harness
+- tests prove continuity across compaction checkpoints
 
 Dependencies:
 
-- should start after Workers A, B, and D have stabilized the main harness path
+- should start after Workers A, B, C, and D are stable enough that the normal-turn path is settled
 
 Status:
 
@@ -277,127 +364,433 @@ Status:
 
 ## Merge Order
 
-Use this order unless reality forces a different one:
+Use this order unless conflict reality forces a different one:
 
 1. Worker A
-2. Worker C
-3. Worker B
-4. Worker D
+2. Worker B
+3. Worker D
+4. Worker C
 5. Worker E
 6. integration cleanup
 
 Why this order:
 
-- Worker A changes the harness shape most
-- Worker C can normalize payloads once exposure is stable
-- Worker B should land after the new exposed surface is clear
-- Worker D should remove forcing only after the stable prompt and tool surface are in place
-- Worker E should adapt compaction after the core harness path settles
+- Worker A removes the strongest remaining app-side policy
+- Worker B sets the stable prompt shape before the turn loop is collapsed
+- Worker D adjusts the default posture once the prompt shape is clear
+- Worker C should land after the prompt and policy changes settle because it rewires the main turn flow
+- Worker E should adapt compaction after the core runtime path stabilizes
+
+## Validation Rules
+
+During worker development:
+
+- update tests whenever behavior changes
+- run the smallest relevant tests while iterating
+- report exactly what was and was not run
+
+Before final merge:
+
+- run `make test`
+
+During integration:
+
+- run targeted tests after each worker lands
+- if a worker changes broad chat runtime behavior, prefer running the relevant `test_service` subset immediately
 
 ## Integration Checklist
 
 For every worker branch:
 
-- [ ] fetch latest main branch state
-- [ ] rebase worker branch
+- [ ] fetch latest integration or main branch state
+- [ ] rebase worker branch if needed
 - [ ] inspect diff for accidental overlap
-- [ ] merge or cherry-pick into integration branch
+- [ ] merge or cherry-pick only that worker
 - [ ] run targeted tests
 - [ ] commit integration result
+- [ ] update this board
 
 Before final merge:
 
 - [ ] run `make test`
-- [ ] update this board statuses
 - [ ] remove dead helper functions
-- [ ] remove tests that only encoded the old heuristic harness
+- [ ] remove tests that only encoded the old harness
+- [ ] confirm this board matches what actually landed
 
-## Suggested Worktree Setup
+## Worker Handoff Format
 
-Run from the main checkout:
-
-```bash
-git worktree add ../paper-ai-harness-a -b codex/harness-tool-exposure
-git worktree add ../paper-ai-harness-b -b codex/harness-single-prompt
-git worktree add ../paper-ai-harness-c -b codex/harness-tool-io
-git worktree add ../paper-ai-harness-d -b codex/harness-tool-choice-auto
-git worktree add ../paper-ai-harness-e -b codex/harness-compaction-alignment
-git worktree add ../paper-ai-harness-integration -b codex/harness-integration
-```
-
-Then open a separate Codex tab in each worktree.
-
-## Suggested Tab Assignments
-
-Tab 1:
-
-- coordinator or integration tab
-- owns this file
-- owns `codex/harness-integration`
-
-Tab 2:
-
-- Worker A
-- worktree `../paper-ai-harness-a`
-
-Tab 3:
-
-- Worker B
-- worktree `../paper-ai-harness-b`
-
-Tab 4:
-
-- Worker C
-- worktree `../paper-ai-harness-c`
-
-Tab 5:
-
-- Worker D
-- worktree `../paper-ai-harness-d`
-
-Tab 6:
-
-- Worker E
-- worktree `../paper-ai-harness-e`
-
-## Prompt To Give Each Worker
-
-Use a prompt like this in each worker tab:
-
-```text
-You own only the write scope assigned in HARNESS.md for your worker lane.
-Read HARNESS.md first, implement only your lane, do not broaden scope, do not edit HARNESS.md, commit when done, and report:
-1. files changed
-2. tests run
-3. remaining merge risks
-```
-
-## Handoff Format
-
-Every worker should report back in this format:
+Every worker must report back in this format:
 
 - branch name
-- commit sha
+- final commit sha
+- merge recommendation: one commit, a commit range, or branch tip
 - files changed
 - tests run
-- known conflicts
-- whether the branch is ready to merge
-
-## What Not To Do
-
-- Do not run multiple Codex tabs against the same checkout and same branch.
-- Do not let more than one tab edit `HARNESS.md`.
-- Do not split the same function across two workers unless you want merge pain.
-- Do not wait until all workers finish before integrating.
-- Do not allow one branch to drift far from the integration branch.
+- remaining overlap risks
+- exact statuses the coordinator should mark complete in this file
 
 ## Definition Of Done
 
-The harness rewrite is done when:
+The wave is done when:
 
-- core Paperbase tools are broadly exposed without keyword gating
-- normal turns use one default prompt
-- normal turns use `tool_choice=auto`
-- tool contracts are stable
+- ordinary turns do not use an app-side forced project-write policy
+- ordinary turns use one stable normal prompt
+- ordinary turns use one normal loop instead of tool phase plus separate answer phase
+- casual turns are not forced into a research-first posture
+- compaction is the only special case and preserves model-visible state
 - tests describe the new harness honestly
 - `make test` passes
+
+## Prompt Pack
+
+Copy one prompt into each worker tab. Workers read this file first, then follow the prompt. Workers must not edit this file.
+
+### Worker A Prompt
+
+```text
+Read HARNESS.md first.
+
+Use HARNESS.md for:
+- the target runtime shape
+- hard rules
+- your branch name
+- your write scope
+- merge order
+- the handoff format
+
+You are Worker A.
+Branch: codex/harness-v2-trust-model-project-writes
+
+Mission:
+Remove the app-side forced project-write policy for ordinary turns. Move the harness closer to trusting the model instead of handwritten write enforcement.
+
+Your scope:
+- paperbase/src/paperbase/service.py
+- paperbase/tests/test_service.py
+
+Primary targets:
+- _should_require_project_code_write
+- _project_code_write_failure_answer
+- _project_code_answer_requires_persisted_python
+- normal answer override paths in send_chat_message and streaming equivalents if needed
+
+What success looks like:
+- the app no longer decides that a project turn had to persist code
+- the app no longer overwrites a normal model answer with the canned write-failure response
+- tests that encoded forced-write behavior are removed or rewritten
+
+Rules:
+- do not edit HARNESS.md
+- do not broaden scope
+- do not redesign prompt structure
+- do not collapse the whole turn loop
+- do not redesign compaction
+
+Before editing:
+1. summarize the current forced-write behavior
+2. list the exact functions and tests you will touch
+3. call out likely overlap with Worker C
+
+Verification:
+- use the repo Makefile flow where practical
+- prefer make test before stopping
+- if you only run narrower checks, say so clearly
+
+When done, report exactly:
+1. branch name
+2. final commit sha
+3. merge recommendation: one commit, range, or branch tip
+4. files changed
+5. tests run
+6. remaining overlap risks
+7. exact HARNESS.md statuses the coordinator should update
+```
+
+### Worker B Prompt
+
+```text
+Read HARNESS.md first.
+
+Use HARNESS.md for:
+- the target runtime shape
+- hard rules
+- your branch name
+- your write scope
+- merge order
+- the handoff format
+
+You are Worker B.
+Branch: codex/harness-v2-single-normal-prompt
+
+Mission:
+Collapse ordinary prompting into one stable normal-turn prompt. Stop using separate prompt personalities for tool use versus final answer generation.
+
+Your scope:
+- paperbase/src/paperbase/service.py
+- paperbase/tests/test_service.py
+
+Primary targets:
+- _chat_tool_system_prompt
+- _chat_answer_system_prompt
+- prompt-related helpers and tests
+
+What success looks like:
+- ordinary turns share one stable base instruction shape
+- prompt branching that only exists to support the old split runtime is removed
+- tests prove prompt stability across different user prompts
+
+Rules:
+- do not edit HARNESS.md
+- do not broaden scope
+- do not redesign compaction
+- do not change tool payload contracts
+- do not reintroduce prompt-keyword routing
+
+Before editing:
+1. identify every normal-turn prompt entrypoint
+2. describe the minimum unification plan
+3. call out overlap risk with Workers C and D
+
+Verification:
+- use the repo Makefile flow where practical
+- prefer make test before stopping
+- if full verification is deferred, report that clearly
+
+When done, report exactly:
+1. branch name
+2. final commit sha
+3. merge recommendation: one commit, range, or branch tip
+4. files changed
+5. tests run
+6. remaining overlap risks
+7. exact HARNESS.md statuses the coordinator should update
+```
+
+### Worker C Prompt
+
+```text
+Read HARNESS.md first.
+
+Use HARNESS.md for:
+- the target runtime shape
+- hard rules
+- your branch name
+- your write scope
+- merge order
+- the handoff format
+
+You are Worker C.
+Branch: codex/harness-v2-single-turn-loop
+
+Mission:
+Collapse the normal chat runtime into one ordinary loop. Send messages plus tools, let the model decide, append tool results, repeat, and stop when the model answers. Remove the separate final-answer model call for ordinary turns.
+
+Your scope:
+- paperbase/src/paperbase/service.py
+- paperbase/tests/test_service.py
+
+Primary targets:
+- _run_chat_tool_rounds
+- _run_chat_tool_rounds_stream
+- send_chat_message
+- send_chat_message_stream
+
+What success looks like:
+- normal turns do not use a separate tool phase and answer phase
+- the model can answer directly from the same loop after any tool calls
+- streaming and non-streaming paths stay aligned
+- tests prove the final answer no longer comes from a separate normal-turn model call
+
+Rules:
+- do not edit HARNESS.md
+- do not broaden scope
+- do not redesign compaction
+- do not reintroduce forced tool use
+- do not undo Worker A or Worker B decisions
+
+Before editing:
+1. summarize the current split-turn flow
+2. propose the minimal loop shape you will implement
+3. list likely overlap with Workers A, B, and D
+
+Verification:
+- use the repo Makefile flow where practical
+- prefer make test before stopping
+- if you only run narrow tests during iteration, say so clearly
+
+When done, report exactly:
+1. branch name
+2. final commit sha
+3. merge recommendation: one commit, range, or branch tip
+4. files changed
+5. tests run
+6. remaining overlap risks
+7. exact HARNESS.md statuses the coordinator should update
+```
+
+### Worker D Prompt
+
+```text
+Read HARNESS.md first.
+
+Use HARNESS.md for:
+- the target runtime shape
+- hard rules
+- your branch name
+- your write scope
+- merge order
+- the handoff format
+
+You are Worker D.
+Branch: codex/harness-v2-relax-research-posture
+
+Mission:
+Stop forcing a research-first Paperbase posture on casual or non-evidence turns. Keep tools available when appropriate, but make the default harness feel more like Codex and less like a mandatory paper-search flow.
+
+Your scope:
+- paperbase/src/paperbase/service.py
+- paperbase/tests/test_service.py
+
+Primary targets:
+- _should_offer_research_chat_tools
+- _should_offer_chat_tools if needed
+- normal-turn prompt text that hardcodes research-first behavior
+- casual-turn tests
+
+What success looks like:
+- casual and brainstorm turns can stay simple
+- tests stop encoding mandatory research posture for small talk or naming turns
+- the runtime still allows tool use when it is actually useful
+
+Rules:
+- do not edit HARNESS.md
+- do not broaden scope
+- do not remove research tools entirely
+- do not redesign project code policy
+- do not redesign compaction
+
+Before editing:
+1. identify where casual turns are still pushed into research posture
+2. state the minimum behavioral change
+3. call out overlap risk with Workers B and C
+
+Verification:
+- use the repo Makefile flow where practical
+- prefer make test before stopping
+- if you only run targeted checks, say so explicitly
+
+When done, report exactly:
+1. branch name
+2. final commit sha
+3. merge recommendation: one commit, range, or branch tip
+4. files changed
+5. tests run
+6. remaining overlap risks
+7. exact HARNESS.md statuses the coordinator should update
+```
+
+### Worker E Prompt
+
+```text
+Read HARNESS.md first.
+
+Use HARNESS.md for:
+- the target runtime shape
+- hard rules
+- your branch name
+- your write scope
+- merge order
+- the handoff format
+
+You are Worker E.
+Branch: codex/harness-v2-compaction-visible-state
+
+Mission:
+Keep compaction as the only special-case runtime path and make sure it preserves only model-visible state. Remove or adapt hidden handwritten assumptions that the model could not recover from the compacted transcript alone.
+
+Your scope:
+- paperbase/src/paperbase/service.py
+- compaction-related tests only
+
+Primary targets:
+- _ensure_chat_context_budget
+- _ensure_chat_context_budget_stream
+- compaction prompt helpers
+- compaction checkpoint rendering
+- compaction continuity tests
+
+What success looks like:
+- compaction still preserves goals, tool findings, active source ids, and next-step context
+- future turns can continue from the compacted transcript without hidden server-side obligations
+- tests prove continuity across compaction checkpoints
+
+Rules:
+- do not edit HARNESS.md
+- do not broaden scope
+- do not redesign the whole normal turn loop
+- do not reintroduce forced-write policy
+- do not change generic tool contracts unless required for compaction continuity
+
+Before editing:
+1. summarize what compaction currently preserves
+2. identify any hidden server-side assumptions outside model-visible context
+3. call out overlap risk with Worker C
+
+Verification:
+- use the repo Makefile flow where practical
+- prefer make test before stopping
+- if you only run narrower checks, report that clearly
+
+When done, report exactly:
+1. branch name
+2. final commit sha
+3. merge recommendation: one commit, range, or branch tip
+4. files changed
+5. tests run
+6. remaining overlap risks
+7. exact HARNESS.md statuses the coordinator should update
+```
+
+### Integrator Prompt
+
+```text
+Read HARNESS.md first.
+
+You own HARNESS.md. No worker does.
+
+Your job:
+- keep HARNESS.md current
+- treat HARNESS.md as the control plane for lane ownership, merge order, status, and handoff
+- integrate one worker at a time unless explicitly told otherwise
+- rebase, inspect overlap, merge or cherry-pick, run validation, then update HARNESS.md
+- run make test before calling the wave complete
+
+For this wave, the lane meanings are:
+- Worker A: remove forced project-write policy
+- Worker B: unify normal-turn prompts
+- Worker D: relax mandatory research posture on casual turns
+- Worker C: collapse normal turns into one loop
+- Worker E: keep compaction as the only special case with model-visible state
+
+When a worker reports back:
+1. read the handoff
+2. inspect the diff
+3. integrate that worker only
+4. run the smallest sensible validation immediately
+5. update HARNESS.md statuses and notes
+6. report the new integration sha, conflicts, and next recommended worker
+
+Before final merge:
+- run make test
+- remove dead helpers and stale tests that only encoded the old harness
+- confirm HARNESS.md matches what actually landed
+```
+
+## What Not To Do
+
+- Do not run multiple Codex tabs in the same checkout on the same branch.
+- Do not let more than one tab edit `HARNESS.md`.
+- Do not let workers pick their own lane.
+- Do not split one function across two workers unless you are prepared for merge pain.
+- Do not wait until all workers finish before integrating.
+- Do not let the board drift away from the actual code that landed.
