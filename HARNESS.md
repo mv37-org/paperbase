@@ -1,374 +1,339 @@
-# Agent Harness Roadmap
+# Codex-Style Harness Roadmap
 
-This document lays out the runtime roadmap for moving the Paperbase agent closer to the behavior quality of Codex-style coding agents.
+This document replaces the previous harness plan with an implementation roadmap specifically aimed at making the Paperbase chat harness behave much more like the open-source Codex runtime.
 
-The goal is not to imitate Codex prompt text. The goal is to build a stronger agent harness: explicit state, richer tool orchestration, better recovery, stronger verification, and clearer completion criteria.
+This is an execution plan for parallel Codex agents. It is not a product vision doc.
 
-## Why This Exists
+## Ground Truth
 
-Today the Paperbase agent is a relatively thin loop around the model:
+The target is based on the open-source `openai/codex` repository, not guesswork.
 
-1. build a tool prompt
-2. call the model with tools
-3. execute any returned tool calls
-4. append tool results
-5. repeat for a few rounds
-6. generate a final answer in a separate call
+Observed Codex behaviors that matter here:
 
-That loop works, but it is still simpler than the runtime shape of Codex-style agents. The main gap is not one missing prompt. The main gap is that our harness does not yet maintain enough explicit execution state or enforce enough structured intermediate behavior.
+- one base instruction set is sent with each model call
+- the Responses API request is built with `input`, `tools`, `parallel_tool_calls`, and `tool_choice: "auto"`
+- the model is generally trusted to decide whether to call tools
+- core tool exposure is broad and stable
+- deterministic filtering still exists for some external tool surfaces, especially connector/app exposure and large MCP tool catalogs
+- tool schemas and tool outputs are structured and stable
 
-Current implementation anchors:
+Key reference points from Codex:
 
-- tool loop: `paperbase/src/paperbase/service.py`
-- model client: `paperbase/src/paperbase/llm.py`
-- behavior tests: `paperbase/tests/test_service.py`
+- prompt assembly: `codex-rs/core/src/session/turn.rs`
+- Responses request builder: `codex-rs/core/src/client.rs`
+- prompt type: `codex-rs/core/src/client_common.rs`
+- MCP tool exposure: `codex-rs/core/src/mcp_tool_exposure.rs`
+- tool registry/spec assembly: `codex-rs/core/src/tools/spec.rs`
 
-## Current State
+## What Must Change In Paperbase
 
-The current agent already has a few useful enforcement mechanisms:
+Today Paperbase does too much app-side routing before the model gets a chance to act.
 
-- a strong tool-use system prompt
-- forced tool usage on certain turns with `tool_choice={"type": "any"}`
-- forced persisted writes for project-code turns
-- a retry prompt when no managed project file was actually updated
-- a separate final-answer pass after tool rounds
+Current behavior we want to remove or sharply reduce:
 
-Those pieces are good, but they are still mostly prompt-and-loop enforcement. The runtime does not yet behave like a full agent harness with explicit planning, verification, repair, and completion gating.
+- keyword-based decisions about whether to offer research tools
+- keyword-based decisions about whether to offer project code tools
+- forced `tool_choice={"type": "any"}` loops for normal turns
+- prompt branching that tries to steer the model too aggressively before tool use
+- different logical harnesses for "research turns" vs "code turns" before the model sees the tool surface
 
-## Target State
+Target behavior:
 
-We want the harness to behave more like a disciplined engineering runtime:
-
-- it tracks the task as structured state, not only as chat history
-- it knows what phase it is in: triage, inspect, edit, verify, finalize
-- it gives the model different guidance at different phases
-- it reacts differently to different tool failures
-- it requires verification before claiming success
-- it can explain why the task is done in terms of explicit completion checks
-
-## Design Principles
-
-- Build runtime behavior in the harness, not only in the prompt.
-- Keep prompts short and phase-specific instead of one monolithic instruction block.
-- Prefer tool-level and state-level enforcement over natural-language nudges.
-- Treat code work as incomplete until inspection, edit, and verification all succeed.
-- Preserve room for Paperbase-specific strengths: research grounding, citations, and project-scoped code tools.
-- Do not try to mimic hidden Codex internals exactly. Reproduce the useful external properties.
+- one default system prompt for normal turns
+- a broad stable tool surface exposed up front
+- `tool_choice=auto`
+- fixed input and output contracts for every tool
+- model-driven iteration through tool calls and tool results
+- deterministic gating only where clearly justified by scale, permissions, or explicitly selected app surfaces
 
 ## Non-Goals
 
-- Recreating Codex's exact internal prompting
-- Replacing Paperbase's research-first identity with a generic coding shell
-- Expanding into arbitrary local filesystem control before the harness logic is ready
-- Optimizing for maximum autonomy before verification and auditability are strong
+- matching every Codex internal feature
+- implementing subagents as part of this first rewrite
+- preserving current Paperbase prompt heuristics if they conflict with the Codex-style harness direction
+- keeping backward compatibility for tests that encode the old keyword-gated behavior
 
-## Phase 1: Introduce Explicit Agent State
+## Success Criteria
 
-Add a structured per-turn harness state object that is maintained outside the raw transcript.
+The rewrite is successful when all of the following are true:
 
-Minimum state:
+- `paperbase/src/paperbase/service.py` no longer decides tool availability from user-message keywords for the core Paperbase tools
+- the model always sees one stable base prompt for normal turns
+- the model always receives the core Paperbase tool set without app-side routing by turn type
+- tool calls use fixed schemas and tool results use fixed structured payloads
+- the model is not forced into tool use with `tool_choice={"type": "any"}` for ordinary turns
+- the final answer is still generated from model-visible conversation and tool results, not from handwritten app-side summaries
+- tests reflect the new harness rather than the old deterministic gating
 
-- user goal
-- task type: research, coding, mixed, review
-- current phase
-- active plan
-- files inspected
-- files edited
-- verification status
-- completion criteria
-- pending blockers
-- last tool failure and recovery path
+## Design Rules
 
-Implementation direction:
+- Prefer one broad core tool set over multiple selectively offered tool sets.
+- Keep tool definitions stable enough that the model can learn reusable habits.
+- Keep tool outputs compact, structured, and deterministic.
+- Do not hide core Paperbase capabilities just because a keyword heuristic did not fire.
+- Do not add new orchestration complexity while removing the old routing logic.
+- Only keep deterministic filtering where Codex also clearly does something similar:
+  - connector or app enablement
+  - config allowlists or blocklists
+  - very large external tool catalogs that should be deferred behind a search tool
 
-- add a turn-scoped state structure in `paperbase/src/paperbase/service.py`
-- persist only what must survive compaction; keep the rest ephemeral per turn
-- make the loop consult state instead of inferring everything from prior messages
+## Scope Boundaries
 
-Acceptance criteria:
+For this roadmap, "core tools" means:
 
-- the harness can identify its current phase without re-parsing the whole transcript
-- the final answer can be gated on explicit completion flags
-- tests prove that state survives multiple tool rounds and compaction
+- Paperbase research tools
+- uploaded-document tools
+- project code tools
 
-## Phase 2: Replace One Prompt With Phase-Specific Prompts
+For this roadmap, "external tools" means:
 
-Split the current generic tool prompt into smaller prompts keyed to harness phase.
+- future connector or app surfaces
+- very large MCP-style catalogs if we add them later
 
-Phases:
+The first rewrite should make the core Paperbase tools always available to the model.
 
-- triage
-- discovery
-- inspection
-- edit
-- verification
-- repair
-- final answer
+## Primary Workstreams
 
-Examples:
+These workstreams are designed so multiple Codex agents can work in parallel with minimal overlap.
 
-- triage prompt decides whether this is a research turn, code turn, or mixed turn
-- inspection prompt forces read-first behavior before edit attempts
-- repair prompt explains why the previous tool attempt failed and what to do next
-- verification prompt forbids success claims until checks pass
+### Workstream 1: Remove Keyword-Gated Tool Exposure
 
-Implementation direction:
-
-- replace one reusable tool system prompt builder with prompt builders by phase
-- inject narrow runtime facts with each phase prompt
-- keep final-answer prompting separate from tool-round prompting
-
-Acceptance criteria:
-
-- the harness uses different prompt text for different phases
-- failed edits trigger repair prompts that are specific to the failure mode
-- tests prove that the model gets different system prompts across a realistic turn
-
-## Phase 3: Add a Real Planner and Done Criteria
-
-Introduce a lightweight hidden plan before substantial tool work.
-
-The plan should not be free-form chain-of-thought. It should be structured runtime state with fields such as:
-
-- objective
-- substeps
-- required tools
-- success checks
-- likely risks
-
-The harness should also generate explicit done criteria. Examples:
-
-- target file was found and read
-- requested edit was applied
-- smoke validation passed
-- final answer references the saved file path
-
-Implementation direction:
-
-- add a planner pass for non-trivial tasks
-- let the planner write into harness state
-- make the executor consume that state rather than improvising every round
-
-Acceptance criteria:
-
-- non-trivial code tasks create a structured plan before edits
-- the harness refuses to finalize if done criteria are not met
-- tests cover incomplete-edit, incomplete-verify, and complete-success cases
-
-## Phase 4: Improve the Tool Surface
-
-Codex-style behavior benefits from richer tools. Our current tool surface is still narrow, especially for project code.
-
-Priority additions:
-
-- stronger patch/edit primitive beyond exact string replacement
-- project test tool
-- project lint tool
-- project git-status tool
-- project diff tool
-- project inspect macro for list plus grep plus read workflows
-
-Secondary additions:
-
-- line-oriented edit support with tighter ambiguity handling
-- richer run outputs with normalized traceback and artifact summaries
-- optional repo-wide search across more than managed Python when safe
-
-Implementation direction:
-
-- expand `project_*` tooling in `paperbase/src/paperbase/service.py`
-- prefer small compound tools for common workflows over forcing the model to compose every micro-step
-- keep tool outputs compact and stable for model consumption
-
-Acceptance criteria:
-
-- the agent can inspect, patch, validate, and summarize a code change without falling back to chat-only reasoning
-- common edit failures no longer require awkward exact-match retries
-- tests cover patching, lint/test execution, and diff-aware finalization
-
-## Phase 5: Add Verification as a First-Class Stage
-
-Verification should become mandatory for meaningful code work.
-
-Verification modes:
-
-- structural verification: file exists, edit applied, imports resolve if cheaply checkable
-- behavioral verification: smoke run, test subset, lint, or targeted checks
-- answer verification: final response accurately reflects what happened
-
-Implementation direction:
-
-- add a dedicated verification phase after edit
-- let the harness select the cheapest sufficient validation for the task
-- persist verification results into turn state
-
-Examples:
-
-- doc-only change: no tests, but file existence and content check
-- small code edit: lint or targeted test
-- workflow change: `make test`
-- performance-sensitive path: `make profile`
-
-Acceptance criteria:
-
-- the harness does not claim code success without a recorded verification result
-- the final answer distinguishes verified work from unverified work
-- tests cover both successful verification and verification-skipped cases
-
-## Phase 6: Add Tool-Failure-Specific Repair Logic
-
-Right now repair is mostly generic. We need failure-aware recovery.
-
-Repair categories:
-
-- search too broad
-- search returned no evidence
-- file not found
-- edit target ambiguous
-- exact-match edit failed
-- run failed with traceback
-- verification failed
-- write attempted but no meaningful project change occurred
-
-Implementation direction:
-
-- normalize tool failures into structured failure types
-- map each type to a repair prompt and preferred next tools
-- record the failure in harness state so repeated bad retries are less likely
-
-Acceptance criteria:
-
-- repeated identical failing tool calls become less common
-- the harness chooses a repair strategy based on failure type
-- tests cover edit failure, missing file, and failed run recovery
-
-## Phase 7: Improve Memory and Compaction
-
-Raw transcript replay is not enough as turns get longer.
-
-The harness should preserve structured facts across compaction:
-
-- active goal
-- inspected files
-- chosen target files
-- evidence gathered
-- edits already completed
-- verification outcomes
-- unresolved blockers
-
-Implementation direction:
-
-- keep the existing compaction path, but add a structured handoff summary format
-- store compact state separately from user-visible chat text when possible
-- make compaction preserve actionable execution state, not just prose summary
-
-Acceptance criteria:
-
-- long multi-round tasks retain execution continuity after compaction
-- the harness does not forget which files were already read or edited
-- tests simulate compaction in the middle of a code task
-
-## Phase 8: Add Self-Review and Finalization Gates
-
-Before the final answer, run a small critic pass over the harness state and execution record.
-
-Critic questions:
-
-- did we inspect before editing
-- did we edit the correct file
-- did verification happen
-- are we claiming success without evidence
-- are citations grounded
-- did we leave code only in chat text
-
-Implementation direction:
-
-- add a pre-finalization review pass
-- give it read-only access to state, tool results, and pending answer draft
-- allow it to send the turn back to repair or verification if needed
-
-Acceptance criteria:
-
-- finalization can be blocked by the critic
-- obvious false-success cases are caught before the user sees them
-- tests cover bad-answer interception
-
-## Phase 9: Build an Evaluation Harness
-
-We need a benchmark for agent behavior, not just low-level tool correctness.
-
-Scenario categories:
-
-- research-only question
-- grounded research comparison
-- code creation from scratch
-- code edit in existing file
-- edit after failed first attempt
-- mixed research plus code task
-- verification-required task
-- long context with compaction
-
-Metrics:
-
-- task completion rate
-- verification rate
-- false success rate
-- unnecessary tool call rate
-- repeated failure loop rate
-- citation correctness rate
-- file-targeting accuracy
-
-Implementation direction:
-
-- add scenario-style tests on top of `paperbase/tests/test_service.py`
-- capture harness-state transitions, not only final text
-- add benchmark fixtures for regression tracking
-
-Acceptance criteria:
-
-- we can measure harness quality over time
-- runtime changes can be compared before and after
-- false-success regressions are caught automatically
-
-## Recommended Build Order
-
-1. explicit state machine
-2. phase-specific prompts
-3. planner plus done criteria
-4. verification phase
-5. failure-specific repair
-6. stronger edit and validation tools
-7. compaction with structured state preservation
-8. critic pass
-9. scenario evaluation harness
-
-This order matters. Tool expansion without stronger state and verification will increase surface area without reliably improving behavior.
-
-## First Implementation Slice
-
-The first concrete slice should stay narrow:
-
-- add a harness state object
-- add phase tracking
-- split tool prompting into at least `triage`, `execute`, `repair`, and `verify`
-- require verification for meaningful code turns
-- add tests for phase transitions and incomplete verification blocking
-
-Suggested files:
+Owner:
 
 - `paperbase/src/paperbase/service.py`
-- `paperbase/src/paperbase/llm.py`
 - `paperbase/tests/test_service.py`
 
-## Definition of "Closer to Codex"
+Required changes:
 
-We should consider this effort successful when the Paperbase agent consistently shows these external behaviors:
+- remove or bypass `_should_offer_research_chat_tools`
+- remove or bypass `_should_offer_project_code_tools`
+- remove or bypass `_should_force_chat_tool_use`
+- stop building tool sets from request-content heuristics
+- make `_chat_tool_definitions` return the stable core tool set for normal turns
 
-- it inspects before editing
-- it changes course after failures instead of blindly repeating
-- it verifies meaningful changes before claiming success
-- it maintains execution continuity across long turns
-- it produces final answers that reflect actual tool outcomes
-- it behaves like a reliable engineering assistant, not a prompt with tools attached
+Acceptance criteria:
 
-That is the real target.
+- ordinary turns expose the same core tool set regardless of whether the prompt contains "agent", "code", "search", or similar trigger words
+- tests no longer assert keyword-based exposure behavior
+- tests verify that core tools are present across turn types
+
+Notes:
+
+- this is the single biggest behavioral change
+- do not combine it with prompt rewrites in the same patch if that makes testing unclear
+
+### Workstream 2: Collapse To One Default Tool Prompt
+
+Owner:
+
+- `paperbase/src/paperbase/service.py`
+- `paperbase/tests/test_service.py`
+
+Required changes:
+
+- replace the current tool-prompt branching with one default normal-turn system prompt
+- keep compaction-specific prompting separate
+- keep final-answer prompting separate only if needed for formatting and citation behavior
+- remove research-turn vs code-turn prompt routing as a gating mechanism
+
+Acceptance criteria:
+
+- one stable system prompt is used for normal tool-enabled turns
+- that prompt describes the available tools and expected behavior without keyword-based branching
+- tests verify prompt stability across substantially different user prompts
+
+Notes:
+
+- "one default prompt" does not mean one string for every system path in the entire product
+- compaction can remain specialized
+- review mode can remain specialized if it is a separate runtime mode
+
+### Workstream 3: Normalize Tool I/O Contracts
+
+Owner:
+
+- `paperbase/src/paperbase/service.py`
+- `paperbase/tests/test_service.py`
+- `paperbase-plugin/tests/test_plugin.py` if plugin tool payloads need alignment
+
+Required changes:
+
+- audit every tool input schema
+- audit every tool result payload
+- make tool outputs consistent in shape and naming
+- ensure errors are returned in a fixed structure
+- make payloads compact and model-facing rather than UI-facing
+
+Acceptance criteria:
+
+- each tool has one documented input contract
+- each tool has one stable success payload shape
+- each tool has one stable error payload shape
+- tests assert exact output shapes for representative tools
+
+Notes:
+
+- this should not materially change product capability
+- it should make the model easier to train against by consistency
+
+### Workstream 4: Remove Forced Tool-Choice Steering
+
+Owner:
+
+- `paperbase/src/paperbase/service.py`
+- `paperbase/tests/test_service.py`
+
+Required changes:
+
+- stop using `tool_choice={"type": "any"}` for ordinary turns
+- default to `auto`
+- remove retry loops whose sole purpose is forcing a write because the app pre-decided the turn should be a code-writing turn
+- keep narrow failure handling only where the tool call itself failed and a retry is explicitly justified
+
+Acceptance criteria:
+
+- normal turns use tool auto-selection
+- tests no longer expect sequences of `{"type": "any"}` calls
+- the harness still completes code tasks successfully through model-driven tool use
+
+Notes:
+
+- this does not forbid future hard requirements for special modes
+- for the main harness, the model should be trusted first
+
+### Workstream 5: Rebuild Tests Around The New Harness
+
+Owner:
+
+- `paperbase/tests/test_service.py`
+- any affected repo-policy tests
+
+Required changes:
+
+- delete or rewrite tests that encode keyword-gated behavior
+- add tests for broad stable tool exposure
+- add tests for `tool_choice=auto`
+- add tests for fixed tool payloads
+- add tests showing the model can choose not to use tools
+- add tests showing the model can choose tools when useful without the app pre-routing the turn
+
+Acceptance criteria:
+
+- test names and assertions describe the new harness honestly
+- no failing tests rely on the old deterministic routing assumptions
+- smoke coverage still protects the new behavior
+
+Notes:
+
+- this workstream should start early so the rewrite has a clear target
+
+## Secondary Workstreams
+
+These are useful after the main simplification lands.
+
+### Workstream 6: Add A Tool Catalog Deferral Pattern
+
+This is the one deterministic gating pattern we should preserve if needed, because Codex does something similar for large MCP catalogs.
+
+Owner:
+
+- `paperbase/src/paperbase/service.py`
+- future tool-search implementation and tests
+
+Required changes:
+
+- if the tool surface ever becomes too large, defer part of it behind a search tool instead of keyword gating
+- keep core Paperbase tools directly exposed
+- only defer very large optional tool families
+
+Acceptance criteria:
+
+- no keyword routing is reintroduced
+- large tool catalogs can be discovered through a dedicated tool-search path
+
+### Workstream 7: Align Compaction With Model-Visible History
+
+Compaction is allowed to stay specialized, but it should not depend on handwritten harness summaries that diverge from the model-visible record.
+
+Owner:
+
+- `paperbase/src/paperbase/service.py`
+- compaction-related tests
+
+Required changes:
+
+- keep compaction model-driven
+- preserve tool call and tool result continuity
+- ensure the post-compaction conversation still reflects what the model actually saw
+
+Acceptance criteria:
+
+- compacted conversations remain tool-usable
+- no hidden app-side state is required for the model to continue
+
+## Recommended Parallel Agent Plan
+
+Use separate Codex agents with disjoint file ownership where possible.
+
+Agent A:
+
+- own tool exposure simplification in `paperbase/src/paperbase/service.py`
+- own test rewrites for exposure behavior in `paperbase/tests/test_service.py`
+
+Agent B:
+
+- own prompt simplification in `paperbase/src/paperbase/service.py`
+- own prompt-related tests in `paperbase/tests/test_service.py`
+
+Agent C:
+
+- own tool I/O normalization in `paperbase/src/paperbase/service.py`
+- own tool payload assertions in `paperbase/tests/test_service.py`
+
+Agent D:
+
+- own compaction alignment and any compaction tests
+
+Coordination rules:
+
+- Agent A lands first or rebases often because tool exposure affects nearly everything
+- Agents B and C can work in parallel if they avoid the same helper functions
+- Agent D should start after the prompt shape and tool payload shape stabilize
+
+## Order Of Operations
+
+1. rewrite tests to make the target explicit
+2. remove keyword-gated tool exposure
+3. collapse to one default prompt
+4. remove forced tool-choice steering
+5. normalize tool I/O
+6. stabilize compaction around the simplified harness
+7. run full validation and remove dead helper code
+
+## Deletions We Expect
+
+The rewrite should probably delete or sharply reduce logic in these areas:
+
+- request-content heuristics for tool offering
+- request-content heuristics for forced tool usage
+- prompt text that exists only to compensate for app-side routing
+- tests asserting the old turn classification behavior
+
+Dead-code cleanup is part of the job, not optional polish.
+
+## Deliverables
+
+The implementation is complete when all of the following exist:
+
+- a simplified `service.py` harness with broad stable tool exposure
+- updated tests proving the new behavior
+- updated docs if developer workflow or debugging expectations changed
+- a short note in this file or `README.md` describing the new harness model
+
+## Definition Of Done
+
+We should be able to describe the harness in one sentence like this:
+
+Paperbase sends one default system prompt, exposes its core tool set up front with fixed schemas and outputs, uses `tool_choice=auto`, and mostly trusts the model to decide how to work.
+
+If that sentence is not true yet, the rewrite is not done.
