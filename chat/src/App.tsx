@@ -80,6 +80,7 @@ const PENDING_PROMPT_KEY = "paperbase-pending-prompt";
 const RESUME_PROJECT_MODAL_KEY = "paperbase-resume-new-project";
 const SIDEBAR_COLLAPSED_KEY = "paperbase-sidebar-collapsed";
 const SELECTED_PROJECT_KEY = "paperbase-selected-project";
+const DISMISSED_CHAT_SETUP_KEY = "paperbase-dismissed-chat-setup";
 const MAX_OPEN_TABS = 8;
 const MESSAGE_LIST_BOTTOM_THRESHOLD = 40;
 const PROJECT_ITEM_PAGE_SIZE = 5;
@@ -592,6 +593,22 @@ function restoreSidebarCollapsed() {
 function restoreSelectedProjectId() {
   const value = localStorage.getItem(SELECTED_PROJECT_KEY)?.trim();
   return value ? value : null;
+}
+
+function restoreDismissedChatSetupSignatures() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(DISMISSED_CHAT_SETUP_KEY) ?? "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+    return Object.fromEntries(
+      Object.entries(parsed).filter(
+        ([key, value]) => typeof key === "string" && typeof value === "string",
+      ),
+    ) as Record<string, string>;
+  } catch {
+    return {};
+  }
 }
 
 function formatChatTitleWord(word: string) {
@@ -1311,6 +1328,9 @@ export default function App() {
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [emptyStateProjectPickerOpen, setEmptyStateProjectPickerOpen] = useState(false);
   const [emptyStateProjectSearch, setEmptyStateProjectSearch] = useState("");
+  const [dismissedChatSetupSignatures, setDismissedChatSetupSignatures] = useState<
+    Record<string, string>
+  >(() => restoreDismissedChatSetupSignatures());
   const notebookUploadInputRef = useRef<HTMLInputElement | null>(null);
   const [streamingThreadId, setStreamingThreadId] = useState<string | null>(null);
   const [threadStreamStates, setThreadStreamStates] = useState<Record<string, ThreadStreamState>>(
@@ -1408,6 +1428,10 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(sidebarCollapsed));
   }, [sidebarCollapsed]);
+
+  useEffect(() => {
+    localStorage.setItem(DISMISSED_CHAT_SETUP_KEY, JSON.stringify(dismissedChatSetupSignatures));
+  }, [dismissedChatSetupSignatures]);
 
   useEffect(() => {
     if (!mobileSidebarOpen) {
@@ -1845,8 +1869,20 @@ export default function App() {
       settingsTab: "sandbox" as const,
     },
   ];
+  const missingChatSetupSignature = chatSetupItems
+    .filter((item) => !item.ready)
+    .map((item) => item.id)
+    .sort()
+    .join("|");
+  const dismissedChatSetupSignature = emptyStateProject?.project_id
+    ? dismissedChatSetupSignatures[emptyStateProject.project_id]
+    : null;
   const showChatSetupCard =
-    authenticated && isChatEmpty && hasProjects && chatSetupItems.some((item) => !item.ready);
+    authenticated &&
+    isChatEmpty &&
+    hasProjects &&
+    missingChatSetupSignature.length > 0 &&
+    dismissedChatSetupSignature !== missingChatSetupSignature;
   const appliedAppearanceTheme = sessionSettings.appearance_theme === "dark" ? "dark" : "light";
   const authenticatedDarkThemeEnabled = authenticated && appliedAppearanceTheme === "dark";
   const activeSettingsConfig = useMemo(
@@ -3243,6 +3279,16 @@ export default function App() {
     },
     [openAuthModal],
   );
+
+  const dismissChatSetupCard = useCallback(() => {
+    if (!emptyStateProject?.project_id || !missingChatSetupSignature) {
+      return;
+    }
+    setDismissedChatSetupSignatures((current) => ({
+      ...current,
+      [emptyStateProject.project_id]: missingChatSetupSignature,
+    }));
+  }, [emptyStateProject?.project_id, missingChatSetupSignature]);
 
   const handleAuthSuccess = useCallback(
     async (nextSession: BrowserSessionResponse) => {
@@ -5572,14 +5618,24 @@ export default function App() {
                       {composerEditor}
                       {showChatSetupCard ? (
                         <section className="chat-setup-card" aria-label="Agent setup checklist">
-                          <div className="chat-setup-copy">
-                            <h2 className="chat-setup-title">
-                              Prepare the agent before the first chat
-                            </h2>
-                            <p className="chat-setup-note">
-                              Connect what is missing for {chatSetupProjectName} so repo saves,
-                              model calls, and sandbox runs do not fail silently.
-                            </p>
+                          <div className="chat-setup-header">
+                            <div className="chat-setup-copy">
+                              <h2 className="chat-setup-title">
+                                Prepare the agent before the first chat
+                              </h2>
+                              <p className="chat-setup-note">
+                                Connect what is missing for {chatSetupProjectName} so repo saves,
+                                model calls, and sandbox runs do not fail silently.
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              className="chat-setup-dismiss"
+                              aria-label="Dismiss setup checklist"
+                              onClick={dismissChatSetupCard}
+                            >
+                              ×
+                            </button>
                           </div>
                           <div className="chat-setup-list">
                             {chatSetupItems.map((item) => (

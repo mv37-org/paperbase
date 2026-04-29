@@ -1455,6 +1455,22 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "Open sandbox setup" })).toBeTruthy();
   });
 
+  it("dismisses the first-chat setup checklist", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Prepare the agent before the first chat")).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss setup checklist" }));
+
+    await waitFor(() => {
+      expect(screen.queryByText("Prepare the agent before the first chat")).toBeNull();
+    });
+  });
+
   it("opens settings from the first-chat setup checklist", async () => {
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());
 

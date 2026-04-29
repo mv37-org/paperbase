@@ -14,7 +14,7 @@ The authenticated sidebar is project-first:
 - existing repo selection includes a branch picker, repo/branch refresh, a GitHub access-management link, and optional `.py`/`.ipynb` imports
 - the modal's advanced section exposes inference and Modal sandbox credential entry points for users who have not configured them yet
 - the selected project persists across reloads, and the sidebar reopens with that project selected and its tree as the only expanded root by default
-- empty first-chat screens include a setup checklist that points users to GitHub, inference, and sandbox settings before the coding agent starts doing repo-backed work
+- empty first-chat screens include a dismissible setup checklist that points users to GitHub, inference, and sandbox settings before the coding agent starts doing repo-backed work
 - chat rows expose delete-on-hover actions and only fetch full thread content when opened
 - `New chat` sessions are renamed after the first real user prompt to a compact 3-5 word summary and then keep that title on later turns
 - chat markdown renders inline/block LaTeX formulas, while localhost-only thread debug metadata stays out of the empty-chat landing layout

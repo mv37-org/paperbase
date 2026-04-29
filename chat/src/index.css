@@ -3123,6 +3123,13 @@ textarea::placeholder,
   text-align: left;
 }
 
+.chat-setup-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .chat-setup-copy {
   display: grid;
   gap: 3px;
@@ -3141,6 +3148,26 @@ textarea::placeholder,
   color: var(--muted);
   font-size: 12px;
   line-height: 1.45;
+}
+
+.chat-setup-dismiss {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.chat-setup-dismiss:hover,
+.chat-setup-dismiss:focus-visible {
+  background: rgba(27, 22, 17, 0.05);
+  color: var(--text);
 }
 
 .chat-setup-list {
@@ -5268,6 +5295,12 @@ body.authenticated-theme-dark .assistant-phase-label {
 body.authenticated-theme-dark .chat-setup-card {
   border-color: rgba(255, 255, 255, 0.08);
   background: rgba(30, 27, 24, 0.96);
+}
+
+body.authenticated-theme-dark .chat-setup-dismiss:hover,
+body.authenticated-theme-dark .chat-setup-dismiss:focus-visible {
+  background: rgba(255, 255, 255, 0.08);
+  color: #f8fafc;
 }
 
 body.authenticated-theme-dark .chat-setup-item {
