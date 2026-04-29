@@ -1040,11 +1040,21 @@ def _pending_project_code_followup_requires_write(thread: ChatThreadResponse | N
 
 
 def _should_offer_research_chat_tools(question: str, request: SendChatMessageRequest) -> bool:
-    return True
+    if request.tag_filters:
+        return True
+    normalized_question = question.strip()
+    if not normalized_question:
+        return False
+    return bool(_GROUNDING_INTENT_RE.search(normalized_question))
 
 
 def _should_offer_project_code_tools(question: str, *, thread: ChatThreadResponse | None) -> bool:
-    return bool(thread and thread.project_id)
+    if not (thread and thread.project_id):
+        return False
+    return _question_has_project_code_intent(question) or _question_confirms_pending_project_code_followup(
+        question,
+        thread=thread,
+    )
 
 
 def _should_require_project_code_write(question: str, *, thread: ChatThreadResponse | None) -> bool:
@@ -2569,9 +2579,9 @@ class PaperbaseService:
         if include_research_tools:
             parts.append(
                 "You have access to Paperbase research tools that can search papers, sections, files, figures, tables, references, related papers, and the user's uploaded documents. "
-                "Every tool-enabled turn must begin by leveraging these research tools. "
-                "Use them aggressively, including on code turns when papers or uploaded documents can inform the work. "
-                "Do not rely on parametric memory when Paperbase tools can answer. "
+                "Use them when the user asks for grounded research, citations, uploaded-document help, or specific factual claims that need evidence. "
+                "You do not need to start with paper search for casual brainstorming, naming, or other lightweight conversational turns. "
+                "Do not rely on parametric memory when Paperbase tools can answer those grounded requests. "
                 "Start with discovery tools to find the right papers, then follow up with evidence tools before making specific factual claims. "
                 "Broad discovery tools like paperbase_search, paperbase_get_results, paperbase_get_paper, paperbase_get_related_papers, and paperbase_get_references are for candidate discovery and metadata only. "
                 "They are not citable evidence by themselves. Before making specific factual claims, follow up with evidence tools like paperbase_search_sections, paperbase_read_file, paperbase_get_figure, paperbase_get_table, or paperbase_search_uploaded_sections. "
@@ -2593,7 +2603,7 @@ class PaperbaseService:
             parts.append(
                 "You also have access to project-scoped coding tools backed by the current Paperbase project files. "
                 "These tools operate on the project's managed Python files only, not the Paperbase application code. "
-                "Act like a careful ML engineer and researcher maintaining a real project repository: prefer durable modules, reproducible experiments, and reusable code over disposable scratch work. "
+                "Act like a careful ML engineer maintaining a real project repository: prefer durable modules, reproducible experiments, and reusable code over disposable scratch work. "
                 "When you create or update code with these tools, you are writing managed project Python files for the current project. "
                 "When the user asks you to create, inspect, change, delete, or run project code, use the project_* tools instead of guessing. "
                 "Before writing new code, inspect the existing project with project_list_files, project_grep, and project_read_file so you reuse what is already there instead of rewriting it. "
@@ -2608,7 +2618,7 @@ class PaperbaseService:
                 "Structure new files as importable modules with named functions, classes, or constants that other files can import; avoid putting all logic in top-level script bodies. "
                 "Keep entrypoint-only behavior under if __name__ == '__main__': when needed. "
                 "Use exact-match edits with project_edit, choose unique snippets, and set replace_all=true only when every match should change. "
-                "Treat project files as durable research artifacts. Delete files only when the user explicitly asks, when a rename or move requires removing the superseded path, or when a file is clearly obsolete and keeping it would be misleading. "
+                "Treat project files as durable project artifacts. Delete files only when the user explicitly asks, when a rename or move requires removing the superseded path, or when a file is clearly obsolete and keeping it would be misleading. "
                 "If you are unsure whether a file truly needs deletion, keep it and edit or replace it instead. "
                 "Read the file before deleting it unless the user already identified the exact obsolete path and reason. "
                 "After you create or edit a project file for the user's request, keep that file as part of the project. "

@@ -42,7 +42,12 @@ from paperbase.models import (
     UpdateProjectRequest,
 )
 from paperbase.repository import MemoryPaperRepository
-from paperbase.service import PaperbaseService, _sanitize_inline_citations, get_service
+from paperbase.service import (
+    PaperbaseService,
+    _sanitize_inline_citations,
+    _should_offer_research_chat_tools,
+    get_service,
+)
 from paperbase.storage import MemoryObjectStore
 
 
@@ -1829,10 +1834,6 @@ def test_project_chat_tools_are_advertised_for_coding_turns(browser_service):
     tools_by_name = {tool["name"]: tool for tool in tools}
 
     assert {
-        "paperbase_search",
-        "paperbase_search_sections",
-        "paperbase_list_uploaded_documents",
-        "paperbase_search_uploaded_sections",
         "project_list_files",
         "project_read_file",
         "project_grep",
@@ -1841,6 +1842,8 @@ def test_project_chat_tools_are_advertised_for_coding_turns(browser_service):
         "project_delete",
         "project_run",
     }.issubset(tool_names)
+    assert "paperbase_search" not in tool_names
+    assert "paperbase_search_sections" not in tool_names
     assert "created earlier in this chat" in tools_by_name["project_list_files"]["description"]
     assert "appear in later project_list_files results" in tools_by_name["project_touch"]["description"]
     assert "meaningful initial code content" in tools_by_name["project_touch"]["description"]
@@ -1858,8 +1861,8 @@ def test_project_chat_tools_are_advertised_for_coding_turns(browser_service):
         include_project_code_tools=True,
         has_evidence_sources=True,
     )
-    assert "Every tool-enabled turn must begin by leveraging these research tools" in prompt
-    assert "Use them aggressively, including on code turns when papers or uploaded documents can inform the work" in prompt
+    assert "Use them when the user asks for grounded research, citations, uploaded-document help" in prompt
+    assert "You do not need to start with paper search for casual brainstorming" in prompt
     assert "strict GitHub-flavored markdown" in prompt
     assert "do not invent source ids like [S1]" in prompt
     assert "markdown links to the paper pages or PDFs" in prompt
@@ -1871,11 +1874,21 @@ def test_project_chat_tools_are_advertised_for_coding_turns(browser_service):
     assert 'old_string=""' in prompt
     assert "do not stop tool use until the relevant managed project Python files have actually been created or updated" in prompt
     assert "Every Python code snippet you generate or revise must live in a managed project Python file" in prompt
-    assert "Act like a careful ML engineer and researcher maintaining a real project repository" in prompt
-    assert "Treat project files as durable research artifacts" in prompt
+    assert "Act like a careful ML engineer maintaining a real project repository" in prompt
+    assert "Treat project files as durable project artifacts" in prompt
     assert "If you are unsure whether a file truly needs deletion, keep it and edit or replace it instead" in prompt
     assert "Do not create a minimal example, scratch file, or throwaway file and then delete it in the same turn" in prompt
     assert prompt == answer_prompt
+
+
+def test_research_tool_offer_tracks_grounding_intent():
+    grounded_request = SendChatMessageRequest(content="Explain the methods grounding with citations")
+    casual_request = SendChatMessageRequest(content="Help me brainstorm a short product name")
+    tagged_request = SendChatMessageRequest(content="Continue with my saved key", tag_filters=["methods"])
+
+    assert _should_offer_research_chat_tools(grounded_request.content, grounded_request) is True
+    assert _should_offer_research_chat_tools(casual_request.content, casual_request) is False
+    assert _should_offer_research_chat_tools(tagged_request.content, tagged_request) is True
 
 
 def test_project_snippet_request_forces_tools_and_persists_file():
@@ -2350,7 +2363,7 @@ def test_project_thread_allows_python_answers_without_persisting_project_code():
                     "tool_choice": tool_choice,
                 }
             )
-            if tools is not None:
+            if tools is None:
                 return {
                     "content": [
                         {
@@ -2360,7 +2373,7 @@ def test_project_thread_allows_python_answers_without_persisting_project_code():
                     ],
                     "stop_reason": "end_turn",
                 }
-            raise AssertionError("Separate normal-turn answer model call should not happen")
+            raise AssertionError("Casual project turns should not enter the tool loop")
 
     service = PaperbaseService(
         settings=Settings(
@@ -2389,7 +2402,8 @@ def test_project_thread_allows_python_answers_without_persisting_project_code():
 
     assert response.assistant_message is not None
     assert response.assistant_message.content_markdown == "```python\ndef recurse(items):\n    return items\n```"
-    assert service.chat_model.create_calls[0]["tool_choice"] == {"type": "any"}
+    assert service.chat_model.create_calls[0]["tool_choice"] is None
+    assert service.chat_model.create_calls[0]["tools"] is None
     assert len(service.chat_model.create_calls) == 1
 
 
@@ -3437,7 +3451,7 @@ def test_browser_uploads_and_chat_require_api_key_after_free_quota(monkeypatch, 
     app.dependency_overrides.clear()
 
 
-def test_non_grounded_chat_still_forces_research_tools_without_citations(browser_service):
+def test_non_grounded_chat_answers_directly_without_research_tools(browser_service):
     service, _, chat_model = browser_service
     session, _ = service.register_browser_user(
         SignupRequest(email="casual@example.com", password="topsecret123", display_name="Casual User")
@@ -3454,24 +3468,17 @@ def test_non_grounded_chat_still_forces_research_tools_without_citations(browser
     assert response.assistant_message is not None
     assert response.assistant_message.citations == []
     assert "[S" not in response.assistant_message.content_markdown
-    assert len(chat_model.create_calls) == 2
+    assert len(chat_model.create_calls) == 1
     first_call = chat_model.create_calls[0]
-    assert first_call["tool_choice"] == {"type": "any"}
-    assert first_call["tools"]
-    first_tool_names = {
-        tool["name"] for tool in first_call["tools"] if isinstance(tool, dict) and "name" in tool
-    }
-    assert "paperbase_search_sections" in first_tool_names
-    assert "paperbase_search_uploaded_sections" in first_tool_names
-    assert "Every tool-enabled turn must begin by leveraging these research tools" in str(
+    assert first_call["tool_choice"] is None
+    assert first_call["tools"] is None
+    assert "strict GitHub-flavored markdown" in str(first_call["system_prompt"])
+    assert "For casual turns such as greetings or small talk, answer briefly and conversationally." in str(
         first_call["system_prompt"]
     )
-    assert chat_model.create_calls[1]["tools"]
-    assert chat_model.create_calls[1]["tool_choice"] == {"type": "auto"}
-    assert all(call["tools"] for call in chat_model.create_calls)
 
 
-def test_normal_chat_answer_comes_from_same_tool_loop():
+def test_grounded_chat_answer_comes_from_same_tool_loop():
     class SameLoopAnswerChatModel(FakeChatModel):
         def create_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
             if tools is None and system_prompt != "":
@@ -3507,7 +3514,7 @@ def test_normal_chat_answer_comes_from_same_tool_loop():
     response = service.send_chat_message(
         session.user,
         thread.thread_id,
-        SendChatMessageRequest(content="Help me brainstorm a short product name"),
+        SendChatMessageRequest(content="Explain the methods grounding with citations"),
     )
 
     assert response.assistant_message is not None
@@ -3564,7 +3571,7 @@ def test_chat_context_uses_full_active_thread_history(browser_service):
     answer_call = chat_model.create_calls[-1]
     sent_messages = answer_call["messages"]
     assert isinstance(sent_messages, list)
-    assert len(sent_messages) == 11
+    assert len(sent_messages) == 9
     assert sent_messages[0]["content"] == "Historical message 0"
     assert sent_messages[7]["content"] == "Historical message 7"
     assert sent_messages[8]["content"] == "Help me brainstorm a short product name"
@@ -3771,7 +3778,8 @@ def test_normal_prompt_is_stable_across_different_research_user_prompts(monkeypa
         prompts.extend(str(call["system_prompt"]) for call in calls)
 
     assert len(set(prompts)) == 1
-    assert "Every tool-enabled turn must begin by leveraging these research tools" in prompts[0]
+    assert "Use them when the user asks for grounded research, citations, uploaded-document help" in prompts[0]
+    assert "You do not need to start with paper search for casual brainstorming" in prompts[0]
     assert "strict GitHub-flavored markdown" in prompts[0]
     assert "do not invent source ids like [S1]" in prompts[0]
 
