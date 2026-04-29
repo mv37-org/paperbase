@@ -445,6 +445,13 @@ def test_claim_pending_job_is_atomic_across_concurrent_workers(integration_conte
         # without committing. While this transaction is alive, any other
         # ``SELECT ... FOR UPDATE SKIP LOCKED`` against the same row
         # MUST skip it — that's the entire guarantee.
+        #
+        # The lock SELECT is filtered to the specific job_id we just
+        # created (#49). An earlier version filtered only on
+        # ``status == 'pending'`` and tripped over leftover rows from
+        # prior manual ``paperbase-dev harvest`` / reindex scripts —
+        # the lock would land on whichever pending row sorted first,
+        # not necessarily ours.
         first_claimed: dict[str, JobORM | None] = {"row": None}
         lock_acquired = threading.Event()
         release = threading.Event()
@@ -454,10 +461,10 @@ def test_claim_pending_job_is_atomic_across_concurrent_workers(integration_conte
                 row = session.scalar(
                     select(JobORM)
                     .where(
+                        JobORM.job_id == created.job_id,
                         JobORM.status == "pending",
                         or_(JobORM.next_run_at.is_(None), JobORM.next_run_at <= utcnow()),
                     )
-                    .order_by(JobORM.next_run_at.is_(None).desc(), JobORM.created_at.asc())
                     .limit(1)
                     .with_for_update(skip_locked=True)
                 )
@@ -471,9 +478,35 @@ def test_claim_pending_job_is_atomic_across_concurrent_workers(integration_conte
         assert first_claimed["row"] is not None
         assert first_claimed["row"].job_id == created.job_id
 
-        # Second worker attempts to claim while the first holds the row.
-        # The only pending job is locked, so SKIP LOCKED must return None.
-        second_claim = repository.claim_pending_job()
+        # Second worker attempts to claim OUR specific row while the
+        # first holds it. We use a hand-rolled claim scoped to
+        # ``created.job_id`` (rather than ``repository.claim_pending_job``
+        # which doesn't filter by id) so leftover pending rows from
+        # prior dev scripts don't muddy the assertion. This still
+        # exercises the production SKIP LOCKED query shape — we just
+        # restrict the candidate set to one row.
+        def claim_specific_with_skip_locked(job_id: str) -> JobORM | None:
+            with Session(repository._engine) as session:
+                row = session.scalar(
+                    select(JobORM)
+                    .where(
+                        JobORM.job_id == job_id,
+                        JobORM.status == "pending",
+                    )
+                    .limit(1)
+                    .with_for_update(skip_locked=True)
+                )
+                if row is None:
+                    return None
+                row.status = "running"
+                row.last_attempted_at = utcnow()
+                row.attempts += 1
+                session.flush()
+                session.expunge(row)
+                session.commit()
+                return row
+
+        second_claim = claim_specific_with_skip_locked(created.job_id)
         assert second_claim is None, (
             "second worker claimed a job that was already locked by the first — "
             "the SELECT FOR UPDATE SKIP LOCKED guarantee is broken"
@@ -481,11 +514,12 @@ def test_claim_pending_job_is_atomic_across_concurrent_workers(integration_conte
 
         # Release the first worker's transaction; the job is still
         # pending from the DB's perspective (the first holder never
-        # mutated), so a post-release claim should succeed.
+        # mutated), so a post-release claim against our specific
+        # job_id should succeed.
         release.set()
         holder.join(timeout=10)
 
-        after_release = repository.claim_pending_job()
+        after_release = claim_specific_with_skip_locked(created.job_id)
         assert after_release is not None
         assert after_release.job_id == created.job_id
         assert after_release.status == "running"
