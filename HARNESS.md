@@ -147,15 +147,15 @@ Responsibilities:
 
 Status:
 
-- [ ] create worktrees
-- [ ] assign workers
+- [x] create worktrees
+- [x] assign workers
 - [x] merge Worker A
 - [x] merge Worker B
 - [x] merge Worker D
 - [x] merge Worker C
-- [ ] merge Worker E
-- [ ] run `make test`
-- [ ] final cleanup pass
+- [x] merge Worker E
+- [x] run `make test`
+- [x] final cleanup pass
 
 ### Worker A
 
@@ -390,11 +390,20 @@ Dependencies:
 
 Status:
 
-- [ ] branch created
-- [ ] implementation started
-- [ ] tests updated
-- [ ] local relevant tests run
-- [ ] ready for merge
+- [x] branch created
+- [x] implementation started
+- [x] tests updated
+- [x] local relevant tests run
+- [x] ready for merge
+
+Integration notes:
+
+- landed on `codex/harness-v2-integration` as `c544caebe5c8e45ad54c6dd03e356fd463b319f4`
+- cherry-picked worker commit `c8f0ea2c741df348a24fcc2090f8c9553d753823`
+- resolved overlap in `paperbase/src/paperbase/service.py` and `paperbase/tests/test_service.py` by keeping Worker C's single-loop runtime and Worker D's relaxed research posture while adding Worker E's visible compaction checkpoint and citation carry-forward
+- targeted integration validation passed: `./.venv/bin/pytest paperbase/tests/test_service.py -k 'compact' -q` and `./.venv/bin/ruff check paperbase/src/paperbase/service.py paperbase/tests/test_service.py`
+- final cleanup removed dead project-write enforcement helpers, removed the stale failure-message retry test, and aligned the project-thread prompt text with Worker A's no-forced-write policy
+- full validation passed: `make test`
 
 ## Merge Order
 
@@ -446,10 +455,10 @@ For every worker branch:
 
 Before final merge:
 
-- [ ] run `make test`
-- [ ] remove dead helper functions
-- [ ] remove tests that only encoded the old harness
-- [ ] confirm this board matches what actually landed
+- [x] run `make test`
+- [x] remove dead helper functions
+- [x] remove tests that only encoded the old harness
+- [x] confirm this board matches what actually landed
 
 ## Worker Handoff Format
 
