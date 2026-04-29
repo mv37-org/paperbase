@@ -2009,7 +2009,7 @@ def test_project_sgd_example_request_forces_tools_and_persists_file():
     assert chat_model.create_calls[0]["tool_choice"] == {"type": "any"}
 
 
-def test_project_code_turn_forces_tools_until_a_write_occurs():
+def test_project_code_turn_does_not_force_writes_after_the_first_tool_round():
     class ProjectWriteChatModel(FakeChatModel):
         def __init__(self) -> None:
             super().__init__()
@@ -2115,12 +2115,13 @@ def test_project_code_turn_forces_tools_until_a_write_occurs():
         repo_path="src/train.py",
     )
     assert chat_model.create_calls[0]["tool_choice"] == {"type": "any"}
-    assert chat_model.create_calls[1]["tool_choice"] == {"type": "any"}
-    assert chat_model.create_calls[2]["tool_choice"] == {"type": "any"}
+    assert chat_model.create_calls[1]["tool_choice"] == {"type": "auto"}
+    assert chat_model.create_calls[2]["tool_choice"] == {"type": "auto"}
     assert chat_model.create_calls[3]["tool_choice"] == {"type": "auto"}
+    assert chat_model.create_calls[4]["tools"] is None
 
 
-def test_project_code_turn_retries_after_failed_touch_and_fills_empty_file():
+def test_project_code_turn_can_continue_after_failed_touch_without_a_forced_retry():
     class FailedTouchThenEditChatModel(FakeChatModel):
         def __init__(self) -> None:
             super().__init__()
@@ -2222,11 +2223,12 @@ def test_project_code_turn_retries_after_failed_touch_and_fills_empty_file():
     assert saved_file is not None
     assert saved_file.content == "def train_linear_gd():\n    return 1\n"
     assert chat_model.create_calls[0]["tool_choice"] == {"type": "any"}
-    assert chat_model.create_calls[1]["tool_choice"] == {"type": "any"}
+    assert chat_model.create_calls[1]["tool_choice"] == {"type": "auto"}
     assert chat_model.create_calls[2]["tool_choice"] == {"type": "auto"}
+    assert chat_model.create_calls[3]["tools"] is None
 
 
-def test_project_code_turn_failed_write_returns_backend_failure_message():
+def test_project_code_turn_failed_write_does_not_trigger_a_backend_failure_answer():
     class FailedWriteChatModel(FakeChatModel):
         def __init__(self) -> None:
             super().__init__()
@@ -2308,16 +2310,13 @@ def test_project_code_turn_failed_write_returns_backend_failure_message():
         repo_path="src/linear_gd.py",
     )
     assert response.assistant_message is not None
-    assert response.assistant_message.content_markdown == (
-        "I wasn't able to persist code into a managed project Python file in this turn, so no project file was changed. "
-        "Please retry, or tell me the exact file you want updated."
-    )
+    assert response.assistant_message.content_markdown == "Saved the module to `src/linear_gd.py`."
     assert saved_file is not None
     assert saved_file.content == ""
-    assert len(chat_model.create_calls) == 4
+    assert len(chat_model.create_calls) == 5
 
 
-def test_project_thread_replaces_unsaved_python_answer_with_failure_message():
+def test_project_thread_allows_python_answers_without_persisting_project_code():
     class UnsavedPythonAnswerChatModel(FakeChatModel):
         def create_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
             self.create_calls.append(
@@ -2375,10 +2374,8 @@ def test_project_thread_replaces_unsaved_python_answer_with_failure_message():
     )
 
     assert response.assistant_message is not None
-    assert response.assistant_message.content_markdown == (
-        "I wasn't able to persist code into a managed project Python file in this turn, so no project file was changed. "
-        "Please retry, or tell me the exact file you want updated."
-    )
+    assert response.assistant_message.content_markdown == "```python\ndef recurse(items):\n    return items\n```"
+    assert service.chat_model.create_calls[0]["tool_choice"] == {"type": "any"}
     assert len(service.chat_model.create_calls) == 2
 
 
@@ -4045,7 +4042,7 @@ def test_browser_chat_stream_marks_partial_failure(monkeypatch, browser_service)
     app.dependency_overrides.clear()
 
 
-def test_browser_chat_stream_failed_project_write_emits_backend_failure(browser_service):
+def test_browser_chat_stream_failed_project_write_still_streams_the_model_answer(browser_service):
     class FailedWriteChatModel(FakeChatModel):
         def __init__(self) -> None:
             super().__init__()
@@ -4078,10 +4075,19 @@ def test_browser_chat_stream_failed_project_write_emits_backend_failure(browser_
                     ],
                     "stop_reason": "tool_use",
                 }
-            raise AssertionError("Final assistant model call should be skipped when no project file was changed")
+            raise AssertionError("Streaming project chats should not make a separate final create_message call")
 
         def stream_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
-            raise AssertionError("Streaming answer model call should be skipped when no project file was changed")
+            self.stream_calls.append(
+                {
+                    "api_key": api_key,
+                    "messages": messages,
+                    "system_prompt": system_prompt,
+                    "tools": tools,
+                    "tool_choice": tool_choice,
+                }
+            )
+            yield ChatModelStreamEvent(text="Saved the module to `src/linear_gd.py`.")
 
     service = PaperbaseService(
         settings=Settings(
@@ -4131,17 +4137,14 @@ def test_browser_chat_stream_failed_project_write_emits_backend_failure(browser_
     event_names = [event_name for event_name, _ in events]
     assert "assistant_start" in event_names
     assert event_names[-1] == "done"
-    assert events[-1][1]["assistant_message"]["content_markdown"] == (
-        "I wasn't able to persist code into a managed project Python file in this turn, so no project file was changed. "
-        "Please retry, or tell me the exact file you want updated."
-    )
+    assert events[-1][1]["assistant_message"]["content_markdown"] == "Saved the module to `src/linear_gd.py`."
     refreshed = client.get(f"/v1/browser/chats/{thread_id}").json()
     assert refreshed["messages"][-1]["content_markdown"] == events[-1][1]["assistant_message"]["content_markdown"]
 
     app.dependency_overrides.clear()
 
 
-def test_browser_chat_stream_replaces_unsaved_python_answer_with_failure(browser_service):
+def test_browser_chat_stream_allows_unsaved_python_answers(browser_service):
     service, _, chat_model = browser_service
     app.dependency_overrides[get_service] = lambda: service
     client = TestClient(app)
@@ -4172,10 +4175,7 @@ def test_browser_chat_stream_replaces_unsaved_python_answer_with_failure(browser
         events = _parse_sse_events("".join(response.iter_text()))
 
     assert events[-1][0] == "done"
-    assert events[-1][1]["assistant_message"]["content_markdown"] == (
-        "I wasn't able to persist code into a managed project Python file in this turn, so no project file was changed. "
-        "Please retry, or tell me the exact file you want updated."
-    )
+    assert events[-1][1]["assistant_message"]["content_markdown"] == "```python\ndef recurse(items):\n    return items\n```"
     refreshed = client.get(f"/v1/browser/chats/{thread_id}").json()
     assert refreshed["messages"][-1]["content_markdown"] == events[-1][1]["assistant_message"]["content_markdown"]
 

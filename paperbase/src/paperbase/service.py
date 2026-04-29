@@ -1048,19 +1048,7 @@ def _should_offer_project_code_tools(question: str, *, thread: ChatThreadRespons
 
 
 def _should_require_project_code_write(question: str, *, thread: ChatThreadResponse | None) -> bool:
-    if not _should_offer_project_code_tools(question, thread=thread):
-        return False
-    if _question_confirms_pending_project_code_followup(question, thread=thread):
-        return _pending_project_code_followup_requires_write(thread)
-    if _PROJECT_CODE_WRITE_TOOL_RE.search(question):
-        return True
-    if _PROJECT_CODE_SNIPPET_RE.search(question) and (
-        _PROJECT_CODE_TARGET_RE.search(question) or _PROJECT_CODE_BUILD_OBJECT_RE.search(question)
-    ):
-        return True
-    if _PROJECT_CODE_WRITE_ACTION_RE.search(question) and _PROJECT_CODE_BUILD_OBJECT_RE.search(question):
-        return True
-    return bool(_PROJECT_CODE_WRITE_ACTION_RE.search(question) and _PROJECT_CODE_TARGET_RE.search(question))
+    return False
 
 
 def _project_code_tool_use_completed_write(tool_use: dict[str, Any], *, is_error: bool) -> bool:
@@ -1111,11 +1099,7 @@ def _project_code_answer_requires_persisted_python(
     project_write_completed: bool,
     project_read_completed: bool,
 ) -> bool:
-    if thread is None or not thread.project_id:
-        return False
-    if not _answer_contains_python_snippet(answer):
-        return False
-    return not (project_write_completed or project_read_completed)
+    return False
 
 
 def _should_offer_chat_tools(question: str, request: SendChatMessageRequest, *, thread: ChatThreadResponse | None) -> bool:
@@ -3698,16 +3682,10 @@ class PaperbaseService:
             request,
             thread=prepared.thread,
         )
-        require_project_code_write = _should_require_project_code_write(
-            prepared.user_message.content_markdown,
-            thread=prepared.thread,
-        )
         project_write_tool_used = False
         project_read_tool_used = False
         for round_index in range(_CHAT_TOOL_MAX_ROUNDS):
-            must_use_tool_this_round = (round_index == 0 and force_first_tool) or (
-                require_project_code_write and not project_write_tool_used
-            )
+            must_use_tool_this_round = round_index == 0 and force_first_tool
             tool_choice = {"type": "any"} if must_use_tool_this_round else {"type": "auto"}
             context, _events = self._ensure_chat_context_budget(
                 prepared=prepared,
@@ -3727,9 +3705,6 @@ class PaperbaseService:
             assistant_content = [block for block in (response.get("content") or []) if isinstance(block, dict)]
             tool_uses = [block for block in assistant_content if block.get("type") == "tool_use"]
             if not tool_uses:
-                if require_project_code_write and not project_write_tool_used and must_use_tool_this_round:
-                    context.messages.append({"role": "user", "content": _project_code_write_retry_prompt()})
-                    continue
                 break
             blocks, completed_write_this_round, completed_read_this_round = self._tool_result_blocks(
                 tool_uses=tool_uses,
@@ -3749,7 +3724,6 @@ class PaperbaseService:
         return ChatToolRoundsResult(
             context=context,
             citation_registry=citation_registry,
-            require_project_code_write=require_project_code_write,
             project_write_completed=project_write_tool_used,
             project_read_completed=project_read_tool_used,
         )
@@ -3778,16 +3752,10 @@ class PaperbaseService:
             request,
             thread=prepared.thread,
         )
-        require_project_code_write = _should_require_project_code_write(
-            prepared.user_message.content_markdown,
-            thread=prepared.thread,
-        )
         project_write_tool_used = False
         project_read_tool_used = False
         for round_index in range(_CHAT_TOOL_MAX_ROUNDS):
-            must_use_tool_this_round = (round_index == 0 and force_first_tool) or (
-                require_project_code_write and not project_write_tool_used
-            )
+            must_use_tool_this_round = round_index == 0 and force_first_tool
             tool_choice = {"type": "any"} if must_use_tool_this_round else {"type": "auto"}
             context = yield from self._ensure_chat_context_budget_stream(
                 prepared=prepared,
@@ -3810,9 +3778,6 @@ class PaperbaseService:
             if usage is not None:
                 yield ("usage", self._chat_usage_payload(usage))
             if not tool_uses:
-                if require_project_code_write and not project_write_tool_used and must_use_tool_this_round:
-                    context.messages.append({"role": "user", "content": _project_code_write_retry_prompt()})
-                    continue
                 break
             context.messages.append({"role": "assistant", "content": assistant_content})
             blocks: list[dict[str, Any]] = []
@@ -3876,7 +3841,6 @@ class PaperbaseService:
         return ChatToolRoundsResult(
             context=context,
             citation_registry=citation_registry,
-            require_project_code_write=require_project_code_write,
             project_write_completed=project_write_tool_used,
             project_read_completed=project_read_tool_used,
         )
@@ -3932,24 +3896,6 @@ class PaperbaseService:
             user=user,
             request=request,
         )
-        if tool_rounds.require_project_code_write and not tool_rounds.project_write_completed:
-            assistant_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
-                thread_id=thread_id,
-                role="assistant",
-                content_markdown=_project_code_write_failure_answer(),
-            )
-            resolved_user = prepared.resolved_user
-            if prepared.using_free_tier:
-                resolved_user = self.repository.increment_free_responses_used(user.user_id) or resolved_user  # type: ignore[attr-defined]
-            refreshed = self.get_chat_thread(user, thread_id)
-            return SendChatMessageResponse(
-                thread=refreshed,
-                assistant_message=assistant_message,
-                remaining_free_responses=self._remaining_free_responses(resolved_user),
-                has_anthropic_api_key=self.repository.get_anthropic_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
-                state="completed",
-            )
-
         conversation_context = tool_rounds.context
         citation_registry = tool_rounds.citation_registry
         current_turn_citations = citation_registry.citations
@@ -3969,13 +3915,6 @@ class PaperbaseService:
             system_prompt=answer_system_prompt,
         )
         answer = _sanitize_inline_citations(_extract_message_text(answer_payload), current_turn_citations)
-        if _project_code_answer_requires_persisted_python(
-            answer,
-            thread=prepared.thread,
-            project_write_completed=tool_rounds.project_write_completed,
-            project_read_completed=tool_rounds.project_read_completed,
-        ):
-            answer = _project_code_write_failure_answer()
         assistant_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
             thread_id=thread_id,
             role="assistant",
@@ -4025,30 +3964,6 @@ class PaperbaseService:
                 tool_rounds_result = stop.value
                 break
             yield (event_name, payload)
-        if tool_rounds_result.require_project_code_write and not tool_rounds_result.project_write_completed:
-            failure_text = _project_code_write_failure_answer()
-            assistant_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
-                thread_id=thread_id,
-                role="assistant",
-                content_markdown=failure_text,
-                status="completed",
-            )
-            yield ("assistant_start", {"assistant_message": assistant_message.model_dump(mode="json")})
-            yield ("delta", {"message_id": assistant_message.message_id, "delta": failure_text})
-            resolved_user = prepared.resolved_user
-            if prepared.using_free_tier:
-                resolved_user = self.repository.increment_free_responses_used(user.user_id) or resolved_user  # type: ignore[attr-defined]
-            yield (
-                "done",
-                {
-                    "assistant_message": assistant_message.model_dump(mode="json"),
-                    "remaining_free_responses": self._remaining_free_responses(resolved_user),
-                    "has_anthropic_api_key": self.repository.get_anthropic_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
-                    "state": "completed",
-                    "usage": None,
-                },
-            )
-            return
 
         conversation_context = tool_rounds_result.context
         citation_registry = tool_rounds_result.citation_registry
@@ -4111,13 +4026,6 @@ class PaperbaseService:
             return
 
         final_text = _sanitize_inline_citations("".join(chunks).strip(), current_turn_citations)
-        if _project_code_answer_requires_persisted_python(
-            final_text,
-            thread=prepared.thread,
-            project_write_completed=tool_rounds_result.project_write_completed,
-            project_read_completed=tool_rounds_result.project_read_completed,
-        ):
-            final_text = _project_code_write_failure_answer()
         final_message = self.repository.update_chat_message(  # type: ignore[attr-defined]
             assistant_message.message_id,
             content_markdown=final_text,
