@@ -9,6 +9,7 @@ Use the repo-root `Makefile` as the primary interface:
 - `make setup`
 - `make doctor`
 - `make dev`
+- `make reset-local`
 - `make test`
 - `make test-smoke` (PR CI smoke gate)
 - `make profile`

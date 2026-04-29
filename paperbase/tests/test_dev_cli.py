@@ -12,6 +12,7 @@ from paperbase.dev_cli import (
     _missing_required_env_vars,
     doctor,
     enrich_missing,
+    flush_local,
     harvest,
     init_local,
     main,
@@ -156,6 +157,38 @@ def test_init_local_bootstraps_database_and_storage(monkeypatch, tmp_path, capsy
     assert "pg_trgm installed:         no" in output
 
 
+def test_flush_local_resets_database_and_storage(monkeypatch, tmp_path, capsys):
+    storage_root = tmp_path / "local-storage"
+    storage_root.mkdir()
+    stale_file = storage_root / "stale.txt"
+    stale_file.write_text("old", encoding="utf-8")
+    settings = Settings(
+        database_url="postgresql+psycopg:///paperbase_test",
+        storage_backend="local",
+        local_storage_root=str(storage_root),
+    )
+    repo_calls: list[str] = []
+
+    class FakeRepository:
+        def init(self) -> None:
+            repo_calls.append("init")
+
+    monkeypatch.setattr("paperbase.dev_cli._settings", lambda: settings)
+    monkeypatch.setattr("paperbase.dev_cli._repo_root", lambda: tmp_path)
+    monkeypatch.setattr("paperbase.dev_cli._reset_database", lambda current: "paperbase_test")
+    monkeypatch.setattr("paperbase.dev_cli.build_repository", lambda current: FakeRepository())
+
+    exit_code = flush_local()
+
+    assert exit_code == 0
+    assert storage_root.exists()
+    assert not stale_file.exists()
+    assert repo_calls == ["init"]
+    output = capsys.readouterr().out
+    assert "Reset database schema: paperbase_test" in output
+    assert f"Reset storage:         {storage_root}" in output
+
+
 def test_missing_required_env_vars_reads_shell_and_repo_env(monkeypatch):
     monkeypatch.delenv("PAPERBASE_DATABASE_URL", raising=False)
     monkeypatch.delenv("PAPERBASE_STORAGE_BACKEND", raising=False)
@@ -241,6 +274,14 @@ def test_main_dispatches_profile_with_current_settings(monkeypatch):
 
     assert exit_code == 23
     assert captured == {"settings": settings, "update_baseline": True}
+
+
+def test_main_dispatches_flush_local(monkeypatch):
+    monkeypatch.setattr("paperbase.dev_cli.flush_local", lambda: 19)
+
+    exit_code = main(["flush-local"])
+
+    assert exit_code == 19
 
 
 def test_main_dispatches_reindex_embeddings(monkeypatch):

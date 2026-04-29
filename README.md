@@ -49,6 +49,7 @@ Optional browser-account settings now hang off the same API env surface:
 - `make setup` installs the Python packages, chat dependencies, repo hooks, and a starter `.env`
 - `make doctor` verifies `vp`, Python, Postgres, `pgvector`, ports, and the repo env
 - `make dev` initializes the local database and storage, then runs the API, worker, MCP bridge, and chat dev server
+- `make reset-local` stops the local stack, wipes the local database/storage, and recreates the latest schema
 - `make test-smoke` runs the PR-oriented CI smoke gate: lint, chat checks/tests/build, a focused backend subset, and plugin tests
 - `make test` runs `ruff check`, `vp check`, a frontend build, backend tests, and plugin tests
 - `make profile` runs the deterministic hotpath profiling flow used for performance tracking
@@ -61,7 +62,13 @@ Optional browser-account settings now hang off the same API env surface:
 - verify and profile workflows cancel superseded in-progress runs on the same PR or branch
 - profiling runs only on `main` pushes or manual dispatch
 
-For a full reset of the local database and storage, use the installed admin CLI directly:
+For a full reset of the local database and storage, use:
+
+```bash
+make reset-local
+```
+
+The lower-level admin CLI still exposes the same operation as:
 
 ```bash
 .venv/bin/paperbase-dev flush-local

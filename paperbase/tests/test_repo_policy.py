@@ -27,6 +27,13 @@ def test_verify_workflow_uses_smoke_on_pull_requests_and_full_test_elsewhere():
     assert "cancel-in-progress: true" in workflow
 
 
+def test_makefile_exposes_reset_local_workflow():
+    makefile = _read_repo_file("Makefile")
+
+    assert "reset-local:" in makefile
+    assert "make reset-local" in makefile
+
+
 def test_profile_workflow_delegates_to_make_profile():
     workflow = _read_repo_file(".github/workflows/profile.yml")
 

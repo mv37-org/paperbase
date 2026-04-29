@@ -25,7 +25,7 @@ ifneq ($(UPDATE_BASELINE),)
 BASELINE_FLAG := --update-baseline
 endif
 
-.PHONY: help setup doctor dev test-smoke test profile clean _require_vp _require_setup _stop_stack
+.PHONY: help setup doctor dev reset-local test-smoke test profile clean _require_vp _require_setup _stop_stack
 
 SMOKE_BACKEND_TESTS := \
 	paperbase/tests/test_api_auth.py \
@@ -38,6 +38,7 @@ help:
 	@printf "  make setup   Install Python packages, chat dependencies, the repo .env, and Git hooks.\n"
 	@printf "  make doctor  Verify vp, Python, Postgres, pgvector, ports, and the repo .env.\n"
 	@printf "  make dev     Initialize local storage/database and run API, worker, MCP bridge, and chat.\n"
+	@printf "  make reset-local  Stop the local stack, wipe local database/storage, and recreate the latest schema.\n"
 	@printf "  make test-smoke  Run the PR-oriented smoke gate used by CI.\n"
 	@printf "  make test    Run doctor, init-local, run-prereq verification, lint, chat checks/tests/build, pytest, and timing comparisons.\n"
 	@printf "  make profile Run doctor, init-local, run-prereq verification, deterministic hotpath profiling, and baseline comparisons.\n"
@@ -94,6 +95,12 @@ dev:
 	printf "Plugin log: %s/plugin.log\n" "$(RUN_DIR)"; \
 	printf "Stopping the local stack when the chat dev server exits.\n"; \
 	cd "$(CHAT_DIR)" && VITE_PAPERBASE_BASE_URL="$${VITE_PAPERBASE_BASE_URL:-http://127.0.0.1:8080}" vp dev
+
+reset-local:
+	@$(MAKE) --no-print-directory _require_vp
+	@$(MAKE) --no-print-directory _require_setup
+	@$(MAKE) --no-print-directory _stop_stack
+	@"$(PAPERBASE_DEV)" flush-local
 
 test:
 	@$(MAKE) --no-print-directory _require_vp

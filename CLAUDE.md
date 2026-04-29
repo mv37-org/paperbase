@@ -9,6 +9,7 @@ Primary commands:
 - `make setup`
 - `make doctor`
 - `make dev`
+- `make reset-local`
 - `make test-smoke`
 - `make test`
 - `make profile`
