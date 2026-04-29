@@ -409,7 +409,7 @@ class PythonFileSummary(BaseModel):
     file_id: str
     project_id: str
     filename: str
-    file_kind: Literal["python", "notebook"] = "python"
+    file_kind: Literal["python", "notebook", "text"] = "python"
     repo_path: str = ""
     created_at: datetime
     updated_at: datetime
@@ -439,7 +439,7 @@ class ProjectItemSummary(BaseModel):
     file_id: str | None = None
     last_message_preview: str = ""
     filename: str = ""
-    file_kind: Literal["python", "notebook"] = "python"
+    file_kind: Literal["python", "notebook", "text"] = "python"
     repo_path: str = ""
 
 
@@ -491,7 +491,7 @@ class GitHubRepoMetadataResponse(BaseModel):
 
 class GitHubRepoImportCandidate(BaseModel):
     path: str
-    file_kind: Literal["python", "notebook"]
+    file_kind: Literal["python", "notebook", "text"]
     size: int = 0
 
 
@@ -515,7 +515,7 @@ class ProjectRepoConflictResolution(BaseModel):
 
 class ProjectRepoConflictFile(BaseModel):
     path: str
-    file_kind: Literal["python", "notebook"] = "python"
+    file_kind: Literal["python", "notebook", "text"] = "python"
     base_content: str = ""
     local_content: str = ""
     remote_content: str = ""

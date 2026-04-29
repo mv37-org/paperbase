@@ -940,14 +940,32 @@ function formatToolActivityText(
       return running
         ? `Searching files${target ? ` for ${target}` : ""}...`
         : `Searched files${target ? ` for ${target}` : ""}`;
+    case "project_write_file":
     case "project_touch":
-      return running ? `Creating ${target || "file"}...` : `Created ${target || "file"}`;
+      return running ? `Writing ${target || "file"}...` : `Wrote ${target || "file"}`;
+    case "project_apply_patch":
     case "project_edit":
-      return running
-        ? `Writing code${target ? ` in ${target}` : ""}...`
-        : `Wrote code${target ? ` in ${target}` : ""}`;
+      return running ? `Patching ${target || "file"}...` : `Patched ${target || "file"}`;
+    case "project_move":
+      return running ? "Moving file..." : "Moved file";
     case "project_delete":
       return running ? `Deleting ${target || "file"}...` : `Deleted ${target || "file"}`;
+    case "project_git_status":
+      return running ? "Checking project status..." : "Checked project status";
+    case "project_git_diff":
+      return running ? "Diffing project files..." : "Diffed project files";
+    case "project_exec":
+      return running ? "Starting project command..." : "Started project command";
+    case "project_wait":
+      return running ? "Waiting on project command..." : "Updated project command status";
+    case "project_cancel":
+      return running ? "Canceling project command..." : "Canceled project command";
+    case "project_logs":
+      return running ? "Reading project logs..." : "Read project logs";
+    case "project_test":
+      return running ? "Running project tests..." : "Ran project tests";
+    case "project_lint":
+      return running ? "Running project lint..." : "Ran project lint";
     case "project_run":
       return running ? `Running ${target || "file"}...` : `Ran ${target || "file"}`;
     default:
@@ -960,7 +978,13 @@ function toolActivityHasDetails(activity: Pick<ToolActivityEntry, "command" | "o
 }
 
 function projectFileKindLabel(fileKind: ProjectFileKind | undefined) {
-  return fileKind === "notebook" ? "Notebook" : "Python";
+  if (fileKind === "notebook") {
+    return "Notebook";
+  }
+  if (fileKind === "text") {
+    return "Text";
+  }
+  return "Python";
 }
 
 function GoogleButton() {
@@ -2525,6 +2549,9 @@ export default function App() {
                 isError: payload.is_error,
               });
               if (
+                payload.tool_name === "project_write_file" ||
+                payload.tool_name === "project_apply_patch" ||
+                payload.tool_name === "project_move" ||
                 payload.tool_name === "project_touch" ||
                 payload.tool_name === "project_edit" ||
                 payload.tool_name === "project_delete"

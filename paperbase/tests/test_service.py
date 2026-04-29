@@ -205,12 +205,63 @@ class FakeChatModel:
                 "parallel_tool_calls": parallel_tool_calls,
             }
         )
+        if tools:
+            tool_names = [tool.get("name") for tool in tools if isinstance(tool, dict)]
+            has_tool_results = any(
+                message.get("role") == "user"
+                and isinstance(message.get("content"), list)
+                and any(block.get("type") == "tool_result" for block in message.get("content"))
+                for message in messages
+                if isinstance(message, dict)
+            )
+            if not has_tool_results:
+                query = "grounding"
+                tool_name = (
+                    "paperbase_search_sections"
+                    if "paperbase_search_sections" in tool_names
+                    else "paperbase_search"
+                    if "paperbase_search" in tool_names
+                    else str(tool_names[0])
+                )
+                yield ChatModelStreamEvent(usage=self.tool_round_usage)
+                yield ChatModelStreamEvent(
+                    response={
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "toolu_search_sections",
+                                "name": tool_name,
+                                "input": {"query": query, "limit": 3},
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": self.tool_round_usage.input_tokens,
+                            "output_tokens": self.tool_round_usage.output_tokens,
+                            "cache_creation_input_tokens": self.tool_round_usage.cache_creation_input_tokens,
+                            "cache_read_input_tokens": self.tool_round_usage.cache_read_input_tokens,
+                        },
+                        "stop_reason": "tool_use",
+                    }
+                )
+                return
         yield ChatModelStreamEvent(usage=self.initial_stream_usage)
         for index, chunk in enumerate(self.stream_chunks):
             if self.fail_stream_after_chunks is not None and index >= self.fail_stream_after_chunks:
                 raise RuntimeError("stream blew up")
             yield ChatModelStreamEvent(text=chunk)
         yield ChatModelStreamEvent(usage=self.final_stream_usage)
+        yield ChatModelStreamEvent(
+            response={
+                "content": [{"type": "text", "text": "".join(self.stream_chunks)}],
+                "usage": {
+                    "input_tokens": self.final_stream_usage.input_tokens,
+                    "output_tokens": self.final_stream_usage.output_tokens,
+                    "cache_creation_input_tokens": self.final_stream_usage.cache_creation_input_tokens,
+                    "cache_read_input_tokens": self.final_stream_usage.cache_read_input_tokens,
+                },
+                "stop_reason": "end_turn",
+            }
+        )
 
 
 class FakeGitHubRepoManager:
@@ -1738,6 +1789,7 @@ def test_project_code_read_grep_edit_and_delete(browser_service):
             "file_id": created.file_id,
             "repo_path": "train.py",
             "filename": "train.py",
+            "file_kind": "python",
             "line_number": 1,
             "line": "import torch",
         }
@@ -1769,6 +1821,7 @@ def test_project_code_read_grep_edit_and_delete(browser_service):
         "file_id": created.file_id,
         "repo_path": "train.py",
         "filename": "train.py",
+        "file_kind": "python",
         "deleted": True,
     }
 
@@ -1865,16 +1918,27 @@ def test_project_chat_tools_are_advertised_for_coding_turns(browser_service):
         "project_list_files",
         "project_read_file",
         "project_grep",
-        "project_touch",
-        "project_edit",
+        "project_write_file",
+        "project_apply_patch",
+        "project_move",
         "project_delete",
+        "project_git_status",
+        "project_git_diff",
+        "project_exec",
+        "project_wait",
+        "project_cancel",
+        "project_logs",
+        "project_test",
+        "project_lint",
         "project_run",
     }.issubset(tool_names)
-    assert "created earlier in this chat" in tools_by_name["project_list_files"]["description"]
-    assert "appear in later project_list_files results" in tools_by_name["project_touch"]["description"]
-    assert "meaningful initial code content" in tools_by_name["project_touch"]["description"]
-    assert "old_string=''" in tools_by_name["project_edit"]["description"]
+    assert "workspace text files" in tools_by_name["project_list_files"]["description"]
+    assert "Create or replace one repo-relative workspace text file" in tools_by_name["project_write_file"]["description"]
+    assert "exact-match text patch" in tools_by_name["project_apply_patch"]["description"]
+    assert "Move or rename one workspace file" in tools_by_name["project_move"]["description"]
     assert "truly needs deletion" in tools_by_name["project_delete"]["description"]
+    assert "long-running command" in tools_by_name["project_exec"]["description"]
+    assert "last synced project repository state" in tools_by_name["project_git_status"]["description"]
 
     prompt = service._chat_tool_system_prompt(
         thread,
@@ -1882,10 +1946,10 @@ def test_project_chat_tools_are_advertised_for_coding_turns(browser_service):
         include_project_code_tools=True,
     )
     assert "Once the tool results are sufficient, stop calling tools and answer directly in the same turn." in prompt
-    assert "Use them when they materially help answer the request" in prompt
-    assert "Project-scoped coding tools are available for the current thread." in prompt
-    assert "When the user asks you to create, inspect, change, delete, or run project code, use the project_* tools instead of guessing." in prompt
-    assert "Generated runnable code should support --run-mode smoke|full" in prompt
+    assert "Use them only when paper evidence" in prompt
+    assert "Operate like a coding agent." in prompt
+    assert "Project workspace tools operate on the current project's repo-relative text files." in prompt
+    assert "Generated runnable code should support smoke-scale validation when practical." in prompt
     assert "Every tool-enabled turn must begin by leveraging these research tools" not in prompt
     assert "do not stop tool use until the relevant managed project Python files have actually been created or updated" not in prompt
 
@@ -2371,7 +2435,7 @@ def test_project_confirmation_turn_keeps_project_tools_available():
     assert saved_file.content == "def train_linear_gd():\n    return 1\n"
     assert chat_model.create_calls[0]["tool_choice"] == {"type": "auto"}
     tool_names = {tool["name"] for tool in chat_model.create_calls[0]["tools"]}
-    assert "project_touch" in tool_names
+    assert "project_write_file" in tool_names
 
 
 def test_project_retry_turn_keeps_project_tools_available():
@@ -2467,7 +2531,7 @@ def test_project_retry_turn_keeps_project_tools_available():
     assert saved_file.content == "def train_linear_gd():\n    return 1\n"
     assert chat_model.create_calls[0]["tool_choice"] == {"type": "auto"}
     tool_names = {tool["name"] for tool in chat_model.create_calls[0]["tools"]}
-    assert "project_edit" in tool_names
+    assert "project_apply_patch" in tool_names
 
 
 def test_python_file_sync_project_repo_writes_metadata_and_files():
@@ -3377,14 +3441,14 @@ def test_stream_chat_compacts_mid_turn_after_tool_results(monkeypatch, browser_s
     assert "tool_result" in str(compaction_call["messages"])
     assert "Explain the methods grounding" in str(compaction_call["messages"])
 
-    final_create_call = next(
+    final_stream_call = next(
         call
-        for call in reversed(chat_model.create_calls)
+        for call in reversed(chat_model.stream_calls)
         if call["system_prompt"] and call["system_prompt"] != ""
     )
-    assert final_create_call["messages"][0]["role"] == "user"
-    assert "Conversation compaction checkpoint" in final_create_call["messages"][0]["content"]
-    assert chat_model.stream_calls == []
+    assert final_stream_call["messages"][0]["role"] == "user"
+    assert "Conversation compaction checkpoint" in final_stream_call["messages"][0]["content"]
+    assert chat_model.stream_calls
 
     refreshed = service.get_chat_thread(session.user, thread.thread_id)
     assert [message.kind for message in refreshed.messages] == ["compaction", "default"]
@@ -3785,17 +3849,17 @@ def test_browser_chat_stream_emits_citations_and_completion(monkeypatch, browser
     assert event_names[-1] == "done"
     assistant_start_index = event_names.index("assistant_start")
     usage_indices = [index for index, event_name in enumerate(event_names) if event_name == "usage"]
-    assert len(usage_indices) == 2
+    assert len(usage_indices) >= 2
     tool_usage_index = usage_indices[0]
-    final_usage_index = usage_indices[1]
-    assert events[assistant_start_index][1]["assistant_message"]["citations"]
+    final_usage_index = usage_indices[-1]
+    assert events[assistant_start_index][1]["assistant_message"]["citations"] == []
     assert events[tool_usage_index][1]["input_tokens"] == 84512
     assert events[tool_usage_index][1]["output_tokens"] == 98
     assert events[tool_usage_index][1]["context_window_tokens"] == 1_000_000
     assert events[final_usage_index][1]["input_tokens"] == 11234
     assert events[-1][1]["assistant_message"]["status"] == "completed"
     assert events[-1][1]["usage"]["output_tokens"] == 27
-    assert service.chat_model.stream_calls == []
+    assert service.chat_model.stream_calls
 
     refreshed = client.get(f"/v1/browser/chats/{thread_id}").json()
     assert refreshed["messages"][-1]["status"] == "completed"
@@ -3841,7 +3905,7 @@ def test_browser_chat_stream_handles_api_key_required_without_placeholder(browse
     app.dependency_overrides.clear()
 
 
-def test_browser_chat_stream_uses_create_message_instead_of_provider_stream(monkeypatch, browser_service):
+def test_browser_chat_stream_falls_back_when_provider_stream_fails_before_text(monkeypatch, browser_service):
     service, _, chat_model = browser_service
     app.dependency_overrides[get_service] = lambda: service
     client = TestClient(app)
@@ -3879,7 +3943,7 @@ def test_browser_chat_stream_uses_create_message_instead_of_provider_stream(monk
     event_names = [event_name for event_name, _ in events]
     assert event_names[-1] == "done"
     assert "error" not in event_names
-    assert chat_model.stream_calls == []
+    assert chat_model.stream_calls
     refreshed = client.get(f"/v1/browser/chats/{thread_id}").json()
     assert refreshed["messages"][-1]["status"] == "completed"
 
@@ -3972,7 +4036,7 @@ def test_browser_chat_stream_can_apply_project_edit_and_answer_in_same_loop():
                         {
                             "type": "tool_use",
                             "id": "toolu_write_file",
-                            "name": "project_touch",
+                            "name": "project_write_file",
                             "input": {
                                 "repo_path": "src/linear_gd.py",
                                 "content": "def train_linear_gd():\n    return 1\n",
@@ -3985,6 +4049,43 @@ def test_browser_chat_stream_can_apply_project_edit_and_answer_in_same_loop():
                 "content": [{"type": "text", "text": "Saved the module to `src/linear_gd.py`."}],
                 "stop_reason": "end_turn",
             }
+
+        def stream_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+            self.stream_calls.append(
+                {
+                    "api_key": api_key,
+                    "messages": messages,
+                    "system_prompt": system_prompt,
+                    "tools": tools,
+                    "tool_choice": tool_choice,
+                }
+            )
+            if tools and not self.used_tool:
+                self.used_tool = True
+                yield ChatModelStreamEvent(
+                    response={
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "toolu_write_file",
+                                "name": "project_write_file",
+                                "input": {
+                                    "repo_path": "src/linear_gd.py",
+                                    "content": "def train_linear_gd():\n    return 1\n",
+                                },
+                            }
+                        ],
+                        "stop_reason": "tool_use",
+                    }
+                )
+                return
+            yield ChatModelStreamEvent(text="Saved the module to `src/linear_gd.py`.")
+            yield ChatModelStreamEvent(
+                response={
+                    "content": [{"type": "text", "text": "Saved the module to `src/linear_gd.py`."}],
+                    "stop_reason": "end_turn",
+                }
+            )
 
     service = PaperbaseService(
         settings=Settings(

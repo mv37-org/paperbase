@@ -91,7 +91,7 @@ Do not leave workflow changes undocumented.
 
 Browser-chat coding flows are project-scoped, not repo-shell scoped.
 
-- operate on Paperbase-managed project `.py` files rather than arbitrary paths in this repo
+- operate on project-scoped repo-relative workspace text files rather than arbitrary paths in this repo
 - read target files before editing and prefer exact-match patch edits over broad rewrites
 - default generated ML code to PyTorch unless the user asks for something else
 - keep runnable entrypoints compatible with `--run-mode smoke|full`

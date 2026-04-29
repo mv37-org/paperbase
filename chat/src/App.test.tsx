@@ -2020,8 +2020,8 @@ describe("App", () => {
       ) => {
         onEvent("tool_start", {
           tool_call_id: "tool_1",
-          tool_name: "project_edit",
-          label: 'project file edit for "src/train.py"',
+          tool_name: "project_apply_patch",
+          label: 'project file patch for "src/train.py"',
         });
         onEvent("assistant_start", {
           assistant_message: {
@@ -2040,8 +2040,8 @@ describe("App", () => {
         await streamDone;
         onEvent("tool_done", {
           tool_call_id: "tool_1",
-          tool_name: "project_edit",
-          label: 'project file edit for "src/train.py"',
+          tool_name: "project_apply_patch",
+          label: 'project file patch for "src/train.py"',
           is_error: false,
         });
         onEvent("done", {
@@ -2076,7 +2076,7 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     await waitFor(() => {
-      expect(screen.getByText("Writing code in src/train.py...")).toBeTruthy();
+      expect(screen.getByText("Patching src/train.py...")).toBeTruthy();
     });
     const preview = await screen.findByTestId("streaming-code-preview");
     expect(within(preview).getByText("Writing code")).toBeTruthy();
@@ -2210,8 +2210,8 @@ describe("App", () => {
       ) => {
         onEvent("tool_start", {
           tool_call_id: "tool_1",
-          tool_name: "project_touch",
-          label: 'project file create for "src/trainer.py"',
+          tool_name: "project_write_file",
+          label: 'project file write for "src/trainer.py"',
         });
         pythonItems = [projectItemFile("file_2", "trainer.py", "proj_1", "src/trainer.py")];
         onEvent("done", {

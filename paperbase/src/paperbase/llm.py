@@ -41,6 +41,7 @@ class ChatModelUsage:
 class ChatModelStreamEvent:
     text: str = ""
     usage: ChatModelUsage | None = None
+    response: dict[str, Any] | None = None
 
 
 def _merge_usage(
@@ -275,6 +276,27 @@ class AnthropicChatModelClient(ChatModelClient):
         )
         response.raise_for_status()
         usage_snapshot: ChatModelUsage | None = None
+        stop_reason: str | None = None
+        content_blocks: list[dict[str, Any]] = []
+        tool_input_fragments: dict[int, list[str]] = {}
+
+        def _ensure_block(index: int, block: dict[str, Any]) -> None:
+            while len(content_blocks) <= index:
+                content_blocks.append({"type": "text", "text": ""})
+            content_blocks[index] = block
+
+        def _finalize_tool_input(index: int) -> None:
+            fragments = tool_input_fragments.pop(index, None)
+            if not fragments:
+                return
+            partial = "".join(fragments).strip()
+            if not partial:
+                content_blocks[index]["input"] = {}
+                return
+            try:
+                content_blocks[index]["input"] = json.loads(partial)
+            except json.JSONDecodeError:
+                content_blocks[index]["input"] = {"partial_json": partial}
 
         for raw_line in response.iter_lines(decode_unicode=True):
             if not raw_line:
@@ -297,23 +319,81 @@ class AnthropicChatModelClient(ChatModelClient):
                     yield ChatModelStreamEvent(usage=usage_snapshot)
                 continue
 
+            if message_type == "content_block_start":
+                index = int(message.get("index") or 0)
+                block = message.get("content_block") or {}
+                block_type = block.get("type")
+                if block_type == "tool_use":
+                    _ensure_block(
+                        index,
+                        {
+                            "type": "tool_use",
+                            "id": str(block.get("id") or ""),
+                            "name": str(block.get("name") or ""),
+                            "input": block.get("input") if isinstance(block.get("input"), dict) else {},
+                        },
+                    )
+                else:
+                    _ensure_block(
+                        index,
+                        {
+                            "type": "text",
+                            "text": str(block.get("text") or ""),
+                        },
+                    )
+                    if block.get("text"):
+                        yield ChatModelStreamEvent(text=str(block.get("text") or ""))
+                continue
+
             if message_type == "message_delta":
+                delta = message.get("delta") or {}
+                next_stop_reason = delta.get("stop_reason")
+                if isinstance(next_stop_reason, str) and next_stop_reason.strip():
+                    stop_reason = next_stop_reason.strip()
                 next_usage = _merge_usage(message.get("usage"), previous=usage_snapshot)
                 if next_usage is not None and next_usage != usage_snapshot:
                     usage_snapshot = next_usage
                     yield ChatModelStreamEvent(usage=usage_snapshot)
                 continue
 
+            if message_type == "content_block_stop":
+                index = int(message.get("index") or 0)
+                if 0 <= index < len(content_blocks) and content_blocks[index].get("type") == "tool_use":
+                    _finalize_tool_input(index)
+                continue
+
             if message_type != "content_block_delta":
                 continue
+            index = int(message.get("index") or 0)
             delta = message.get("delta") or {}
-            if delta.get("type") != "text_delta":
+            delta_type = delta.get("type")
+            if delta_type == "text_delta":
+                text = delta.get("text") or ""
+                if text:
+                    if 0 <= index < len(content_blocks):
+                        content_blocks[index]["text"] = f"{content_blocks[index].get('text') or ''}{text}"
+                    yield ChatModelStreamEvent(text=text)
                 continue
-            text = delta.get("text") or ""
-            if text:
-                yield ChatModelStreamEvent(text=text)
+            if delta_type == "input_json_delta":
+                tool_input_fragments.setdefault(index, []).append(str(delta.get("partial_json") or ""))
+                continue
 
         logger.info(
             "Completed Anthropic streaming chat request",
             extra={"event": "chat.model.stream.completed", "model": self._settings.anthropic_model},
         )
+        for index, block in enumerate(content_blocks):
+            if block.get("type") == "tool_use":
+                _finalize_tool_input(index)
+        response_payload: dict[str, Any] = {
+            "content": content_blocks,
+            "stop_reason": stop_reason or "end_turn",
+        }
+        if usage_snapshot is not None:
+            response_payload["usage"] = {
+                "input_tokens": usage_snapshot.input_tokens,
+                "output_tokens": usage_snapshot.output_tokens,
+                "cache_creation_input_tokens": usage_snapshot.cache_creation_input_tokens,
+                "cache_read_input_tokens": usage_snapshot.cache_read_input_tokens,
+            }
+        yield ChatModelStreamEvent(response=response_payload)
