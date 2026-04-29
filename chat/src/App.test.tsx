@@ -1451,7 +1451,7 @@ describe("App", () => {
     expect(screen.getByText("Inference access")).toBeTruthy();
     expect(screen.getByText("Sandbox credentials")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Open GitHub setup" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Ready" })).toBeTruthy();
+    expect(screen.getByLabelText("Inference access configured")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Open sandbox setup" })).toBeTruthy();
   });
 

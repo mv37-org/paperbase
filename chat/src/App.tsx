@@ -5662,26 +5662,32 @@ export default function App() {
                                   <div className="chat-setup-item-copy">
                                     <div className="chat-setup-item-header">
                                       <strong>{item.label}</strong>
-                                      <span
-                                        className={`chat-setup-state${item.ready ? " ready" : " pending"}`}
-                                      >
-                                        {item.ready
-                                          ? "Configured"
-                                          : item.required
-                                            ? "Required"
-                                            : "Optional"}
-                                      </span>
+                                      {item.ready ? null : (
+                                        <span className="chat-setup-state pending">
+                                          {item.required ? "Required" : "Optional"}
+                                        </span>
+                                      )}
                                     </div>
                                     <p>{item.description}</p>
                                   </div>
                                 </div>
-                                <button
-                                  type="button"
-                                  className={`chat-setup-action${item.ready ? " secondary" : ""}`}
-                                  onClick={() => openChatSetupSettings(item.settingsTab)}
-                                >
-                                  {item.actionLabel}
-                                </button>
+                                {item.ready ? (
+                                  <span
+                                    className="chat-setup-check"
+                                    aria-label={`${item.label} configured`}
+                                    title="Configured"
+                                  >
+                                    ✓
+                                  </span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    className="chat-setup-action"
+                                    onClick={() => openChatSetupSettings(item.settingsTab)}
+                                  >
+                                    {item.actionLabel}
+                                  </button>
+                                )}
                               </div>
                             ))}
                           </div>
