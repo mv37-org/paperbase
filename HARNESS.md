@@ -151,7 +151,7 @@ Status:
 - [ ] assign workers
 - [x] merge Worker A
 - [x] merge Worker B
-- [ ] merge Worker D
+- [x] merge Worker D
 - [x] merge Worker C
 - [ ] merge Worker E
 - [ ] run `make test`
@@ -340,11 +340,20 @@ Dependencies:
 
 Status:
 
-- [ ] branch created
-- [ ] implementation started
-- [ ] tests updated
-- [ ] local relevant tests run
-- [ ] ready for merge
+- [x] branch created
+- [x] implementation started
+- [x] tests updated
+- [x] local relevant tests run
+- [x] ready for merge
+
+Integration notes:
+
+- landed on `codex/harness-v2-integration` as `f1704e3c1d7cb72bd9e1a14a7a478c0b6b07497d`
+- cherry-picked worker commit `26160b24b46b18c1ac138e88f72b67bcc3794f9f`
+- resolved overlap in `paperbase/tests/test_service.py` against Workers B and C by keeping Worker D's relaxed research posture while preserving the unified prompt shape and same-loop runtime coverage
+- preserved the narrowed `_should_offer_project_code_tools` behavior so default-project casual turns do not re-enter the tool loop
+- worker reported `make test` passed after `make setup`, and again during the pre-push hook on `git push`
+- targeted integration validation passed: `paperbase-dev verify-run --mode test` and 10 focused `paperbase/tests/test_service.py` cases covering relaxed research posture, prompt stability, grounded same-loop behavior, project-thread direct answers, and streaming alignment
 
 ### Worker E
 
