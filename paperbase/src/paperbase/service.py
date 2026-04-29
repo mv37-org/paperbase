@@ -2547,14 +2547,23 @@ class PaperbaseService:
             "Treat these instructions as active context for this session."
         )
 
-    def _chat_tool_system_prompt(
+    def _chat_normal_system_prompt(
         self,
-        thread: ChatThreadResponse,
         *,
+        thread: ChatThreadResponse,
         include_research_tools: bool,
         include_project_code_tools: bool,
     ) -> str:
-        parts = ["You are Paperbase Chat."]
+        parts = [
+            "You are Paperbase Chat. Respond naturally and helpfully in strict GitHub-flavored markdown. "
+            "Output must be valid markdown that a standard parser can render directly, not markdown-like plain text. "
+            "Use markdown syntax exactly: write emphasis as **text** with no extra inner spaces, keep headings, lists, and tables on their own lines, and preserve blank lines where block markdown needs them. "
+            "Use headings, bullets, tables, fenced code blocks, and normal markdown links when they clarify the answer, but only with correct markdown syntax. "
+            "Do not put spaces just inside emphasis delimiters, and do not run prose into list or table blocks. "
+            "When tools are available and still needed, emit tool calls only and do not write any user-facing narrative text in the same assistant message. "
+            "Once the current context is sufficient, stop calling tools and answer from the gathered context. "
+            "For casual turns such as greetings or small talk, answer briefly and conversationally."
+        ]
         if include_research_tools:
             parts.append(
                 "You have access to Paperbase research tools that can search papers, sections, files, figures, tables, references, related papers, and the user's uploaded documents. "
@@ -2564,7 +2573,19 @@ class PaperbaseService:
                 "Start with discovery tools to find the right papers, then follow up with evidence tools before making specific factual claims. "
                 "Broad discovery tools like paperbase_search, paperbase_get_results, paperbase_get_paper, paperbase_get_related_papers, and paperbase_get_references are for candidate discovery and metadata only. "
                 "They are not citable evidence by themselves. Before making specific factual claims, follow up with evidence tools like paperbase_search_sections, paperbase_read_file, paperbase_get_figure, paperbase_get_table, or paperbase_search_uploaded_sections. "
-                "When a final answer should mention papers, recommendations, or reading lists, gather metadata rich enough to include direct paper links such as html_url or pdf_url when available."
+                "When a final answer should mention papers, recommendations, or reading lists, gather metadata rich enough to include direct paper links such as html_url or pdf_url when available. "
+                "Only cite source ids inline like [S1] when those ids came from evidence-bearing tool results such as section hits, file reads, figure captions, tables, or uploaded-document excerpts. "
+                "Do not cite broad search results or metadata-only results. "
+                "If the current turn does not have evidence-bearing tool results, do not cite sources, do not invent source ids like [S1], and do not bring up papers or research context unless the user explicitly asks for them. "
+                "Treat any citations that appeared in earlier turns as historical context only, not as active sources for this reply. "
+                "When you mention specific research papers, include markdown links to the paper pages or PDFs from the gathered tool results whenever those URLs are available. "
+                "If the user asked for related reading, recommendations, or references, prefer a compact bullet list with paper title plus link before any longer discussion. "
+                "If the gathered sources are insufficient, say so plainly."
+            )
+        if thread.project_id:
+            parts.append(
+                "In project threads, do not leave fresh Python code only in chat text. "
+                "Persist generated or revised Python into managed project files first, then reference the saved repo path succinctly instead of pasting large unsaved code blocks."
             )
         if include_project_code_tools:
             parts.append(
@@ -2592,42 +2613,33 @@ class PaperbaseService:
                 "Do not create a minimal example, scratch file, or throwaway file and then delete it in the same turn unless the user explicitly asked for that cleanup. "
                 "Generated runnable code should support --run-mode smoke|full. Use project_run with mode=smoke for fast validation and mode=full for the normal workflow."
             )
-        parts.append(
-            "On turns where you still need tools, emit tool calls only and do not write any user-facing narrative text. "
-            "Once the tool results are sufficient, stop calling tools. The final answer will be generated in a separate step."
-        )
         return " ".join(parts) + self._project_prompt_suffix(thread)
 
-    def _chat_answer_system_prompt(self, *, thread: ChatThreadResponse, has_evidence_sources: bool) -> str:
-        project_code_suffix = (
-            " In project threads, do not leave fresh Python code only in chat text. "
-            "Persist generated or revised Python into managed project files first, then reference the saved repo path succinctly instead of pasting large unsaved code blocks."
-            if thread.project_id
-            else ""
+    def _chat_tool_system_prompt(
+        self,
+        thread: ChatThreadResponse,
+        *,
+        include_research_tools: bool,
+        include_project_code_tools: bool,
+    ) -> str:
+        return self._chat_normal_system_prompt(
+            thread=thread,
+            include_research_tools=include_research_tools,
+            include_project_code_tools=include_project_code_tools,
         )
-        if not has_evidence_sources:
-            return (
-                "You are Paperbase Chat. Respond naturally and helpfully in strict GitHub-flavored markdown. "
-                "Output must be valid markdown that a standard parser can render directly, not markdown-like plain text. "
-                "Use markdown syntax exactly: write emphasis as **text** with no extra inner spaces, keep headings/lists/tables on their own lines, and preserve blank lines where block markdown needs them. "
-                "If no evidence sources were gathered for this turn, do not cite sources, do not invent source ids like [S1], "
-                "and do not bring up papers or research context unless the user explicitly asks for them. "
-                "Treat any citations that appeared in earlier turns as historical context only, not as active sources for this reply. "
-                "For casual turns such as greetings or small talk, answer briefly and conversationally."
-                + project_code_suffix
-                + self._project_prompt_suffix(thread)
-            )
-        return (
-            "You are Paperbase Chat. Answer using the gathered Paperbase tool results when possible. "
-            "Respond in strict GitHub-flavored markdown. Output must be valid markdown that a standard parser can render directly, not markdown-like plain text. "
-            "Use headings, bullets, tables, fenced code blocks, and normal markdown links when they clarify the answer, but only with correct markdown syntax. "
-            "Do not put spaces just inside emphasis delimiters, and do not run prose into list or table blocks. "
-            "When you mention specific research papers, include markdown links to the paper pages or PDFs from the gathered tool results whenever those URLs are available. "
-            "If the user asked for related reading, recommendations, or references, prefer a compact bullet list with paper title plus link before any longer discussion. "
-            "Only cite source ids inline like [S1] when those ids came from evidence-bearing tool results such as section hits, file reads, figure captions, tables, or uploaded-document excerpts. "
-            "Do not cite broad search results or metadata-only results. If the gathered sources are insufficient, say so plainly."
-            + project_code_suffix
-            + self._project_prompt_suffix(thread)
+
+    def _chat_answer_system_prompt(
+        self,
+        *,
+        thread: ChatThreadResponse,
+        include_research_tools: bool,
+        include_project_code_tools: bool,
+        has_evidence_sources: bool,
+    ) -> str:
+        return self._chat_normal_system_prompt(
+            thread=thread,
+            include_research_tools=include_research_tools,
+            include_project_code_tools=include_project_code_tools,
         )
 
     def _chat_message_for_model(self, message: ChatMessageResponse) -> dict[str, Any]:
@@ -2637,6 +2649,17 @@ class PaperbaseService:
                 "content": f"Conversation compaction checkpoint:\n\n{message.content_markdown}",
             }
         return {"role": message.role, "content": message.content_markdown}
+
+    def _chat_tool_offer_flags(
+        self,
+        request: SendChatMessageRequest,
+        *,
+        thread: ChatThreadResponse | None = None,
+    ) -> tuple[bool, bool]:
+        return (
+            _should_offer_research_chat_tools(request.content, request),
+            _should_offer_project_code_tools(request.content, thread=thread),
+        )
 
     def _chat_turn_context(self, prepared: PreparedChatGeneration) -> ChatTurnContext:
         active_messages = [*prepared.thread.messages, prepared.user_message]
@@ -2850,9 +2873,11 @@ class PaperbaseService:
         *,
         thread: ChatThreadResponse | None = None,
     ) -> list[dict[str, Any]]:
+        include_research_tools, include_project_code_tools = self._chat_tool_offer_flags(
+            request,
+            thread=thread,
+        )
         tools: list[dict[str, Any]] = []
-        include_research_tools = _should_offer_research_chat_tools(request.content, request)
-        include_project_code_tools = _should_offer_project_code_tools(request.content, thread=thread)
         if not (include_research_tools or include_project_code_tools):
             return tools
         if include_research_tools:
@@ -3899,8 +3924,14 @@ class PaperbaseService:
         conversation_context = tool_rounds.context
         citation_registry = tool_rounds.citation_registry
         current_turn_citations = citation_registry.citations
+        include_research_tools, include_project_code_tools = self._chat_tool_offer_flags(
+            request,
+            thread=prepared.thread,
+        )
         answer_system_prompt = self._chat_answer_system_prompt(
             thread=prepared.thread,
+            include_research_tools=include_research_tools,
+            include_project_code_tools=include_project_code_tools,
             has_evidence_sources=bool(current_turn_citations),
         )
         conversation_context, _events = self._ensure_chat_context_budget(
@@ -3968,8 +3999,14 @@ class PaperbaseService:
         conversation_context = tool_rounds_result.context
         citation_registry = tool_rounds_result.citation_registry
         current_turn_citations = citation_registry.citations
+        include_research_tools, include_project_code_tools = self._chat_tool_offer_flags(
+            request,
+            thread=prepared.thread,
+        )
         answer_system_prompt = self._chat_answer_system_prompt(
             thread=prepared.thread,
+            include_research_tools=include_research_tools,
+            include_project_code_tools=include_project_code_tools,
             has_evidence_sources=bool(current_turn_citations),
         )
         conversation_context = yield from self._ensure_chat_context_budget_stream(

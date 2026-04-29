@@ -1845,8 +1845,17 @@ def test_project_chat_tools_are_advertised_for_coding_turns(browser_service):
         include_research_tools=True,
         include_project_code_tools=True,
     )
+    answer_prompt = service._chat_answer_system_prompt(
+        thread=thread,
+        include_research_tools=True,
+        include_project_code_tools=True,
+        has_evidence_sources=True,
+    )
     assert "Every tool-enabled turn must begin by leveraging these research tools" in prompt
     assert "Use them aggressively, including on code turns when papers or uploaded documents can inform the work" in prompt
+    assert "strict GitHub-flavored markdown" in prompt
+    assert "do not invent source ids like [S1]" in prompt
+    assert "markdown links to the paper pages or PDFs" in prompt
     assert "writing managed project Python files" in prompt
     assert "decide from the prompt whether to edit an existing project file or create a new one" in prompt
     assert "appear in later project_list_files results" in prompt
@@ -1859,6 +1868,7 @@ def test_project_chat_tools_are_advertised_for_coding_turns(browser_service):
     assert "Treat project files as durable research artifacts" in prompt
     assert "If you are unsure whether a file truly needs deletion, keep it and edit or replace it instead" in prompt
     assert "Do not create a minimal example, scratch file, or throwaway file and then delete it in the same turn" in prompt
+    assert prompt == answer_prompt
 
 
 def test_project_snippet_request_forces_tools_and_persists_file():
@@ -3657,9 +3667,51 @@ def test_link_requests_force_tool_use_and_prompt_for_paper_links(monkeypatch, br
         SendChatMessageRequest(content="Give me links to papers about grounding"),
     )
 
+    first_prompt = str(chat_model.create_calls[0]["system_prompt"])
+    final_prompt = str(chat_model.create_calls[-1]["system_prompt"])
     assert chat_model.create_calls[0]["tool_choice"] == {"type": "any"}
-    assert "html_url or pdf_url" in str(chat_model.create_calls[0]["system_prompt"])
-    assert "markdown links to the paper pages or PDFs" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert first_prompt == final_prompt
+    assert "html_url or pdf_url" in first_prompt
+    assert "markdown links to the paper pages or PDFs" in first_prompt
+
+
+def test_normal_prompt_is_stable_across_different_research_user_prompts(monkeypatch, browser_service):
+    service, _, chat_model = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="stable-prompts@example.com", password="topsecret123", display_name="Stable Prompts")
+    )
+    assert session.user is not None
+
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda paper: _rich_extraction(text="## Methods\n\nGrounding methods and benchmark comparisons."),
+    )
+    service.index_arxiv_paper(
+        "2402.55555",
+        paper=_sample_paper("2402.55555", title="Prompt Stability Paper", abstract="A paper with grounded evidence"),
+    )
+
+    prompts: list[str] = []
+    for content in (
+        "Explain grounding methods with citations",
+        "Give me links to papers about grounding",
+    ):
+        thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
+        start_index = len(chat_model.create_calls)
+        service.send_chat_message(
+            session.user,
+            thread.thread_id,
+            SendChatMessageRequest(content=content),
+        )
+        calls = chat_model.create_calls[start_index:]
+        assert len(calls) == 3
+        prompts.extend(str(call["system_prompt"]) for call in calls)
+
+    assert len(set(prompts)) == 1
+    assert "Every tool-enabled turn must begin by leveraging these research tools" in prompts[0]
+    assert "strict GitHub-flavored markdown" in prompts[0]
+    assert "do not invent source ids like [S1]" in prompts[0]
 
 
 def test_project_defaults_and_thread_snapshots(browser_service):
@@ -3805,14 +3857,25 @@ def test_chat_answer_prompt_requires_strict_markdown(browser_service):
 
     thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="Markdown prompt"))
 
-    with_evidence = service._chat_answer_system_prompt(thread=thread, has_evidence_sources=True)
-    without_evidence = service._chat_answer_system_prompt(thread=thread, has_evidence_sources=False)
+    with_evidence = service._chat_answer_system_prompt(
+        thread=thread,
+        include_research_tools=True,
+        include_project_code_tools=False,
+        has_evidence_sources=True,
+    )
+    without_evidence = service._chat_answer_system_prompt(
+        thread=thread,
+        include_research_tools=True,
+        include_project_code_tools=False,
+        has_evidence_sources=False,
+    )
 
     assert "strict GitHub-flavored markdown" in with_evidence
     assert "valid markdown that a standard parser can render directly" in with_evidence
     assert "Do not put spaces just inside emphasis delimiters" in with_evidence
     assert "strict GitHub-flavored markdown" in without_evidence
     assert "valid markdown that a standard parser can render directly" in without_evidence
+    assert with_evidence == without_evidence
 
 
 def test_empty_chat_can_move_between_projects(browser_service):
