@@ -3478,7 +3478,7 @@ class PaperbaseService:
             parts.extend(["", "## Persisted Source IDs", "", *citation_lines])
         return "\n".join(parts).strip()
 
-    def _chat_input_item_from_thread_item(self, item: ChatThreadItemResponse) -> dict[str, Any]:
+    def _chat_input_item_from_thread_item(self, item: ChatThreadItemResponse) -> dict[str, Any] | None:
         if item.item_type == "compaction":
             return {
                 "type": "message",
@@ -3491,7 +3491,6 @@ class PaperbaseService:
                 arguments = json.dumps(item.content_json, ensure_ascii=False)
             return {
                 "type": "function_call",
-                "id": item.item_id,
                 "call_id": item.call_id or item.item_id,
                 "name": item.name or "",
                 "arguments": arguments,
@@ -3506,10 +3505,12 @@ class PaperbaseService:
                 "output": output,
             }
         if item.item_type == "reasoning":
+            if not isinstance(item.content_json, list) or not item.content_json:
+                return None
             return {
                 "type": "reasoning",
                 "id": item.item_id,
-                "summary": item.content_json if item.content_json is not None else item.content_text,
+                "summary": item.content_json,
             }
         return {
             "type": "message",
@@ -3518,8 +3519,13 @@ class PaperbaseService:
         }
 
     def _chat_turn_context(self, prepared: PreparedChatGeneration) -> ChatTurnContext:
+        prompt_items = [
+            normalized
+            for item in prepared.thread.items
+            if (normalized := self._chat_input_item_from_thread_item(item)) is not None
+        ]
         return ChatTurnContext(
-            items=[self._chat_input_item_from_thread_item(item) for item in prepared.thread.items],
+            items=prompt_items,
             active_item_ids=[item.item_id for item in prepared.thread.items],
         )
 
@@ -3636,7 +3642,11 @@ class PaperbaseService:
             refreshed = self.get_chat_thread(prepared.resolved_user, prepared.thread.thread_id)
             return (
                 ChatTurnContext(
-                    items=[self._chat_input_item_from_thread_item(compaction_message)],
+                    items=[
+                        normalized
+                        for normalized in [self._chat_input_item_from_thread_item(compaction_message)]
+                        if normalized is not None
+                    ],
                     active_item_ids=[compaction_message.item_id],
                     compactions_used=context.compactions_used + 1,
                 ),
@@ -5029,7 +5039,9 @@ class PaperbaseService:
                     if persisted_item is None:
                         raise RuntimeError("Completed output item vanished during persistence")
                     step_items[provider_item_id] = persisted_item
-                    context.items.append(self._chat_input_item_from_thread_item(persisted_item))
+                    normalized_item = self._chat_input_item_from_thread_item(persisted_item)
+                    if normalized_item is not None:
+                        context.items.append(normalized_item)
                     if persisted_item.item_type == "assistant_message":
                         completed_assistant_item_ids.append(provider_item_id)
                         continue
@@ -5156,7 +5168,9 @@ class PaperbaseService:
                 )
                 if completed_output_item is None:
                     raise RuntimeError("Tool output item vanished during persistence")
-                context.items.append(self._chat_input_item_from_thread_item(completed_output_item))
+                normalized_output_item = self._chat_input_item_from_thread_item(completed_output_item)
+                if normalized_output_item is not None:
+                    context.items.append(normalized_output_item)
                 yield ("item_completed", {"item": completed_output_item.model_dump(mode="json")})
 
         raise RuntimeError("Chat turn exceeded the maximum number of sampling steps")

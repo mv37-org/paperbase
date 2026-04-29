@@ -108,17 +108,24 @@ def _tool_spec_to_responses(tool: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _message_content_blocks_from_text(text: str) -> list[dict[str, Any]]:
-    return [{"type": "input_text", "text": text}]
+def _message_content_blocks_from_text(text: str, *, role: str = "user") -> list[dict[str, Any]]:
+    block_type = "output_text" if role == "assistant" else "input_text"
+    return [{"type": block_type, "text": text}]
 
 
 def _normalize_message_item(item: dict[str, Any]) -> list[dict[str, Any]]:
     role = str(item.get("role") or "user")
     content = item.get("content")
     if isinstance(content, str):
-        return [{"type": "message", "role": role, "content": _message_content_blocks_from_text(content)}]
+        return [{"type": "message", "role": role, "content": _message_content_blocks_from_text(content, role=role)}]
     if not isinstance(content, list):
-        return [{"type": "message", "role": role, "content": _message_content_blocks_from_text(str(content or ""))}]
+        return [
+            {
+                "type": "message",
+                "role": role,
+                "content": _message_content_blocks_from_text(str(content or ""), role=role),
+            }
+        ]
 
     normalized: list[dict[str, Any]] = []
     text_parts: list[str] = []
@@ -130,7 +137,10 @@ def _normalize_message_item(item: dict[str, Any]) -> list[dict[str, Any]]:
             {
                 "type": "message",
                 "role": role,
-                "content": _message_content_blocks_from_text("\n".join(part for part in text_parts if part).strip()),
+                "content": _message_content_blocks_from_text(
+                    "\n".join(part for part in text_parts if part).strip(),
+                    role=role,
+                ),
             }
         )
         text_parts.clear()
@@ -179,7 +189,9 @@ def _normalize_input_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     for item in items:
         if not isinstance(item, dict):
-            normalized.append({"type": "message", "role": "user", "content": _message_content_blocks_from_text(str(item))})
+            normalized.append(
+                {"type": "message", "role": "user", "content": _message_content_blocks_from_text(str(item), role="user")}
+            )
             continue
         item_type = str(item.get("type") or "")
         if item_type in {
@@ -197,7 +209,10 @@ def _normalize_input_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 normalized.append(
                     {
                         **item,
-                        "content": _message_content_blocks_from_text(str(item.get("content") or "")),
+                        "content": _message_content_blocks_from_text(
+                            str(item.get("content") or ""),
+                            role=str(item.get("role") or "user"),
+                        ),
                     }
                 )
             else:
@@ -206,7 +221,13 @@ def _normalize_input_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if "role" in item:
             normalized.extend(_normalize_message_item(item))
             continue
-        normalized.append({"type": "message", "role": "user", "content": _message_content_blocks_from_text(json.dumps(item, ensure_ascii=False))})
+        normalized.append(
+            {
+                "type": "message",
+                "role": "user",
+                "content": _message_content_blocks_from_text(json.dumps(item, ensure_ascii=False), role="user"),
+            }
+        )
     return normalized
 
 
@@ -294,6 +315,44 @@ def _normalize_response_item(item: dict[str, Any]) -> ResponseItem:
     )
 
 
+def _response_error_detail(response: requests.Response) -> str:
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict):
+            message = str(error.get("message") or "").strip()
+            code = str(error.get("code") or "").strip()
+            param = str(error.get("param") or "").strip()
+            pieces = [piece for piece in [message, f"code={code}" if code else "", f"param={param}" if param else ""] if piece]
+            if pieces:
+                return "; ".join(pieces)
+    text = response.text.strip()
+    return text[:1000] if text else f"HTTP {response.status_code}"
+
+
+def _raise_for_status_with_detail(response: requests.Response) -> None:
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        detail = _response_error_detail(response)
+        logger.error(
+            "OpenAI Responses request failed",
+            extra={
+                "event": "chat.model.responses.error",
+                "status_code": response.status_code,
+                "detail": detail,
+            },
+        )
+        raise requests.HTTPError(
+            f"{exc}. OpenAI Responses error: {detail}",
+            request=exc.request,
+            response=exc.response,
+        ) from exc
+
+
 class ChatModelClient(ABC):
     @abstractmethod
     def create_response(self, *, api_key: str, prompt: Prompt) -> ResponseEnvelope:
@@ -336,7 +395,7 @@ class OpenAIResponsesChatModelClient(ChatModelClient):
             json=self._request_body(prompt=prompt, stream=False),
             timeout=120,
         )
-        response.raise_for_status()
+        _raise_for_status_with_detail(response)
         payload = response.json()
         items = [_normalize_response_item(item) for item in (payload.get("output") or []) if isinstance(item, dict)]
         return ResponseEnvelope(
@@ -357,7 +416,7 @@ class OpenAIResponsesChatModelClient(ChatModelClient):
             timeout=120,
             stream=True,
         )
-        response.raise_for_status()
+        _raise_for_status_with_detail(response)
         response_id = ""
         completed_usage: ChatModelUsage | None = None
         for raw_line in response.iter_lines(decode_unicode=True):

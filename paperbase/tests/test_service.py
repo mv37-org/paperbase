@@ -32,6 +32,7 @@ from paperbase.llm import (
 )
 from paperbase.models import (
     ChatCitation,
+    ChatThreadItemResponse,
     CreateChatThreadRequest,
     CreateProjectGitHubRepoRequest,
     CreateProjectRequest,
@@ -3664,6 +3665,73 @@ def test_chat_context_uses_full_active_thread_history(browser_service):
     assert sent_messages[0]["content"] == "Historical message 0"
     assert sent_messages[7]["content"] == "Historical message 7"
     assert sent_messages[8]["content"] == "Help me brainstorm a short product name"
+
+
+def test_chat_turn_context_skips_empty_reasoning_items(browser_service):
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="reasoning-context@example.com", password="topsecret123", display_name="Reasoning User")
+    )
+    assert session.user is not None
+
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
+    prepared = service._prepare_chat_generation(
+        user=session.user,
+        thread_id=thread.thread_id,
+        request=SendChatMessageRequest(content="Follow up on the existing plan"),
+    )
+    reasoning_item = ChatThreadItemResponse(
+        item_id="item_reasoning",
+        thread_id=thread.thread_id,
+        turn_id=prepared.turn.turn_id,
+        item_type="reasoning",
+        role="assistant",
+        content_text="",
+        content_json=None,
+        citations=[],
+        created_at=prepared.user_item.created_at,
+        status="completed",
+    )
+    prepared = prepared.__class__(
+        thread=prepared.thread.model_copy(update={"items": [*prepared.thread.items, reasoning_item]}),
+        turn=prepared.turn,
+        user_item=prepared.user_item,
+        resolved_user=prepared.resolved_user,
+        api_key_value=prepared.api_key_value,
+        using_free_tier=prepared.using_free_tier,
+        api_key_state=prepared.api_key_state,
+    )
+
+    context = service._chat_turn_context(prepared)
+
+    assert not any(item.get("type") == "reasoning" for item in context.prompt_input)
+
+
+def test_chat_input_function_calls_omit_internal_item_ids(browser_service):
+    service, _, _ = browser_service
+    item = ChatThreadItemResponse(
+        item_id="item_internal",
+        thread_id="thread_test",
+        turn_id="turn_test",
+        item_type="function_call",
+        role="assistant",
+        call_id="call_external",
+        name="project_list_files",
+        content_text="{}",
+        content_json={},
+        citations=[],
+        created_at=datetime.now(timezone.utc),
+        status="completed",
+    )
+
+    normalized = service._chat_input_item_from_thread_item(item)
+
+    assert normalized == {
+        "type": "function_call",
+        "call_id": "call_external",
+        "name": "project_list_files",
+        "arguments": "{}",
+    }
 
 
 def test_stream_chat_compacts_mid_turn_after_tool_results(monkeypatch, browser_service):
