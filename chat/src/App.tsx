@@ -1815,6 +1815,7 @@ export default function App() {
   const chatSetupItems = [
     {
       id: "github",
+      provider: "github",
       label: "GitHub connection",
       description: "Needed for the agent to create, edit, and save project files.",
       actionLabel: sessionSettings.has_github_connection ? "Connected" : "Open GitHub setup",
@@ -1824,6 +1825,7 @@ export default function App() {
     },
     {
       id: "inference",
+      provider: "openai",
       label: "Inference access",
       description:
         "Needed for the agent to run turns. A saved OpenAI key or remaining free responses both count.",
@@ -1834,6 +1836,7 @@ export default function App() {
     },
     {
       id: "sandbox",
+      provider: "modal",
       label: "Sandbox credentials",
       description: "Recommended for run, test, and long-running coding tools.",
       actionLabel: sessionSettings.has_modal_credentials ? "Ready" : "Open sandbox setup",
@@ -5563,6 +5566,10 @@ export default function App() {
                           ) : null}
                         </div>
                       </div>
+                      {composerStatus ? (
+                        <div className="composer-status inline">{composerStatus}</div>
+                      ) : null}
+                      {composerEditor}
                       {showChatSetupCard ? (
                         <section className="chat-setup-card" aria-label="Agent setup checklist">
                           <div className="chat-setup-copy">
@@ -5570,9 +5577,8 @@ export default function App() {
                               Prepare the agent before the first chat
                             </h2>
                             <p className="chat-setup-note">
-                              {chatSetupProjectName} will work best once the required services are
-                              connected. This prevents the agent from silently failing when it tries
-                              to save code or call the model.
+                              Connect what is missing for {chatSetupProjectName} so repo saves,
+                              model calls, and sandbox runs do not fail silently.
                             </p>
                           </div>
                           <div className="chat-setup-list">
@@ -5581,20 +5587,37 @@ export default function App() {
                                 key={item.id}
                                 className={`chat-setup-item${item.ready ? " ready" : ""}${item.required ? " required" : " optional"}`}
                               >
-                                <div className="chat-setup-item-copy">
-                                  <div className="chat-setup-item-header">
-                                    <strong>{item.label}</strong>
-                                    <span
-                                      className={`chat-setup-state${item.ready ? " ready" : " pending"}`}
-                                    >
-                                      {item.ready
-                                        ? "Configured"
-                                        : item.required
-                                          ? "Required"
-                                          : "Optional"}
-                                    </span>
+                                <div className="chat-setup-item-main">
+                                  <div
+                                    className={`chat-setup-provider-mark ${item.provider}`}
+                                    aria-hidden="true"
+                                  >
+                                    {item.provider === "github" ? (
+                                      <AppIcon
+                                        src={staticAssetPath("github.svg")}
+                                        className="chat-setup-provider-icon"
+                                      />
+                                    ) : item.provider === "openai" ? (
+                                      <span className="chat-setup-provider-text">AI</span>
+                                    ) : (
+                                      <span className="chat-setup-provider-text">M</span>
+                                    )}
                                   </div>
-                                  <p>{item.description}</p>
+                                  <div className="chat-setup-item-copy">
+                                    <div className="chat-setup-item-header">
+                                      <strong>{item.label}</strong>
+                                      <span
+                                        className={`chat-setup-state${item.ready ? " ready" : " pending"}`}
+                                      >
+                                        {item.ready
+                                          ? "Configured"
+                                          : item.required
+                                            ? "Required"
+                                            : "Optional"}
+                                      </span>
+                                    </div>
+                                    <p>{item.description}</p>
+                                  </div>
                                 </div>
                                 <button
                                   type="button"
@@ -5608,10 +5631,6 @@ export default function App() {
                           </div>
                         </section>
                       ) : null}
-                      {composerStatus ? (
-                        <div className="composer-status inline">{composerStatus}</div>
-                      ) : null}
-                      {composerEditor}
                       <div className="chat-empty-actions">
                         <button
                           type="button"
