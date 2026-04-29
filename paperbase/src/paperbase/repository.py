@@ -921,8 +921,19 @@ class PaperRepository(ABC):
         """Stamp the author-harvest provenance on an existing paper
         (#39 PR C). Same separation rationale as :meth:`set_paper_venue`
         — kept out of the upsert path so a regular re-index does not
-        clear it. Returns the refreshed paper row, or ``None`` if the
-        paper does not exist."""
+        clear it.
+
+        First-write-wins when ``top_author_s2_id`` is non-None: if the
+        row already has a non-null stamp, the existing value is kept
+        and the row is returned unchanged. Multiple top authors can
+        surface the same paper through concurrent ``harvest_chunk``
+        jobs, and an undefined "last writer wins" would make the
+        provenance non-deterministic. Pass ``top_author_s2_id=None``
+        to clear an existing stamp explicitly.
+
+        Returns the post-call row (so the caller can check
+        ``row.top_author_s2_id == requested`` to know whether their
+        stamp landed), or ``None`` if the paper does not exist."""
         raise NotImplementedError
 
     def replace_paper_authors(
@@ -1804,6 +1815,11 @@ class SqlAlchemyPaperRepository(PaperRepository):
             row = session.get(PaperORM, paper_id)
             if row is None:
                 return None
+            # First-write-wins: keep an existing stamp when the caller
+            # is trying to set a new one. Clearing (None) is always
+            # honored so operators can explicitly reset.
+            if top_author_s2_id is not None and row.top_author_s2_id is not None:
+                return _paper_from_orm(row)
             row.top_author_s2_id = top_author_s2_id
             row.updated_at = utcnow()
             session.flush()
@@ -4437,6 +4453,9 @@ class MemoryPaperRepository(PaperRepository):
         existing = self.papers.get(paper_id)
         if existing is None:
             return None
+        # First-write-wins for non-None writes (see ABC docstring).
+        if top_author_s2_id is not None and existing.top_author_s2_id is not None:
+            return existing
         updated = existing.model_copy(update={"top_author_s2_id": top_author_s2_id})
         self.papers[paper_id] = updated
         return updated

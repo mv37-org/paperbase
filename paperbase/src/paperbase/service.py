@@ -4603,7 +4603,7 @@ class PaperbaseService:
     def enqueue_harvest_author_job(
         self,
         *,
-        min_paper_count: int = 1,
+        min_paper_count: int = 2,
         min_cite_mass: int = 5_000,
         max_authors: int = 100,
         max_papers_per_author: int | None = None,
@@ -4771,17 +4771,26 @@ class PaperbaseService:
         Iterates ``arxiv_ids``, calls ``index_arxiv_paper``, and stamps
         ``top_author_s2_id`` via ``set_paper_top_author``. Per-id
         ``PermanentError`` is swallowed.
+
+        ``arxiv_ids`` is deduped on entry — multiple top authors can
+        surface the same paper, and the planner can produce duplicate
+        ids in a single chunk. ``index_arxiv_paper`` is idempotent so
+        duplicates are safe, but the work is wasted.
+
+        ``stamped`` counts papers whose post-call ``top_author_s2_id``
+        equals what we asked for, so under first-write-wins a paper
+        already stamped by a different author does not get
+        double-counted as our success.
         """
         if not arxiv_ids:
             return {"requested": 0, "indexed": 0, "stamped": 0, "skipped": 0}
         run_harvest_id = harvest_id or new_id("harvest")
+        # Preserve order while deduping; drop empties up front.
+        deduped_ids = list(dict.fromkeys(aid for aid in arxiv_ids if aid))
         indexed = 0
         stamped = 0
-        skipped = 0
-        for arxiv_id in arxiv_ids:
-            if not arxiv_id:
-                skipped += 1
-                continue
+        skipped = len(arxiv_ids) - len(deduped_ids)  # empty/duplicate entries
+        for arxiv_id in deduped_ids:
             try:
                 stored = self.index_arxiv_paper(arxiv_id, force=False)
                 indexed += 1
@@ -4793,7 +4802,7 @@ class PaperbaseService:
                     stored.paper_id,
                     top_author_s2_id=top_author_s2_id,
                 )
-                if updated is not None:
+                if updated is not None and updated.top_author_s2_id == top_author_s2_id:
                     stamped += 1
         logger.info(
             "harvest_author chunk completed",
@@ -4933,7 +4942,7 @@ class PaperbaseService:
                 )
             elif job.job_type == "harvest_author":
                 self.run_harvest_author(
-                    min_paper_count=int(job.payload.get("min_paper_count", 1)),
+                    min_paper_count=int(job.payload.get("min_paper_count", 2)),
                     min_cite_mass=int(job.payload.get("min_cite_mass", 5_000)),
                     max_authors=int(job.payload.get("max_authors", 100)),
                     max_papers_per_author=job.payload.get("max_papers_per_author"),

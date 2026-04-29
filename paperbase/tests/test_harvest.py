@@ -1358,6 +1358,89 @@ def test_set_paper_top_author_preserves_other_fields():
     assert out.top_author_s2_id == "A1"
 
 
+def test_set_paper_top_author_is_first_write_wins():
+    """When two top authors surface the same paper through concurrent
+    harvest_chunk jobs, the first stamp must win — last-write would
+    make provenance non-deterministic. Explicit clears (None) still
+    bypass the guard so operators can reset."""
+    repo = MemoryPaperRepository()
+    p = repo.upsert_paper(PaperMetadata(arxiv_id="2020.00001"))
+
+    # First writer lands.
+    first = repo.set_paper_top_author(p.paper_id, top_author_s2_id="A1")
+    assert first is not None and first.top_author_s2_id == "A1"
+
+    # Second writer is preserved-by-existing — returned row still
+    # carries A1, not A2.
+    second = repo.set_paper_top_author(p.paper_id, top_author_s2_id="A2")
+    assert second is not None and second.top_author_s2_id == "A1"
+
+    # Explicit clear bypasses the guard.
+    cleared = repo.set_paper_top_author(p.paper_id, top_author_s2_id=None)
+    assert cleared is not None and cleared.top_author_s2_id is None
+
+    # After clearing, a new stamp lands again.
+    relanded = repo.set_paper_top_author(p.paper_id, top_author_s2_id="A2")
+    assert relanded is not None and relanded.top_author_s2_id == "A2"
+
+
+def test_run_harvest_chunk_author_dedupes_arxiv_ids(monkeypatch):
+    """Multiple top authors can surface the same paper, so the planner
+    can produce duplicate ids in a single chunk. The chunk worker
+    dedupes before indexing — index_arxiv_paper is idempotent but the
+    work is wasted, and ``stamped`` would otherwise overcount."""
+    service = _service()
+    service.repository.upsert_paper(PaperMetadata(arxiv_id="2020.00001"))
+
+    index_calls: list[str] = []
+
+    def fake_index(arxiv_id, *, paper=None, force=False):
+        index_calls.append(arxiv_id)
+        return service.repository.get_paper_by_arxiv_id(arxiv_id)
+
+    monkeypatch.setattr(service, "index_arxiv_paper", fake_index)
+
+    result = service.run_harvest_chunk_author(
+        arxiv_ids=["2020.00001", "2020.00001", "2020.00001"],
+        top_author_s2_id="A1",
+    )
+
+    # Three requested, but only one unique id → one index call.
+    assert index_calls == ["2020.00001"]
+    assert result["requested"] == 3
+    assert result["indexed"] == 1
+    assert result["stamped"] == 1
+    # Duplicates count as skipped so the totals add up to ``requested``.
+    assert result["skipped"] == 2
+
+
+def test_run_harvest_chunk_author_does_not_overcount_when_already_stamped(monkeypatch):
+    """Under first-write-wins, attempting to stamp a paper that another
+    author already claimed must NOT increment ``stamped`` — that count
+    reflects papers whose post-call top_author is ours."""
+    service = _service()
+    p = service.repository.upsert_paper(PaperMetadata(arxiv_id="2020.00001"))
+    # Pre-stamp by a different author.
+    service.repository.set_paper_top_author(p.paper_id, top_author_s2_id="A_other")
+
+    def fake_index(arxiv_id, *, paper=None, force=False):
+        return service.repository.get_paper_by_arxiv_id(arxiv_id)
+
+    monkeypatch.setattr(service, "index_arxiv_paper", fake_index)
+
+    result = service.run_harvest_chunk_author(
+        arxiv_ids=["2020.00001"],
+        top_author_s2_id="A_us",
+    )
+
+    assert result["indexed"] == 1
+    assert result["stamped"] == 0  # A_other won the race
+
+    # Stamp is preserved.
+    p_after = service.repository.get_paper_by_arxiv_id("2020.00001")
+    assert p_after.top_author_s2_id == "A_other"
+
+
 def test_list_top_authors_aggregation():
     """list_top_authors aggregates citation_count across an author's
     papers and sorts by cite mass desc. min_paper_count + min_cite_mass

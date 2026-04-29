@@ -1080,8 +1080,12 @@ def _build_parser() -> argparse.ArgumentParser:
     author_parser.add_argument(
         "--min-paper-count",
         type=int,
-        default=1,
-        help="Min papers in our corpus before an author counts as 'top' (default 1).",
+        default=2,
+        help=(
+            "Min papers in our corpus before an author counts as 'top' "
+            "(default 2). Bumped from 1 so a single heavily-cited paper "
+            "doesn't qualify its first author as 'established'."
+        ),
     )
     author_parser.add_argument(
         "--min-cite-mass",
