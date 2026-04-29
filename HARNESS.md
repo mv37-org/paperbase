@@ -149,7 +149,7 @@ Status:
 
 - [ ] create worktrees
 - [ ] assign workers
-- [ ] merge Worker A
+- [x] merge Worker A
 - [ ] merge Worker B
 - [ ] merge Worker D
 - [ ] merge Worker C
@@ -192,11 +192,18 @@ Dependencies:
 
 Status:
 
-- [ ] branch created
-- [ ] implementation started
-- [ ] tests updated
-- [ ] local relevant tests run
-- [ ] ready for merge
+- [x] branch created
+- [x] implementation started
+- [x] tests updated
+- [x] local relevant tests run
+- [x] ready for merge
+
+Integration notes:
+
+- landed on `codex/harness-v2-integration` as `bd3a3669b11be3de57be618a9a8496b82255ef74`
+- cherry-picked worker commit `aa7983670d6e2ddb54445efc91b39d5d7b4ec7c5`
+- targeted validation passed: `paperbase-dev doctor --mode test`, `paperbase-dev init-local`, `paperbase-dev verify-run --mode test`, and 7 Worker A `paperbase/tests/test_service.py` cases
+- remaining overlap is mainly Worker C around `_run_chat_tool_rounds`, `_run_chat_tool_rounds_stream`, `send_chat_message`, `send_chat_message_stream`, and nearby normal-turn assertions
 
 ### Worker B
 
