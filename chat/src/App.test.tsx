@@ -337,6 +337,7 @@ function threadResponse(
         citations: [],
         created_at: "2026-04-21T00:00:00Z",
         status: "completed",
+        phase: "final_answer",
       },
     ],
   };
@@ -1436,6 +1437,103 @@ describe("App", () => {
       expect(screen.getByRole("button", { name: "Connect GitHub account" })).toBeTruthy();
     });
     expect(apiMocks.createPythonFile).not.toHaveBeenCalled();
+  });
+
+  it("shows a first-chat setup checklist when project agent prerequisites are missing", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Prepare the agent before the first chat")).toBeTruthy();
+    });
+    expect(screen.getByText("GitHub connection")).toBeTruthy();
+    expect(screen.getByText("Inference access")).toBeTruthy();
+    expect(screen.getByText("Sandbox credentials")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open GitHub setup" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Ready" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open sandbox setup" })).toBeTruthy();
+  });
+
+  it("opens settings from the first-chat setup checklist", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Prepare the agent before the first chat")).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Open GitHub setup" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Manage GitHub connection for repositories.")).toBeTruthy();
+    });
+  });
+
+  it("renders assistant commentary as its own labeled message", async () => {
+    const commentaryItem = threadItemResponse(
+      "item_commentary",
+      "assistant_message",
+      "assistant",
+      "I'm checking the repo layout before I edit anything.",
+      {
+        thread_id: "thread_1",
+        turn_id: "turn_1",
+        phase: "commentary",
+      },
+    );
+    const finalItem = threadItemResponse(
+      "item_final",
+      "assistant_message",
+      "assistant",
+      "Final answer",
+      {
+        thread_id: "thread_1",
+        turn_id: "turn_1",
+        phase: "final_answer",
+      },
+    );
+    apiMocks.getThread.mockResolvedValue({
+      thread_id: "thread_1",
+      project_id: "proj_1",
+      project_name: "General",
+      project_instructions: "",
+      title: "Recovered thread",
+      created_at: "2026-04-21T00:00:00Z",
+      updated_at: "2026-04-21T00:00:00Z",
+      items: [commentaryItem, finalItem],
+      turns: [turnResponse("turn_1", "thread_1", [commentaryItem, finalItem])],
+      messages: [
+        {
+          message_id: "item_commentary",
+          role: "assistant",
+          content_markdown: "I'm checking the repo layout before I edit anything.",
+          citations: [],
+          created_at: "2026-04-21T00:00:00Z",
+          status: "completed",
+          phase: "commentary",
+        },
+        {
+          message_id: "item_final",
+          role: "assistant",
+          content_markdown: "Final answer",
+          citations: [],
+          created_at: "2026-04-21T00:00:01Z",
+          status: "completed",
+          phase: "final_answer",
+        },
+      ],
+    });
+    localStorage.setItem(OPEN_TABS_KEY, JSON.stringify(["thread_1"]));
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Commentary")).toBeTruthy();
+    });
+    expect(screen.getByText("I'm checking the repo layout before I edit anything.")).toBeTruthy();
+    expect(screen.getByText("Final answer")).toBeTruthy();
   });
 
   it("creates a Python file and saves it explicitly to GitHub", async () => {

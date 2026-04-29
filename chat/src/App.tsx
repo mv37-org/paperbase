@@ -445,7 +445,7 @@ function projectRepoConflictFromError(error: unknown): ProjectRepoConflictDetail
 function createLocalMessage(
   role: string,
   content_markdown: string,
-  options: Partial<Pick<ChatMessageResponse, "citations" | "status" | "message_id">> = {},
+  options: Partial<Pick<ChatMessageResponse, "citations" | "status" | "message_id" | "phase">> = {},
 ): ChatMessageResponse {
   return {
     message_id: options.message_id ?? `local-${role}-${Math.random().toString(36).slice(2)}`,
@@ -454,6 +454,7 @@ function createLocalMessage(
     citations: options.citations ?? [],
     created_at: new Date().toISOString(),
     status: options.status ?? "completed",
+    phase: options.phase ?? null,
   };
 }
 
@@ -469,6 +470,7 @@ function messageFromThreadItem(item: ChatThreadItemResponse): ChatMessageRespons
     created_at: item.created_at,
     status: item.status,
     kind: item.item_type === "compaction" ? "compaction" : "default",
+    phase: item.phase ?? null,
   };
 }
 
@@ -1806,6 +1808,42 @@ export default function App() {
     };
   }, [session]);
   const sessionSettings = sessionSummary?.settings ?? DEFAULT_BROWSER_SETTINGS;
+  const hasInferenceAccess = Boolean(
+    sessionSummary?.hasOpenAIApiKey || (session?.remaining_free_responses ?? 0) > 0,
+  );
+  const chatSetupProjectName = emptyStateProject?.name ?? activeThread?.project_name ?? "Project";
+  const chatSetupItems = [
+    {
+      id: "github",
+      label: "GitHub connection",
+      description: "Needed for the agent to create, edit, and save project files.",
+      actionLabel: sessionSettings.has_github_connection ? "Connected" : "Open GitHub setup",
+      ready: sessionSettings.has_github_connection,
+      required: true,
+      settingsTab: "version-control" as const,
+    },
+    {
+      id: "inference",
+      label: "Inference access",
+      description:
+        "Needed for the agent to run turns. A saved OpenAI key or remaining free responses both count.",
+      actionLabel: hasInferenceAccess ? "Ready" : "Open inference setup",
+      ready: hasInferenceAccess,
+      required: true,
+      settingsTab: "inference" as const,
+    },
+    {
+      id: "sandbox",
+      label: "Sandbox credentials",
+      description: "Recommended for run, test, and long-running coding tools.",
+      actionLabel: sessionSettings.has_modal_credentials ? "Ready" : "Open sandbox setup",
+      ready: sessionSettings.has_modal_credentials,
+      required: false,
+      settingsTab: "sandbox" as const,
+    },
+  ];
+  const showChatSetupCard =
+    authenticated && isChatEmpty && hasProjects && chatSetupItems.some((item) => !item.ready);
   const appliedAppearanceTheme = sessionSettings.appearance_theme === "dark" ? "dark" : "light";
   const authenticatedDarkThemeEnabled = authenticated && appliedAppearanceTheme === "dark";
   const activeSettingsConfig = useMemo(
@@ -3194,6 +3232,13 @@ export default function App() {
       setProjectMenuProjectId(null);
     },
     [clearFlash],
+  );
+
+  const openChatSetupSettings = useCallback(
+    (settingsTab: SettingsTab) => {
+      openAuthModal("settings", settingsTab);
+    },
+    [openAuthModal],
   );
 
   const handleAuthSuccess = useCallback(
@@ -5518,6 +5563,51 @@ export default function App() {
                           ) : null}
                         </div>
                       </div>
+                      {showChatSetupCard ? (
+                        <section className="chat-setup-card" aria-label="Agent setup checklist">
+                          <div className="chat-setup-copy">
+                            <h2 className="chat-setup-title">
+                              Prepare the agent before the first chat
+                            </h2>
+                            <p className="chat-setup-note">
+                              {chatSetupProjectName} will work best once the required services are
+                              connected. This prevents the agent from silently failing when it tries
+                              to save code or call the model.
+                            </p>
+                          </div>
+                          <div className="chat-setup-list">
+                            {chatSetupItems.map((item) => (
+                              <div
+                                key={item.id}
+                                className={`chat-setup-item${item.ready ? " ready" : ""}${item.required ? " required" : " optional"}`}
+                              >
+                                <div className="chat-setup-item-copy">
+                                  <div className="chat-setup-item-header">
+                                    <strong>{item.label}</strong>
+                                    <span
+                                      className={`chat-setup-state${item.ready ? " ready" : " pending"}`}
+                                    >
+                                      {item.ready
+                                        ? "Configured"
+                                        : item.required
+                                          ? "Required"
+                                          : "Optional"}
+                                    </span>
+                                  </div>
+                                  <p>{item.description}</p>
+                                </div>
+                                <button
+                                  type="button"
+                                  className={`chat-setup-action${item.ready ? " secondary" : ""}`}
+                                  onClick={() => openChatSetupSettings(item.settingsTab)}
+                                >
+                                  {item.actionLabel}
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        </section>
+                      ) : null}
                       {composerStatus ? (
                         <div className="composer-status inline">{composerStatus}</div>
                       ) : null}
@@ -5583,6 +5673,8 @@ export default function App() {
                     let userTurnIndex = 0;
                     return activeThread.messages.map((message) => {
                       const isCompactionMessage = message.kind === "compaction";
+                      const isCommentaryMessage =
+                        message.role === "assistant" && message.phase === "commentary";
                       const isStreamingMessage = isStreamingMessageStatus(message.status);
                       const streamingCodePreview =
                         message.role === "assistant" && isStreamingMessage && !isCompactionMessage
@@ -5616,7 +5708,7 @@ export default function App() {
                       return (
                         <Fragment key={message.message_id}>
                           <article
-                            className={`message-row ${isCompactionMessage ? "compaction" : message.role === "assistant" ? "assistant" : "user"} status-${message.status}`}
+                            className={`message-row ${isCompactionMessage ? "compaction" : message.role === "assistant" ? "assistant" : "user"}${isCommentaryMessage ? " commentary" : ""} status-${message.status}`}
                           >
                             {message.status !== "completed" && !isCompactionMessage ? (
                               <div className="message-meta-row">
@@ -5630,7 +5722,7 @@ export default function App() {
                               </div>
                             ) : null}
                             <div
-                              className={`message-bubble ${isCompactionMessage ? "compaction" : message.role === "assistant" ? "assistant" : "user"}${isCompactionMessage && isStreamingMessage ? " thinking-shimmer" : ""}`}
+                              className={`message-bubble ${isCompactionMessage ? "compaction" : message.role === "assistant" ? "assistant" : "user"}${isCommentaryMessage ? " commentary" : ""}${isCompactionMessage && isStreamingMessage ? " thinking-shimmer" : ""}`}
                             >
                               {isCompactionMessage ? (
                                 <MarkdownRenderer
@@ -5638,19 +5730,24 @@ export default function App() {
                                   className="message-markdown compaction-markdown"
                                 />
                               ) : message.role === "assistant" ? (
-                                <MarkdownRenderer
-                                  markdown={message.content_markdown}
-                                  className="message-markdown"
-                                  interactiveCitations
-                                  onCitationClick={(sourceId) => {
-                                    const citation = message.citations.find(
-                                      (item) => item.source_id === sourceId,
-                                    );
-                                    if (citation) {
-                                      handleCitationClick(message, citation);
-                                    }
-                                  }}
-                                />
+                                <>
+                                  {isCommentaryMessage ? (
+                                    <div className="assistant-phase-label">Commentary</div>
+                                  ) : null}
+                                  <MarkdownRenderer
+                                    markdown={message.content_markdown}
+                                    className="message-markdown"
+                                    interactiveCitations
+                                    onCitationClick={(sourceId) => {
+                                      const citation = message.citations.find(
+                                        (item) => item.source_id === sourceId,
+                                      );
+                                      if (citation) {
+                                        handleCitationClick(message, citation);
+                                      }
+                                    }}
+                                  />
+                                </>
                               ) : (
                                 <div className="message-plain-text">{message.content_markdown}</div>
                               )}

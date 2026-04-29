@@ -117,6 +117,7 @@ The browser chat experience is project-based:
 - the new-project modal can refresh the accessible repo list, link to GitHub's Paperbase access settings, and expose optional inference/sandbox credential fields
 - existing repos expose a branch picker and optional import selection for `.py` and `.ipynb` files; new repos start on a fixed `main` branch
 - the sidebar lazily loads mixed project items per project, persists the last selected project across reloads, and reopens with only that project tree expanded by default
+- the empty first-chat state now shows a setup checklist for GitHub, inference, and sandbox access so users can connect required services before the coding agent hits save/run failures
 - project descriptions are snapped onto new sessions as per-session prompt context, so later project edits do not rewrite existing chats
 - once the first user prompt lands in a `New chat` thread, Paperbase renames the session to a compact 3-5 word summary and keeps that title for later turns
 - Python and notebook files are project-scoped tabs backed by Monaco in a high-contrast Python editor view
@@ -124,6 +125,7 @@ The browser chat experience is project-based:
 - project chats can invoke a project-scoped coding tool surface against repo-relative workspace text files, including list/read/grep/write/patch/move/delete/git-diff/exec/test/lint/run operations instead of raw repo-shell access
 - coding turns auto-persist dirty project Python drafts before the agent runs tools, so the backend tool view stays aligned with Monaco edits
 - duplicate Python basenames are disambiguated with repo-path context in the sidebar and tab strip
+- assistant commentary is now rendered as its own labeled chat item instead of being flattened into the final answer message
 - streamed and finished chat code blocks use matching light/dark editor-style themes, show line numbers, let longer snippets collapse in place with a compact chevron control, and render inline/block LaTeX formulas in chat markdown
 - project Python files written by coding-tool turns refresh back into the sidebar Code section once the turn completes
 - local `localhost` chat threads render a compact debug strip with the current user, project, thread, and latest message ids so Codex can inspect backend state from a pasted bundle without displacing the empty-chat layout

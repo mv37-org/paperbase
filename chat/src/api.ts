@@ -131,6 +131,7 @@ function messageFromItem(item: ChatThreadItemResponse): ChatMessageResponse | nu
     created_at: item.created_at,
     status: item.status,
     kind: item.item_type === "compaction" ? "compaction" : "default",
+    phase: item.phase ?? null,
   };
 }
 

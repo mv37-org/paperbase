@@ -114,6 +114,7 @@ export interface ChatMessageResponse {
   created_at: string;
   status: string;
   kind?: "default" | "compaction" | string;
+  phase?: "commentary" | "final_answer" | null;
 }
 
 export type ChatItemType =
