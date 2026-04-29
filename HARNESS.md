@@ -150,7 +150,7 @@ Status:
 - [ ] create worktrees
 - [ ] assign workers
 - [x] merge Worker A
-- [ ] merge Worker B
+- [x] merge Worker B
 - [ ] merge Worker D
 - [ ] merge Worker C
 - [ ] merge Worker E
@@ -238,11 +238,21 @@ Dependencies:
 
 Status:
 
-- [ ] branch created
-- [ ] implementation started
-- [ ] tests updated
-- [ ] local relevant tests run
-- [ ] ready for merge
+- [x] branch created
+- [x] implementation started
+- [x] tests updated
+- [x] local relevant tests run
+- [x] ready for merge
+
+Integration notes:
+
+- landed on `codex/harness-v2-integration` as `72d4f8f4de84ed4edc95a7f3e1b2cbef618d543a`
+- cherry-picked worker commit `0797a34357d06919fbe06d4aa52d9105a7af48d4`
+- worker reported `make test` passed after `make setup`
+- targeted integration validation passed: `paperbase-dev verify-run --mode test` and 6 prompt/answer-path `paperbase/tests/test_service.py` cases
+- Worker C remains the highest overlap in `service.py` around final-answer prompt call sites in `send_chat_message*` and prompt assertions that compare first vs last model calls
+- Worker D has medium overlap in shared research/casual normal-turn prompt text and prompt-oriented service tests
+- Worker A has only low residual overlap now that its answer-path changes are already landed
 
 ### Worker C
 
