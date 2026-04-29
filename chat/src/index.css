@@ -3117,7 +3117,6 @@ textarea::placeholder,
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--paper);
-  box-shadow: 0 4px 12px rgba(16, 24, 40, 0.05);
   display: grid;
   gap: 10px;
   text-align: left;
