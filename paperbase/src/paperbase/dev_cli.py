@@ -601,16 +601,36 @@ def jobs_retry(*, job_id: str) -> int:
     return 0
 
 
-def enrich_missing(*, limit: int, min_age_seconds: int, batch_size: int) -> int:
-    """Synchronously run the enrich_missing_metadata pass in the current
-    process. Intended for manual backfill from the CLI; routine operation
-    should go through ``enqueue_enrich_missing_metadata_job`` so the worker
-    does it asynchronously."""
+def enrich_missing(*, limit: int, min_age_seconds: int, batch_size: int, queue: bool = False) -> int:
+    """Backfill Semantic Scholar metadata for indexed papers (#38).
+
+    Two modes:
+
+    - ``--queue`` (preferred for prod-scale backfills): enqueue an
+      ``enrich_missing_metadata`` job that the worker pool processes
+      asynchronously. The serving container is not tied up; this is
+      what an operator would use to backfill the existing corpus
+      after PR C (#39) shipped author-IDs in the inline enrich path.
+    - default (synchronous): run the pass in the current process.
+      Useful for spot-checks during local development; not appropriate
+      for corpus-scale runs because the CLI process holds the work.
+    """
     # Imported lazily so `paperbase-dev --help` does not pull in the whole
     # service graph (which loads heavy embedding/reranker model clients).
     from .service import get_service
 
     service = get_service()
+    if queue:
+        job = service.enqueue_enrich_missing_metadata_job(
+            limit=limit,
+            min_age_seconds=min_age_seconds,
+        )
+        print(
+            f"Queued enrich_missing_metadata {job.job_id}: "
+            f"limit={limit}, min_age_seconds={min_age_seconds}"
+        )
+        return 0
+
     stats_before = service.repository.enrichment_stats()
     result = service.enrich_missing_metadata(
         limit=limit,
@@ -853,6 +873,15 @@ def _build_parser() -> argparse.ArgumentParser:
         default=20,
         help="Semantic Scholar /paper/batch size (max 500 per S2 docs).",
     )
+    enrich_parser.add_argument(
+        "--queue",
+        action="store_true",
+        help=(
+            "Queue an ``enrich_missing_metadata`` job for the worker pool "
+            "instead of running the backfill synchronously in this CLI "
+            "process. Preferred for corpus-scale runs."
+        ),
+    )
     harvest_parser = subparsers.add_parser(
         "harvest",
         help="Queue a historical arxiv backfill by date range (runs at backfill priority).",
@@ -987,6 +1016,7 @@ def main(argv: list[str] | None = None) -> int:
             limit=args.limit,
             min_age_seconds=args.min_age_seconds,
             batch_size=args.batch_size,
+            queue=args.queue,
         )
     if args.command == "harvest":
         if args.categories:
