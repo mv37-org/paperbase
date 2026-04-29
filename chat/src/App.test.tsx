@@ -2832,6 +2832,9 @@ describe("App", () => {
       document.querySelector("#login-form input[name='password']")?.getAttribute("autocomplete"),
     ).toBe("current-password");
     expect(
+      document.querySelector("#login-form input[name='password']")?.getAttribute("minlength"),
+    ).toBe("8");
+    expect(
       document
         .querySelector("#signup-form input[name='display_name']")
         ?.getAttribute("autocomplete"),
@@ -2840,11 +2843,20 @@ describe("App", () => {
       document.querySelector("#signup-form input[name='password']")?.getAttribute("autocomplete"),
     ).toBe("new-password");
     expect(
+      document.querySelector("#signup-form input[name='password']")?.getAttribute("minlength"),
+    ).toBe("8");
+    expect(
       document.querySelector("#reset-form input[name='token']")?.getAttribute("autocomplete"),
     ).toBe("one-time-code");
     expect(
+      document.querySelector("#reset-form input[name='token']")?.getAttribute("minlength"),
+    ).toBe("8");
+    expect(
       document.querySelector("#reset-form input[name='password']")?.getAttribute("autocomplete"),
     ).toBe("new-password");
+    expect(
+      document.querySelector("#reset-form input[name='password']")?.getAttribute("minlength"),
+    ).toBe("8");
 
     unmount();
 

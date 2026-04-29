@@ -4938,6 +4938,39 @@ class PaperbaseService:
             },
         )
 
+    def _log_chat_turn_progress(
+        self,
+        *,
+        event: str,
+        message: str,
+        prepared: PreparedChatGeneration,
+        sample_index: int | None = None,
+        item: ChatThreadItemResponse | ResponseItem | None = None,
+        **metadata: Any,
+    ) -> None:
+        extra: dict[str, Any] = {
+            "event": event,
+            "thread_id": prepared.thread.thread_id,
+            "turn_id": prepared.turn.turn_id,
+            "project_id": prepared.thread.project_id or "",
+        }
+        if sample_index is not None:
+            extra["sample_index"] = sample_index
+        if item is not None:
+            extra["item_id"] = getattr(item, "item_id", "")
+            extra["item_type"] = getattr(item, "item_type", "")
+            extra["item_role"] = getattr(item, "role", "")
+            extra["item_status"] = getattr(item, "status", "")
+            extra["call_id"] = getattr(item, "call_id", "")
+            extra["item_name"] = getattr(item, "name", "")
+            phase = getattr(item, "phase", None)
+            if phase:
+                extra["item_phase"] = phase
+        for key, value in metadata.items():
+            if value is not None:
+                extra[key] = value
+        logger.info(message, extra=extra)
+
     def _run_chat_turn_engine(
         self,
         *,
@@ -4953,6 +4986,14 @@ class PaperbaseService:
         router = self._chat_tool_router(request, thread=prepared.thread)
         turn_state = ChatTurnState(active_goal=prepared.user_item.content_text)
         aggregated_usage: ChatModelUsage | None = None
+        self._log_chat_turn_progress(
+            event="chat.turn.started",
+            message="Chat turn started",
+            prepared=prepared,
+            prompt_item_count=len(context.items),
+            direct_tool_count=len(router.model_visible_specs()),
+            deferred_tool_count=len(router.deferred_specs()),
+        )
 
         for _sample_index in range(_CHAT_TOOL_MAX_ROUNDS + 1):
             context, prompt, compaction_events = self._ensure_chat_context_budget(
@@ -4962,6 +5003,25 @@ class PaperbaseService:
                 turn_state=turn_state,
                 router=router,
             )
+            self._log_chat_turn_progress(
+                event="chat.turn.step.started",
+                message="Chat turn sampling step started",
+                prepared=prepared,
+                sample_index=_sample_index,
+                prompt_item_count=len(context.items),
+                direct_tool_count=len(prompt.tools),
+                compactions_used=context.compactions_used,
+                parallel_tool_calls=prompt.parallel_tool_calls,
+            )
+            if compaction_events:
+                self._log_chat_turn_progress(
+                    event="chat.turn.compacted",
+                    message="Chat turn compacted context before sampling",
+                    prepared=prepared,
+                    sample_index=_sample_index,
+                    compaction_event_count=len(compaction_events),
+                    compactions_used=context.compactions_used,
+                )
             for event in compaction_events:
                 yield event
 
@@ -4981,6 +5041,13 @@ class PaperbaseService:
                         item=event.item,
                     )
                     step_items[provider_item_id] = persisted_item
+                    self._log_chat_turn_progress(
+                        event="chat.turn.item.started",
+                        message="Chat turn item started",
+                        prepared=prepared,
+                        sample_index=_sample_index,
+                        item=persisted_item,
+                    )
                     yield ("item_started", {"item": persisted_item.model_dump(mode="json")})
                     continue
                 if event.type in {"response.output_text.delta", "response.function_call_arguments.delta"}:
@@ -5042,6 +5109,13 @@ class PaperbaseService:
                     normalized_item = self._chat_input_item_from_thread_item(persisted_item)
                     if normalized_item is not None:
                         context.items.append(normalized_item)
+                    self._log_chat_turn_progress(
+                        event="chat.turn.item.completed",
+                        message="Chat turn item completed",
+                        prepared=prepared,
+                        sample_index=_sample_index,
+                        item=persisted_item,
+                    )
                     if persisted_item.item_type == "assistant_message":
                         completed_assistant_item_ids.append(provider_item_id)
                         continue
@@ -5052,6 +5126,16 @@ class PaperbaseService:
                 if event.type == "response.completed":
                     response_id = response_id or event.response_id
                     step_usage = _merge_chat_usage(step_usage, event.usage)
+                    self._log_chat_turn_progress(
+                        event="chat.turn.step.response.completed",
+                        message="Chat model response stream completed",
+                        prepared=prepared,
+                        sample_index=_sample_index,
+                        response_id=response_id,
+                        input_tokens=step_usage.input_tokens if step_usage is not None else None,
+                        output_tokens=step_usage.output_tokens if step_usage is not None else None,
+                        total_tokens=step_usage.total_tokens if step_usage is not None else None,
+                    )
 
             aggregated_usage = _merge_chat_usage(aggregated_usage, step_usage)
             if step_usage is not None:
@@ -5103,6 +5187,18 @@ class PaperbaseService:
                     changed_paths=turn_state.diff_tracker.changed_files(),
                     exec_session_ids=sorted(turn_state.running_exec_session_ids),
                 )
+                self._log_chat_turn_progress(
+                    event="chat.turn.completed",
+                    message="Chat turn completed",
+                    prepared=prepared,
+                    sample_index=_sample_index,
+                    item=final_item,
+                    changed_path_count=len(turn_state.diff_tracker.changed_files()),
+                    exec_session_count=len(turn_state.running_exec_session_ids),
+                    input_tokens=aggregated_usage.input_tokens if aggregated_usage is not None else None,
+                    output_tokens=aggregated_usage.output_tokens if aggregated_usage is not None else None,
+                    total_tokens=aggregated_usage.total_tokens if aggregated_usage is not None else None,
+                )
                 return ChatTurnExecutionResult(
                     turn=final_turn or prepared.turn,
                     final_item=final_item,
@@ -5110,6 +5206,13 @@ class PaperbaseService:
                     usage=aggregated_usage,
                 )
 
+            self._log_chat_turn_progress(
+                event="chat.turn.tools.queued",
+                message="Chat turn queued tool calls for execution",
+                prepared=prepared,
+                sample_index=_sample_index,
+                pending_tool_call_count=len(pending_tool_calls),
+            )
             for index, tool_item in enumerate(pending_tool_calls):
                 tool_name = tool_item.name or ""
                 tool_input = tool_item.content_json if isinstance(tool_item.content_json, dict) else {}
@@ -5120,6 +5223,15 @@ class PaperbaseService:
                             tool_input = parsed_tool_input
                     except json.JSONDecodeError:
                         tool_input = {}
+                self._log_chat_turn_progress(
+                    event="chat.turn.tool.started",
+                    message="Chat tool execution started",
+                    prepared=prepared,
+                    sample_index=_sample_index,
+                    item=tool_item,
+                    tool_name=tool_name,
+                    tool_call_index=index,
+                )
                 if router.find_spec(tool_name) is None:
                     payload = {"error": f"Unknown tool: {tool_name}"}
                     is_error = True
@@ -5171,6 +5283,16 @@ class PaperbaseService:
                 normalized_output_item = self._chat_input_item_from_thread_item(completed_output_item)
                 if normalized_output_item is not None:
                     context.items.append(normalized_output_item)
+                self._log_chat_turn_progress(
+                    event="chat.turn.tool.completed",
+                    message="Chat tool execution completed",
+                    prepared=prepared,
+                    sample_index=_sample_index,
+                    item=completed_output_item,
+                    tool_name=tool_name,
+                    tool_call_index=index,
+                    is_error=is_error,
+                )
                 yield ("item_completed", {"item": completed_output_item.model_dump(mode="json")})
 
         raise RuntimeError("Chat turn exceeded the maximum number of sampling steps")
@@ -5277,6 +5399,15 @@ class PaperbaseService:
                     break
                 yield (event_name, payload)
         except Exception as exc:
+            logger.exception(
+                "Chat turn failed during streaming",
+                extra={
+                    "event": "chat.turn.failed",
+                    "thread_id": prepared.thread.thread_id,
+                    "turn_id": prepared.turn.turn_id,
+                    "project_id": prepared.thread.project_id or "",
+                },
+            )
             failed_turn = self.repository.update_chat_turn(  # type: ignore[attr-defined]
                 prepared.turn.turn_id,
                 status="failed",

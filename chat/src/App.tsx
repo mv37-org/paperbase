@@ -6750,6 +6750,7 @@ export default function App() {
                 type="password"
                 placeholder="Password"
                 autoComplete="current-password"
+                minLength={8}
                 required
               />
               <button className="primary-button" type="submit">
@@ -6798,6 +6799,7 @@ export default function App() {
                 type="password"
                 placeholder="Password"
                 autoComplete="new-password"
+                minLength={8}
                 required
               />
               <button className="primary-button" type="submit">
@@ -6865,6 +6867,7 @@ export default function App() {
                 placeholder="Reset token"
                 defaultValue={new URLSearchParams(window.location.search).get("reset_token") ?? ""}
                 autoComplete="one-time-code"
+                minLength={8}
                 required
               />
               <input
@@ -6872,6 +6875,7 @@ export default function App() {
                 type="password"
                 placeholder="New password"
                 autoComplete="new-password"
+                minLength={8}
                 required
               />
               <button className="primary-button" type="submit">
