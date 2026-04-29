@@ -701,6 +701,82 @@ def harvest(
     return 0
 
 
+def harvest_top_cited(
+    *,
+    min_citations: int,
+    max_papers: int | None,
+    chunk_size: int,
+) -> int:
+    """Queue a quality-curated harvest by Semantic Scholar citationCount.
+
+    The planner streams S2's bulk-search endpoint sorted by
+    ``citationCount:desc``, filters to arxiv-linked papers, and enqueues
+    ``harvest_chunk`` jobs in batches of ``chunk_size`` arxiv ids.
+    Chunks run at the same low priority as the date-range harvest so
+    on-demand ``index_paper`` always cuts in front.
+
+    ``min_citations=100`` is a good first run (~106k arxiv-linked CS
+    papers); drop to ~25 for full ~500k-paper coverage.
+    """
+    from .errors import PermanentError
+    from .service import get_service
+
+    service = get_service()
+    try:
+        job = service.enqueue_harvest_top_cited_job(
+            min_citations=min_citations,
+            max_papers=max_papers,
+            chunk_size=chunk_size,
+        )
+    except PermanentError as exc:
+        print(f"Invalid harvest-top-cited request: {exc}")
+        return 1
+    print(
+        f"Queued harvest_top_cited {job.job_id}: "
+        f"min_citations={min_citations}, max_papers={max_papers}, "
+        f"chunk_size={chunk_size}"
+    )
+    return 0
+
+
+def harvest_venue(
+    *,
+    venue: str,
+    year: int,
+    max_papers: int | None,
+    chunk_size: int,
+) -> int:
+    """Queue a venue-curated harvest from Semantic Scholar's bulk search
+    filtered by ``venue`` + ``year`` (#39 PR B).
+
+    The planner pages S2 for arxiv-linked papers accepted at the chosen
+    conference + year, batches them into ``chunk_size`` groups, and
+    enqueues ``harvest_chunk`` jobs (``source='s2_venue'``). The chunk
+    worker indexes each paper and stamps the ``venue`` / ``venue_year``
+    / ``venue_source`` columns. Chunks run at the same low priority as
+    ``harvest_range`` so on-demand work always cuts in front.
+    """
+    from .errors import PermanentError
+    from .service import get_service
+
+    service = get_service()
+    try:
+        job = service.enqueue_harvest_venue_job(
+            venue=venue,
+            year=year,
+            max_papers=max_papers,
+            chunk_size=chunk_size,
+        )
+    except PermanentError as exc:
+        print(f"Invalid harvest-venue request: {exc}")
+        return 1
+    print(
+        f"Queued harvest_venue {job.job_id}: "
+        f"venue={venue!r}, year={year}, max_papers={max_papers}, chunk_size={chunk_size}"
+    )
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Local developer helpers for paperbase.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -847,6 +923,67 @@ def _build_parser() -> argparse.ArgumentParser:
         default=3,
         help="Sub-job window size in months. Smaller = finer progress + more resume points.",
     )
+
+    top_cited_parser = subparsers.add_parser(
+        "harvest-top-cited",
+        help=(
+            "Queue a quality-curated harvest from Semantic Scholar's bulk search "
+            "ordered by citationCount desc. See issue #39 for the design + corpus "
+            "math. ``--min-citations=100`` yields ~106k arxiv-linked papers; "
+            "drop to ~25 for the full ~500k-paper target."
+        ),
+    )
+    top_cited_parser.add_argument(
+        "--min-citations",
+        type=int,
+        default=100,
+        help="S2 minCitationCount floor (default 100).",
+    )
+    top_cited_parser.add_argument(
+        "--max-papers",
+        type=int,
+        default=None,
+        help="Stop after this many candidates; omit for full sweep until S2 is exhausted.",
+    )
+    top_cited_parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=50,
+        help="arxiv_ids per harvest_chunk (default 50). Smaller = finer interactive priority bandwidth.",
+    )
+
+    venue_parser = subparsers.add_parser(
+        "harvest-venue",
+        help=(
+            "Queue a venue-curated harvest from Semantic Scholar's bulk search "
+            "filtered by venue + year (#39 PR B). The chunk worker indexes each "
+            "paper and stamps the venue/venue_year/venue_source columns so "
+            "retrieval can boost peer-reviewed work over preprints."
+        ),
+    )
+    venue_parser.add_argument(
+        "--venue",
+        required=True,
+        help="Conference venue (e.g. ICLR, NeurIPS, ICML, CVPR — short or long form).",
+    )
+    venue_parser.add_argument(
+        "--year",
+        type=int,
+        required=True,
+        help="4-digit conference year.",
+    )
+    venue_parser.add_argument(
+        "--max-papers",
+        type=int,
+        default=None,
+        help="Stop after this many candidates; omit for full sweep until S2 exhausts.",
+    )
+    venue_parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=50,
+        help="arxiv_ids per harvest_chunk (default 50).",
+    )
     return parser
 
 
@@ -903,6 +1040,19 @@ def main(argv: list[str] | None = None) -> int:
             end_date=args.end_date,
             limit_per_window=args.limit_per_window,
             chunk_months=args.chunk_months,
+        )
+    if args.command == "harvest-top-cited":
+        return harvest_top_cited(
+            min_citations=args.min_citations,
+            max_papers=args.max_papers,
+            chunk_size=args.chunk_size,
+        )
+    if args.command == "harvest-venue":
+        return harvest_venue(
+            venue=args.venue,
+            year=args.year,
+            max_papers=args.max_papers,
+            chunk_size=args.chunk_size,
         )
 
     parser.error(f"Unsupported command: {args.command}")

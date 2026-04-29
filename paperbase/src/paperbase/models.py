@@ -43,6 +43,11 @@ class PaperMetadata(BaseModel):
     code_is_python: bool | None = None
     code_python_reason: str | None = None
     code_manifest: dict[str, Any] | None = None
+    # Peer-review venue signal (#39 PR B). See PaperORM.venue / venue_year /
+    # venue_source for column docs.
+    venue: str | None = None
+    venue_year: int | None = None
+    venue_source: str | None = None
     source_type: str | None = None
     index_status: str = "discovered"
     indexed_at: datetime | None = None

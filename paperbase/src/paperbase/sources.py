@@ -178,13 +178,7 @@ def get_paper_details(arxiv_id: str) -> PaperMetadata | None:
 
 @dataclass(slots=True)
 class TopCitedCandidate:
-    """Lightweight S2 search result used by the top-cited harvest planner.
-
-    The planner doesn't need a full ``PaperMetadata`` (extraction will
-    refetch arxiv metadata at index time); it only needs enough fields to
-    decide whether the paper passes the AI/ML category filter and to
-    enqueue an indexing chunk.
-    """
+    """One arxiv-resolved row from S2 ``/paper/search/bulk`` sorted by citations."""
 
     arxiv_id: str
     semantic_scholar_id: str
@@ -202,77 +196,152 @@ def fetch_top_cited_cs(
     fields_of_study: str = "Computer Science",
     timeout_seconds: int = 30,
 ) -> tuple[list[TopCitedCandidate], str | None]:
-    """Page through Semantic Scholar's bulk search ordered by citationCount
-    desc, returning candidates that have an arXiv external id.
+    """Page S2 ``/paper/search/bulk`` for top-cited CS papers with arxiv ids.
 
-    Returns ``(candidates, next_cursor)``. When ``next_cursor`` is ``None``
-    the planner has exhausted the result set; otherwise the caller passes
-    it back to fetch the next page.
+    Returns ``(candidates, next_token)``. ``next_token`` is ``None`` when the
+    bulk response did not include one (last page). Only papers with both an
+    arxiv id and a citation count >= ``min_citations`` are returned; everything
+    else is filtered out client-side.
 
-    The S2 endpoint returns ~1000 results/page and emits a continuation
-    token. We filter to arxiv-linked papers client-side so the planner
-    can reason about a single id namespace; non-arxiv high-cited CS
-    papers (R, BLAST, SHELX, etc.) are out of scope for the AI/ML
-    corpus this primitive feeds (see issue #39).
+    Sorted by ``citationCount:desc`` so paging walks from the most-cited papers
+    downward — the planner stops when it has enough or when ``next_token`` is
+    exhausted.
     """
     if min_citations < 0:
         raise ValueError(f"min_citations must be >= 0, got {min_citations}")
     if page_size < 1 or page_size > 1000:
         raise ValueError(f"page_size must be in [1, 1000], got {page_size}")
-
-    params: dict[str, object] = {
-        "query": "*",
+    # S2 bulk search rejects unbounded queries with "too many hits" (>10M cap)
+    # — passing minCitationCount server-side narrows the result set under the
+    # cap AND saves bandwidth vs filtering client-side. Falls back to a tiny
+    # floor of 1 when caller asks for "all" so the bulk endpoint still accepts
+    # the request.
+    server_min = max(1, min_citations) if min_citations > 0 else 1
+    params: dict[str, str | int] = {
         "fieldsOfStudy": fields_of_study,
+        "minCitationCount": server_min,
+        "fields": "externalIds,title,citationCount,year,s2FieldsOfStudy",
         "sort": "citationCount:desc",
-        "fields": "paperId,title,citationCount,externalIds,year",
-        "minCitationCount": int(min_citations),
         "limit": page_size,
     }
     if cursor:
         params["token"] = cursor
-
     response = SESSION.get(
         f"{S2_API}/paper/search/bulk",
         params=params,
         timeout=timeout_seconds,
     )
-    if response.status_code != 200:
-        logger.warning(
-            "fetch_top_cited_cs non-200",
-            extra={
-                "event": "sources.top_cited.non_200",
-                "status_code": response.status_code,
-                "min_citations": min_citations,
-                "has_cursor": cursor is not None,
-            },
-        )
-        response.raise_for_status()
-
-    payload = response.json() or {}
-    next_cursor = payload.get("token") or None
-    raw_results = payload.get("data") or []
-
-    candidates: list[TopCitedCandidate] = []
-    for item in raw_results:
+    response.raise_for_status()
+    payload = response.json()
+    raw = payload.get("data") or []
+    next_token = payload.get("token")
+    out: list[TopCitedCandidate] = []
+    for item in raw:
         external_ids = item.get("externalIds") or {}
-        raw_arxiv = external_ids.get("ArXiv")
-        if not raw_arxiv:
+        arxiv_id = external_ids.get("ArXiv")
+        if not arxiv_id:
             continue
-        candidates.append(
+        citation_count = item.get("citationCount") or 0
+        if citation_count < min_citations:
+            continue
+        s2_fields = item.get("s2FieldsOfStudy") or []
+        primary_category: str | None = None
+        if s2_fields and isinstance(s2_fields, list):
+            first = s2_fields[0]
+            if isinstance(first, dict):
+                primary_category = first.get("category")
+        out.append(
             TopCitedCandidate(
-                arxiv_id=canonical_arxiv_id(raw_arxiv),
+                arxiv_id=canonical_arxiv_id(arxiv_id),
                 semantic_scholar_id=item.get("paperId") or "",
                 title=item.get("title") or "",
-                citation_count=int(item.get("citationCount") or 0),
-                # S2 doesn't expose arxiv primary_category on bulk search;
-                # the planner does the per-arxiv-id category lookup downstream
-                # if a tighter category gate is needed. None here means
-                # "not yet checked".
-                primary_category=None,
+                citation_count=citation_count,
+                primary_category=primary_category,
                 year=item.get("year"),
             )
         )
-    return candidates, next_cursor
+    return out, next_token
+
+
+@dataclass(slots=True)
+class VenueCandidate:
+    """One arxiv-resolved row from S2 ``/paper/search/bulk`` filtered by venue.
+
+    The chunk worker uses this to (a) ingest the paper from arxiv via
+    ``index_arxiv_paper`` and (b) stamp the ``venue`` columns on the
+    resulting row. ``venue_string`` is whatever S2 returned in the
+    ``venue`` field (typically the canonical full name, e.g.
+    "International Conference on Learning Representations").
+    """
+
+    arxiv_id: str
+    semantic_scholar_id: str
+    title: str
+    venue_string: str
+    year: int | None
+
+
+def fetch_venue_accepted(
+    *,
+    venue: str,
+    year: int,
+    cursor: str | None = None,
+    page_size: int = 1000,
+    timeout_seconds: int = 30,
+) -> tuple[list[VenueCandidate], str | None]:
+    """Page S2 ``/paper/search/bulk`` for papers accepted at ``venue`` in
+    ``year`` that have an arxiv external id.
+
+    S2's ``venue`` query param accepts both short (``ICLR``) and long
+    (``International Conference on Learning Representations``) forms;
+    the response carries the canonical long form in each row's
+    ``venue`` field, which we propagate so downstream callers can store
+    a stable string.
+
+    Returns ``(candidates, next_token)``. ``next_token`` is ``None``
+    when the bulk response did not include one (last page). Papers
+    without an arxiv id are filtered out client-side — there is nothing
+    we can ingest for them.
+    """
+    if not venue or not venue.strip():
+        raise ValueError("venue must not be empty")
+    if year < 1900 or year > 2100:
+        raise ValueError(f"year must be a 4-digit year, got {year}")
+    if page_size < 1 or page_size > 1000:
+        raise ValueError(f"page_size must be in [1, 1000], got {page_size}")
+    params: dict[str, str | int] = {
+        "venue": venue,
+        "year": year,
+        "fields": "externalIds,title,venue,year",
+        "limit": page_size,
+    }
+    if cursor:
+        params["token"] = cursor
+    response = SESSION.get(
+        f"{S2_API}/paper/search/bulk",
+        params=params,
+        timeout=timeout_seconds,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    raw = payload.get("data") or []
+    next_token = payload.get("token")
+    out: list[VenueCandidate] = []
+    for item in raw:
+        external_ids = item.get("externalIds") or {}
+        arxiv_id = external_ids.get("ArXiv")
+        if not arxiv_id:
+            continue
+        out.append(
+            VenueCandidate(
+                arxiv_id=canonical_arxiv_id(arxiv_id),
+                semantic_scholar_id=item.get("paperId") or "",
+                title=item.get("title") or "",
+                venue_string=item.get("venue") or venue,
+                year=item.get("year"),
+            )
+        )
+    return out, next_token
 
 
 @dataclass(slots=True)
