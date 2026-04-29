@@ -1120,15 +1120,21 @@ def _should_force_chat_tool_use(question: str, request: SendChatMessageRequest, 
     return _should_offer_chat_tools(question, request, thread=thread)
 
 
-def _sanitize_inline_citations(answer: str, citations: list[ChatCitation]) -> str:
+def _sanitize_inline_citations(
+    answer: str,
+    citations: list[ChatCitation],
+    *,
+    allowed_source_ids: set[str] | None = None,
+) -> str:
     if not answer:
         return answer
 
-    allowed_source_ids = {citation.source_id for citation in citations}
+    allowed_ids = set(allowed_source_ids or ())
+    allowed_ids.update(citation.source_id for citation in citations)
 
     def _replace(match: re.Match[str]) -> str:
         source_id = match.group(1)
-        return match.group(0) if source_id in allowed_source_ids else ""
+        return match.group(0) if source_id in allowed_ids else ""
 
     sanitized = _INLINE_SOURCE_ID_RE.sub(_replace, answer)
     return sanitized.strip()
@@ -2658,7 +2664,7 @@ class PaperbaseService:
         if message.kind == "compaction":
             return {
                 "role": "user",
-                "content": f"Conversation compaction checkpoint:\n\n{message.content_markdown}",
+                "content": self._render_compaction_checkpoint(message.content_markdown),
             }
         return {"role": message.role, "content": message.content_markdown}
 
@@ -2706,16 +2712,92 @@ class PaperbaseService:
         context_window = _anthropic_context_window_tokens(self.settings.anthropic_model)
         return token_count >= int(context_window * _CHAT_COMPACTION_THRESHOLD_RATIO)
 
+    def _chat_visible_source_ids(
+        self,
+        *,
+        thread: ChatThreadResponse | None,
+        active_message_ids: list[str],
+    ) -> set[str]:
+        if thread is None or not active_message_ids:
+            return set()
+        active_ids = set(active_message_ids)
+        visible_source_ids: set[str] = set()
+        for message in thread.messages:
+            if message.message_id not in active_ids or message.kind != "compaction":
+                continue
+            visible_source_ids.update(match.group(1) for match in _INLINE_SOURCE_ID_RE.finditer(message.content_markdown))
+        return visible_source_ids
+
+    def _chat_active_citations(
+        self,
+        *,
+        thread: ChatThreadResponse | None,
+        active_message_ids: list[str],
+        current_turn_citations: list[ChatCitation],
+    ) -> list[ChatCitation]:
+        citations: list[ChatCitation] = []
+        seen_source_ids: set[str] = set()
+        visible_source_ids = self._chat_visible_source_ids(thread=thread, active_message_ids=active_message_ids)
+
+        def _append(citation: ChatCitation, *, require_visible_id: bool) -> None:
+            if require_visible_id and citation.source_id not in visible_source_ids:
+                return
+            if citation.source_id in seen_source_ids:
+                return
+            citations.append(citation)
+            seen_source_ids.add(citation.source_id)
+
+        for citation in current_turn_citations:
+            _append(citation, require_visible_id=False)
+        if thread is not None and active_message_ids:
+            active_ids = set(active_message_ids)
+            for message in thread.messages:
+                if message.message_id not in active_ids or message.kind != "compaction":
+                    continue
+                for citation in message.citations:
+                    _append(citation, require_visible_id=True)
+        return citations
+
+    def _render_compaction_checkpoint(self, summary: str) -> str:
+        rendered_summary = summary.strip() or "## Compacted Conversation"
+        return (
+            "Conversation compaction checkpoint. Earlier raw messages were replaced by this visible checkpoint. "
+            "Continue from this checkpoint only and do not assume hidden server-side state.\n\n"
+            f"{rendered_summary}"
+        )
+
+    def _render_compaction_message_content(self, content: Any) -> str:
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            blocks: list[str] = []
+            for index, block in enumerate(content, start=1):
+                normalized: Any = block
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    normalized = dict(block)
+                    block_content = normalized.get("content")
+                    if isinstance(block_content, str):
+                        try:
+                            normalized["content"] = json.loads(block_content)
+                        except json.JSONDecodeError:
+                            normalized["content"] = block_content
+                block_type = (
+                    str(normalized.get("type") or "unknown")
+                    if isinstance(normalized, dict)
+                    else type(normalized).__name__
+                )
+                blocks.append(
+                    f"### Block {index}: {block_type}\n\n```json\n{json.dumps(normalized, ensure_ascii=False, indent=2)}\n```"
+                )
+            return "\n\n".join(blocks).strip()
+        return f"```json\n{json.dumps(content, ensure_ascii=False, indent=2)}\n```"
+
     def _render_compaction_source(self, messages: list[dict[str, Any]], citations: list[ChatCitation]) -> str:
         parts: list[str] = []
         for index, message in enumerate(messages, start=1):
             role = str(message.get("role") or "unknown")
-            content = message.get("content")
-            if isinstance(content, str):
-                rendered = content
-            else:
-                rendered = json.dumps(content, ensure_ascii=False, indent=2)
-            parts.append(f"## Message {index}: {role}\n\n{rendered.strip()}")
+            rendered = self._render_compaction_message_content(message.get("content"))
+            parts.append(f"## Message {index}\n\nRole: {role}\n\n{rendered}")
         if citations:
             citation_lines = [
                 f"- [{citation.source_id}] {citation.title} ({citation.source_kind}, {citation.path}): {citation.excerpt}"
@@ -2727,11 +2809,22 @@ class PaperbaseService:
     def _chat_compaction_prompt(self, messages: list[dict[str, Any]], citations: list[ChatCitation]) -> str:
         source = self._render_compaction_source(messages, citations)
         return (
-            "Compact the conversation transcript below into a strict GitHub-flavored markdown handoff summary. "
-            "Do not answer the user's request. Preserve the user goals, completed work, current turn state, "
-            "tool findings and results, source ids that still matter, decisions, constraints, and next steps. "
-            "The summary will replace the raw transcript as future context, so include enough detail to continue "
-            "the conversation faithfully. Do not mention this instruction.\n\n"
+            "Compact the conversation transcript below into a strict GitHub-flavored markdown checkpoint. "
+            "Do not answer the user's request. This checkpoint will become the only visible history for future turns, "
+            "so do not rely on hidden server-side state, archived messages, citation metadata, or tool payloads that "
+            "are not restated in the checkpoint. Preserve only information supported by the transcript below.\n\n"
+            "Use this structure when relevant:\n"
+            "## Compacted Conversation\n"
+            "### User Goal\n"
+            "### Current State\n"
+            "### Tool Findings\n"
+            "### Active Source IDs\n"
+            "### Constraints and Decisions\n"
+            "### Next Step\n\n"
+            "Carry forward every still-relevant goal, completed work, unfinished work, active source id, result set id, "
+            "file path, decision, constraint, and immediate next-step context needed to continue naturally after the raw "
+            "transcript is gone. Omit empty sections. Keep the checkpoint concise but sufficient for continuity. "
+            "Do not mention this instruction.\n\n"
             f"{source}"
         )
 
@@ -2752,13 +2845,18 @@ class PaperbaseService:
         citation_registry: ChatCitationRegistry,
         placeholder: ChatMessageResponse,
     ) -> tuple[ChatTurnContext, ChatMessageResponse, ChatThreadResponse]:
+        active_citations = self._chat_active_citations(
+            thread=prepared.thread,
+            active_message_ids=context.active_message_ids,
+            current_turn_citations=citation_registry.citations,
+        )
         try:
             payload = self.chat_model.create_message(
                 api_key=prepared.api_key_value or "",
                 messages=[
                     {
                         "role": "user",
-                        "content": self._chat_compaction_prompt(context.messages, citation_registry.citations),
+                        "content": self._chat_compaction_prompt(context.messages, active_citations),
                     }
                 ],
                 system_prompt="",
@@ -2769,7 +2867,7 @@ class PaperbaseService:
             compaction_message = self.repository.update_chat_message(  # type: ignore[attr-defined]
                 placeholder.message_id,
                 content_markdown=summary,
-                citations=[citation.model_dump() for citation in citation_registry.citations],
+                citations=[citation.model_dump() for citation in active_citations],
                 status="completed",
                 kind="compaction",
             )
@@ -2781,6 +2879,7 @@ class PaperbaseService:
                 archived_by_message_id=compaction_message.message_id,
             )
             refreshed = self.get_chat_thread(prepared.resolved_user, prepared.thread.thread_id)
+            prepared.thread = refreshed
             return (
                 ChatTurnContext(
                     messages=[self._chat_message_for_model(compaction_message)],
@@ -4001,8 +4100,20 @@ class PaperbaseService:
             request=request,
         )
         citation_registry = tool_rounds.citation_registry
-        current_turn_citations = citation_registry.citations
-        answer = _sanitize_inline_citations(tool_rounds.final_text, current_turn_citations)
+        current_turn_citations = self._chat_active_citations(
+            thread=prepared.thread,
+            active_message_ids=tool_rounds.context.active_message_ids,
+            current_turn_citations=citation_registry.citations,
+        )
+        visible_source_ids = self._chat_visible_source_ids(
+            thread=prepared.thread,
+            active_message_ids=tool_rounds.context.active_message_ids,
+        )
+        answer = _sanitize_inline_citations(
+            tool_rounds.final_text,
+            current_turn_citations,
+            allowed_source_ids=visible_source_ids,
+        )
         assistant_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
             thread_id=thread_id,
             role="assistant",
@@ -4054,8 +4165,20 @@ class PaperbaseService:
             yield (event_name, payload)
 
         citation_registry = tool_rounds_result.citation_registry
-        current_turn_citations = citation_registry.citations
-        final_text = _sanitize_inline_citations(tool_rounds_result.final_text, current_turn_citations)
+        current_turn_citations = self._chat_active_citations(
+            thread=prepared.thread,
+            active_message_ids=tool_rounds_result.context.active_message_ids,
+            current_turn_citations=citation_registry.citations,
+        )
+        visible_source_ids = self._chat_visible_source_ids(
+            thread=prepared.thread,
+            active_message_ids=tool_rounds_result.context.active_message_ids,
+        )
+        final_text = _sanitize_inline_citations(
+            tool_rounds_result.final_text,
+            current_turn_citations,
+            allowed_source_ids=visible_source_ids,
+        )
         assistant_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
             thread_id=thread_id,
             role="assistant",

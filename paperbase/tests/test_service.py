@@ -71,7 +71,14 @@ class FakeChatModel:
         self.final_message_usage = ChatModelUsage(input_tokens=11234, output_tokens=27)
         self.count_calls: list[dict[str, object]] = []
         self.token_counts: list[int | None] = []
-        self.compaction_summary = "## Compacted Conversation\n\nContinue from this compacted context."
+        self.compaction_summary = (
+            "## Compacted Conversation\n\n"
+            "### Current State\n"
+            "- Continue from this compacted context.\n\n"
+            "### Next Step\n"
+            "- Resume the interrupted turn."
+        )
+        self.compaction_summaries: list[str] = []
 
     def count_message_tokens(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
         self.count_calls.append(
@@ -98,8 +105,9 @@ class FakeChatModel:
             }
         )
         if system_prompt == "" and messages and "Compact the conversation transcript" in str(messages[-1]):
+            summary = self.compaction_summaries.pop(0) if self.compaction_summaries else self.compaction_summary
             return {
-                "content": [{"type": "text", "text": self.compaction_summary}],
+                "content": [{"type": "text", "text": summary}],
                 "stop_reason": "end_turn",
             }
         if tools:
@@ -3615,6 +3623,9 @@ def test_stream_chat_compacts_mid_turn_after_tool_results(monkeypatch, browser_s
 
     compaction_call = next(call for call in chat_model.create_calls if call["system_prompt"] == "")
     assert "Compact the conversation transcript" in str(compaction_call["messages"])
+    assert "only visible history for future turns" in str(compaction_call["messages"])
+    assert "citation metadata" in str(compaction_call["messages"])
+    assert "### Active Source IDs" in str(compaction_call["messages"])
     assert "tool_result" in str(compaction_call["messages"])
     assert "Explain the methods grounding" in str(compaction_call["messages"])
 
@@ -3622,10 +3633,193 @@ def test_stream_chat_compacts_mid_turn_after_tool_results(monkeypatch, browser_s
     assert final_answer_call["messages"][0]["role"] == "user"
     assert "Conversation compaction checkpoint" in final_answer_call["messages"][0]["content"]
     assert chat_model.stream_calls == []
+    assert "Continue from this checkpoint only" in final_answer_call["messages"][0]["content"]
 
     refreshed = service.get_chat_thread(session.user, thread.thread_id)
     assert [message.kind for message in refreshed.messages] == ["compaction", "default"]
     assert all("Explain the methods grounding" not in message.content_markdown for message in refreshed.messages)
+
+
+def test_chat_continues_across_compaction_checkpoints_without_hidden_state(monkeypatch):
+    first_summary = (
+        "## Compacted Conversation\n\n"
+        "### User Goal\n"
+        "- Explain the methods grounding with citations.\n\n"
+        "### Current State\n"
+        "- The earlier transcript was compacted after grounded tool results were gathered.\n\n"
+        "### Tool Findings\n"
+        "- `paperbase_search_sections` surfaced the grounding discussion in `introduction`.\n\n"
+        "### Active Source IDs\n"
+        "- [S1] Compaction Paper (paperbase_paper, introduction): Methods section explains grounding and citations.\n\n"
+        "### Constraints and Decisions\n"
+        "- Use grounded evidence only.\n\n"
+        "### Next Step\n"
+        "- Compare the methods grounding details if the user asks a follow-up."
+    )
+    second_summary = (
+        "## Compacted Conversation\n\n"
+        "### User Goal\n"
+        "- Continue from the earlier checkpoint and tell the user the next step.\n\n"
+        "### Current State\n"
+        "- Prior checkpoint state was preserved after the second compaction.\n\n"
+        "### Tool Findings\n"
+        "- The earlier grounding evidence remains the relevant basis for the answer.\n\n"
+        "### Active Source IDs\n"
+        "- [S1] Compaction Paper (paperbase_paper, introduction): Methods section explains grounding and citations.\n\n"
+        "### Next Step\n"
+        "- Continue with [S1] and compare the methods grounding details."
+    )
+
+    class ContinuityChatModel(FakeChatModel):
+        def create_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+            if system_prompt == "" and messages and "Compact the conversation transcript" in str(messages[-1]):
+                self.create_calls.append(
+                    {
+                        "api_key": api_key,
+                        "messages": messages,
+                        "system_prompt": system_prompt,
+                        "tools": tools,
+                        "tool_choice": tool_choice,
+                    }
+                )
+                summary = self.compaction_summaries.pop(0) if self.compaction_summaries else self.compaction_summary
+                return {
+                    "content": [{"type": "text", "text": summary}],
+                    "stop_reason": "end_turn",
+                }
+
+            checkpoint_text = "\n\n".join(
+                str(message.get("content"))
+                for message in messages
+                if isinstance(message, dict)
+                and message.get("role") == "user"
+                and isinstance(message.get("content"), str)
+            )
+            if tools and "Prior checkpoint state was preserved after the second compaction." in checkpoint_text:
+                self.create_calls.append(
+                    {
+                        "api_key": api_key,
+                        "messages": messages,
+                        "system_prompt": system_prompt,
+                        "tools": tools,
+                        "tool_choice": tool_choice,
+                    }
+                )
+                return {
+                    "content": [{"type": "text", "text": "Continue directly from the checkpoint."}],
+                    "stop_reason": "end_turn",
+                }
+            if not tools and "Prior checkpoint state was preserved after the second compaction." in checkpoint_text:
+                self.create_calls.append(
+                    {
+                        "api_key": api_key,
+                        "messages": messages,
+                        "system_prompt": system_prompt,
+                        "tools": tools,
+                        "tool_choice": tool_choice,
+                    }
+                )
+                answer = (
+                    "Continue with [S1] and compare the methods grounding details."
+                    if "[S1] Compaction Paper" in checkpoint_text
+                    and "Continue with [S1] and compare the methods grounding details." in checkpoint_text
+                    and "Prior checkpoint state was preserved after the second compaction." in checkpoint_text
+                    else "Missing visible checkpoint state."
+                )
+                return {
+                    "content": [{"type": "text", "text": answer}],
+                    "stop_reason": "end_turn",
+                }
+            return super().create_message(
+                api_key=api_key,
+                messages=messages,
+                system_prompt=system_prompt,
+                tools=tools,
+                tool_choice=tool_choice,
+            )
+
+    chat_model = ContinuityChatModel()
+    chat_model.compaction_summaries = [first_summary, second_summary]
+    chat_model.token_counts = [1, 950_000, 1, 950_000, 1]
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=chat_model,
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="compact-followup@example.com", password="topsecret123", display_name="Compact Followup")
+    )
+    assert session.user is not None
+
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda paper: _rich_extraction(text="## Methods\n\nMethods section explains grounding and citations."),
+    )
+    service.index_arxiv_paper(
+        "2401.88888",
+        paper=_sample_paper("2401.88888", title="Compaction Paper", abstract="A paper about tool results"),
+    )
+
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
+    first_response = service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="Explain the methods grounding with citations"),
+    )
+    assert first_response.assistant_message is not None
+
+    second_response = service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="Continue from the compacted checkpoint and tell me the next step"),
+    )
+
+    assert second_response.assistant_message is not None
+    assert second_response.assistant_message.content_markdown == (
+        "Continue with [S1] and compare the methods grounding details."
+    )
+    assert [citation.source_id for citation in second_response.assistant_message.citations] == ["S1"]
+
+    compaction_calls = [call for call in chat_model.create_calls if call["system_prompt"] == ""]
+    assert len(compaction_calls) == 2
+    second_compaction_prompt = str(compaction_calls[1]["messages"])
+    assert "Conversation compaction checkpoint. Earlier raw messages were replaced by this visible checkpoint." in (
+        second_compaction_prompt
+    )
+    assert "[S1] Compaction Paper" in second_compaction_prompt
+    assert "Compare the methods grounding details if the user asks a follow-up." in second_compaction_prompt
+
+    final_answer_call = chat_model.create_calls[-1]
+    assert final_answer_call["messages"][0]["role"] == "user"
+    assert "Prior checkpoint state was preserved after the second compaction." in final_answer_call["messages"][0][
+        "content"
+    ]
+    assert "tool_result" not in str(final_answer_call["messages"])
+
+    refreshed = service.get_chat_thread(session.user, thread.thread_id)
+    assert sum(message.kind == "compaction" for message in refreshed.messages) == 1
+    assert refreshed.messages[0].kind == "compaction"
+    assert "[S1] Compaction Paper" in refreshed.messages[0].content_markdown
+    assert "Compare the methods grounding details if the user asks a follow-up." not in refreshed.messages[0].content_markdown
+    assert "Continue with [S1] and compare the methods grounding details." in refreshed.messages[0].content_markdown
+    assert [citation.source_id for citation in refreshed.messages[0].citations] == ["S1"]
+    assert all("Explain the methods grounding with citations" not in message.content_markdown for message in refreshed.messages)
+    assert any(
+        message.content_markdown == "Continue from the compacted checkpoint and tell me the next step"
+        for message in refreshed.messages
+    )
+    assert any(
+        message.content_markdown == "Continue with [S1] and compare the methods grounding details."
+        for message in refreshed.messages
+    )
 
 
 def test_search_only_tool_results_do_not_create_citations(monkeypatch):
