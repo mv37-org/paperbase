@@ -1232,6 +1232,8 @@ class ChatTurnContext:
 class ChatToolRoundsResult:
     context: ChatTurnContext
     citation_registry: ChatCitationRegistry
+    final_text: str = ""
+    final_usage: ChatModelUsage | None = None
     require_project_code_write: bool = False
     project_write_completed: bool = False
     project_read_completed: bool = False
@@ -3694,7 +3696,33 @@ class PaperbaseService:
         citation_registry = ChatCitationRegistry()
         tools = self._chat_tool_definitions(request, thread=prepared.thread)
         if not tools:
-            return ChatToolRoundsResult(context=context, citation_registry=citation_registry)
+            include_research_tools, include_project_code_tools = self._chat_tool_offer_flags(
+                request,
+                thread=prepared.thread,
+            )
+            answer_system_prompt = self._chat_answer_system_prompt(
+                thread=prepared.thread,
+                include_research_tools=include_research_tools,
+                include_project_code_tools=include_project_code_tools,
+                has_evidence_sources=False,
+            )
+            context, _events = self._ensure_chat_context_budget(
+                prepared=prepared,
+                context=context,
+                system_prompt=answer_system_prompt,
+                citation_registry=citation_registry,
+            )
+            response = self.chat_model.create_message(
+                api_key=prepared.api_key_value or "",
+                messages=context.messages,
+                system_prompt=answer_system_prompt,
+            )
+            return ChatToolRoundsResult(
+                context=context,
+                citation_registry=citation_registry,
+                final_text=_extract_message_text(response),
+                final_usage=response_usage(response),
+            )
 
         tool_names = {tool.get("name") for tool in tools if isinstance(tool, dict)}
         tool_system_prompt = self._chat_tool_system_prompt(
@@ -3727,10 +3755,18 @@ class PaperbaseService:
                 tools=tools,
                 tool_choice=tool_choice,
             )
+            final_usage = response_usage(response)
             assistant_content = [block for block in (response.get("content") or []) if isinstance(block, dict)]
             tool_uses = [block for block in assistant_content if block.get("type") == "tool_use"]
             if not tool_uses:
-                break
+                return ChatToolRoundsResult(
+                    context=context,
+                    citation_registry=citation_registry,
+                    final_text=_extract_message_text(response),
+                    final_usage=final_usage,
+                    project_write_completed=project_write_tool_used,
+                    project_read_completed=project_read_tool_used,
+                )
             blocks, completed_write_this_round, completed_read_this_round = self._tool_result_blocks(
                 tool_uses=tool_uses,
                 user=user,
@@ -3764,7 +3800,33 @@ class PaperbaseService:
         citation_registry = ChatCitationRegistry()
         tools = self._chat_tool_definitions(request, thread=prepared.thread)
         if not tools:
-            return ChatToolRoundsResult(context=context, citation_registry=citation_registry)
+            include_research_tools, include_project_code_tools = self._chat_tool_offer_flags(
+                request,
+                thread=prepared.thread,
+            )
+            answer_system_prompt = self._chat_answer_system_prompt(
+                thread=prepared.thread,
+                include_research_tools=include_research_tools,
+                include_project_code_tools=include_project_code_tools,
+                has_evidence_sources=False,
+            )
+            context = yield from self._ensure_chat_context_budget_stream(
+                prepared=prepared,
+                context=context,
+                system_prompt=answer_system_prompt,
+                citation_registry=citation_registry,
+            )
+            response = self.chat_model.create_message(
+                api_key=prepared.api_key_value or "",
+                messages=context.messages,
+                system_prompt=answer_system_prompt,
+            )
+            return ChatToolRoundsResult(
+                context=context,
+                citation_registry=citation_registry,
+                final_text=_extract_message_text(response),
+                final_usage=response_usage(response),
+            )
 
         tool_names = {tool.get("name") for tool in tools if isinstance(tool, dict)}
         tool_system_prompt = self._chat_tool_system_prompt(
@@ -3800,10 +3862,17 @@ class PaperbaseService:
             assistant_content = [block for block in (response.get("content") or []) if isinstance(block, dict)]
             tool_uses = [block for block in assistant_content if block.get("type") == "tool_use"]
             usage = response_usage(response)
+            if not tool_uses:
+                return ChatToolRoundsResult(
+                    context=context,
+                    citation_registry=citation_registry,
+                    final_text=_extract_message_text(response),
+                    final_usage=usage,
+                    project_write_completed=project_write_tool_used,
+                    project_read_completed=project_read_tool_used,
+                )
             if usage is not None:
                 yield ("usage", self._chat_usage_payload(usage))
-            if not tool_uses:
-                break
             context.messages.append({"role": "assistant", "content": assistant_content})
             blocks: list[dict[str, Any]] = []
             completed_write_this_round = False
@@ -3921,31 +3990,9 @@ class PaperbaseService:
             user=user,
             request=request,
         )
-        conversation_context = tool_rounds.context
         citation_registry = tool_rounds.citation_registry
         current_turn_citations = citation_registry.citations
-        include_research_tools, include_project_code_tools = self._chat_tool_offer_flags(
-            request,
-            thread=prepared.thread,
-        )
-        answer_system_prompt = self._chat_answer_system_prompt(
-            thread=prepared.thread,
-            include_research_tools=include_research_tools,
-            include_project_code_tools=include_project_code_tools,
-            has_evidence_sources=bool(current_turn_citations),
-        )
-        conversation_context, _events = self._ensure_chat_context_budget(
-            prepared=prepared,
-            context=conversation_context,
-            system_prompt=answer_system_prompt,
-            citation_registry=citation_registry,
-        )
-        answer_payload = self.chat_model.create_message(
-            api_key=prepared.api_key_value,
-            messages=conversation_context.messages,
-            system_prompt=answer_system_prompt,
-        )
-        answer = _sanitize_inline_citations(_extract_message_text(answer_payload), current_turn_citations)
+        answer = _sanitize_inline_citations(tool_rounds.final_text, current_turn_citations)
         assistant_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
             thread_id=thread_id,
             role="assistant",
@@ -3996,81 +4043,26 @@ class PaperbaseService:
                 break
             yield (event_name, payload)
 
-        conversation_context = tool_rounds_result.context
         citation_registry = tool_rounds_result.citation_registry
         current_turn_citations = citation_registry.citations
-        include_research_tools, include_project_code_tools = self._chat_tool_offer_flags(
-            request,
-            thread=prepared.thread,
-        )
-        answer_system_prompt = self._chat_answer_system_prompt(
-            thread=prepared.thread,
-            include_research_tools=include_research_tools,
-            include_project_code_tools=include_project_code_tools,
-            has_evidence_sources=bool(current_turn_citations),
-        )
-        conversation_context = yield from self._ensure_chat_context_budget_stream(
-            prepared=prepared,
-            context=conversation_context,
-            system_prompt=answer_system_prompt,
-            citation_registry=citation_registry,
-        )
+        final_text = _sanitize_inline_citations(tool_rounds_result.final_text, current_turn_citations)
         assistant_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
             thread_id=thread_id,
             role="assistant",
-            content_markdown="",
-            citations=[citation.model_dump() for citation in current_turn_citations],
-            status="streaming",
-        )
-        yield ("assistant_start", {"assistant_message": assistant_message.model_dump(mode="json")})
-
-        chunks: list[str] = []
-        usage_payload: dict[str, Any] | None = None
-        try:
-            for stream_event in self.chat_model.stream_message(
-                api_key=prepared.api_key_value,
-                messages=conversation_context.messages,
-                system_prompt=answer_system_prompt,
-            ):
-                if stream_event.usage is not None:
-                    usage_payload = self._chat_usage_payload(stream_event.usage)
-                    yield ("usage", usage_payload)
-                if not stream_event.text:
-                    continue
-                chunks.append(stream_event.text)
-                yield ("delta", {"message_id": assistant_message.message_id, "delta": stream_event.text})
-        except Exception as exc:
-            failed_message = self.repository.update_chat_message(  # type: ignore[attr-defined]
-                assistant_message.message_id,
-                content_markdown="".join(chunks).strip(),
-                status="failed",
-            )
-            logger.exception(
-                "Streaming chat request failed",
-                extra={
-                    "event": "chat.model.stream.failed",
-                    "thread_id": thread_id,
-                    "message_id": assistant_message.message_id,
-                },
-            )
-            yield (
-                "error",
-                {
-                    "message_id": failed_message.message_id if failed_message else assistant_message.message_id,
-                    "detail": str(exc) or "Streaming request failed",
-                },
-            )
-            return
-
-        final_text = _sanitize_inline_citations("".join(chunks).strip(), current_turn_citations)
-        final_message = self.repository.update_chat_message(  # type: ignore[attr-defined]
-            assistant_message.message_id,
             content_markdown=final_text,
             citations=[citation.model_dump() for citation in current_turn_citations],
             status="completed",
         )
-        if final_message is None:
-            raise RuntimeError("Assistant message vanished during streaming")
+        yield ("assistant_start", {"assistant_message": assistant_message.model_dump(mode="json")})
+        usage_payload = (
+            self._chat_usage_payload(tool_rounds_result.final_usage)
+            if tool_rounds_result.final_usage is not None
+            else None
+        )
+        if usage_payload is not None:
+            yield ("usage", usage_payload)
+        if final_text:
+            yield ("delta", {"message_id": assistant_message.message_id, "delta": final_text})
 
         resolved_user = prepared.resolved_user
         if prepared.using_free_tier:
@@ -4079,7 +4071,7 @@ class PaperbaseService:
         yield (
             "done",
             {
-                "assistant_message": final_message.model_dump(mode="json"),
+                "assistant_message": assistant_message.model_dump(mode="json"),
                 "remaining_free_responses": self._remaining_free_responses(resolved_user),
                 "has_anthropic_api_key": self.repository.get_anthropic_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
                 "state": "completed",

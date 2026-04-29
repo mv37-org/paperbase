@@ -63,6 +63,7 @@ class FakeChatModel:
         self.tool_round_usage = ChatModelUsage(input_tokens=84512, output_tokens=98)
         self.initial_stream_usage = ChatModelUsage(input_tokens=11234, output_tokens=1)
         self.final_stream_usage = ChatModelUsage(input_tokens=11234, output_tokens=27)
+        self.final_message_usage = ChatModelUsage(input_tokens=11234, output_tokens=27)
         self.count_calls: list[dict[str, object]] = []
         self.token_counts: list[int | None] = []
         self.compaction_summary = "## Compacted Conversation\n\nContinue from this compacted context."
@@ -156,6 +157,12 @@ class FakeChatModel:
                     "text": f"Grounded answer with citations [S1]\n\nAPI key used: {api_key[:6]}",
                 }
             ],
+            "usage": {
+                "input_tokens": self.final_message_usage.input_tokens,
+                "output_tokens": self.final_message_usage.output_tokens,
+                "cache_creation_input_tokens": self.final_message_usage.cache_creation_input_tokens,
+                "cache_read_input_tokens": self.final_message_usage.cache_read_input_tokens,
+            },
             "stop_reason": "end_turn",
         }
 
@@ -2128,7 +2135,8 @@ def test_project_code_turn_does_not_force_writes_after_the_first_tool_round():
     assert chat_model.create_calls[1]["tool_choice"] == {"type": "auto"}
     assert chat_model.create_calls[2]["tool_choice"] == {"type": "auto"}
     assert chat_model.create_calls[3]["tool_choice"] == {"type": "auto"}
-    assert chat_model.create_calls[4]["tools"] is None
+    assert len(chat_model.create_calls) == 4
+    assert all(call["tools"] for call in chat_model.create_calls)
 
 
 def test_project_code_turn_can_continue_after_failed_touch_without_a_forced_retry():
@@ -2235,7 +2243,8 @@ def test_project_code_turn_can_continue_after_failed_touch_without_a_forced_retr
     assert chat_model.create_calls[0]["tool_choice"] == {"type": "any"}
     assert chat_model.create_calls[1]["tool_choice"] == {"type": "auto"}
     assert chat_model.create_calls[2]["tool_choice"] == {"type": "auto"}
-    assert chat_model.create_calls[3]["tools"] is None
+    assert len(chat_model.create_calls) == 3
+    assert all(call["tools"] for call in chat_model.create_calls)
 
 
 def test_project_code_turn_failed_write_does_not_trigger_a_backend_failure_answer():
@@ -2256,6 +2265,16 @@ def test_project_code_turn_failed_write_does_not_trigger_a_backend_failure_answe
             )
             if tools:
                 self.round_index += 1
+                if self.round_index >= 4:
+                    return {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Saved the module to `src/linear_gd.py`.",
+                            }
+                        ],
+                        "stop_reason": "end_turn",
+                    }
                 return {
                     "content": [
                         {
@@ -2271,15 +2290,7 @@ def test_project_code_turn_failed_write_does_not_trigger_a_backend_failure_answe
                     ],
                     "stop_reason": "tool_use",
                 }
-            return {
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "Saved the module to `src/linear_gd.py`.",
-                    }
-                ],
-                "stop_reason": "end_turn",
-            }
+            raise AssertionError("Separate normal-turn answer model call should not happen")
 
     chat_model = FailedWriteChatModel()
     service = PaperbaseService(
@@ -2323,7 +2334,8 @@ def test_project_code_turn_failed_write_does_not_trigger_a_backend_failure_answe
     assert response.assistant_message.content_markdown == "Saved the module to `src/linear_gd.py`."
     assert saved_file is not None
     assert saved_file.content == ""
-    assert len(chat_model.create_calls) == 5
+    assert len(chat_model.create_calls) == 4
+    assert all(call["tools"] for call in chat_model.create_calls)
 
 
 def test_project_thread_allows_python_answers_without_persisting_project_code():
@@ -2343,20 +2355,12 @@ def test_project_thread_allows_python_answers_without_persisting_project_code():
                     "content": [
                         {
                             "type": "text",
-                            "text": "No tool use needed.",
+                            "text": "```python\ndef recurse(items):\n    return items\n```",
                         }
                     ],
                     "stop_reason": "end_turn",
                 }
-            return {
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "```python\ndef recurse(items):\n    return items\n```",
-                    }
-                ],
-                "stop_reason": "end_turn",
-            }
+            raise AssertionError("Separate normal-turn answer model call should not happen")
 
     service = PaperbaseService(
         settings=Settings(
@@ -2386,7 +2390,7 @@ def test_project_thread_allows_python_answers_without_persisting_project_code():
     assert response.assistant_message is not None
     assert response.assistant_message.content_markdown == "```python\ndef recurse(items):\n    return items\n```"
     assert service.chat_model.create_calls[0]["tool_choice"] == {"type": "any"}
-    assert len(service.chat_model.create_calls) == 2
+    assert len(service.chat_model.create_calls) == 1
 
 
 def test_project_thread_allows_python_answer_after_reading_existing_file():
@@ -2401,7 +2405,14 @@ def test_project_thread_allows_python_answer_after_reading_existing_file():
                     "tool_choice": tool_choice,
                 }
             )
-            if tools:
+            has_tool_results = any(
+                message.get("role") == "user"
+                and isinstance(message.get("content"), list)
+                and any(block.get("type") == "tool_result" for block in message.get("content"))
+                for message in messages
+                if isinstance(message, dict)
+            )
+            if tools and not has_tool_results:
                 return {
                     "content": [
                         {
@@ -2415,15 +2426,17 @@ def test_project_thread_allows_python_answer_after_reading_existing_file():
                     ],
                     "stop_reason": "tool_use",
                 }
-            return {
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "Here is `src/train.py`:\n\n```python\ndef train():\n    return 1\n```",
-                    }
-                ],
-                "stop_reason": "end_turn",
-            }
+            if tools:
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Here is `src/train.py`:\n\n```python\ndef train():\n    return 1\n```",
+                        }
+                    ],
+                    "stop_reason": "end_turn",
+                }
+            raise AssertionError("Separate normal-turn answer model call should not happen")
 
     chat_model = ReadOnlyPythonAnswerChatModel()
     service = PaperbaseService(
@@ -2462,6 +2475,8 @@ def test_project_thread_allows_python_answer_after_reading_existing_file():
     assert response.assistant_message.content_markdown == (
         "Here is `src/train.py`:\n\n```python\ndef train():\n    return 1\n```"
     )
+    assert len(chat_model.create_calls) == 2
+    assert all(call["tools"] for call in chat_model.create_calls)
 
 
 def test_project_code_confirmation_turn_inherits_tool_context():
@@ -3439,7 +3454,7 @@ def test_non_grounded_chat_still_forces_research_tools_without_citations(browser
     assert response.assistant_message is not None
     assert response.assistant_message.citations == []
     assert "[S" not in response.assistant_message.content_markdown
-    assert len(chat_model.create_calls) == 3
+    assert len(chat_model.create_calls) == 2
     first_call = chat_model.create_calls[0]
     assert first_call["tool_choice"] == {"type": "any"}
     assert first_call["tools"]
@@ -3453,7 +3468,51 @@ def test_non_grounded_chat_still_forces_research_tools_without_citations(browser
     )
     assert chat_model.create_calls[1]["tools"]
     assert chat_model.create_calls[1]["tool_choice"] == {"type": "auto"}
-    assert "do not invent source ids" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert all(call["tools"] for call in chat_model.create_calls)
+
+
+def test_normal_chat_answer_comes_from_same_tool_loop():
+    class SameLoopAnswerChatModel(FakeChatModel):
+        def create_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+            if tools is None and system_prompt != "":
+                raise AssertionError("Separate normal-turn answer model call should not happen")
+            return super().create_message(
+                api_key=api_key,
+                messages=messages,
+                system_prompt=system_prompt,
+                tools=tools,
+                tool_choice=tool_choice,
+            )
+
+    chat_model = SameLoopAnswerChatModel()
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=chat_model,
+        github_repo_manager=FakeGitHubRepoManager(),
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="same-loop@example.com", password="topsecret123", display_name="Same Loop")
+    )
+    assert session.user is not None
+
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
+    response = service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="Help me brainstorm a short product name"),
+    )
+
+    assert response.assistant_message is not None
+    assert len(chat_model.create_calls) == 2
+    assert all(call["tools"] for call in chat_model.create_calls)
 
 
 def test_first_prompt_renames_new_chat_to_short_summary(browser_service):
@@ -3513,7 +3572,7 @@ def test_chat_context_uses_full_active_thread_history(browser_service):
 
 def test_stream_chat_compacts_mid_turn_after_tool_results(monkeypatch, browser_service):
     service, _, chat_model = browser_service
-    chat_model.token_counts = [1, 1, 950_000, 1]
+    chat_model.token_counts = [1, 950_000, 1]
     session, _ = service.register_browser_user(
         SignupRequest(email="compact@example.com", password="topsecret123", display_name="Compact User")
     )
@@ -3552,9 +3611,10 @@ def test_stream_chat_compacts_mid_turn_after_tool_results(monkeypatch, browser_s
     assert "tool_result" in str(compaction_call["messages"])
     assert "Explain the methods grounding" in str(compaction_call["messages"])
 
-    final_stream_call = chat_model.stream_calls[-1]
-    assert final_stream_call["messages"][0]["role"] == "user"
-    assert "Conversation compaction checkpoint" in final_stream_call["messages"][0]["content"]
+    final_answer_call = chat_model.create_calls[-1]
+    assert final_answer_call["messages"][0]["role"] == "user"
+    assert "Conversation compaction checkpoint" in final_answer_call["messages"][0]["content"]
+    assert chat_model.stream_calls == []
 
     refreshed = service.get_chat_thread(session.user, thread.thread_id)
     assert [message.kind for message in refreshed.messages] == ["compaction", "default"]
@@ -3673,6 +3733,8 @@ def test_link_requests_force_tool_use_and_prompt_for_paper_links(monkeypatch, br
     assert first_prompt == final_prompt
     assert "html_url or pdf_url" in first_prompt
     assert "markdown links to the paper pages or PDFs" in first_prompt
+    assert len(chat_model.create_calls) == 2
+    assert all(call["tools"] for call in chat_model.create_calls)
 
 
 def test_normal_prompt_is_stable_across_different_research_user_prompts(monkeypatch, browser_service):
@@ -3705,7 +3767,7 @@ def test_normal_prompt_is_stable_across_different_research_user_prompts(monkeypa
             SendChatMessageRequest(content=content),
         )
         calls = chat_model.create_calls[start_index:]
-        assert len(calls) == 3
+        assert len(calls) == 2
         prompts.extend(str(call["system_prompt"]) for call in calls)
 
     assert len(set(prompts)) == 1
@@ -3960,7 +4022,7 @@ def test_delete_project_cascades_threads_files_and_allows_default_removal(browse
 
 
 def test_browser_chat_stream_emits_citations_and_completion(monkeypatch, browser_service):
-    service, _, _ = browser_service
+    service, _, chat_model = browser_service
     app.dependency_overrides[get_service] = lambda: service
     client = TestClient(app)
 
@@ -4014,6 +4076,7 @@ def test_browser_chat_stream_emits_citations_and_completion(monkeypatch, browser
     assert events[stream_usage_index][1]["input_tokens"] == 11234
     assert events[-1][1]["assistant_message"]["status"] == "completed"
     assert events[-1][1]["usage"]["output_tokens"] == 27
+    assert chat_model.stream_calls == []
 
     refreshed = client.get(f"/v1/browser/chats/{thread_id}").json()
     assert refreshed["messages"][-1]["status"] == "completed"
@@ -4059,8 +4122,36 @@ def test_browser_chat_stream_handles_api_key_required_without_placeholder(browse
     app.dependency_overrides.clear()
 
 
-def test_browser_chat_stream_marks_partial_failure(monkeypatch, browser_service):
-    service, _, chat_model = browser_service
+def test_browser_chat_stream_uses_same_tool_loop_for_final_answer(monkeypatch):
+    class SameLoopStreamChatModel(FakeChatModel):
+        def create_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+            if tools is None and system_prompt != "":
+                raise AssertionError("Separate streamed answer model call should not happen")
+            return super().create_message(
+                api_key=api_key,
+                messages=messages,
+                system_prompt=system_prompt,
+                tools=tools,
+                tool_choice=tool_choice,
+            )
+
+        def stream_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+            raise AssertionError("Streaming answer model call should not happen")
+
+    chat_model = SameLoopStreamChatModel()
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=chat_model,
+        github_repo_manager=FakeGitHubRepoManager(),
+    )
     app.dependency_overrides[get_service] = lambda: service
     client = TestClient(app)
 
@@ -4080,7 +4171,6 @@ def test_browser_chat_stream_marks_partial_failure(monkeypatch, browser_service)
         "2401.99999",
         paper=_sample_paper("2401.99999", title="Failure Paper", abstract="A paper about stream failure"),
     )
-    chat_model.fail_stream_after_chunks = 1
 
     thread = client.post("/v1/browser/chats", json={"title": "New chat"}, headers=csrf_headers).json()
     thread_id = thread["thread_id"]
@@ -4096,11 +4186,12 @@ def test_browser_chat_stream_marks_partial_failure(monkeypatch, browser_service)
 
     event_names = [event_name for event_name, _ in events]
     assert event_names[:4] == ["usage", "tool_start", "tool_done", "assistant_start"]
+    assert event_names[-1] == "done"
     assert "delta" in event_names
-    assert events[-1][0] == "error"
+    assert "usage" in event_names[event_names.index("assistant_start") + 1 :]
     refreshed = client.get(f"/v1/browser/chats/{thread_id}").json()
-    assert refreshed["messages"][-1]["status"] == "failed"
-    assert refreshed["messages"][-1]["content_markdown"] == "Grounded"
+    assert refreshed["messages"][-1]["status"] == "completed"
+    assert refreshed["messages"][-1]["content_markdown"].startswith("Grounded answer")
 
     app.dependency_overrides.clear()
 
@@ -4123,6 +4214,16 @@ def test_browser_chat_stream_failed_project_write_still_streams_the_model_answer
             )
             if tools:
                 self.round_index += 1
+                if self.round_index >= 4:
+                    return {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Saved the module to `src/linear_gd.py`.",
+                            }
+                        ],
+                        "stop_reason": "end_turn",
+                    }
                 return {
                     "content": [
                         {
@@ -4141,16 +4242,7 @@ def test_browser_chat_stream_failed_project_write_still_streams_the_model_answer
             raise AssertionError("Streaming project chats should not make a separate final create_message call")
 
         def stream_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
-            self.stream_calls.append(
-                {
-                    "api_key": api_key,
-                    "messages": messages,
-                    "system_prompt": system_prompt,
-                    "tools": tools,
-                    "tool_choice": tool_choice,
-                }
-            )
-            yield ChatModelStreamEvent(text="Saved the module to `src/linear_gd.py`.")
+            raise AssertionError("Streaming answer model call should not happen")
 
     service = PaperbaseService(
         settings=Settings(
@@ -4201,6 +4293,7 @@ def test_browser_chat_stream_failed_project_write_still_streams_the_model_answer
     assert "assistant_start" in event_names
     assert event_names[-1] == "done"
     assert events[-1][1]["assistant_message"]["content_markdown"] == "Saved the module to `src/linear_gd.py`."
+    assert service.chat_model.stream_calls == []
     refreshed = client.get(f"/v1/browser/chats/{thread_id}").json()
     assert refreshed["messages"][-1]["content_markdown"] == events[-1][1]["assistant_message"]["content_markdown"]
 
@@ -4208,7 +4301,48 @@ def test_browser_chat_stream_failed_project_write_still_streams_the_model_answer
 
 
 def test_browser_chat_stream_allows_unsaved_python_answers(browser_service):
-    service, _, chat_model = browser_service
+    class UnsavedPythonStreamChatModel(FakeChatModel):
+        def create_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+            self.create_calls.append(
+                {
+                    "api_key": api_key,
+                    "messages": messages,
+                    "system_prompt": system_prompt,
+                    "tools": tools,
+                    "tool_choice": tool_choice,
+                }
+            )
+            if tools is not None:
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "```python\ndef recurse(items):\n    return items\n```",
+                        }
+                    ],
+                    "usage": {
+                        "input_tokens": self.final_message_usage.input_tokens,
+                        "output_tokens": self.final_message_usage.output_tokens,
+                        "cache_creation_input_tokens": self.final_message_usage.cache_creation_input_tokens,
+                        "cache_read_input_tokens": self.final_message_usage.cache_read_input_tokens,
+                    },
+                    "stop_reason": "end_turn",
+                }
+            raise AssertionError("Streaming answer model call should not happen")
+
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=UnsavedPythonStreamChatModel(),
+        github_repo_manager=FakeGitHubRepoManager(),
+    )
     app.dependency_overrides[get_service] = lambda: service
     client = TestClient(app)
 
@@ -4218,12 +4352,6 @@ def test_browser_chat_stream_allows_unsaved_python_answers(browser_service):
     )
     assert signup.status_code == 200
     csrf_headers = {"X-Paperbase-CSRF": signup.json()["csrf_token"]}
-    chat_model.stream_chunks = [
-        "```python\n",
-        "def recurse(items):\n",
-        "    return items\n",
-        "```",
-    ]
 
     thread = client.post("/v1/browser/chats", json={"title": "New chat"}, headers=csrf_headers).json()
     thread_id = thread["thread_id"]
@@ -4239,6 +4367,7 @@ def test_browser_chat_stream_allows_unsaved_python_answers(browser_service):
 
     assert events[-1][0] == "done"
     assert events[-1][1]["assistant_message"]["content_markdown"] == "```python\ndef recurse(items):\n    return items\n```"
+    assert service.chat_model.stream_calls == []
     refreshed = client.get(f"/v1/browser/chats/{thread_id}").json()
     assert refreshed["messages"][-1]["content_markdown"] == events[-1][1]["assistant_message"]["content_markdown"]
 
