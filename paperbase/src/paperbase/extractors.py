@@ -11,6 +11,7 @@ import tarfile
 import tempfile
 from dataclasses import dataclass, field
 from textwrap import shorten
+from typing import NamedTuple
 
 import requests
 from bs4 import BeautifulSoup
@@ -529,7 +530,12 @@ def _rasterize_pdf_to_png(pdf_bytes: bytes) -> bytes | None:
         document = pdfium.PdfDocument(pdf_bytes)
         if len(document) == 0:
             return None
-        pil_image = document[0].render(scale=1.5).to_pil()
+        # scale=2.0 doubles the rendered DPI relative to the PDF's
+        # native resolution. arxiv figures shipped as single-page PDFs
+        # are usually authored at print quality (~300 DPI); 2x keeps
+        # text in figure annotations legible after the PNG conversion.
+        # Matches the scale chosen for EPS rasterization below.
+        pil_image = document[0].render(scale=2.0).to_pil()
         buffer = io.BytesIO()
         pil_image.save(buffer, format="PNG", optimize=True)
         return buffer.getvalue()
@@ -551,6 +557,11 @@ def _rasterize_eps_to_png(eps_bytes: bytes) -> bytes | None:
         return None
     try:
         with Image.open(io.BytesIO(eps_bytes)) as eps_image:
+            # scale=2 doubles Ghostscript's render DPI vs Pillow's
+            # default. EPS figures are vector-only so doubling has
+            # no quality cost at the source; 2x preserves detail in
+            # axis labels and small annotations after the PNG
+            # conversion. Matches the PDF rasterizer's scale choice.
             eps_image.load(scale=2)
             converted = eps_image.convert("RGBA") if eps_image.mode != "RGBA" else eps_image
             buffer = io.BytesIO()
@@ -560,17 +571,27 @@ def _rasterize_eps_to_png(eps_bytes: bytes) -> bytes | None:
         return None
 
 
+class ResolvedLatexImage(NamedTuple):
+    """Output of ``_resolve_latex_image``. Named so the call site doesn't
+    have to unpack a positional 3-tuple — the (bytes, type, ext) shape
+    is non-obvious from the type alone."""
+
+    image_bytes: bytes
+    content_type: str | None
+    file_extension: str
+
+
 def _resolve_latex_image(
     asset_bytes: dict[str, bytes],
     source_path: str,
-) -> tuple[bytes, str | None, str] | None:
+) -> ResolvedLatexImage | None:
     """Resolve a ``\\includegraphics{source_path}`` reference to image bytes
     from the LaTeX tarball.
 
-    Returns ``(bytes, content_type, file_extension)`` or ``None`` when
-    the path can't be resolved. Tries the bare path first, then each
-    candidate extension; raster-friendly formats (PNG/JPG/GIF) pass
-    through unchanged; PDF figures are rasterized to PNG; EPS attempts
+    Returns a :class:`ResolvedLatexImage` or ``None`` when the path can't
+    be resolved. Tries the bare path first, then each candidate
+    extension; raster-friendly formats (PNG/JPG/GIF) pass through
+    unchanged; PDF figures are rasterized to PNG; EPS attempts
     rasterize and falls back to raw bytes when Ghostscript is missing.
     """
     if not asset_bytes or not source_path:
@@ -608,17 +629,17 @@ def _resolve_latex_image(
     if extension == "pdf":
         rasterized = _rasterize_pdf_to_png(matched_bytes)
         if rasterized is not None:
-            return rasterized, "image/png", "png"
-        return matched_bytes, "application/pdf", "pdf"
+            return ResolvedLatexImage(rasterized, "image/png", "png")
+        return ResolvedLatexImage(matched_bytes, "application/pdf", "pdf")
     if extension == "eps":
         rasterized = _rasterize_eps_to_png(matched_bytes)
         if rasterized is not None:
-            return rasterized, "image/png", "png"
-        return matched_bytes, "application/postscript", "eps"
+            return ResolvedLatexImage(rasterized, "image/png", "png")
+        return ResolvedLatexImage(matched_bytes, "application/postscript", "eps")
     if extension in {"png", "jpg", "jpeg", "gif"}:
         content_type = "image/jpeg" if extension == "jpg" else f"image/{extension}"
-        return matched_bytes, content_type, extension
-    return matched_bytes, "application/octet-stream", extension or "bin"
+        return ResolvedLatexImage(matched_bytes, content_type, extension)
+    return ResolvedLatexImage(matched_bytes, "application/octet-stream", extension or "bin")
 
 
 def _extract_latex_figures(
@@ -640,7 +661,9 @@ def _extract_latex_figures(
         if source_path:
             resolved = _resolve_latex_image(asset_map, source_path)
             if resolved is not None:
-                image_bytes, content_type, file_extension = resolved
+                image_bytes = resolved.image_bytes
+                content_type = resolved.content_type
+                file_extension = resolved.file_extension
 
         figures.append(
             FigureArtifact(
@@ -714,20 +737,32 @@ def _extract_latex_text(source_bytes: bytes) -> str | None:
 
 
 # Image extensions we recognize when resolving ``\includegraphics{path}``.
-# Ordered by typical arxiv prevalence so first-match-wins favors the most
-# likely candidate when authors omit the extension. ``.pdf_tex`` is rare
-# and intentionally excluded — it's a TeX directive container, not a real
-# image file.
-_LATEX_IMAGE_EXTENSIONS: tuple[str, ...] = (".eps", ".pdf", ".png", ".jpg", ".jpeg", ".gif")
+# Ordered by what we can render cheaply, NOT by arxiv prevalence: when
+# an author ships both ``foo.png`` and ``foo.eps`` (a common dual-output
+# pattern from LaTeX build pipelines) we'd rather pick the PNG that
+# passes through unchanged than the EPS that needs Ghostscript at
+# runtime to rasterize. PDF goes through pypdfium2 (already a dep) so
+# it lands ahead of EPS, which falls back to raw bytes whenever the
+# slim Docker image isn't carrying Ghostscript. ``.pdf_tex`` is rare
+# and intentionally excluded — it's a TeX directive container, not a
+# real image file.
+_LATEX_IMAGE_EXTENSIONS: tuple[str, ...] = (".png", ".jpg", ".jpeg", ".gif", ".pdf", ".eps")
 
 
 def _load_latex_archive(source_bytes: bytes) -> tuple[str | None, dict[str, bytes]]:
     """Return ``(resolved_latex_text, asset_bytes_by_name)`` for a tarball
     or plain-text LaTeX source.
 
-    ``asset_bytes_by_name`` is empty when the source is plain text or
-    can't be parsed as a tarball — figure resolution falls back to
-    ``image_bytes=None`` in that case (same behavior as pre-#48).
+    Contract: when ``resolved_latex_text`` is ``None`` (any failure
+    path — tarball corrupt, no .tex files, includepdf-only stub,
+    plain text without LaTeX markers), ``asset_bytes_by_name`` is
+    always ``{}``. A partial asset dict from a failed parse would
+    invite a caller to use it without realizing the .tex extraction
+    didn't succeed; returning ``{}`` makes the contract explicit.
+    On success, ``asset_bytes_by_name`` carries every recognized
+    image member (see ``_LATEX_IMAGE_EXTENSIONS``) under its tarball
+    member name. Plain-text sources have no assets, so the dict is
+    ``{}`` there too.
     """
     asset_bytes: dict[str, bytes] = {}
     try:
@@ -754,7 +789,7 @@ def _load_latex_archive(source_bytes: bytes) -> tuple[str | None, dict[str, byte
                         if any(lowered.endswith(ext) for ext in _LATEX_IMAGE_EXTENSIONS):
                             asset_bytes[member.name] = handle.read()
                     if not tex_by_name:
-                        return None, asset_bytes
+                        return None, {}
                     entrypoint_name = next(
                         (name for name, body in tex_by_name.items() if "\\begin{document}" in body),
                         None,
@@ -764,16 +799,16 @@ def _load_latex_archive(source_bytes: bytes) -> tuple[str | None, dict[str, byte
                     entrypoint = tex_by_name[entrypoint_name]
                     resolved = _resolve_latex_inputs(entrypoint, tex_by_name, entrypoint_name)
                     if "\\includepdf" in resolved and not re.search(r"\\section\b", resolved):
-                        return None, asset_bytes
+                        return None, {}
                     return resolved, asset_bytes
             except tarfile.TarError:
-                return None, asset_bytes
+                return None, {}
         text = source_bytes.decode("utf-8", errors="replace")
         if "\\begin{document}" in text or "\\section" in text:
             return text, asset_bytes
     except Exception:
-        return None, asset_bytes
-    return None, asset_bytes
+        return None, {}
+    return None, {}
 
 
 def _latex_to_markdown(latex: str) -> str:
