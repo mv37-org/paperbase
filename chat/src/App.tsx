@@ -9,6 +9,7 @@ import {
   createProject,
   createThread,
   deleteProject,
+  deletePythonFile,
   deleteThread,
   getBrowserPaper,
   getBrowserPaperFigure,
@@ -41,6 +42,7 @@ import {
   updatePythonFile,
   uploadDocument,
 } from "./api";
+import { CodeSnippet, extractStreamingPythonPreview } from "./CodeSnippet";
 import { LandingMentionEditor } from "./LandingMentionEditor";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 import type {
@@ -76,10 +78,50 @@ const OPEN_TABS_KEY = "paperbase-open-tabs";
 const PENDING_PROMPT_KEY = "paperbase-pending-prompt";
 const RESUME_PROJECT_MODAL_KEY = "paperbase-resume-new-project";
 const SIDEBAR_COLLAPSED_KEY = "paperbase-sidebar-collapsed";
+const SELECTED_PROJECT_KEY = "paperbase-selected-project";
 const MAX_OPEN_TABS = 8;
 const MESSAGE_LIST_BOTTOM_THRESHOLD = 40;
 const PROJECT_ITEM_PAGE_SIZE = 5;
 const PROJECT_SIDEBAR_ITEM_KINDS: ProjectItemKind[] = ["python_file", "thread"];
+const CHAT_TITLE_STOP_WORDS = new Set([
+  "a",
+  "an",
+  "and",
+  "are",
+  "as",
+  "at",
+  "be",
+  "but",
+  "by",
+  "can",
+  "could",
+  "for",
+  "from",
+  "help",
+  "i",
+  "if",
+  "in",
+  "into",
+  "is",
+  "it",
+  "me",
+  "my",
+  "of",
+  "on",
+  "or",
+  "our",
+  "please",
+  "show",
+  "tell",
+  "that",
+  "the",
+  "this",
+  "to",
+  "us",
+  "we",
+  "with",
+  "would",
+]);
 type ModalFlashKind = "error" | "note";
 type PaperDrawerState = { paperId: string; path: string } | null;
 type PaperDrawerContent =
@@ -147,11 +189,15 @@ type ProjectModalState = { mode: "create" } | { mode: "edit"; projectId: string 
 type DeleteModalState =
   | { kind: "project"; projectId: string; name: string }
   | { kind: "thread"; projectId: string; threadId: string; title: string }
+  | { kind: "python_file"; projectId: string; fileId: string; title: string }
   | null;
 type ToolActivityEntry = {
   id: string;
   turnIndex: number;
+  toolName?: string;
   label: string;
+  command: string | null;
+  output: string | null;
   status: "running" | "completed";
   startedAt: string;
   finishedAt: string | null;
@@ -353,6 +399,15 @@ const THINKING_WORDS = [
   "Synthesizing",
 ];
 
+const PROJECT_CODE_ACTION_RE =
+  /\b(write|create|make|add|implement|edit|modify|update|refactor|fix|rename|delete|remove|read|show|open|grep|search|run)\b/i;
+const PROJECT_CODE_TARGET_RE =
+  /\b(code|python|pytorch|torch|script|module|file|files|function|class|training|train|evaluation|eval|workflow|repo|project)\b/i;
+const PROJECT_CODE_DIRECT_TOOL_RE =
+  /\b(project_(?:list_files|read_file|grep|touch|edit|delete|run))\b/i;
+const PROJECT_CODE_PATH_HINT_RE = /(?:^|[\s`'"])([A-Za-z0-9_./-]+\.py)(?:$|[\s`'",.:;!?])/i;
+const TOOL_ACTIVITY_TARGET_RE = /"([^"]+)"/;
+
 function staticAssetPath(name: string) {
   const path = `${import.meta.env.BASE_URL}${name.replace(/^\/+/, "")}`;
   return `${path}${path.includes("?") ? "&" : "?"}v=${PUBLIC_ASSET_CACHE_KEY}`;
@@ -499,6 +554,46 @@ function isMessageListNearBottom(
 
 function restoreSidebarCollapsed() {
   return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "true";
+}
+
+function restoreSelectedProjectId() {
+  const value = localStorage.getItem(SELECTED_PROJECT_KEY)?.trim();
+  return value ? value : null;
+}
+
+function formatChatTitleWord(word: string) {
+  if (!word) {
+    return word;
+  }
+  if (word === word.toUpperCase()) {
+    return word;
+  }
+  if (/[A-Z]/.test(word.slice(1))) {
+    return word;
+  }
+  return `${word[0]?.toUpperCase() ?? ""}${word.slice(1).toLowerCase()}`;
+}
+
+function summarizeThreadTitle(content: string) {
+  const tokens = content.match(/[A-Za-z0-9]+(?:['-][A-Za-z0-9]+)*/g) ?? [];
+  if (tokens.length === 0) {
+    return "New chat";
+  }
+  const informativeTokens = tokens.filter(
+    (token) => !CHAT_TITLE_STOP_WORDS.has(token.toLowerCase()),
+  );
+  const sourceTokens = informativeTokens.length >= 3 ? informativeTokens : tokens;
+  const desiredCount = Math.min(5, Math.max(3, sourceTokens.length));
+  let selectedTokens = sourceTokens.slice(0, desiredCount);
+  if (selectedTokens.length < 3 && tokens.length >= 3) {
+    selectedTokens = tokens.slice(0, 3);
+  }
+  return (
+    selectedTokens
+      .map((token) => formatChatTitleWord(token))
+      .join(" ")
+      .trim() || "New chat"
+  );
 }
 
 function displayThreadTitle(title: string) {
@@ -730,6 +825,140 @@ function displayPythonFilename(filename: string) {
   return filename.trim() || "something.py";
 }
 
+function pythonFilenameKey(filename: string) {
+  return displayPythonFilename(filename);
+}
+
+function duplicatePythonFilenameKeys(
+  files: Array<
+    Pick<ProjectItemSummary, "filename" | "title"> | Pick<PythonFileResponse, "filename">
+  >,
+) {
+  const counts = new Map<string, number>();
+  for (const file of files) {
+    const key = pythonFilenameKey("filename" in file ? file.filename : file.title);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return new Set([...counts.entries()].filter(([, count]) => count > 1).map(([key]) => key));
+}
+
+function displayPythonFileTitle(
+  file: Pick<PythonFileResponse, "filename" | "repo_path">,
+  _duplicateKeys: Set<string>,
+) {
+  return displayPythonFilename(file.filename);
+}
+
+function displayPythonFilePathContext(
+  file: Pick<PythonFileResponse, "filename" | "repo_path">,
+  duplicateKeys: Set<string>,
+) {
+  const filename = displayPythonFilename(file.filename);
+  return duplicateKeys.has(filename) ? pythonRepoPathForFile(file) : "";
+}
+
+function displayPythonTabTitle(
+  file: Pick<PythonFileResponse, "filename" | "repo_path">,
+  duplicateKeys: Set<string>,
+) {
+  const filename = displayPythonFilename(file.filename);
+  return duplicateKeys.has(filename) ? pythonRepoPathForFile(file) : filename;
+}
+
+function messageHasProjectCodeIntent(content: string) {
+  if (!content.trim()) {
+    return false;
+  }
+  if (PROJECT_CODE_DIRECT_TOOL_RE.test(content)) {
+    return true;
+  }
+  if (PROJECT_CODE_PATH_HINT_RE.test(content) && /(read|edit|run)/i.test(content)) {
+    return true;
+  }
+  return PROJECT_CODE_ACTION_RE.test(content) && PROJECT_CODE_TARGET_RE.test(content);
+}
+
+function isLocalDebugHost() {
+  try {
+    const { hostname } = new URL(window.location.href);
+    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+  } catch {
+    return false;
+  }
+}
+
+function latestThreadMessageId(
+  thread: ChatThreadResponse,
+  predicate: (message: ChatMessageResponse) => boolean,
+) {
+  for (let index = thread.messages.length - 1; index >= 0; index -= 1) {
+    const message = thread.messages[index];
+    if (message && predicate(message)) {
+      return message.message_id;
+    }
+  }
+  return null;
+}
+
+function buildThreadDebugBundle(thread: ChatThreadResponse, userId: string | null) {
+  const latestMessage = thread.messages[thread.messages.length - 1] ?? null;
+  return {
+    user_id: userId,
+    project_id: thread.project_id,
+    project_name: thread.project_name,
+    thread_id: thread.thread_id,
+    thread_title: thread.title,
+    message_count: thread.messages.length,
+    latest_message_id: latestMessage?.message_id ?? null,
+    latest_user_message_id: latestThreadMessageId(thread, (message) => message.role === "user"),
+    latest_assistant_message_id: latestThreadMessageId(
+      thread,
+      (message) => message.role === "assistant" && message.kind !== "compaction",
+    ),
+    latest_compaction_message_id: latestThreadMessageId(
+      thread,
+      (message) => message.kind === "compaction",
+    ),
+  };
+}
+
+function quotedToolActivityTarget(label: string) {
+  return label.match(TOOL_ACTIVITY_TARGET_RE)?.[1] ?? "";
+}
+
+function formatToolActivityText(
+  activity: Pick<ToolActivityEntry, "label" | "status" | "toolName">,
+) {
+  const running = activity.status === "running";
+  const target = quotedToolActivityTarget(activity.label);
+  switch (activity.toolName) {
+    case "project_list_files":
+      return running ? "Listing files..." : "Listed files";
+    case "project_read_file":
+      return running ? `Reading ${target || "file"}...` : `Read ${target || "file"}`;
+    case "project_grep":
+      return running
+        ? `Searching files${target ? ` for ${target}` : ""}...`
+        : `Searched files${target ? ` for ${target}` : ""}`;
+    case "project_touch":
+      return running ? `Creating ${target || "file"}...` : `Created ${target || "file"}`;
+    case "project_edit":
+      return running
+        ? `Writing code${target ? ` in ${target}` : ""}...`
+        : `Wrote code${target ? ` in ${target}` : ""}`;
+    case "project_delete":
+      return running ? `Deleting ${target || "file"}...` : `Deleted ${target || "file"}`;
+    case "project_run":
+      return running ? `Running ${target || "file"}...` : `Ran ${target || "file"}`;
+    default:
+      return running ? `Doing ${activity.label}...` : `Did ${activity.label}`;
+  }
+}
+
+function toolActivityHasDetails(activity: Pick<ToolActivityEntry, "command" | "output">) {
+  return Boolean(activity.command || activity.output);
+}
+
 function projectFileKindLabel(fileKind: ProjectFileKind | undefined) {
   return fileKind === "notebook" ? "Notebook" : "Python";
 }
@@ -798,8 +1027,13 @@ export default function App() {
   const [session, setSession] = useState<BrowserSessionResponse | null>(null);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [projectItems, setProjectItems] = useState<Record<string, ProjectItemState>>({});
-  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
-  const [expandedProjectIds, setExpandedProjectIds] = useState<string[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(() =>
+    restoreSelectedProjectId(),
+  );
+  const [expandedProjectIds, setExpandedProjectIds] = useState<string[]>(() => {
+    const restoredProjectId = restoreSelectedProjectId();
+    return restoredProjectId ? [restoredProjectId] : [];
+  });
   const [collapsedProjectCategories, setCollapsedProjectCategories] = useState<
     Record<string, Partial<Record<ProjectSidebarCategoryKey, boolean>>>
   >({});
@@ -883,7 +1117,7 @@ export default function App() {
 
   const sessionRef = useRef<BrowserSessionResponse | null>(null);
   const projectsRef = useRef<ProjectSummary[]>([]);
-  const selectedProjectIdRef = useRef<string | null>(null);
+  const selectedProjectIdRef = useRef<string | null>(restoreSelectedProjectId());
   const projectItemsRef = useRef<Record<string, ProjectItemState>>({});
   const threadMapRef = useRef<Record<string, ChatThreadResponse>>({});
   const pythonFileMapRef = useRef<Record<string, PythonFileResponse>>({});
@@ -912,6 +1146,14 @@ export default function App() {
 
   useEffect(() => {
     selectedProjectIdRef.current = selectedProjectId;
+  }, [selectedProjectId]);
+
+  useEffect(() => {
+    if (selectedProjectId) {
+      localStorage.setItem(SELECTED_PROJECT_KEY, selectedProjectId);
+      return;
+    }
+    localStorage.removeItem(SELECTED_PROJECT_KEY);
   }, [selectedProjectId]);
 
   useEffect(() => {
@@ -1045,6 +1287,7 @@ export default function App() {
 
   const authCopy = AUTH_VIEW_COPY[authView];
   const authenticated = Boolean(session?.authenticated);
+  const localThreadDebugEnabled = useMemo(() => isLocalDebugHost(), []);
   const activeThreadId = activeTab?.kind === "thread" ? activeTab.id : null;
   const activePythonFileId = activeTab?.kind === "python_file" ? activeTab.id : null;
   const activeProjectHomeId = activeTab?.kind === "project_home" ? activeTab.id : null;
@@ -1059,6 +1302,13 @@ export default function App() {
   const activePythonRun = activePythonFileId
     ? (pythonFileRuns[activePythonFileId] ?? { running: false, result: null, error: "" })
     : { running: false, result: null, error: "" };
+  const activeThreadDebugBundle = useMemo(
+    () =>
+      activeThread && localThreadDebugEnabled
+        ? buildThreadDebugBundle(activeThread, session?.user?.user_id ?? null)
+        : null,
+    [activeThread, localThreadDebugEnabled, session?.user?.user_id],
+  );
   const activePythonContent = activePythonDraft?.content ?? activePythonFile?.content ?? "";
   const activeProjectHomeItems = activeProjectHomeId
     ? (projectItems[activeProjectHomeId]?.items ?? [])
@@ -1084,6 +1334,7 @@ export default function App() {
     activeTab == null ||
     (activeTab.kind === "thread" && (!activeThread || activeThread.messages.length === 0));
   const paperDrawerOpen = Boolean(paperDrawer);
+  const hasProjects = projects.length > 0;
   const emptyStateProject =
     projects.find((project) => project.project_id === selectedProjectId) ?? projects[0] ?? null;
   const filteredEmptyStateProjects = useMemo(() => {
@@ -1102,43 +1353,55 @@ export default function App() {
       projects.every((project) => expandedProjectIds.includes(project.project_id)),
     [expandedProjectIds, projects],
   );
-  const openTabItems = useMemo(
-    () =>
-      openTabs.map((tab) => {
-        if (tab.kind === "thread") {
-          const loadedThread = threadMap[tab.id];
-          const title = loadedThread?.title ?? "New chat";
-          return {
-            key: `thread:${tab.id}`,
-            kind: tab.kind,
-            id: tab.id,
-            title: displayThreadTitle(title),
-            tabTitle: truncateTabTitle(title),
-          };
-        }
-        if (tab.kind === "project_home") {
-          const project = projects.find((item) => item.project_id === tab.id);
-          const title = project ? `${project.name} Home` : "Project Home";
-          return {
-            key: `project_home:${tab.id}`,
-            kind: tab.kind,
-            id: tab.id,
-            title,
-            tabTitle: truncateTabTitle(title),
-          };
-        }
-        const loadedFile = pythonFileMap[tab.id];
-        const title = displayPythonFilename(loadedFile?.filename ?? "something.py");
+  const openTabItems = useMemo(() => {
+    const openPythonFiles = openTabs
+      .filter((tab): tab is Extract<OpenTab, { kind: "python_file" }> => tab.kind === "python_file")
+      .map(
+        (tab) =>
+          pythonFileMap[tab.id] ?? { filename: "something.py", repo_path: `src/${tab.id}.py` },
+      );
+    const duplicateKeys = duplicatePythonFilenameKeys(openPythonFiles);
+    return openTabs.map((tab) => {
+      if (tab.kind === "thread") {
+        const loadedThread = threadMap[tab.id];
+        const title = loadedThread?.title ?? "New chat";
         return {
-          key: `python_file:${tab.id}`,
+          key: `thread:${tab.id}`,
           kind: tab.kind,
           id: tab.id,
+          isStreaming: streamingThreadId === tab.id,
+          title: displayThreadTitle(title),
+          tabTitle: truncateTabTitle(title),
+        };
+      }
+      if (tab.kind === "project_home") {
+        const project = projects.find((item) => item.project_id === tab.id);
+        const title = project ? `${project.name} Home` : "Project Home";
+        return {
+          key: `project_home:${tab.id}`,
+          kind: tab.kind,
+          id: tab.id,
+          isStreaming: false,
           title,
           tabTitle: truncateTabTitle(title),
         };
-      }),
-    [openTabs, projects, pythonFileMap, threadMap],
-  );
+      }
+      const loadedFile = pythonFileMap[tab.id];
+      const file = loadedFile ?? {
+        filename: "something.py",
+        repo_path: `src/${tab.id}.py`,
+      };
+      const title = displayPythonTabTitle(file, duplicateKeys);
+      return {
+        key: `python_file:${tab.id}`,
+        kind: tab.kind,
+        id: tab.id,
+        isStreaming: false,
+        title,
+        tabTitle: truncateTabTitle(title),
+      };
+    });
+  }, [openTabs, projects, pythonFileMap, streamingThreadId, threadMap]);
   const hasOpenTabs = openTabItems.length > 0;
   const tabStripStyle = useMemo(
     () =>
@@ -1485,7 +1748,9 @@ export default function App() {
     (
       threadId: string,
       toolId: string,
-      updates: Partial<Pick<ToolActivityEntry, "finishedAt" | "isError">> = {},
+      updates: Partial<
+        Pick<ToolActivityEntry, "finishedAt" | "isError" | "command" | "output">
+      > = {},
     ) => {
       setToolActivities((current) => {
         const existingEntries = current[threadId] ?? [];
@@ -1500,6 +1765,8 @@ export default function App() {
                   ...entry,
                   status: "completed",
                   finishedAt: updates.finishedAt ?? new Date().toISOString(),
+                  command: updates.command ?? entry.command,
+                  output: updates.output ?? entry.output,
                   isError: updates.isError ?? entry.isError,
                 }
               : entry,
@@ -1672,6 +1939,85 @@ export default function App() {
     [updateProjectItemCache],
   );
 
+  const removePythonFileIdsLocally = useCallback(
+    (fileIds: string[], projectId?: string) => {
+      const ids = new Set(fileIds.filter(Boolean));
+      if (ids.size === 0) {
+        return;
+      }
+      setPythonFileMap((current) => {
+        const next = { ...current };
+        for (const fileId of ids) {
+          delete next[fileId];
+        }
+        return next;
+      });
+      setPythonFileDrafts((current) => {
+        const next = { ...current };
+        for (const fileId of ids) {
+          delete next[fileId];
+        }
+        return next;
+      });
+      setPythonFileRuns((current) => {
+        const next = { ...current };
+        for (const fileId of ids) {
+          delete next[fileId];
+        }
+        return next;
+      });
+      setOpenTabs((current) => {
+        const nextTabs = current.filter(
+          (value) => value.kind !== "python_file" || !ids.has(value.id),
+        );
+        setActiveTab((currentActive) => {
+          if (
+            !currentActive ||
+            currentActive.kind !== "python_file" ||
+            !ids.has(currentActive.id)
+          ) {
+            return currentActive;
+          }
+          return nextTabs[nextTabs.length - 1] ?? null;
+        });
+        return nextTabs;
+      });
+      if (projectId) {
+        updateProjectItemCache(projectId, (current) => {
+          if (!current) {
+            return current;
+          }
+          const nextItems = current.items.filter(
+            (item) => item.item_kind !== "python_file" || !ids.has(item.file_id ?? ""),
+          );
+          const removedCount = current.items.length - nextItems.length;
+          const totalCountByKind = { ...current.totalCountByKind };
+          const nextFileTotal = Math.max(
+            0,
+            (totalCountByKind.python_file ?? projectItemKindCount(current.items, "python_file")) -
+              removedCount,
+          );
+          totalCountByKind.python_file = nextFileTotal;
+          return {
+            ...current,
+            items: nextItems,
+            totalCount: Math.max(0, current.totalCount - removedCount),
+            totalCountByKind,
+            hasMore:
+              current.hasMore || nextItems.length < Math.max(0, current.totalCount - removedCount),
+            hasMoreByKind: {
+              ...current.hasMoreByKind,
+              python_file:
+                Boolean(current.hasMoreByKind?.python_file) ||
+                projectItemKindCount(nextItems, "python_file") < nextFileTotal,
+            },
+          };
+        });
+      }
+    },
+    [updateProjectItemCache],
+  );
+
   const fetchProjectItems = useCallback(
     async (projectId: string, append = false, itemKind?: ProjectItemKind) => {
       const existing = projectItemsRef.current[projectId];
@@ -1819,6 +2165,20 @@ export default function App() {
     [updateProjectItemCache],
   );
 
+  const refreshLoadedProjectCodeItems = useCallback(
+    async (projectId: string) => {
+      if (!projectItemsRef.current[projectId]?.loaded) {
+        return;
+      }
+      try {
+        await fetchProjectItems(projectId, false, "python_file");
+      } catch (error) {
+        console.error(error);
+      }
+    },
+    [fetchProjectItems],
+  );
+
   const moveThreadBetweenProjectItems = useCallback(
     (thread: ChatThreadResponse, previousProjectId: string) => {
       if (previousProjectId && previousProjectId !== thread.project_id) {
@@ -1876,10 +2236,12 @@ export default function App() {
   );
 
   const fetchAndStoreThread = useCallback(
-    async (threadId: string) => {
+    async (threadId: string, selectProject = true) => {
       const thread = await getThread(threadId);
       setThreadMap((current) => ({ ...current, [thread.thread_id]: thread }));
-      setSelectedProjectId(thread.project_id);
+      if (selectProject) {
+        setSelectedProjectId(thread.project_id);
+      }
       upsertThreadIntoProjectItems(thread);
       return thread;
     },
@@ -1897,10 +2259,12 @@ export default function App() {
   );
 
   const fetchAndStorePythonFile = useCallback(
-    async (fileId: string) => {
+    async (fileId: string, selectProject = true) => {
       const file = await getPythonFile(fileId);
       setPythonFileMap((current) => ({ ...current, [file.file_id]: file }));
-      setSelectedProjectId(file.project_id);
+      if (selectProject) {
+        setSelectedProjectId(file.project_id);
+      }
       setPythonFileDrafts((current) => ({
         ...current,
         [file.file_id]: current[file.file_id] ?? { content: file.content, dirty: false },
@@ -1909,6 +2273,39 @@ export default function App() {
       return file;
     },
     [upsertPythonFileIntoProjectItems],
+  );
+
+  const persistPythonFile = useCallback(
+    async (fileId: string, content: string) => {
+      const updated = await updatePythonFile(fileId, { content });
+      setPythonFileMap((current) => ({ ...current, [updated.file_id]: updated }));
+      setPythonFileDrafts((current) => ({
+        ...current,
+        [updated.file_id]: { content: updated.content, dirty: false },
+      }));
+      upsertPythonFileIntoProjectItems(updated);
+      await refreshProjects();
+      return updated;
+    },
+    [refreshProjects, upsertPythonFileIntoProjectItems],
+  );
+
+  const persistDirtyProjectDrafts = useCallback(
+    async (projectId: string) => {
+      const dirtyFileIds = Object.entries(pythonFileDraftsRef.current)
+        .filter(([fileId, draft]) => {
+          const pythonFile = pythonFileMapRef.current[fileId];
+          return Boolean(draft.dirty && pythonFile && pythonFile.project_id === projectId);
+        })
+        .map(([fileId]) => fileId);
+      for (const fileId of dirtyFileIds) {
+        const pythonFile =
+          pythonFileMapRef.current[fileId] ?? (await fetchAndStorePythonFile(fileId));
+        const nextContent = pythonFileDraftsRef.current[fileId]?.content ?? pythonFile.content;
+        await persistPythonFile(fileId, nextContent);
+      }
+    },
+    [fetchAndStorePythonFile, persistPythonFile],
   );
 
   const openPythonFile = useCallback(
@@ -1973,29 +2370,60 @@ export default function App() {
     }
   }, []);
 
+  const copyThreadDebugBundle = useCallback(
+    async (bundle: ReturnType<typeof buildThreadDebugBundle>) => {
+      try {
+        await navigator.clipboard.writeText(JSON.stringify(bundle, null, 2));
+        showNoteFlash("Copied chat debug bundle.");
+      } catch (error) {
+        console.error(error);
+      }
+    },
+    [showNoteFlash],
+  );
+
   const sendMessage = useCallback(
     async (threadId: string, content: string) => {
-      const optimisticUserMessage = createLocalMessage("user", content);
-      const now = new Date().toISOString();
-      const fallbackThread = threadMapRef.current[threadId];
-      const turnIndex =
-        (fallbackThread?.messages.filter((message) => message.role === "user").length ?? 0) + 1;
-      const fallbackProjectId =
-        fallbackThread?.project_id ??
+      const existingThread = threadMapRef.current[threadId];
+      const projectIdForTurn =
+        existingThread?.project_id ??
         selectedProjectIdRef.current ??
         projectsRef.current[0]?.project_id ??
         "";
+      if (projectIdForTurn && messageHasProjectCodeIntent(content)) {
+        try {
+          await persistDirtyProjectDrafts(projectIdForTurn);
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : "Project drafts could not be saved.";
+          setComposerStatus(message);
+          if (message.toLowerCase().includes("github")) {
+            showErrorFlash(message);
+            setAuthView("settings");
+            setAuthModalOpen(true);
+          }
+          return null;
+        }
+      }
+      const optimisticUserMessage = createLocalMessage("user", content);
+      const now = new Date().toISOString();
+      const fallbackThread = existingThread;
+      const turnIndex =
+        (fallbackThread?.messages.filter((message) => message.role === "user").length ?? 0) + 1;
+      const fallbackProjectId = projectIdForTurn;
       const fallbackProjectName =
         fallbackThread?.project_name ??
         projectsRef.current.find((project) => project.project_id === fallbackProjectId)?.name ??
         "";
       const fallbackProjectInstructions = fallbackThread?.project_instructions ?? "";
       let assistantStarted = false;
+      let turnUsedProjectCodeTools = false;
       let donePayload: ChatStreamDoneEvent | null = null;
       let gatingPayload: SendChatMessageResponse | null = null;
       let streamError: string | null = null;
       let streamingMessageId: string | null = null;
       const streamAbortController = new AbortController();
+      const optimisticTitle = summarizeThreadTitle(content);
 
       updateThread(threadId, (thread) => ({
         thread_id: thread?.thread_id ?? threadId,
@@ -2004,7 +2432,7 @@ export default function App() {
         project_instructions: thread?.project_instructions ?? fallbackProjectInstructions,
         title:
           (thread?.title ?? "New chat") === "New chat"
-            ? content.slice(0, 60)
+            ? optimisticTitle
             : (thread?.title ?? "New chat"),
         created_at: thread?.created_at ?? now,
         updated_at: now,
@@ -2034,7 +2462,7 @@ export default function App() {
                   project_id: fallbackProjectId,
                   project_name: fallbackProjectName,
                   project_instructions: fallbackProjectInstructions,
-                  title: content.slice(0, 60),
+                  title: optimisticTitle,
                   created_at: now,
                   updated_at: now,
                   messages: [],
@@ -2060,7 +2488,7 @@ export default function App() {
                   project_id: fallbackProjectId,
                   project_name: fallbackProjectName,
                   project_instructions: fallbackProjectInstructions,
-                  title: content.slice(0, 60),
+                  title: optimisticTitle,
                   created_at: now,
                   updated_at: now,
                   messages: [],
@@ -2072,10 +2500,16 @@ export default function App() {
             }
 
             if (eventName === "tool_start") {
+              if (String(payload.tool_name ?? "").startsWith("project_")) {
+                turnUsedProjectCodeTools = true;
+              }
               upsertToolActivity(threadId, {
                 id: payload.tool_call_id,
                 turnIndex,
+                toolName: payload.tool_name,
                 label: payload.label,
+                command: payload.command ?? null,
+                output: null,
                 status: "running",
                 startedAt: new Date().toISOString(),
                 finishedAt: null,
@@ -2086,8 +2520,17 @@ export default function App() {
 
             if (eventName === "tool_done") {
               completeToolActivity(threadId, payload.tool_call_id, {
+                command: payload.command ?? null,
+                output: payload.output ?? null,
                 isError: payload.is_error,
               });
+              if (
+                payload.tool_name === "project_touch" ||
+                payload.tool_name === "project_edit" ||
+                payload.tool_name === "project_delete"
+              ) {
+                void refreshLoadedProjectCodeItems(fallbackProjectId);
+              }
               return;
             }
 
@@ -2101,7 +2544,7 @@ export default function App() {
                   project_id: fallbackProjectId,
                   project_name: fallbackProjectName,
                   project_instructions: fallbackProjectInstructions,
-                  title: content.slice(0, 60),
+                  title: optimisticTitle,
                   created_at: now,
                   updated_at: now,
                   messages: [],
@@ -2125,7 +2568,7 @@ export default function App() {
                   project_id: fallbackProjectId,
                   project_name: fallbackProjectName,
                   project_instructions: fallbackProjectInstructions,
-                  title: content.slice(0, 60),
+                  title: optimisticTitle,
                   created_at: now,
                   updated_at: now,
                   messages: [],
@@ -2155,7 +2598,7 @@ export default function App() {
                   project_id: fallbackProjectId,
                   project_name: fallbackProjectName,
                   project_instructions: fallbackProjectInstructions,
-                  title: content.slice(0, 60),
+                  title: optimisticTitle,
                   created_at: now,
                   updated_at: now,
                   messages: [],
@@ -2191,7 +2634,7 @@ export default function App() {
                 project_id: fallbackProjectId,
                 project_name: fallbackProjectName,
                 project_instructions: fallbackProjectInstructions,
-                title: content.slice(0, 60),
+                title: optimisticTitle,
                 created_at: now,
                 updated_at: now,
                 messages: [],
@@ -2228,6 +2671,9 @@ export default function App() {
           );
           setComposerStatus("");
           await refreshProjects();
+          if (messageHasProjectCodeIntent(content)) {
+            await refreshLoadedProjectCodeItems(payload.thread.project_id);
+          }
           if (payload.state === "api_key_required" || payload.state === "api_key_invalid") {
             showErrorFlash(apiKeyStateMessage(payload.state));
             setAuthView("settings");
@@ -2244,7 +2690,7 @@ export default function App() {
               project_id: fallbackProjectId,
               project_name: fallbackProjectName,
               project_instructions: fallbackProjectInstructions,
-              title: content.slice(0, 60),
+              title: optimisticTitle,
               created_at: now,
               updated_at: now,
               messages: [],
@@ -2281,6 +2727,9 @@ export default function App() {
         );
         setComposerStatus("");
         await refreshProjects();
+        if (turnUsedProjectCodeTools) {
+          await refreshLoadedProjectCodeItems(gatingPayload.thread.project_id);
+        }
         showErrorFlash(apiKeyStateMessage(gatingPayload.state));
         setAuthView("settings");
         setAuthModalOpen(true);
@@ -2292,6 +2741,9 @@ export default function App() {
         const refreshedThread = await fetchAndStoreThread(threadId);
         upsertThreadIntoProjectItems(refreshedThread);
         await refreshProjects();
+        if (turnUsedProjectCodeTools) {
+          await refreshLoadedProjectCodeItems(refreshedThread.project_id);
+        }
         return null;
       }
 
@@ -2309,6 +2761,9 @@ export default function App() {
         const refreshedThread = await fetchAndStoreThread(threadId);
         upsertThreadIntoProjectItems(refreshedThread);
         await refreshProjects();
+        if (turnUsedProjectCodeTools) {
+          await refreshLoadedProjectCodeItems(refreshedThread.project_id);
+        }
         return donePayload;
       }
 
@@ -2324,6 +2779,8 @@ export default function App() {
       includePapers,
       includeUploads,
       markThreadAssistantStarted,
+      persistDirtyProjectDrafts,
+      refreshLoadedProjectCodeItems,
       refreshProjects,
       setThreadUsageSnapshot,
       showErrorFlash,
@@ -2338,14 +2795,31 @@ export default function App() {
   const bootstrapAuthenticatedUi = useCallback(async () => {
     await refreshUploads();
     const loadedProjects = await refreshProjects();
+    const persistedSelectedProjectId = restoreSelectedProjectId();
+    const restoredSelectedProjectId =
+      persistedSelectedProjectId &&
+      loadedProjects.some((project) => project.project_id === persistedSelectedProjectId)
+        ? persistedSelectedProjectId
+        : null;
+    const selectedProjectId = restoredSelectedProjectId ?? loadedProjects[0]?.project_id ?? null;
+    selectedProjectIdRef.current = selectedProjectId;
+    setSelectedProjectId(selectedProjectId);
+    setExpandedProjectIds(restoredSelectedProjectId ? [restoredSelectedProjectId] : []);
+    if (
+      restoredSelectedProjectId &&
+      !projectItemsRef.current[restoredSelectedProjectId]?.loaded &&
+      !projectItemsRef.current[restoredSelectedProjectId]?.loading
+    ) {
+      await fetchProjectItems(restoredSelectedProjectId);
+    }
     const restoredTabs = restoreTabs();
     const validRestoredTabs: OpenTab[] = [];
     for (const tab of restoredTabs) {
       try {
         if (tab.kind === "thread") {
-          await fetchAndStoreThread(tab.id);
+          await fetchAndStoreThread(tab.id, false);
         } else if (tab.kind === "python_file") {
-          await fetchAndStorePythonFile(tab.id);
+          await fetchAndStorePythonFile(tab.id, false);
         } else if (!loadedProjects.some((project) => project.project_id === tab.id)) {
           continue;
         }
@@ -2358,7 +2832,7 @@ export default function App() {
 
     const pendingPrompt = consumePendingPrompt().trim();
     if (pendingPrompt) {
-      const thread = await createNewThread("", loadedProjects[0]?.project_id);
+      const thread = await createNewThread("", selectedProjectId ?? loadedProjects[0]?.project_id);
       setLandingPrompt("");
       await sendMessage(thread.thread_id, pendingPrompt);
       return;
@@ -2367,21 +2841,11 @@ export default function App() {
     const firstOpen = validRestoredTabs[0];
     if (firstOpen) {
       setActiveTab(firstOpen);
-      setSelectedProjectId(
-        firstOpen.kind === "thread"
-          ? (threadMapRef.current[firstOpen.id]?.project_id ??
-              loadedProjects[0]?.project_id ??
-              null)
-          : (pythonFileMapRef.current[firstOpen.id]?.project_id ??
-              loadedProjects[0]?.project_id ??
-              null),
-      );
-    } else if (loadedProjects[0]) {
-      setSelectedProjectId(loadedProjects[0].project_id);
     }
   }, [
     createNewThread,
     fetchAndStorePythonFile,
+    fetchProjectItems,
     fetchAndStoreThread,
     refreshProjects,
     refreshUploads,
@@ -2653,11 +3117,11 @@ export default function App() {
     async (projectId: string) => {
       setSelectedProjectId(projectId);
       const expanded = expandedProjectIds.includes(projectId);
-      if (expanded) {
-        setExpandedProjectIds((current) => current.filter((value) => value !== projectId));
+      if (expanded && expandedProjectIds.length === 1) {
+        setExpandedProjectIds([]);
         return;
       }
-      setExpandedProjectIds((current) => [...current, projectId]);
+      setExpandedProjectIds([projectId]);
       if (
         !projectItemsRef.current[projectId]?.loaded &&
         !projectItemsRef.current[projectId]?.loading
@@ -3076,6 +3540,13 @@ export default function App() {
     [],
   );
 
+  const openDeletePythonFileModal = useCallback(
+    (projectId: string, fileId: string, title: string) => {
+      setDeleteModalState({ kind: "python_file", projectId, fileId, title });
+    },
+    [],
+  );
+
   const closeDeleteModal = useCallback(() => {
     setDeleteModalState(null);
   }, []);
@@ -3102,35 +3573,16 @@ export default function App() {
           .map((item) => item.file_id ?? "");
         await deleteProject(projectId);
         removeThreadIdsLocally([...new Set([...deletedThreadIds, ...cachedThreadIds])], projectId);
-        setPythonFileMap((current) => {
-          const next = { ...current };
-          for (const fileId of [...deletedFileIds, ...cachedFileIds]) {
-            delete next[fileId];
-          }
-          return next;
-        });
-        setPythonFileDrafts((current) => {
-          const next = { ...current };
-          for (const fileId of [...deletedFileIds, ...cachedFileIds]) {
-            delete next[fileId];
-          }
-          return next;
-        });
-        setPythonFileRuns((current) => {
-          const next = { ...current };
-          for (const fileId of [...deletedFileIds, ...cachedFileIds]) {
-            delete next[fileId];
-          }
-          return next;
-        });
+        removePythonFileIdsLocally([...new Set([...deletedFileIds, ...cachedFileIds])], projectId);
         setOpenTabs((current) => {
-          const ids = new Set([...deletedFileIds, ...cachedFileIds]);
-          const nextTabs = current.filter((tab) => tab.kind !== "python_file" || !ids.has(tab.id));
+          const nextTabs = current.filter(
+            (tab) => tab.kind !== "project_home" || tab.id !== projectId,
+          );
           setActiveTab((currentActive) => {
             if (
               !currentActive ||
-              currentActive.kind !== "python_file" ||
-              !ids.has(currentActive.id)
+              currentActive.kind !== "project_home" ||
+              currentActive.id !== projectId
             ) {
               return currentActive;
             }
@@ -3145,16 +3597,26 @@ export default function App() {
         });
         setExpandedProjectIds((current) => current.filter((value) => value !== projectId));
         await refreshProjects();
-      } else {
+      } else if (deleteModalState.kind === "thread") {
         await deleteThread(deleteModalState.threadId);
         removeThreadIdsLocally([deleteModalState.threadId], deleteModalState.projectId);
+        await refreshProjects();
+      } else {
+        await deletePythonFile(deleteModalState.fileId);
+        removePythonFileIdsLocally([deleteModalState.fileId], deleteModalState.projectId);
         await refreshProjects();
       }
       closeDeleteModal();
     } catch (error) {
       setComposerStatus(error instanceof Error ? error.message : "Delete failed.");
     }
-  }, [closeDeleteModal, deleteModalState, refreshProjects, removeThreadIdsLocally]);
+  }, [
+    closeDeleteModal,
+    deleteModalState,
+    refreshProjects,
+    removePythonFileIdsLocally,
+    removeThreadIdsLocally,
+  ]);
 
   const handleProjectStartChat = useCallback(
     async (projectId: string) => {
@@ -3294,21 +3756,6 @@ export default function App() {
       showErrorFlash,
       upsertPythonFileIntoProjectItems,
     ],
-  );
-
-  const persistPythonFile = useCallback(
-    async (fileId: string, content: string) => {
-      const updated = await updatePythonFile(fileId, { content });
-      setPythonFileMap((current) => ({ ...current, [updated.file_id]: updated }));
-      setPythonFileDrafts((current) => ({
-        ...current,
-        [updated.file_id]: { content: updated.content, dirty: false },
-      }));
-      upsertPythonFileIntoProjectItems(updated);
-      await refreshProjects();
-      return updated;
-    },
-    [refreshProjects, upsertPythonFileIntoProjectItems],
   );
 
   const applyConflictResolutionsLocally = useCallback(
@@ -3537,7 +3984,7 @@ export default function App() {
         [fileId]: { running: true, result: null, error: "" },
       }));
       try {
-        const result = await runPythonFile(fileId);
+        const result = await runPythonFile(fileId, "full");
         setPythonFileRuns((current) => ({
           ...current,
           [fileId]: { running: false, result, error: "" },
@@ -3635,7 +4082,7 @@ export default function App() {
         }));
         return;
       }
-      const result = await runPythonFile(activePythonFileId);
+      const result = await runPythonFile(activePythonFileId, "full");
       setPythonFileRuns((current) => ({
         ...current,
         [activePythonFileId]: { running: false, result, error: "" },
@@ -3879,15 +4326,18 @@ export default function App() {
               </div>
               <div className="sidebar-quick-actions">
                 <button
+                  type="button"
                   id="new-chat-button"
                   className="sidebar-quick-action"
-                  onClick={() => void handleNewChat()}
+                  onClick={() => (hasProjects ? void handleNewChat() : openCreateProjectModal())}
                 >
                   <AppIcon
-                    src={staticAssetPath("edit.svg")}
+                    src={staticAssetPath(hasProjects ? "edit.svg" : "new-project.svg")}
                     className="sidebar-quick-action-icon"
                   />
-                  <span className="sidebar-quick-action-label">New chat</span>
+                  <span className="sidebar-quick-action-label">
+                    {hasProjects ? "New chat" : "Create project"}
+                  </span>
                 </button>
                 <button type="button" className="sidebar-quick-action" onClick={handleReadDocs}>
                   <AppIcon
@@ -3934,161 +4384,200 @@ export default function App() {
                 </div>
               </div>
               <div id="project-list" className="project-list">
-                {projects.map((project) => {
-                  const expanded = expandedProjectIds.includes(project.project_id);
-                  const itemState = projectItems[project.project_id];
-                  const collapsedCategories = collapsedProjectCategories[project.project_id] ?? {};
-                  const visibleProjectItems = itemState?.items ?? [];
-                  const codeItems = visibleProjectItems.filter(
-                    (item) => item.item_kind === "python_file",
-                  );
-                  const sessionItems = visibleProjectItems.filter((item) => {
-                    if (item.item_kind !== "thread") {
-                      return false;
-                    }
-                    return shouldShowThreadInSidebar({
-                      thread_id: item.thread_id ?? "",
-                      project_id: item.project_id,
-                      title: item.title,
-                      created_at: item.created_at,
-                      updated_at: item.updated_at,
-                      last_message_preview: item.last_message_preview,
+                {projects.length === 0 ? (
+                  <div className="project-list-empty">
+                    <p>No projects yet.</p>
+                    <button type="button" className="sidebar-link" onClick={openCreateProjectModal}>
+                      Create project
+                    </button>
+                  </div>
+                ) : (
+                  projects.map((project) => {
+                    const expanded = expandedProjectIds.includes(project.project_id);
+                    const itemState = projectItems[project.project_id];
+                    const collapsedCategories =
+                      collapsedProjectCategories[project.project_id] ?? {};
+                    const visibleProjectItems = itemState?.items ?? [];
+                    const codeItems = visibleProjectItems.filter(
+                      (item) => item.item_kind === "python_file",
+                    );
+                    const sessionItems = visibleProjectItems.filter((item) => {
+                      if (item.item_kind !== "thread") {
+                        return false;
+                      }
+                      return shouldShowThreadInSidebar({
+                        thread_id: item.thread_id ?? "",
+                        project_id: item.project_id,
+                        title: item.title,
+                        created_at: item.created_at,
+                        updated_at: item.updated_at,
+                        last_message_preview: item.last_message_preview,
+                      });
                     });
-                  });
-                  const codeHasMore = Boolean(itemState?.hasMoreByKind?.python_file);
-                  const sessionsHasMore = Boolean(itemState?.hasMoreByKind?.thread);
-                  const codeLoadingMore = Boolean(itemState?.loadingMoreByKind?.python_file);
-                  const sessionsLoadingMore = Boolean(itemState?.loadingMoreByKind?.thread);
-                  const allProjectCategoriesCollapsed = PROJECT_SIDEBAR_CATEGORY_KEYS.every((key) =>
-                    Boolean(collapsedCategories[key]),
-                  );
-                  const expandProjectSections = !expanded || allProjectCategoriesCollapsed;
-                  return (
-                    <div
-                      key={project.project_id}
-                      className={`project-group${expanded ? " expanded" : ""}${projectMenuProjectId === project.project_id ? " menu-open" : ""}`}
-                    >
+                    const codeHasMore = Boolean(itemState?.hasMoreByKind?.python_file);
+                    const sessionsHasMore = Boolean(itemState?.hasMoreByKind?.thread);
+                    const codeLoadingMore = Boolean(itemState?.loadingMoreByKind?.python_file);
+                    const sessionsLoadingMore = Boolean(itemState?.loadingMoreByKind?.thread);
+                    const allProjectCategoriesCollapsed = PROJECT_SIDEBAR_CATEGORY_KEYS.every(
+                      (key) => Boolean(collapsedCategories[key]),
+                    );
+                    const expandProjectSections = !expanded || allProjectCategoriesCollapsed;
+                    return (
                       <div
-                        role="button"
-                        tabIndex={0}
-                        className={`project-card${selectedProjectId === project.project_id ? " active" : ""}`}
-                        onClick={() => void handleProjectSelection(project.project_id)}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter" || event.key === " ") {
-                            event.preventDefault();
-                            void handleProjectSelection(project.project_id);
-                          }
-                        }}
-                        title={project.name}
+                        key={project.project_id}
+                        className={`project-group${expanded ? " expanded" : ""}${projectMenuProjectId === project.project_id ? " menu-open" : ""}`}
                       >
-                        <div className="project-card-main">
-                          <AppIcon
-                            src={staticAssetPath(
-                              expanded ? "project-opened.svg" : "project-closed.svg",
-                            )}
-                            className="project-card-icon"
-                          />
-                          <strong className="project-card-title">{project.name}</strong>
-                        </div>
                         <div
-                          className="project-card-actions"
-                          onMouseDown={(event) => event.stopPropagation()}
-                          onClick={(event) => event.stopPropagation()}
-                        >
-                          <button
-                            type="button"
-                            className="sidebar-icon-button project-action-button"
-                            aria-label={
-                              expandProjectSections
-                                ? `Expand all sections in ${project.name}`
-                                : `Collapse all sections in ${project.name}`
+                          role="button"
+                          tabIndex={0}
+                          className={`project-card${selectedProjectId === project.project_id ? " active" : ""}`}
+                          onClick={() => void handleProjectSelection(project.project_id)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter" || event.key === " ") {
+                              event.preventDefault();
+                              void handleProjectSelection(project.project_id);
                             }
-                            onMouseDown={(event) => event.stopPropagation()}
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              void toggleAllProjectCategories(project.project_id);
-                            }}
-                          >
+                          }}
+                          title={project.name}
+                        >
+                          <div className="project-card-main">
                             <AppIcon
                               src={staticAssetPath(
-                                expandProjectSections
-                                  ? "expand-projects.svg"
-                                  : "collapse-projects.svg",
+                                expanded ? "project-opened.svg" : "project-closed.svg",
                               )}
-                              className="project-action-icon"
+                              className="project-card-icon"
                             />
-                          </button>
+                            <strong className="project-card-title">{project.name}</strong>
+                          </div>
                           <div
-                            ref={
-                              projectMenuProjectId === project.project_id ? projectMenuRef : null
-                            }
-                            className="project-menu-wrap"
+                            className="project-card-actions"
                             onMouseDown={(event) => event.stopPropagation()}
+                            onClick={(event) => event.stopPropagation()}
                           >
                             <button
                               type="button"
                               className="sidebar-icon-button project-action-button"
-                              aria-label={`Open project menu for ${project.name}`}
+                              aria-label={
+                                expandProjectSections
+                                  ? `Expand all sections in ${project.name}`
+                                  : `Collapse all sections in ${project.name}`
+                              }
                               onMouseDown={(event) => event.stopPropagation()}
                               onClick={(event) => {
                                 event.stopPropagation();
-                                setSelectedProjectId(project.project_id);
-                                setProjectMenuProjectId((current) =>
-                                  current === project.project_id ? null : project.project_id,
-                                );
+                                void toggleAllProjectCategories(project.project_id);
                               }}
                             >
                               <AppIcon
-                                src={staticAssetPath("menu.svg")}
+                                src={staticAssetPath(
+                                  expandProjectSections
+                                    ? "expand-projects.svg"
+                                    : "collapse-projects.svg",
+                                )}
                                 className="project-action-icon"
                               />
                             </button>
-                            {projectMenuProjectId === project.project_id ? (
-                              <div className="project-menu-popover" role="menu">
-                                <button
-                                  type="button"
-                                  className="project-menu-item"
-                                  role="menuitem"
-                                  onClick={() => openEditProjectModal(project.project_id)}
-                                >
-                                  Rename project
-                                </button>
-                                <button
-                                  type="button"
-                                  className="project-menu-item danger"
-                                  role="menuitem"
-                                  disabled={project.is_default}
-                                  onClick={() =>
-                                    openDeleteProjectModal(project.project_id, project.name)
-                                  }
-                                >
-                                  Delete project
-                                </button>
-                              </div>
-                            ) : null}
+                            <div
+                              ref={
+                                projectMenuProjectId === project.project_id ? projectMenuRef : null
+                              }
+                              className="project-menu-wrap"
+                              onMouseDown={(event) => event.stopPropagation()}
+                            >
+                              <button
+                                type="button"
+                                className="sidebar-icon-button project-action-button"
+                                aria-label={`Open project menu for ${project.name}`}
+                                onMouseDown={(event) => event.stopPropagation()}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  setSelectedProjectId(project.project_id);
+                                  setProjectMenuProjectId((current) =>
+                                    current === project.project_id ? null : project.project_id,
+                                  );
+                                }}
+                              >
+                                <AppIcon
+                                  src={staticAssetPath("menu.svg")}
+                                  className="project-action-icon"
+                                />
+                              </button>
+                              {projectMenuProjectId === project.project_id ? (
+                                <div className="project-menu-popover" role="menu">
+                                  <button
+                                    type="button"
+                                    className="project-menu-item"
+                                    role="menuitem"
+                                    onClick={() => openEditProjectModal(project.project_id)}
+                                  >
+                                    Rename project
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="project-menu-item danger"
+                                    role="menuitem"
+                                    onClick={() =>
+                                      openDeleteProjectModal(project.project_id, project.name)
+                                    }
+                                  >
+                                    Delete project
+                                  </button>
+                                </div>
+                              ) : null}
+                            </div>
                           </div>
                         </div>
-                      </div>
-                      {expanded ? (
-                        <div className="project-session-section">
-                          {itemState?.loading ? (
-                            <div className="project-session-state">Loading items…</div>
-                          ) : null}
-                          {itemState?.error ? (
-                            <div className="project-session-state error">{itemState.error}</div>
-                          ) : null}
-                          {itemState?.loaded ? (
-                            <>
-                              <div className="project-tree">
-                                {PROJECT_PLACEHOLDER_CATEGORIES.map((category) => (
-                                  <div key={category.label} className="project-tree-category">
+                        {expanded ? (
+                          <div className="project-session-section">
+                            {itemState?.loading ? (
+                              <div className="project-session-state">Loading items…</div>
+                            ) : null}
+                            {itemState?.error ? (
+                              <div className="project-session-state error">{itemState.error}</div>
+                            ) : null}
+                            {itemState?.loaded ? (
+                              <>
+                                <div className="project-tree">
+                                  {PROJECT_PLACEHOLDER_CATEGORIES.map((category) => (
+                                    <div key={category.label} className="project-tree-category">
+                                      <div className="project-tree-category-header">
+                                        <button
+                                          type="button"
+                                          className="project-tree-category-label"
+                                          aria-expanded={!collapsedCategories[category.key]}
+                                          onClick={() =>
+                                            toggleProjectCategory(project.project_id, category.key)
+                                          }
+                                        >
+                                          <span
+                                            className="project-tree-category-chevron"
+                                            aria-hidden="true"
+                                          />
+                                          <MaskedAssetIcon
+                                            asset={category.asset}
+                                            className="project-tree-category-icon"
+                                          />
+                                          <span>{category.label}</span>
+                                        </button>
+                                        {category.showCount ? (
+                                          <div className="project-tree-category-actions">
+                                            <em className="project-tree-category-count">0</em>
+                                          </div>
+                                        ) : null}
+                                      </div>
+                                      {!collapsedCategories[category.key] ? (
+                                        <div className="project-tree-empty">Empty</div>
+                                      ) : null}
+                                    </div>
+                                  ))}
+                                  <div className="project-tree-category">
                                     <div className="project-tree-category-header">
                                       <button
                                         type="button"
                                         className="project-tree-category-label"
-                                        aria-expanded={!collapsedCategories[category.key]}
+                                        aria-expanded={!collapsedCategories.sessions}
                                         onClick={() =>
-                                          toggleProjectCategory(project.project_id, category.key)
+                                          toggleProjectCategory(project.project_id, "sessions")
                                         }
                                       >
                                         <span
@@ -4096,252 +4585,269 @@ export default function App() {
                                           aria-hidden="true"
                                         />
                                         <MaskedAssetIcon
-                                          asset={category.asset}
+                                          asset="sessions.svg"
                                           className="project-tree-category-icon"
                                         />
-                                        <span>{category.label}</span>
+                                        <span>Sessions</span>
                                       </button>
-                                      {category.showCount ? (
-                                        <div className="project-tree-category-actions">
-                                          <em className="project-tree-category-count">0</em>
-                                        </div>
-                                      ) : null}
+                                      <div className="project-tree-category-actions">
+                                        <button
+                                          type="button"
+                                          className="sidebar-icon-button project-action-button"
+                                          aria-label={`Start chat in ${project.name}`}
+                                          onClick={() =>
+                                            void handleProjectStartChat(project.project_id)
+                                          }
+                                        >
+                                          <AppIcon
+                                            src={staticAssetPath("edit.svg")}
+                                            className="project-action-icon"
+                                          />
+                                        </button>
+                                      </div>
                                     </div>
-                                    {!collapsedCategories[category.key] ? (
-                                      <div className="project-tree-empty">Empty</div>
+                                    {!collapsedCategories.sessions && sessionItems.length > 0 ? (
+                                      <div className="thread-list project-thread-list project-category-list">
+                                        {sessionItems.map((item) => {
+                                          const title = displayThreadTitle(item.title);
+                                          return (
+                                            <div
+                                              key={item.item_id}
+                                              role="button"
+                                              tabIndex={0}
+                                              className={`thread-card${activeThreadId === item.thread_id ? " active" : ""}`}
+                                              title={title}
+                                              onClick={() =>
+                                                void handleThreadSelection(item.thread_id ?? "")
+                                              }
+                                              onKeyDown={(event) => {
+                                                if (event.key === "Enter" || event.key === " ") {
+                                                  event.preventDefault();
+                                                  void handleThreadSelection(item.thread_id ?? "");
+                                                }
+                                              }}
+                                            >
+                                              <div className="thread-card-copy">
+                                                <strong className="thread-card-title">
+                                                  {title}
+                                                </strong>
+                                              </div>
+                                              <span className="thread-card-age">
+                                                {formatThreadAge(item.updated_at)}
+                                              </span>
+                                              <button
+                                                type="button"
+                                                className="thread-card-delete"
+                                                aria-label={`Delete ${title}`}
+                                                onClick={(event) => {
+                                                  event.stopPropagation();
+                                                  openDeleteThreadModal(
+                                                    project.project_id,
+                                                    item.thread_id ?? "",
+                                                    title,
+                                                  );
+                                                }}
+                                              >
+                                                <AppIcon
+                                                  src={staticAssetPath("delete-session.svg")}
+                                                  className="thread-card-delete-icon"
+                                                />
+                                              </button>
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+                                    ) : !collapsedCategories.sessions ? (
+                                      <div className="project-tree-empty">No sessions yet.</div>
                                     ) : null}
-                                  </div>
-                                ))}
-                                <div className="project-tree-category">
-                                  <div className="project-tree-category-header">
-                                    <button
-                                      type="button"
-                                      className="project-tree-category-label"
-                                      aria-expanded={!collapsedCategories.sessions}
-                                      onClick={() =>
-                                        toggleProjectCategory(project.project_id, "sessions")
-                                      }
-                                    >
-                                      <span
-                                        className="project-tree-category-chevron"
-                                        aria-hidden="true"
-                                      />
-                                      <MaskedAssetIcon
-                                        asset="sessions.svg"
-                                        className="project-tree-category-icon"
-                                      />
-                                      <span>Sessions</span>
-                                    </button>
-                                    <div className="project-tree-category-actions">
+                                    {!collapsedCategories.sessions && sessionsHasMore ? (
                                       <button
                                         type="button"
-                                        className="sidebar-icon-button project-action-button"
-                                        aria-label={`Start chat in ${project.name}`}
+                                        className="project-show-more"
+                                        disabled={sessionsLoadingMore}
                                         onClick={() =>
-                                          void handleProjectStartChat(project.project_id)
+                                          void handleLoadMoreItems(project.project_id, "thread")
                                         }
                                       >
-                                        <AppIcon
-                                          src={staticAssetPath("edit.svg")}
-                                          className="project-action-icon"
-                                        />
+                                        {sessionsLoadingMore ? "Loading..." : "Show more"}
                                       </button>
-                                    </div>
+                                    ) : null}
                                   </div>
-                                  {!collapsedCategories.sessions && sessionItems.length > 0 ? (
-                                    <div className="thread-list project-thread-list project-category-list">
-                                      {sessionItems.map((item) => {
-                                        const title = displayThreadTitle(item.title);
-                                        return (
-                                          <div
-                                            key={item.item_id}
-                                            role="button"
-                                            tabIndex={0}
-                                            className={`thread-card${activeThreadId === item.thread_id ? " active" : ""}`}
-                                            title={title}
-                                            onClick={() =>
-                                              void handleThreadSelection(item.thread_id ?? "")
-                                            }
-                                            onKeyDown={(event) => {
-                                              if (event.key === "Enter" || event.key === " ") {
-                                                event.preventDefault();
-                                                void handleThreadSelection(item.thread_id ?? "");
-                                              }
-                                            }}
+                                  <div className="project-tree-category">
+                                    <div className="project-tree-category-header">
+                                      <button
+                                        type="button"
+                                        className="project-tree-category-label"
+                                        aria-expanded={!collapsedCategories.code}
+                                        onClick={() =>
+                                          toggleProjectCategory(project.project_id, "code")
+                                        }
+                                      >
+                                        <span
+                                          className="project-tree-category-chevron"
+                                          aria-hidden="true"
+                                        />
+                                        <MaskedAssetIcon
+                                          asset="code.svg"
+                                          className="project-tree-category-icon"
+                                        />
+                                        <span>Code</span>
+                                      </button>
+                                      <div className="project-tree-category-actions">
+                                        {project.github_repo_url ? (
+                                          <a
+                                            href={project.github_repo_url}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            className="project-tree-repo-link"
+                                            aria-label={`Open GitHub repository for ${project.name}`}
+                                            title="Open GitHub repository"
+                                            onClick={(event) => event.stopPropagation()}
                                           >
-                                            <div className="thread-card-copy">
-                                              <strong className="thread-card-title">{title}</strong>
-                                            </div>
-                                            <span className="thread-card-age">
-                                              {formatThreadAge(item.updated_at)}
-                                            </span>
-                                            <button
-                                              type="button"
-                                              className="thread-card-delete"
-                                              aria-label={`Delete ${title}`}
-                                              onClick={(event) => {
-                                                event.stopPropagation();
-                                                openDeleteThreadModal(
-                                                  project.project_id,
-                                                  item.thread_id ?? "",
-                                                  title,
-                                                );
-                                              }}
-                                            >
-                                              <AppIcon
-                                                src={staticAssetPath("delete-session.svg")}
-                                                className="thread-card-delete-icon"
-                                              />
-                                            </button>
-                                          </div>
-                                        );
-                                      })}
+                                            <MaskedAssetIcon
+                                              asset="git.svg"
+                                              className="project-tree-repo-icon"
+                                            />
+                                          </a>
+                                        ) : null}
+                                      </div>
                                     </div>
-                                  ) : !collapsedCategories.sessions ? (
-                                    <div className="project-tree-empty">No sessions yet.</div>
-                                  ) : null}
-                                  {!collapsedCategories.sessions && sessionsHasMore ? (
-                                    <button
-                                      type="button"
-                                      className="project-show-more"
-                                      disabled={sessionsLoadingMore}
-                                      onClick={() =>
-                                        void handleLoadMoreItems(project.project_id, "thread")
-                                      }
-                                    >
-                                      {sessionsLoadingMore ? "Loading..." : "Show more"}
-                                    </button>
-                                  ) : null}
-                                </div>
-                                <div className="project-tree-category">
-                                  <div className="project-tree-category-header">
-                                    <button
-                                      type="button"
-                                      className="project-tree-category-label"
-                                      aria-expanded={!collapsedCategories.code}
-                                      onClick={() =>
-                                        toggleProjectCategory(project.project_id, "code")
-                                      }
-                                    >
-                                      <span
-                                        className="project-tree-category-chevron"
-                                        aria-hidden="true"
-                                      />
-                                      <MaskedAssetIcon
-                                        asset="code.svg"
-                                        className="project-tree-category-icon"
-                                      />
-                                      <span>Code</span>
-                                    </button>
-                                    <div className="project-tree-category-actions">
-                                      {project.github_repo_url ? (
-                                        <a
-                                          href={project.github_repo_url}
-                                          target="_blank"
-                                          rel="noreferrer"
-                                          className="project-tree-repo-link"
-                                          aria-label={`Open GitHub repository for ${project.name}`}
-                                          title="Open GitHub repository"
-                                          onClick={(event) => event.stopPropagation()}
-                                        >
-                                          <MaskedAssetIcon
-                                            asset="git.svg"
-                                            className="project-tree-repo-icon"
-                                          />
-                                        </a>
-                                      ) : null}
-                                    </div>
+                                    {!collapsedCategories.code && codeItems.length > 0 ? (
+                                      <div className="thread-list project-thread-list project-category-list">
+                                        {(() => {
+                                          const duplicateKeys =
+                                            duplicatePythonFilenameKeys(codeItems);
+                                          return codeItems.map((item) => {
+                                            const displayFile = {
+                                              filename: item.filename || item.title,
+                                              repo_path: item.repo_path,
+                                            };
+                                            const title = displayPythonFileTitle(
+                                              displayFile,
+                                              duplicateKeys,
+                                            );
+                                            const pathContext = displayPythonFilePathContext(
+                                              displayFile,
+                                              duplicateKeys,
+                                            );
+                                            return (
+                                              <div
+                                                key={item.item_id}
+                                                role="button"
+                                                tabIndex={0}
+                                                className={`thread-card python-file-card${activePythonFileId === item.file_id ? " active" : ""}`}
+                                                title={pathContext || title}
+                                                onClick={() =>
+                                                  void handlePythonFileSelection(item.file_id ?? "")
+                                                }
+                                                onKeyDown={(event) => {
+                                                  if (event.key === "Enter" || event.key === " ") {
+                                                    event.preventDefault();
+                                                    void handlePythonFileSelection(
+                                                      item.file_id ?? "",
+                                                    );
+                                                  }
+                                                }}
+                                              >
+                                                <div className="thread-card-copy python-file-card-copy">
+                                                  <AppIcon
+                                                    src={staticAssetPath(
+                                                      item.file_kind === "notebook"
+                                                        ? "note.svg"
+                                                        : "python.svg",
+                                                    )}
+                                                    className="python-file-card-icon"
+                                                  />
+                                                  <span className="python-file-card-text">
+                                                    <strong className="thread-card-title">
+                                                      {title}
+                                                    </strong>
+                                                    {pathContext ? (
+                                                      <span className="thread-card-subtitle">
+                                                        {pathContext}
+                                                      </span>
+                                                    ) : null}
+                                                  </span>
+                                                </div>
+                                                <span className="thread-card-age">
+                                                  {formatThreadAge(item.updated_at)}
+                                                </span>
+                                                <button
+                                                  type="button"
+                                                  className="thread-card-delete thread-card-rename"
+                                                  aria-label={`Rename ${title}`}
+                                                  onClick={(event) => {
+                                                    event.stopPropagation();
+                                                    void handleRenamePythonFile(item.file_id ?? "");
+                                                  }}
+                                                >
+                                                  <AppIcon
+                                                    src={staticAssetPath("edit.svg")}
+                                                    className="thread-card-delete-icon"
+                                                  />
+                                                </button>
+                                                <button
+                                                  type="button"
+                                                  className="thread-card-delete"
+                                                  aria-label={`Delete ${title}`}
+                                                  onClick={(event) => {
+                                                    event.stopPropagation();
+                                                    openDeletePythonFileModal(
+                                                      item.project_id,
+                                                      item.file_id ?? "",
+                                                      title,
+                                                    );
+                                                  }}
+                                                >
+                                                  <AppIcon
+                                                    src={staticAssetPath("delete-session.svg")}
+                                                    className="thread-card-delete-icon"
+                                                  />
+                                                </button>
+                                              </div>
+                                            );
+                                          });
+                                        })()}
+                                      </div>
+                                    ) : !collapsedCategories.code ? (
+                                      <div className="project-tree-empty">No code files yet.</div>
+                                    ) : null}
+                                    {!collapsedCategories.code && codeHasMore ? (
+                                      <button
+                                        type="button"
+                                        className="project-show-more"
+                                        disabled={codeLoadingMore}
+                                        onClick={() =>
+                                          void handleLoadMoreItems(
+                                            project.project_id,
+                                            "python_file",
+                                          )
+                                        }
+                                      >
+                                        {codeLoadingMore ? "Loading..." : "Show more"}
+                                      </button>
+                                    ) : null}
                                   </div>
-                                  {!collapsedCategories.code && codeItems.length > 0 ? (
-                                    <div className="thread-list project-thread-list project-category-list">
-                                      {codeItems.map((item) => {
-                                        const title = displayPythonFilename(
-                                          item.filename || item.title,
-                                        );
-                                        return (
-                                          <div
-                                            key={item.item_id}
-                                            role="button"
-                                            tabIndex={0}
-                                            className={`thread-card python-file-card${activePythonFileId === item.file_id ? " active" : ""}`}
-                                            title={title}
-                                            onClick={() =>
-                                              void handlePythonFileSelection(item.file_id ?? "")
-                                            }
-                                            onKeyDown={(event) => {
-                                              if (event.key === "Enter" || event.key === " ") {
-                                                event.preventDefault();
-                                                void handlePythonFileSelection(item.file_id ?? "");
-                                              }
-                                            }}
-                                          >
-                                            <div className="thread-card-copy python-file-card-copy">
-                                              <AppIcon
-                                                src={staticAssetPath(
-                                                  item.file_kind === "notebook"
-                                                    ? "note.svg"
-                                                    : "python.svg",
-                                                )}
-                                                className="python-file-card-icon"
-                                              />
-                                              <strong className="thread-card-title">{title}</strong>
-                                            </div>
-                                            <span className="thread-card-age">
-                                              {formatThreadAge(item.updated_at)}
-                                            </span>
-                                            <button
-                                              type="button"
-                                              className="thread-card-delete thread-card-rename"
-                                              aria-label={`Rename ${title}`}
-                                              onClick={(event) => {
-                                                event.stopPropagation();
-                                                void handleRenamePythonFile(item.file_id ?? "");
-                                              }}
-                                            >
-                                              <AppIcon
-                                                src={staticAssetPath("edit.svg")}
-                                                className="thread-card-delete-icon"
-                                              />
-                                            </button>
-                                          </div>
-                                        );
-                                      })}
-                                    </div>
-                                  ) : !collapsedCategories.code ? (
-                                    <div className="project-tree-empty">No code files yet.</div>
-                                  ) : null}
-                                  {!collapsedCategories.code && codeHasMore ? (
-                                    <button
-                                      type="button"
-                                      className="project-show-more"
-                                      disabled={codeLoadingMore}
-                                      onClick={() =>
-                                        void handleLoadMoreItems(project.project_id, "python_file")
-                                      }
-                                    >
-                                      {codeLoadingMore ? "Loading..." : "Show more"}
-                                    </button>
-                                  ) : null}
+                                  <button
+                                    type="button"
+                                    className={`project-tree-home${activeProjectHomeId === project.project_id ? " active" : ""}`}
+                                    onClick={() => openProjectHome(project.project_id)}
+                                  >
+                                    <MaskedAssetIcon
+                                      asset="home.svg"
+                                      className="project-tree-category-icon"
+                                    />
+                                    <span>Home</span>
+                                  </button>
                                 </div>
-                                <button
-                                  type="button"
-                                  className={`project-tree-home${activeProjectHomeId === project.project_id ? " active" : ""}`}
-                                  onClick={() => openProjectHome(project.project_id)}
-                                >
-                                  <MaskedAssetIcon
-                                    asset="home.svg"
-                                    className="project-tree-category-icon"
-                                  />
-                                  <span>Home</span>
-                                </button>
-                              </div>
-                            </>
-                          ) : null}
-                        </div>
-                      ) : null}
-                    </div>
-                  );
-                })}
+                              </>
+                            ) : null}
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  })
+                )}
               </div>
             </section>
 
@@ -4465,7 +4971,12 @@ export default function App() {
                             }
                           }}
                         >
-                          <span className="chat-tab-title">{tab.tabTitle}</span>
+                          <span className="chat-tab-label">
+                            {tab.kind === "thread" && tab.isStreaming ? (
+                              <span className="chat-tab-thread-indicator" aria-hidden="true" />
+                            ) : null}
+                            <span className="chat-tab-title">{tab.tabTitle}</span>
+                          </span>
                         </button>
                         <button
                           type="button"
@@ -4490,6 +5001,29 @@ export default function App() {
               className={`chat-message-list${isChatEmpty ? " empty" : ""}${activeTab?.kind === "python_file" ? " python-file-view" : ""}`}
               onScroll={handleMessageListScroll}
             >
+              {activeTab?.kind === "thread" && activeThreadDebugBundle && !isChatEmpty ? (
+                <div className="chat-thread-debug-strip" data-testid="thread-debug-strip">
+                  <div className="chat-thread-debug-copy-row">
+                    <span className="chat-thread-debug-label">Debug IDs</span>
+                    <button
+                      type="button"
+                      className="chat-thread-debug-copy-button"
+                      aria-label="Copy chat debug bundle"
+                      title="Copy chat debug bundle"
+                      onClick={() => void copyThreadDebugBundle(activeThreadDebugBundle)}
+                    >
+                      Copy
+                    </button>
+                  </div>
+                  <div className="chat-thread-debug-values">
+                    <span>{`user ${activeThreadDebugBundle.user_id ?? "none"}`}</span>
+                    <span>{`project ${activeThreadDebugBundle.project_id}`}</span>
+                    <span>{`thread ${activeThreadDebugBundle.thread_id}`}</span>
+                    <span>{`last ${activeThreadDebugBundle.latest_message_id ?? "none"}`}</span>
+                    <span>{`assistant ${activeThreadDebugBundle.latest_assistant_message_id ?? "none"}`}</span>
+                  </div>
+                </div>
+              ) : null}
               {activeTab?.kind === "project_home" ? (
                 activeProjectHome ? (
                   <div className="project-home-page">
@@ -4651,123 +5185,151 @@ export default function App() {
                       />
                     </button>
                   ) : null}
-                  <div className="chat-empty-state">
-                    <a
-                      className="brandline brandline-link chat-empty-brandline"
-                      href="https://mv37.org"
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      MV37
-                    </a>
-                    <div className="chat-empty-project-row">
-                      <strong>Start new research in</strong>
-                      <div ref={emptyStateProjectPickerRef} className="chat-empty-project-picker">
-                        <button
-                          type="button"
-                          id="empty-state-project-select-trigger"
-                          className="chat-empty-project-trigger"
-                          aria-label="Open empty state project picker"
-                          aria-haspopup="dialog"
-                          aria-expanded={emptyStateProjectPickerOpen}
-                          onClick={() => setEmptyStateProjectPickerOpen((current) => !current)}
-                        >
-                          <span>{emptyStateProject?.name ?? "Project"}</span>
-                        </button>
-                        {emptyStateProjectPickerOpen ? (
-                          <div
-                            className="chat-empty-project-menu"
-                            role="dialog"
-                            aria-label="Choose project"
+                  {hasProjects ? (
+                    <div className="chat-empty-state">
+                      <a
+                        className="brandline brandline-link chat-empty-brandline"
+                        href="https://mv37.org"
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        MV37
+                      </a>
+                      <div className="chat-empty-project-row">
+                        <strong>Start new research in</strong>
+                        <div ref={emptyStateProjectPickerRef} className="chat-empty-project-picker">
+                          <button
+                            type="button"
+                            id="empty-state-project-select-trigger"
+                            className="chat-empty-project-trigger"
+                            aria-label="Open empty state project picker"
+                            aria-haspopup="dialog"
+                            aria-expanded={emptyStateProjectPickerOpen}
+                            onClick={() => setEmptyStateProjectPickerOpen((current) => !current)}
                           >
-                            <div className="chat-empty-project-search-shell">
-                              <input
-                                ref={emptyStateProjectSearchInputRef}
-                                type="text"
-                                className="chat-empty-project-search"
-                                placeholder="Search projects"
-                                aria-label="Search projects"
-                                value={emptyStateProjectSearch}
-                                onChange={(event) => setEmptyStateProjectSearch(event.target.value)}
-                              />
-                            </div>
+                            <span>{emptyStateProject?.name ?? "Project"}</span>
+                          </button>
+                          {emptyStateProjectPickerOpen ? (
                             <div
-                              className="chat-empty-project-options"
-                              role="listbox"
+                              className="chat-empty-project-menu"
+                              role="dialog"
                               aria-label="Choose project"
                             >
-                              {filteredEmptyStateProjects.length > 0 ? (
-                                filteredEmptyStateProjects.map((project) => (
-                                  <button
-                                    key={project.project_id}
-                                    type="button"
-                                    role="option"
-                                    aria-selected={
-                                      emptyStateProject?.project_id === project.project_id
-                                    }
-                                    className={`chat-empty-project-option${emptyStateProject?.project_id === project.project_id ? " active" : ""}`}
-                                    onClick={() => {
-                                      setSelectedProjectId(project.project_id);
-                                      setEmptyStateProjectPickerOpen(false);
-                                    }}
-                                  >
-                                    {project.name}
-                                  </button>
-                                ))
-                              ) : (
-                                <div className="chat-empty-project-empty">
-                                  No projects match this search.
-                                </div>
-                              )}
+                              <div className="chat-empty-project-search-shell">
+                                <input
+                                  ref={emptyStateProjectSearchInputRef}
+                                  type="text"
+                                  className="chat-empty-project-search"
+                                  placeholder="Search projects"
+                                  aria-label="Search projects"
+                                  value={emptyStateProjectSearch}
+                                  onChange={(event) =>
+                                    setEmptyStateProjectSearch(event.target.value)
+                                  }
+                                />
+                              </div>
+                              <div
+                                className="chat-empty-project-options"
+                                role="listbox"
+                                aria-label="Choose project"
+                              >
+                                {filteredEmptyStateProjects.length > 0 ? (
+                                  filteredEmptyStateProjects.map((project) => (
+                                    <button
+                                      key={project.project_id}
+                                      type="button"
+                                      role="option"
+                                      aria-selected={
+                                        emptyStateProject?.project_id === project.project_id
+                                      }
+                                      className={`chat-empty-project-option${emptyStateProject?.project_id === project.project_id ? " active" : ""}`}
+                                      onClick={() => {
+                                        setSelectedProjectId(project.project_id);
+                                        setEmptyStateProjectPickerOpen(false);
+                                      }}
+                                    >
+                                      {project.name}
+                                    </button>
+                                  ))
+                                ) : (
+                                  <div className="chat-empty-project-empty">
+                                    No projects match this search.
+                                  </div>
+                                )}
+                              </div>
+                              <button
+                                type="button"
+                                className="chat-empty-project-create"
+                                onClick={openCreateProjectModal}
+                              >
+                                <AppIcon
+                                  src={staticAssetPath("new-project.svg")}
+                                  className="chat-empty-project-create-icon"
+                                />
+                                <span>Create new project</span>
+                              </button>
                             </div>
-                            <button
-                              type="button"
-                              className="chat-empty-project-create"
-                              onClick={openCreateProjectModal}
-                            >
-                              <AppIcon
-                                src={staticAssetPath("new-project.svg")}
-                                className="chat-empty-project-create-icon"
-                              />
-                              <span>Create new project</span>
-                            </button>
-                          </div>
-                        ) : null}
+                          ) : null}
+                        </div>
+                      </div>
+                      {composerStatus ? (
+                        <div className="composer-status inline">{composerStatus}</div>
+                      ) : null}
+                      {composerEditor}
+                      <div className="chat-empty-actions">
+                        <button
+                          type="button"
+                          className="chat-empty-action-tag python"
+                          onClick={() => void handleCreatePythonFile()}
+                        >
+                          <span className="chat-empty-action-icon" aria-hidden="true">
+                            <EmptyStateActionIcon asset="python.svg" />
+                          </span>
+                          <span className="chat-empty-action-label">Add python file</span>
+                        </button>
+                        <button
+                          type="button"
+                          className="chat-empty-action-tag notes"
+                          onClick={() => notebookUploadInputRef.current?.click()}
+                        >
+                          <span className="chat-empty-action-icon" aria-hidden="true">
+                            <EmptyStateActionIcon asset="note.svg" />
+                          </span>
+                          <span className="chat-empty-action-label">Import notebook</span>
+                        </button>
+                        <button type="button" className="chat-empty-action-tag notes">
+                          <span className="chat-empty-action-icon" aria-hidden="true">
+                            <EmptyStateActionIcon asset="note.svg" />
+                          </span>
+                          <span className="chat-empty-action-label">Add notes</span>
+                        </button>
                       </div>
                     </div>
-                    {composerStatus ? (
-                      <div className="composer-status inline">{composerStatus}</div>
-                    ) : null}
-                    {composerEditor}
-                    <div className="chat-empty-actions">
+                  ) : (
+                    <div className="chat-empty-state chat-empty-projectless-state">
+                      <a
+                        className="brandline brandline-link chat-empty-brandline"
+                        href="https://mv37.org"
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        MV37
+                      </a>
+                      <h1 className="chat-empty-projectless-title">
+                        Create a project to get started
+                      </h1>
+                      <p className="chat-empty-projectless-copy">
+                        Projects hold your chats, Python files, and repo-backed code workspace.
+                      </p>
                       <button
                         type="button"
-                        className="chat-empty-action-tag python"
-                        onClick={() => void handleCreatePythonFile()}
+                        className="primary-button chat-empty-projectless-action"
+                        onClick={openCreateProjectModal}
                       >
-                        <span className="chat-empty-action-icon" aria-hidden="true">
-                          <EmptyStateActionIcon asset="python.svg" />
-                        </span>
-                        <span className="chat-empty-action-label">Add python file</span>
-                      </button>
-                      <button
-                        type="button"
-                        className="chat-empty-action-tag notes"
-                        onClick={() => notebookUploadInputRef.current?.click()}
-                      >
-                        <span className="chat-empty-action-icon" aria-hidden="true">
-                          <EmptyStateActionIcon asset="note.svg" />
-                        </span>
-                        <span className="chat-empty-action-label">Import notebook</span>
-                      </button>
-                      <button type="button" className="chat-empty-action-tag notes">
-                        <span className="chat-empty-action-icon" aria-hidden="true">
-                          <EmptyStateActionIcon asset="note.svg" />
-                        </span>
-                        <span className="chat-empty-action-label">Add notes</span>
+                        Create project
                       </button>
                     </div>
-                  </div>
+                  )}
                 </div>
               ) : (
                 <div className="chat-message-column">
@@ -4775,6 +5337,12 @@ export default function App() {
                     let userTurnIndex = 0;
                     return activeThread.messages.map((message) => {
                       const isCompactionMessage = message.kind === "compaction";
+                      const streamingCodePreview =
+                        message.role === "assistant" &&
+                        message.status === "streaming" &&
+                        !isCompactionMessage
+                          ? extractStreamingPythonPreview(message.content_markdown)
+                          : null;
                       if (message.role === "user" && !isCompactionMessage) {
                         userTurnIndex += 1;
                       }
@@ -4842,6 +5410,16 @@ export default function App() {
                                 <div className="message-plain-text">{message.content_markdown}</div>
                               )}
                             </div>
+                            {streamingCodePreview ? (
+                              <CodeSnippet
+                                code={streamingCodePreview.code}
+                                language={streamingCodePreview.language}
+                                className="preview thinking-shimmer"
+                                headerTitle="Writing code"
+                                headerMeta={streamingCodePreview.language}
+                                dataTestId="streaming-code-preview"
+                              />
+                            ) : null}
                             {message.role === "assistant" && !isCompactionMessage ? (
                               <div className="assistant-hover-actions">
                                 {hoverTime ? (
@@ -4907,13 +5485,44 @@ export default function App() {
                               key={activity.id}
                               className={`tool-activity-row status-${activity.status}${activity.isError ? " error" : ""}`}
                             >
-                              <span
-                                className={`tool-activity-label${activity.status === "running" ? " thinking-shimmer" : ""}`}
-                              >
-                                {activity.status === "running"
-                                  ? `Doing ${activity.label}...`
-                                  : `Did ${activity.label}`}
-                              </span>
+                              {toolActivityHasDetails(activity) ? (
+                                <details className="tool-activity-details">
+                                  <summary className="tool-activity-summary">
+                                    <span
+                                      className={`tool-activity-label${activity.status === "running" ? " thinking-shimmer" : ""}`}
+                                    >
+                                      {formatToolActivityText(activity)}
+                                    </span>
+                                    <span className="tool-activity-summary-hint">
+                                      Command{activity.output ? " and output" : ""}
+                                    </span>
+                                  </summary>
+                                  <div className="tool-activity-content">
+                                    {activity.command ? (
+                                      <div className="tool-activity-detail-block">
+                                        <span className="tool-activity-detail-label">Command</span>
+                                        <pre className="tool-activity-detail-payload">
+                                          {activity.command}
+                                        </pre>
+                                      </div>
+                                    ) : null}
+                                    {activity.output ? (
+                                      <div className="tool-activity-detail-block">
+                                        <span className="tool-activity-detail-label">Output</span>
+                                        <pre className="tool-activity-detail-payload">
+                                          {activity.output}
+                                        </pre>
+                                      </div>
+                                    ) : null}
+                                  </div>
+                                </details>
+                              ) : (
+                                <span
+                                  className={`tool-activity-label${activity.status === "running" ? " thinking-shimmer" : ""}`}
+                                >
+                                  {formatToolActivityText(activity)}
+                                </span>
+                              )}
                             </div>
                           ))}
                           {showThinkingPlaceholder ? (
@@ -5800,12 +6409,18 @@ export default function App() {
           </button>
           <div className="modal-heading">
             <h2 className="modal-title">
-              {deleteModalState?.kind === "project" ? "Delete project" : "Delete session"}
+              {deleteModalState?.kind === "project"
+                ? "Delete project"
+                : deleteModalState?.kind === "python_file"
+                  ? "Delete file"
+                  : "Delete session"}
             </h2>
             <p className="modal-caption">
               {deleteModalState?.kind === "project"
-                ? `Delete ${deleteModalState.name} and all of its sessions?`
-                : `Delete ${deleteModalState?.title ?? "this session"}?`}
+                ? `Delete ${deleteModalState.name} and all of its chats and code files?`
+                : deleteModalState?.kind === "python_file"
+                  ? `Delete ${deleteModalState.title}?`
+                  : `Delete ${deleteModalState?.title ?? "this session"}?`}
             </p>
           </div>
           <div className="modal-view visible">
@@ -5815,7 +6430,11 @@ export default function App() {
                 type="button"
                 onClick={() => void confirmDeleteModal()}
               >
-                {deleteModalState?.kind === "project" ? "Delete project" : "Delete session"}
+                {deleteModalState?.kind === "project"
+                  ? "Delete project"
+                  : deleteModalState?.kind === "python_file"
+                    ? "Delete file"
+                    : "Delete session"}
               </button>
               <button className="secondary-button" type="button" onClick={closeDeleteModal}>
                 Cancel

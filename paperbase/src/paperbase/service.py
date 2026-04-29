@@ -229,6 +229,101 @@ _FORCE_TOOL_QUERY_RE = re.compile(
     re.IGNORECASE,
 )
 
+_CHAT_TITLE_TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:['-][A-Za-z0-9]+)*")
+_CHAT_TITLE_STOP_WORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "but",
+    "by",
+    "can",
+    "could",
+    "for",
+    "from",
+    "help",
+    "i",
+    "if",
+    "in",
+    "into",
+    "is",
+    "it",
+    "me",
+    "my",
+    "of",
+    "on",
+    "or",
+    "our",
+    "please",
+    "show",
+    "tell",
+    "that",
+    "the",
+    "this",
+    "to",
+    "us",
+    "we",
+    "with",
+    "would",
+}
+
+_PROJECT_CODE_DIRECT_TOOL_RE = re.compile(r"\b(project_(?:list_files|read_file|grep|touch|edit|delete|run))\b", re.IGNORECASE)
+_PROJECT_CODE_ACTION_RE = re.compile(
+    r"\b("
+    r"write|save|create|make|add|implement|edit|modify|update|refactor|fix|rename|delete|remove|read|show|open|grep|search|run"
+    r")\b",
+    re.IGNORECASE,
+)
+_PROJECT_CODE_WRITE_ACTION_RE = re.compile(
+    r"\b("
+    r"write|save|create|make|add|implement|edit|modify|update|refactor|fix|rename|delete|remove"
+    r")\b",
+    re.IGNORECASE,
+)
+_PROJECT_CODE_TARGET_RE = re.compile(
+    r"\b("
+    r"code|python|pytorch|torch|script|module|file|files|function|class|train(?:ing)?|eval(?:uation)?|workflow|repo|project"
+    r")\b",
+    re.IGNORECASE,
+)
+_PROJECT_CODE_PATH_HINT_RE = re.compile(r"(?:^|[\s`'\"])([A-Za-z0-9_./-]+\.py)(?:$|[\s`'\",.:;!?])")
+_PROJECT_CODE_WRITE_TOOL_RE = re.compile(r"\b(project_(?:touch|edit|delete))\b", re.IGNORECASE)
+_PROJECT_CODE_SNIPPET_RE = re.compile(
+    r"\b(snippet|example|sample|template|starter|boilerplate)\b",
+    re.IGNORECASE,
+)
+_PROJECT_CODE_BUILD_OBJECT_RE = re.compile(
+    r"\b("
+    r"sgd|adam|optimizer|optimiser|scheduler|model|network|layer|loss|dataset|dataloader|loader|"
+    r"pipeline|trainer|baseline|agent|parser|client|server|api|cli|demo|prototype"
+    r")\b",
+    re.IGNORECASE,
+)
+_PROJECT_CODE_CONFIRMATION_RE = re.compile(
+    r"^\s*(?:"
+    r"yes|yeah|yep|yup|sure|ok(?:ay)?|please|please do|go ahead|do it|do that|"
+    r"save it|save that|write it|write that|create it|create that|make it|make that|"
+    r"edit it|edit that|update it|update that|run it|run that"
+    r")\s*[.!?]*\s*$",
+    re.IGNORECASE,
+)
+_PROJECT_CODE_RETRY_RE = re.compile(
+    r"^\s*(?:try again|retry|please retry|again|one more time|try it again|retry that)\s*[.!?]*\s*$",
+    re.IGNORECASE,
+)
+_PROJECT_CODE_FOLLOWUP_PROMPT_RE = re.compile(
+    r"\b(want me to|should i|would you like me to|i can|if you want|if you'd like)\b",
+    re.IGNORECASE,
+)
+_PROJECT_CODE_FAILURE_FOLLOWUP_RE = re.compile(
+    r"\b(wasn't able to persist code|no project file was changed|tell me the exact file|please retry)\b",
+    re.IGNORECASE,
+)
+_PYTHON_FENCE_RE = re.compile(r"(?ms)(```|~~~)\s*(?:python|py)\s*\n.+?\n\1")
+
 _INLINE_SOURCE_ID_RE = re.compile(r"\[(S\d+)\]")
 _PYTHON_FILENAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _GITHUB_REPO_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -294,6 +389,13 @@ def _normalize_repo_path(value: str) -> str:
     if parsed.is_absolute() or any(part in {"", ".", "..", ".git"} for part in parsed.parts):
         raise HTTPException(status_code=422, detail="Use a valid repository path")
     return parsed.as_posix()
+
+
+def _normalize_project_code_repo_path(value: str) -> str:
+    path = _normalize_repo_path(value)
+    if not path.lower().endswith(".py"):
+        raise HTTPException(status_code=422, detail="Use a valid Python repository path")
+    return path
 
 
 def _file_kind_for_repo_path(path: str) -> str:
@@ -823,31 +925,205 @@ def _query_variants(question: str) -> list[str]:
     return deduped[:5]
 
 
+def _format_chat_title_word(word: str) -> str:
+    if not word:
+        return word
+    if word.isupper():
+        return word
+    if any(char.isupper() for char in word[1:]):
+        return word
+    return word.capitalize()
+
+
+def _summarize_chat_title(content: str) -> str:
+    tokens = _CHAT_TITLE_TOKEN_RE.findall(content)
+    if not tokens:
+        return "New chat"
+    informative_tokens = [token for token in tokens if token.lower() not in _CHAT_TITLE_STOP_WORDS]
+    source_tokens = informative_tokens if len(informative_tokens) >= 3 else tokens
+    desired_count = min(5, max(3, len(source_tokens)))
+    selected_tokens = source_tokens[:desired_count]
+    if len(selected_tokens) < 3 and len(tokens) >= 3:
+        selected_tokens = tokens[:3]
+    return " ".join(_format_chat_title_word(token) for token in selected_tokens).strip() or "New chat"
+
+
 def _question_mentions_uploads(question: str) -> bool:
     lowered = question.lower()
     return any(token in lowered for token in ("upload", "uploaded", "document", "documents", "docs", "notes", "note"))
 
 
-def _should_offer_chat_tools(question: str, request: SendChatMessageRequest) -> bool:
-    if not (request.include_papers or request.include_uploads):
+def _question_has_project_code_intent(question: str) -> bool:
+    if not question.strip():
         return False
-    if request.tag_filters:
+    if _PROJECT_CODE_DIRECT_TOOL_RE.search(question):
         return True
-    if request.include_uploads and _question_mentions_uploads(question):
+    if _PROJECT_CODE_PATH_HINT_RE.search(question) and (
+        _PROJECT_CODE_ACTION_RE.search(question) or any(token in question.lower() for token in ("read", "edit", "run"))
+    ):
         return True
-    if request.include_papers and _GROUNDING_INTENT_RE.search(question):
+    if _PROJECT_CODE_SNIPPET_RE.search(question) and (
+        _PROJECT_CODE_TARGET_RE.search(question) or _PROJECT_CODE_BUILD_OBJECT_RE.search(question)
+    ):
         return True
-    return False
+    if _PROJECT_CODE_ACTION_RE.search(question) and (
+        _PROJECT_CODE_SNIPPET_RE.search(question) or _PROJECT_CODE_BUILD_OBJECT_RE.search(question)
+    ):
+        return True
+    return bool(_PROJECT_CODE_ACTION_RE.search(question) and _PROJECT_CODE_TARGET_RE.search(question))
 
 
-def _should_force_chat_tool_use(question: str, request: SendChatMessageRequest) -> bool:
-    if not _should_offer_chat_tools(question, request):
+def _question_is_project_code_confirmation(question: str) -> bool:
+    return bool(_PROJECT_CODE_CONFIRMATION_RE.match(question.strip()))
+
+
+def _question_is_project_code_retry(question: str) -> bool:
+    return bool(_PROJECT_CODE_RETRY_RE.match(question.strip()))
+
+
+def _last_pending_project_code_followup(thread: ChatThreadResponse | None) -> ChatMessageResponse | None:
+    if thread is None or not thread.messages:
+        return None
+    assistant_index: int | None = None
+    for index in range(len(thread.messages) - 1, -1, -1):
+        message = thread.messages[index]
+        if message.kind == "compaction" or not message.content_markdown.strip():
+            continue
+        if message.role == "assistant":
+            assistant_index = index
+            break
+        if message.role == "user":
+            return None
+    if assistant_index is None:
+        return None
+    assistant_message = thread.messages[assistant_index]
+    prior_user_message = next(
+        (
+            message
+            for message in reversed(thread.messages[:assistant_index])
+            if message.role == "user" and message.kind != "compaction" and message.content_markdown.strip()
+        ),
+        None,
+    )
+    if prior_user_message is None or not _question_has_project_code_intent(prior_user_message.content_markdown):
+        return None
+    assistant_text = assistant_message.content_markdown.strip()
+    lowered = assistant_text.lower()
+    if _PROJECT_CODE_FAILURE_FOLLOWUP_RE.search(assistant_text):
+        return assistant_message
+    if not (_PROJECT_CODE_FOLLOWUP_PROMPT_RE.search(assistant_text) or assistant_text.endswith("?")):
+        return None
+    if _PROJECT_CODE_ACTION_RE.search(assistant_text) and (
+        _PROJECT_CODE_TARGET_RE.search(assistant_text)
+        or _PROJECT_CODE_PATH_HINT_RE.search(assistant_text)
+        or "project" in lowered
+    ):
+        return assistant_message
+    if _PROJECT_CODE_PATH_HINT_RE.search(assistant_text) and "project" in lowered:
+        return assistant_message
+    return None
+
+
+def _question_confirms_pending_project_code_followup(question: str, *, thread: ChatThreadResponse | None) -> bool:
+    return (
+        (_question_is_project_code_confirmation(question) or _question_is_project_code_retry(question))
+        and _last_pending_project_code_followup(thread) is not None
+    )
+
+
+def _pending_project_code_followup_requires_write(thread: ChatThreadResponse | None) -> bool:
+    assistant_message = _last_pending_project_code_followup(thread)
+    if assistant_message is None:
         return False
-    if request.tag_filters:
+    assistant_text = assistant_message.content_markdown.strip()
+    return bool(_PROJECT_CODE_WRITE_ACTION_RE.search(assistant_text) or "into your project" in assistant_text.lower())
+
+
+def _should_offer_research_chat_tools(question: str, request: SendChatMessageRequest) -> bool:
+    return True
+
+
+def _should_offer_project_code_tools(question: str, *, thread: ChatThreadResponse | None) -> bool:
+    return bool(thread and thread.project_id)
+
+
+def _should_require_project_code_write(question: str, *, thread: ChatThreadResponse | None) -> bool:
+    if not _should_offer_project_code_tools(question, thread=thread):
+        return False
+    if _question_confirms_pending_project_code_followup(question, thread=thread):
+        return _pending_project_code_followup_requires_write(thread)
+    if _PROJECT_CODE_WRITE_TOOL_RE.search(question):
         return True
-    if _query_signals_recency(question):
+    if _PROJECT_CODE_SNIPPET_RE.search(question) and (
+        _PROJECT_CODE_TARGET_RE.search(question) or _PROJECT_CODE_BUILD_OBJECT_RE.search(question)
+    ):
         return True
-    return bool(_FORCE_TOOL_QUERY_RE.search(question))
+    if _PROJECT_CODE_WRITE_ACTION_RE.search(question) and _PROJECT_CODE_BUILD_OBJECT_RE.search(question):
+        return True
+    return bool(_PROJECT_CODE_WRITE_ACTION_RE.search(question) and _PROJECT_CODE_TARGET_RE.search(question))
+
+
+def _project_code_tool_use_completed_write(tool_use: dict[str, Any], *, is_error: bool) -> bool:
+    if is_error:
+        return False
+    tool_name = str(tool_use.get("name") or "").strip().lower()
+    if tool_name == "project_touch":
+        tool_input = tool_use.get("input")
+        if not isinstance(tool_input, dict):
+            return False
+        return bool(str(tool_input.get("content") or "").strip())
+    return tool_name in {"project_edit", "project_delete"}
+
+
+def _project_code_tool_use_completed_read(tool_use: dict[str, Any], *, is_error: bool) -> bool:
+    if is_error:
+        return False
+    tool_name = str(tool_use.get("name") or "").strip().lower()
+    return tool_name == "project_read_file"
+
+
+def _answer_contains_python_snippet(answer: str) -> bool:
+    if not answer.strip():
+        return False
+    return bool(_PYTHON_FENCE_RE.search(answer))
+
+
+def _project_code_write_retry_prompt() -> str:
+    return (
+        "No managed project Python file has been updated yet. "
+        "This turn still requires successful project_* tool calls before any user-facing narrative text. "
+        "If the target file already exists, update it with project_edit instead of claiming success. "
+        "If the target file exists and is empty, you may populate it with project_edit using old_string=\"\"."
+    )
+
+
+def _project_code_write_failure_answer() -> str:
+    return (
+        "I wasn't able to persist code into a managed project Python file in this turn, so no project file was changed. "
+        "Please retry, or tell me the exact file you want updated."
+    )
+
+
+def _project_code_answer_requires_persisted_python(
+    answer: str,
+    *,
+    thread: ChatThreadResponse | None,
+    project_write_completed: bool,
+    project_read_completed: bool,
+) -> bool:
+    if thread is None or not thread.project_id:
+        return False
+    if not _answer_contains_python_snippet(answer):
+        return False
+    return not (project_write_completed or project_read_completed)
+
+
+def _should_offer_chat_tools(question: str, request: SendChatMessageRequest, *, thread: ChatThreadResponse | None) -> bool:
+    return _should_offer_research_chat_tools(question, request) or _should_offer_project_code_tools(question, thread=thread)
+
+
+def _should_force_chat_tool_use(question: str, request: SendChatMessageRequest, *, thread: ChatThreadResponse | None) -> bool:
+    return _should_offer_chat_tools(question, request, thread=thread)
 
 
 def _sanitize_inline_citations(answer: str, citations: list[ChatCitation]) -> str:
@@ -968,6 +1244,15 @@ class ChatTurnContext:
     compactions_used: int = 0
 
 
+@dataclass
+class ChatToolRoundsResult:
+    context: ChatTurnContext
+    citation_registry: ChatCitationRegistry
+    require_project_code_write: bool = False
+    project_write_completed: bool = False
+    project_read_completed: bool = False
+
+
 class PaperbaseService:
     def __init__(
         self,
@@ -1040,6 +1325,7 @@ class PaperbaseService:
             display_name=request.display_name.strip(),
             password_hash=hash_password(request.password),
         )
+        self.repository.ensure_default_project(user.user_id)  # type: ignore[attr-defined]
         session_token = self._create_browser_session(user.user_id)
         return self._browser_session_response(user), session_token
 
@@ -1290,7 +1576,6 @@ class PaperbaseService:
         return ChatThreadListResponse(threads=self.repository.list_chat_threads(user.user_id))  # type: ignore[attr-defined]
 
     def list_projects(self, user: BrowserUser) -> ProjectListResponse:
-        self.repository.ensure_default_project(user.user_id)  # type: ignore[attr-defined]
         return ProjectListResponse(projects=self.repository.list_projects(user.user_id))  # type: ignore[attr-defined]
 
     def _github_access(self, user: BrowserUser) -> tuple[dict[str, str], str]:
@@ -1526,8 +1811,6 @@ class PaperbaseService:
         project = self.repository.get_project(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
         if project is None:
             raise HTTPException(status_code=404, detail="Project not found")
-        if project.is_default:
-            raise HTTPException(status_code=400, detail="Default project cannot be deleted")
         deleted = self.repository.delete_project(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
         if not deleted:
             raise HTTPException(status_code=404, detail="Project not found")
@@ -1625,6 +1908,212 @@ class PaperbaseService:
             raise HTTPException(status_code=404, detail="Python file not found")
         return python_file
 
+    def list_project_code_files(self, user: BrowserUser, project_id: str) -> list[PythonFileResponse]:
+        project = self.repository.get_project(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        project_files = self.repository.list_project_python_files(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+        )
+        if project_files is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        return sorted(
+            [project_file for project_file in project_files if project_file.file_kind == "python"],
+            key=lambda item: item.repo_path,
+        )
+
+    def _get_project_code_file(self, user: BrowserUser, project_id: str, repo_path: str) -> PythonFileResponse:
+        project = self.repository.get_project(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        normalized_repo_path = _normalize_project_code_repo_path(repo_path)
+        project_file = self.repository.get_project_python_file_by_path(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+            repo_path=normalized_repo_path,
+        )
+        if project_file is None or project_file.file_kind != "python":
+            raise HTTPException(status_code=404, detail="Project code file not found")
+        return project_file
+
+    def read_project_code_file(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        repo_path: str,
+        *,
+        start_line: int | None = None,
+        end_line: int | None = None,
+    ) -> dict[str, Any]:
+        project_file = self._get_project_code_file(user, project_id, repo_path)
+        all_lines = project_file.content.splitlines()
+        total_lines = len(all_lines)
+        start = 1 if start_line is None else start_line
+        end = total_lines if end_line is None else end_line
+        if start < 1 or end < start:
+            raise HTTPException(status_code=422, detail="Use a valid line range")
+        start = min(start, total_lines + 1 if total_lines == 0 else total_lines)
+        end = min(end, total_lines)
+        numbered_lines = [
+            {"line_number": line_number, "text": all_lines[line_number - 1]}
+            for line_number in range(start, end + 1)
+        ]
+        rendered = "\n".join(f"{line['line_number']}: {line['text']}" for line in numbered_lines)
+        return {
+            "file_id": project_file.file_id,
+            "repo_path": project_file.repo_path,
+            "filename": project_file.filename,
+            "start_line": start,
+            "end_line": end if total_lines else 0,
+            "total_lines": total_lines,
+            "content": rendered,
+            "lines": numbered_lines,
+        }
+
+    def grep_project_code(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        *,
+        pattern: str,
+        literal: bool = False,
+        case_sensitive: bool = False,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        query = str(pattern or "").strip()
+        if not query:
+            raise HTTPException(status_code=422, detail="Pattern is required")
+        flags = 0 if case_sensitive else re.IGNORECASE
+        try:
+            matcher = re.compile(re.escape(query) if literal else query, flags)
+        except re.error as exc:
+            raise HTTPException(status_code=422, detail=f"Invalid grep pattern: {exc}") from exc
+        matches: list[dict[str, Any]] = []
+        for project_file in self.list_project_code_files(user, project_id):
+            for line_number, line in enumerate(project_file.content.splitlines(), start=1):
+                if not matcher.search(line):
+                    continue
+                matches.append(
+                    {
+                        "file_id": project_file.file_id,
+                        "repo_path": project_file.repo_path,
+                        "filename": project_file.filename,
+                        "line_number": line_number,
+                        "line": line,
+                    }
+                )
+                if len(matches) >= limit:
+                    return {
+                        "pattern": query,
+                        "literal": literal,
+                        "case_sensitive": case_sensitive,
+                        "matches": matches,
+                        "truncated": True,
+                    }
+        return {
+            "pattern": query,
+            "literal": literal,
+            "case_sensitive": case_sensitive,
+            "matches": matches,
+            "truncated": False,
+        }
+
+    def create_project_python_file(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        *,
+        repo_path: str,
+        content: str = "",
+    ) -> PythonFileResponse:
+        self._get_github_connection(user)
+        project = self.repository.get_project(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        normalized_repo_path = _normalize_project_code_repo_path(repo_path)
+        existing = self.repository.get_project_python_file_by_path(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+            repo_path=normalized_repo_path,
+        )
+        if existing is not None:
+            raise HTTPException(status_code=409, detail=f"Project code file '{normalized_repo_path}' already exists")
+        created = self.repository.create_python_file(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+            filename=Path(normalized_repo_path).name,
+            repo_path=normalized_repo_path,
+            content=content,
+        )
+        if created is None:
+            raise HTTPException(status_code=500, detail="Project code file could not be created")
+        return created
+
+    def edit_project_code_file(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        *,
+        repo_path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False,
+    ) -> dict[str, Any]:
+        self._get_github_connection(user)
+        project_file = self._get_project_code_file(user, project_id, repo_path)
+        if old_string == "":
+            if not new_string.strip():
+                raise HTTPException(status_code=422, detail="new_string must be non-empty when populating an empty file")
+            if project_file.content != "":
+                raise HTTPException(status_code=422, detail="old_string is required unless the file is empty")
+            match_count = 1
+            updated_content = new_string
+        else:
+            match_count = project_file.content.count(old_string)
+            if match_count == 0:
+                raise HTTPException(status_code=409, detail=f"Exact text was not found in '{project_file.repo_path}'")
+            if match_count > 1 and not replace_all:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Exact text matched {match_count} times in '{project_file.repo_path}'. Read the file and retry with a unique snippet or replace_all=true.",
+                )
+            updated_content = (
+                project_file.content.replace(old_string, new_string)
+                if replace_all
+                else project_file.content.replace(old_string, new_string, 1)
+            )
+        if updated_content == project_file.content:
+            raise HTTPException(status_code=409, detail=f"Edit did not change '{project_file.repo_path}'")
+        updated = self.repository.update_python_file(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            file_id=project_file.file_id,
+            content=updated_content,
+        )
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Project code file not found")
+        return {
+            "file_id": updated.file_id,
+            "repo_path": updated.repo_path,
+            "filename": updated.filename,
+            "match_count": match_count,
+            "replace_all": replace_all,
+            "content": updated.content,
+        }
+
+    def delete_project_code_file(self, user: BrowserUser, project_id: str, *, repo_path: str) -> dict[str, Any]:
+        self._get_github_connection(user)
+        project_file = self._get_project_code_file(user, project_id, repo_path)
+        deleted = self.repository.delete_python_file(user_id=user.user_id, file_id=project_file.file_id)  # type: ignore[attr-defined]
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Project code file not found")
+        return {
+            "file_id": project_file.file_id,
+            "repo_path": project_file.repo_path,
+            "filename": project_file.filename,
+            "deleted": True,
+        }
+
     def update_python_file(
         self,
         user: BrowserUser,
@@ -1644,6 +2133,22 @@ class PaperbaseService:
         if python_file is None:
             raise HTTPException(status_code=404, detail="Python file not found")
         return python_file
+
+    def delete_python_file(self, user: BrowserUser, file_id: str) -> dict[str, Any]:
+        self._get_github_connection(user)
+        project_file = self.repository.get_python_file(user_id=user.user_id, file_id=file_id)  # type: ignore[attr-defined]
+        if project_file is None:
+            raise HTTPException(status_code=404, detail="Python file not found")
+        deleted = self.repository.delete_python_file(user_id=user.user_id, file_id=file_id)  # type: ignore[attr-defined]
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Python file not found")
+        return {
+            "file_id": project_file.file_id,
+            "project_id": project_file.project_id,
+            "repo_path": project_file.repo_path,
+            "filename": project_file.filename,
+            "deleted": True,
+        }
 
     def get_project_repo_sync(self, user: BrowserUser, project_id: str) -> ProjectRepoSyncResponse:
         sync = self.repository.get_project_repo_sync(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
@@ -1869,25 +2374,72 @@ class PaperbaseService:
             raise HTTPException(status_code=500, detail="Project repository metadata could not be saved")
         return saved
 
-    def run_python_file(self, user: BrowserUser, file_id: str) -> RunPythonFileResponse:
-        python_file = self.get_python_file(user, file_id)
+    def run_project_python_file(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        *,
+        repo_path: str,
+        mode: str = "full",
+    ) -> RunPythonFileResponse:
+        project_file = self._get_project_code_file(user, project_id, repo_path)
+        return self._run_project_file_workspace(user, project_id, project_file=project_file, mode=mode)
+
+    def _run_project_file_workspace(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        *,
+        project_file: PythonFileResponse,
+        mode: str,
+    ) -> RunPythonFileResponse:
+        normalized_mode = str(mode or "full").strip().lower() or "full"
+        if normalized_mode not in {"smoke", "full"}:
+            raise HTTPException(status_code=422, detail="Run mode must be 'smoke' or 'full'")
+        project_files = self.repository.list_project_python_files(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+        )
+        if project_files is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        workspace_files: dict[str, str] = {}
+        for item in project_files:
+            if item.file_kind == "python":
+                workspace_files[item.repo_path] = item.content
+            elif item.file_kind == "notebook":
+                workspace_files[item.repo_path] = _python_source_to_notebook(item.content)
+        entrypoint_path = project_file.repo_path
+        if project_file.file_kind == "notebook":
+            entrypoint_path = "__paperbase_notebook_entry__.py"
+            workspace_files[entrypoint_path] = project_file.content
         token_id, token_secret = self._get_modal_credentials(user)
         try:
-            result = self.modal_runner.run(
+            result = self.modal_runner.run_project(
                 token_id=token_id,
                 token_secret=token_secret,
-                code=python_file.content,
+                files=workspace_files,
+                entrypoint_path=entrypoint_path,
+                run_mode=normalized_mode,
             )
         except ModalExecutionError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         return RunPythonFileResponse(
-            file_id=python_file.file_id,
+            file_id=project_file.file_id,
             status=result.status,
             stdout=result.stdout,
             stderr=result.stderr,
             exit_code=result.exit_code,
             started_at=result.started_at,
             finished_at=result.finished_at,
+        )
+
+    def run_python_file(self, user: BrowserUser, file_id: str, *, mode: str = "full") -> RunPythonFileResponse:
+        python_file = self.get_python_file(user, file_id)
+        return self._run_project_file_workspace(
+            user,
+            python_file.project_id,
+            project_file=python_file,
+            mode=mode,
         )
 
     def create_chat_thread(self, user: BrowserUser, request: CreateChatThreadRequest) -> ChatThreadResponse:
@@ -1899,7 +2451,14 @@ class PaperbaseService:
         else:
             project = self.repository.get_default_project(user.user_id)  # type: ignore[attr-defined]
             if project is None:
-                project = self.repository.ensure_default_project(user.user_id)  # type: ignore[attr-defined]
+                first_project = next(iter(self.repository.list_projects(user.user_id)), None)  # type: ignore[attr-defined]
+                if first_project is not None:
+                    project = self.repository.get_project(  # type: ignore[attr-defined]
+                        user_id=user.user_id,
+                        project_id=first_project.project_id,
+                    )
+            if project is None:
+                raise HTTPException(status_code=409, detail="Create a project before starting a chat")
         summary = self.repository.create_chat_thread(  # type: ignore[attr-defined]
             user_id=user.user_id,
             title=request.title.strip() or "New chat",
@@ -1977,7 +2536,10 @@ class PaperbaseService:
             content_markdown=content,
         )
         if thread.title == "New chat":
-            self.repository.rename_chat_thread(thread_id=thread_id, title=content[:60])  # type: ignore[attr-defined]
+            self.repository.rename_chat_thread(  # type: ignore[attr-defined]
+                thread_id=thread_id,
+                title=_summarize_chat_title(content),
+            )
         resolved_user = self.repository.get_browser_user_by_id(user.user_id) or user  # type: ignore[attr-defined]
         api_key_value, using_free_tier, api_key_state = self._choose_anthropic_api_key(resolved_user)
         return PreparedChatGeneration(
@@ -2001,20 +2563,64 @@ class PaperbaseService:
             "Treat these instructions as active context for this session."
         )
 
-    def _chat_tool_system_prompt(self, thread: ChatThreadResponse) -> str:
-        return (
-            "You are Paperbase Chat. You have access to Paperbase research tools that can search papers, sections, files, figures, tables, references, related papers, and the user's uploaded documents. "
-            "Use tools aggressively for research-oriented turns. If the user asks about papers, references, findings, comparisons, methods, figures, tables, benchmarks, uploaded notes, or asks for links, do not rely on parametric memory when Paperbase tools can answer. "
-            "Start with discovery tools to find the right papers, then follow up with evidence tools before making specific factual claims. "
-            "Broad discovery tools like paperbase_search, paperbase_get_results, paperbase_get_paper, paperbase_get_related_papers, and paperbase_get_references are for candidate discovery and metadata only. "
-            "They are not citable evidence by themselves. Before making specific factual claims, follow up with evidence tools like paperbase_search_sections, paperbase_read_file, paperbase_get_figure, paperbase_get_table, or paperbase_search_uploaded_sections. "
-            "When a final answer should mention papers, recommendations, or reading lists, gather metadata rich enough to include direct paper links such as html_url or pdf_url when available. "
+    def _chat_tool_system_prompt(
+        self,
+        thread: ChatThreadResponse,
+        *,
+        include_research_tools: bool,
+        include_project_code_tools: bool,
+    ) -> str:
+        parts = ["You are Paperbase Chat."]
+        if include_research_tools:
+            parts.append(
+                "You have access to Paperbase research tools that can search papers, sections, files, figures, tables, references, related papers, and the user's uploaded documents. "
+                "Every tool-enabled turn must begin by leveraging these research tools. "
+                "Use them aggressively, including on code turns when papers or uploaded documents can inform the work. "
+                "Do not rely on parametric memory when Paperbase tools can answer. "
+                "Start with discovery tools to find the right papers, then follow up with evidence tools before making specific factual claims. "
+                "Broad discovery tools like paperbase_search, paperbase_get_results, paperbase_get_paper, paperbase_get_related_papers, and paperbase_get_references are for candidate discovery and metadata only. "
+                "They are not citable evidence by themselves. Before making specific factual claims, follow up with evidence tools like paperbase_search_sections, paperbase_read_file, paperbase_get_figure, paperbase_get_table, or paperbase_search_uploaded_sections. "
+                "When a final answer should mention papers, recommendations, or reading lists, gather metadata rich enough to include direct paper links such as html_url or pdf_url when available."
+            )
+        if include_project_code_tools:
+            parts.append(
+                "You also have access to project-scoped coding tools backed by the current Paperbase project files. "
+                "These tools operate on the project's managed Python files only, not the Paperbase application code. "
+                "Act like a careful ML engineer and researcher maintaining a real project repository: prefer durable modules, reproducible experiments, and reusable code over disposable scratch work. "
+                "When you create or update code with these tools, you are writing managed project Python files for the current project. "
+                "When the user asks you to create, inspect, change, delete, or run project code, use the project_* tools instead of guessing. "
+                "Before writing new code, inspect the existing project with project_list_files, project_grep, and project_read_file so you reuse what is already there instead of rewriting it. "
+                "When the user asks for code, decide from the prompt whether to edit an existing project file or create a new one; do not ask a follow-up question just to decide between those two paths when the prompt and project state are sufficient. "
+                "Files you create with project_touch become part of the project and will appear in later project_list_files results and in the project's Code section. "
+                "When creating a file for the user's request, include meaningful initial code in project_touch or follow immediately with project_edit; do not leave the requested file empty. "
+                "If the user asked you to create or change code, do not stop tool use until the relevant managed project Python files have actually been created or updated. "
+                "Read files before editing them. Prefer small PyTorch-first modules and scripts. "
+                "If the target file already exists, update it with project_edit instead of calling project_touch on the same path. "
+                "If the target file exists and is empty, you may populate it with project_edit using old_string=\"\". "
+                "Every Python code snippet you generate or revise must live in a managed project Python file in the same turn instead of existing only in chat text. "
+                "Structure new files as importable modules with named functions, classes, or constants that other files can import; avoid putting all logic in top-level script bodies. "
+                "Keep entrypoint-only behavior under if __name__ == '__main__': when needed. "
+                "Use exact-match edits with project_edit, choose unique snippets, and set replace_all=true only when every match should change. "
+                "Treat project files as durable research artifacts. Delete files only when the user explicitly asks, when a rename or move requires removing the superseded path, or when a file is clearly obsolete and keeping it would be misleading. "
+                "If you are unsure whether a file truly needs deletion, keep it and edit or replace it instead. "
+                "Read the file before deleting it unless the user already identified the exact obsolete path and reason. "
+                "After you create or edit a project file for the user's request, keep that file as part of the project. "
+                "Do not create a minimal example, scratch file, or throwaway file and then delete it in the same turn unless the user explicitly asked for that cleanup. "
+                "Generated runnable code should support --run-mode smoke|full. Use project_run with mode=smoke for fast validation and mode=full for the normal workflow."
+            )
+        parts.append(
             "On turns where you still need tools, emit tool calls only and do not write any user-facing narrative text. "
             "Once the tool results are sufficient, stop calling tools. The final answer will be generated in a separate step."
-            + self._project_prompt_suffix(thread)
         )
+        return " ".join(parts) + self._project_prompt_suffix(thread)
 
     def _chat_answer_system_prompt(self, *, thread: ChatThreadResponse, has_evidence_sources: bool) -> str:
+        project_code_suffix = (
+            " In project threads, do not leave fresh Python code only in chat text. "
+            "Persist generated or revised Python into managed project files first, then reference the saved repo path succinctly instead of pasting large unsaved code blocks."
+            if thread.project_id
+            else ""
+        )
         if not has_evidence_sources:
             return (
                 "You are Paperbase Chat. Respond naturally and helpfully in strict GitHub-flavored markdown. "
@@ -2024,6 +2630,7 @@ class PaperbaseService:
                 "and do not bring up papers or research context unless the user explicitly asks for them. "
                 "Treat any citations that appeared in earlier turns as historical context only, not as active sources for this reply. "
                 "For casual turns such as greetings or small talk, answer briefly and conversationally."
+                + project_code_suffix
                 + self._project_prompt_suffix(thread)
             )
         return (
@@ -2035,6 +2642,7 @@ class PaperbaseService:
             "If the user asked for related reading, recommendations, or references, prefer a compact bullet list with paper title plus link before any longer discussion. "
             "Only cite source ids inline like [S1] when those ids came from evidence-bearing tool results such as section hits, file reads, figure captions, tables, or uploaded-document excerpts. "
             "Do not cite broad search results or metadata-only results. If the gathered sources are insufficient, say so plainly."
+            + project_code_suffix
             + self._project_prompt_suffix(thread)
         )
 
@@ -2252,11 +2860,18 @@ class PaperbaseService:
                 },
             )
 
-    def _chat_tool_definitions(self, request: SendChatMessageRequest) -> list[dict[str, Any]]:
+    def _chat_tool_definitions(
+        self,
+        request: SendChatMessageRequest,
+        *,
+        thread: ChatThreadResponse | None = None,
+    ) -> list[dict[str, Any]]:
         tools: list[dict[str, Any]] = []
-        if not _should_offer_chat_tools(request.content, request):
+        include_research_tools = _should_offer_research_chat_tools(request.content, request)
+        include_project_code_tools = _should_offer_project_code_tools(request.content, thread=thread)
+        if not (include_research_tools or include_project_code_tools):
             return tools
-        if request.include_papers:
+        if include_research_tools:
             tools.extend(
                 [
                     {
@@ -2388,7 +3003,7 @@ class PaperbaseService:
                     },
                 ]
             )
-        if request.include_uploads:
+        if include_research_tools:
             tools.extend(
                 [
                     {
@@ -2407,6 +3022,90 @@ class PaperbaseService:
                                 "tag_filters": {"type": "array", "items": {"type": "string"}},
                             },
                             "required": ["query"],
+                        },
+                    },
+                ]
+            )
+        if include_project_code_tools:
+            tools.extend(
+                [
+                    {
+                        "name": "project_list_files",
+                        "description": "List the current project's managed Python files, including files you created earlier in this chat. Use this before edits when you need to discover which files already exist.",
+                        "input_schema": {"type": "object", "properties": {}},
+                    },
+                    {
+                        "name": "project_read_file",
+                        "description": "Read a specific managed Python file from the current project, optionally limited to a line range. Read files before editing them.",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {
+                                "repo_path": {"type": "string"},
+                                "start_line": {"type": "integer", "minimum": 1},
+                                "end_line": {"type": "integer", "minimum": 1},
+                            },
+                            "required": ["repo_path"],
+                        },
+                    },
+                    {
+                        "name": "project_grep",
+                        "description": "Search the current project's managed Python files by regex or literal pattern and return matching lines with paths and line numbers.",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {
+                                "pattern": {"type": "string"},
+                                "literal": {"type": "boolean"},
+                                "case_sensitive": {"type": "boolean"},
+                                "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+                            },
+                            "required": ["pattern"],
+                        },
+                    },
+                    {
+                        "name": "project_touch",
+                        "description": "Create a new managed Python file at an exact safe repo-relative .py path. After creation it will appear in later project_list_files results and in the project's Code section. When creating a file for the user's request, include meaningful initial code content or follow immediately with project_edit. Fails if that path already exists.",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {
+                                "repo_path": {"type": "string"},
+                                "content": {"type": "string"},
+                            },
+                            "required": ["repo_path"],
+                        },
+                    },
+                    {
+                        "name": "project_edit",
+                        "description": "Apply an exact-match text edit to one managed Python file. Fails if the old text is missing or ambiguous unless replace_all=true. If the file already exists and is empty, you may use old_string='' once to populate it.",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {
+                                "repo_path": {"type": "string"},
+                                "old_string": {"type": "string"},
+                                "new_string": {"type": "string"},
+                                "replace_all": {"type": "boolean"},
+                            },
+                            "required": ["repo_path", "old_string", "new_string"],
+                        },
+                    },
+                    {
+                        "name": "project_delete",
+                        "description": "Delete one managed Python file from the current project by exact repo-relative path. Use this only when the file truly needs deletion, such as an explicit user request or a superseded rename/move path.",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {"repo_path": {"type": "string"}},
+                            "required": ["repo_path"],
+                        },
+                    },
+                    {
+                        "name": "project_run",
+                        "description": "Run one managed Python file from the current project with run mode smoke or full. Prefer smoke for quick validation and full for the normal workflow.",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {
+                                "repo_path": {"type": "string"},
+                                "mode": {"type": "string", "enum": ["smoke", "full"]},
+                            },
+                            "required": ["repo_path"],
                         },
                     },
                 ]
@@ -2460,6 +3159,7 @@ class PaperbaseService:
         tool_input: dict[str, Any],
         user: BrowserUser,
         citation_registry: ChatCitationRegistry,
+        project_id: str | None = None,
     ) -> dict[str, Any]:
         if tool_name == "paperbase_search":
             query = str(tool_input.get("query") or "").strip()
@@ -2740,6 +3440,99 @@ class PaperbaseService:
                 )
             return {"query": query, "sections": sections}
 
+        if tool_name.startswith("project_"):
+            if not project_id:
+                raise HTTPException(status_code=409, detail="Project-scoped coding tools require a project thread")
+
+            if tool_name == "project_list_files":
+                project_files = self.list_project_code_files(user, project_id)
+                return {
+                    "project_id": project_id,
+                    "files": [
+                        {
+                            "file_id": project_file.file_id,
+                            "repo_path": project_file.repo_path,
+                            "filename": project_file.filename,
+                            "updated_at": project_file.updated_at.isoformat(),
+                        }
+                        for project_file in project_files[:_CHAT_TOOL_MAX_FILE_LIST]
+                    ],
+                    "truncated": len(project_files) > _CHAT_TOOL_MAX_FILE_LIST,
+                }
+
+            if tool_name == "project_read_file":
+                read_result = self.read_project_code_file(
+                    user,
+                    project_id,
+                    str(tool_input.get("repo_path") or "").strip(),
+                    start_line=tool_input.get("start_line") if tool_input.get("start_line") is not None else None,
+                    end_line=tool_input.get("end_line") if tool_input.get("end_line") is not None else None,
+                )
+                trimmed, truncated = _truncate_tool_text(read_result["content"], limit=_CHAT_TOOL_MAX_FILE_CHARS)
+                return {
+                    **read_result,
+                    "content": trimmed,
+                    "truncated": truncated,
+                }
+
+            if tool_name == "project_grep":
+                return self.grep_project_code(
+                    user,
+                    project_id,
+                    pattern=str(tool_input.get("pattern") or "").strip(),
+                    literal=_tool_bool(tool_input.get("literal"), default=False),
+                    case_sensitive=_tool_bool(tool_input.get("case_sensitive"), default=False),
+                    limit=_tool_int(tool_input.get("limit"), default=20, maximum=50),
+                )
+
+            if tool_name == "project_touch":
+                created = self.create_project_python_file(
+                    user,
+                    project_id,
+                    repo_path=str(tool_input.get("repo_path") or "").strip(),
+                    content=str(tool_input.get("content") or ""),
+                )
+                return {
+                    "project_id": project_id,
+                    "file_id": created.file_id,
+                    "repo_path": created.repo_path,
+                    "filename": created.filename,
+                    "content": created.content,
+                }
+
+            if tool_name == "project_edit":
+                updated = self.edit_project_code_file(
+                    user,
+                    project_id,
+                    repo_path=str(tool_input.get("repo_path") or "").strip(),
+                    old_string=str(tool_input.get("old_string") or ""),
+                    new_string=str(tool_input.get("new_string") or ""),
+                    replace_all=_tool_bool(tool_input.get("replace_all"), default=False),
+                )
+                trimmed, truncated = _truncate_tool_text(str(updated.get("content") or ""), limit=_CHAT_TOOL_MAX_FILE_CHARS)
+                return {
+                    **updated,
+                    "content": trimmed,
+                    "truncated": truncated,
+                }
+
+            if tool_name == "project_delete":
+                return self.delete_project_code_file(
+                    user,
+                    project_id,
+                    repo_path=str(tool_input.get("repo_path") or "").strip(),
+                )
+
+            if tool_name == "project_run":
+                mode = str(tool_input.get("mode") or "full").strip().lower() or "full"
+                result = self.run_project_python_file(
+                    user,
+                    project_id,
+                    repo_path=str(tool_input.get("repo_path") or "").strip(),
+                    mode=mode,
+                )
+                return result.model_dump(mode="json") | {"mode": mode}
+
         raise ValueError(f"Unknown tool: {tool_name}")
 
     def _chat_tool_activity_label(self, *, tool_name: str, tool_input: dict[str, Any]) -> str:
@@ -2783,7 +3576,30 @@ class PaperbaseService:
             return "upload listing"
         if tool_name == "paperbase_search_uploaded_sections":
             return f'uploaded-note search for "{query}"' if query else "uploaded-note search"
+        if tool_name == "project_list_files":
+            return "project file listing"
+        if tool_name == "project_read_file":
+            return f'project file read for "{path}"' if path else "project file read"
+        if tool_name == "project_grep":
+            return f'project grep for "{pattern}"' if pattern else "project grep"
+        if tool_name == "project_touch":
+            return f'project file create for "{path}"' if path else "project file create"
+        if tool_name == "project_edit":
+            return f'project file edit for "{path}"' if path else "project file edit"
+        if tool_name == "project_delete":
+            return f'project file delete for "{path}"' if path else "project file delete"
+        if tool_name == "project_run":
+            return f'project run for "{path}"' if path else "project run"
         return "tool call"
+
+    def _chat_tool_activity_command(self, *, tool_name: str, tool_input: dict[str, Any]) -> str:
+        rendered_input = json.dumps(tool_input, ensure_ascii=False, indent=2)
+        return f"{tool_name}({rendered_input})"
+
+    def _chat_tool_activity_output(self, payload: Any) -> str:
+        if isinstance(payload, (dict, list)):
+            return json.dumps(payload, ensure_ascii=False, indent=2)
+        return str(payload)
 
     def _run_single_chat_tool(
         self,
@@ -2793,6 +3609,7 @@ class PaperbaseService:
         tool_input: dict[str, Any],
         user: BrowserUser,
         citation_registry: ChatCitationRegistry,
+        project_id: str | None = None,
     ) -> tuple[dict[str, Any], bool]:
         if index >= _CHAT_TOOL_MAX_CALLS_PER_ROUND:
             return {"error": "Too many tool calls requested in one round"}, True
@@ -2802,6 +3619,7 @@ class PaperbaseService:
                 tool_input=tool_input,
                 user=user,
                 citation_registry=citation_registry,
+                project_id=project_id,
             )
             return payload, False
         except HTTPException as exc:
@@ -2819,18 +3637,32 @@ class PaperbaseService:
         tool_uses: list[dict[str, Any]],
         user: BrowserUser,
         citation_registry: ChatCitationRegistry,
-    ) -> list[dict[str, Any]]:
+        project_id: str | None = None,
+    ) -> tuple[list[dict[str, Any]], bool, bool]:
         blocks: list[dict[str, Any]] = []
+        project_write_completed = False
+        project_read_completed = False
         for index, tool_use in enumerate(tool_uses):
             tool_use_id = str(tool_use.get("id") or "").strip()
             if not tool_use_id:
                 continue
+            tool_name = str(tool_use.get("name") or "").strip()
+            tool_input = tool_use.get("input") if isinstance(tool_use.get("input"), dict) else {}
             payload, is_error = self._run_single_chat_tool(
                 index=index,
-                tool_name=str(tool_use.get("name") or "").strip(),
-                tool_input=tool_use.get("input") if isinstance(tool_use.get("input"), dict) else {},
+                tool_name=tool_name,
+                tool_input=tool_input,
                 user=user,
                 citation_registry=citation_registry,
+                project_id=project_id,
+            )
+            project_write_completed = project_write_completed or _project_code_tool_use_completed_write(
+                {"name": tool_name, "input": tool_input},
+                is_error=is_error,
+            )
+            project_read_completed = project_read_completed or _project_code_tool_use_completed_read(
+                {"name": tool_name, "input": tool_input},
+                is_error=is_error,
             )
             block = {
                 "type": "tool_result",
@@ -2840,7 +3672,7 @@ class PaperbaseService:
             if is_error:
                 block["is_error"] = True
             blocks.append(block)
-        return blocks
+        return blocks, project_write_completed, project_read_completed
 
     def _run_chat_tool_rounds(
         self,
@@ -2848,17 +3680,35 @@ class PaperbaseService:
         prepared: PreparedChatGeneration,
         user: BrowserUser,
         request: SendChatMessageRequest,
-    ) -> tuple[ChatTurnContext, ChatCitationRegistry]:
+    ) -> ChatToolRoundsResult:
         context = self._chat_turn_context(prepared)
         citation_registry = ChatCitationRegistry()
-        tools = self._chat_tool_definitions(request)
+        tools = self._chat_tool_definitions(request, thread=prepared.thread)
         if not tools:
-            return context, citation_registry
+            return ChatToolRoundsResult(context=context, citation_registry=citation_registry)
 
-        tool_system_prompt = self._chat_tool_system_prompt(prepared.thread)
-        force_first_tool = _should_force_chat_tool_use(prepared.user_message.content_markdown, request)
+        tool_names = {tool.get("name") for tool in tools if isinstance(tool, dict)}
+        tool_system_prompt = self._chat_tool_system_prompt(
+            prepared.thread,
+            include_research_tools=any(str(name).startswith("paperbase_") for name in tool_names),
+            include_project_code_tools=any(str(name).startswith("project_") for name in tool_names),
+        )
+        force_first_tool = _should_force_chat_tool_use(
+            prepared.user_message.content_markdown,
+            request,
+            thread=prepared.thread,
+        )
+        require_project_code_write = _should_require_project_code_write(
+            prepared.user_message.content_markdown,
+            thread=prepared.thread,
+        )
+        project_write_tool_used = False
+        project_read_tool_used = False
         for round_index in range(_CHAT_TOOL_MAX_ROUNDS):
-            tool_choice = {"type": "any"} if round_index == 0 and force_first_tool else {"type": "auto"}
+            must_use_tool_this_round = (round_index == 0 and force_first_tool) or (
+                require_project_code_write and not project_write_tool_used
+            )
+            tool_choice = {"type": "any"} if must_use_tool_this_round else {"type": "auto"}
             context, _events = self._ensure_chat_context_budget(
                 prepared=prepared,
                 context=context,
@@ -2877,19 +3727,32 @@ class PaperbaseService:
             assistant_content = [block for block in (response.get("content") or []) if isinstance(block, dict)]
             tool_uses = [block for block in assistant_content if block.get("type") == "tool_use"]
             if not tool_uses:
+                if require_project_code_write and not project_write_tool_used and must_use_tool_this_round:
+                    context.messages.append({"role": "user", "content": _project_code_write_retry_prompt()})
+                    continue
                 break
+            blocks, completed_write_this_round, completed_read_this_round = self._tool_result_blocks(
+                tool_uses=tool_uses,
+                user=user,
+                citation_registry=citation_registry,
+                project_id=prepared.thread.project_id,
+            )
+            project_write_tool_used = project_write_tool_used or completed_write_this_round
+            project_read_tool_used = project_read_tool_used or completed_read_this_round
             context.messages.append({"role": "assistant", "content": assistant_content})
             context.messages.append(
                 {
                     "role": "user",
-                    "content": self._tool_result_blocks(
-                        tool_uses=tool_uses,
-                        user=user,
-                        citation_registry=citation_registry,
-                    ),
+                    "content": blocks,
                 }
             )
-        return context, citation_registry
+        return ChatToolRoundsResult(
+            context=context,
+            citation_registry=citation_registry,
+            require_project_code_write=require_project_code_write,
+            project_write_completed=project_write_tool_used,
+            project_read_completed=project_read_tool_used,
+        )
 
     def _run_chat_tool_rounds_stream(
         self,
@@ -2897,17 +3760,35 @@ class PaperbaseService:
         prepared: PreparedChatGeneration,
         user: BrowserUser,
         request: SendChatMessageRequest,
-    ) -> Generator[tuple[str, dict[str, Any]], None, tuple[ChatTurnContext, ChatCitationRegistry]]:
+    ) -> Generator[tuple[str, dict[str, Any]], None, ChatToolRoundsResult]:
         context = self._chat_turn_context(prepared)
         citation_registry = ChatCitationRegistry()
-        tools = self._chat_tool_definitions(request)
+        tools = self._chat_tool_definitions(request, thread=prepared.thread)
         if not tools:
-            return context, citation_registry
+            return ChatToolRoundsResult(context=context, citation_registry=citation_registry)
 
-        tool_system_prompt = self._chat_tool_system_prompt(prepared.thread)
-        force_first_tool = _should_force_chat_tool_use(prepared.user_message.content_markdown, request)
+        tool_names = {tool.get("name") for tool in tools if isinstance(tool, dict)}
+        tool_system_prompt = self._chat_tool_system_prompt(
+            prepared.thread,
+            include_research_tools=any(str(name).startswith("paperbase_") for name in tool_names),
+            include_project_code_tools=any(str(name).startswith("project_") for name in tool_names),
+        )
+        force_first_tool = _should_force_chat_tool_use(
+            prepared.user_message.content_markdown,
+            request,
+            thread=prepared.thread,
+        )
+        require_project_code_write = _should_require_project_code_write(
+            prepared.user_message.content_markdown,
+            thread=prepared.thread,
+        )
+        project_write_tool_used = False
+        project_read_tool_used = False
         for round_index in range(_CHAT_TOOL_MAX_ROUNDS):
-            tool_choice = {"type": "any"} if round_index == 0 and force_first_tool else {"type": "auto"}
+            must_use_tool_this_round = (round_index == 0 and force_first_tool) or (
+                require_project_code_write and not project_write_tool_used
+            )
+            tool_choice = {"type": "any"} if must_use_tool_this_round else {"type": "auto"}
             context = yield from self._ensure_chat_context_budget_stream(
                 prepared=prepared,
                 context=context,
@@ -2925,13 +3806,18 @@ class PaperbaseService:
             )
             assistant_content = [block for block in (response.get("content") or []) if isinstance(block, dict)]
             tool_uses = [block for block in assistant_content if block.get("type") == "tool_use"]
-            if not tool_uses:
-                break
             usage = response_usage(response)
             if usage is not None:
                 yield ("usage", self._chat_usage_payload(usage))
+            if not tool_uses:
+                if require_project_code_write and not project_write_tool_used and must_use_tool_this_round:
+                    context.messages.append({"role": "user", "content": _project_code_write_retry_prompt()})
+                    continue
+                break
             context.messages.append({"role": "assistant", "content": assistant_content})
             blocks: list[dict[str, Any]] = []
+            completed_write_this_round = False
+            completed_read_this_round = False
             for index, tool_use in enumerate(tool_uses):
                 tool_use_id = str(tool_use.get("id") or "").strip()
                 if not tool_use_id:
@@ -2939,12 +3825,14 @@ class PaperbaseService:
                 tool_name = str(tool_use.get("name") or "").strip()
                 tool_input = tool_use.get("input") if isinstance(tool_use.get("input"), dict) else {}
                 label = self._chat_tool_activity_label(tool_name=tool_name, tool_input=tool_input)
+                command = self._chat_tool_activity_command(tool_name=tool_name, tool_input=tool_input)
                 yield (
                     "tool_start",
                     {
                         "tool_call_id": tool_use_id,
                         "tool_name": tool_name,
                         "label": label,
+                        "command": command,
                     },
                 )
                 payload, is_error = self._run_single_chat_tool(
@@ -2953,6 +3841,15 @@ class PaperbaseService:
                     tool_input=tool_input,
                     user=user,
                     citation_registry=citation_registry,
+                    project_id=prepared.thread.project_id,
+                )
+                completed_write_this_round = completed_write_this_round or _project_code_tool_use_completed_write(
+                    {"name": tool_name, "input": tool_input},
+                    is_error=is_error,
+                )
+                completed_read_this_round = completed_read_this_round or _project_code_tool_use_completed_read(
+                    {"name": tool_name, "input": tool_input},
+                    is_error=is_error,
                 )
                 yield (
                     "tool_done",
@@ -2960,6 +3857,8 @@ class PaperbaseService:
                         "tool_call_id": tool_use_id,
                         "tool_name": tool_name,
                         "label": label,
+                        "command": command,
+                        "output": self._chat_tool_activity_output(payload),
                         "is_error": is_error,
                     },
                 )
@@ -2971,8 +3870,16 @@ class PaperbaseService:
                 if is_error:
                     block["is_error"] = True
                 blocks.append(block)
+            project_write_tool_used = project_write_tool_used or completed_write_this_round
+            project_read_tool_used = project_read_tool_used or completed_read_this_round
             context.messages.append({"role": "user", "content": blocks})
-        return context, citation_registry
+        return ChatToolRoundsResult(
+            context=context,
+            citation_registry=citation_registry,
+            require_project_code_write=require_project_code_write,
+            project_write_completed=project_write_tool_used,
+            project_read_completed=project_read_tool_used,
+        )
 
     def _api_key_required_response(
         self,
@@ -3020,11 +3927,31 @@ class PaperbaseService:
                 state=prepared.api_key_state,
             )
 
-        conversation_context, citation_registry = self._run_chat_tool_rounds(
+        tool_rounds = self._run_chat_tool_rounds(
             prepared=prepared,
             user=user,
             request=request,
         )
+        if tool_rounds.require_project_code_write and not tool_rounds.project_write_completed:
+            assistant_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
+                thread_id=thread_id,
+                role="assistant",
+                content_markdown=_project_code_write_failure_answer(),
+            )
+            resolved_user = prepared.resolved_user
+            if prepared.using_free_tier:
+                resolved_user = self.repository.increment_free_responses_used(user.user_id) or resolved_user  # type: ignore[attr-defined]
+            refreshed = self.get_chat_thread(user, thread_id)
+            return SendChatMessageResponse(
+                thread=refreshed,
+                assistant_message=assistant_message,
+                remaining_free_responses=self._remaining_free_responses(resolved_user),
+                has_anthropic_api_key=self.repository.get_anthropic_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
+                state="completed",
+            )
+
+        conversation_context = tool_rounds.context
+        citation_registry = tool_rounds.citation_registry
         current_turn_citations = citation_registry.citations
         answer_system_prompt = self._chat_answer_system_prompt(
             thread=prepared.thread,
@@ -3042,6 +3969,13 @@ class PaperbaseService:
             system_prompt=answer_system_prompt,
         )
         answer = _sanitize_inline_citations(_extract_message_text(answer_payload), current_turn_citations)
+        if _project_code_answer_requires_persisted_python(
+            answer,
+            thread=prepared.thread,
+            project_write_completed=tool_rounds.project_write_completed,
+            project_read_completed=tool_rounds.project_read_completed,
+        ):
+            answer = _project_code_write_failure_answer()
         assistant_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
             thread_id=thread_id,
             role="assistant",
@@ -3088,9 +4022,36 @@ class PaperbaseService:
             try:
                 event_name, payload = next(tool_rounds)
             except StopIteration as stop:
-                conversation_context, citation_registry = stop.value
+                tool_rounds_result = stop.value
                 break
             yield (event_name, payload)
+        if tool_rounds_result.require_project_code_write and not tool_rounds_result.project_write_completed:
+            failure_text = _project_code_write_failure_answer()
+            assistant_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
+                thread_id=thread_id,
+                role="assistant",
+                content_markdown=failure_text,
+                status="completed",
+            )
+            yield ("assistant_start", {"assistant_message": assistant_message.model_dump(mode="json")})
+            yield ("delta", {"message_id": assistant_message.message_id, "delta": failure_text})
+            resolved_user = prepared.resolved_user
+            if prepared.using_free_tier:
+                resolved_user = self.repository.increment_free_responses_used(user.user_id) or resolved_user  # type: ignore[attr-defined]
+            yield (
+                "done",
+                {
+                    "assistant_message": assistant_message.model_dump(mode="json"),
+                    "remaining_free_responses": self._remaining_free_responses(resolved_user),
+                    "has_anthropic_api_key": self.repository.get_anthropic_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
+                    "state": "completed",
+                    "usage": None,
+                },
+            )
+            return
+
+        conversation_context = tool_rounds_result.context
+        citation_registry = tool_rounds_result.citation_registry
         current_turn_citations = citation_registry.citations
         answer_system_prompt = self._chat_answer_system_prompt(
             thread=prepared.thread,
@@ -3149,9 +4110,17 @@ class PaperbaseService:
             )
             return
 
+        final_text = _sanitize_inline_citations("".join(chunks).strip(), current_turn_citations)
+        if _project_code_answer_requires_persisted_python(
+            final_text,
+            thread=prepared.thread,
+            project_write_completed=tool_rounds_result.project_write_completed,
+            project_read_completed=tool_rounds_result.project_read_completed,
+        ):
+            final_text = _project_code_write_failure_answer()
         final_message = self.repository.update_chat_message(  # type: ignore[attr-defined]
             assistant_message.message_id,
-            content_markdown=_sanitize_inline_citations("".join(chunks).strip(), current_turn_citations),
+            content_markdown=final_text,
             citations=[citation.model_dump() for citation in current_turn_citations],
             status="completed",
         )
@@ -4191,17 +5160,22 @@ class PaperbaseService:
         *,
         min_citations: int = 100,
         max_papers: int | None = None,
-        categories: list[str] | None = None,
         chunk_size: int = 50,
     ) -> JobResponse:
         """Queue a ``harvest_top_cited`` planner job.
 
         Planner paginates Semantic Scholar's bulk search ordered by
-        ``citationCount:desc``, filters to arxiv-linked papers in the
-        target categories, and enqueues ``harvest_chunk`` jobs (one per
-        ``chunk_size`` arxiv ids) with ``source='s2_top_cited'``. Workers
-        index each id; existing priority + retry + dedupe machinery from
-        the date-range harvest applies unchanged.
+        ``citationCount:desc``, filters to arxiv-linked papers, and
+        enqueues ``harvest_chunk`` jobs (one per ``chunk_size`` arxiv
+        ids) with ``source='s2_top_cited'``. Workers index each id;
+        existing priority + retry + dedupe machinery from the date-range
+        harvest applies unchanged.
+
+        ``categories`` is intentionally absent: S2's bulk search does
+        not surface arxiv categories, so any pre-index filter would
+        require a separate per-candidate arxiv lookup that defeats the
+        bulk-fetch advantage. A future PR can add the gate once we have
+        a cheaper signal — see PR #50 review for the rationale.
         """
         if min_citations < 0:
             raise PermanentError("min_citations must be >= 0")
@@ -4209,15 +5183,11 @@ class PaperbaseService:
             raise PermanentError("max_papers must be >= 1 when provided")
         if chunk_size < 1 or chunk_size > 500:
             raise PermanentError("chunk_size must be in [1, 500]")
-        resolved_categories = list(categories) if categories else list(self.settings.arxiv_categories)
-        if not resolved_categories:
-            raise PermanentError("categories must not be empty")
         job = self.repository.create_job(
             "harvest_top_cited",
             {
                 "min_citations": int(min_citations),
                 "max_papers": max_papers,
-                "categories": resolved_categories,
                 "chunk_size": int(chunk_size),
             },
         )
@@ -4228,7 +5198,6 @@ class PaperbaseService:
                 "job_id": job.job_id,
                 "min_citations": min_citations,
                 "max_papers": max_papers,
-                "category_count": len(resolved_categories),
                 "chunk_size": chunk_size,
             },
         )
@@ -4239,7 +5208,6 @@ class PaperbaseService:
         *,
         min_citations: int,
         max_papers: int | None,
-        categories: list[str],
         chunk_size: int,
         harvest_id: str | None = None,
     ) -> dict[str, int]:
@@ -4251,11 +5219,11 @@ class PaperbaseService:
         ``index_arxiv_paper`` per id. Per-id ``PermanentError`` (e.g. a
         404 on arxiv) is swallowed so one bad id doesn't kill the chunk.
 
-        Per-paper category filtering happens at index time when the arxiv
-        feed gives us the full ``primary_category`` — bulk search doesn't
-        expose it. The ``categories`` list is therefore validated in the
-        planner (must be non-empty) and persisted to the chunk payload so
-        a future tightening of the gate has somewhere to read it.
+        Pagination contract (PR #50 review): ``fetch_top_cited_cs`` may
+        return an empty ``page`` while ``next_cursor`` is still set,
+        because non-arxiv rows are filtered out client-side. The planner
+        must keep paging until S2 itself signals end-of-stream (i.e.
+        ``next_cursor is None``) — never break on an empty filtered page.
         """
         if min_citations < 0:
             raise PermanentError("min_citations must be >= 0")
@@ -4263,8 +5231,6 @@ class PaperbaseService:
             raise PermanentError("max_papers must be >= 1 when provided")
         if chunk_size < 1 or chunk_size > 500:
             raise PermanentError("chunk_size must be in [1, 500]")
-        if not categories:
-            raise PermanentError("categories must not be empty")
 
         run_harvest_id = harvest_id or new_id("harvest")
         cursor: str | None = None
@@ -4283,7 +5249,6 @@ class PaperbaseService:
                     "harvest_id": run_harvest_id,
                     "source": "s2_top_cited",
                     "arxiv_ids": list(pending_batch),
-                    "categories": list(categories),
                     "min_citations": int(min_citations),
                 },
                 dedupe_key=(
@@ -4302,8 +5267,6 @@ class PaperbaseService:
                 cursor=cursor,
             )
             pages_fetched += 1
-            if not page:
-                break
             for candidate in page:
                 if max_papers is not None and candidates_emitted >= max_papers:
                     break
@@ -4311,6 +5274,10 @@ class PaperbaseService:
                 candidates_emitted += 1
                 if len(pending_batch) >= chunk_size:
                     _flush_batch()
+            # Keep paging until S2 itself signals last page. An empty
+            # filtered ``page`` does NOT mean end-of-stream — bulk search
+            # often returns pages with all non-arxiv rows that get
+            # filtered to nothing client-side.
             if next_cursor is None:
                 break
             cursor = next_cursor
@@ -4338,7 +5305,6 @@ class PaperbaseService:
         self,
         *,
         arxiv_ids: list[str],
-        categories: list[str] | None = None,
         min_citations: int = 0,
         harvest_id: str | None = None,
     ) -> dict[str, int]:
@@ -4347,10 +5313,9 @@ class PaperbaseService:
         Iterates ``arxiv_ids`` and calls ``index_arxiv_paper`` per id.
         Per-id ``PermanentError`` is swallowed so a 404 doesn't fail the
         whole chunk; the retry policy still catches transient failures
-        on the chunk as a whole. ``categories`` and ``min_citations`` are
-        carried for observability / future filtering and are not used to
-        gate ingestion in v1 (server-side bulk search already filtered
-        by citation count, and arxiv feed-time gating is a follow-up).
+        on the chunk as a whole. ``min_citations`` is carried for
+        observability — server-side bulk search already filtered by
+        citation count.
         """
         if not arxiv_ids:
             return {"requested": 0, "indexed": 0, "skipped": 0}
@@ -4497,8 +5462,6 @@ class PaperbaseService:
                 cursor=cursor,
             )
             pages_fetched += 1
-            if not page:
-                break
             for candidate in page:
                 if max_papers is not None and candidates_emitted >= max_papers:
                     break
@@ -4510,6 +5473,10 @@ class PaperbaseService:
                 candidates_emitted += 1
                 if len(pending_batch) >= chunk_size:
                     _flush_batch()
+            # Keep paging until S2 itself signals last page (PR #52 review).
+            # An empty filtered ``page`` does NOT mean end-of-stream — bulk
+            # search may return pages where every result is non-arxiv and
+            # gets filtered out client-side.
             if next_cursor is None:
                 break
             cursor = next_cursor
@@ -4894,7 +5861,6 @@ class PaperbaseService:
                     # job-type wiring.
                     self.run_harvest_chunk_top_cited(
                         arxiv_ids=list(job.payload.get("arxiv_ids", [])),
-                        categories=list(job.payload.get("categories") or []),
                         min_citations=int(job.payload.get("min_citations", 0)),
                         harvest_id=str(job.payload.get("harvest_id") or job.job_id),
                     )
@@ -4928,7 +5894,6 @@ class PaperbaseService:
                 self.run_harvest_top_cited(
                     min_citations=int(job.payload.get("min_citations", 0)),
                     max_papers=job.payload.get("max_papers"),
-                    categories=list(job.payload.get("categories") or self.settings.arxiv_categories),
                     chunk_size=int(job.payload.get("chunk_size", 50)),
                     harvest_id=str(job.payload.get("harvest_id") or job.job_id),
                 )

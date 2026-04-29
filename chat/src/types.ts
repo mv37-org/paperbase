@@ -152,6 +152,7 @@ export interface ProjectSummary {
 export interface ProjectResponse extends ProjectSummary {}
 
 export type ProjectFileKind = "python" | "notebook";
+export type ProjectRunMode = "smoke" | "full";
 
 export interface CreateProjectGitHubRepoPayload {
   mode: "existing" | "create";
@@ -349,12 +350,15 @@ export interface ChatStreamToolStartEvent {
   tool_call_id: string;
   tool_name: string;
   label: string;
+  command: string;
 }
 
 export interface ChatStreamToolDoneEvent {
   tool_call_id: string;
   tool_name: string;
   label: string;
+  command: string;
+  output: string;
   is_error: boolean;
 }
 

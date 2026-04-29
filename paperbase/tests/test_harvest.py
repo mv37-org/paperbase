@@ -641,17 +641,6 @@ def test_enqueue_harvest_top_cited_job_rejects_invalid_inputs():
         service.enqueue_harvest_top_cited_job(chunk_size=0)
     with pytest.raises(PermanentError):
         service.enqueue_harvest_top_cited_job(chunk_size=1000)
-    # Empty categories falls back to the configured AI/ML defaults — covered
-    # by ``test_enqueue_harvest_top_cited_job_uses_default_categories_when_none_given``.
-
-
-def test_enqueue_harvest_top_cited_job_uses_default_categories_when_none_given():
-    """Defaulting to the configured AI/ML category list keeps operators
-    from accidentally harvesting "all of CS" when they meant "AI/ML"."""
-    service = _service()
-    job = service.enqueue_harvest_top_cited_job(min_citations=100)
-    assert job.job_type == "harvest_top_cited"
-    assert job.payload["categories"] == list(service.settings.arxiv_categories)
 
 
 def test_run_harvest_top_cited_planner_batches_into_chunk_size_groups(monkeypatch):
@@ -670,7 +659,6 @@ def test_run_harvest_top_cited_planner_batches_into_chunk_size_groups(monkeypatc
     result = service.run_harvest_top_cited(
         min_citations=100,
         max_papers=None,
-        categories=["cs.LG"],
         chunk_size=4,
     )
 
@@ -681,7 +669,6 @@ def test_run_harvest_top_cited_planner_batches_into_chunk_size_groups(monkeypatc
     chunks = [j for j in service.repository.jobs.values() if j.job_type == "harvest_chunk"]
     assert len(chunks) == 3
     assert all(c.payload["source"] == "s2_top_cited" for c in chunks)
-    assert all(c.payload["categories"] == ["cs.LG"] for c in chunks)
     sizes = sorted(len(c.payload["arxiv_ids"]) for c in chunks)
     assert sizes == [2, 4, 4]
     # Pagination handed cursors back to fetch_top_cited_cs.
@@ -706,7 +693,6 @@ def test_run_harvest_top_cited_respects_max_papers(monkeypatch):
     result = service.run_harvest_top_cited(
         min_citations=50,
         max_papers=7,
-        categories=["cs.LG"],
         chunk_size=10,
     )
 
@@ -725,13 +711,55 @@ def test_run_harvest_top_cited_handles_empty_first_page(monkeypatch):
     result = service.run_harvest_top_cited(
         min_citations=1_000_000,
         max_papers=None,
-        categories=["cs.LG"],
         chunk_size=50,
     )
 
     assert result == {"chunks_created": 0, "candidates_emitted": 0, "pages_fetched": 1}
     chunks = [j for j in service.repository.jobs.values() if j.job_type == "harvest_chunk"]
     assert chunks == []
+
+
+def test_run_harvest_top_cited_continues_through_empty_filtered_pages(monkeypatch):
+    """Regression for PR #50 review: ``fetch_top_cited_cs`` filters non-arxiv
+    rows client-side and may return an empty ``page`` while ``next_cursor``
+    is still set. The planner must keep paging until S2 itself signals
+    end-of-stream (next_cursor is None), not stop on the first empty
+    filtered page."""
+    from paperbase.sources import TopCitedCandidate
+
+    service = _service()
+    call_count = {"n": 0}
+
+    def stub(*, min_citations, cursor=None, page_size=1000, fields_of_study="Computer Science", timeout_seconds=30):
+        idx = call_count["n"]
+        call_count["n"] += 1
+        # Page 0: real data. Page 1: empty (all filtered out client-side)
+        # but next_cursor is still set. Page 2: more real data, then EOF.
+        if idx == 0:
+            return [
+                TopCitedCandidate(arxiv_id="2020.00001", semantic_scholar_id="s1", title="P1", citation_count=100, primary_category=None, year=2020),
+            ], "token-0"
+        if idx == 1:
+            return [], "token-1"  # empty filtered page, but more remains
+        if idx == 2:
+            return [
+                TopCitedCandidate(arxiv_id="2020.00002", semantic_scholar_id="s2", title="P2", citation_count=100, primary_category=None, year=2020),
+            ], None
+        return [], None
+
+    monkeypatch.setattr("paperbase.service.sources.fetch_top_cited_cs", stub)
+
+    result = service.run_harvest_top_cited(
+        min_citations=100,
+        max_papers=None,
+        chunk_size=50,
+    )
+
+    # Both real candidates collected — the planner did NOT stop on the
+    # empty page 1.
+    assert result["candidates_emitted"] == 2
+    assert result["pages_fetched"] == 3
+    assert call_count["n"] == 3
 
 
 def test_run_harvest_chunk_top_cited_iterates_arxiv_ids(monkeypatch):
@@ -747,7 +775,6 @@ def test_run_harvest_chunk_top_cited_iterates_arxiv_ids(monkeypatch):
 
     result = service.run_harvest_chunk_top_cited(
         arxiv_ids=["2020.00001", "2020.00002", "2020.00003"],
-        categories=["cs.LG"],
         min_citations=100,
     )
 
@@ -769,7 +796,6 @@ def test_run_harvest_chunk_top_cited_swallows_per_id_permanent_errors(monkeypatc
 
     result = service.run_harvest_chunk_top_cited(
         arxiv_ids=["2020.00001", "2020.bad", "2020.00003"],
-        categories=["cs.LG"],
         min_citations=100,
     )
 
@@ -943,6 +969,52 @@ def test_run_harvest_venue_handles_empty_first_page(monkeypatch):
     assert result == {"chunks_created": 0, "candidates_emitted": 0, "pages_fetched": 1}
     chunks = [j for j in service.repository.jobs.values() if j.job_type == "harvest_chunk"]
     assert chunks == []
+
+
+def test_run_harvest_venue_continues_through_empty_filtered_pages(monkeypatch):
+    """Regression for PR #52 review: ``fetch_venue_accepted`` filters out
+    papers without arXiv IDs client-side but still returns the upstream
+    pagination token. The planner must keep paging until S2 itself
+    signals end-of-stream (next_cursor is None), not stop on the first
+    empty filtered page — for venues with many non-arxiv papers (e.g.
+    CVPR, where workshop papers / tech reports often lack arxiv links)
+    that would truncate the harvest badly."""
+    from paperbase.sources import VenueCandidate
+
+    service = _service()
+    call_count = {"n": 0}
+
+    def stub(*, venue, year, cursor=None, page_size=1000, timeout_seconds=30):
+        idx = call_count["n"]
+        call_count["n"] += 1
+        # Page 0: real data. Page 1: empty (all filtered out client-side)
+        # but next_cursor is still set. Page 2: more real data, then EOF.
+        if idx == 0:
+            return [
+                VenueCandidate(arxiv_id="2020.00001", semantic_scholar_id="s1", title="P1", venue_string="ICLR canonical", year=2024),
+            ], "token-0"
+        if idx == 1:
+            return [], "token-1"  # empty filtered page, but more remains
+        if idx == 2:
+            return [
+                VenueCandidate(arxiv_id="2020.00002", semantic_scholar_id="s2", title="P2", venue_string="ICLR canonical", year=2024),
+            ], None
+        return [], None
+
+    monkeypatch.setattr("paperbase.service.sources.fetch_venue_accepted", stub)
+
+    result = service.run_harvest_venue(
+        venue="ICLR",
+        year=2024,
+        max_papers=None,
+        chunk_size=50,
+    )
+
+    # Both real candidates collected — the planner did NOT stop on the
+    # empty page 1.
+    assert result["candidates_emitted"] == 2
+    assert result["pages_fetched"] == 3
+    assert call_count["n"] == 3
 
 
 def test_run_harvest_chunk_venue_indexes_and_stamps_venue(monkeypatch):

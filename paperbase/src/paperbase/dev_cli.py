@@ -601,16 +601,36 @@ def jobs_retry(*, job_id: str) -> int:
     return 0
 
 
-def enrich_missing(*, limit: int, min_age_seconds: int, batch_size: int) -> int:
-    """Synchronously run the enrich_missing_metadata pass in the current
-    process. Intended for manual backfill from the CLI; routine operation
-    should go through ``enqueue_enrich_missing_metadata_job`` so the worker
-    does it asynchronously."""
+def enrich_missing(*, limit: int, min_age_seconds: int, batch_size: int, queue: bool = False) -> int:
+    """Backfill Semantic Scholar metadata for indexed papers (#38).
+
+    Two modes:
+
+    - ``--queue`` (preferred for prod-scale backfills): enqueue an
+      ``enrich_missing_metadata`` job that the worker pool processes
+      asynchronously. The serving container is not tied up; this is
+      what an operator would use to backfill the existing corpus
+      after PR C (#39) shipped author-IDs in the inline enrich path.
+    - default (synchronous): run the pass in the current process.
+      Useful for spot-checks during local development; not appropriate
+      for corpus-scale runs because the CLI process holds the work.
+    """
     # Imported lazily so `paperbase-dev --help` does not pull in the whole
     # service graph (which loads heavy embedding/reranker model clients).
     from .service import get_service
 
     service = get_service()
+    if queue:
+        job = service.enqueue_enrich_missing_metadata_job(
+            limit=limit,
+            min_age_seconds=min_age_seconds,
+        )
+        print(
+            f"Queued enrich_missing_metadata {job.job_id}: "
+            f"limit={limit}, min_age_seconds={min_age_seconds}"
+        )
+        return 0
+
     stats_before = service.repository.enrichment_stats()
     result = service.enrich_missing_metadata(
         limit=limit,
@@ -680,16 +700,15 @@ def harvest_top_cited(
     *,
     min_citations: int,
     max_papers: int | None,
-    categories: list[str],
     chunk_size: int,
 ) -> int:
     """Queue a quality-curated harvest by Semantic Scholar citationCount.
 
     The planner streams S2's bulk-search endpoint sorted by
-    ``citationCount:desc``, filters to arxiv-linked papers in the chosen
-    AI/ML categories, and enqueues ``harvest_chunk`` jobs in batches of
-    ``chunk_size`` arxiv ids. Chunks run at the same low priority as the
-    date-range harvest so on-demand ``index_paper`` always cuts in front.
+    ``citationCount:desc``, filters to arxiv-linked papers, and enqueues
+    ``harvest_chunk`` jobs in batches of ``chunk_size`` arxiv ids.
+    Chunks run at the same low priority as the date-range harvest so
+    on-demand ``index_paper`` always cuts in front.
 
     ``min_citations=100`` is a good first run (~106k arxiv-linked CS
     papers); drop to ~25 for full ~500k-paper coverage.
@@ -702,7 +721,6 @@ def harvest_top_cited(
         job = service.enqueue_harvest_top_cited_job(
             min_citations=min_citations,
             max_papers=max_papers,
-            categories=categories,
             chunk_size=chunk_size,
         )
     except PermanentError as exc:
@@ -711,7 +729,7 @@ def harvest_top_cited(
     print(
         f"Queued harvest_top_cited {job.job_id}: "
         f"min_citations={min_citations}, max_papers={max_papers}, "
-        f"categories={len(categories)}, chunk_size={chunk_size}"
+        f"chunk_size={chunk_size}"
     )
     return 0
 
@@ -965,6 +983,15 @@ def _build_parser() -> argparse.ArgumentParser:
         default=20,
         help="Semantic Scholar /paper/batch size (max 500 per S2 docs).",
     )
+    enrich_parser.add_argument(
+        "--queue",
+        action="store_true",
+        help=(
+            "Queue an ``enrich_missing_metadata`` job for the worker pool "
+            "instead of running the backfill synchronously in this CLI "
+            "process. Preferred for corpus-scale runs."
+        ),
+    )
     harvest_parser = subparsers.add_parser(
         "harvest",
         help="Queue a historical arxiv backfill by date range (runs at backfill priority).",
@@ -1019,14 +1046,6 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Stop after this many candidates; omit for full sweep until S2 is exhausted.",
-    )
-    top_cited_parser.add_argument(
-        "--categories",
-        default=None,
-        help=(
-            "Comma-separated arxiv categories to keep (post-filter at index time). "
-            "Defaults to the configured AI/ML category list."
-        ),
     )
     top_cited_parser.add_argument(
         "--chunk-size",
@@ -1172,6 +1191,7 @@ def main(argv: list[str] | None = None) -> int:
             limit=args.limit,
             min_age_seconds=args.min_age_seconds,
             batch_size=args.batch_size,
+            queue=args.queue,
         )
     if args.command == "harvest":
         if args.categories:
@@ -1186,14 +1206,9 @@ def main(argv: list[str] | None = None) -> int:
             chunk_months=args.chunk_months,
         )
     if args.command == "harvest-top-cited":
-        if args.categories:
-            categories = [cat.strip() for cat in args.categories.split(",") if cat.strip()]
-        else:
-            categories = list(_settings().arxiv_categories)
         return harvest_top_cited(
             min_citations=args.min_citations,
             max_papers=args.max_papers,
-            categories=categories,
             chunk_size=args.chunk_size,
         )
     if args.command == "harvest-venue":

@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import logging
 import re
+import time
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from datetime import timedelta
-from typing import Any
+from pathlib import PurePosixPath
+from typing import Any, TypeVar
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
@@ -29,7 +32,7 @@ from sqlalchemy import (
     true,
 )
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
 from .config import Settings
@@ -60,6 +63,74 @@ from .models import (
     SearchSectionResult,
 )
 from .utils import canonical_arxiv_id, canonical_paper_id, literal_hint_from_pattern, new_id, utcnow
+
+
+logger = logging.getLogger(__name__)
+
+
+# Postgres SQLSTATE for ``deadlock_detected``. We retry the loser of a
+# deadlock cycle a few times so a transient AB-BA contention on
+# ``papers`` ↔ ``text_chunks`` row locks (#51) self-heals inside the
+# repository layer instead of bubbling up to the chunk worker and
+# burning a whole retry attempt's worth of arxiv/S2 quota.
+_DEADLOCK_SQLSTATE = "40P01"
+
+
+_T = TypeVar("_T")
+
+
+def _is_deadlock_error(exc: OperationalError) -> bool:
+    pgcode = getattr(getattr(exc, "orig", None), "sqlstate", None)
+    return pgcode == _DEADLOCK_SQLSTATE
+
+
+def _retry_on_deadlock(
+    fn: Callable[[], _T],
+    *,
+    max_attempts: int = 4,
+    base_backoff_seconds: float = 0.05,
+    label: str = "",
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> _T:
+    """Run ``fn()`` and retry on Postgres deadlock detection.
+
+    Postgres aborts ONE side of a deadlock cycle; that side raises
+    ``DeadlockDetected`` (SQLSTATE 40P01, surfaced through SQLAlchemy
+    as ``OperationalError``). The other side's transaction has already
+    committed and released its locks by the time we observe the error,
+    so retrying the loser usually succeeds on the next attempt.
+
+    Used by ``upsert_paper`` and ``replace_text_chunks`` (#51): under
+    tight indexing loops the same Python process can hold two pooled
+    connections in concurrent transactions that contend on the same
+    ``papers`` row's FK lock. Without this retry the failure bubbles
+    up to the chunk worker, which burns an entire retry attempt
+    (re-fetching arxiv + S2 for every paper in the batch) just to
+    re-do work the deadlock-loser had already half-completed.
+    """
+    last_exc: OperationalError | None = None
+    for attempt in range(max_attempts):
+        try:
+            return fn()
+        except OperationalError as exc:
+            if not _is_deadlock_error(exc):
+                raise
+            last_exc = exc
+            if attempt + 1 >= max_attempts:
+                break
+            sleep_for = base_backoff_seconds * (2 ** attempt)
+            logger.warning(
+                "Postgres deadlock; retrying repository call",
+                extra={
+                    "event": "repo.deadlock_retry",
+                    "label": label,
+                    "attempt": attempt + 1,
+                    "sleep_seconds": sleep_for,
+                },
+            )
+            sleep_fn(sleep_for)
+    assert last_exc is not None
+    raise last_exc
 
 
 class Base(DeclarativeBase):
@@ -418,6 +489,37 @@ def _resolve_unique_project_filename(
         index += 1
         candidate = f"{stem}_{index}{suffix}"
     return candidate
+
+
+def _filename_from_repo_path(repo_path: str) -> str:
+    return PurePosixPath(repo_path).name
+
+
+def _resolve_unique_repo_path(
+    repo_path: str,
+    existing_repo_paths: Iterable[str],
+    *,
+    exclude_repo_path: str | None = None,
+) -> str:
+    taken = {value for value in existing_repo_paths if value and value != exclude_repo_path}
+    if repo_path not in taken:
+        return repo_path
+    path = PurePosixPath(repo_path)
+    parent = "" if str(path.parent) == "." else str(path.parent)
+    filename = path.name
+    if "." in filename:
+        stem, suffix = filename.rsplit(".", 1)
+        suffix = f".{suffix}"
+    else:
+        stem, suffix = filename, ""
+    index = 2
+    candidate_name = f"{stem}_{index}{suffix}"
+    candidate_path = f"{parent}/{candidate_name}" if parent else candidate_name
+    while candidate_path in taken:
+        index += 1
+        candidate_name = f"{stem}_{index}{suffix}"
+        candidate_path = f"{parent}/{candidate_name}" if parent else candidate_name
+    return candidate_path
 
 
 def _repo_path_for_filename(filename: str, file_kind: str, repo_path: str | None = None) -> str:
@@ -1503,8 +1605,13 @@ class SqlAlchemyPaperRepository(PaperRepository):
             )
             connection.execute(
                 text(
-                    "CREATE UNIQUE INDEX IF NOT EXISTS python_files_project_filename_unique "
-                    "ON python_files (project_id, filename)"
+                    "DROP INDEX IF EXISTS python_files_project_filename_unique"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS python_files_project_repo_path_unique "
+                    "ON python_files (project_id, repo_path)"
                 )
             )
             connection.execute(
@@ -1669,11 +1776,20 @@ class SqlAlchemyPaperRepository(PaperRepository):
             "updated_at": utcnow(),
         }
         statement = statement.on_conflict_do_update(index_elements=[PaperORM.paper_id], set_=update_values)
-        with self._session() as session:
-            session.execute(statement)
-            row = session.get(PaperORM, canonical_paper_id(paper.arxiv_id))
-            assert row is not None
-            return _paper_from_orm(row)
+
+        # Wrapped in deadlock-retry per #51 (symmetric to the
+        # ``replace_text_chunks`` wrap below). The INSERT ... ON CONFLICT
+        # path can deadlock against an in-flight ``replace_text_chunks``
+        # in another pooled connection that holds an FK lock on the
+        # same paper row.
+        def _do() -> PaperResponse:
+            with self._session() as session:
+                session.execute(statement)
+                row = session.get(PaperORM, canonical_paper_id(paper.arxiv_id))
+                assert row is not None
+                return _paper_from_orm(row)
+
+        return _retry_on_deadlock(_do, label="upsert_paper")
 
     def upsert_paper_shallow(self, paper: PaperMetadata) -> PaperResponse:
         paper_id = canonical_paper_id(paper.arxiv_id)
@@ -1733,22 +1849,32 @@ class SqlAlchemyPaperRepository(PaperRepository):
             return _paper_from_orm(row) if row else None
 
     def replace_text_chunks(self, paper_id: str, chunks: list[dict[str, Any]]) -> None:
-        with self._session() as session:
-            session.execute(delete(TextChunkORM).where(TextChunkORM.paper_id == paper_id))
-            for chunk in chunks:
-                session.add(
-                    TextChunkORM(
-                        chunk_id=new_id("chunk"),
-                        paper_id=paper_id,
-                        path=chunk["path"],
-                        chunk_kind=chunk["chunk_kind"],
-                        content=chunk["content"],
-                        embedding=chunk.get("embedding"),
-                        chunk_index=int(chunk.get("chunk_index", 0)),
-                        section_depth=int(chunk.get("section_depth", 1)),
-                        section_order=int(chunk.get("section_order", 0)),
+        # Wrapped in deadlock-retry per #51. The DELETE + INSERT pattern
+        # against ``text_chunks`` takes a RowShareLock on the parent
+        # ``papers`` row for FK validation, which can deadlock against
+        # an in-flight ``upsert_paper`` running in a different pooled
+        # connection in the same process. Retrying the deadlock loser
+        # is cheaper than letting the chunk worker fail and re-fetch
+        # arxiv + S2 metadata from scratch.
+        def _do() -> None:
+            with self._session() as session:
+                session.execute(delete(TextChunkORM).where(TextChunkORM.paper_id == paper_id))
+                for chunk in chunks:
+                    session.add(
+                        TextChunkORM(
+                            chunk_id=new_id("chunk"),
+                            paper_id=paper_id,
+                            path=chunk["path"],
+                            chunk_kind=chunk["chunk_kind"],
+                            content=chunk["content"],
+                            embedding=chunk.get("embedding"),
+                            chunk_index=int(chunk.get("chunk_index", 0)),
+                            section_depth=int(chunk.get("section_depth", 1)),
+                            section_order=int(chunk.get("section_order", 0)),
+                        )
                     )
-                )
+
+        _retry_on_deadlock(_do, label="replace_text_chunks")
 
     def update_summaries(self, paper_id: str, *, summary_short: str, summary_eli5: str) -> PaperResponse | None:
         with self._session() as session:
@@ -3298,7 +3424,6 @@ class SqlAlchemyPaperRepository(PaperRepository):
 
     def list_projects(self, user_id: str) -> list[ProjectSummary]:
         with self._session() as session:
-            self._ensure_default_project_row(session, user_id)
             projects = session.scalars(
                 select(ProjectORM)
                 .where(ProjectORM.user_id == user_id)
@@ -3389,7 +3514,6 @@ class SqlAlchemyPaperRepository(PaperRepository):
             is_default=False,
         )
         with self._session() as session:
-            self._ensure_default_project_row(session, user_id)
             session.add(row)
         return ProjectResponse(**_project_from_orm(row).model_dump())
 
@@ -3410,7 +3534,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
             project = session.scalar(
                 select(ProjectORM).where(ProjectORM.project_id == project_id, ProjectORM.user_id == user_id)
             )
-            if project is None or project.is_default:
+            if project is None:
                 return False
             session.execute(
                 delete(ChatThreadORM).where(ChatThreadORM.user_id == user_id, ChatThreadORM.project_id == project_id)
@@ -3561,21 +3685,19 @@ class SqlAlchemyPaperRepository(PaperRepository):
             )
             if project is None:
                 return None
-            existing_filenames = session.scalars(
-                select(PythonFileORM.filename).where(PythonFileORM.project_id == project_id)
+            existing_repo_paths = session.scalars(
+                select(PythonFileORM.repo_path).where(PythonFileORM.project_id == project_id)
             ).all()
-            resolved_filename = (
-                _resolve_unique_python_filename(filename, existing_filenames)
-                if file_kind == "python"
-                else _resolve_unique_project_filename(filename, existing_filenames)
-            )
+            base_repo_path = _repo_path_for_filename(filename, file_kind, repo_path)
+            resolved_repo_path = _resolve_unique_repo_path(base_repo_path, existing_repo_paths)
+            resolved_filename = _filename_from_repo_path(resolved_repo_path)
             row = PythonFileORM(
                 file_id=new_id("pyf"),
                 user_id=user_id,
                 project_id=project_id,
                 filename=resolved_filename,
                 file_kind=file_kind,
-                repo_path=_repo_path_for_filename(resolved_filename, file_kind, repo_path),
+                repo_path=resolved_repo_path,
                 content=content,
             )
             session.add(row)
@@ -3607,29 +3729,34 @@ class SqlAlchemyPaperRepository(PaperRepository):
             if row is None:
                 return None
             updated_at = utcnow()
+            next_repo_path = row.repo_path or _repo_path_for_filename(row.filename, row.file_kind or "python")
+            next_filename = row.filename
             if filename is not None and filename.strip():
-                existing_filenames = session.scalars(
-                    select(PythonFileORM.filename).where(PythonFileORM.project_id == row.project_id)
+                existing_repo_paths = session.scalars(
+                    select(PythonFileORM.repo_path).where(PythonFileORM.project_id == row.project_id)
                 ).all()
-                row.filename = (
-                    _resolve_unique_python_filename(
-                        filename,
-                        existing_filenames,
-                        exclude_filename=row.filename,
-                    )
-                    if (row.file_kind or "python") == "python"
-                    else _resolve_unique_project_filename(
-                        filename,
-                        existing_filenames,
-                        exclude_filename=row.filename,
-                    )
+                requested_repo_path = _repo_path_with_filename(
+                    next_repo_path,
+                    filename,
                 )
-                row.repo_path = _repo_path_with_filename(
-                    row.repo_path or _repo_path_for_filename(row.filename, row.file_kind or "python"),
-                    row.filename,
+                next_repo_path = _resolve_unique_repo_path(
+                    requested_repo_path,
+                    existing_repo_paths,
+                    exclude_repo_path=row.repo_path,
                 )
+                next_filename = _filename_from_repo_path(next_repo_path)
             if repo_path is not None and repo_path.strip():
-                row.repo_path = repo_path.strip()
+                existing_repo_paths = session.scalars(
+                    select(PythonFileORM.repo_path).where(PythonFileORM.project_id == row.project_id)
+                ).all()
+                next_repo_path = _resolve_unique_repo_path(
+                    repo_path.strip(),
+                    existing_repo_paths,
+                    exclude_repo_path=row.repo_path,
+                )
+                next_filename = _filename_from_repo_path(next_repo_path)
+            row.filename = next_filename
+            row.repo_path = next_repo_path
             if content is not None:
                 row.content = content
             row.updated_at = updated_at
@@ -3637,6 +3764,39 @@ class SqlAlchemyPaperRepository(PaperRepository):
             if project is not None:
                 project.updated_at = updated_at
         return self.get_python_file(user_id=user_id, file_id=file_id)
+
+    def get_project_python_file_by_path(
+        self,
+        *,
+        user_id: str,
+        project_id: str,
+        repo_path: str,
+    ) -> PythonFileResponse | None:
+        with self._session() as session:
+            row = session.scalar(
+                select(PythonFileORM).where(
+                    PythonFileORM.user_id == user_id,
+                    PythonFileORM.project_id == project_id,
+                    PythonFileORM.repo_path == repo_path,
+                )
+            )
+            if row is None:
+                return None
+        return _python_file_from_orm(row)
+
+    def delete_python_file(self, *, user_id: str, file_id: str) -> bool:
+        with self._session() as session:
+            row = session.scalar(
+                select(PythonFileORM).where(PythonFileORM.file_id == file_id, PythonFileORM.user_id == user_id)
+            )
+            if row is None:
+                return False
+            updated_at = utcnow()
+            project = session.get(ProjectORM, row.project_id)
+            if project is not None:
+                project.updated_at = updated_at
+            session.delete(row)
+        return True
 
     def get_project_repo_sync(self, *, user_id: str, project_id: str) -> ProjectRepoSyncResponse | None:
         with self._session() as session:
@@ -5265,7 +5425,6 @@ class MemoryPaperRepository(PaperRepository):
         return self.get_project(user_id=user_id, project_id=project_id)
 
     def list_projects(self, user_id: str) -> list[ProjectSummary]:
-        self._ensure_default_project(user_id)
         summaries: list[ProjectSummary] = []
         for project in self.projects.values():
             if self.project_users.get(project.project_id) != user_id:
@@ -5322,7 +5481,6 @@ class MemoryPaperRepository(PaperRepository):
         )
 
     def create_project(self, *, user_id: str, name: str, description: str) -> ProjectResponse:
-        self._ensure_default_project(user_id)
         now = utcnow()
         project = ProjectResponse(
             project_id=new_id("proj"),
@@ -5347,7 +5505,7 @@ class MemoryPaperRepository(PaperRepository):
 
     def delete_project(self, *, user_id: str, project_id: str) -> bool:
         project = self.get_project(user_id=user_id, project_id=project_id)
-        if project is None or project.is_default:
+        if project is None:
             return False
         for thread_id, thread in list(self.chat_threads.items()):
             if self.chat_thread_users.get(thread_id) == user_id and thread.project_id == project_id:
@@ -5358,6 +5516,8 @@ class MemoryPaperRepository(PaperRepository):
                 self.python_files.pop(file_id, None)
                 self.python_file_users.pop(file_id, None)
         self.project_repo_syncs.pop(project_id, None)
+        if self.default_projects_by_user.get(user_id) == project_id:
+            self.default_projects_by_user.pop(user_id, None)
         self.projects.pop(project_id, None)
         self.project_users.pop(project_id, None)
         return True
@@ -5473,23 +5633,21 @@ class MemoryPaperRepository(PaperRepository):
         project = self.get_project(user_id=user_id, project_id=project_id)
         if project is None:
             return None
-        existing = [
-            file.filename
+        existing_repo_paths = [
+            file.repo_path
             for file in self.python_files.values()
             if self.python_file_users.get(file.file_id) == user_id and file.project_id == project_id
         ]
-        resolved_filename = (
-            _resolve_unique_python_filename(filename, existing)
-            if file_kind == "python"
-            else _resolve_unique_project_filename(filename, existing)
-        )
+        base_repo_path = _repo_path_for_filename(filename, file_kind, repo_path)
+        resolved_repo_path = _resolve_unique_repo_path(base_repo_path, existing_repo_paths)
+        resolved_filename = _filename_from_repo_path(resolved_repo_path)
         now = utcnow()
         file = PythonFileResponse(
             file_id=new_id("pyf"),
             project_id=project_id,
             filename=resolved_filename,
             file_kind=file_kind,  # type: ignore[arg-type]
-            repo_path=_repo_path_for_filename(resolved_filename, file_kind, repo_path),
+            repo_path=resolved_repo_path,
             content=content,
             created_at=now,
             updated_at=now,
@@ -5516,31 +5674,36 @@ class MemoryPaperRepository(PaperRepository):
         current = self.get_python_file(user_id=user_id, file_id=file_id)
         if current is None:
             return None
+        next_repo_path = current.repo_path or _repo_path_for_filename(current.filename, current.file_kind)
         next_filename = current.filename
         if filename is not None and filename.strip():
-            existing = [
-                file.filename
+            existing_repo_paths = [
+                file.repo_path
                 for file in self.python_files.values()
                 if self.python_file_users.get(file.file_id) == user_id and file.project_id == current.project_id
             ]
-            next_filename = (
-                _resolve_unique_python_filename(
-                    filename,
-                    existing,
-                    exclude_filename=current.filename,
-                )
-                if current.file_kind == "python"
-                else _resolve_unique_project_filename(
-                    filename,
-                    existing,
-                    exclude_filename=current.filename,
-                )
+            requested_repo_path = _repo_path_with_filename(
+                next_repo_path,
+                filename,
             )
-        next_repo_path = current.repo_path
-        if filename is not None and filename.strip():
-            next_repo_path = _repo_path_with_filename(current.repo_path or _repo_path_for_filename(current.filename, current.file_kind), next_filename)
+            next_repo_path = _resolve_unique_repo_path(
+                requested_repo_path,
+                existing_repo_paths,
+                exclude_repo_path=current.repo_path,
+            )
+            next_filename = _filename_from_repo_path(next_repo_path)
         if repo_path is not None and repo_path.strip():
-            next_repo_path = repo_path.strip()
+            existing_repo_paths = [
+                file.repo_path
+                for file in self.python_files.values()
+                if self.python_file_users.get(file.file_id) == user_id and file.project_id == current.project_id
+            ]
+            next_repo_path = _resolve_unique_repo_path(
+                repo_path.strip(),
+                existing_repo_paths,
+                exclude_repo_path=current.repo_path,
+            )
+            next_filename = _filename_from_repo_path(next_repo_path)
         updated_at = utcnow()
         updated = current.model_copy(
             update={
@@ -5555,6 +5718,33 @@ class MemoryPaperRepository(PaperRepository):
         if project is not None:
             self.projects[current.project_id] = project.model_copy(update={"updated_at": updated_at})
         return updated
+
+    def get_project_python_file_by_path(
+        self,
+        *,
+        user_id: str,
+        project_id: str,
+        repo_path: str,
+    ) -> PythonFileResponse | None:
+        for file in self.python_files.values():
+            if (
+                self.python_file_users.get(file.file_id) == user_id
+                and file.project_id == project_id
+                and file.repo_path == repo_path
+            ):
+                return file
+        return None
+
+    def delete_python_file(self, *, user_id: str, file_id: str) -> bool:
+        current = self.get_python_file(user_id=user_id, file_id=file_id)
+        if current is None:
+            return False
+        self.python_files.pop(file_id, None)
+        self.python_file_users.pop(file_id, None)
+        project = self.projects.get(current.project_id)
+        if project is not None:
+            self.projects[current.project_id] = project.model_copy(update={"updated_at": utcnow()})
+        return True
 
     def get_project_repo_sync(self, *, user_id: str, project_id: str) -> ProjectRepoSyncResponse | None:
         if self.get_project(user_id=user_id, project_id=project_id) is None:

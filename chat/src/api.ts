@@ -16,6 +16,7 @@ import type {
   ProjectRepoConflictResolution,
   ProjectRepoSyncResponse,
   ProjectListResponse,
+  ProjectRunMode,
   ProjectResponse,
   ProjectSessionPageResponse,
   PythonFileResponse,
@@ -387,9 +388,19 @@ export function updatePythonFile(
   });
 }
 
-export function runPythonFile(fileId: string) {
+export function deletePythonFile(fileId: string) {
+  return api<{ file_id: string; project_id: string; filename: string; deleted: boolean }>(
+    `/v1/browser/python-files/${fileId}`,
+    {
+      method: "DELETE",
+    },
+  );
+}
+
+export function runPythonFile(fileId: string, mode: ProjectRunMode = "full") {
   return api<RunPythonFileResponse>(`/v1/browser/python-files/${fileId}/run`, {
     method: "POST",
+    body: JSON.stringify({ mode }),
   });
 }
 

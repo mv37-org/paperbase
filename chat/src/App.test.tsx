@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const apiMocks = vi.hoisted(() => {
@@ -38,6 +38,7 @@ const apiMocks = vi.hoisted(() => {
     createProject: vi.fn(),
     createThread: vi.fn(),
     deleteProject: vi.fn(),
+    deletePythonFile: vi.fn(),
     deleteThread: vi.fn(),
     getBrowserPaper: vi.fn(),
     getBrowserPaperFigure: vi.fn(),
@@ -110,6 +111,7 @@ vi.mock("./api", () => ({
   createProject: apiMocks.createProject,
   createThread: apiMocks.createThread,
   deleteProject: apiMocks.deleteProject,
+  deletePythonFile: apiMocks.deletePythonFile,
   deleteThread: apiMocks.deleteThread,
   getBrowserPaper: apiMocks.getBrowserPaper,
   getBrowserPaperFigure: apiMocks.getBrowserPaperFigure,
@@ -178,6 +180,7 @@ import App from "./App";
 
 const OPEN_TABS_KEY = "paperbase-open-tabs";
 const PENDING_PROMPT_KEY = "paperbase-pending-prompt";
+const SELECTED_PROJECT_KEY = "paperbase-selected-project";
 
 function authenticatedSession(
   overrides: Partial<{
@@ -286,20 +289,27 @@ function pythonFileResponse(
   filename = "something.py",
   content = "",
   projectId = "proj_1",
+  repoPath?: string,
 ) {
   return {
     file_id: fileId,
     project_id: projectId,
     filename,
     file_kind: filename.endsWith(".ipynb") ? "notebook" : "python",
-    repo_path: filename.endsWith(".ipynb") ? `notebooks/${filename}` : `src/${filename}`,
+    repo_path:
+      repoPath ?? (filename.endsWith(".ipynb") ? `notebooks/${filename}` : `src/${filename}`),
     content,
     created_at: "2026-04-21T00:00:00Z",
     updated_at: "2026-04-21T00:00:00Z",
   };
 }
 
-function projectItemFile(fileId: string, filename = "something.py", projectId = "proj_1") {
+function projectItemFile(
+  fileId: string,
+  filename = "something.py",
+  projectId = "proj_1",
+  repoPath?: string,
+) {
   return {
     item_id: fileId,
     item_kind: "python_file",
@@ -312,7 +322,8 @@ function projectItemFile(fileId: string, filename = "something.py", projectId = 
     last_message_preview: "",
     filename,
     file_kind: filename.endsWith(".ipynb") ? "notebook" : "python",
-    repo_path: filename.endsWith(".ipynb") ? `notebooks/${filename}` : `src/${filename}`,
+    repo_path:
+      repoPath ?? (filename.endsWith(".ipynb") ? `notebooks/${filename}` : `src/${filename}`),
   };
 }
 
@@ -436,6 +447,12 @@ describe("App", () => {
     apiMocks.createThread.mockResolvedValue(threadResponse("thread_2", "New chat"));
     apiMocks.createPythonFile.mockResolvedValue(pythonFileResponse("file_1"));
     apiMocks.deleteProject.mockResolvedValue({ status: "deleted" });
+    apiMocks.deletePythonFile.mockResolvedValue({
+      file_id: "file_1",
+      project_id: "proj_1",
+      filename: "something.py",
+      deleted: true,
+    });
     apiMocks.deleteThread.mockResolvedValue({ status: "deleted" });
     apiMocks.importProjectNotebook.mockResolvedValue(
       pythonFileResponse("file_2", "notebook.ipynb", "# %%\nprint('notebook')\n"),
@@ -552,6 +569,72 @@ describe("App", () => {
     });
     expect(apiMocks.getThread).toHaveBeenCalledWith("thread_1");
     expect(apiMocks.loadProjects).toHaveBeenCalledTimes(1);
+    const tabElements = [...document.querySelectorAll<HTMLElement>(".chat-tab")];
+    const restoredTab = tabElements.find((element) =>
+      element.textContent?.includes("Restored research thread"),
+    );
+    expect(restoredTab?.querySelector(".chat-tab-thread-indicator")).toBeNull();
+    expect(document.querySelectorAll(".chat-tab-thread-indicator")).toHaveLength(0);
+    const debugStrip = screen.getByTestId("thread-debug-strip");
+    expect(debugStrip.textContent).toContain("user user_1");
+    expect(debugStrip.textContent).toContain("project proj_1");
+    expect(debugStrip.textContent).toContain("thread thread_1");
+    expect(debugStrip.textContent).toContain("assistant msg_1");
+    expect(screen.getByRole("button", { name: "Copy chat debug bundle" })).toBeTruthy();
+  });
+
+  it("restores the previously selected project and keeps only that tree expanded", async () => {
+    localStorage.setItem(SELECTED_PROJECT_KEY, "proj_2");
+    localStorage.setItem(OPEN_TABS_KEY, JSON.stringify(["thread_1"]));
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.loadProjects.mockResolvedValue({
+      projects: [projectSummary("proj_1", "General"), projectSummary("proj_2", "Agents", 0)],
+    });
+    apiMocks.getThread.mockResolvedValue(
+      threadResponse(
+        "thread_1",
+        "Restored research thread",
+        "Grounded answer",
+        "proj_1",
+        "General",
+      ),
+    );
+    apiMocks.loadProjectItems.mockImplementation(
+      async (projectId: string, limit = 25, offset = 0, itemKind?: "thread" | "python_file") => {
+        const allItems =
+          projectId === "proj_2"
+            ? [projectItemThread("thread_2", "Agents thread", projectId)]
+            : [projectItemThread("thread_1", "General thread", projectId)];
+        const filteredItems = itemKind
+          ? allItems.filter((item) => item.item_kind === itemKind)
+          : allItems;
+        const pageItems = filteredItems.slice(offset, offset + limit);
+        return {
+          ...projectItemsPage(projectId, pageItems),
+          offset,
+          limit,
+          total_count: filteredItems.length,
+          has_more: offset + pageItems.length < filteredItems.length,
+        };
+      },
+    );
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Agents thread")).toBeTruthy();
+    });
+    expect(screen.queryByText("General thread")).toBeNull();
+    expect(apiMocks.loadProjectItems).toHaveBeenCalledWith("proj_2", 5, 0, "python_file");
+    expect(apiMocks.loadProjectItems).toHaveBeenCalledWith("proj_2", 5, 0, "thread");
+    expect(apiMocks.loadProjectItems).not.toHaveBeenCalledWith("proj_1", 5, 0, "python_file");
+    expect(apiMocks.loadProjectItems).not.toHaveBeenCalledWith("proj_1", 5, 0, "thread");
+
+    const activeProject = document.querySelector<HTMLElement>(".project-card.active");
+    expect(activeProject?.textContent).toContain("Agents");
+    const expandedProjects = [...document.querySelectorAll<HTMLElement>(".project-group.expanded")];
+    expect(expandedProjects).toHaveLength(1);
+    expect(expandedProjects[0]?.textContent).toContain("Agents");
   });
 
   it("loads project sessions lazily when a project is expanded", async () => {
@@ -672,6 +755,69 @@ describe("App", () => {
     expect(await screen.findByText("analysis-6.py")).toBeTruthy();
   });
 
+  it("shows repo path context for duplicate Python basenames in the sidebar and tabs", async () => {
+    localStorage.setItem(
+      OPEN_TABS_KEY,
+      JSON.stringify([
+        { kind: "python_file", id: "file_1" },
+        { kind: "python_file", id: "file_2" },
+      ]),
+    );
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.loadProjectItems.mockImplementation(
+      async (projectId: string, limit = 25, offset = 0, itemKind?: "thread" | "python_file") => {
+        const allItems =
+          itemKind === "python_file"
+            ? [
+                projectItemFile("file_1", "train.py", projectId, "src/models/train.py"),
+                projectItemFile("file_2", "train.py", projectId, "experiments/models/train.py"),
+              ]
+            : [projectItemThread("thread_1", "Recovered thread", projectId)];
+        const pageItems = allItems.slice(offset, offset + limit);
+        return {
+          ...projectItemsPage(projectId, pageItems),
+          offset,
+          limit,
+          total_count: allItems.length,
+          has_more: offset + pageItems.length < allItems.length,
+        };
+      },
+    );
+    apiMocks.getPythonFile.mockImplementation(async (fileId: string) => {
+      if (fileId === "file_1") {
+        return pythonFileResponse(
+          "file_1",
+          "train.py",
+          "print('a')\n",
+          "proj_1",
+          "src/models/train.py",
+        );
+      }
+      return pythonFileResponse(
+        "file_2",
+        "train.py",
+        "print('b')\n",
+        "proj_1",
+        "experiments/models/train.py",
+      );
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Close src/models/train.py" })).toBeTruthy();
+    });
+    expect(screen.getByRole("button", { name: "Close experiments/models/train.py" })).toBeTruthy();
+
+    fireEvent.click(screen.getAllByText("General")[0]!);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("train.py")).toHaveLength(2);
+    });
+    expect(screen.getAllByText("src/models/train.py").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("experiments/models/train.py").length).toBeGreaterThan(0);
+  });
+
   it("paginates project sessions inside the sessions section", async () => {
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());
     apiMocks.loadProjectItems.mockImplementation(
@@ -712,7 +858,11 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Show more" }));
 
     await waitFor(() => {
-      expect(apiMocks.loadProjectItems).toHaveBeenCalledWith("proj_1", 5, 5, "thread");
+      expect(
+        apiMocks.loadProjectItems.mock.calls.some(
+          (call) => call[0] === "proj_1" && call[2] > 0 && call[3] === "thread",
+        ),
+      ).toBe(true);
     });
     expect(await screen.findByText("Session 6")).toBeTruthy();
   });
@@ -800,6 +950,7 @@ describe("App", () => {
     });
     expect(screen.getByRole("button", { name: "Add python file" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Add notes" })).toBeTruthy();
+    expect(screen.queryByTestId("thread-debug-strip")).toBeNull();
 
     fireEvent.click(screen.getByLabelText("Open empty state project picker"));
 
@@ -1368,10 +1519,157 @@ describe("App", () => {
       expectedRemoteHeadSha: null,
       conflictResolutions: [],
     });
-    expect(apiMocks.runPythonFile).toHaveBeenCalledWith("file_1");
+    expect(apiMocks.runPythonFile).toHaveBeenCalledWith("file_1", "full");
     await waitFor(() => {
       expect(screen.getByText("Latest run")).toBeTruthy();
     });
+  });
+
+  it("persists dirty project drafts before project-code chat turns", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.loadProjectItems.mockImplementation(
+      async (projectId: string, limit = 25, offset = 0, itemKind?: "thread" | "python_file") => {
+        const allItems =
+          itemKind === "python_file"
+            ? [projectItemFile("file_1", "agent.py", projectId, "src/agent.py")]
+            : [projectItemThread("thread_1", "Recovered thread", projectId)];
+        const pageItems = allItems.slice(offset, offset + limit);
+        return {
+          ...projectItemsPage(projectId, pageItems),
+          offset,
+          limit,
+          total_count: allItems.length,
+          has_more: false,
+        };
+      },
+    );
+    apiMocks.getPythonFile.mockResolvedValue(
+      pythonFileResponse("file_1", "agent.py", "print('base')\n", "proj_1", "src/agent.py"),
+    );
+    apiMocks.updatePythonFile.mockResolvedValue(
+      pythonFileResponse("file_1", "agent.py", "print('dirty')\n", "proj_1", "src/agent.py"),
+    );
+    apiMocks.sendThreadMessageStream.mockRejectedValue(
+      new apiMocks.StreamingChatError("stream failed", true),
+    );
+    apiMocks.sendThreadMessage.mockResolvedValue({
+      thread: threadResponse("thread_1", "Recovered thread", "Code answer"),
+      assistant_message: {
+        message_id: "msg_2",
+        role: "assistant",
+        content_markdown: "Code answer",
+        citations: [],
+        created_at: "2026-04-21T00:00:00Z",
+        status: "completed",
+      },
+      remaining_free_responses: 2,
+      has_anthropic_api_key: false,
+      state: "completed",
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+    fireEvent.click(screen.getAllByText("General")[0]!);
+    fireEvent.click(await screen.findByText("agent.py"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("monaco-editor")).toBeTruthy();
+    });
+    fireEvent.change(screen.getByTestId("monaco-editor"), {
+      target: { value: "print('dirty')\n" },
+    });
+
+    fireEvent.click(screen.getAllByText("Recovered thread")[0]!);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("mention-input-chat")).toBeTruthy();
+    });
+    fireEvent.change(screen.getByLabelText("mention-input-chat"), {
+      target: { value: "edit src/agent.py to add a torch smoke run" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
+      expect(apiMocks.updatePythonFile).toHaveBeenCalledWith("file_1", {
+        content: "print('dirty')\n",
+      });
+    });
+    await waitFor(() => {
+      expect(apiMocks.sendThreadMessage).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("does not persist dirty project drafts for non-coding chat turns", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.loadProjectItems.mockImplementation(
+      async (projectId: string, limit = 25, offset = 0, itemKind?: "thread" | "python_file") => {
+        const allItems =
+          itemKind === "python_file"
+            ? [projectItemFile("file_1", "agent.py", projectId, "src/agent.py")]
+            : [projectItemThread("thread_1", "Recovered thread", projectId)];
+        const pageItems = allItems.slice(offset, offset + limit);
+        return {
+          ...projectItemsPage(projectId, pageItems),
+          offset,
+          limit,
+          total_count: allItems.length,
+          has_more: false,
+        };
+      },
+    );
+    apiMocks.getPythonFile.mockResolvedValue(
+      pythonFileResponse("file_1", "agent.py", "print('base')\n", "proj_1", "src/agent.py"),
+    );
+    apiMocks.sendThreadMessageStream.mockRejectedValue(
+      new apiMocks.StreamingChatError("stream failed", true),
+    );
+    apiMocks.sendThreadMessage.mockResolvedValue({
+      thread: threadResponse("thread_1", "Recovered thread", "Research answer"),
+      assistant_message: {
+        message_id: "msg_2",
+        role: "assistant",
+        content_markdown: "Research answer",
+        citations: [],
+        created_at: "2026-04-21T00:00:00Z",
+        status: "completed",
+      },
+      remaining_free_responses: 2,
+      has_anthropic_api_key: false,
+      state: "completed",
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+    fireEvent.click(screen.getAllByText("General")[0]!);
+    fireEvent.click(await screen.findByText("agent.py"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("monaco-editor")).toBeTruthy();
+    });
+    fireEvent.change(screen.getByTestId("monaco-editor"), {
+      target: { value: "print('dirty')\n" },
+    });
+
+    fireEvent.click(screen.getAllByText("Recovered thread")[0]!);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("mention-input-chat")).toBeTruthy();
+    });
+    fireEvent.change(screen.getByLabelText("mention-input-chat"), {
+      target: { value: "Summarize the benchmark papers" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
+      expect(apiMocks.sendThreadMessage).toHaveBeenCalledTimes(1);
+    });
+    expect(apiMocks.updatePythonFile).not.toHaveBeenCalled();
   });
 
   it("opens the project menu from the action button", async () => {
@@ -1411,6 +1709,87 @@ describe("App", () => {
     await waitFor(() => {
       expect(apiMocks.deleteThread).toHaveBeenCalledWith("thread_1");
     });
+  });
+
+  it("shows rename and delete actions for code files and removes deleted files", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.loadProjectItems.mockImplementation(
+      async (projectId: string, limit = 25, offset = 0, itemKind?: "thread" | "python_file") => {
+        const allItems = [
+          projectItemThread("thread_1", "Recovered thread", projectId),
+          projectItemFile("file_1", "agent.py", projectId),
+        ];
+        const filteredItems = itemKind
+          ? allItems.filter((item) => item.item_kind === itemKind)
+          : allItems;
+        const pageItems = filteredItems.slice(offset, offset + limit);
+        return {
+          ...projectItemsPage(projectId, pageItems),
+          offset,
+          limit,
+          total_count: filteredItems.length,
+          has_more: offset + pageItems.length < filteredItems.length,
+        };
+      },
+    );
+    apiMocks.deletePythonFile.mockResolvedValue({
+      file_id: "file_1",
+      project_id: "proj_1",
+      filename: "agent.py",
+      deleted: true,
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+    fireEvent.click(screen.getAllByText("General")[0]!);
+
+    await waitFor(() => {
+      expect(screen.getByText("agent.py")).toBeTruthy();
+    });
+
+    expect(screen.getByLabelText("Rename agent.py")).toBeTruthy();
+    fireEvent.click(screen.getByLabelText("Delete agent.py"));
+    fireEvent.click(screen.getByRole("button", { name: "Delete file" }));
+
+    await waitFor(() => {
+      expect(apiMocks.deletePythonFile).toHaveBeenCalledWith("file_1");
+    });
+    await waitFor(() => {
+      expect(screen.queryByText("agent.py")).toBeNull();
+    });
+  });
+
+  it("can delete the General project and falls back to a create-project-only state", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.loadProjects
+      .mockResolvedValueOnce({
+        projects: [projectSummary("proj_1", "General")],
+      })
+      .mockResolvedValueOnce({
+        projects: [],
+      });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByLabelText("Open project menu for General"));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Delete project" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete project" }));
+
+    await waitFor(() => {
+      expect(apiMocks.deleteProject).toHaveBeenCalledWith("proj_1");
+    });
+    await waitFor(() => {
+      expect(screen.getByText("Create a project to get started")).toBeTruthy();
+    });
+    expect(screen.queryByLabelText("mention-input-chat")).toBeNull();
+    expect(screen.queryByText("Add python file")).toBeNull();
   });
 
   it("opens the cited-paper drawer from the URL state", async () => {
@@ -1541,11 +1920,14 @@ describe("App", () => {
           tool_call_id: "tool_1",
           tool_name: "paperbase_search",
           label: 'paper search for "grounding"',
+          command: 'paperbase_search({\n  "query": "grounding"\n})',
         });
         onEvent("tool_done", {
           tool_call_id: "tool_1",
           tool_name: "paperbase_search",
           label: 'paper search for "grounding"',
+          command: 'paperbase_search({\n  "query": "grounding"\n})',
+          output: '{\n  "result_set_id": "rs_1"\n}',
           is_error: false,
         });
         await streamDone;
@@ -1566,8 +1948,20 @@ describe("App", () => {
       expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
     });
     await waitFor(() => {
+      expect(document.querySelectorAll(".chat-tab-thread-indicator")).toHaveLength(1);
+    });
+    await waitFor(() => {
       expect(screen.getByText('Did paper search for "grounding"')).toBeTruthy();
     });
+    const toolActivitySummary = screen
+      .getByText('Did paper search for "grounding"')
+      .closest("summary");
+    expect(toolActivitySummary?.textContent).toContain("Command and output");
+    fireEvent.click(toolActivitySummary!);
+    expect(screen.getByText("Command")).toBeTruthy();
+    expect(screen.getByText("Output")).toBeTruthy();
+    expect(screen.getByText(/paperbase_search\(\{/)).toBeTruthy();
+    expect(screen.getByText(/"result_set_id": "rs_1"/)).toBeTruthy();
     await waitFor(() => {
       expect(
         screen.getByRole("button", {
@@ -1599,7 +1993,262 @@ describe("App", () => {
       releaseStream?.();
       await streamDone;
     });
+
+    await waitFor(() => {
+      expect(document.querySelectorAll(".chat-tab-thread-indicator")).toHaveLength(0);
+    });
     randomSpy.mockRestore();
+  });
+
+  it("shows project coding activity copy and a live Python preview while code streams", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.createThread.mockResolvedValue(emptyThreadResponse("thread_2"));
+    apiMocks.getThread.mockResolvedValue(
+      threadResponse("thread_2", "New chat", "```python\ndef train():\n    return 1\n```"),
+    );
+
+    let releaseStream: (() => void) | null = null;
+    const streamDone = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+
+    apiMocks.sendThreadMessageStream.mockImplementation(
+      async (
+        _threadId: string,
+        _payload: unknown,
+        onEvent: (eventName: string, payload: unknown) => void,
+      ) => {
+        onEvent("tool_start", {
+          tool_call_id: "tool_1",
+          tool_name: "project_edit",
+          label: 'project file edit for "src/train.py"',
+        });
+        onEvent("assistant_start", {
+          assistant_message: {
+            message_id: "msg_2",
+            role: "assistant",
+            content_markdown: "",
+            citations: [],
+            created_at: "2026-04-21T00:00:00Z",
+            status: "streaming",
+          },
+        });
+        onEvent("delta", {
+          message_id: "msg_2",
+          delta: "```python\ndef train():\n    return 1\n",
+        });
+        await streamDone;
+        onEvent("tool_done", {
+          tool_call_id: "tool_1",
+          tool_name: "project_edit",
+          label: 'project file edit for "src/train.py"',
+          is_error: false,
+        });
+        onEvent("done", {
+          thread: threadResponse(
+            "thread_2",
+            "New chat",
+            "```python\ndef train():\n    return 1\n```",
+          ),
+          assistant_message: {
+            message_id: "msg_2",
+            role: "assistant",
+            content_markdown: "```python\ndef train():\n    return 1\n```",
+            citations: [],
+            created_at: "2026-04-21T00:00:00Z",
+            status: "completed",
+          },
+          remaining_free_responses: 2,
+          has_anthropic_api_key: false,
+          state: "completed",
+        });
+      },
+    );
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Start new research in")).toBeTruthy();
+    });
+    fireEvent.change(screen.getByLabelText("mention-input-chat"), {
+      target: { value: "write a training script" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Writing code in src/train.py...")).toBeTruthy();
+    });
+    const preview = await screen.findByTestId("streaming-code-preview");
+    expect(within(preview).getByText("Writing code")).toBeTruthy();
+    expect(preview.textContent).toContain("python");
+    expect(preview.textContent).toContain("1");
+    expect(preview.textContent).toContain("2");
+    expect(preview.textContent).toContain("def train():");
+    expect(document.querySelector(".code-snippet-token.keyword")?.textContent).toBe("def");
+
+    await act(async () => {
+      releaseStream?.();
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("streaming-code-preview")).toBeNull();
+    });
+  });
+
+  it("hides the live code preview once the fenced block closes during the stream", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.createThread.mockResolvedValue(emptyThreadResponse("thread_2"));
+
+    let allowFenceClose: (() => void) | null = null;
+    const waitForFenceClose = new Promise<void>((resolve) => {
+      allowFenceClose = resolve;
+    });
+    let releaseStream: (() => void) | null = null;
+    const streamDone = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+
+    apiMocks.sendThreadMessageStream.mockImplementation(
+      async (
+        _threadId: string,
+        _payload: unknown,
+        onEvent: (eventName: string, payload: unknown) => void,
+      ) => {
+        onEvent("assistant_start", {
+          assistant_message: {
+            message_id: "msg_2",
+            role: "assistant",
+            content_markdown: "",
+            citations: [],
+            created_at: "2026-04-21T00:00:00Z",
+            status: "streaming",
+          },
+        });
+        onEvent("delta", {
+          message_id: "msg_2",
+          delta: "```python\ndef train():\n    return 1\n",
+        });
+        await waitForFenceClose;
+        onEvent("delta", {
+          message_id: "msg_2",
+          delta: "```\n\nThis script is ready to run.",
+        });
+        await streamDone;
+        onEvent("done", {
+          assistant_message: {
+            message_id: "msg_2",
+            role: "assistant",
+            content_markdown:
+              "```python\ndef train():\n    return 1\n```\n\nThis script is ready to run.",
+            citations: [],
+            created_at: "2026-04-21T00:00:00Z",
+            status: "completed",
+          },
+          remaining_free_responses: 2,
+          has_anthropic_api_key: false,
+          state: "completed",
+        });
+      },
+    );
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Start new research in")).toBeTruthy();
+    });
+    fireEvent.change(screen.getByLabelText("mention-input-chat"), {
+      target: { value: "write a training script with a short explanation" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    const preview = await screen.findByTestId("streaming-code-preview");
+    expect(preview.textContent).toContain("def train():");
+
+    await act(async () => {
+      allowFenceClose?.();
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("streaming-code-preview")).toBeNull();
+    });
+
+    await act(async () => {
+      releaseStream?.();
+    });
+  });
+
+  it("refreshes project code items after coding-tool turns complete", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.createThread.mockResolvedValue(emptyThreadResponse("thread_2"));
+    apiMocks.getThread.mockResolvedValue(threadResponse("thread_2", "New chat", "Created trainer"));
+
+    let pythonItems: Array<ReturnType<typeof projectItemFile>> = [];
+    apiMocks.loadProjectItems.mockImplementation(
+      async (projectId: string, limit = 25, offset = 0, itemKind?: "thread" | "python_file") => {
+        const allItems = [
+          projectItemThread("thread_1", "Recovered thread", projectId),
+          ...pythonItems,
+        ];
+        const filteredItems = itemKind
+          ? allItems.filter((item) => item.item_kind === itemKind)
+          : allItems;
+        const pageItems = filteredItems.slice(offset, offset + limit);
+        return {
+          ...projectItemsPage(projectId, pageItems),
+          offset,
+          limit,
+          total_count: filteredItems.length,
+          has_more: offset + pageItems.length < filteredItems.length,
+        };
+      },
+    );
+    apiMocks.sendThreadMessageStream.mockImplementation(
+      async (
+        _threadId: string,
+        _payload: unknown,
+        onEvent: (eventName: string, payload: unknown) => void,
+      ) => {
+        onEvent("tool_start", {
+          tool_call_id: "tool_1",
+          tool_name: "project_touch",
+          label: 'project file create for "src/trainer.py"',
+        });
+        pythonItems = [projectItemFile("file_2", "trainer.py", "proj_1", "src/trainer.py")];
+        onEvent("done", {
+          assistant_message: {
+            message_id: "msg_2",
+            role: "assistant",
+            content_markdown: "Created trainer.py",
+            citations: [],
+            created_at: "2026-04-21T00:00:00Z",
+            status: "completed",
+          },
+          remaining_free_responses: 2,
+          has_anthropic_api_key: false,
+          state: "completed",
+        });
+      },
+    );
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+    fireEvent.click(screen.getAllByText("General")[0]!);
+
+    await waitFor(() => {
+      expect(screen.getByText("No code files yet.")).toBeTruthy();
+    });
+
+    fireEvent.change(screen.getByLabelText("mention-input-chat"), {
+      target: { value: "create a trainer module" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("trainer.py")).toBeTruthy();
+    });
   });
 
   it("keeps the context usage control in the composer after streaming completes", async () => {

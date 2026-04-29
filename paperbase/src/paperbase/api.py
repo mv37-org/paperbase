@@ -59,6 +59,7 @@ from .models import (
     ProjectResponse,
     ProjectSessionPageResponse,
     PythonFileResponse,
+    RunPythonFileRequest,
     ResetPasswordRequest,
     ResultSetResponse,
     RunPythonFileResponse,
@@ -332,13 +333,10 @@ def harvest_range(
 
 class HarvestTopCitedRequest(_BaseModel):
     # Citation floor on Semantic Scholar's bulk search. From measurement:
-    # ≥100 cs cites yields ~106k arxiv-linked papers; ≥25 yields ~470k —
-    # close to the 500k AI/ML target after the per-paper category gate.
+    # ≥100 cs cites yields ~106k arxiv-linked papers; ≥25 yields ~470k.
     min_citations: int = _Field(default=100, ge=0, le=1_000_000)
     # Stop after this many candidates; ``None`` means "until S2 is exhausted".
     max_papers: int | None = _Field(default=None, ge=1, le=10_000_000)
-    # When omitted, defaults to the configured AI/ML arxiv categories.
-    categories: list[str] = _Field(default_factory=list)
     # arxiv_ids per harvest_chunk; smaller chunks let interactive work
     # cut in faster, larger chunks cut planner overhead. 50 is a balance.
     chunk_size: int = _Field(default=50, ge=1, le=500)
@@ -361,12 +359,10 @@ def harvest_top_cited(
     ``index_paper`` always cuts in front."""
     from .errors import PermanentError
 
-    categories = request.categories or list(get_settings().arxiv_categories)
     try:
         return service.enqueue_harvest_top_cited_job(
             min_citations=request.min_citations,
             max_papers=request.max_papers,
-            categories=categories,
             chunk_size=request.chunk_size,
         )
     except PermanentError as exc:
@@ -472,6 +468,27 @@ def reindex_embeddings(
         limit=limit,
         include_chunks=include_chunks,
         rewrite_existing=rewrite_existing,
+    )
+
+
+@app.post(
+    "/v1/index/enrich-missing-metadata",
+    response_model=JobResponse,
+    dependencies=[Depends(require_bearer_token)],
+)
+def enrich_missing_metadata(
+    limit: int = Query(default=50_000, ge=1, le=5_000_000),
+    min_age_seconds: int = Query(default=3600, ge=0, le=30 * 24 * 3600),
+    service: PaperbaseService = Depends(get_service),
+) -> JobResponse:
+    """Queue an ``enrich_missing_metadata`` job (#38). The worker picks
+    up the job and re-runs Semantic Scholar enrichment for any indexed
+    paper that inline enrichment left unfilled (usually due to transient
+    429s). Asynchronous so a backfill at corpus scale doesn't tie up
+    the serving container."""
+    return service.enqueue_enrich_missing_metadata_job(
+        limit=limit,
+        min_age_seconds=min_age_seconds,
     )
 
 
@@ -1244,13 +1261,23 @@ def browser_update_python_file(
     )
 
 
-@app.post("/v1/browser/python-files/{file_id}/run", response_model=RunPythonFileResponse)
-def browser_run_python_file(
+@app.delete("/v1/browser/python-files/{file_id}", response_model=dict[str, object])
+def browser_delete_python_file(
     file_id: str,
     user=Depends(require_browser_write_user),
     service: PaperbaseService = Depends(get_service),
+) -> dict[str, object]:
+    return service.delete_python_file(user, file_id)
+
+
+@app.post("/v1/browser/python-files/{file_id}/run", response_model=RunPythonFileResponse)
+def browser_run_python_file(
+    file_id: str,
+    request: RunPythonFileRequest | None = None,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
 ) -> RunPythonFileResponse:
-    return service.run_python_file(user, file_id)
+    return service.run_python_file(user, file_id, mode=(request.mode if request is not None else "full"))
 
 
 @app.get("/v1/browser/projects/{project_id}/repo-sync", response_model=ProjectRepoSyncResponse)
