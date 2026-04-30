@@ -1848,10 +1848,10 @@ export default function App() {
     {
       id: "inference",
       provider: "openai",
-      label: "Inference access",
+      label: "OpenAI API key",
       description:
         "Needed for the agent to run turns. Add your OpenAI API key before starting chat.",
-      actionLabel: hasInferenceAccess ? "Ready" : "Open inference setup",
+      actionLabel: hasInferenceAccess ? "Ready" : "Open OpenAI setup",
       ready: hasInferenceAccess,
       required: true,
       settingsTab: "inference" as const,
@@ -5663,8 +5663,8 @@ export default function App() {
                                 Prepare the agent before the first chat
                               </h2>
                               <p className="chat-setup-note">
-                                Connect what is missing for {chatSetupProjectName} so repo saves,
-                                model calls, and sandbox runs do not fail silently.
+                                Add your OpenAI API key and connect anything else missing for{" "}
+                                {chatSetupProjectName} so the first chat can run cleanly.
                               </p>
                             </div>
                             <button

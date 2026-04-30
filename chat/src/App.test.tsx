@@ -1443,11 +1443,17 @@ describe("App", () => {
     await waitFor(() => {
       expect(screen.getByText("Prepare the agent before the first chat")).toBeTruthy();
     });
-    expect(screen.getByText("GitHub connection")).toBeTruthy();
-    expect(screen.getByText("Inference access")).toBeTruthy();
-    expect(screen.getByText("Sandbox credentials")).toBeTruthy();
+    const checklist = screen.getByLabelText("Agent setup checklist");
+    expect(
+      within(checklist).getByText(
+        /Add your OpenAI API key and connect anything else missing for .* so the first chat can run cleanly\./,
+      ),
+    ).toBeTruthy();
+    expect(within(checklist).getByText("GitHub connection")).toBeTruthy();
+    expect(within(checklist).getByText("OpenAI API key")).toBeTruthy();
+    expect(within(checklist).getByText("Sandbox credentials")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Open GitHub setup" })).toBeTruthy();
-    expect(screen.getByLabelText("Inference access configured")).toBeTruthy();
+    expect(screen.getByLabelText("OpenAI API key configured")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Open sandbox setup" })).toBeTruthy();
   });
 
