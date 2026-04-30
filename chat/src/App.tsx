@@ -7202,33 +7202,22 @@ export default function App() {
                           }
                         }}
                       >
-                        <div className="settings-form-card">
-                          <div className="settings-form-copy">
-                            <div className="settings-form-kicker">Credentials</div>
-                            <p className="settings-form-caption">
-                              Save the key used for signed-in workspace inference requests.
-                            </p>
-                          </div>
-                          <div className="settings-field">
-                            <label
-                              className="settings-field-label"
-                              htmlFor="settings-openai-api-key"
-                            >
-                              OpenAI API key
-                            </label>
-                            <input
-                              id="settings-openai-api-key"
-                              name="api_key"
-                              type="password"
-                              placeholder="OpenAI API key"
-                              autoComplete="new-password"
-                              aria-describedby="settings-openai-api-key-note"
-                              required
-                            />
-                            <p id="settings-openai-api-key-note" className="settings-field-note">
-                              Stored on this workspace and reused for chat and research turns.
-                            </p>
-                          </div>
+                        <div className="settings-field">
+                          <label className="settings-field-label" htmlFor="settings-openai-api-key">
+                            OpenAI API key
+                          </label>
+                          <input
+                            id="settings-openai-api-key"
+                            name="api_key"
+                            type="password"
+                            placeholder="OpenAI API key"
+                            autoComplete="new-password"
+                            aria-describedby="settings-openai-api-key-note"
+                            required
+                          />
+                          <p id="settings-openai-api-key-note" className="settings-field-note">
+                            Stored on this workspace and reused for chat and research turns.
+                          </p>
                         </div>
                         <div className="settings-footer-actions">
                           <button className="primary-button settings-submit-button" type="submit">
@@ -7316,57 +7305,42 @@ export default function App() {
                           }
                         }}
                       >
-                        <div className="settings-form-card">
-                          <div className="settings-form-copy">
-                            <div className="settings-form-kicker">Sandbox credentials</div>
-                            <p className="settings-form-caption">
-                              Add the Modal token pair this workspace should use for sandboxed runs.
-                            </p>
-                          </div>
-                          <div className="settings-field">
-                            <label
-                              className="settings-field-label"
-                              htmlFor="settings-modal-token-id"
-                            >
-                              Modal token ID
-                            </label>
-                            <input
-                              id="settings-modal-token-id"
-                              name="token_id"
-                              type="password"
-                              placeholder="Paste token ID"
-                              autoComplete="new-password"
-                              aria-describedby="settings-modal-token-id-note"
-                              required
-                            />
-                            <p id="settings-modal-token-id-note" className="settings-field-note">
-                              The identifier paired with your sandbox token secret.
-                            </p>
-                          </div>
-                          <div className="settings-field">
-                            <label
-                              className="settings-field-label"
-                              htmlFor="settings-modal-token-secret"
-                            >
-                              Modal token secret
-                            </label>
-                            <input
-                              id="settings-modal-token-secret"
-                              name="token_secret"
-                              type="password"
-                              placeholder="Paste token secret"
-                              autoComplete="new-password"
-                              aria-describedby="settings-modal-token-secret-note"
-                              required
-                            />
-                            <p
-                              id="settings-modal-token-secret-note"
-                              className="settings-field-note"
-                            >
-                              Stored for this signed-in workspace and used only for sandbox
-                              sessions.
-                            </p>
-                          </div>
+                        <div className="settings-field">
+                          <label className="settings-field-label" htmlFor="settings-modal-token-id">
+                            Modal token ID
+                          </label>
+                          <input
+                            id="settings-modal-token-id"
+                            name="token_id"
+                            type="password"
+                            placeholder="Paste token ID"
+                            autoComplete="new-password"
+                            aria-describedby="settings-modal-token-id-note"
+                            required
+                          />
+                          <p id="settings-modal-token-id-note" className="settings-field-note">
+                            The identifier paired with your sandbox token secret.
+                          </p>
+                        </div>
+                        <div className="settings-field">
+                          <label
+                            className="settings-field-label"
+                            htmlFor="settings-modal-token-secret"
+                          >
+                            Modal token secret
+                          </label>
+                          <input
+                            id="settings-modal-token-secret"
+                            name="token_secret"
+                            type="password"
+                            placeholder="Paste token secret"
+                            autoComplete="new-password"
+                            aria-describedby="settings-modal-token-secret-note"
+                            required
+                          />
+                          <p id="settings-modal-token-secret-note" className="settings-field-note">
+                            Stored for this signed-in workspace and used only for sandbox sessions.
+                          </p>
                         </div>
                         <div className="settings-footer-actions">
                           <button className="primary-button settings-submit-button" type="submit">
