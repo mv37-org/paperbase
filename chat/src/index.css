@@ -3679,11 +3679,10 @@ textarea {
 }
 
 .settings-modal-panel {
-  width: min(860px, calc(100vw - 32px));
-  min-height: min(680px, calc(100vh - 48px));
-  max-height: min(92vh, 820px);
-  overflow: hidden;
-  padding: 22px 22px 24px;
+  width: min(720px, calc(100vw - 32px));
+  max-height: min(84vh, 640px);
+  overflow: auto;
+  padding: 0;
 }
 
 .python-save-modal-panel {
@@ -4500,7 +4499,7 @@ textarea {
 .settings-panel {
   display: grid;
   grid-template-columns: 180px minmax(0, 1fr);
-  gap: 28px;
+  gap: 0;
   min-height: 0;
   height: 100%;
 }
@@ -4509,7 +4508,7 @@ textarea {
   display: grid;
   align-content: start;
   gap: 6px;
-  padding: 0 16px 0 0;
+  padding: 22px 16px 22px 22px;
   border-right: 1px solid rgba(27, 22, 17, 0.08);
 }
 
@@ -4551,8 +4550,7 @@ textarea {
   align-content: start;
   gap: 12px;
   min-height: 0;
-  overflow: auto;
-  padding-right: 4px;
+  padding: 22px 52px 24px 22px;
 }
 
 .settings-modal-flash {
@@ -5955,8 +5953,24 @@ body.authenticated-theme-dark .project-menu-item:disabled {
   }
 
   @media (max-width: 820px) {
+    .settings-modal-panel {
+      width: calc(100vw - 20px);
+      max-height: calc(100vh - 20px);
+    }
+
+    .settings-panel {
+      grid-template-columns: 1fr;
+    }
+
     .settings-tabs {
-      flex-direction: column;
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+      padding: 18px;
+      border-right: 0;
+      border-bottom: 1px solid rgba(27, 22, 17, 0.08);
+    }
+
+    .settings-tab-panels {
+      padding: 18px;
     }
 
     .python-conflict-layout {

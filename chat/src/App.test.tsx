@@ -2901,13 +2901,12 @@ describe("App", () => {
       });
     });
     await waitFor(() => {
-      expect(screen.getByText("Dark mode enabled.")).toBeTruthy();
-    });
-    expect(document.querySelector(".settings-tab-panels > #modal-flash")).toBeTruthy();
-    expect(document.querySelector(".modal-panel > #modal-flash")).toBeNull();
-    await waitFor(() => {
       expect(document.body.classList.contains("authenticated-theme-dark")).toBe(true);
     });
+    await waitFor(() => {
+      expect(document.querySelector("#auth-modal")?.classList.contains("hidden")).toBe(true);
+    });
+    expect(document.querySelector("#auth-modal.hidden")).toBeTruthy();
   });
 
   it("sets explicit autocomplete hints on auth and settings key inputs", async () => {

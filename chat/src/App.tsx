@@ -7409,11 +7409,7 @@ export default function App() {
                             },
                           );
                           setSession(nextSession);
-                          showNoteFlash(
-                            appearanceThemeDraft === "dark"
-                              ? "Dark mode enabled."
-                              : "Light mode enabled.",
-                          );
+                          closeAuthModal();
                         } catch (error) {
                           showErrorFlash(
                             error instanceof Error
