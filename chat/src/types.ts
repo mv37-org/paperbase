@@ -4,11 +4,11 @@ export interface BrowserUser {
   user_id: string;
   email: string;
   display_name: string;
-  free_responses_used: number;
 }
 
 export interface BrowserUserSettingsResponse {
-  anthropic_api_key_hint: string;
+  openai_api_key_hint: string;
+  anthropic_api_key_hint?: string;
   has_modal_credentials: boolean;
   modal_token_id_hint: string;
   has_github_connection: boolean;
@@ -22,8 +22,8 @@ export interface BrowserUserSettingsResponse {
 export interface BrowserSessionResponse {
   authenticated: boolean;
   user: BrowserUser | null;
-  remaining_free_responses: number;
-  has_anthropic_api_key: boolean;
+  has_openai_api_key: boolean;
+  has_anthropic_api_key?: boolean;
   settings?: BrowserUserSettingsResponse;
   csrf_token: string | null;
 }
@@ -112,6 +112,52 @@ export interface ChatMessageResponse {
   created_at: string;
   status: string;
   kind?: "default" | "compaction" | string;
+  phase?: "commentary" | "final_answer" | null;
+}
+
+export type ChatItemType =
+  | "user_message"
+  | "assistant_message"
+  | "reasoning"
+  | "function_call"
+  | "function_call_output"
+  | "custom_tool_call"
+  | "custom_tool_call_output"
+  | "tool_search_call"
+  | "tool_search_output"
+  | "web_search_call"
+  | "compaction"
+  | "error"
+  | "other";
+
+export interface ChatThreadItemResponse {
+  item_id: string;
+  thread_id: string;
+  turn_id: string;
+  item_type: ChatItemType | string;
+  role: string;
+  phase?: "commentary" | "final_answer" | null;
+  call_id?: string | null;
+  name?: string | null;
+  content_text: string;
+  content_json?: unknown;
+  citations: ChatCitation[];
+  created_at: string;
+  status: string;
+}
+
+export interface ChatTurnResponse {
+  turn_id: string;
+  thread_id: string;
+  status: string;
+  provider_response_id: string;
+  started_at: string;
+  completed_at?: string | null;
+  usage?: Record<string, unknown> | null;
+  diff_summary: string;
+  changed_paths: string[];
+  exec_session_ids: string[];
+  items: ChatThreadItemResponse[];
 }
 
 export interface ChatThreadSummary {
@@ -131,7 +177,9 @@ export interface ChatThreadResponse {
   title: string;
   created_at: string;
   updated_at: string;
-  messages: ChatMessageResponse[];
+  items?: ChatThreadItemResponse[];
+  turns?: ChatTurnResponse[];
+  messages?: ChatMessageResponse[];
 }
 
 export interface ChatThreadListResponse {
@@ -151,7 +199,7 @@ export interface ProjectSummary {
 
 export interface ProjectResponse extends ProjectSummary {}
 
-export type ProjectFileKind = "python" | "notebook";
+export type ProjectFileKind = "python" | "notebook" | "text";
 export type ProjectRunMode = "smoke" | "full";
 
 export interface CreateProjectGitHubRepoPayload {
@@ -308,78 +356,70 @@ export interface GitHubRepoImportCandidateResponse {
 
 export interface SendChatMessageResponse {
   thread: ChatThreadResponse;
-  assistant_message: ChatMessageResponse | null;
-  remaining_free_responses: number;
-  has_anthropic_api_key: boolean;
+  turn?: ChatTurnResponse | null;
+  final_item?: ChatThreadItemResponse | null;
+  assistant_message?: ChatMessageResponse | null;
+  has_openai_api_key: boolean;
+  has_anthropic_api_key?: boolean;
   state: string;
 }
 
-export interface ChatStreamAssistantStartEvent {
-  assistant_message: ChatMessageResponse;
+export interface ChatStreamTurnStartedEvent {
+  turn: ChatTurnResponse;
 }
 
-export interface ChatStreamDeltaEvent {
-  message_id: string;
+export interface ChatStreamItemStartedEvent {
+  item: ChatThreadItemResponse;
+}
+
+export interface ChatStreamItemDeltaEvent {
+  item_id: string;
   delta: string;
+  delta_type: string;
+}
+
+export interface ChatStreamItemCompletedEvent {
+  item: ChatThreadItemResponse;
 }
 
 export interface ChatStreamUsageEvent {
   model: string;
   input_tokens: number;
   output_tokens: number;
-  cache_creation_input_tokens: number;
-  cache_read_input_tokens: number;
   total_tokens: number;
   context_window_tokens: number;
 }
 
-export interface ChatStreamDoneEvent {
-  assistant_message: ChatMessageResponse;
-  remaining_free_responses: number;
-  has_anthropic_api_key: boolean;
+export interface ChatStreamTurnCompletedEvent {
+  thread: ChatThreadResponse;
+  turn: ChatTurnResponse;
+  final_item?: ChatThreadItemResponse | null;
+  has_openai_api_key: boolean;
+  has_anthropic_api_key?: boolean;
   state: "completed";
   usage?: ChatStreamUsageEvent | null;
 }
+
+export interface ChatStreamTurnFailedEvent {
+  turn: ChatTurnResponse;
+  detail: string;
+}
+
+export type ChatStreamDoneEvent = ChatStreamTurnCompletedEvent;
 
 export interface ChatStreamErrorEvent {
   message_id?: string;
   detail: string;
 }
 
-export interface ChatStreamToolStartEvent {
-  tool_call_id: string;
-  tool_name: string;
-  label: string;
-  command: string;
-}
-
-export interface ChatStreamToolDoneEvent {
-  tool_call_id: string;
-  tool_name: string;
-  label: string;
-  command: string;
-  output: string;
-  is_error: boolean;
-}
-
-export interface ChatStreamCompactionStartEvent {
-  compaction_message: ChatMessageResponse;
-}
-
-export interface ChatStreamCompactionDoneEvent {
-  compaction_message: ChatMessageResponse;
-  messages: ChatMessageResponse[];
-}
-
 export type ChatStreamEventMap = {
-  compaction_start: ChatStreamCompactionStartEvent;
-  compaction_done: ChatStreamCompactionDoneEvent;
-  tool_start: ChatStreamToolStartEvent;
-  tool_done: ChatStreamToolDoneEvent;
-  assistant_start: ChatStreamAssistantStartEvent;
+  turn_started: ChatStreamTurnStartedEvent;
+  item_started: ChatStreamItemStartedEvent;
+  item_delta: ChatStreamItemDeltaEvent;
+  item_completed: ChatStreamItemCompletedEvent;
   usage: ChatStreamUsageEvent;
-  delta: ChatStreamDeltaEvent;
-  done: ChatStreamDoneEvent;
+  turn_completed: ChatStreamTurnCompletedEvent;
+  turn_failed: ChatStreamTurnFailedEvent;
   api_key_required: SendChatMessageResponse;
   error: ChatStreamErrorEvent;
 };

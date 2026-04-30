@@ -51,6 +51,7 @@ import type {
   ChatCitation,
   ChatMessageResponse,
   ChatStreamDoneEvent,
+  ChatThreadItemResponse,
   ChatStreamUsageEvent,
   ChatThreadResponse,
   ChatThreadSummary,
@@ -79,6 +80,7 @@ const PENDING_PROMPT_KEY = "paperbase-pending-prompt";
 const RESUME_PROJECT_MODAL_KEY = "paperbase-resume-new-project";
 const SIDEBAR_COLLAPSED_KEY = "paperbase-sidebar-collapsed";
 const SELECTED_PROJECT_KEY = "paperbase-selected-project";
+const DISMISSED_CHAT_SETUP_KEY = "paperbase-dismissed-chat-setup";
 const MAX_OPEN_TABS = 8;
 const MESSAGE_LIST_BOTTOM_THRESHOLD = 40;
 const PROJECT_ITEM_PAGE_SIZE = 5;
@@ -222,6 +224,7 @@ const AUTH_VIEW_COPY: Record<AuthView, { title: string; caption: string }> = {
 };
 
 const DEFAULT_BROWSER_SETTINGS: NonNullable<BrowserSessionResponse["settings"]> = {
+  openai_api_key_hint: "",
   anthropic_api_key_hint: "",
   has_modal_credentials: false,
   modal_token_id_hint: "",
@@ -240,7 +243,7 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; caption: string }> 
   {
     id: "inference",
     label: "Inference",
-    caption: "Manage Anthropic inference API key.",
+    caption: "Manage OpenAI inference API key.",
   },
   {
     id: "sandbox",
@@ -249,7 +252,7 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; caption: string }> 
   },
   {
     id: "version-control",
-    label: "Version control",
+    label: "GitHub",
     caption: "Manage GitHub connection for repositories.",
   },
   {
@@ -443,7 +446,7 @@ function projectRepoConflictFromError(error: unknown): ProjectRepoConflictDetail
 function createLocalMessage(
   role: string,
   content_markdown: string,
-  options: Partial<Pick<ChatMessageResponse, "citations" | "status" | "message_id">> = {},
+  options: Partial<Pick<ChatMessageResponse, "citations" | "status" | "message_id" | "phase">> = {},
 ): ChatMessageResponse {
   return {
     message_id: options.message_id ?? `local-${role}-${Math.random().toString(36).slice(2)}`,
@@ -452,6 +455,37 @@ function createLocalMessage(
     citations: options.citations ?? [],
     created_at: new Date().toISOString(),
     status: options.status ?? "completed",
+    phase: options.phase ?? null,
+  };
+}
+
+function messageFromThreadItem(item: ChatThreadItemResponse): ChatMessageResponse | null {
+  if (!["user_message", "assistant_message", "compaction"].includes(item.item_type)) {
+    return null;
+  }
+  return {
+    message_id: item.item_id,
+    role: item.role,
+    content_markdown: item.content_text,
+    citations: item.citations,
+    created_at: item.created_at,
+    status: item.status,
+    kind: item.item_type === "compaction" ? "compaction" : "default",
+    phase: item.phase ?? null,
+  };
+}
+
+function normalizeThreadForState(thread: ChatThreadResponse): ChatThreadResponse {
+  const items = [...(thread.items ?? [])];
+  if (items.length === 0) {
+    return thread;
+  }
+  return {
+    ...thread,
+    items,
+    messages: items
+      .map(messageFromThreadItem)
+      .filter((message): message is ChatMessageResponse => Boolean(message)),
   };
 }
 
@@ -559,6 +593,22 @@ function restoreSidebarCollapsed() {
 function restoreSelectedProjectId() {
   const value = localStorage.getItem(SELECTED_PROJECT_KEY)?.trim();
   return value ? value : null;
+}
+
+function restoreDismissedChatSetupSignatures() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(DISMISSED_CHAT_SETUP_KEY) ?? "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+    return Object.fromEntries(
+      Object.entries(parsed).filter(
+        ([key, value]) => typeof key === "string" && typeof value === "string",
+      ),
+    ) as Record<string, string>;
+  } catch {
+    return {};
+  }
 }
 
 function formatChatTitleWord(word: string) {
@@ -704,9 +754,9 @@ function contextUsageButtonLabel(usage: ChatStreamUsageEvent) {
 
 function apiKeyStateMessage(state: string) {
   if (state === "api_key_invalid") {
-    return "Your saved Anthropic API key could not be decrypted. Add it again in Settings.";
+    return "Your saved OpenAI API key could not be decrypted. Add it again in Settings.";
   }
-  return "You have used your 3 free responses. Add an Anthropic API key to continue.";
+  return "Add an OpenAI API key in Settings before starting a chat.";
 }
 
 function shouldShowThreadInSidebar(thread: ChatThreadSummary) {
@@ -926,6 +976,160 @@ function quotedToolActivityTarget(label: string) {
   return label.match(TOOL_ACTIVITY_TARGET_RE)?.[1] ?? "";
 }
 
+function toolActivityInputForItem(
+  item: Pick<ChatThreadItemResponse, "content_json" | "content_text">,
+) {
+  if (
+    item.content_json &&
+    typeof item.content_json === "object" &&
+    !Array.isArray(item.content_json)
+  ) {
+    return item.content_json as Record<string, unknown>;
+  }
+  if (item.content_text.trim()) {
+    try {
+      const parsed = JSON.parse(item.content_text);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function toolActivityLabelForItem(
+  item: Pick<ChatThreadItemResponse, "name" | "content_json" | "content_text">,
+) {
+  const toolName = item.name ?? "";
+  const toolInput = toolActivityInputForItem(item);
+  const detail = (value: unknown, limit = 56) => {
+    const text = String(value ?? "").trim();
+    if (!text) {
+      return null;
+    }
+    if (text.length > limit) {
+      return `${text.slice(0, limit - 1).trimEnd()}…`;
+    }
+    return text;
+  };
+
+  const query = detail(toolInput?.query);
+  const path = detail(toolInput?.path) ?? detail(toolInput?.repo_path);
+  const newPath = detail(toolInput?.new_repo_path);
+  const pattern = detail(toolInput?.pattern);
+  const figureId = detail(toolInput?.figure_id);
+  const tableId = detail(toolInput?.table_id);
+  const execId = detail(toolInput?.exec_id);
+
+  if (toolName === "paperbase_search") {
+    return query ? `paper search for "${query}"` : "paper search";
+  }
+  if (toolName === "paperbase_search_sections") {
+    return query ? `section search for "${query}"` : "section search";
+  }
+  if (toolName === "paperbase_get_results") {
+    return "result lookup";
+  }
+  if (toolName === "paperbase_grep_results") {
+    return pattern ? `result filtering for "${pattern}"` : "result filtering";
+  }
+  if (toolName === "paperbase_get_paper") {
+    return "paper lookup";
+  }
+  if (toolName === "paperbase_list_files") {
+    return "file listing";
+  }
+  if (toolName === "paperbase_read_file") {
+    return path ? `file read for "${path}"` : "file read";
+  }
+  if (toolName === "paperbase_get_figure") {
+    return figureId ? `figure lookup for "${figureId}"` : "figure lookup";
+  }
+  if (toolName === "paperbase_get_table") {
+    return tableId ? `table lookup for "${tableId}"` : "table lookup";
+  }
+  if (toolName === "paperbase_get_related_papers") {
+    return "related-paper lookup";
+  }
+  if (toolName === "paperbase_get_references") {
+    return "reference lookup";
+  }
+  if (toolName === "paperbase_list_uploaded_documents") {
+    return "upload listing";
+  }
+  if (toolName === "paperbase_search_uploaded_sections") {
+    return query ? `uploaded-note search for "${query}"` : "uploaded-note search";
+  }
+  if (toolName === "project_list_files") {
+    return "project file listing";
+  }
+  if (toolName === "project_read_file") {
+    return path ? `project file read for "${path}"` : "project file read";
+  }
+  if (toolName === "project_grep") {
+    return pattern ? `project grep for "${pattern}"` : "project grep";
+  }
+  if (toolName === "project_write_file" || toolName === "project_touch") {
+    return path ? `project file write for "${path}"` : "project file write";
+  }
+  if (toolName === "project_apply_patch" || toolName === "project_edit") {
+    return path ? `project file patch for "${path}"` : "project file patch";
+  }
+  if (toolName === "project_move") {
+    if (path && newPath) {
+      return `project file move from "${path}" to "${newPath}"`;
+    }
+    return "project file move";
+  }
+  if (toolName === "project_delete") {
+    return path ? `project file delete for "${path}"` : "project file delete";
+  }
+  if (toolName === "project_git_status") {
+    return "project git status";
+  }
+  if (toolName === "project_git_diff") {
+    return "project git diff";
+  }
+  if (toolName === "project_exec") {
+    return "project exec";
+  }
+  if (toolName === "project_wait") {
+    return execId ? `project exec wait for "${execId}"` : "project exec wait";
+  }
+  if (toolName === "project_cancel") {
+    return execId ? `project exec cancel for "${execId}"` : "project exec cancel";
+  }
+  if (toolName === "project_logs") {
+    return execId ? `project exec logs for "${execId}"` : "project exec logs";
+  }
+  if (toolName === "project_test") {
+    return "project test";
+  }
+  if (toolName === "project_lint") {
+    return "project lint";
+  }
+  if (toolName === "project_run") {
+    return path ? `project run for "${path}"` : "project run";
+  }
+  return toolName || "tool call";
+}
+
+function toolActivityCommandForItem(
+  item: Pick<ChatThreadItemResponse, "name" | "content_json" | "content_text">,
+) {
+  const toolName = item.name ?? "";
+  const toolInput = toolActivityInputForItem(item);
+  if (!toolName) {
+    return item.content_text || null;
+  }
+  if (!toolInput) {
+    return item.content_text || null;
+  }
+  return `${toolName}(${JSON.stringify(toolInput, null, 2)})`;
+}
+
 function formatToolActivityText(
   activity: Pick<ToolActivityEntry, "label" | "status" | "toolName">,
 ) {
@@ -940,14 +1144,32 @@ function formatToolActivityText(
       return running
         ? `Searching files${target ? ` for ${target}` : ""}...`
         : `Searched files${target ? ` for ${target}` : ""}`;
+    case "project_write_file":
     case "project_touch":
-      return running ? `Creating ${target || "file"}...` : `Created ${target || "file"}`;
+      return running ? `Writing ${target || "file"}...` : `Wrote ${target || "file"}`;
+    case "project_apply_patch":
     case "project_edit":
-      return running
-        ? `Writing code${target ? ` in ${target}` : ""}...`
-        : `Wrote code${target ? ` in ${target}` : ""}`;
+      return running ? `Patching ${target || "file"}...` : `Patched ${target || "file"}`;
+    case "project_move":
+      return running ? "Moving file..." : "Moved file";
     case "project_delete":
       return running ? `Deleting ${target || "file"}...` : `Deleted ${target || "file"}`;
+    case "project_git_status":
+      return running ? "Checking project status..." : "Checked project status";
+    case "project_git_diff":
+      return running ? "Diffing project files..." : "Diffed project files";
+    case "project_exec":
+      return running ? "Starting project command..." : "Started project command";
+    case "project_wait":
+      return running ? "Waiting on project command..." : "Updated project command status";
+    case "project_cancel":
+      return running ? "Canceling project command..." : "Canceled project command";
+    case "project_logs":
+      return running ? "Reading project logs..." : "Read project logs";
+    case "project_test":
+      return running ? "Running project tests..." : "Ran project tests";
+    case "project_lint":
+      return running ? "Running project lint..." : "Ran project lint";
     case "project_run":
       return running ? `Running ${target || "file"}...` : `Ran ${target || "file"}`;
     default:
@@ -959,8 +1181,18 @@ function toolActivityHasDetails(activity: Pick<ToolActivityEntry, "command" | "o
   return Boolean(activity.command || activity.output);
 }
 
+function isStreamingMessageStatus(status: string) {
+  return status === "streaming" || status === "in_progress";
+}
+
 function projectFileKindLabel(fileKind: ProjectFileKind | undefined) {
-  return fileKind === "notebook" ? "Notebook" : "Python";
+  if (fileKind === "notebook") {
+    return "Notebook";
+  }
+  if (fileKind === "text") {
+    return "Text";
+  }
+  return "Python";
 }
 
 function GoogleButton() {
@@ -1096,6 +1328,9 @@ export default function App() {
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [emptyStateProjectPickerOpen, setEmptyStateProjectPickerOpen] = useState(false);
   const [emptyStateProjectSearch, setEmptyStateProjectSearch] = useState("");
+  const [dismissedChatSetupSignatures, setDismissedChatSetupSignatures] = useState<
+    Record<string, string>
+  >(() => restoreDismissedChatSetupSignatures());
   const notebookUploadInputRef = useRef<HTMLInputElement | null>(null);
   const [streamingThreadId, setStreamingThreadId] = useState<string | null>(null);
   const [threadStreamStates, setThreadStreamStates] = useState<Record<string, ThreadStreamState>>(
@@ -1193,6 +1428,10 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(sidebarCollapsed));
   }, [sidebarCollapsed]);
+
+  useEffect(() => {
+    localStorage.setItem(DISMISSED_CHAT_SETUP_KEY, JSON.stringify(dismissedChatSetupSignatures));
+  }, [dismissedChatSetupSignatures]);
 
   useEffect(() => {
     if (!mobileSidebarOpen) {
@@ -1588,11 +1827,60 @@ export default function App() {
     }
     return {
       email: session.user.email,
-      hasAnthropicApiKey: session.has_anthropic_api_key,
+      hasOpenAIApiKey: session.has_openai_api_key ?? session.has_anthropic_api_key ?? false,
       settings: session.settings ?? DEFAULT_BROWSER_SETTINGS,
     };
   }, [session]);
   const sessionSettings = sessionSummary?.settings ?? DEFAULT_BROWSER_SETTINGS;
+  const hasInferenceAccess = Boolean(sessionSummary?.hasOpenAIApiKey);
+  const chatSetupProjectName = emptyStateProject?.name ?? activeThread?.project_name ?? "Project";
+  const chatSetupItems = [
+    {
+      id: "github",
+      provider: "github",
+      label: "GitHub connection",
+      description: "Needed for the agent to create, edit, and save project files.",
+      actionLabel: sessionSettings.has_github_connection ? "Connected" : "Open GitHub setup",
+      ready: sessionSettings.has_github_connection,
+      required: true,
+      settingsTab: "version-control" as const,
+    },
+    {
+      id: "inference",
+      provider: "openai",
+      label: "OpenAI API key",
+      description:
+        "Needed for the agent to run turns. Add your OpenAI API key before starting chat.",
+      actionLabel: hasInferenceAccess ? "Ready" : "Open OpenAI setup",
+      ready: hasInferenceAccess,
+      required: true,
+      settingsTab: "inference" as const,
+    },
+    {
+      id: "sandbox",
+      provider: "modal",
+      label: "Sandbox credentials",
+      description: "Recommended for run, test, and long-running coding tools.",
+      actionLabel: sessionSettings.has_modal_credentials ? "Ready" : "Open sandbox setup",
+      ready: sessionSettings.has_modal_credentials,
+      required: false,
+      settingsTab: "sandbox" as const,
+    },
+  ];
+  const missingChatSetupSignature = chatSetupItems
+    .filter((item) => !item.ready)
+    .map((item) => item.id)
+    .sort()
+    .join("|");
+  const dismissedChatSetupSignature = emptyStateProject?.project_id
+    ? dismissedChatSetupSignatures[emptyStateProject.project_id]
+    : null;
+  const showChatSetupCard =
+    authenticated &&
+    isChatEmpty &&
+    hasProjects &&
+    missingChatSetupSignature.length > 0 &&
+    dismissedChatSetupSignature !== missingChatSetupSignature;
   const appliedAppearanceTheme = sessionSettings.appearance_theme === "dark" ? "dark" : "light";
   const authenticatedDarkThemeEnabled = authenticated && appliedAppearanceTheme === "dark";
   const activeSettingsConfig = useMemo(
@@ -2382,8 +2670,33 @@ export default function App() {
     [showNoteFlash],
   );
 
+  const requireInferenceAccess = useCallback(
+    (currentSession?: BrowserSessionResponse | null) => {
+      const hasOpenAIApiKey = Boolean(
+        currentSession?.has_openai_api_key ??
+        currentSession?.has_anthropic_api_key ??
+        sessionRef.current?.has_openai_api_key ??
+        sessionRef.current?.has_anthropic_api_key,
+      );
+      if (hasOpenAIApiKey) {
+        return true;
+      }
+      const message = apiKeyStateMessage("api_key_required");
+      setComposerStatus(message);
+      showErrorFlash(message);
+      setActiveSettingsTab("inference");
+      setAuthView("settings");
+      setAuthModalOpen(true);
+      return false;
+    },
+    [showErrorFlash],
+  );
+
   const sendMessage = useCallback(
-    async (threadId: string, content: string) => {
+    async (threadId: string, content: string, currentSession?: BrowserSessionResponse | null) => {
+      if (!requireInferenceAccess(currentSession)) {
+        return null;
+      }
       const existingThread = threadMapRef.current[threadId];
       const projectIdForTurn =
         existingThread?.project_id ??
@@ -2439,6 +2752,84 @@ export default function App() {
         messages: [...(thread?.messages ?? []), optimisticUserMessage],
       }));
 
+      const upsertThreadItemState = (
+        thread: ChatThreadResponse | null,
+        item: ChatThreadItemResponse,
+      ): ChatThreadResponse => {
+        const nextThread =
+          thread ??
+          ({
+            thread_id: threadId,
+            project_id: fallbackProjectId,
+            project_name: fallbackProjectName,
+            project_instructions: fallbackProjectInstructions,
+            title: optimisticTitle,
+            created_at: now,
+            updated_at: now,
+            items: [],
+            turns: [],
+            messages: [],
+          } satisfies ChatThreadResponse);
+        const existingItems = nextThread.items ?? [];
+        const nextItems = existingItems.some((existing) => existing.item_id === item.item_id)
+          ? existingItems.map((existing) => (existing.item_id === item.item_id ? item : existing))
+          : [...existingItems, item];
+        const derivedMessage = messageFromThreadItem(item);
+        let nextMessages = nextThread.messages ?? [];
+        if (derivedMessage) {
+          nextMessages = nextMessages.some(
+            (message) => message.message_id === derivedMessage.message_id,
+          )
+            ? nextMessages.map((message) =>
+                message.message_id === derivedMessage.message_id ? derivedMessage : message,
+              )
+            : [...nextMessages, derivedMessage];
+        }
+        return {
+          ...nextThread,
+          updated_at: new Date().toISOString(),
+          items: nextItems,
+          messages: nextMessages,
+        };
+      };
+
+      const appendItemDeltaState = (
+        thread: ChatThreadResponse | null,
+        itemId: string,
+        delta: string,
+      ): ChatThreadResponse => {
+        const nextThread =
+          thread ??
+          ({
+            thread_id: threadId,
+            project_id: fallbackProjectId,
+            project_name: fallbackProjectName,
+            project_instructions: fallbackProjectInstructions,
+            title: optimisticTitle,
+            created_at: now,
+            updated_at: now,
+            items: [],
+            turns: [],
+            messages: [],
+          } satisfies ChatThreadResponse);
+        const nextItems = (nextThread.items ?? []).map((item) =>
+          item.item_id === itemId
+            ? { ...item, content_text: `${item.content_text}${delta}` }
+            : item,
+        );
+        const nextMessages = (nextThread.messages ?? []).map((message) =>
+          message.message_id === itemId
+            ? { ...message, content_markdown: `${message.content_markdown}${delta}` }
+            : message,
+        );
+        return {
+          ...nextThread,
+          updated_at: new Date().toISOString(),
+          items: nextItems,
+          messages: nextMessages,
+        };
+      };
+
       streamAbortControllerRef.current = streamAbortController;
       setStreamingThreadId(threadId);
       clearThreadUsageSnapshot(threadId);
@@ -2455,103 +2846,81 @@ export default function App() {
             include_papers: includePapers,
           },
           (eventName, payload) => {
-            if (eventName === "compaction_start") {
-              updateThread(threadId, (thread) => ({
-                ...(thread ?? {
-                  thread_id: threadId,
-                  project_id: fallbackProjectId,
-                  project_name: fallbackProjectName,
-                  project_instructions: fallbackProjectInstructions,
-                  title: optimisticTitle,
-                  created_at: now,
-                  updated_at: now,
-                  messages: [],
-                }),
-                updated_at: new Date().toISOString(),
-                messages: (thread?.messages ?? []).some(
-                  (message) => message.message_id === payload.compaction_message.message_id,
-                )
-                  ? (thread?.messages ?? []).map((message) =>
-                      message.message_id === payload.compaction_message.message_id
-                        ? payload.compaction_message
-                        : message,
-                    )
-                  : [...(thread?.messages ?? []), payload.compaction_message],
-              }));
+            if (eventName === "turn_started") {
               return;
             }
 
-            if (eventName === "compaction_done") {
-              updateThread(threadId, (thread) => ({
-                ...(thread ?? {
-                  thread_id: threadId,
-                  project_id: fallbackProjectId,
-                  project_name: fallbackProjectName,
-                  project_instructions: fallbackProjectInstructions,
-                  title: optimisticTitle,
-                  created_at: now,
-                  updated_at: now,
-                  messages: [],
-                }),
-                updated_at: new Date().toISOString(),
-                messages: payload.messages,
-              }));
+            if (eventName === "item_started") {
+              updateThread(threadId, (thread) => upsertThreadItemState(thread, payload.item));
+              if (payload.item.item_type === "assistant_message") {
+                assistantStarted = true;
+                streamingMessageId = payload.item.item_id;
+                markThreadAssistantStarted(threadId);
+              }
+              if (
+                payload.item.item_type === "function_call" ||
+                payload.item.item_type === "custom_tool_call"
+              ) {
+                const toolName = payload.item.name ?? "";
+                if (toolName.startsWith("project_")) {
+                  turnUsedProjectCodeTools = true;
+                }
+                const toolLabel = toolActivityLabelForItem(payload.item);
+                upsertToolActivity(threadId, {
+                  id: payload.item.call_id ?? payload.item.item_id,
+                  turnIndex,
+                  toolName,
+                  label: toolLabel,
+                  command: toolActivityCommandForItem(payload.item),
+                  output: null,
+                  status: "running",
+                  startedAt: new Date().toISOString(),
+                  finishedAt: null,
+                  isError: false,
+                });
+              }
               return;
             }
 
-            if (eventName === "tool_start") {
-              if (String(payload.tool_name ?? "").startsWith("project_")) {
+            if (eventName === "item_delta") {
+              updateThread(threadId, (thread) =>
+                appendItemDeltaState(thread, payload.item_id, payload.delta),
+              );
+              return;
+            }
+
+            if (eventName === "item_completed") {
+              updateThread(threadId, (thread) => upsertThreadItemState(thread, payload.item));
+              if (
+                payload.item.item_type === "function_call_output" ||
+                payload.item.item_type === "custom_tool_call_output"
+              ) {
+                const toolName = payload.item.name ?? "";
+                completeToolActivity(threadId, payload.item.call_id ?? payload.item.item_id, {
+                  command: null,
+                  output: payload.item.content_text ?? null,
+                  isError:
+                    typeof payload.item.content_json === "object" &&
+                    payload.item.content_json !== null &&
+                    "error" in (payload.item.content_json as Record<string, unknown>),
+                });
+                if (
+                  toolName === "project_write_file" ||
+                  toolName === "project_apply_patch" ||
+                  toolName === "project_move" ||
+                  toolName === "project_touch" ||
+                  toolName === "project_edit" ||
+                  toolName === "project_delete"
+                ) {
+                  void refreshLoadedProjectCodeItems(fallbackProjectId);
+                }
+              }
+              if (
+                payload.item.item_type === "function_call" &&
+                String(payload.item.name ?? "").startsWith("project_")
+              ) {
                 turnUsedProjectCodeTools = true;
               }
-              upsertToolActivity(threadId, {
-                id: payload.tool_call_id,
-                turnIndex,
-                toolName: payload.tool_name,
-                label: payload.label,
-                command: payload.command ?? null,
-                output: null,
-                status: "running",
-                startedAt: new Date().toISOString(),
-                finishedAt: null,
-                isError: false,
-              });
-              return;
-            }
-
-            if (eventName === "tool_done") {
-              completeToolActivity(threadId, payload.tool_call_id, {
-                command: payload.command ?? null,
-                output: payload.output ?? null,
-                isError: payload.is_error,
-              });
-              if (
-                payload.tool_name === "project_touch" ||
-                payload.tool_name === "project_edit" ||
-                payload.tool_name === "project_delete"
-              ) {
-                void refreshLoadedProjectCodeItems(fallbackProjectId);
-              }
-              return;
-            }
-
-            if (eventName === "assistant_start") {
-              assistantStarted = true;
-              streamingMessageId = payload.assistant_message.message_id;
-              markThreadAssistantStarted(threadId);
-              updateThread(threadId, (thread) => ({
-                ...(thread ?? {
-                  thread_id: threadId,
-                  project_id: fallbackProjectId,
-                  project_name: fallbackProjectName,
-                  project_instructions: fallbackProjectInstructions,
-                  title: optimisticTitle,
-                  created_at: now,
-                  updated_at: now,
-                  messages: [],
-                }),
-                updated_at: now,
-                messages: [...(thread?.messages ?? []), payload.assistant_message],
-              }));
               return;
             }
 
@@ -2561,60 +2930,26 @@ export default function App() {
               return;
             }
 
-            if (eventName === "delta") {
-              updateThread(threadId, (thread) => ({
-                ...(thread ?? {
-                  thread_id: threadId,
-                  project_id: fallbackProjectId,
-                  project_name: fallbackProjectName,
-                  project_instructions: fallbackProjectInstructions,
-                  title: optimisticTitle,
-                  created_at: now,
-                  updated_at: now,
-                  messages: [],
-                }),
-                updated_at: new Date().toISOString(),
-                messages: (thread?.messages ?? []).map((message) =>
-                  message.message_id === payload.message_id
-                    ? {
-                        ...message,
-                        content_markdown: `${message.content_markdown}${payload.delta}`,
-                      }
-                    : message,
-                ),
-              }));
-              return;
-            }
-
-            if (eventName === "done") {
+            if (eventName === "turn_completed") {
               donePayload = payload;
               if (payload.usage) {
                 updateThreadStreamUsage(threadId, payload.usage);
                 setThreadUsageSnapshot(threadId, payload.usage);
               }
-              updateThread(threadId, (thread) => ({
-                ...(thread ?? {
-                  thread_id: threadId,
-                  project_id: fallbackProjectId,
-                  project_name: fallbackProjectName,
-                  project_instructions: fallbackProjectInstructions,
-                  title: optimisticTitle,
-                  created_at: now,
-                  updated_at: now,
-                  messages: [],
-                }),
-                updated_at: new Date().toISOString(),
-                messages: (thread?.messages ?? []).map((message) =>
-                  message.message_id === payload.assistant_message.message_id
-                    ? payload.assistant_message
-                    : message,
-                ),
+              setThreadMap((current) => ({
+                ...current,
+                [threadId]: normalizeThreadForState(payload.thread),
               }));
               return;
             }
 
             if (eventName === "api_key_required") {
               gatingPayload = payload;
+              return;
+            }
+
+            if (eventName === "turn_failed") {
+              streamError = payload.detail;
               return;
             }
 
@@ -2657,22 +2992,25 @@ export default function App() {
             include_uploads: includeUploads,
             include_papers: includePapers,
           });
-          setThreadMap((current) => ({ ...current, [threadId]: payload.thread }));
-          setSelectedProjectId(payload.thread.project_id);
-          upsertThreadIntoProjectItems(payload.thread);
+          const normalizedThread = normalizeThreadForState(payload.thread);
+          setThreadMap((current) => ({ ...current, [threadId]: normalizedThread }));
+          setSelectedProjectId(normalizedThread.project_id);
+          upsertThreadIntoProjectItems(normalizedThread);
           setSession((current) =>
             current
               ? {
                   ...current,
-                  remaining_free_responses: payload.remaining_free_responses,
-                  has_anthropic_api_key: payload.has_anthropic_api_key,
+                  has_openai_api_key:
+                    payload.has_openai_api_key ?? payload.has_anthropic_api_key ?? false,
+                  has_anthropic_api_key:
+                    payload.has_openai_api_key ?? payload.has_anthropic_api_key ?? false,
                 }
               : current,
           );
           setComposerStatus("");
           await refreshProjects();
           if (messageHasProjectCodeIntent(content)) {
-            await refreshLoadedProjectCodeItems(payload.thread.project_id);
+            await refreshLoadedProjectCodeItems(normalizedThread.project_id);
           }
           if (payload.state === "api_key_required" || payload.state === "api_key_invalid") {
             showErrorFlash(apiKeyStateMessage(payload.state));
@@ -2713,22 +3051,25 @@ export default function App() {
       }
 
       if (gatingPayload) {
-        setThreadMap((current) => ({ ...current, [threadId]: gatingPayload.thread }));
-        setSelectedProjectId(gatingPayload.thread.project_id);
-        upsertThreadIntoProjectItems(gatingPayload.thread);
+        const normalizedThread = normalizeThreadForState(gatingPayload.thread);
+        setThreadMap((current) => ({ ...current, [threadId]: normalizedThread }));
+        setSelectedProjectId(normalizedThread.project_id);
+        upsertThreadIntoProjectItems(normalizedThread);
         setSession((current) =>
           current
             ? {
                 ...current,
-                remaining_free_responses: gatingPayload.remaining_free_responses,
-                has_anthropic_api_key: gatingPayload.has_anthropic_api_key,
+                has_openai_api_key:
+                  gatingPayload.has_openai_api_key ?? gatingPayload.has_anthropic_api_key ?? false,
+                has_anthropic_api_key:
+                  gatingPayload.has_openai_api_key ?? gatingPayload.has_anthropic_api_key ?? false,
               }
             : current,
         );
         setComposerStatus("");
         await refreshProjects();
         if (turnUsedProjectCodeTools) {
-          await refreshLoadedProjectCodeItems(gatingPayload.thread.project_id);
+          await refreshLoadedProjectCodeItems(normalizedThread.project_id);
         }
         showErrorFlash(apiKeyStateMessage(gatingPayload.state));
         setAuthView("settings");
@@ -2752,8 +3093,10 @@ export default function App() {
           current
             ? {
                 ...current,
-                remaining_free_responses: donePayload.remaining_free_responses,
-                has_anthropic_api_key: donePayload.has_anthropic_api_key,
+                has_openai_api_key:
+                  donePayload.has_openai_api_key ?? donePayload.has_anthropic_api_key ?? false,
+                has_anthropic_api_key:
+                  donePayload.has_openai_api_key ?? donePayload.has_anthropic_api_key ?? false,
               }
             : current,
         );
@@ -2782,6 +3125,7 @@ export default function App() {
       persistDirtyProjectDrafts,
       refreshLoadedProjectCodeItems,
       refreshProjects,
+      requireInferenceAccess,
       setThreadUsageSnapshot,
       showErrorFlash,
       startThreadStreamState,
@@ -2792,65 +3136,76 @@ export default function App() {
     ],
   );
 
-  const bootstrapAuthenticatedUi = useCallback(async () => {
-    await refreshUploads();
-    const loadedProjects = await refreshProjects();
-    const persistedSelectedProjectId = restoreSelectedProjectId();
-    const restoredSelectedProjectId =
-      persistedSelectedProjectId &&
-      loadedProjects.some((project) => project.project_id === persistedSelectedProjectId)
-        ? persistedSelectedProjectId
-        : null;
-    const selectedProjectId = restoredSelectedProjectId ?? loadedProjects[0]?.project_id ?? null;
-    selectedProjectIdRef.current = selectedProjectId;
-    setSelectedProjectId(selectedProjectId);
-    setExpandedProjectIds(restoredSelectedProjectId ? [restoredSelectedProjectId] : []);
-    if (
-      restoredSelectedProjectId &&
-      !projectItemsRef.current[restoredSelectedProjectId]?.loaded &&
-      !projectItemsRef.current[restoredSelectedProjectId]?.loading
-    ) {
-      await fetchProjectItems(restoredSelectedProjectId);
-    }
-    const restoredTabs = restoreTabs();
-    const validRestoredTabs: OpenTab[] = [];
-    for (const tab of restoredTabs) {
-      try {
-        if (tab.kind === "thread") {
-          await fetchAndStoreThread(tab.id, false);
-        } else if (tab.kind === "python_file") {
-          await fetchAndStorePythonFile(tab.id, false);
-        } else if (!loadedProjects.some((project) => project.project_id === tab.id)) {
-          continue;
-        }
-        validRestoredTabs.push(tab);
-      } catch (error) {
-        console.error(error);
+  const bootstrapAuthenticatedUi = useCallback(
+    async (currentSession?: BrowserSessionResponse | null) => {
+      await refreshUploads();
+      const loadedProjects = await refreshProjects();
+      const persistedSelectedProjectId = restoreSelectedProjectId();
+      const restoredSelectedProjectId =
+        persistedSelectedProjectId &&
+        loadedProjects.some((project) => project.project_id === persistedSelectedProjectId)
+          ? persistedSelectedProjectId
+          : null;
+      const selectedProjectId = restoredSelectedProjectId ?? loadedProjects[0]?.project_id ?? null;
+      selectedProjectIdRef.current = selectedProjectId;
+      setSelectedProjectId(selectedProjectId);
+      setExpandedProjectIds(restoredSelectedProjectId ? [restoredSelectedProjectId] : []);
+      if (
+        restoredSelectedProjectId &&
+        !projectItemsRef.current[restoredSelectedProjectId]?.loaded &&
+        !projectItemsRef.current[restoredSelectedProjectId]?.loading
+      ) {
+        await fetchProjectItems(restoredSelectedProjectId);
       }
-    }
-    setOpenTabs(validRestoredTabs);
+      const restoredTabs = restoreTabs();
+      const validRestoredTabs: OpenTab[] = [];
+      for (const tab of restoredTabs) {
+        try {
+          if (tab.kind === "thread") {
+            await fetchAndStoreThread(tab.id, false);
+          } else if (tab.kind === "python_file") {
+            await fetchAndStorePythonFile(tab.id, false);
+          } else if (!loadedProjects.some((project) => project.project_id === tab.id)) {
+            continue;
+          }
+          validRestoredTabs.push(tab);
+        } catch (error) {
+          console.error(error);
+        }
+      }
+      setOpenTabs(validRestoredTabs);
 
-    const pendingPrompt = consumePendingPrompt().trim();
-    if (pendingPrompt) {
-      const thread = await createNewThread("", selectedProjectId ?? loadedProjects[0]?.project_id);
-      setLandingPrompt("");
-      await sendMessage(thread.thread_id, pendingPrompt);
-      return;
-    }
+      const pendingPrompt = consumePendingPrompt().trim();
+      if (pendingPrompt) {
+        if (!requireInferenceAccess(currentSession)) {
+          setComposerInput(pendingPrompt);
+          return;
+        }
+        const thread = await createNewThread(
+          "",
+          selectedProjectId ?? loadedProjects[0]?.project_id,
+        );
+        setLandingPrompt("");
+        await sendMessage(thread.thread_id, pendingPrompt, currentSession);
+        return;
+      }
 
-    const firstOpen = validRestoredTabs[0];
-    if (firstOpen) {
-      setActiveTab(firstOpen);
-    }
-  }, [
-    createNewThread,
-    fetchAndStorePythonFile,
-    fetchProjectItems,
-    fetchAndStoreThread,
-    refreshProjects,
-    refreshUploads,
-    sendMessage,
-  ]);
+      const firstOpen = validRestoredTabs[0];
+      if (firstOpen) {
+        setActiveTab(firstOpen);
+      }
+    },
+    [
+      createNewThread,
+      fetchAndStorePythonFile,
+      fetchProjectItems,
+      fetchAndStoreThread,
+      refreshProjects,
+      refreshUploads,
+      requireInferenceAccess,
+      sendMessage,
+    ],
+  );
 
   useEffect(() => {
     void (async () => {
@@ -2927,7 +3282,7 @@ export default function App() {
         }
       }
       if (nextSession.authenticated) {
-        await bootstrapAuthenticatedUi();
+        await bootstrapAuthenticatedUi(nextSession);
       }
     })().catch((error: unknown) => {
       console.error(error);
@@ -2950,11 +3305,28 @@ export default function App() {
     [clearFlash],
   );
 
+  const openChatSetupSettings = useCallback(
+    (settingsTab: SettingsTab) => {
+      openAuthModal("settings", settingsTab);
+    },
+    [openAuthModal],
+  );
+
+  const dismissChatSetupCard = useCallback(() => {
+    if (!emptyStateProject?.project_id || !missingChatSetupSignature) {
+      return;
+    }
+    setDismissedChatSetupSignatures((current) => ({
+      ...current,
+      [emptyStateProject.project_id]: missingChatSetupSignature,
+    }));
+  }, [emptyStateProject?.project_id, missingChatSetupSignature]);
+
   const handleAuthSuccess = useCallback(
     async (nextSession: BrowserSessionResponse) => {
       setSession(nextSession);
       closeAuthModal();
-      await bootstrapAuthenticatedUi();
+      await bootstrapAuthenticatedUi(nextSession);
     },
     [bootstrapAuthenticatedUi, closeAuthModal],
   );
@@ -2969,10 +3341,13 @@ export default function App() {
       openAuthModal("login");
       return;
     }
+    if (!requireInferenceAccess()) {
+      return;
+    }
     const thread = await createNewThread();
     setLandingPrompt("");
     await sendMessage(thread.thread_id, prompt);
-  }, [createNewThread, landingPrompt, openAuthModal, sendMessage]);
+  }, [createNewThread, landingPrompt, openAuthModal, requireInferenceAccess, sendMessage]);
 
   const handleExample = useCallback(
     async (prompt: string) => {
@@ -3023,6 +3398,9 @@ export default function App() {
     if (!content) {
       return;
     }
+    if (!requireInferenceAccess()) {
+      return;
+    }
     const threadId = activeThreadId ?? (await createNewThread()).thread_id;
     setComposerInput("");
     scrollMessageListToBottom();
@@ -3031,6 +3409,7 @@ export default function App() {
     activeThreadId,
     composerInput,
     createNewThread,
+    requireInferenceAccess,
     scrollMessageListToBottom,
     sendMessage,
     streamingThreadId,
@@ -3478,13 +3857,13 @@ export default function App() {
   const saveProjectInferenceKey = useCallback(async () => {
     const apiKey = projectAnthropicKey.trim();
     if (!apiKey) {
-      setProjectAdvancedStatus("Enter an Anthropic API key.");
+      setProjectAdvancedStatus("Enter an OpenAI API key.");
       return;
     }
     setProjectAdvancedSaving("inference");
     setProjectAdvancedStatus("");
     try {
-      const nextSession = await api<BrowserSessionResponse>("/v1/browser/settings/anthropic-key", {
+      const nextSession = await api<BrowserSessionResponse>("/v1/browser/settings/openai-key", {
         method: "PUT",
         body: JSON.stringify({ api_key: apiKey }),
       });
@@ -5276,6 +5655,83 @@ export default function App() {
                         <div className="composer-status inline">{composerStatus}</div>
                       ) : null}
                       {composerEditor}
+                      {showChatSetupCard ? (
+                        <section className="chat-setup-card" aria-label="Agent setup checklist">
+                          <div className="chat-setup-header">
+                            <div className="chat-setup-copy">
+                              <h2 className="chat-setup-title">
+                                Prepare the agent before the first chat
+                              </h2>
+                              <p className="chat-setup-note">
+                                Add your OpenAI API key and connect anything else missing for{" "}
+                                {chatSetupProjectName} so the first chat can run cleanly.
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              className="chat-setup-dismiss"
+                              aria-label="Dismiss setup checklist"
+                              onClick={dismissChatSetupCard}
+                            >
+                              ×
+                            </button>
+                          </div>
+                          <div className="chat-setup-list">
+                            {chatSetupItems.map((item) => (
+                              <div
+                                key={item.id}
+                                className={`chat-setup-item${item.ready ? " ready" : ""}${item.required ? " required" : " optional"}`}
+                              >
+                                <div className="chat-setup-item-main">
+                                  <div
+                                    className={`chat-setup-provider-mark provider-${item.provider}`}
+                                    aria-hidden="true"
+                                  >
+                                    {item.provider === "github" ? (
+                                      <AppIcon
+                                        src={staticAssetPath("github.svg")}
+                                        className="chat-setup-provider-icon"
+                                      />
+                                    ) : item.provider === "openai" ? (
+                                      <span className="chat-setup-provider-text">AI</span>
+                                    ) : (
+                                      <span className="chat-setup-provider-text">M</span>
+                                    )}
+                                  </div>
+                                  <div className="chat-setup-item-copy">
+                                    <div className="chat-setup-item-header">
+                                      <strong>{item.label}</strong>
+                                      {item.ready ? null : (
+                                        <span className="chat-setup-state pending">
+                                          {item.required ? "Required" : "Optional"}
+                                        </span>
+                                      )}
+                                    </div>
+                                    <p>{item.description}</p>
+                                  </div>
+                                </div>
+                                {item.ready ? (
+                                  <span
+                                    className="chat-setup-check"
+                                    aria-label={`${item.label} configured`}
+                                    title="Configured"
+                                  >
+                                    ✓
+                                  </span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    className="chat-setup-action"
+                                    onClick={() => openChatSetupSettings(item.settingsTab)}
+                                  >
+                                    {item.actionLabel}
+                                  </button>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </section>
+                      ) : null}
                       <div className="chat-empty-actions">
                         <button
                           type="button"
@@ -5337,10 +5793,11 @@ export default function App() {
                     let userTurnIndex = 0;
                     return activeThread.messages.map((message) => {
                       const isCompactionMessage = message.kind === "compaction";
+                      const isCommentaryMessage =
+                        message.role === "assistant" && message.phase === "commentary";
+                      const isStreamingMessage = isStreamingMessageStatus(message.status);
                       const streamingCodePreview =
-                        message.role === "assistant" &&
-                        message.status === "streaming" &&
-                        !isCompactionMessage
+                        message.role === "assistant" && isStreamingMessage && !isCompactionMessage
                           ? extractStreamingPythonPreview(message.content_markdown)
                           : null;
                       if (message.role === "user" && !isCompactionMessage) {
@@ -5371,21 +5828,21 @@ export default function App() {
                       return (
                         <Fragment key={message.message_id}>
                           <article
-                            className={`message-row ${isCompactionMessage ? "compaction" : message.role === "assistant" ? "assistant" : "user"} status-${message.status}`}
+                            className={`message-row ${isCompactionMessage ? "compaction" : message.role === "assistant" ? "assistant" : "user"}${isCommentaryMessage ? " commentary" : ""} status-${message.status}`}
                           >
                             {message.status !== "completed" && !isCompactionMessage ? (
                               <div className="message-meta-row">
                                 <span
-                                  className={`message-status-label${message.status === "streaming" ? " thinking-shimmer" : ""}`}
+                                  className={`message-status-label${isStreamingMessage ? " thinking-shimmer" : ""}`}
                                 >
-                                  {message.status === "streaming"
+                                  {isStreamingMessage
                                     ? formatThinkingLabel(activeThreadStreamState?.thinkingWord)
                                     : "Failed"}
                                 </span>
                               </div>
                             ) : null}
                             <div
-                              className={`message-bubble ${isCompactionMessage ? "compaction" : message.role === "assistant" ? "assistant" : "user"}${isCompactionMessage && message.status === "streaming" ? " thinking-shimmer" : ""}`}
+                              className={`message-bubble ${isCompactionMessage ? "compaction" : message.role === "assistant" ? "assistant" : "user"}${isCommentaryMessage ? " commentary" : ""}${isCompactionMessage && isStreamingMessage ? " thinking-shimmer" : ""}`}
                             >
                               {isCompactionMessage ? (
                                 <MarkdownRenderer
@@ -5393,19 +5850,24 @@ export default function App() {
                                   className="message-markdown compaction-markdown"
                                 />
                               ) : message.role === "assistant" ? (
-                                <MarkdownRenderer
-                                  markdown={message.content_markdown}
-                                  className="message-markdown"
-                                  interactiveCitations
-                                  onCitationClick={(sourceId) => {
-                                    const citation = message.citations.find(
-                                      (item) => item.source_id === sourceId,
-                                    );
-                                    if (citation) {
-                                      handleCitationClick(message, citation);
-                                    }
-                                  }}
-                                />
+                                <>
+                                  {isCommentaryMessage ? (
+                                    <div className="assistant-phase-label">Commentary</div>
+                                  ) : null}
+                                  <MarkdownRenderer
+                                    markdown={message.content_markdown}
+                                    className="message-markdown"
+                                    interactiveCitations
+                                    onCitationClick={(sourceId) => {
+                                      const citation = message.citations.find(
+                                        (item) => item.source_id === sourceId,
+                                      );
+                                      if (citation) {
+                                        handleCitationClick(message, citation);
+                                      }
+                                    }}
+                                  />
+                                </>
                               ) : (
                                 <div className="message-plain-text">{message.content_markdown}</div>
                               )}
@@ -6250,25 +6712,27 @@ export default function App() {
                           </div>
                           {projectAdvancedTab === "inference" ? (
                             <section className="project-advanced-group" role="tabpanel">
-                              {sessionSummary?.hasAnthropicApiKey ? (
+                              {sessionSummary?.hasOpenAIApiKey ? (
                                 <div className="settings-secret-row">
                                   <div className="settings-secret-copy">
-                                    <div className="settings-secret-label">Anthropic API key</div>
+                                    <div className="settings-secret-label">OpenAI API key</div>
                                     <div className="settings-secret-value">
-                                      {sessionSettings.anthropic_api_key_hint || "Saved"}
+                                      {sessionSettings.openai_api_key_hint ||
+                                        sessionSettings.anthropic_api_key_hint ||
+                                        "Saved"}
                                     </div>
                                   </div>
                                 </div>
                               ) : (
                                 <div className="project-advanced-form">
                                   <label className="project-field" htmlFor="project-anthropic-key">
-                                    <span>Anthropic API key</span>
+                                    <span>OpenAI API key</span>
                                     <input
                                       id="project-anthropic-key"
                                       name="project_anthropic_key"
                                       type="password"
                                       autoComplete="new-password"
-                                      placeholder="Anthropic API key"
+                                      placeholder="OpenAI API key"
                                       value={projectAnthropicKey}
                                       onChange={(event) =>
                                         setProjectAnthropicKey(event.target.value)
@@ -6503,6 +6967,7 @@ export default function App() {
                 type="password"
                 placeholder="Password"
                 autoComplete="current-password"
+                minLength={8}
                 required
               />
               <button className="primary-button" type="submit">
@@ -6551,6 +7016,7 @@ export default function App() {
                 type="password"
                 placeholder="Password"
                 autoComplete="new-password"
+                minLength={8}
                 required
               />
               <button className="primary-button" type="submit">
@@ -6618,6 +7084,7 @@ export default function App() {
                 placeholder="Reset token"
                 defaultValue={new URLSearchParams(window.location.search).get("reset_token") ?? ""}
                 autoComplete="one-time-code"
+                minLength={8}
                 required
               />
               <input
@@ -6625,6 +7092,7 @@ export default function App() {
                 type="password"
                 placeholder="New password"
                 autoComplete="new-password"
+                minLength={8}
                 required
               />
               <button className="primary-button" type="submit">
@@ -6669,30 +7137,32 @@ export default function App() {
                   >
                     <SettingsSectionHeading
                       title="Inference"
-                      caption="Manage Anthropic inference API key."
+                      caption="Manage OpenAI inference API key."
                     />
-                    {sessionSummary?.hasAnthropicApiKey ? (
+                    {sessionSummary?.hasOpenAIApiKey ? (
                       <div className="settings-secret-row">
                         <div className="settings-secret-copy">
-                          <div className="settings-secret-label">Anthropic API key</div>
+                          <div className="settings-secret-label">OpenAI API key</div>
                           <div className="settings-secret-value">
-                            {sessionSettings.anthropic_api_key_hint || "Saved"}
+                            {sessionSettings.openai_api_key_hint ||
+                              sessionSettings.anthropic_api_key_hint ||
+                              "Saved"}
                           </div>
                         </div>
                         <button
                           id="delete-anthropic-key-button"
                           className="api-key-delete-button"
                           type="button"
-                          aria-label="Delete saved Anthropic API key"
-                          title="Delete saved Anthropic API key"
+                          aria-label="Delete saved OpenAI API key"
+                          title="Delete saved OpenAI API key"
                           onClick={async () => {
                             try {
                               const nextSession = await api<BrowserSessionResponse>(
-                                "/v1/browser/settings/anthropic-key",
+                                "/v1/browser/settings/openai-key",
                                 { method: "DELETE" },
                               );
                               setSession(nextSession);
-                              showNoteFlash("Anthropic API key removed.");
+                              showNoteFlash("OpenAI API key removed.");
                             } catch (error) {
                               showErrorFlash(
                                 error instanceof Error ? error.message : "Deleting API key failed",
@@ -6717,14 +7187,14 @@ export default function App() {
                               new FormData(event.currentTarget).entries(),
                             );
                             const nextSession = await api<BrowserSessionResponse>(
-                              "/v1/browser/settings/anthropic-key",
+                              "/v1/browser/settings/openai-key",
                               {
                                 method: "PUT",
                                 body: JSON.stringify(payload),
                               },
                             );
                             setSession(nextSession);
-                            showNoteFlash("Anthropic API key saved.");
+                            showNoteFlash("OpenAI API key saved.");
                           } catch (error) {
                             showErrorFlash(
                               error instanceof Error ? error.message : "Saving API key failed",
@@ -6732,13 +7202,23 @@ export default function App() {
                           }
                         }}
                       >
-                        <input
-                          name="api_key"
-                          type="password"
-                          placeholder="Anthropic API key"
-                          autoComplete="new-password"
-                          required
-                        />
+                        <div className="settings-field">
+                          <label className="settings-field-label" htmlFor="settings-openai-api-key">
+                            OpenAI API key
+                          </label>
+                          <input
+                            id="settings-openai-api-key"
+                            name="api_key"
+                            type="password"
+                            placeholder="OpenAI API key"
+                            autoComplete="new-password"
+                            aria-describedby="settings-openai-api-key-note"
+                            required
+                          />
+                          <p id="settings-openai-api-key-note" className="settings-field-note">
+                            Stored on this workspace and reused for chat and research turns.
+                          </p>
+                        </div>
                         <div className="settings-footer-actions">
                           <button className="primary-button settings-submit-button" type="submit">
                             Save key
@@ -6825,20 +7305,43 @@ export default function App() {
                           }
                         }}
                       >
-                        <input
-                          name="token_id"
-                          type="password"
-                          placeholder="Modal token ID"
-                          autoComplete="new-password"
-                          required
-                        />
-                        <input
-                          name="token_secret"
-                          type="password"
-                          placeholder="Modal token secret"
-                          autoComplete="new-password"
-                          required
-                        />
+                        <div className="settings-field">
+                          <label className="settings-field-label" htmlFor="settings-modal-token-id">
+                            Modal token ID
+                          </label>
+                          <input
+                            id="settings-modal-token-id"
+                            name="token_id"
+                            type="password"
+                            placeholder="Paste token ID"
+                            autoComplete="new-password"
+                            aria-describedby="settings-modal-token-id-note"
+                            required
+                          />
+                          <p id="settings-modal-token-id-note" className="settings-field-note">
+                            The identifier paired with your sandbox token secret.
+                          </p>
+                        </div>
+                        <div className="settings-field">
+                          <label
+                            className="settings-field-label"
+                            htmlFor="settings-modal-token-secret"
+                          >
+                            Modal token secret
+                          </label>
+                          <input
+                            id="settings-modal-token-secret"
+                            name="token_secret"
+                            type="password"
+                            placeholder="Paste token secret"
+                            autoComplete="new-password"
+                            aria-describedby="settings-modal-token-secret-note"
+                            required
+                          />
+                          <p id="settings-modal-token-secret-note" className="settings-field-note">
+                            Stored for this signed-in workspace and used only for sandbox sessions.
+                          </p>
+                        </div>
                         <div className="settings-footer-actions">
                           <button className="primary-button settings-submit-button" type="submit">
                             Save credentials
@@ -6939,11 +7442,7 @@ export default function App() {
                             },
                           );
                           setSession(nextSession);
-                          showNoteFlash(
-                            appearanceThemeDraft === "dark"
-                              ? "Dark mode enabled."
-                              : "Light mode enabled.",
-                          );
+                          closeAuthModal();
                         } catch (error) {
                           showErrorFlash(
                             error instanceof Error

@@ -96,10 +96,13 @@ class Settings(BaseSettings):
     github_client_id: str | None = None
     github_client_secret: str | None = None
     github_oauth_redirect_url: str | None = None
+    openai_api_key: str | None = None
+    openai_base_url: str = Field(default="https://api.openai.com")
+    openai_model: str = Field(default="gpt-5")
     anthropic_api_key: str | None = None
     anthropic_base_url: str = Field(default="https://api.anthropic.com")
     anthropic_model: str = Field(default="claude-opus-4-7")
-    free_chat_response_limit: int = Field(default=3)
+    chat_runtime_mode: str = Field(default="codex_kernel")
     upload_max_bytes: int = Field(default=25_000_000)
     gcs_project: str | None = None
     gcs_bucket: str = "paperbase"

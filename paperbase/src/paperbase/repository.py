@@ -41,8 +41,10 @@ from .models import (
     BrowserUserSettingsResponse,
     ChatCitation,
     ChatMessageResponse,
+    ChatThreadItemResponse,
     ChatThreadResponse,
     ChatThreadSummary,
+    ChatTurnResponse,
     GrepPaperMatch,
     IntegrationProbeComponent,
     JobResponse,
@@ -515,7 +517,6 @@ class BrowserUserORM(Base):
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
     display_name: Mapped[str] = mapped_column(Text, default="")
     password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
-    free_responses_used: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
@@ -556,6 +557,19 @@ class AnthropicAPIKeyORM(Base):
     __tablename__ = "anthropic_api_keys"
 
     anthropic_api_key_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("browser_users.user_id", ondelete="CASCADE"), unique=True, index=True
+    )
+    encrypted_api_key: Mapped[str] = mapped_column(Text)
+    api_key_hint: Mapped[str] = mapped_column(String(32), default="")
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class OpenAIAPIKeyORM(Base):
+    __tablename__ = "openai_api_keys"
+
+    openai_api_key_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[str] = mapped_column(
         ForeignKey("browser_users.user_id", ondelete="CASCADE"), unique=True, index=True
     )
@@ -696,6 +710,40 @@ class ChatMessageORM(Base):
     archived_by_message_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
+class ChatTurnORM(Base):
+    __tablename__ = "chat_turns"
+
+    turn_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    thread_id: Mapped[str] = mapped_column(ForeignKey("chat_threads.thread_id", ondelete="CASCADE"), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="completed")
+    provider_response_id: Mapped[str] = mapped_column(String(128), default="")
+    started_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
+    completed_at: Mapped[Any | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    usage_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    diff_summary: Mapped[str] = mapped_column(Text, default="")
+    changed_paths: Mapped[list[str]] = mapped_column(JSON, default=list)
+    exec_session_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+
+
+class ChatThreadItemORM(Base):
+    __tablename__ = "chat_thread_items"
+
+    item_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    thread_id: Mapped[str] = mapped_column(ForeignKey("chat_threads.thread_id", ondelete="CASCADE"), index=True)
+    turn_id: Mapped[str] = mapped_column(ForeignKey("chat_turns.turn_id", ondelete="CASCADE"), index=True)
+    sequence: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    item_type: Mapped[str] = mapped_column(String(64), default="other")
+    role: Mapped[str] = mapped_column(String(32), default="assistant")
+    phase: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    call_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="completed")
+    content_text: Mapped[str] = mapped_column(Text, default="")
+    content_json: Mapped[Any | None] = mapped_column(JSON, nullable=True)
+    citations_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 def _paper_from_orm(row: PaperORM) -> PaperResponse:
     return PaperResponse(
         paper_id=row.paper_id,
@@ -747,7 +795,6 @@ def _browser_user_from_orm(row: BrowserUserORM) -> BrowserUser:
         user_id=row.user_id,
         email=row.email,
         display_name=row.display_name,
-        free_responses_used=row.free_responses_used,
     )
 
 
@@ -755,6 +802,7 @@ def _browser_user_settings_from_orm(row: BrowserUserSettingsORM | None) -> Brows
     if row is None:
         return BrowserUserSettingsResponse()
     return BrowserUserSettingsResponse(
+        openai_api_key_hint="",
         has_modal_credentials=bool(row.encrypted_modal_token_id and row.encrypted_modal_token_secret),
         modal_token_id_hint=row.modal_token_id_hint or "",
         has_github_connection=bool(row.encrypted_github_access_token and row.github_login),
@@ -894,6 +942,41 @@ def _chat_message_from_orm(row: ChatMessageORM) -> ChatMessageResponse:
         created_at=row.created_at,
         status=row.status,
         kind=row.kind or "default",
+    )
+
+
+def _chat_thread_item_from_orm(row: ChatThreadItemORM) -> ChatThreadItemResponse:
+    phase = row.phase if row.phase in {"commentary", "final_answer"} else None
+    return ChatThreadItemResponse(
+        item_id=row.item_id,
+        thread_id=row.thread_id,
+        turn_id=row.turn_id,
+        item_type=row.item_type,
+        role=row.role,
+        phase=phase,  # type: ignore[arg-type]
+        call_id=row.call_id,
+        name=row.name,
+        content_text=row.content_text or "",
+        content_json=row.content_json,
+        citations=[ChatCitation.model_validate(citation) for citation in (row.citations_json or [])],
+        created_at=row.created_at,
+        status=row.status or "completed",
+    )
+
+
+def _chat_turn_from_orm(row: ChatTurnORM, *, items: list[ChatThreadItemResponse] | None = None) -> ChatTurnResponse:
+    return ChatTurnResponse(
+        turn_id=row.turn_id,
+        thread_id=row.thread_id,
+        status=row.status or "completed",
+        provider_response_id=row.provider_response_id or "",
+        started_at=row.started_at,
+        completed_at=row.completed_at,
+        usage=row.usage_json,
+        diff_summary=row.diff_summary or "",
+        changed_paths=list(row.changed_paths or []),
+        exec_session_ids=list(row.exec_session_ids or []),
+        items=list(items or []),
     )
 
 
@@ -2871,15 +2954,6 @@ class SqlAlchemyPaperRepository(PaperRepository):
             row = session.get(BrowserUserORM, user_id)
             return row.password_hash if row else None
 
-    def increment_free_responses_used(self, user_id: str) -> BrowserUser | None:
-        with self._session() as session:
-            row = session.get(BrowserUserORM, user_id)
-            if row is None:
-                return None
-            row.free_responses_used += 1
-            row.updated_at = utcnow()
-        return self.get_browser_user_by_id(user_id)
-
     def create_browser_session(self, *, user_id: str, token_hash_value: str, expires_at: Any) -> None:
         with self._session() as session:
             session.add(
@@ -2961,9 +3035,30 @@ class SqlAlchemyPaperRepository(PaperRepository):
         with self._session() as session:
             session.execute(statement)
 
+    def save_openai_api_key(self, *, user_id: str, encrypted_api_key: str, hint: str) -> None:
+        statement = insert(OpenAIAPIKeyORM).values(
+            openai_api_key_id=new_id("uak"),
+            user_id=user_id,
+            encrypted_api_key=encrypted_api_key,
+            api_key_hint=hint,
+        )
+        statement = statement.on_conflict_do_update(
+            index_elements=[OpenAIAPIKeyORM.user_id],
+            set_={"encrypted_api_key": encrypted_api_key, "api_key_hint": hint, "updated_at": utcnow()},
+        )
+        with self._session() as session:
+            session.execute(statement)
+
     def get_anthropic_api_key_record(self, user_id: str) -> dict[str, str] | None:
         with self._session() as session:
             row = session.scalar(select(AnthropicAPIKeyORM).where(AnthropicAPIKeyORM.user_id == user_id))
+            if row is None:
+                return None
+            return {"encrypted_api_key": row.encrypted_api_key, "api_key_hint": row.api_key_hint}
+
+    def get_openai_api_key_record(self, user_id: str) -> dict[str, str] | None:
+        with self._session() as session:
+            row = session.scalar(select(OpenAIAPIKeyORM).where(OpenAIAPIKeyORM.user_id == user_id))
             if row is None:
                 return None
             return {"encrypted_api_key": row.encrypted_api_key, "api_key_hint": row.api_key_hint}
@@ -2972,10 +3067,18 @@ class SqlAlchemyPaperRepository(PaperRepository):
         with self._session() as session:
             session.execute(delete(AnthropicAPIKeyORM).where(AnthropicAPIKeyORM.user_id == user_id))
 
+    def delete_openai_api_key(self, user_id: str) -> None:
+        with self._session() as session:
+            session.execute(delete(OpenAIAPIKeyORM).where(OpenAIAPIKeyORM.user_id == user_id))
+
     def get_browser_user_settings(self, user_id: str) -> BrowserUserSettingsResponse:
         with self._session() as session:
             row = session.scalar(select(BrowserUserSettingsORM).where(BrowserUserSettingsORM.user_id == user_id))
-            return _browser_user_settings_from_orm(row)
+            settings = _browser_user_settings_from_orm(row)
+            openai_record = session.scalar(select(OpenAIAPIKeyORM).where(OpenAIAPIKeyORM.user_id == user_id))
+            if openai_record is not None:
+                settings = settings.model_copy(update={"openai_api_key_hint": openai_record.api_key_hint or ""})
+            return settings
 
     def get_modal_credentials_record(self, user_id: str) -> dict[str, str] | None:
         with self._session() as session:
@@ -3379,16 +3482,13 @@ class SqlAlchemyPaperRepository(PaperRepository):
             ).all()
             results: list[ChatThreadSummary] = []
             for thread in threads:
-                last_message = session.scalar(
-                    select(ChatMessageORM)
-                    .where(
-                        ChatMessageORM.thread_id == thread.thread_id,
-                        ChatMessageORM.archived_at.is_(None),
-                    )
-                    .order_by(ChatMessageORM.created_at.desc())
+                last_item = session.scalar(
+                    select(ChatThreadItemORM)
+                    .where(ChatThreadItemORM.thread_id == thread.thread_id)
+                    .order_by(ChatThreadItemORM.sequence.desc(), ChatThreadItemORM.created_at.desc())
                     .limit(1)
                 )
-                preview = (last_message.content_markdown[:120] if last_message else "").strip()
+                preview = (last_item.content_text[:120] if last_item else "").strip()
                 results.append(_chat_thread_summary_from_orm(thread, last_message_preview=preview))
         return ProjectSessionPageResponse(
             project_id=project_id,
@@ -3420,16 +3520,13 @@ class SqlAlchemyPaperRepository(PaperRepository):
             ).all()
             items: list[ProjectItemSummary] = []
             for thread in thread_rows:
-                last_message = session.scalar(
-                    select(ChatMessageORM)
-                    .where(
-                        ChatMessageORM.thread_id == thread.thread_id,
-                        ChatMessageORM.archived_at.is_(None),
-                    )
-                    .order_by(ChatMessageORM.created_at.desc())
+                last_item = session.scalar(
+                    select(ChatThreadItemORM)
+                    .where(ChatThreadItemORM.thread_id == thread.thread_id)
+                    .order_by(ChatThreadItemORM.sequence.desc(), ChatThreadItemORM.created_at.desc())
                     .limit(1)
                 )
-                preview = (last_message.content_markdown[:120] if last_message else "").strip()
+                preview = (last_item.content_text[:120] if last_item else "").strip()
                 items.append(
                     _project_item_from_thread_summary(
                         _chat_thread_summary_from_orm(thread, last_message_preview=preview)
@@ -3732,16 +3829,13 @@ class SqlAlchemyPaperRepository(PaperRepository):
             ).all()
             results: list[ChatThreadSummary] = []
             for thread in threads:
-                last_message = session.scalar(
-                    select(ChatMessageORM)
-                    .where(
-                        ChatMessageORM.thread_id == thread.thread_id,
-                        ChatMessageORM.archived_at.is_(None),
-                    )
-                    .order_by(ChatMessageORM.created_at.desc())
+                last_item = session.scalar(
+                    select(ChatThreadItemORM)
+                    .where(ChatThreadItemORM.thread_id == thread.thread_id)
+                    .order_by(ChatThreadItemORM.sequence.desc(), ChatThreadItemORM.created_at.desc())
                     .limit(1)
                 )
-                preview = (last_message.content_markdown[:120] if last_message else "").strip()
+                preview = (last_item.content_text[:120] if last_item else "").strip()
                 results.append(_chat_thread_summary_from_orm(thread, last_message_preview=preview))
         return results
 
@@ -3752,11 +3846,19 @@ class SqlAlchemyPaperRepository(PaperRepository):
             )
             if thread is None:
                 return None
-            messages = session.scalars(
-                select(ChatMessageORM)
-                .where(ChatMessageORM.thread_id == thread_id, ChatMessageORM.archived_at.is_(None))
-                .order_by(ChatMessageORM.created_at.asc())
+            turn_rows = session.scalars(
+                select(ChatTurnORM).where(ChatTurnORM.thread_id == thread_id).order_by(ChatTurnORM.started_at.asc())
             ).all()
+            item_rows = session.scalars(
+                select(ChatThreadItemORM)
+                .where(ChatThreadItemORM.thread_id == thread_id)
+                .order_by(ChatThreadItemORM.sequence.asc(), ChatThreadItemORM.created_at.asc())
+            ).all()
+        items = [_chat_thread_item_from_orm(row) for row in item_rows]
+        items_by_turn: dict[str, list[ChatThreadItemResponse]] = defaultdict(list)
+        for item in items:
+            items_by_turn[item.turn_id].append(item)
+        turns = [_chat_turn_from_orm(row, items=items_by_turn.get(row.turn_id, [])) for row in turn_rows]
         return ChatThreadResponse(
             thread_id=thread.thread_id,
             project_id=thread.project_id or "",
@@ -3765,8 +3867,166 @@ class SqlAlchemyPaperRepository(PaperRepository):
             title=thread.title,
             created_at=thread.created_at,
             updated_at=thread.updated_at,
-            messages=[_chat_message_from_orm(message) for message in messages],
+            items=items,
+            turns=turns,
         )
+
+    def _next_chat_item_sequence(self, session: Session, thread_id: str) -> int:
+        current = session.scalar(select(func.max(ChatThreadItemORM.sequence)).where(ChatThreadItemORM.thread_id == thread_id))
+        return int(current or 0) + 1
+
+    def create_chat_turn(
+        self,
+        *,
+        thread_id: str,
+        status: str = "running",
+        provider_response_id: str = "",
+    ) -> ChatTurnResponse:
+        row = ChatTurnORM(
+            turn_id=new_id("turn"),
+            thread_id=thread_id,
+            status=status,
+            provider_response_id=provider_response_id,
+            started_at=utcnow(),
+        )
+        with self._session() as session:
+            session.add(row)
+            thread = session.get(ChatThreadORM, thread_id)
+            if thread is not None:
+                thread.updated_at = utcnow()
+        return _chat_turn_from_orm(row)
+
+    def update_chat_turn(
+        self,
+        turn_id: str,
+        *,
+        status: str | None = None,
+        provider_response_id: str | None = None,
+        completed_at: Any | None = None,
+        usage: dict[str, Any] | None = None,
+        diff_summary: str | None = None,
+        changed_paths: list[str] | None = None,
+        exec_session_ids: list[str] | None = None,
+    ) -> ChatTurnResponse | None:
+        with self._session() as session:
+            row = session.get(ChatTurnORM, turn_id)
+            if row is None:
+                return None
+            if status is not None:
+                row.status = status
+            if provider_response_id is not None:
+                row.provider_response_id = provider_response_id
+            if completed_at is not None:
+                row.completed_at = completed_at
+            if usage is not None:
+                row.usage_json = usage
+            if diff_summary is not None:
+                row.diff_summary = diff_summary
+            if changed_paths is not None:
+                row.changed_paths = list(changed_paths)
+            if exec_session_ids is not None:
+                row.exec_session_ids = list(exec_session_ids)
+            item_rows = session.scalars(
+                select(ChatThreadItemORM)
+                .where(ChatThreadItemORM.turn_id == turn_id)
+                .order_by(ChatThreadItemORM.sequence.asc(), ChatThreadItemORM.created_at.asc())
+            ).all()
+            items = [_chat_thread_item_from_orm(item) for item in item_rows]
+            thread = session.get(ChatThreadORM, row.thread_id)
+            if thread is not None:
+                thread.updated_at = utcnow()
+        return _chat_turn_from_orm(row, items=items)
+
+    def add_chat_thread_item(
+        self,
+        *,
+        thread_id: str,
+        turn_id: str,
+        item_type: str,
+        role: str,
+        phase: str | None = None,
+        call_id: str | None = None,
+        name: str | None = None,
+        content_text: str = "",
+        content_json: Any | None = None,
+        citations: list[dict[str, Any]] | None = None,
+        status: str = "completed",
+        item_id: str | None = None,
+    ) -> ChatThreadItemResponse:
+        with self._session() as session:
+            row = ChatThreadItemORM(
+                item_id=item_id or new_id("item"),
+                thread_id=thread_id,
+                turn_id=turn_id,
+                sequence=self._next_chat_item_sequence(session, thread_id),
+                item_type=item_type,
+                role=role,
+                phase=phase,
+                call_id=call_id,
+                name=name,
+                status=status,
+                content_text=content_text,
+                content_json=content_json,
+                citations_json=citations or [],
+            )
+            session.add(row)
+            thread = session.get(ChatThreadORM, thread_id)
+            if thread is not None:
+                thread.updated_at = utcnow()
+                project = session.get(ProjectORM, thread.project_id) if thread.project_id else None
+                if project is not None:
+                    project.updated_at = thread.updated_at
+        return _chat_thread_item_from_orm(row)
+
+    def update_chat_thread_item(
+        self,
+        item_id: str,
+        *,
+        phase: str | None = None,
+        content_text: str | None = None,
+        content_json: Any | None = None,
+        citations: list[dict[str, Any]] | None = None,
+        status: str | None = None,
+        name: str | None = None,
+        call_id: str | None = None,
+        item_type: str | None = None,
+    ) -> ChatThreadItemResponse | None:
+        with self._session() as session:
+            row = session.get(ChatThreadItemORM, item_id)
+            if row is None:
+                return None
+            if phase is not None:
+                row.phase = phase
+            if content_text is not None:
+                row.content_text = content_text
+            if content_json is not None:
+                row.content_json = content_json
+            if citations is not None:
+                row.citations_json = citations
+            if status is not None:
+                row.status = status
+            if name is not None:
+                row.name = name
+            if call_id is not None:
+                row.call_id = call_id
+            if item_type is not None:
+                row.item_type = item_type
+            thread = session.get(ChatThreadORM, row.thread_id)
+            if thread is not None:
+                thread.updated_at = utcnow()
+                project = session.get(ProjectORM, thread.project_id) if thread.project_id else None
+                if project is not None:
+                    project.updated_at = thread.updated_at
+        return _chat_thread_item_from_orm(row)
+
+    def list_chat_turn_items(self, *, thread_id: str, turn_id: str) -> list[ChatThreadItemResponse]:
+        with self._session() as session:
+            rows = session.scalars(
+                select(ChatThreadItemORM)
+                .where(ChatThreadItemORM.thread_id == thread_id, ChatThreadItemORM.turn_id == turn_id)
+                .order_by(ChatThreadItemORM.sequence.asc(), ChatThreadItemORM.created_at.asc())
+            ).all()
+        return [_chat_thread_item_from_orm(row) for row in rows]
 
     def add_chat_message(
         self,
@@ -4889,7 +5149,7 @@ class MemoryPaperRepository(PaperRepository):
         return matches[:limit]
 
     def create_browser_user(self, *, email: str, display_name: str, password_hash: str | None) -> BrowserUser:
-        user = BrowserUser(user_id=new_id("usr"), email=email, display_name=display_name, free_responses_used=0)
+        user = BrowserUser(user_id=new_id("usr"), email=email, display_name=display_name)
         self.browser_users[user.user_id] = user
         self.browser_users_by_email[email] = user.user_id
         self.browser_user_passwords[user.user_id] = password_hash
@@ -4916,14 +5176,6 @@ class MemoryPaperRepository(PaperRepository):
 
     def get_browser_password_hash(self, user_id: str) -> str | None:
         return self.browser_user_passwords.get(user_id)
-
-    def increment_free_responses_used(self, user_id: str) -> BrowserUser | None:
-        user = self.browser_users.get(user_id)
-        if user is None:
-            return None
-        updated = user.model_copy(update={"free_responses_used": user.free_responses_used + 1})
-        self.browser_users[user_id] = updated
-        return updated
 
     def create_browser_session(self, *, user_id: str, token_hash_value: str, expires_at: Any) -> None:
         self.browser_sessions[token_hash_value] = {
@@ -4959,14 +5211,27 @@ class MemoryPaperRepository(PaperRepository):
     def save_anthropic_api_key(self, *, user_id: str, encrypted_api_key: str, hint: str) -> None:
         self.user_api_keys[user_id] = {"encrypted_api_key": encrypted_api_key, "api_key_hint": hint}
 
+    def save_openai_api_key(self, *, user_id: str, encrypted_api_key: str, hint: str) -> None:
+        self.user_api_keys[user_id] = {"encrypted_api_key": encrypted_api_key, "api_key_hint": hint}
+
     def get_anthropic_api_key_record(self, user_id: str) -> dict[str, str] | None:
+        return self.user_api_keys.get(user_id)
+
+    def get_openai_api_key_record(self, user_id: str) -> dict[str, str] | None:
         return self.user_api_keys.get(user_id)
 
     def delete_anthropic_api_key(self, user_id: str) -> None:
         self.user_api_keys.pop(user_id, None)
 
+    def delete_openai_api_key(self, user_id: str) -> None:
+        self.user_api_keys.pop(user_id, None)
+
     def get_browser_user_settings(self, user_id: str) -> BrowserUserSettingsResponse:
-        return self.browser_user_settings.get(user_id, BrowserUserSettingsResponse())
+        settings = self.browser_user_settings.get(user_id, BrowserUserSettingsResponse())
+        record = self.user_api_keys.get(user_id)
+        if record is None:
+            return settings
+        return settings.model_copy(update={"openai_api_key_hint": record.get("api_key_hint", "")})
 
     def get_modal_credentials_record(self, user_id: str) -> dict[str, str] | None:
         return self.modal_credentials_records.get(user_id)
@@ -5274,7 +5539,7 @@ class MemoryPaperRepository(PaperRepository):
                 title=thread.title,
                 created_at=thread.created_at,
                 updated_at=thread.updated_at,
-                last_message_preview=thread.messages[-1].content_markdown[:120] if thread.messages else "",
+                last_message_preview=thread.items[-1].content_text[:120] if thread.items else "",
             )
             for thread in self.chat_threads.values()
             if self.chat_thread_users.get(thread.thread_id) == user_id and thread.project_id == project_id
@@ -5537,7 +5802,8 @@ class MemoryPaperRepository(PaperRepository):
             title=title or "New chat",
             created_at=now,
             updated_at=now,
-            messages=[],
+            items=[],
+            turns=[],
         )
         self.chat_threads[thread.thread_id] = thread
         self.chat_thread_users[thread.thread_id] = user_id
@@ -5597,7 +5863,7 @@ class MemoryPaperRepository(PaperRepository):
         for thread in self.chat_threads.values():
             if self.chat_thread_users.get(thread.thread_id) != user_id:
                 continue
-            last_message = thread.messages[-1].content_markdown[:120] if thread.messages else ""
+            last_message = thread.items[-1].content_text[:120] if thread.items else ""
             summaries.append(
                 ChatThreadSummary(
                     thread_id=thread.thread_id,
@@ -5616,6 +5882,163 @@ class MemoryPaperRepository(PaperRepository):
             return None
         return self.chat_threads.get(thread_id)
 
+    def create_chat_turn(
+        self,
+        *,
+        thread_id: str,
+        status: str = "running",
+        provider_response_id: str = "",
+    ) -> ChatTurnResponse:
+        thread = self.chat_threads[thread_id]
+        turn = ChatTurnResponse(
+            turn_id=new_id("turn"),
+            thread_id=thread_id,
+            status=status,
+            provider_response_id=provider_response_id,
+            started_at=utcnow(),
+            completed_at=None,
+            usage=None,
+            diff_summary="",
+            changed_paths=[],
+            exec_session_ids=[],
+            items=[],
+        )
+        updated_at = utcnow()
+        self.chat_threads[thread_id] = thread.model_copy(
+            update={"turns": [*thread.turns, turn], "updated_at": updated_at}
+        )
+        return turn
+
+    def update_chat_turn(
+        self,
+        turn_id: str,
+        *,
+        status: str | None = None,
+        provider_response_id: str | None = None,
+        completed_at: Any | None = None,
+        usage: dict[str, Any] | None = None,
+        diff_summary: str | None = None,
+        changed_paths: list[str] | None = None,
+        exec_session_ids: list[str] | None = None,
+    ) -> ChatTurnResponse | None:
+        for thread_id, thread in self.chat_threads.items():
+            for index, turn in enumerate(thread.turns):
+                if turn.turn_id != turn_id:
+                    continue
+                updated_turn = turn.model_copy(
+                    update={
+                        "status": turn.status if status is None else status,
+                        "provider_response_id": turn.provider_response_id
+                        if provider_response_id is None
+                        else provider_response_id,
+                        "completed_at": turn.completed_at if completed_at is None else completed_at,
+                        "usage": turn.usage if usage is None else usage,
+                        "diff_summary": turn.diff_summary if diff_summary is None else diff_summary,
+                        "changed_paths": turn.changed_paths if changed_paths is None else list(changed_paths),
+                        "exec_session_ids": turn.exec_session_ids if exec_session_ids is None else list(exec_session_ids),
+                    }
+                )
+                turns = list(thread.turns)
+                turns[index] = updated_turn
+                updated_at = utcnow()
+                self.chat_threads[thread_id] = thread.model_copy(update={"turns": turns, "updated_at": updated_at})
+                return updated_turn
+        return None
+
+    def add_chat_thread_item(
+        self,
+        *,
+        thread_id: str,
+        turn_id: str,
+        item_type: str,
+        role: str,
+        phase: str | None = None,
+        call_id: str | None = None,
+        name: str | None = None,
+        content_text: str = "",
+        content_json: Any | None = None,
+        citations: list[dict[str, Any]] | None = None,
+        status: str = "completed",
+        item_id: str | None = None,
+    ) -> ChatThreadItemResponse:
+        item = ChatThreadItemResponse(
+            item_id=item_id or new_id("item"),
+            thread_id=thread_id,
+            turn_id=turn_id,
+            item_type=item_type,
+            role=role,
+            phase=phase,  # type: ignore[arg-type]
+            call_id=call_id,
+            name=name,
+            content_text=content_text,
+            content_json=content_json,
+            citations=[ChatCitation.model_validate(citation) for citation in (citations or [])],
+            created_at=utcnow(),
+            status=status,
+        )
+        thread = self.chat_threads[thread_id]
+        turns: list[ChatTurnResponse] = []
+        for turn in thread.turns:
+            if turn.turn_id == turn_id:
+                turns.append(turn.model_copy(update={"items": [*turn.items, item]}))
+            else:
+                turns.append(turn)
+        updated_at = utcnow()
+        self.chat_threads[thread_id] = thread.model_copy(
+            update={"items": [*thread.items, item], "turns": turns, "updated_at": updated_at}
+        )
+        return item
+
+    def update_chat_thread_item(
+        self,
+        item_id: str,
+        *,
+        phase: str | None = None,
+        content_text: str | None = None,
+        content_json: Any | None = None,
+        citations: list[dict[str, Any]] | None = None,
+        status: str | None = None,
+        name: str | None = None,
+        call_id: str | None = None,
+        item_type: str | None = None,
+    ) -> ChatThreadItemResponse | None:
+        for thread_id, thread in self.chat_threads.items():
+            for index, item in enumerate(thread.items):
+                if item.item_id != item_id:
+                    continue
+                updated_item = item.model_copy(
+                    update={
+                        "phase": item.phase if phase is None else phase,
+                        "content_text": item.content_text if content_text is None else content_text,
+                        "content_json": item.content_json if content_json is None else content_json,
+                        "citations": item.citations
+                        if citations is None
+                        else [ChatCitation.model_validate(citation) for citation in citations],
+                        "status": item.status if status is None else status,
+                        "name": item.name if name is None else name,
+                        "call_id": item.call_id if call_id is None else call_id,
+                        "item_type": item.item_type if item_type is None else item_type,
+                    }
+                )
+                items = list(thread.items)
+                items[index] = updated_item
+                turns: list[ChatTurnResponse] = []
+                for turn in thread.turns:
+                    turn_items = [updated_item if turn_item.item_id == item_id else turn_item for turn_item in turn.items]
+                    turns.append(turn.model_copy(update={"items": turn_items}))
+                updated_at = utcnow()
+                self.chat_threads[thread_id] = thread.model_copy(
+                    update={"items": items, "turns": turns, "updated_at": updated_at}
+                )
+                return updated_item
+        return None
+
+    def list_chat_turn_items(self, *, thread_id: str, turn_id: str) -> list[ChatThreadItemResponse]:
+        thread = self.chat_threads.get(thread_id)
+        if thread is None:
+            return []
+        return [item for item in thread.items if item.turn_id == turn_id]
+
     def add_chat_message(
         self,
         *,
@@ -5626,23 +6049,26 @@ class MemoryPaperRepository(PaperRepository):
         status: str = "completed",
         kind: str = "default",
     ) -> ChatMessageResponse:
-        message = ChatMessageResponse(
-            message_id=new_id("msg"),
+        turn = self.create_chat_turn(thread_id=thread_id, status="completed")
+        item = self.add_chat_thread_item(
+            thread_id=thread_id,
+            turn_id=turn.turn_id,
+            item_type="compaction" if kind == "compaction" else "assistant_message" if role == "assistant" else "user_message",
             role=role,
-            content_markdown=content_markdown,
-            citations=[ChatCitation.model_validate(citation) for citation in (citations or [])],
-            created_at=utcnow(),
+            phase="final_answer" if role == "assistant" and kind != "compaction" else None,
+            content_text=content_markdown,
+            citations=citations,
             status=status,
+        )
+        return ChatMessageResponse(
+            message_id=item.item_id,
+            role=item.role,
+            content_markdown=item.content_text,
+            citations=item.citations,
+            created_at=item.created_at,
+            status=item.status,
             kind=kind,
         )
-        thread = self.chat_threads[thread_id]
-        updated_at = utcnow()
-        updated = thread.model_copy(update={"messages": [*thread.messages, message], "updated_at": updated_at})
-        self.chat_threads[thread_id] = updated
-        project = self.projects.get(thread.project_id)
-        if project is not None:
-            self.projects[thread.project_id] = project.model_copy(update={"updated_at": updated_at})
-        return message
 
     def update_chat_message(
         self,
@@ -5653,31 +6079,24 @@ class MemoryPaperRepository(PaperRepository):
         status: str | None = None,
         kind: str | None = None,
     ) -> ChatMessageResponse | None:
-        for thread_id, thread in self.chat_threads.items():
-            for index, message in enumerate(thread.messages):
-                if message.message_id != message_id:
-                    continue
-                updated_message = message.model_copy(
-                    update={
-                        "content_markdown": message.content_markdown if content_markdown is None else content_markdown,
-                        "citations": message.citations
-                        if citations is None
-                        else [ChatCitation.model_validate(citation) for citation in citations],
-                        "status": message.status if status is None else status,
-                        "kind": message.kind if kind is None else kind,
-                    }
-                )
-                messages = list(thread.messages)
-                messages[index] = updated_message
-                updated_at = utcnow()
-                self.chat_threads[thread_id] = thread.model_copy(
-                    update={"messages": messages, "updated_at": updated_at}
-                )
-                project = self.projects.get(thread.project_id)
-                if project is not None:
-                    self.projects[thread.project_id] = project.model_copy(update={"updated_at": updated_at})
-                return updated_message
-        return None
+        updated_item = self.update_chat_thread_item(
+            message_id,
+            content_text=content_markdown,
+            citations=citations,
+            status=status,
+            item_type="compaction" if kind == "compaction" else None,
+        )
+        if updated_item is None:
+            return None
+        return ChatMessageResponse(
+            message_id=updated_item.item_id,
+            role=updated_item.role,
+            content_markdown=updated_item.content_text,
+            citations=updated_item.citations,
+            created_at=updated_item.created_at,
+            status=updated_item.status,
+            kind=kind or updated_item.kind,
+        )
 
     def archive_chat_messages(
         self,
@@ -5691,12 +6110,17 @@ class MemoryPaperRepository(PaperRepository):
         if thread is None or not message_ids:
             return 0
         archived_ids = set(message_ids)
-        messages = [message for message in thread.messages if message.message_id not in archived_ids]
-        archived_count = len(thread.messages) - len(messages)
+        items = [item for item in thread.items if item.item_id not in archived_ids]
+        archived_count = len(thread.items) - len(items)
         if archived_count == 0:
             return 0
+        turns: list[ChatTurnResponse] = []
+        for turn in thread.turns:
+            turns.append(turn.model_copy(update={"items": [item for item in turn.items if item.item_id not in archived_ids]}))
         updated_at = utcnow()
-        self.chat_threads[thread_id] = thread.model_copy(update={"messages": messages, "updated_at": updated_at})
+        self.chat_threads[thread_id] = thread.model_copy(
+            update={"items": items, "turns": turns, "updated_at": updated_at}
+        )
         project = self.projects.get(thread.project_id)
         if project is not None:
             self.projects[thread.project_id] = project.model_copy(update={"updated_at": updated_at})
