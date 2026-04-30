@@ -3211,15 +3211,15 @@ textarea::placeholder,
   justify-content: center;
 }
 
-.chat-setup-provider-mark.github {
+.chat-setup-provider-mark.provider-github {
   background: rgba(27, 22, 17, 0.03);
 }
 
-.chat-setup-provider-mark.openai {
+.chat-setup-provider-mark.provider-openai {
   background: rgba(16, 24, 40, 0.04);
 }
 
-.chat-setup-provider-mark.modal {
+.chat-setup-provider-mark.provider-modal {
   background: rgba(37, 99, 235, 0.06);
 }
 
@@ -5326,7 +5326,7 @@ body.authenticated-theme-dark .chat-setup-provider-mark {
   background: rgba(255, 255, 255, 0.04);
 }
 
-body.authenticated-theme-dark .chat-setup-provider-mark.modal {
+body.authenticated-theme-dark .chat-setup-provider-mark.provider-modal {
   background: rgba(96, 165, 250, 0.12);
 }
 

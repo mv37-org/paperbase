@@ -5684,7 +5684,7 @@ export default function App() {
                               >
                                 <div className="chat-setup-item-main">
                                   <div
-                                    className={`chat-setup-provider-mark ${item.provider}`}
+                                    className={`chat-setup-provider-mark provider-${item.provider}`}
                                     aria-hidden="true"
                                   >
                                     {item.provider === "github" ? (

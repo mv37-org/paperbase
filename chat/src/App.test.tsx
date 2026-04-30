@@ -1452,6 +1452,8 @@ describe("App", () => {
     expect(within(checklist).getByText("GitHub connection")).toBeTruthy();
     expect(within(checklist).getByText("OpenAI API key")).toBeTruthy();
     expect(within(checklist).getByText("Sandbox credentials")).toBeTruthy();
+    expect(checklist.querySelector(".chat-setup-provider-mark.provider-modal")).toBeTruthy();
+    expect(checklist.querySelector(".chat-setup-provider-mark.modal")).toBeNull();
     expect(screen.getByRole("button", { name: "Open GitHub setup" })).toBeTruthy();
     expect(screen.getByLabelText("OpenAI API key configured")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Open sandbox setup" })).toBeTruthy();
