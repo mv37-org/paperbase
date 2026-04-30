@@ -252,7 +252,7 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; caption: string }> 
   },
   {
     id: "version-control",
-    label: "Version control",
+    label: "GitHub",
     caption: "Manage GitHub connection for repositories.",
   },
   {

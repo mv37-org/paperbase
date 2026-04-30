@@ -2841,7 +2841,7 @@ describe("App", () => {
       expect(screen.getByRole("tab", { name: "Inference", selected: true })).toBeTruthy();
     });
     expect(screen.getByRole("tab", { name: "Sandbox" })).toBeTruthy();
-    expect(screen.getByRole("tab", { name: "Version control" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "GitHub" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "Appearance" })).toBeTruthy();
     expect(screen.queryByRole("tab", { name: "Notifications" })).toBeNull();
     expect(document.querySelector("#auth-modal-title")).toBeNull();
