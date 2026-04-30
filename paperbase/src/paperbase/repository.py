@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import logging
 import re
+import time
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import PurePosixPath
-from typing import Any
+from typing import Any, TypeVar
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
@@ -30,7 +32,7 @@ from sqlalchemy import (
     true,
 )
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
 from .config import Settings
@@ -63,6 +65,74 @@ from .models import (
     SearchSectionResult,
 )
 from .utils import canonical_arxiv_id, canonical_paper_id, literal_hint_from_pattern, new_id, utcnow
+
+
+logger = logging.getLogger(__name__)
+
+
+# Postgres SQLSTATE for ``deadlock_detected``. We retry the loser of a
+# deadlock cycle a few times so a transient AB-BA contention on
+# ``papers`` ↔ ``text_chunks`` row locks (#51) self-heals inside the
+# repository layer instead of bubbling up to the chunk worker and
+# burning a whole retry attempt's worth of arxiv/S2 quota.
+_DEADLOCK_SQLSTATE = "40P01"
+
+
+_T = TypeVar("_T")
+
+
+def _is_deadlock_error(exc: OperationalError) -> bool:
+    pgcode = getattr(getattr(exc, "orig", None), "sqlstate", None)
+    return pgcode == _DEADLOCK_SQLSTATE
+
+
+def _retry_on_deadlock(
+    fn: Callable[[], _T],
+    *,
+    max_attempts: int = 4,
+    base_backoff_seconds: float = 0.05,
+    label: str = "",
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> _T:
+    """Run ``fn()`` and retry on Postgres deadlock detection.
+
+    Postgres aborts ONE side of a deadlock cycle; that side raises
+    ``DeadlockDetected`` (SQLSTATE 40P01, surfaced through SQLAlchemy
+    as ``OperationalError``). The other side's transaction has already
+    committed and released its locks by the time we observe the error,
+    so retrying the loser usually succeeds on the next attempt.
+
+    Used by ``upsert_paper`` and ``replace_text_chunks`` (#51): under
+    tight indexing loops the same Python process can hold two pooled
+    connections in concurrent transactions that contend on the same
+    ``papers`` row's FK lock. Without this retry the failure bubbles
+    up to the chunk worker, which burns an entire retry attempt
+    (re-fetching arxiv + S2 for every paper in the batch) just to
+    re-do work the deadlock-loser had already half-completed.
+    """
+    last_exc: OperationalError | None = None
+    for attempt in range(max_attempts):
+        try:
+            return fn()
+        except OperationalError as exc:
+            if not _is_deadlock_error(exc):
+                raise
+            last_exc = exc
+            if attempt + 1 >= max_attempts:
+                break
+            sleep_for = base_backoff_seconds * (2 ** attempt)
+            logger.warning(
+                "Postgres deadlock; retrying repository call",
+                extra={
+                    "event": "repo.deadlock_retry",
+                    "label": label,
+                    "attempt": attempt + 1,
+                    "sleep_seconds": sleep_for,
+                },
+            )
+            sleep_fn(sleep_for)
+    assert last_exc is not None
+    raise last_exc
 
 
 class Base(DeclarativeBase):
@@ -1685,11 +1755,20 @@ class SqlAlchemyPaperRepository(PaperRepository):
             "updated_at": utcnow(),
         }
         statement = statement.on_conflict_do_update(index_elements=[PaperORM.paper_id], set_=update_values)
-        with self._session() as session:
-            session.execute(statement)
-            row = session.get(PaperORM, canonical_paper_id(paper.arxiv_id))
-            assert row is not None
-            return _paper_from_orm(row)
+
+        # Wrapped in deadlock-retry per #51 (symmetric to the
+        # ``replace_text_chunks`` wrap below). The INSERT ... ON CONFLICT
+        # path can deadlock against an in-flight ``replace_text_chunks``
+        # in another pooled connection that holds an FK lock on the
+        # same paper row.
+        def _do() -> PaperResponse:
+            with self._session() as session:
+                session.execute(statement)
+                row = session.get(PaperORM, canonical_paper_id(paper.arxiv_id))
+                assert row is not None
+                return _paper_from_orm(row)
+
+        return _retry_on_deadlock(_do, label="upsert_paper")
 
     def upsert_paper_shallow(self, paper: PaperMetadata) -> PaperResponse:
         paper_id = canonical_paper_id(paper.arxiv_id)
@@ -1749,22 +1828,32 @@ class SqlAlchemyPaperRepository(PaperRepository):
             return _paper_from_orm(row) if row else None
 
     def replace_text_chunks(self, paper_id: str, chunks: list[dict[str, Any]]) -> None:
-        with self._session() as session:
-            session.execute(delete(TextChunkORM).where(TextChunkORM.paper_id == paper_id))
-            for chunk in chunks:
-                session.add(
-                    TextChunkORM(
-                        chunk_id=new_id("chunk"),
-                        paper_id=paper_id,
-                        path=chunk["path"],
-                        chunk_kind=chunk["chunk_kind"],
-                        content=chunk["content"],
-                        embedding=chunk.get("embedding"),
-                        chunk_index=int(chunk.get("chunk_index", 0)),
-                        section_depth=int(chunk.get("section_depth", 1)),
-                        section_order=int(chunk.get("section_order", 0)),
+        # Wrapped in deadlock-retry per #51. The DELETE + INSERT pattern
+        # against ``text_chunks`` takes a RowShareLock on the parent
+        # ``papers`` row for FK validation, which can deadlock against
+        # an in-flight ``upsert_paper`` running in a different pooled
+        # connection in the same process. Retrying the deadlock loser
+        # is cheaper than letting the chunk worker fail and re-fetch
+        # arxiv + S2 metadata from scratch.
+        def _do() -> None:
+            with self._session() as session:
+                session.execute(delete(TextChunkORM).where(TextChunkORM.paper_id == paper_id))
+                for chunk in chunks:
+                    session.add(
+                        TextChunkORM(
+                            chunk_id=new_id("chunk"),
+                            paper_id=paper_id,
+                            path=chunk["path"],
+                            chunk_kind=chunk["chunk_kind"],
+                            content=chunk["content"],
+                            embedding=chunk.get("embedding"),
+                            chunk_index=int(chunk.get("chunk_index", 0)),
+                            section_depth=int(chunk.get("section_depth", 1)),
+                            section_order=int(chunk.get("section_order", 0)),
+                        )
                     )
-                )
+
+        _retry_on_deadlock(_do, label="replace_text_chunks")
 
     def update_summaries(self, paper_id: str, *, summary_short: str, summary_eli5: str) -> PaperResponse | None:
         with self._session() as session:

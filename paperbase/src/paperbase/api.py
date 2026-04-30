@@ -429,6 +429,27 @@ def reindex_embeddings(
     )
 
 
+@app.post(
+    "/v1/index/enrich-missing-metadata",
+    response_model=JobResponse,
+    dependencies=[Depends(require_bearer_token)],
+)
+def enrich_missing_metadata(
+    limit: int = Query(default=50_000, ge=1, le=5_000_000),
+    min_age_seconds: int = Query(default=3600, ge=0, le=30 * 24 * 3600),
+    service: PaperbaseService = Depends(get_service),
+) -> JobResponse:
+    """Queue an ``enrich_missing_metadata`` job (#38). The worker picks
+    up the job and re-runs Semantic Scholar enrichment for any indexed
+    paper that inline enrichment left unfilled (usually due to transient
+    429s). Asynchronous so a backfill at corpus scale doesn't tie up
+    the serving container."""
+    return service.enqueue_enrich_missing_metadata_job(
+        limit=limit,
+        min_age_seconds=min_age_seconds,
+    )
+
+
 @app.post("/v1/query/expand", dependencies=[Depends(require_bearer_token)])
 def expand_query(
     query: str = Query(..., min_length=1),

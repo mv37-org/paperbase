@@ -156,15 +156,15 @@ Responsibilities:
 
 Status:
 
-- [ ] create worktrees
-- [ ] assign workers
-- [ ] merge Worker A
-- [ ] merge Worker B
-- [ ] merge Worker D
-- [ ] merge Worker C
-- [ ] merge Worker E
-- [ ] run `make test`
-- [ ] final cleanup pass
+- [x] create worktrees
+- [x] assign workers
+- [x] merge Worker A
+- [x] merge Worker B
+- [x] merge Worker D
+- [x] merge Worker C
+- [x] merge Worker E
+- [x] run `make test`
+- [x] final cleanup pass
 
 ### Worker A
 
@@ -201,11 +201,18 @@ Dependencies:
 
 Status:
 
-- [ ] branch created
-- [ ] implementation started
-- [ ] tests updated
-- [ ] local relevant tests run
-- [ ] ready for merge
+- [x] branch created
+- [x] implementation started
+- [x] tests updated
+- [x] local relevant tests run
+- [x] ready for merge
+
+Integration notes:
+
+- landed on `codex/harness-v2-integration` as `bd3a3669b11be3de57be618a9a8496b82255ef74`
+- cherry-picked worker commit `aa7983670d6e2ddb54445efc91b39d5d7b4ec7c5`
+- targeted validation passed: `paperbase-dev doctor --mode test`, `paperbase-dev init-local`, `paperbase-dev verify-run --mode test`, and 7 Worker A `paperbase/tests/test_service.py` cases
+- remaining overlap is mainly Worker C around `_run_chat_tool_rounds`, `_run_chat_tool_rounds_stream`, `send_chat_message`, `send_chat_message_stream`, and nearby normal-turn assertions
 
 ### Worker B
 
@@ -240,11 +247,21 @@ Dependencies:
 
 Status:
 
-- [ ] branch created
-- [ ] implementation started
-- [ ] tests updated
-- [ ] local relevant tests run
-- [ ] ready for merge
+- [x] branch created
+- [x] implementation started
+- [x] tests updated
+- [x] local relevant tests run
+- [x] ready for merge
+
+Integration notes:
+
+- landed on `codex/harness-v2-integration` as `72d4f8f4de84ed4edc95a7f3e1b2cbef618d543a`
+- cherry-picked worker commit `0797a34357d06919fbe06d4aa52d9105a7af48d4`
+- worker reported `make test` passed after `make setup`
+- targeted integration validation passed: `paperbase-dev verify-run --mode test` and 6 prompt/answer-path `paperbase/tests/test_service.py` cases
+- Worker C remains the highest overlap in `service.py` around final-answer prompt call sites in `send_chat_message*` and prompt assertions that compare first vs last model calls
+- Worker D has medium overlap in shared research/casual normal-turn prompt text and prompt-oriented service tests
+- Worker A has only low residual overlap now that its answer-path changes are already landed
 
 ### Worker C
 
@@ -284,11 +301,19 @@ Dependencies:
 
 Status:
 
-- [ ] branch created
-- [ ] implementation started
-- [ ] tests updated
-- [ ] local relevant tests run
-- [ ] ready for merge
+- [x] branch created
+- [x] implementation started
+- [x] tests updated
+- [x] local relevant tests run
+- [x] ready for merge
+
+Integration notes:
+
+- landed on `codex/harness-v2-integration` as `fad54f45e02b1c6255c8b9f52f4e078f6c457676`
+- cherry-picked worker commit `0b9dde217f47aee0be355cfade2754dcf8bd4467`
+- resolved overlap in `paperbase/src/paperbase/service.py` and `paperbase/tests/test_service.py` by keeping Worker C's single-loop runtime while preserving Worker A's removal of backend write-enforcement answers and Worker B's unified prompt shape
+- targeted integration validation passed: `paperbase-dev verify-run --mode test` and 10 focused `paperbase/tests/test_service.py` cases covering the single-loop runtime, prompt stability, compaction-mid-turn behavior, and streaming alignment
+- merged ahead of Worker D by coordinator choice; Worker D still has the main remaining overlap in shared research/casual normal-turn prompt text and normal-turn service tests
 
 ### Worker D
 
@@ -324,11 +349,20 @@ Dependencies:
 
 Status:
 
-- [ ] branch created
-- [ ] implementation started
-- [ ] tests updated
-- [ ] local relevant tests run
-- [ ] ready for merge
+- [x] branch created
+- [x] implementation started
+- [x] tests updated
+- [x] local relevant tests run
+- [x] ready for merge
+
+Integration notes:
+
+- landed on `codex/harness-v2-integration` as `f1704e3c1d7cb72bd9e1a14a7a478c0b6b07497d`
+- cherry-picked worker commit `26160b24b46b18c1ac138e88f72b67bcc3794f9f`
+- resolved overlap in `paperbase/tests/test_service.py` against Workers B and C by keeping Worker D's relaxed research posture while preserving the unified prompt shape and same-loop runtime coverage
+- preserved the narrowed `_should_offer_project_code_tools` behavior so default-project casual turns do not re-enter the tool loop
+- worker reported `make test` passed after `make setup`, and again during the pre-push hook on `git push`
+- targeted integration validation passed: `paperbase-dev verify-run --mode test` and 10 focused `paperbase/tests/test_service.py` cases covering relaxed research posture, prompt stability, grounded same-loop behavior, project-thread direct answers, and streaming alignment
 
 ### Worker E
 
@@ -365,11 +399,20 @@ Dependencies:
 
 Status:
 
-- [ ] branch created
-- [ ] implementation started
-- [ ] tests updated
-- [ ] local relevant tests run
-- [ ] ready for merge
+- [x] branch created
+- [x] implementation started
+- [x] tests updated
+- [x] local relevant tests run
+- [x] ready for merge
+
+Integration notes:
+
+- landed on `codex/harness-v2-integration` as `c544caebe5c8e45ad54c6dd03e356fd463b319f4`
+- cherry-picked worker commit `c8f0ea2c741df348a24fcc2090f8c9553d753823`
+- resolved overlap in `paperbase/src/paperbase/service.py` and `paperbase/tests/test_service.py` by keeping Worker C's single-loop runtime and Worker D's relaxed research posture while adding Worker E's visible compaction checkpoint and citation carry-forward
+- targeted integration validation passed: `./.venv/bin/pytest paperbase/tests/test_service.py -k 'compact' -q` and `./.venv/bin/ruff check paperbase/src/paperbase/service.py paperbase/tests/test_service.py`
+- final cleanup removed dead project-write enforcement helpers, removed the stale failure-message retry test, and aligned the project-thread prompt text with Worker A's no-forced-write policy
+- full validation passed: `make test`
 
 ## Merge Order
 
@@ -421,10 +464,10 @@ For every worker branch:
 
 Before final merge:
 
-- [ ] run `make test`
-- [ ] remove dead helper functions
-- [ ] remove tests that only encoded the old harness
-- [ ] confirm this board matches what actually landed
+- [x] run `make test`
+- [x] remove dead helper functions
+- [x] remove tests that only encoded the old harness
+- [x] confirm this board matches what actually landed
 
 ## Worker Handoff Format
 

@@ -186,6 +186,13 @@ class StubApiService:
             },
         )
 
+    def enqueue_enrich_missing_metadata_job(self, *, limit: int, min_age_seconds: int):
+        self.calls.append(("enqueue_enrich_missing_metadata_job", (limit, min_age_seconds)))
+        return _job(
+            "enrich_missing_metadata",
+            payload={"limit": limit, "min_age_seconds": min_age_seconds},
+        )
+
     def expand_query(self, query: str, *, variants: int = 4) -> list[str]:
         self.calls.append(("expand_query", (query, variants)))
         return [query, f"{query} variant"]
@@ -1533,6 +1540,54 @@ def test_harvest_top_cited_endpoint_requires_bearer_token(api_client):
         "/v1/index/harvest-top-cited",
         headers={"Authorization": "Bearer wrong"},
         json=body,
+    )
+
+    assert missing.status_code == 401
+    assert invalid.status_code == 403
+
+
+def test_enrich_missing_metadata_endpoint_delegates_to_service(api_client):
+    """``POST /v1/index/enrich-missing-metadata`` queues an
+    ``enrich_missing_metadata`` job via
+    ``service.enqueue_enrich_missing_metadata_job`` (#38). Asynchronous so
+    a corpus-scale backfill doesn't tie up the serving container."""
+    client, service, settings = api_client
+    headers = {"Authorization": f"Bearer {settings.api_key}"}
+
+    response = client.post(
+        "/v1/index/enrich-missing-metadata?limit=2000&min_age_seconds=600",
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["job_type"] == "enrich_missing_metadata"
+    enqueue_calls = [c for c in service.calls if c[0] == "enqueue_enrich_missing_metadata_job"]
+    assert len(enqueue_calls) == 1
+    assert enqueue_calls[0][1] == (2000, 600)
+
+
+def test_enrich_missing_metadata_endpoint_uses_defaults(api_client):
+    """No query params → server defaults (limit=50_000, min_age_seconds=3600).
+    Default min-age guards against racing inline enrichment on freshly
+    ingested papers."""
+    client, service, settings = api_client
+    headers = {"Authorization": f"Bearer {settings.api_key}"}
+
+    response = client.post("/v1/index/enrich-missing-metadata", headers=headers)
+    assert response.status_code == 200
+    enqueue_calls = [c for c in service.calls if c[0] == "enqueue_enrich_missing_metadata_job"]
+    assert enqueue_calls[-1][1] == (50_000, 3600)
+
+
+def test_enrich_missing_metadata_endpoint_requires_bearer_token(api_client):
+    """Backfill is admin-only. No auth → 401 / invalid auth → 403."""
+    client, _, _ = api_client
+
+    missing = client.post("/v1/index/enrich-missing-metadata")
+    invalid = client.post(
+        "/v1/index/enrich-missing-metadata",
+        headers={"Authorization": "Bearer wrong"},
     )
 
     assert missing.status_code == 401

@@ -373,3 +373,44 @@ def test_enrich_missing_cli_reports_partial_failure_without_traceback(monkeypatc
     assert "Updated:        2" in output
     assert "Batches failed: 1" in output
     assert "Incomplete: rerun paperbase-dev enrich-missing" in output
+
+
+def test_enrich_missing_cli_queue_mode_enqueues_job(monkeypatch, capsys):
+    """``--queue`` enqueues an ``enrich_missing_metadata`` job and exits
+    without running enrichment in the CLI process (#38). Lets operators
+    backfill at corpus scale without tying up the serving container."""
+    from datetime import datetime, timezone
+    from paperbase.models import JobResponse
+
+    class FakeService:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, int]]] = []
+
+        def enqueue_enrich_missing_metadata_job(self, *, limit: int, min_age_seconds: int):
+            self.calls.append(("enqueue", {"limit": limit, "min_age_seconds": min_age_seconds}))
+            now = datetime(2026, 4, 28, tzinfo=timezone.utc)
+            return JobResponse(
+                job_id="job_enrich_q1",
+                job_type="enrich_missing_metadata",
+                status="pending",
+                payload={"limit": limit, "min_age_seconds": min_age_seconds},
+                created_at=now,
+                updated_at=now,
+            )
+
+        # If we accidentally ran in synchronous mode this would be hit;
+        # leaving it unimplemented makes the regression loud.
+        def enrich_missing_metadata(self, **_kwargs):
+            raise AssertionError("queue-mode CLI must not invoke synchronous enrichment")
+
+    fake = FakeService()
+    monkeypatch.setattr("paperbase.service.get_service", lambda: fake)
+
+    exit_code = enrich_missing(limit=2000, min_age_seconds=600, batch_size=20, queue=True)
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert fake.calls == [("enqueue", {"limit": 2000, "min_age_seconds": 600})]
+    assert "Queued enrich_missing_metadata job_enrich_q1" in output
+    assert "limit=2000" in output
+    assert "min_age_seconds=600" in output
