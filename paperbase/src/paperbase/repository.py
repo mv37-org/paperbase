@@ -447,7 +447,6 @@ class BrowserUserORM(Base):
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
     display_name: Mapped[str] = mapped_column(Text, default="")
     password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
-    free_responses_used: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
@@ -726,7 +725,6 @@ def _browser_user_from_orm(row: BrowserUserORM) -> BrowserUser:
         user_id=row.user_id,
         email=row.email,
         display_name=row.display_name,
-        free_responses_used=row.free_responses_used,
     )
 
 
@@ -2866,15 +2864,6 @@ class SqlAlchemyPaperRepository(PaperRepository):
         with self._session() as session:
             row = session.get(BrowserUserORM, user_id)
             return row.password_hash if row else None
-
-    def increment_free_responses_used(self, user_id: str) -> BrowserUser | None:
-        with self._session() as session:
-            row = session.get(BrowserUserORM, user_id)
-            if row is None:
-                return None
-            row.free_responses_used += 1
-            row.updated_at = utcnow()
-        return self.get_browser_user_by_id(user_id)
 
     def create_browser_session(self, *, user_id: str, token_hash_value: str, expires_at: Any) -> None:
         with self._session() as session:
@@ -5071,7 +5060,7 @@ class MemoryPaperRepository(PaperRepository):
         return matches[:limit]
 
     def create_browser_user(self, *, email: str, display_name: str, password_hash: str | None) -> BrowserUser:
-        user = BrowserUser(user_id=new_id("usr"), email=email, display_name=display_name, free_responses_used=0)
+        user = BrowserUser(user_id=new_id("usr"), email=email, display_name=display_name)
         self.browser_users[user.user_id] = user
         self.browser_users_by_email[email] = user.user_id
         self.browser_user_passwords[user.user_id] = password_hash
@@ -5098,14 +5087,6 @@ class MemoryPaperRepository(PaperRepository):
 
     def get_browser_password_hash(self, user_id: str) -> str | None:
         return self.browser_user_passwords.get(user_id)
-
-    def increment_free_responses_used(self, user_id: str) -> BrowserUser | None:
-        user = self.browser_users.get(user_id)
-        if user is None:
-            return None
-        updated = user.model_copy(update={"free_responses_used": user.free_responses_used + 1})
-        self.browser_users[user_id] = updated
-        return updated
 
     def create_browser_session(self, *, user_id: str, token_hash_value: str, expires_at: Any) -> None:
         self.browser_sessions[token_hash_value] = {

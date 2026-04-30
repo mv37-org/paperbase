@@ -1500,9 +1500,7 @@ class PreparedChatGeneration:
     turn: ChatTurnResponse
     user_item: ChatThreadItemResponse
     resolved_user: BrowserUser
-    api_key_value: str | None
-    using_free_tier: bool
-    api_key_state: str = "completed"
+    api_key_value: str
 
 
 @dataclass
@@ -1600,9 +1598,6 @@ class PaperbaseService:
     def init(self) -> None:
         self.repository.init()
 
-    def _remaining_free_responses(self, user: BrowserUser) -> int:
-        return max(self.settings.free_chat_response_limit - user.free_responses_used, 0)
-
     def _browser_user_settings_response(
         self,
         user: BrowserUser,
@@ -1629,7 +1624,6 @@ class PaperbaseService:
         return BrowserSessionResponse(
             authenticated=True,
             user=user,
-            remaining_free_responses=self._remaining_free_responses(user),
             has_openai_api_key=api_key_record is not None,
             settings=self._browser_user_settings_response(
                 user,
@@ -3343,33 +3337,30 @@ class PaperbaseService:
         if not deleted:
             raise HTTPException(status_code=404, detail="Chat thread not found")
 
-    def _choose_openai_api_key(self, user: BrowserUser) -> tuple[str | None, bool, str]:
+    def _choose_openai_api_key(self, user: BrowserUser) -> tuple[str | None, str]:
         user_key_record = self.repository.get_openai_api_key_record(user.user_id)  # type: ignore[attr-defined]
-        product_key = self.settings.openai_api_key or self.settings.anthropic_api_key
-        if user.free_responses_used < self.settings.free_chat_response_limit and product_key:
-            return product_key, True, "completed"
         if user_key_record:
             try:
-                return self.secret_cipher.decrypt(user_key_record["encrypted_api_key"]), False, "completed"
+                return self.secret_cipher.decrypt(user_key_record["encrypted_api_key"]), "completed"
             except InvalidToken:
                 logger.warning(
                     "Saved OpenAI API key could not be decrypted; deleting stale record",
                     extra={"event": "browser.auth.openai_key.invalid", "user_id": user.user_id},
                 )
                 self.repository.delete_openai_api_key(user.user_id)  # type: ignore[attr-defined]
-                return None, False, "api_key_invalid"
+                return None, "api_key_invalid"
         legacy_user_key_record = self.repository.get_anthropic_api_key_record(user.user_id)  # type: ignore[attr-defined]
         if legacy_user_key_record:
             try:
-                return self.secret_cipher.decrypt(legacy_user_key_record["encrypted_api_key"]), False, "completed"
+                return self.secret_cipher.decrypt(legacy_user_key_record["encrypted_api_key"]), "completed"
             except InvalidToken:
                 logger.warning(
                     "Saved legacy Anthropic API key could not be decrypted; deleting stale record",
                     extra={"event": "browser.auth.openai_key.legacy_invalid", "user_id": user.user_id},
                 )
                 self.repository.delete_anthropic_api_key(user.user_id)  # type: ignore[attr-defined]
-                return None, False, "api_key_invalid"
-        return None, False, "api_key_required"
+                return None, "api_key_invalid"
+        return None, "api_key_required"
 
     def _choose_anthropic_api_key(self, user: BrowserUser) -> tuple[str | None, bool, str]:
         return self._choose_openai_api_key(user)
@@ -3380,6 +3371,8 @@ class PaperbaseService:
         user: BrowserUser,
         thread_id: str,
         request: SendChatMessageRequest,
+        resolved_user: BrowserUser,
+        api_key_value: str,
     ) -> PreparedChatGeneration:
         thread = self.get_chat_thread(user, thread_id)
         content = request.content.strip()
@@ -3399,8 +3392,6 @@ class PaperbaseService:
                 thread_id=thread_id,
                 title=_summarize_chat_title(content),
             )
-        resolved_user = self.repository.get_browser_user_by_id(user.user_id) or user  # type: ignore[attr-defined]
-        api_key_value, using_free_tier, api_key_state = self._choose_openai_api_key(resolved_user)
         refreshed = self.get_chat_thread(user, thread_id)
         return PreparedChatGeneration(
             thread=refreshed,
@@ -3408,8 +3399,6 @@ class PaperbaseService:
             user_item=user_item,
             resolved_user=resolved_user,
             api_key_value=api_key_value,
-            using_free_tier=using_free_tier,
-            api_key_state=api_key_state,
         )
 
     def _project_prompt_suffix(self, thread: ChatThreadResponse) -> str:
@@ -5302,7 +5291,6 @@ class PaperbaseService:
         *,
         user: BrowserUser,
         thread_id: str,
-        resolved_user: BrowserUser,
         state: str = "api_key_required",
     ) -> SendChatMessageResponse:
         refreshed = self.get_chat_thread(user, thread_id)
@@ -5310,7 +5298,6 @@ class PaperbaseService:
             thread=refreshed,
             turn=None,
             final_item=None,
-            remaining_free_responses=self._remaining_free_responses(resolved_user),
             has_openai_api_key=self.repository.get_openai_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
             state=state,
         )
@@ -5327,14 +5314,21 @@ class PaperbaseService:
     def send_chat_message(
         self, user: BrowserUser, thread_id: str, request: SendChatMessageRequest
     ) -> SendChatMessageResponse:
-        prepared = self._prepare_chat_generation(user=user, thread_id=thread_id, request=request)
-        if not prepared.api_key_value:
+        resolved_user = self.repository.get_browser_user_by_id(user.user_id) or user  # type: ignore[attr-defined]
+        api_key_value, api_key_state = self._choose_openai_api_key(resolved_user)
+        if not api_key_value:
             return self._api_key_required_response(
                 user=user,
                 thread_id=thread_id,
-                resolved_user=prepared.resolved_user,
-                state=prepared.api_key_state,
+                state=api_key_state,
             )
+        prepared = self._prepare_chat_generation(
+            user=user,
+            thread_id=thread_id,
+            request=request,
+            resolved_user=resolved_user,
+            api_key_value=api_key_value,
+        )
 
         _ = self._chat_runtime_mode()
         turn_engine = self._run_chat_turn_engine(
@@ -5350,15 +5344,11 @@ class PaperbaseService:
                 turn_result = stop.value
                 break
 
-        resolved_user = prepared.resolved_user
-        if prepared.using_free_tier:
-            resolved_user = self.repository.increment_free_responses_used(user.user_id) or resolved_user  # type: ignore[attr-defined]
         refreshed = self.get_chat_thread(user, thread_id)
         return SendChatMessageResponse(
             thread=refreshed,
             turn=turn_result.turn,
             final_item=turn_result.final_item,
-            remaining_free_responses=self._remaining_free_responses(resolved_user),
             has_openai_api_key=self.repository.get_openai_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
             state="completed",
         )
@@ -5369,18 +5359,25 @@ class PaperbaseService:
         thread_id: str,
         request: SendChatMessageRequest,
     ) -> Iterator[tuple[str, dict[str, Any]]]:
-        prepared = self._prepare_chat_generation(user=user, thread_id=thread_id, request=request)
-        if not prepared.api_key_value:
+        resolved_user = self.repository.get_browser_user_by_id(user.user_id) or user  # type: ignore[attr-defined]
+        api_key_value, api_key_state = self._choose_openai_api_key(resolved_user)
+        if not api_key_value:
             yield (
                 "api_key_required",
                 self._api_key_required_response(
                     user=user,
                     thread_id=thread_id,
-                    resolved_user=prepared.resolved_user,
-                    state=prepared.api_key_state,
+                    state=api_key_state,
                 ).model_dump(mode="json"),
             )
             return
+        prepared = self._prepare_chat_generation(
+            user=user,
+            thread_id=thread_id,
+            request=request,
+            resolved_user=resolved_user,
+            api_key_value=api_key_value,
+        )
 
         _ = self._chat_runtime_mode()
         yield ("turn_started", {"turn": prepared.turn.model_dump(mode="json")})
@@ -5422,9 +5419,6 @@ class PaperbaseService:
             )
             return
 
-        resolved_user = prepared.resolved_user
-        if prepared.using_free_tier:
-            resolved_user = self.repository.increment_free_responses_used(user.user_id) or resolved_user  # type: ignore[attr-defined]
         refreshed = self.get_chat_thread(user, thread_id)
 
         yield (
@@ -5433,7 +5427,6 @@ class PaperbaseService:
                 "thread": refreshed.model_dump(mode="json"),
                 "turn": turn_result.turn.model_dump(mode="json"),
                 "final_item": turn_result.final_item.model_dump(mode="json") if turn_result.final_item is not None else None,
-                "remaining_free_responses": self._remaining_free_responses(resolved_user),
                 "has_openai_api_key": self.repository.get_openai_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
                 "state": "completed",
                 "usage": self._chat_usage_payload(turn_result.usage) if turn_result.usage is not None else None,

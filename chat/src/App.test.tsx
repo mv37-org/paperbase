@@ -184,7 +184,6 @@ const SELECTED_PROJECT_KEY = "paperbase-selected-project";
 
 function authenticatedSession(
   overrides: Partial<{
-    remaining_free_responses: number;
     has_openai_api_key: boolean;
     has_anthropic_api_key: boolean;
     csrf_token: string | null;
@@ -208,11 +207,9 @@ function authenticatedSession(
       user_id: "user_1",
       email: "user@example.com",
       display_name: "User Example",
-      free_responses_used: 0,
     },
-    remaining_free_responses: overrides.remaining_free_responses ?? 3,
-    has_openai_api_key: overrides.has_openai_api_key ?? overrides.has_anthropic_api_key ?? false,
-    has_anthropic_api_key: overrides.has_anthropic_api_key ?? false,
+    has_openai_api_key: overrides.has_openai_api_key ?? overrides.has_anthropic_api_key ?? true,
+    has_anthropic_api_key: overrides.has_anthropic_api_key ?? overrides.has_openai_api_key ?? true,
     settings: {
       openai_api_key_hint: "",
       anthropic_api_key_hint: "",
@@ -621,7 +618,6 @@ describe("App", () => {
     apiMocks.loadSession.mockResolvedValue({
       authenticated: false,
       user: null,
-      remaining_free_responses: 0,
       has_anthropic_api_key: false,
       csrf_token: null,
     });
@@ -1753,7 +1749,6 @@ describe("App", () => {
         created_at: "2026-04-21T00:00:00Z",
         status: "completed",
       },
-      remaining_free_responses: 2,
       has_anthropic_api_key: false,
       state: "completed",
     });
@@ -1827,7 +1822,6 @@ describe("App", () => {
         created_at: "2026-04-21T00:00:00Z",
         status: "completed",
       },
-      remaining_free_responses: 2,
       has_anthropic_api_key: false,
       state: "completed",
     });
@@ -2014,7 +2008,6 @@ describe("App", () => {
         created_at: "2026-04-21T00:00:00Z",
         status: "completed",
       },
-      remaining_free_responses: 2,
       has_anthropic_api_key: false,
       state: "completed",
     });
@@ -2042,7 +2035,6 @@ describe("App", () => {
           thread: emptyThreadResponse("thread_2"),
           turn: turnResponse("turn_invalid", "thread_2", [], { status: "failed" }),
           final_item: null,
-          remaining_free_responses: 0,
           has_openai_api_key: false,
           has_anthropic_api_key: false,
           state: "api_key_invalid",
@@ -2313,7 +2305,6 @@ describe("App", () => {
           thread: completedThread,
           turn: turnResponse("turn_project_preview", "thread_2", [completedAssistantItem]),
           final_item: completedAssistantItem,
-          remaining_free_responses: 2,
           has_openai_api_key: false,
           has_anthropic_api_key: false,
           state: "completed",
@@ -2418,7 +2409,6 @@ describe("App", () => {
           },
           turn: turnResponse("turn_fence", "thread_2", [completedAssistantItem]),
           final_item: completedAssistantItem,
-          remaining_free_responses: 2,
           has_openai_api_key: false,
           has_anthropic_api_key: false,
           state: "completed",
@@ -2546,7 +2536,6 @@ describe("App", () => {
           },
           turn: turnResponse("turn_refresh", "thread_2", [finalItem]),
           final_item: finalItem,
-          remaining_free_responses: 2,
           has_openai_api_key: false,
           has_anthropic_api_key: false,
           state: "completed",
@@ -2634,7 +2623,6 @@ describe("App", () => {
           },
           turn: turnResponse("turn_usage", "thread_2", [finalItem]),
           final_item: finalItem,
-          remaining_free_responses: 2,
           has_openai_api_key: false,
           has_anthropic_api_key: false,
           state: "completed",
@@ -2803,7 +2791,6 @@ describe("App", () => {
             finalItem,
           ]),
           final_item: finalItem,
-          remaining_free_responses: 2,
           has_openai_api_key: false,
           has_anthropic_api_key: false,
           state: "completed",
@@ -2919,7 +2906,6 @@ describe("App", () => {
     apiMocks.loadSession.mockResolvedValueOnce({
       authenticated: false,
       user: null,
-      remaining_free_responses: 3,
       has_anthropic_api_key: false,
       settings: {
         anthropic_api_key_hint: "",
@@ -2974,7 +2960,9 @@ describe("App", () => {
 
     unmount();
 
-    apiMocks.loadSession.mockResolvedValueOnce(authenticatedSession());
+    apiMocks.loadSession.mockResolvedValueOnce(
+      authenticatedSession({ has_openai_api_key: false, has_anthropic_api_key: false }),
+    );
 
     render(<App />);
 

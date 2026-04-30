@@ -41,6 +41,7 @@ from paperbase.models import (
     ProjectRepoSyncRequest,
     SaveAnthropicKeyRequest,
     SaveModalCredentialsRequest,
+    SaveOpenAIKeyRequest,
     SearchRequest,
     SearchSectionRequest,
     SendChatMessageRequest,
@@ -726,6 +727,10 @@ def _connect_github(service: PaperbaseService, user) -> None:
         access_token="github-access-token",
         scope="repo,read:user",
     )
+
+
+def _save_browser_openai_key(service: PaperbaseService, user, api_key: str = "openai-user-key-999") -> None:
+    service.save_user_openai_key(user, SaveOpenAIKeyRequest(api_key=api_key))
 
 
 def _create_repo_project_request(
@@ -1789,7 +1794,6 @@ def test_browser_auth_and_password_reset_flow(browser_service):
     )
     assert signup.status_code == 200
     assert signup.json()["authenticated"] is True
-    assert signup.json()["remaining_free_responses"] == 3
     csrf_token = signup.json()["csrf_token"]
     assert csrf_token
 
@@ -1883,8 +1887,6 @@ def test_invalid_saved_anthropic_key_is_cleared_and_gates_chat(browser_service):
         encrypted_api_key="stale-invalid-token",
         hint="anth...999",
     )
-    for _ in range(service.settings.free_chat_response_limit):
-        service.repository.increment_free_responses_used(session.user.user_id)  # type: ignore[attr-defined]
 
     thread = service.create_chat_thread(
         session.user,
@@ -1914,6 +1916,8 @@ def test_invalid_saved_anthropic_key_is_cleared_and_gates_chat(browser_service):
     assert service.repository.get_anthropic_api_key_record(session.user.user_id) is None  # type: ignore[attr-defined]
     assert [event_name for event_name, _ in streamed] == ["api_key_required"]
     assert streamed[0][1]["state"] == "api_key_invalid"
+    assert response.thread.messages == []
+    assert streamed[0][1]["thread"]["messages"] == []
 
 
 def test_sanitize_inline_citations_preserves_markdown_structure():
@@ -2278,6 +2282,7 @@ def test_project_snippet_request_uses_auto_tools_and_persists_file():
         SignupRequest(email="project-snippet@example.com", password="topsecret123", display_name="Project Snippet")
     )
     assert session.user is not None
+    _save_browser_openai_key(service, session.user)
     _connect_github(service, session.user)
     thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="Project chat"))
 
@@ -2366,6 +2371,7 @@ def test_project_code_turn_can_read_then_write_then_answer_in_same_loop():
         SignupRequest(email="project-write@example.com", password="topsecret123", display_name="Project Write")
     )
     assert session.user is not None
+    _save_browser_openai_key(service, session.user)
     _connect_github(service, session.user)
     thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="Project chat"))
 
@@ -2456,6 +2462,7 @@ def test_project_code_turn_can_recover_from_failed_create_with_edit():
         SignupRequest(email="failed-touch@example.com", password="topsecret123", display_name="Failed Touch")
     )
     assert session.user is not None
+    _save_browser_openai_key(service, session.user)
     _connect_github(service, session.user)
     thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="Project chat"))
     service.create_project_python_file(
@@ -2521,6 +2528,7 @@ def test_project_thread_can_answer_with_python_without_persisted_write():
         SignupRequest(email="unsaved-python@example.com", password="topsecret123", display_name="Unsaved Python")
     )
     assert session.user is not None
+    _save_browser_openai_key(service, session.user)
     thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="Project chat"))
 
     response = service.send_chat_message(
@@ -2594,6 +2602,7 @@ def test_project_thread_allows_python_answer_after_reading_existing_file():
         SignupRequest(email="read-code@example.com", password="topsecret123", display_name="Read Code")
     )
     assert session.user is not None
+    _save_browser_openai_key(service, session.user)
     _connect_github(service, session.user)
     thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="Project chat"))
     service.create_project_python_file(
@@ -2673,6 +2682,7 @@ def test_project_confirmation_turn_keeps_project_tools_available():
         SignupRequest(email="project-confirm@example.com", password="topsecret123", display_name="Project Confirm")
     )
     assert session.user is not None
+    _save_browser_openai_key(service, session.user)
     _connect_github(service, session.user)
     thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="Project chat"))
     service.repository.add_chat_message(  # type: ignore[attr-defined]
@@ -2763,6 +2773,7 @@ def test_project_retry_turn_keeps_project_tools_available():
         SignupRequest(email="project-retry@example.com", password="topsecret123", display_name="Project Retry")
     )
     assert session.user is not None
+    _save_browser_openai_key(service, session.user)
     _connect_github(service, session.user)
     thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="Project chat"))
     service.repository.add_chat_message(  # type: ignore[attr-defined]
@@ -3499,7 +3510,7 @@ def test_run_project_python_file_materializes_workspace_and_threads_smoke_mode()
     ]
 
 
-def test_browser_uploads_and_chat_require_api_key_after_free_quota(monkeypatch, browser_service):
+def test_browser_uploads_and_chat_require_api_key_before_first_turn(monkeypatch, browser_service):
     service, _, chat_model = browser_service
     app.dependency_overrides[get_service] = lambda: service
     client = TestClient(app)
@@ -3535,39 +3546,30 @@ def test_browser_uploads_and_chat_require_api_key_after_free_quota(monkeypatch, 
     thread = client.post("/v1/browser/chats", json={"title": "New chat"}, headers=csrf_headers).json()
     thread_id = thread["thread_id"]
 
-    for _ in range(3):
-        response = client.post(
-            f"/v1/browser/chats/{thread_id}/messages",
-            json={"content": "Explain the methods grounding with citations", "tag_filters": ["methods"]},
-            headers=csrf_headers,
-        )
-        assert response.status_code == 200
-        payload = response.json()
-        assert payload["state"] == "completed"
-        assert payload["assistant_message"]["citations"]
-
     gated = client.post(
         f"/v1/browser/chats/{thread_id}/messages",
-        json={"content": "One more answer please", "tag_filters": ["methods"]},
+        json={"content": "Explain the methods grounding with citations", "tag_filters": ["methods"]},
         headers=csrf_headers,
     )
     assert gated.status_code == 200
     assert gated.json()["state"] == "api_key_required"
+    assert gated.json()["thread"]["messages"] == []
 
     save_key = client.put(
-        "/v1/browser/settings/anthropic-key", json={"api_key": "anthropic-user-key-999"}, headers=csrf_headers
+        "/v1/browser/settings/openai-key", json={"api_key": "openai-user-key-999"}, headers=csrf_headers
     )
     assert save_key.status_code == 200
-    assert save_key.json()["has_anthropic_api_key"] is True
+    assert save_key.json()["has_openai_api_key"] is True
     csrf_headers = {"X-Paperbase-CSRF": save_key.json()["csrf_token"]}
 
     resumed = client.post(
         f"/v1/browser/chats/{thread_id}/messages",
-        json={"content": "Continue with my saved key", "tag_filters": ["methods"]},
+        json={"content": "Explain the methods grounding with citations", "tag_filters": ["methods"]},
         headers=csrf_headers,
     )
     assert resumed.status_code == 200
     assert resumed.json()["state"] == "completed"
+    assert resumed.json()["assistant_message"]["citations"]
     assert chat_model.create_calls
     assert chat_model.create_calls[0]["tool_choice"] == {"type": "auto"}
     assert chat_model.create_calls[0]["tools"]
@@ -3581,6 +3583,7 @@ def test_non_grounded_chat_can_use_tools_without_forcing_research_posture(browse
         SignupRequest(email="casual@example.com", password="topsecret123", display_name="Casual User")
     )
     assert session.user is not None
+    _save_browser_openai_key(service, session.user)
 
     thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
     response = service.send_chat_message(
@@ -3618,6 +3621,7 @@ def test_first_prompt_renames_new_chat_to_short_summary(browser_service):
         SignupRequest(email="title@example.com", password="topsecret123", display_name="Title User")
     )
     assert session.user is not None
+    _save_browser_openai_key(service, session.user)
 
     thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
     first_response = service.send_chat_message(
@@ -3643,6 +3647,7 @@ def test_chat_context_uses_full_active_thread_history(browser_service):
         SignupRequest(email="history@example.com", password="topsecret123", display_name="History User")
     )
     assert session.user is not None
+    _save_browser_openai_key(service, session.user)
 
     thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
     for index in range(8):
@@ -3673,12 +3678,16 @@ def test_chat_turn_context_skips_empty_reasoning_items(browser_service):
         SignupRequest(email="reasoning-context@example.com", password="topsecret123", display_name="Reasoning User")
     )
     assert session.user is not None
+    _save_browser_openai_key(service, session.user)
 
     thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
+    resolved_user = service.repository.get_browser_user_by_id(session.user.user_id) or session.user  # type: ignore[attr-defined]
     prepared = service._prepare_chat_generation(
         user=session.user,
         thread_id=thread.thread_id,
         request=SendChatMessageRequest(content="Follow up on the existing plan"),
+        resolved_user=resolved_user,
+        api_key_value="openai-user-key-999",
     )
     reasoning_item = ChatThreadItemResponse(
         item_id="item_reasoning",
@@ -3698,8 +3707,6 @@ def test_chat_turn_context_skips_empty_reasoning_items(browser_service):
         user_item=prepared.user_item,
         resolved_user=prepared.resolved_user,
         api_key_value=prepared.api_key_value,
-        using_free_tier=prepared.using_free_tier,
-        api_key_state=prepared.api_key_state,
     )
 
     context = service._chat_turn_context(prepared)
@@ -3741,6 +3748,7 @@ def test_stream_chat_compacts_mid_turn_after_tool_results(monkeypatch, browser_s
         SignupRequest(email="compact@example.com", password="topsecret123", display_name="Compact User")
     )
     assert session.user is not None
+    _save_browser_openai_key(service, session.user)
 
     monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
     monkeypatch.setattr(
@@ -3874,6 +3882,7 @@ def test_search_only_tool_results_do_not_create_citations(monkeypatch):
         SignupRequest(email="search-only@example.com", password="topsecret123", display_name="Search Only")
     )
     assert session.user is not None
+    _save_browser_openai_key(service, session.user)
 
     monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
     monkeypatch.setattr(
@@ -3903,6 +3912,7 @@ def test_link_requests_expose_metadata_guidance_for_paper_links(monkeypatch, bro
         SignupRequest(email="links@example.com", password="topsecret123", display_name="Links User")
     )
     assert session.user is not None
+    _save_browser_openai_key(service, session.user)
 
     monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
     monkeypatch.setattr(
@@ -3932,6 +3942,7 @@ def test_project_defaults_and_thread_snapshots(browser_service):
         SignupRequest(email="projects@example.com", password="topsecret123", display_name="Project User")
     )
     assert session.user is not None
+    _save_browser_openai_key(service, session.user)
     _connect_github(service, session.user)
 
     initial_projects = service.list_projects(session.user).projects
@@ -4087,6 +4098,7 @@ def test_empty_chat_can_move_between_projects(browser_service):
         SignupRequest(email="move-empty@example.com", password="topsecret123", display_name="Move Empty")
     )
     assert session.user is not None
+    _save_browser_openai_key(service, session.user)
     _connect_github(service, session.user)
 
     project = service.create_project(
@@ -4173,6 +4185,9 @@ def test_browser_chat_stream_emits_citations_and_completion(monkeypatch, browser
     )
     assert signup.status_code == 200
     csrf_headers = {"X-Paperbase-CSRF": signup.json()["csrf_token"]}
+    user = service.repository.get_browser_user_by_id(signup.json()["user"]["user_id"])  # type: ignore[attr-defined]
+    assert user is not None
+    _save_browser_openai_key(service, user)
 
     monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
     monkeypatch.setattr(
@@ -4247,10 +4262,6 @@ def test_browser_chat_stream_handles_api_key_required_without_placeholder(browse
     assert signup.status_code == 200
     payload = signup.json()
     csrf_headers = {"X-Paperbase-CSRF": payload["csrf_token"]}
-    user_id = payload["user"]["user_id"]
-
-    for _ in range(3):
-        service.repository.increment_free_responses_used(user_id)  # type: ignore[attr-defined]
 
     thread = client.post("/v1/browser/chats", json={"title": "New chat"}, headers=csrf_headers).json()
     thread_id = thread["thread_id"]
@@ -4267,7 +4278,7 @@ def test_browser_chat_stream_handles_api_key_required_without_placeholder(browse
     assert [event_name for event_name, _ in events] == ["api_key_required"]
     assert events[0][1]["state"] == "api_key_required"
     assert events[0][1]["assistant_message"] is None
-    assert [message["role"] for message in events[0][1]["thread"]["messages"]] == ["user"]
+    assert events[0][1]["thread"]["messages"] == []
 
     app.dependency_overrides.clear()
 
@@ -4283,6 +4294,9 @@ def test_browser_chat_stream_falls_back_when_provider_stream_fails_before_text(m
     )
     assert signup.status_code == 200
     csrf_headers = {"X-Paperbase-CSRF": signup.json()["csrf_token"]}
+    user = service.repository.get_browser_user_by_id(signup.json()["user"]["user_id"])  # type: ignore[attr-defined]
+    assert user is not None
+    _save_browser_openai_key(service, user)
 
     monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
     monkeypatch.setattr(
@@ -4359,6 +4373,9 @@ def test_browser_chat_stream_allows_project_answer_without_persisted_write(brows
     )
     assert signup.status_code == 200
     csrf_headers = {"X-Paperbase-CSRF": signup.json()["csrf_token"]}
+    user = service.repository.get_browser_user_by_id(signup.json()["user"]["user_id"])  # type: ignore[attr-defined]
+    assert user is not None
+    _save_browser_openai_key(service, user)
 
     thread = client.post("/v1/browser/chats", json={"title": "New chat"}, headers=csrf_headers).json()
     thread_id = thread["thread_id"]
@@ -4479,6 +4496,7 @@ def test_browser_chat_stream_can_apply_project_edit_and_answer_in_same_loop():
     user_id = signup.json()["user"]["user_id"]
     user = service.repository.get_browser_user_by_id(user_id)  # type: ignore[attr-defined]
     assert user is not None
+    _save_browser_openai_key(service, user)
     _connect_github(service, user)
 
     thread = client.post("/v1/browser/chats", json={"title": "New chat"}, headers=csrf_headers).json()

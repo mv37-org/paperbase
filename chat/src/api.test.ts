@@ -41,9 +41,7 @@ describe("chat api", () => {
             user_id: "user_1",
             email: "user@example.com",
             display_name: "User",
-            free_responses_used: 0,
           },
-          remaining_free_responses: 3,
           has_anthropic_api_key: false,
           csrf_token: "csrf-123",
         }),
@@ -83,9 +81,7 @@ describe("chat api", () => {
             user_id: "user_1",
             email: "user@example.com",
             display_name: "User",
-            free_responses_used: 0,
           },
-          remaining_free_responses: 3,
           has_anthropic_api_key: false,
           csrf_token: "csrf-123",
         }),
@@ -239,9 +235,7 @@ describe("chat api", () => {
             user_id: "user_1",
             email: "user@example.com",
             display_name: "User",
-            free_responses_used: 0,
           },
-          remaining_free_responses: 3,
           has_anthropic_api_key: false,
           csrf_token: "csrf-123",
         }),
@@ -458,7 +452,7 @@ describe("chat api", () => {
               );
               controller.enqueue(
                 encoder.encode(
-                  'ed answer","delta_type":"output_text"}\n\nevent: item_completed\ndata: {"item":{"item_id":"msg_1","thread_id":"thread_1","turn_id":"turn_1","item_type":"assistant_message","role":"assistant","phase":"final_answer","call_id":null,"name":null,"content_text":"Grounded answer","citations":[],"created_at":"2026-04-21T00:00:00Z","status":"completed"}}\n\nevent: turn_completed\ndata: {"thread":{"thread_id":"thread_1","project_id":"proj_1","project_name":"General","project_instructions":"","title":"New chat","created_at":"2026-04-21T00:00:00Z","updated_at":"2026-04-21T00:00:00Z","items":[{"item_id":"msg_1","thread_id":"thread_1","turn_id":"turn_1","item_type":"assistant_message","role":"assistant","phase":"final_answer","call_id":null,"name":null,"content_text":"Grounded answer","citations":[],"created_at":"2026-04-21T00:00:00Z","status":"completed"}],"turns":[{"turn_id":"turn_1","thread_id":"thread_1","status":"completed","provider_response_id":"resp_1","started_at":"2026-04-21T00:00:00Z","completed_at":"2026-04-21T00:00:01Z","usage":null,"diff_summary":"","changed_paths":[],"exec_session_ids":[],"items":[{"item_id":"msg_1","thread_id":"thread_1","turn_id":"turn_1","item_type":"assistant_message","role":"assistant","phase":"final_answer","call_id":null,"name":null,"content_text":"Grounded answer","citations":[],"created_at":"2026-04-21T00:00:00Z","status":"completed"}]}]},"turn":{"turn_id":"turn_1","thread_id":"thread_1","status":"completed","provider_response_id":"resp_1","started_at":"2026-04-21T00:00:00Z","completed_at":"2026-04-21T00:00:01Z","usage":null,"diff_summary":"","changed_paths":[],"exec_session_ids":[],"items":[{"item_id":"msg_1","thread_id":"thread_1","turn_id":"turn_1","item_type":"assistant_message","role":"assistant","phase":"final_answer","call_id":null,"name":null,"content_text":"Grounded answer","citations":[],"created_at":"2026-04-21T00:00:00Z","status":"completed"}]},"final_item":{"item_id":"msg_1","thread_id":"thread_1","turn_id":"turn_1","item_type":"assistant_message","role":"assistant","phase":"final_answer","call_id":null,"name":null,"content_text":"Grounded answer","citations":[],"created_at":"2026-04-21T00:00:00Z","status":"completed"},"remaining_free_responses":2,"has_openai_api_key":false,"state":"completed","usage":{"model":"gpt-5","input_tokens":11234,"output_tokens":27,"total_tokens":11261,"context_window_tokens":1000000}}\n\n',
+                  'ed answer","delta_type":"output_text"}\n\nevent: item_completed\ndata: {"item":{"item_id":"msg_1","thread_id":"thread_1","turn_id":"turn_1","item_type":"assistant_message","role":"assistant","phase":"final_answer","call_id":null,"name":null,"content_text":"Grounded answer","citations":[],"created_at":"2026-04-21T00:00:00Z","status":"completed"}}\n\nevent: turn_completed\ndata: {"thread":{"thread_id":"thread_1","project_id":"proj_1","project_name":"General","project_instructions":"","title":"New chat","created_at":"2026-04-21T00:00:00Z","updated_at":"2026-04-21T00:00:00Z","items":[{"item_id":"msg_1","thread_id":"thread_1","turn_id":"turn_1","item_type":"assistant_message","role":"assistant","phase":"final_answer","call_id":null,"name":null,"content_text":"Grounded answer","citations":[],"created_at":"2026-04-21T00:00:00Z","status":"completed"}],"turns":[{"turn_id":"turn_1","thread_id":"thread_1","status":"completed","provider_response_id":"resp_1","started_at":"2026-04-21T00:00:00Z","completed_at":"2026-04-21T00:00:01Z","usage":null,"diff_summary":"","changed_paths":[],"exec_session_ids":[],"items":[{"item_id":"msg_1","thread_id":"thread_1","turn_id":"turn_1","item_type":"assistant_message","role":"assistant","phase":"final_answer","call_id":null,"name":null,"content_text":"Grounded answer","citations":[],"created_at":"2026-04-21T00:00:00Z","status":"completed"}]}]},"turn":{"turn_id":"turn_1","thread_id":"thread_1","status":"completed","provider_response_id":"resp_1","started_at":"2026-04-21T00:00:00Z","completed_at":"2026-04-21T00:00:01Z","usage":null,"diff_summary":"","changed_paths":[],"exec_session_ids":[],"items":[{"item_id":"msg_1","thread_id":"thread_1","turn_id":"turn_1","item_type":"assistant_message","role":"assistant","phase":"final_answer","call_id":null,"name":null,"content_text":"Grounded answer","citations":[],"created_at":"2026-04-21T00:00:00Z","status":"completed"}]},"final_item":{"item_id":"msg_1","thread_id":"thread_1","turn_id":"turn_1","item_type":"assistant_message","role":"assistant","phase":"final_answer","call_id":null,"name":null,"content_text":"Grounded answer","citations":[],"created_at":"2026-04-21T00:00:00Z","status":"completed"},"has_openai_api_key":false,"state":"completed","usage":{"model":"gpt-5","input_tokens":11234,"output_tokens":27,"total_tokens":11261,"context_window_tokens":1000000}}\n\n',
                 ),
               );
               controller.close();
@@ -751,7 +745,6 @@ describe("chat api", () => {
             kind: "default",
             phase: "final_answer",
           },
-          remaining_free_responses: 2,
           has_openai_api_key: false,
           has_anthropic_api_key: false,
           state: "completed",

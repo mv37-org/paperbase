@@ -756,7 +756,7 @@ function apiKeyStateMessage(state: string) {
   if (state === "api_key_invalid") {
     return "Your saved OpenAI API key could not be decrypted. Add it again in Settings.";
   }
-  return "You have used your 3 free responses. Add an OpenAI API key to continue.";
+  return "Add an OpenAI API key in Settings before starting a chat.";
 }
 
 function shouldShowThreadInSidebar(thread: ChatThreadSummary) {
@@ -1832,9 +1832,7 @@ export default function App() {
     };
   }, [session]);
   const sessionSettings = sessionSummary?.settings ?? DEFAULT_BROWSER_SETTINGS;
-  const hasInferenceAccess = Boolean(
-    sessionSummary?.hasOpenAIApiKey || (session?.remaining_free_responses ?? 0) > 0,
-  );
+  const hasInferenceAccess = Boolean(sessionSummary?.hasOpenAIApiKey);
   const chatSetupProjectName = emptyStateProject?.name ?? activeThread?.project_name ?? "Project";
   const chatSetupItems = [
     {
@@ -1852,7 +1850,7 @@ export default function App() {
       provider: "openai",
       label: "Inference access",
       description:
-        "Needed for the agent to run turns. A saved OpenAI key or remaining free responses both count.",
+        "Needed for the agent to run turns. Add your OpenAI API key before starting chat.",
       actionLabel: hasInferenceAccess ? "Ready" : "Open inference setup",
       ready: hasInferenceAccess,
       required: true,
@@ -2672,8 +2670,33 @@ export default function App() {
     [showNoteFlash],
   );
 
+  const requireInferenceAccess = useCallback(
+    (currentSession?: BrowserSessionResponse | null) => {
+      const hasOpenAIApiKey = Boolean(
+        currentSession?.has_openai_api_key ??
+        currentSession?.has_anthropic_api_key ??
+        sessionRef.current?.has_openai_api_key ??
+        sessionRef.current?.has_anthropic_api_key,
+      );
+      if (hasOpenAIApiKey) {
+        return true;
+      }
+      const message = apiKeyStateMessage("api_key_required");
+      setComposerStatus(message);
+      showErrorFlash(message);
+      setActiveSettingsTab("inference");
+      setAuthView("settings");
+      setAuthModalOpen(true);
+      return false;
+    },
+    [showErrorFlash],
+  );
+
   const sendMessage = useCallback(
-    async (threadId: string, content: string) => {
+    async (threadId: string, content: string, currentSession?: BrowserSessionResponse | null) => {
+      if (!requireInferenceAccess(currentSession)) {
+        return null;
+      }
       const existingThread = threadMapRef.current[threadId];
       const projectIdForTurn =
         existingThread?.project_id ??
@@ -2977,7 +3000,6 @@ export default function App() {
             current
               ? {
                   ...current,
-                  remaining_free_responses: payload.remaining_free_responses,
                   has_openai_api_key:
                     payload.has_openai_api_key ?? payload.has_anthropic_api_key ?? false,
                   has_anthropic_api_key:
@@ -3037,7 +3059,6 @@ export default function App() {
           current
             ? {
                 ...current,
-                remaining_free_responses: gatingPayload.remaining_free_responses,
                 has_openai_api_key:
                   gatingPayload.has_openai_api_key ?? gatingPayload.has_anthropic_api_key ?? false,
                 has_anthropic_api_key:
@@ -3072,7 +3093,6 @@ export default function App() {
           current
             ? {
                 ...current,
-                remaining_free_responses: donePayload.remaining_free_responses,
                 has_openai_api_key:
                   donePayload.has_openai_api_key ?? donePayload.has_anthropic_api_key ?? false,
                 has_anthropic_api_key:
@@ -3105,6 +3125,7 @@ export default function App() {
       persistDirtyProjectDrafts,
       refreshLoadedProjectCodeItems,
       refreshProjects,
+      requireInferenceAccess,
       setThreadUsageSnapshot,
       showErrorFlash,
       startThreadStreamState,
@@ -3115,65 +3136,76 @@ export default function App() {
     ],
   );
 
-  const bootstrapAuthenticatedUi = useCallback(async () => {
-    await refreshUploads();
-    const loadedProjects = await refreshProjects();
-    const persistedSelectedProjectId = restoreSelectedProjectId();
-    const restoredSelectedProjectId =
-      persistedSelectedProjectId &&
-      loadedProjects.some((project) => project.project_id === persistedSelectedProjectId)
-        ? persistedSelectedProjectId
-        : null;
-    const selectedProjectId = restoredSelectedProjectId ?? loadedProjects[0]?.project_id ?? null;
-    selectedProjectIdRef.current = selectedProjectId;
-    setSelectedProjectId(selectedProjectId);
-    setExpandedProjectIds(restoredSelectedProjectId ? [restoredSelectedProjectId] : []);
-    if (
-      restoredSelectedProjectId &&
-      !projectItemsRef.current[restoredSelectedProjectId]?.loaded &&
-      !projectItemsRef.current[restoredSelectedProjectId]?.loading
-    ) {
-      await fetchProjectItems(restoredSelectedProjectId);
-    }
-    const restoredTabs = restoreTabs();
-    const validRestoredTabs: OpenTab[] = [];
-    for (const tab of restoredTabs) {
-      try {
-        if (tab.kind === "thread") {
-          await fetchAndStoreThread(tab.id, false);
-        } else if (tab.kind === "python_file") {
-          await fetchAndStorePythonFile(tab.id, false);
-        } else if (!loadedProjects.some((project) => project.project_id === tab.id)) {
-          continue;
-        }
-        validRestoredTabs.push(tab);
-      } catch (error) {
-        console.error(error);
+  const bootstrapAuthenticatedUi = useCallback(
+    async (currentSession?: BrowserSessionResponse | null) => {
+      await refreshUploads();
+      const loadedProjects = await refreshProjects();
+      const persistedSelectedProjectId = restoreSelectedProjectId();
+      const restoredSelectedProjectId =
+        persistedSelectedProjectId &&
+        loadedProjects.some((project) => project.project_id === persistedSelectedProjectId)
+          ? persistedSelectedProjectId
+          : null;
+      const selectedProjectId = restoredSelectedProjectId ?? loadedProjects[0]?.project_id ?? null;
+      selectedProjectIdRef.current = selectedProjectId;
+      setSelectedProjectId(selectedProjectId);
+      setExpandedProjectIds(restoredSelectedProjectId ? [restoredSelectedProjectId] : []);
+      if (
+        restoredSelectedProjectId &&
+        !projectItemsRef.current[restoredSelectedProjectId]?.loaded &&
+        !projectItemsRef.current[restoredSelectedProjectId]?.loading
+      ) {
+        await fetchProjectItems(restoredSelectedProjectId);
       }
-    }
-    setOpenTabs(validRestoredTabs);
+      const restoredTabs = restoreTabs();
+      const validRestoredTabs: OpenTab[] = [];
+      for (const tab of restoredTabs) {
+        try {
+          if (tab.kind === "thread") {
+            await fetchAndStoreThread(tab.id, false);
+          } else if (tab.kind === "python_file") {
+            await fetchAndStorePythonFile(tab.id, false);
+          } else if (!loadedProjects.some((project) => project.project_id === tab.id)) {
+            continue;
+          }
+          validRestoredTabs.push(tab);
+        } catch (error) {
+          console.error(error);
+        }
+      }
+      setOpenTabs(validRestoredTabs);
 
-    const pendingPrompt = consumePendingPrompt().trim();
-    if (pendingPrompt) {
-      const thread = await createNewThread("", selectedProjectId ?? loadedProjects[0]?.project_id);
-      setLandingPrompt("");
-      await sendMessage(thread.thread_id, pendingPrompt);
-      return;
-    }
+      const pendingPrompt = consumePendingPrompt().trim();
+      if (pendingPrompt) {
+        if (!requireInferenceAccess(currentSession)) {
+          setComposerInput(pendingPrompt);
+          return;
+        }
+        const thread = await createNewThread(
+          "",
+          selectedProjectId ?? loadedProjects[0]?.project_id,
+        );
+        setLandingPrompt("");
+        await sendMessage(thread.thread_id, pendingPrompt, currentSession);
+        return;
+      }
 
-    const firstOpen = validRestoredTabs[0];
-    if (firstOpen) {
-      setActiveTab(firstOpen);
-    }
-  }, [
-    createNewThread,
-    fetchAndStorePythonFile,
-    fetchProjectItems,
-    fetchAndStoreThread,
-    refreshProjects,
-    refreshUploads,
-    sendMessage,
-  ]);
+      const firstOpen = validRestoredTabs[0];
+      if (firstOpen) {
+        setActiveTab(firstOpen);
+      }
+    },
+    [
+      createNewThread,
+      fetchAndStorePythonFile,
+      fetchProjectItems,
+      fetchAndStoreThread,
+      refreshProjects,
+      refreshUploads,
+      requireInferenceAccess,
+      sendMessage,
+    ],
+  );
 
   useEffect(() => {
     void (async () => {
@@ -3250,7 +3282,7 @@ export default function App() {
         }
       }
       if (nextSession.authenticated) {
-        await bootstrapAuthenticatedUi();
+        await bootstrapAuthenticatedUi(nextSession);
       }
     })().catch((error: unknown) => {
       console.error(error);
@@ -3294,7 +3326,7 @@ export default function App() {
     async (nextSession: BrowserSessionResponse) => {
       setSession(nextSession);
       closeAuthModal();
-      await bootstrapAuthenticatedUi();
+      await bootstrapAuthenticatedUi(nextSession);
     },
     [bootstrapAuthenticatedUi, closeAuthModal],
   );
@@ -3309,10 +3341,13 @@ export default function App() {
       openAuthModal("login");
       return;
     }
+    if (!requireInferenceAccess()) {
+      return;
+    }
     const thread = await createNewThread();
     setLandingPrompt("");
     await sendMessage(thread.thread_id, prompt);
-  }, [createNewThread, landingPrompt, openAuthModal, sendMessage]);
+  }, [createNewThread, landingPrompt, openAuthModal, requireInferenceAccess, sendMessage]);
 
   const handleExample = useCallback(
     async (prompt: string) => {
@@ -3363,6 +3398,9 @@ export default function App() {
     if (!content) {
       return;
     }
+    if (!requireInferenceAccess()) {
+      return;
+    }
     const threadId = activeThreadId ?? (await createNewThread()).thread_id;
     setComposerInput("");
     scrollMessageListToBottom();
@@ -3371,6 +3409,7 @@ export default function App() {
     activeThreadId,
     composerInput,
     createNewThread,
+    requireInferenceAccess,
     scrollMessageListToBottom,
     sendMessage,
     streamingThreadId,

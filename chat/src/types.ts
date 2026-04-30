@@ -4,7 +4,6 @@ export interface BrowserUser {
   user_id: string;
   email: string;
   display_name: string;
-  free_responses_used: number;
 }
 
 export interface BrowserUserSettingsResponse {
@@ -23,7 +22,6 @@ export interface BrowserUserSettingsResponse {
 export interface BrowserSessionResponse {
   authenticated: boolean;
   user: BrowserUser | null;
-  remaining_free_responses: number;
   has_openai_api_key: boolean;
   has_anthropic_api_key?: boolean;
   settings?: BrowserUserSettingsResponse;
@@ -361,7 +359,6 @@ export interface SendChatMessageResponse {
   turn?: ChatTurnResponse | null;
   final_item?: ChatThreadItemResponse | null;
   assistant_message?: ChatMessageResponse | null;
-  remaining_free_responses: number;
   has_openai_api_key: boolean;
   has_anthropic_api_key?: boolean;
   state: string;
@@ -397,7 +394,6 @@ export interface ChatStreamTurnCompletedEvent {
   thread: ChatThreadResponse;
   turn: ChatTurnResponse;
   final_item?: ChatThreadItemResponse | null;
-  remaining_free_responses: number;
   has_openai_api_key: boolean;
   has_anthropic_api_key?: boolean;
   state: "completed";

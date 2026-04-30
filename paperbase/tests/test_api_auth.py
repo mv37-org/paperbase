@@ -373,7 +373,6 @@ class StubApiService:
         return BrowserSessionResponse(
             authenticated=True,
             user=user,
-            remaining_free_responses=2,
             has_anthropic_api_key=False,
         )
 
@@ -382,7 +381,6 @@ class StubApiService:
         return BrowserSessionResponse(
             authenticated=True,
             user=user,
-            remaining_free_responses=2,
             has_anthropic_api_key=False,
         )
 
@@ -391,7 +389,6 @@ class StubApiService:
         return BrowserSessionResponse(
             authenticated=True,
             user=user,
-            remaining_free_responses=2,
             has_anthropic_api_key=False,
         )
 
@@ -400,7 +397,6 @@ class StubApiService:
         return BrowserSessionResponse(
             authenticated=True,
             user=user,
-            remaining_free_responses=2,
             has_anthropic_api_key=False,
         )
 
@@ -422,7 +418,6 @@ class StubApiService:
         return BrowserSessionResponse(
             authenticated=True,
             user=user,
-            remaining_free_responses=2,
             has_anthropic_api_key=False,
         )
 
@@ -431,7 +426,6 @@ class StubApiService:
         return BrowserSessionResponse(
             authenticated=True,
             user=user,
-            remaining_free_responses=2,
             has_anthropic_api_key=False,
         )
 
@@ -749,7 +743,6 @@ class StubApiService:
             BrowserSessionResponse(
                 authenticated=True,
                 user=BrowserUser(user_id="user_google", email=email, display_name=display_name),
-                remaining_free_responses=3,
                 has_anthropic_api_key=False,
             ),
             "google-browser-token",

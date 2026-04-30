@@ -220,7 +220,6 @@ class BrowserUser(BaseModel):
     user_id: str
     email: str
     display_name: str = ""
-    free_responses_used: int = 0
 
 
 class BrowserUserSettingsResponse(BaseModel):
@@ -250,7 +249,6 @@ class BrowserUserSettingsResponse(BaseModel):
 class BrowserSessionResponse(BaseModel):
     authenticated: bool
     user: BrowserUser | None = None
-    remaining_free_responses: int = 0
     has_openai_api_key: bool = False
     settings: BrowserUserSettingsResponse = Field(default_factory=BrowserUserSettingsResponse)
     csrf_token: str | None = None
@@ -709,7 +707,6 @@ class SendChatMessageResponse(BaseModel):
     thread: ChatThreadResponse
     turn: ChatTurnResponse | None = None
     final_item: ChatThreadItemResponse | None = None
-    remaining_free_responses: int = 0
     has_openai_api_key: bool = False
     state: str = "completed"
 
