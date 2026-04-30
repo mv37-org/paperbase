@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import tomllib
 
 from paperbase.config import repo_root
 from paperbase.extractors import ExtractionOutput, build_manifest
@@ -56,6 +57,13 @@ def test_cloudbuild_uses_supported_substitutions_only():
     )
 
     assert invalid == []
+
+
+def test_pyproject_packages_prompt_assets():
+    pyproject = tomllib.loads(_read_repo_file("paperbase/pyproject.toml"))
+    package_data = pyproject["tool"]["setuptools"]["package-data"]["paperbase"]
+
+    assert "prompt_assets/*/*.md" in package_data
 
 
 def test_job_orm_carries_retry_policy_columns():
