@@ -2851,6 +2851,8 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Sandbox" }));
     expect(document.querySelector(".settings-section-title")?.textContent).toBe("Sandbox");
     expect(screen.getAllByText("Manage Modal sandbox credentials.")).toHaveLength(1);
+    expect(screen.getByLabelText("Modal token ID")).toBeTruthy();
+    expect(screen.getByLabelText("Modal token secret")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("tab", { name: "Appearance" }));
     expect(document.querySelector(".settings-section-title")?.textContent).toBe("Appearance");
