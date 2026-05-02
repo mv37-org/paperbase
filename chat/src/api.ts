@@ -197,6 +197,60 @@ function messageFromItem(item: ChatThreadItemResponse): ChatMessageResponse | nu
   };
 }
 
+function itemFromLegacyMessage(
+  message: ChatMessageResponse,
+  options: { threadId: string; index: number },
+): ChatThreadItemResponse {
+  const { threadId, index } = options;
+  const role = String(message.role || "assistant");
+  return {
+    item_id: message.message_id || `legacy_msg_${index + 1}`,
+    thread_id: threadId,
+    turn_id: `legacy_turn_${index + 1}`,
+    item_type:
+      message.kind === "compaction"
+        ? "compaction"
+        : role === "assistant"
+          ? "assistant_message"
+          : "user_message",
+    role,
+    phase: role === "assistant" && message.kind !== "compaction" ? "final_answer" : null,
+    call_id: null,
+    name: null,
+    content_text: message.content_markdown ?? "",
+    content_json: null,
+    citations: [...(message.citations ?? [])],
+    created_at: message.created_at,
+    status: message.status ?? "completed",
+  };
+}
+
+function turnsFromItems(items: ChatThreadItemResponse[]): ChatTurnResponse[] {
+  if (items.length === 0) {
+    return [];
+  }
+  const grouped = new Map<string, ChatThreadItemResponse[]>();
+  for (const item of items) {
+    const turnId = item.turn_id || `legacy_turn_${grouped.size + 1}`;
+    const existing = grouped.get(turnId) ?? [];
+    existing.push(item);
+    grouped.set(turnId, existing);
+  }
+  return [...grouped.entries()].map(([turnId, turnItems]) => ({
+    turn_id: turnId,
+    thread_id: turnItems[0]?.thread_id ?? "",
+    status: "completed",
+    provider_response_id: "",
+    started_at: turnItems[0]?.created_at ?? "",
+    completed_at: turnItems[turnItems.length - 1]?.created_at ?? turnItems[0]?.created_at ?? "",
+    usage: null,
+    diff_summary: "",
+    changed_paths: [],
+    exec_session_ids: [],
+    items: turnItems,
+  }));
+}
+
 function hydrateTurn(turn: ChatTurnResponse): ChatTurnResponse {
   return {
     ...turn,
@@ -205,11 +259,19 @@ function hydrateTurn(turn: ChatTurnResponse): ChatTurnResponse {
 }
 
 function hydrateThread(thread: ChatThreadResponse): ChatThreadResponse {
-  const items = [...(thread.items ?? [])];
+  const fallbackMessages = [...(thread.messages ?? [])];
+  const items =
+    (thread.items ?? []).length > 0
+      ? [...(thread.items ?? [])]
+      : fallbackMessages.map((message, index) =>
+          itemFromLegacyMessage(message, { threadId: thread.thread_id, index }),
+        );
+  const turns =
+    (thread.turns ?? []).length > 0 ? (thread.turns ?? []).map(hydrateTurn) : turnsFromItems(items);
   return {
     ...thread,
     items,
-    turns: (thread.turns ?? []).map(hydrateTurn),
+    turns,
     messages: items
       .map(messageFromItem)
       .filter((message): message is ChatMessageResponse => Boolean(message)),
@@ -742,7 +804,6 @@ export function createBrowserTrendingPaperComment(
     },
   );
 }
-
 export function getBrowserPaperPreview(paperId: string) {
   return api<PaperPreviewResponse>(`/v1/browser/papers/${paperId}/preview`, { method: "GET" });
 }

@@ -176,6 +176,12 @@ export interface FigureResponse {
   content_type?: string | null;
 }
 
+export interface PaperPreviewResponse {
+  paper_id: string;
+  image_url: string;
+  content_type: string;
+}
+
 export interface TableResponse {
   paper_id: string;
   table_id: string;

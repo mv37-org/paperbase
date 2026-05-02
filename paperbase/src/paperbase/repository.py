@@ -1100,6 +1100,33 @@ def _chat_message_from_orm(row: ChatMessageORM) -> ChatMessageResponse:
     )
 
 
+def _legacy_chat_messages_for_thread(session: Session, thread_id: str) -> list[ChatMessageResponse]:
+    rows = session.scalars(
+        select(ChatMessageORM)
+        .where(ChatMessageORM.thread_id == thread_id, ChatMessageORM.archived_at.is_(None))
+        .order_by(ChatMessageORM.created_at.asc())
+    ).all()
+    return [_chat_message_from_orm(row) for row in rows]
+
+
+def _thread_preview_text(session: Session, thread_id: str) -> str:
+    last_item = session.scalar(
+        select(ChatThreadItemORM)
+        .where(ChatThreadItemORM.thread_id == thread_id)
+        .order_by(ChatThreadItemORM.sequence.desc(), ChatThreadItemORM.created_at.desc())
+        .limit(1)
+    )
+    if last_item is not None:
+        return (last_item.content_text[:120] if last_item.content_text else "").strip()
+    last_message = session.scalar(
+        select(ChatMessageORM)
+        .where(ChatMessageORM.thread_id == thread_id, ChatMessageORM.archived_at.is_(None))
+        .order_by(ChatMessageORM.created_at.desc())
+        .limit(1)
+    )
+    return (last_message.content_markdown[:120] if last_message and last_message.content_markdown else "").strip()
+
+
 def _chat_thread_item_from_orm(row: ChatThreadItemORM) -> ChatThreadItemResponse:
     phase = row.phase if row.phase in {"commentary", "final_answer"} else None
     return ChatThreadItemResponse(
@@ -4406,13 +4433,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
             ).all()
             results: list[ChatThreadSummary] = []
             for thread in threads:
-                last_item = session.scalar(
-                    select(ChatThreadItemORM)
-                    .where(ChatThreadItemORM.thread_id == thread.thread_id)
-                    .order_by(ChatThreadItemORM.sequence.desc(), ChatThreadItemORM.created_at.desc())
-                    .limit(1)
-                )
-                preview = (last_item.content_text[:120] if last_item else "").strip()
+                preview = _thread_preview_text(session, thread.thread_id)
                 results.append(_chat_thread_summary_from_orm(thread, last_message_preview=preview))
         return ProjectSessionPageResponse(
             project_id=project_id,
@@ -4444,13 +4465,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
             ).all()
             items: list[ProjectItemSummary] = []
             for thread in thread_rows:
-                last_item = session.scalar(
-                    select(ChatThreadItemORM)
-                    .where(ChatThreadItemORM.thread_id == thread.thread_id)
-                    .order_by(ChatThreadItemORM.sequence.desc(), ChatThreadItemORM.created_at.desc())
-                    .limit(1)
-                )
-                preview = (last_item.content_text[:120] if last_item else "").strip()
+                preview = _thread_preview_text(session, thread.thread_id)
                 items.append(
                     _project_item_from_thread_summary(
                         _chat_thread_summary_from_orm(thread, last_message_preview=preview)
@@ -4753,13 +4768,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
             ).all()
             results: list[ChatThreadSummary] = []
             for thread in threads:
-                last_item = session.scalar(
-                    select(ChatThreadItemORM)
-                    .where(ChatThreadItemORM.thread_id == thread.thread_id)
-                    .order_by(ChatThreadItemORM.sequence.desc(), ChatThreadItemORM.created_at.desc())
-                    .limit(1)
-                )
-                preview = (last_item.content_text[:120] if last_item else "").strip()
+                preview = _thread_preview_text(session, thread.thread_id)
                 results.append(_chat_thread_summary_from_orm(thread, last_message_preview=preview))
         return results
 
@@ -4778,22 +4787,27 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 .where(ChatThreadItemORM.thread_id == thread_id)
                 .order_by(ChatThreadItemORM.sequence.asc(), ChatThreadItemORM.created_at.asc())
             ).all()
+            legacy_messages = _legacy_chat_messages_for_thread(session, thread_id) if not item_rows else []
         items = [_chat_thread_item_from_orm(row) for row in item_rows]
         items_by_turn: dict[str, list[ChatThreadItemResponse]] = defaultdict(list)
         for item in items:
             items_by_turn[item.turn_id].append(item)
         turns = [_chat_turn_from_orm(row, items=items_by_turn.get(row.turn_id, [])) for row in turn_rows]
-        return ChatThreadResponse(
-            thread_id=thread.thread_id,
-            project_id=thread.project_id or "",
-            project_name=thread.project_name or "",
-            project_instructions=thread.project_instructions or "",
-            title=thread.title,
-            created_at=thread.created_at,
-            updated_at=thread.updated_at,
-            items=items,
-            turns=turns,
-        )
+        payload: dict[str, Any] = {
+            "thread_id": thread.thread_id,
+            "project_id": thread.project_id or "",
+            "project_name": thread.project_name or "",
+            "project_instructions": thread.project_instructions or "",
+            "title": thread.title,
+            "created_at": thread.created_at,
+            "updated_at": thread.updated_at,
+            "turns": turns,
+        }
+        if items:
+            payload["items"] = items
+        else:
+            payload["messages"] = legacy_messages
+        return ChatThreadResponse(**payload)
 
     def _next_chat_item_sequence(self, session: Session, thread_id: str) -> int:
         current = session.scalar(select(func.max(ChatThreadItemORM.sequence)).where(ChatThreadItemORM.thread_id == thread_id))

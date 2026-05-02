@@ -2321,6 +2321,116 @@ describe("App", () => {
     });
   });
 
+  it("shows inline paper previews for cited research papers", async () => {
+    localStorage.setItem(OPEN_TABS_KEY, JSON.stringify(["thread_1"]));
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.getThread.mockResolvedValue({
+      thread_id: "thread_1",
+      project_id: "proj_1",
+      project_name: "General",
+      project_instructions: "",
+      title: "Preview thread",
+      created_at: "2026-04-21T00:00:00Z",
+      updated_at: "2026-04-21T00:00:00Z",
+      items: [
+        threadItemResponse("msg_1", "assistant_message", "assistant", "Read this paper [S1].", {
+          thread_id: "thread_1",
+          turn_id: "turn_1",
+          phase: "final_answer",
+          citations: [
+            {
+              source_id: "S1",
+              source_kind: "paperbase_paper",
+              title: "Benchmark Paper",
+              path: "sections/introduction.md",
+              excerpt: "Agents plan and use tools.",
+              paper_id: "arxiv:2401.12345",
+              tags: [],
+            },
+          ],
+        }),
+      ],
+      turns: [
+        turnResponse("turn_1", "thread_1", [
+          threadItemResponse("msg_1", "assistant_message", "assistant", "Read this paper [S1].", {
+            thread_id: "thread_1",
+            turn_id: "turn_1",
+            phase: "final_answer",
+            citations: [
+              {
+                source_id: "S1",
+                source_kind: "paperbase_paper",
+                title: "Benchmark Paper",
+                path: "sections/introduction.md",
+                excerpt: "Agents plan and use tools.",
+                paper_id: "arxiv:2401.12345",
+                tags: [],
+              },
+            ],
+          }),
+        ]),
+      ],
+      messages: [
+        {
+          message_id: "msg_1",
+          role: "assistant",
+          content_markdown: "Read this paper [S1].",
+          citations: [
+            {
+              source_id: "S1",
+              source_kind: "paperbase_paper",
+              title: "Benchmark Paper",
+              path: "sections/introduction.md",
+              excerpt: "Agents plan and use tools.",
+              paper_id: "arxiv:2401.12345",
+              tags: [],
+            },
+          ],
+          created_at: "2026-04-21T00:00:00Z",
+          status: "completed",
+        },
+      ],
+    });
+    apiMocks.getBrowserPaper.mockResolvedValue({
+      paper_id: "arxiv:2401.12345",
+      arxiv_id: "2401.12345",
+      title: "Benchmark Paper",
+      authors: "Ada Lovelace",
+      abstract: "Grounded benchmark paper.",
+      summary_short: "Short grounded benchmark summary.",
+      summary_eli5: "Simple benchmark summary.",
+      categories: "cs.AI",
+      primary_category: "cs.AI",
+      published: "2026-04-01",
+      updated: "2026-04-02",
+      pdf_url: "https://example.test/2401.12345.pdf",
+      html_url: "https://example.test/2401.12345",
+      citation_count: 12,
+      influential_citation_count: 3,
+      index_status: "indexed",
+    });
+    apiMocks.getBrowserPaperPreview.mockResolvedValue({
+      paper_id: "arxiv:2401.12345",
+      image_url: "https://example.test/preview.webp",
+      content_type: "image/webp",
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Benchmark Paper")).toBeTruthy();
+    });
+    expect(await screen.findByText("Short grounded benchmark summary.")).toBeTruthy();
+    expect(screen.getByText("Ada Lovelace")).toBeTruthy();
+    expect(screen.getByRole("img", { name: "Benchmark Paper preview" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "HTML" }).getAttribute("href")).toBe(
+      "https://example.test/2401.12345",
+    );
+    expect(screen.getByRole("link", { name: "PDF" }).getAttribute("href")).toBe(
+      "https://example.test/2401.12345.pdf",
+    );
+  });
+
   it("falls back to the non-streaming send path when the stream fails before any events", async () => {
     sessionStorage.setItem(PENDING_PROMPT_KEY, "Summarize the benchmark papers");
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());

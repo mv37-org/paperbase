@@ -1113,4 +1113,38 @@ describe("chat api", () => {
     expect(init?.method).toBe("POST");
     expect(init?.body).toBe(JSON.stringify({ mode: "smoke" }));
   });
+
+  it("hydrates legacy chat threads from messages when item payloads are absent", async () => {
+    const fetchMock = vi
+      .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          thread_id: "thread_legacy",
+          project_id: "proj_1",
+          project_name: "General",
+          project_instructions: "",
+          title: "Legacy thread",
+          created_at: "2026-04-21T00:00:00Z",
+          updated_at: "2026-04-21T00:00:00Z",
+          messages: [
+            {
+              message_id: "msg_legacy_1",
+              role: "assistant",
+              content_markdown: "Legacy grounded answer",
+              citations: [],
+              created_at: "2026-04-21T00:00:00Z",
+              status: "completed",
+            },
+          ],
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await loadApiModule();
+
+    const thread = await api.getThread("thread_legacy");
+
+    expect(thread.messages?.[0]?.content_markdown).toBe("Legacy grounded answer");
+    expect(thread.items?.[0]?.content_text).toBe("Legacy grounded answer");
+    expect(thread.turns?.[0]?.items[0]?.item_id).toBe("msg_legacy_1");
+  });
 });

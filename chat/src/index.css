@@ -3323,6 +3323,79 @@ textarea::placeholder,
   line-height: 1.4;
 }
 
+.citation-card-preview-shell {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.citation-card-preview-image,
+.citation-card-preview-placeholder {
+  width: 120px;
+  height: 156px;
+  border: 1px solid rgba(27, 22, 17, 0.1);
+  border-radius: 10px;
+  background: #f3efe6;
+}
+
+.citation-card-preview-image {
+  object-fit: cover;
+  display: block;
+}
+
+.citation-card-preview-placeholder {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: center;
+  padding: 10px;
+}
+
+.citation-card-preview-copy {
+  min-width: 0;
+}
+
+.citation-card-preview-meta,
+.citation-card-preview-authors,
+.citation-card-preview-error {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.citation-card-preview-authors {
+  margin-top: 4px;
+}
+
+.citation-card-preview-summary {
+  margin: 8px 0 0;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.citation-card-preview-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+@media (max-width: 720px) {
+  .citation-card-preview-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .citation-card-preview-image,
+  .citation-card-preview-placeholder {
+    width: 100%;
+    max-width: 220px;
+  }
+}
+
 .citation-card-excerpt {
   margin: 8px 0 0;
   color: var(--text);
@@ -7601,6 +7674,9 @@ body.authenticated-theme-dark .paper-drawer-path,
 body.authenticated-theme-dark .paper-drawer-meta,
 body.authenticated-theme-dark .paper-drawer-eyebrow,
 body.authenticated-theme-dark .citation-card-path,
+body.authenticated-theme-dark .citation-card-preview-meta,
+body.authenticated-theme-dark .citation-card-preview-authors,
+body.authenticated-theme-dark .citation-card-preview-error,
 body.authenticated-theme-dark .project-repo-status,
 body.authenticated-theme-dark .project-repo-import-item em,
 body.authenticated-theme-dark .project-repo-option small,
@@ -7858,6 +7934,8 @@ body.authenticated-theme-dark .settings-appearance-option,
 body.authenticated-theme-dark .paper-drawer-placeholder,
 body.authenticated-theme-dark .paper-drawer-error,
 body.authenticated-theme-dark .citation-card,
+body.authenticated-theme-dark .citation-card-preview-image,
+body.authenticated-theme-dark .citation-card-preview-placeholder,
 body.authenticated-theme-dark .project-home-stat,
 body.authenticated-theme-dark .project-repo-info-button,
 body.authenticated-theme-dark .project-github-required,

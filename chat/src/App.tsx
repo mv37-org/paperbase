@@ -12,6 +12,7 @@ import {
   deletePythonFile,
   deleteThread,
   getBrowserPaper,
+  getBrowserPaperPreview,
   getBrowserPaperFigure,
   getBrowserPaperFile,
   getBrowserPaperTable,
@@ -66,6 +67,7 @@ import type {
   GitHubRepoMetadataResponse,
   GitHubRepoSummary,
   MentionTag,
+  PaperPreviewResponse,
   PaperResponse,
   ProjectFileKind,
   ProjectItemKind,
@@ -136,6 +138,12 @@ type PaperDrawerContent =
   | { kind: "markdown"; path: string; file: FileContentResponse }
   | { kind: "figure"; path: string; figure: FigureResponse }
   | { kind: "table"; path: string; table: TableResponse };
+type PaperCitationPreviewState = {
+  paper: PaperResponse | null;
+  preview: PaperPreviewResponse | null;
+  status: "loading" | "ready" | "error";
+  error: string;
+};
 type OpenTab =
   | { kind: "thread"; id: string }
   | { kind: "python_file"; id: string }
@@ -1051,6 +1059,18 @@ function latestThreadMessageId(
   return null;
 }
 
+function summarizeCitationPreview(paper: PaperResponse | null) {
+  if (!paper) {
+    return "";
+  }
+  const source = paper.summary_short || paper.summary_eli5 || paper.abstract || "";
+  const trimmed = source.trim();
+  if (trimmed.length <= 220) {
+    return trimmed;
+  }
+  return `${trimmed.slice(0, 217).trimEnd()}...`;
+}
+
 function buildThreadDebugBundle(thread: ChatThreadResponse, userId: string | null) {
   const latestMessage = thread.messages[thread.messages.length - 1] ?? null;
   return {
@@ -1458,12 +1478,17 @@ export default function App() {
     "idle" | "loading" | "ready" | "error"
   >("idle");
   const [paperDrawerError, setPaperDrawerError] = useState("");
+  const [paperCitationPreviews, setPaperCitationPreviews] = useState<
+    Record<string, PaperCitationPreviewState>
+  >({});
   const [messageListAtBottom, setMessageListAtBottom] = useState(true);
 
   const sessionRef = useRef<BrowserSessionResponse | null>(null);
   const projectsRef = useRef<ProjectSummary[]>([]);
   const selectedProjectIdRef = useRef<string | null>(restoreSelectedProjectId());
   const projectItemsRef = useRef<Record<string, ProjectItemState>>({});
+  const paperCitationPreviewsRef = useRef<Record<string, PaperCitationPreviewState>>({});
+  const paperCitationPreviewFetchesRef = useRef(new Set<string>());
   const threadMapRef = useRef<Record<string, ChatThreadResponse>>({});
   const pythonFileMapRef = useRef<Record<string, PythonFileResponse>>({});
   const pythonFileDraftsRef = useRef<Record<string, PythonFileDraft>>({});
@@ -1504,6 +1529,10 @@ export default function App() {
   useEffect(() => {
     projectItemsRef.current = projectItems;
   }, [projectItems]);
+
+  useEffect(() => {
+    paperCitationPreviewsRef.current = paperCitationPreviews;
+  }, [paperCitationPreviews]);
 
   useEffect(() => {
     pythonFileMapRef.current = pythonFileMap;
@@ -1667,6 +1696,19 @@ export default function App() {
   const activePythonRun = activePythonFileId
     ? (pythonFileRuns[activePythonFileId] ?? { running: false, result: null, error: "" })
     : { running: false, result: null, error: "" };
+  const activeThreadPaperIds = useMemo(() => {
+    if (!activeThread) {
+      return [];
+    }
+    return [
+      ...new Set(
+        activeThread.messages
+          .flatMap((message) => message.citations)
+          .map((citation) => citation.paper_id ?? "")
+          .filter((paperId) => paperId.trim().length > 0),
+      ),
+    ];
+  }, [activeThread]);
   const activeThreadDebugBundle = useMemo(
     () =>
       activeThread && localThreadDebugEnabled
@@ -1861,6 +1903,80 @@ export default function App() {
       window.removeEventListener("keydown", handleKeyDown);
     };
   }, [contextUsagePopoverOpen]);
+
+  useEffect(() => {
+    if (authenticated) {
+      return;
+    }
+    paperCitationPreviewFetchesRef.current.clear();
+    setPaperCitationPreviews({});
+  }, [authenticated]);
+
+  useEffect(() => {
+    if (!authenticated || activeThreadPaperIds.length === 0) {
+      return;
+    }
+    let cancelled = false;
+    for (const paperId of activeThreadPaperIds) {
+      if (
+        paperCitationPreviewsRef.current[paperId] ||
+        paperCitationPreviewFetchesRef.current.has(paperId)
+      ) {
+        continue;
+      }
+      paperCitationPreviewFetchesRef.current.add(paperId);
+      setPaperCitationPreviews((current) => ({
+        ...current,
+        [paperId]: {
+          paper: null,
+          preview: null,
+          status: "loading",
+          error: "",
+        },
+      }));
+      void (async () => {
+        try {
+          const [paperResult, previewResult] = await Promise.allSettled([
+            getBrowserPaper(paperId),
+            getBrowserPaperPreview(paperId),
+          ]);
+          if (cancelled) {
+            return;
+          }
+          if (paperResult.status !== "fulfilled") {
+            throw paperResult.reason;
+          }
+          setPaperCitationPreviews((current) => ({
+            ...current,
+            [paperId]: {
+              paper: paperResult.value,
+              preview: previewResult.status === "fulfilled" ? previewResult.value : null,
+              status: "ready",
+              error: "",
+            },
+          }));
+        } catch (error) {
+          if (cancelled) {
+            return;
+          }
+          setPaperCitationPreviews((current) => ({
+            ...current,
+            [paperId]: {
+              paper: null,
+              preview: null,
+              status: "error",
+              error: error instanceof Error ? error.message : "Paper preview could not be loaded.",
+            },
+          }));
+        } finally {
+          paperCitationPreviewFetchesRef.current.delete(paperId);
+        }
+      })();
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [activeThreadPaperIds, authenticated]);
 
   useEffect(() => {
     setContextUsagePopoverOpen(false);
@@ -6270,42 +6386,118 @@ export default function App() {
                             ) : null}
                             {message.role === "assistant" && message.citations.length > 0 ? (
                               <div className="message-citations">
-                                {message.citations.map((citation) => (
-                                  <div
-                                    key={citation.source_id}
-                                    id={sourceCardId(message.message_id, citation.source_id)}
-                                    className="citation-card"
-                                  >
-                                    <div className="citation-card-header">
-                                      <div>
-                                        <span className="citation-card-source-id">
-                                          {citation.source_id}
-                                        </span>
-                                        <strong className="citation-card-title">
-                                          {citation.title}
-                                        </strong>
+                                {message.citations.map((citation) => {
+                                  const paperPreview = citation.paper_id
+                                    ? (paperCitationPreviews[citation.paper_id] ?? null)
+                                    : null;
+                                  const paperSummary = summarizeCitationPreview(
+                                    paperPreview?.paper ?? null,
+                                  );
+                                  return (
+                                    <div
+                                      key={citation.source_id}
+                                      id={sourceCardId(message.message_id, citation.source_id)}
+                                      className="citation-card"
+                                    >
+                                      <div className="citation-card-header">
+                                        <div>
+                                          <span className="citation-card-source-id">
+                                            {citation.source_id}
+                                          </span>
+                                          <strong className="citation-card-title">
+                                            {citation.title}
+                                          </strong>
+                                        </div>
+                                        {citation.paper_id ? (
+                                          <button
+                                            type="button"
+                                            className="citation-card-action"
+                                            onClick={() =>
+                                              openPaperDrawer(citation.paper_id!, citation.path)
+                                            }
+                                          >
+                                            Open paper
+                                          </button>
+                                        ) : null}
+                                      </div>
+                                      <div className="citation-card-path">
+                                        {citation.source_kind === "paperbase_paper"
+                                          ? "Paper"
+                                          : "Upload"}{" "}
+                                        · {citation.path}
                                       </div>
                                       {citation.paper_id ? (
-                                        <button
-                                          type="button"
-                                          className="citation-card-action"
-                                          onClick={() =>
-                                            openPaperDrawer(citation.paper_id!, citation.path)
-                                          }
-                                        >
-                                          Open paper
-                                        </button>
+                                        <div className="citation-card-preview-shell">
+                                          {paperPreview?.preview?.image_url ? (
+                                            <img
+                                              src={paperPreview.preview.image_url}
+                                              alt={`${paperPreview.paper?.title ?? citation.title} preview`}
+                                              className="citation-card-preview-image"
+                                            />
+                                          ) : (
+                                            <div className="citation-card-preview-placeholder">
+                                              {paperPreview?.status === "loading"
+                                                ? "Loading preview..."
+                                                : "No preview"}
+                                            </div>
+                                          )}
+                                          <div className="citation-card-preview-copy">
+                                            {paperPreview?.paper ? (
+                                              <>
+                                                <div className="citation-card-preview-meta">
+                                                  {paperPreview.paper.primary_category ||
+                                                    paperPreview.paper.categories}
+                                                  {paperPreview.paper.published
+                                                    ? ` · ${paperPreview.paper.published}`
+                                                    : ""}
+                                                </div>
+                                                <div className="citation-card-preview-authors">
+                                                  {paperPreview.paper.authors}
+                                                </div>
+                                                {paperSummary ? (
+                                                  <p className="citation-card-preview-summary">
+                                                    {paperSummary}
+                                                  </p>
+                                                ) : null}
+                                                <div className="citation-card-preview-links">
+                                                  {paperPreview.paper.html_url ? (
+                                                    <a
+                                                      className="citation-card-action"
+                                                      href={paperPreview.paper.html_url}
+                                                      target="_blank"
+                                                      rel="noreferrer"
+                                                    >
+                                                      HTML
+                                                    </a>
+                                                  ) : null}
+                                                  {paperPreview.paper.pdf_url ? (
+                                                    <a
+                                                      className="citation-card-action"
+                                                      href={paperPreview.paper.pdf_url}
+                                                      target="_blank"
+                                                      rel="noreferrer"
+                                                    >
+                                                      PDF
+                                                    </a>
+                                                  ) : null}
+                                                </div>
+                                              </>
+                                            ) : paperPreview?.status === "error" ? (
+                                              <div className="citation-card-preview-error">
+                                                {paperPreview.error}
+                                              </div>
+                                            ) : (
+                                              <div className="citation-card-preview-meta">
+                                                Loading paper details...
+                                              </div>
+                                            )}
+                                          </div>
+                                        </div>
                                       ) : null}
+                                      <p className="citation-card-excerpt">{citation.excerpt}</p>
                                     </div>
-                                    <div className="citation-card-path">
-                                      {citation.source_kind === "paperbase_paper"
-                                        ? "Paper"
-                                        : "Upload"}{" "}
-                                      · {citation.path}
-                                    </div>
-                                    <p className="citation-card-excerpt">{citation.excerpt}</p>
-                                  </div>
-                                ))}
+                                  );
+                                })}
                               </div>
                             ) : null}
                           </article>
