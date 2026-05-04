@@ -62,6 +62,11 @@ Optional browser-account settings now hang off the same API env surface:
 - verify and profile workflows cancel superseded in-progress runs on the same PR or branch
 - profiling runs only on `main` pushes or manual dispatch
 
+## Benchmarks
+
+- deterministic hotpath and test-time artifacts live under `benchmarks/`
+- [benchmarks/impact-scorecard-spec.md](./benchmarks/impact-scorecard-spec.md) defines the scientific measurement spec for indexing quality, retrieval quality, and harness lift with vs without Paperbase
+
 For a full reset of the local database and storage, use:
 
 ```bash
