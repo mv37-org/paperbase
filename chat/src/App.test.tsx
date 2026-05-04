@@ -44,6 +44,7 @@ const apiMocks = vi.hoisted(() => {
     getBrowserPaperFigure: vi.fn(),
     getBrowserPaperFile: vi.fn(),
     getBrowserPaperTable: vi.fn(),
+    getBootstrapSession: vi.fn(),
     getProjectRepoSync: vi.fn(),
     getPythonFile: vi.fn(),
     getThread: vi.fn(),
@@ -117,6 +118,7 @@ vi.mock("./api", () => ({
   getBrowserPaperFigure: apiMocks.getBrowserPaperFigure,
   getBrowserPaperFile: apiMocks.getBrowserPaperFile,
   getBrowserPaperTable: apiMocks.getBrowserPaperTable,
+  getBootstrapSession: apiMocks.getBootstrapSession,
   getProjectRepoSync: apiMocks.getProjectRepoSync,
   getPythonFile: apiMocks.getPythonFile,
   getThread: apiMocks.getThread,
@@ -498,6 +500,7 @@ describe("App", () => {
       configurable: true,
       value: vi.fn(),
     });
+    apiMocks.getBootstrapSession.mockReturnValue(null);
     apiMocks.loadUploads.mockResolvedValue({ documents: [], available_tags: [] });
     apiMocks.loadProjects.mockResolvedValue({
       projects: [projectSummary("proj_1", "General")],
@@ -629,6 +632,18 @@ describe("App", () => {
     });
     expect(document.querySelector("#app-shell")).toBeNull();
     expect(apiMocks.landingMentionEditor).toHaveBeenCalled();
+  });
+
+  it("boots from the server session payload without refetching the browser session", async () => {
+    apiMocks.getBootstrapSession.mockReturnValue(authenticatedSession());
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(document.querySelector("#account-menu-button")).toBeTruthy();
+    });
+
+    expect(apiMocks.loadSession).not.toHaveBeenCalled();
   });
 
   it("restores previously open tabs for an authenticated session", async () => {

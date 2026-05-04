@@ -120,6 +120,35 @@ function syncBrowserSession(payload: unknown) {
   browserCsrfToken = session.authenticated ? (session.csrf_token ?? null) : null;
 }
 
+function readBootstrapSession() {
+  const payload = (window as typeof window & { PAPERBASE_BOOTSTRAP_SESSION?: unknown })
+    .PAPERBASE_BOOTSTRAP_SESSION;
+  if (!payload || typeof payload !== "object" || !("authenticated" in payload)) {
+    return null;
+  }
+  return payload as BrowserSessionResponse;
+}
+
+function cloneBrowserSession(
+  session: BrowserSessionResponse | null,
+): BrowserSessionResponse | null {
+  if (!session) {
+    return null;
+  }
+  return {
+    ...session,
+    user: session.user ? { ...session.user } : null,
+    settings: session.settings ? { ...session.settings } : session.settings,
+  };
+}
+
+const bootstrapSession = readBootstrapSession();
+syncBrowserSession(bootstrapSession);
+
+export function getBootstrapSession() {
+  return cloneBrowserSession(bootstrapSession);
+}
+
 function messageFromItem(item: ChatThreadItemResponse): ChatMessageResponse | null {
   if (!["user_message", "assistant_message", "compaction"].includes(item.item_type)) {
     return null;

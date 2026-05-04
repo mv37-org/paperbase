@@ -259,19 +259,47 @@ def _browser_session_response_with_csrf(
     return session_response
 
 
+def _current_browser_session(
+    request: Request, service: PaperbaseService
+) -> BrowserSessionResponse:
+    raw_token = _browser_session_token(request)
+    session = service.get_browser_session(raw_token)
+    if session.authenticated and raw_token:
+        session.csrf_token = csrf_token_for_session(raw_token, get_settings())
+    return session
+
+
+def _serialize_browser_session_for_html(
+    session_response: BrowserSessionResponse,
+) -> str:
+    payload = json.dumps(jsonable_encoder(session_response), ensure_ascii=False, separators=(",", ":"))
+    return (
+        payload.replace("&", "\\u0026")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+    )
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
 @app.get("/", response_class=HTMLResponse)
-def home(request: Request) -> HTMLResponse:
+def home(request: Request, service: PaperbaseService = Depends(get_service)) -> HTMLResponse:
     if not _STATIC_DIR.exists():
         return HTMLResponse("Chat frontend not built. Run `cd chat && vp build`.", status_code=503)
     html = (_STATIC_DIR / "index.html").read_text(encoding="utf-8")
     api_base_url = _public_base_url(request)
+    bootstrap_session = _current_browser_session(request, service)
     html = html.replace("__PAPERBASE_BASE_URL__", api_base_url)
-    return HTMLResponse(html)
+    html = html.replace(
+        "__PAPERBASE_BOOTSTRAP_SESSION__",
+        _serialize_browser_session_for_html(bootstrap_session),
+    )
+    response = HTMLResponse(html)
+    set_no_store_headers(response)
+    return response
 
 
 @app.post("/v1/index/papers/arxiv/{arxiv_id}", response_model=JobResponse, dependencies=[Depends(require_bearer_token)])
@@ -800,10 +828,7 @@ def probe_integrations(
 def browser_session(
     request: Request, response: Response, service: PaperbaseService = Depends(get_service)
 ) -> BrowserSessionResponse:
-    raw_token = _browser_session_token(request)
-    session = service.get_browser_session(raw_token)
-    if session.authenticated and raw_token:
-        session.csrf_token = csrf_token_for_session(raw_token, get_settings())
+    session = _current_browser_session(request, service)
     set_no_store_headers(response)
     return session
 

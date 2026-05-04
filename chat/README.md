@@ -4,6 +4,8 @@
 
 Source lives here. Generated assets are built into `paperbase/src/paperbase/static/` and are not tracked.
 
+The server-rendered HTML shell now inlines the current browser session and applies the authenticated dark-theme class before React mounts, so reloads do not block on a second `/v1/browser/session` round trip or flash a white shell for signed-in dark-theme users.
+
 The landing prompt and authenticated chat composer both support live `@` paper mentions backed by the browser suggestion endpoint, so tagged-paper search suggestions come from the indexed paper corpus instead of local mock data.
 
 The authenticated sidebar is project-first:

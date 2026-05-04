@@ -10,6 +10,27 @@
     <script>
       window.PAPERBASE_BASE_URL = "__PAPERBASE_BASE_URL__";
     </script>
+    <script id="paperbase-bootstrap-session" type="application/json">
+      __PAPERBASE_BOOTSTRAP_SESSION__
+    </script>
+    <script>
+      const bootstrapSessionEl = document.getElementById("paperbase-bootstrap-session");
+      const rawBootstrapSession = bootstrapSessionEl?.textContent?.trim() ?? "";
+      let bootstrapSession = null;
+      if (rawBootstrapSession && !rawBootstrapSession.startsWith("__")) {
+        try {
+          bootstrapSession = JSON.parse(rawBootstrapSession);
+        } catch (error) {
+          console.error("Paperbase bootstrap session could not be parsed.", error);
+        }
+      }
+      window.PAPERBASE_BOOTSTRAP_SESSION = bootstrapSession;
+      const authenticatedDarkTheme = Boolean(
+        bootstrapSession?.authenticated && bootstrapSession?.settings?.appearance_theme === "dark",
+      );
+      document.documentElement.classList.toggle("authenticated-theme-dark", authenticatedDarkTheme);
+      document.body.classList.toggle("authenticated-theme-dark", authenticatedDarkTheme);
+    </script>
     <div id="root">
       <main class="landing-page app-boot-fallback">
         <button class="landing-login-button" type="button" aria-label="Log in">

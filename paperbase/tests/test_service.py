@@ -1127,6 +1127,9 @@ def test_root_serves_built_chat_shell():
     assert "/static/app.js" in response.text
     assert "/static/app.css" in response.text
     assert "__PAPERBASE_BASE_URL__" not in response.text
+    assert "__PAPERBASE_BOOTSTRAP_SESSION__" not in response.text
+    assert response.headers["Cache-Control"] == "no-store"
+    assert response.headers["Pragma"] == "no-cache"
 
 
 def test_root_uses_forwarded_https_base_url():
@@ -1142,6 +1145,28 @@ def test_root_uses_forwarded_https_base_url():
 
     assert response.status_code == 200
     assert 'window.PAPERBASE_BASE_URL = "https://paperbase-api.example.test";' in response.text
+
+
+def test_root_inlines_bootstrap_browser_session(browser_service):
+    service, _, _ = browser_service
+    app.dependency_overrides[get_service] = lambda: service
+    try:
+        client = TestClient(app)
+
+        signup = client.post(
+            "/v1/browser/auth/signup",
+            json={"email": "inline@example.com", "password": "topsecret123", "display_name": "Inline User"},
+        )
+        csrf_token = signup.json()["csrf_token"]
+
+        response = client.get("/")
+
+        assert response.status_code == 200
+        assert '"authenticated":true' in response.text
+        assert f'"csrf_token":"{csrf_token}"' in response.text
+        assert '"appearance_theme":"light"' in response.text
+    finally:
+        app.dependency_overrides.clear()
 
 
 def test_static_chat_assets_are_served():
