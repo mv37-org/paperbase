@@ -556,10 +556,7 @@ function rememberPendingPrompt(prompt: string, paperIds: string[] = []) {
   if (!trimmed) {
     return;
   }
-  sessionStorage.setItem(
-    PENDING_PROMPT_KEY,
-    JSON.stringify({ prompt: trimmed, paperIds }),
-  );
+  sessionStorage.setItem(PENDING_PROMPT_KEY, JSON.stringify({ prompt: trimmed, paperIds }));
 }
 
 function restoreTabs() {
@@ -3237,12 +3234,7 @@ export default function App() {
         );
         setLandingPrompt("");
         setLandingTags([]);
-        await sendMessage(
-          thread.thread_id,
-          trimmedPendingPrompt,
-          currentSession,
-          pendingPaperIds,
-        );
+        await sendMessage(thread.thread_id, trimmedPendingPrompt, currentSession, pendingPaperIds);
         return;
       }
 
