@@ -8,9 +8,11 @@ from PIL import Image
 
 from paperbase.extractors import (
     PREVIEW_ARTIFACT_PATH,
+    _extract_latex_figures,
     _extract_latex_text,
     _extract_sections,
     _latex_to_markdown,
+    _load_latex_archive,
     _sanitize_extracted_text,
     build_manifest,
     index_paper_artifacts,
@@ -208,6 +210,31 @@ def _build_tex_tarball(files: dict[str, str]) -> bytes:
             info.size = len(data)
             tar.addfile(info, io.BytesIO(data))
     return buf.getvalue()
+
+
+def _build_mixed_tarball(files: dict[str, bytes | str]) -> bytes:
+    """Like ``_build_tex_tarball`` but accepts binary entries too — used
+    for #48's figure-resolution tests."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for name, body in files.items():
+            data = body.encode("utf-8") if isinstance(body, str) else body
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+def _tiny_png_bytes() -> bytes:
+    buffer = io.BytesIO()
+    Image.new("RGB", (8, 8), color="red").save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _tiny_jpg_bytes() -> bytes:
+    buffer = io.BytesIO()
+    Image.new("RGB", (8, 8), color="blue").save(buffer, format="JPEG")
+    return buffer.getvalue()
 
 
 def test_extract_latex_text_resolves_input_and_include_directives():
@@ -555,3 +582,162 @@ def test_manifest_always_carries_preview_key(monkeypatch):
 
     assert "preview" in manifest["available_artifacts"]
     assert manifest["available_artifacts"]["preview"] == PREVIEW_ARTIFACT_PATH
+
+
+# --- LaTeX figure image-bytes resolution (#48) ------------------------------
+
+
+def test_load_latex_archive_returns_text_and_assets():
+    """``_load_latex_archive`` is the new combined extractor used by the
+    LaTeX path: it parses the tarball once and returns both the resolved
+    .tex content AND a binary asset map keyed by member name (#48)."""
+    png = _tiny_png_bytes()
+    tarball = _build_mixed_tarball({
+        "main.tex": (
+            "\\documentclass{article}\n\\begin{document}\n"
+            "\\begin{figure}\\includegraphics{figs/diagram}\\caption{Diagram}\\end{figure}\n"
+            "\\end{document}\n"
+        ),
+        "figs/diagram.png": png,
+    })
+
+    text, assets = _load_latex_archive(tarball)
+
+    assert text is not None
+    assert "\\begin{document}" in text
+    assert "figs/diagram.png" in assets
+    assert assets["figs/diagram.png"] == png
+
+
+def test_extract_latex_figures_passes_through_png_bytes_with_extension_fallback():
+    """`\\includegraphics{figs/diagram}` (no extension) resolves to
+    ``figs/diagram.png`` via the candidate-extension search; the PNG
+    bytes pass through unchanged with content_type=image/png. Closes
+    the literal #48 bug: ``image_bytes=None`` for LaTeX figures."""
+    png = _tiny_png_bytes()
+    latex = (
+        "\\begin{figure}\n\\includegraphics{figs/diagram}\n"
+        "\\caption{A diagram.}\n\\end{figure}\n"
+    )
+
+    figures = _extract_latex_figures(latex, {"figs/diagram.png": png})
+
+    assert len(figures) == 1
+    assert figures[0].image_bytes == png
+    assert figures[0].content_type == "image/png"
+    assert figures[0].file_extension == "png"
+    # source_url retains the author-written reference for traceability.
+    assert figures[0].source_url == "figs/diagram"
+
+
+def test_extract_latex_figures_resolves_jpeg_with_explicit_extension():
+    """Author wrote the extension explicitly — direct lookup wins over
+    extension fallback. JPEG content_type uses ``image/jpeg`` for both
+    .jpg and .jpeg suffixes."""
+    jpg = _tiny_jpg_bytes()
+    latex = "\\begin{figure}\\includegraphics{figs/photo.jpg}\\caption{Photo}\\end{figure}"
+
+    figures = _extract_latex_figures(latex, {"figs/photo.jpg": jpg})
+
+    assert figures[0].image_bytes == jpg
+    assert figures[0].content_type == "image/jpeg"
+    assert figures[0].file_extension == "jpg"
+
+
+def test_extract_latex_figures_rasterizes_pdf_to_png():
+    """PDF-format figures are rasterized to PNG via pypdfium2 at extract
+    time so browsers / VLM pipelines can render them inline. We don't
+    assert the exact bytes (the rasterizer is non-deterministic across
+    versions); we only assert that bytes are present and content_type
+    flipped to image/png."""
+    pdf_bytes = _valid_single_page_pdf()
+    latex = "\\begin{figure}\\includegraphics{figs/arch.pdf}\\caption{Arch}\\end{figure}"
+
+    figures = _extract_latex_figures(latex, {"figs/arch.pdf": pdf_bytes})
+
+    assert figures[0].image_bytes is not None
+    assert figures[0].image_bytes[:8] == b"\x89PNG\r\n\x1a\n"  # PNG magic
+    assert figures[0].content_type == "image/png"
+    assert figures[0].file_extension == "png"
+
+
+def test_extract_latex_figures_keeps_eps_raw_when_ghostscript_unavailable(monkeypatch):
+    """EPS rasterize requires Ghostscript at runtime. When it's not
+    installed (the default in our slim Docker image), we fall back to
+    storing the raw EPS bytes with ``content_type='application/postscript'``
+    rather than dropping the figure. Strictly better than the prior
+    state of ``image_bytes=None``; full inline rendering is a follow-up."""
+    eps_bytes = b"%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 100 100\n%%EOF\n"
+    latex = "\\begin{figure}\\includegraphics{eps/block}\\caption{Block}\\end{figure}"
+
+    # Force the rasterize path to fail so we exercise the raw-bytes
+    # fallback regardless of whether Ghostscript happens to be installed
+    # on the test machine.
+    monkeypatch.setattr("paperbase.extractors._rasterize_eps_to_png", lambda _b: None)
+
+    figures = _extract_latex_figures(latex, {"eps/block.eps": eps_bytes})
+
+    assert figures[0].image_bytes == eps_bytes
+    assert figures[0].content_type == "application/postscript"
+    assert figures[0].file_extension == "eps"
+
+
+def test_extract_latex_figures_resolves_member_with_directory_prefix():
+    """Tarballs from arxiv often nest contents under a top-level
+    directory (``main/figs/foo.eps``) while authors write the
+    ``\\includegraphics{figs/foo}`` reference relative to the .tex
+    entrypoint. Suffix-match lets the resolver find the file anyway."""
+    png = _tiny_png_bytes()
+    latex = "\\begin{figure}\\includegraphics{figs/diagram}\\caption{D}\\end{figure}"
+
+    figures = _extract_latex_figures(latex, {"main/figs/diagram.png": png})
+
+    assert figures[0].image_bytes == png
+    assert figures[0].content_type == "image/png"
+
+
+def test_extract_latex_figures_returns_none_bytes_for_unresolvable_path():
+    """If the asset map doesn't contain a matching file under any
+    candidate extension, the figure record still gets created (the
+    caption is real signal) but image_bytes stays None. Pre-#48
+    behavior preserved as the failure mode."""
+    latex = "\\begin{figure}\\includegraphics{figs/missing}\\caption{M}\\end{figure}"
+
+    figures = _extract_latex_figures(latex, {"figs/something_else.png": _tiny_png_bytes()})
+
+    assert len(figures) == 1
+    assert figures[0].image_bytes is None
+    assert figures[0].content_type is None
+    assert figures[0].source_url == "figs/missing"
+
+
+def test_extract_latex_figures_without_asset_map_preserves_legacy_behavior():
+    """Calling without ``asset_bytes`` (legacy single-arg call) still
+    works — image_bytes is None, no exceptions. Lock the backwards-
+    compat signature so an older caller doesn't break post-#48."""
+    latex = "\\begin{figure}\\includegraphics{figs/diagram}\\caption{X}\\end{figure}"
+
+    figures = _extract_latex_figures(latex)
+
+    assert len(figures) == 1
+    assert figures[0].image_bytes is None
+    assert figures[0].source_url == "figs/diagram"
+
+
+def test_load_latex_archive_skips_oversize_image_assets():
+    """The asset map caps per-file size to avoid pathologically large
+    images blowing up memory. 25MB is the threshold — anything bigger
+    is silently dropped; the figure resolver then falls back to None."""
+    big_png = b"\x89PNG\r\n\x1a\n" + b"\x00" * (26 * 1024 * 1024)
+    tarball = _build_mixed_tarball({
+        "main.tex": (
+            "\\documentclass{article}\n\\begin{document}\n"
+            "\\begin{figure}\\includegraphics{figs/huge.png}\\end{figure}\n"
+            "\\end{document}\n"
+        ),
+        "figs/huge.png": big_png,
+    })
+
+    _, assets = _load_latex_archive(tarball)
+
+    assert "figs/huge.png" not in assets

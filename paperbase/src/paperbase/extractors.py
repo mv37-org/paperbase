@@ -11,6 +11,7 @@ import tarfile
 import tempfile
 from dataclasses import dataclass, field
 from textwrap import shorten
+from typing import NamedTuple
 
 import requests
 from bs4 import BeautifulSoup
@@ -512,21 +513,165 @@ def _extract_latex_tables(latex: str) -> list[TableArtifact]:
     return tables
 
 
-def _extract_latex_figures(latex: str) -> list[FigureArtifact]:
+def _rasterize_pdf_to_png(pdf_bytes: bytes) -> bytes | None:
+    """Render the first page of a single-figure PDF to PNG.
+
+    arxiv LaTeX sources commonly ship figures as PDF (esp. tikz output).
+    Browsers can't render PDF inline, so we rasterize at ingest using
+    pypdfium2 (already in deps for the paper-preview path). Failures
+    return ``None`` so the caller can fall back to storing raw PDF bytes.
+    """
+    try:
+        import pypdfium2 as pdfium
+        from PIL import Image  # noqa: F401  (registers PNG codec)
+    except Exception:
+        return None
+    try:
+        document = pdfium.PdfDocument(pdf_bytes)
+        if len(document) == 0:
+            return None
+        # scale=2.0 doubles the rendered DPI relative to the PDF's
+        # native resolution. arxiv figures shipped as single-page PDFs
+        # are usually authored at print quality (~300 DPI); 2x keeps
+        # text in figure annotations legible after the PNG conversion.
+        # Matches the scale chosen for EPS rasterization below.
+        pil_image = document[0].render(scale=2.0).to_pil()
+        buffer = io.BytesIO()
+        pil_image.save(buffer, format="PNG", optimize=True)
+        return buffer.getvalue()
+    except Exception:
+        return None
+
+
+def _rasterize_eps_to_png(eps_bytes: bytes) -> bytes | None:
+    """Best-effort EPS → PNG via Pillow.
+
+    Pillow's EPS plugin shells out to Ghostscript at runtime; if Ghostscript
+    is not installed (the default in our slim Docker image), the rasterize
+    fails and the caller stores raw EPS bytes instead. Tracking adding
+    Ghostscript to the image is out of scope for this PR — see #48.
+    """
+    try:
+        from PIL import Image
+    except Exception:
+        return None
+    try:
+        with Image.open(io.BytesIO(eps_bytes)) as eps_image:
+            # scale=2 doubles Ghostscript's render DPI vs Pillow's
+            # default. EPS figures are vector-only so doubling has
+            # no quality cost at the source; 2x preserves detail in
+            # axis labels and small annotations after the PNG
+            # conversion. Matches the PDF rasterizer's scale choice.
+            eps_image.load(scale=2)
+            converted = eps_image.convert("RGBA") if eps_image.mode != "RGBA" else eps_image
+            buffer = io.BytesIO()
+            converted.save(buffer, format="PNG", optimize=True)
+            return buffer.getvalue()
+    except Exception:
+        return None
+
+
+class ResolvedLatexImage(NamedTuple):
+    """Output of ``_resolve_latex_image``. Named so the call site doesn't
+    have to unpack a positional 3-tuple — the (bytes, type, ext) shape
+    is non-obvious from the type alone."""
+
+    image_bytes: bytes
+    content_type: str | None
+    file_extension: str
+
+
+def _resolve_latex_image(
+    asset_bytes: dict[str, bytes],
+    source_path: str,
+) -> ResolvedLatexImage | None:
+    """Resolve a ``\\includegraphics{source_path}`` reference to image bytes
+    from the LaTeX tarball.
+
+    Returns a :class:`ResolvedLatexImage` or ``None`` when the path can't
+    be resolved. Tries the bare path first, then each candidate
+    extension; raster-friendly formats (PNG/JPG/GIF) pass through
+    unchanged; PDF figures are rasterized to PNG; EPS attempts
+    rasterize and falls back to raw bytes when Ghostscript is missing.
+    """
+    if not asset_bytes or not source_path:
+        return None
+
+    # Authors sometimes write ``./figs/foo`` or ``figs/foo`` interchangeably;
+    # treat the leading ``./`` as a no-op so both forms hit the same lookup.
+    cleaned = source_path[2:] if source_path.startswith("./") else source_path
+    candidates: list[str] = [cleaned]
+    if "." not in cleaned.rsplit("/", 1)[-1]:
+        candidates.extend(f"{cleaned}{ext}" for ext in _LATEX_IMAGE_EXTENSIONS)
+
+    matched_name: str | None = None
+    matched_bytes: bytes | None = None
+    for candidate in candidates:
+        if candidate in asset_bytes:
+            matched_name = candidate
+            matched_bytes = asset_bytes[candidate]
+            break
+        # Fall back to suffix-match for tarballs whose member names carry a
+        # leading directory the author didn't write (``main/figs/foo.eps``
+        # vs ``\includegraphics{figs/foo.eps}``).
+        for member_name in asset_bytes:
+            if member_name == candidate or member_name.endswith("/" + candidate):
+                matched_name = member_name
+                matched_bytes = asset_bytes[member_name]
+                break
+        if matched_bytes is not None:
+            break
+
+    if matched_bytes is None or matched_name is None:
+        return None
+
+    extension = matched_name.rsplit(".", 1)[-1].lower() if "." in matched_name else ""
+    if extension == "pdf":
+        rasterized = _rasterize_pdf_to_png(matched_bytes)
+        if rasterized is not None:
+            return ResolvedLatexImage(rasterized, "image/png", "png")
+        return ResolvedLatexImage(matched_bytes, "application/pdf", "pdf")
+    if extension == "eps":
+        rasterized = _rasterize_eps_to_png(matched_bytes)
+        if rasterized is not None:
+            return ResolvedLatexImage(rasterized, "image/png", "png")
+        return ResolvedLatexImage(matched_bytes, "application/postscript", "eps")
+    if extension in {"png", "jpg", "jpeg", "gif"}:
+        content_type = "image/jpeg" if extension == "jpg" else f"image/{extension}"
+        return ResolvedLatexImage(matched_bytes, content_type, extension)
+    return ResolvedLatexImage(matched_bytes, "application/octet-stream", extension or "bin")
+
+
+def _extract_latex_figures(
+    latex: str,
+    asset_bytes: dict[str, bytes] | None = None,
+) -> list[FigureArtifact]:
     figures: list[FigureArtifact] = []
+    asset_map = asset_bytes or {}
     for index, match in enumerate(_LATEX_FIGURE_ENV_RE.finditer(latex), start=1):
         body = match.group(2)
         caption_match = _LATEX_CAPTION_RE.search(body)
         caption = _strip_latex_inline(caption_match.group(1)) if caption_match else ""
         graphics_match = _LATEX_INCLUDEGRAPHICS_RE.search(body)
         source_path = graphics_match.group(1) if graphics_match else None
+
+        image_bytes: bytes | None = None
+        content_type: str | None = None
+        file_extension = "bin"
+        if source_path:
+            resolved = _resolve_latex_image(asset_map, source_path)
+            if resolved is not None:
+                image_bytes = resolved.image_bytes
+                content_type = resolved.content_type
+                file_extension = resolved.file_extension
+
         figures.append(
             FigureArtifact(
                 figure_id=f"figure-{index}",
                 caption=caption[:1000],
-                file_extension="bin",
-                content_type=None,
-                image_bytes=None,
+                file_extension=file_extension,
+                content_type=content_type,
+                image_bytes=image_bytes,
                 source_url=source_path,
             )
         )
@@ -584,6 +729,42 @@ def _resolve_latex_inputs(
 
 
 def _extract_latex_text(source_bytes: bytes) -> str | None:
+    """Backwards-compatible single-value extractor — returns just the
+    resolved LaTeX text. Use ``_load_latex_archive`` when the caller
+    also needs the binary file map for figure resolution (#48)."""
+    text, _ = _load_latex_archive(source_bytes)
+    return text
+
+
+# Image extensions we recognize when resolving ``\includegraphics{path}``.
+# Ordered by what we can render cheaply, NOT by arxiv prevalence: when
+# an author ships both ``foo.png`` and ``foo.eps`` (a common dual-output
+# pattern from LaTeX build pipelines) we'd rather pick the PNG that
+# passes through unchanged than the EPS that needs Ghostscript at
+# runtime to rasterize. PDF goes through pypdfium2 (already a dep) so
+# it lands ahead of EPS, which falls back to raw bytes whenever the
+# slim Docker image isn't carrying Ghostscript. ``.pdf_tex`` is rare
+# and intentionally excluded — it's a TeX directive container, not a
+# real image file.
+_LATEX_IMAGE_EXTENSIONS: tuple[str, ...] = (".png", ".jpg", ".jpeg", ".gif", ".pdf", ".eps")
+
+
+def _load_latex_archive(source_bytes: bytes) -> tuple[str | None, dict[str, bytes]]:
+    """Return ``(resolved_latex_text, asset_bytes_by_name)`` for a tarball
+    or plain-text LaTeX source.
+
+    Contract: when ``resolved_latex_text`` is ``None`` (any failure
+    path — tarball corrupt, no .tex files, includepdf-only stub,
+    plain text without LaTeX markers), ``asset_bytes_by_name`` is
+    always ``{}``. A partial asset dict from a failed parse would
+    invite a caller to use it without realizing the .tex extraction
+    didn't succeed; returning ``{}`` makes the contract explicit.
+    On success, ``asset_bytes_by_name`` carries every recognized
+    image member (see ``_LATEX_IMAGE_EXTENSIONS``) under its tarball
+    member name. Plain-text sources have no assets, so the dict is
+    ``{}`` there too.
+    """
+    asset_bytes: dict[str, bytes] = {}
     try:
         if source_bytes[:2] == b"\x1f\x8b" or source_bytes[:4] == b"PK\x03\x04":
             file_obj = io.BytesIO(source_bytes)
@@ -591,14 +772,24 @@ def _extract_latex_text(source_bytes: bytes) -> str | None:
                 with tarfile.open(fileobj=file_obj, mode="r:gz") as archive:
                     tex_by_name: dict[str, str] = {}
                     for member in archive.getmembers():
-                        if not member.name.endswith(".tex"):
+                        if not member.isfile():
                             continue
                         handle = archive.extractfile(member)
                         if handle is None:
                             continue
-                        tex_by_name[member.name] = handle.read().decode("utf-8", errors="replace")
+                        if member.name.endswith(".tex"):
+                            tex_by_name[member.name] = handle.read().decode("utf-8", errors="replace")
+                            continue
+                        # Cap per-asset size to avoid pathologically large
+                        # images filling memory; 25MB covers all real-world
+                        # arxiv figures with headroom.
+                        if member.size and member.size > 25 * 1024 * 1024:
+                            continue
+                        lowered = member.name.lower()
+                        if any(lowered.endswith(ext) for ext in _LATEX_IMAGE_EXTENSIONS):
+                            asset_bytes[member.name] = handle.read()
                     if not tex_by_name:
-                        return None
+                        return None, {}
                     entrypoint_name = next(
                         (name for name, body in tex_by_name.items() if "\\begin{document}" in body),
                         None,
@@ -608,16 +799,16 @@ def _extract_latex_text(source_bytes: bytes) -> str | None:
                     entrypoint = tex_by_name[entrypoint_name]
                     resolved = _resolve_latex_inputs(entrypoint, tex_by_name, entrypoint_name)
                     if "\\includepdf" in resolved and not re.search(r"\\section\b", resolved):
-                        return None
-                    return resolved
+                        return None, {}
+                    return resolved, asset_bytes
             except tarfile.TarError:
-                return None
+                return None, {}
         text = source_bytes.decode("utf-8", errors="replace")
         if "\\begin{document}" in text or "\\section" in text:
-            return text
+            return text, asset_bytes
     except Exception:
-        return None
-    return None
+        return None, {}
+    return None, {}
 
 
 def _latex_to_markdown(latex: str) -> str:
@@ -801,14 +992,14 @@ def index_paper_artifacts(paper: PaperMetadata) -> ExtractionOutput:
 
     source_bytes = fetch_source(paper.arxiv_id)
     if source_bytes:
-        latex = _extract_latex_text(source_bytes)
+        latex, asset_bytes = _load_latex_archive(source_bytes)
         if latex:
             markdown = _latex_to_markdown(latex)
             extraction = ExtractionOutput(
                 source_type="latex",
                 text_markdown=markdown,
                 sections=_extract_sections(markdown),
-                figures=_extract_latex_figures(latex),
+                figures=_extract_latex_figures(latex, asset_bytes),
                 tables=_extract_latex_tables(latex),
                 raw_artifacts=[
                     RawArtifact(path="raw/source.tar.gz", data=source_bytes, content_type="application/gzip"),
