@@ -530,33 +530,92 @@ function sourceCardId(messageId: string, sourceId: string) {
   return `source-card-${messageId}-${sourceId}`;
 }
 
-function consumePendingPrompt(): { prompt: string; paperIds: string[] } {
+type PendingPromptState = {
+  prompt: string;
+  paperIds: string[];
+  mentions: MentionTag[];
+};
+
+function normalizePendingPromptMentions(value: unknown): MentionTag[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const mentions: MentionTag[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") {
+      continue;
+    }
+    const id = typeof entry.id === "string" ? entry.id : "";
+    if (!id || seen.has(id)) {
+      continue;
+    }
+    seen.add(id);
+    mentions.push({
+      id,
+      title: typeof entry.title === "string" ? entry.title : "",
+    });
+  }
+  return mentions;
+}
+
+function mentionedPaperIdsInText(text: string, mentions: MentionTag[]) {
+  const paperIds: string[] = [];
+  const seen = new Set<string>();
+  for (const mention of mentions) {
+    if (!mention.id || seen.has(mention.id)) {
+      continue;
+    }
+    if (mention.title.trim() && !text.includes(`@${mention.title}`)) {
+      continue;
+    }
+    seen.add(mention.id);
+    paperIds.push(mention.id);
+  }
+  return paperIds;
+}
+
+function consumePendingPrompt(): PendingPromptState {
   const raw = sessionStorage.getItem(PENDING_PROMPT_KEY);
   sessionStorage.removeItem(PENDING_PROMPT_KEY);
   if (!raw) {
-    return { prompt: "", paperIds: [] };
+    return { prompt: "", paperIds: [], mentions: [] };
   }
   if (raw.startsWith("{")) {
     try {
       const parsed = JSON.parse(raw);
       const prompt = typeof parsed?.prompt === "string" ? parsed.prompt : "";
-      const paperIds = Array.isArray(parsed?.paperIds)
+      const legacyPaperIds = Array.isArray(parsed?.paperIds)
         ? parsed.paperIds.filter((id: unknown): id is string => typeof id === "string")
         : [];
-      return { prompt, paperIds };
+      const mentions = normalizePendingPromptMentions(parsed?.mentions);
+      const paperIds = [...new Set([...legacyPaperIds, ...mentions.map((mention) => mention.id)])];
+      return {
+        prompt,
+        paperIds,
+        mentions: mentions.length ? mentions : paperIds.map((id) => ({ id, title: "" })),
+      };
     } catch {
-      return { prompt: "", paperIds: [] };
+      return { prompt: "", paperIds: [], mentions: [] };
     }
   }
-  return { prompt: raw, paperIds: [] };
+  return { prompt: raw, paperIds: [], mentions: [] };
 }
 
-function rememberPendingPrompt(prompt: string, paperIds: string[] = []) {
+function rememberPendingPrompt(prompt: string, mentions: MentionTag[] = []) {
   const trimmed = prompt.trim();
   if (!trimmed) {
     return;
   }
-  sessionStorage.setItem(PENDING_PROMPT_KEY, JSON.stringify({ prompt: trimmed, paperIds }));
+  const normalizedMentions = normalizePendingPromptMentions(mentions);
+  sessionStorage.setItem(
+    PENDING_PROMPT_KEY,
+    JSON.stringify({
+      prompt: trimmed,
+      paperIds: normalizedMentions.map((mention) => mention.id),
+      mentions: normalizedMentions,
+    }),
+  );
 }
 
 function restoreTabs() {
@@ -1340,6 +1399,7 @@ export default function App() {
   const [composerInput, setComposerInput] = useState("");
   const [composerTags, setComposerTags] = useState<MentionTag[]>([]);
   const [landingTags, setLandingTags] = useState<MentionTag[]>([]);
+  const [restoredComposerMentions, setRestoredComposerMentions] = useState<MentionTag[]>([]);
   const [composerStatus, setComposerStatus] = useState("");
   const [includeUploads] = useState(true);
   const [includePapers] = useState(true);
@@ -3221,11 +3281,16 @@ export default function App() {
       }
       setOpenTabs(validRestoredTabs);
 
-      const { prompt: pendingPrompt, paperIds: pendingPaperIds } = consumePendingPrompt();
+      const {
+        prompt: pendingPrompt,
+        paperIds: pendingPaperIds,
+        mentions: pendingMentions,
+      } = consumePendingPrompt();
       const trimmedPendingPrompt = pendingPrompt.trim();
       if (trimmedPendingPrompt) {
         if (!requireInferenceAccess(currentSession)) {
           setComposerInput(trimmedPendingPrompt);
+          setRestoredComposerMentions(pendingMentions);
           return;
         }
         const thread = await createNewThread(
@@ -3234,6 +3299,7 @@ export default function App() {
         );
         setLandingPrompt("");
         setLandingTags([]);
+        setRestoredComposerMentions([]);
         await sendMessage(thread.thread_id, trimmedPendingPrompt, currentSession, pendingPaperIds);
         return;
       }
@@ -3384,9 +3450,9 @@ export default function App() {
     if (!prompt) {
       return;
     }
-    const paperIds = landingTags.map((tag) => tag.id);
+    const mentions = landingTags.filter((tag) => tag.id);
     if (!sessionRef.current?.authenticated) {
-      rememberPendingPrompt(prompt, paperIds);
+      rememberPendingPrompt(prompt, mentions);
       openAuthModal("login");
       return;
     }
@@ -3394,6 +3460,7 @@ export default function App() {
       return;
     }
     const thread = await createNewThread();
+    const paperIds = mentions.map((tag) => tag.id);
     setLandingPrompt("");
     setLandingTags([]);
     await sendMessage(thread.thread_id, prompt, undefined, paperIds);
@@ -3459,9 +3526,15 @@ export default function App() {
       return;
     }
     const threadId = activeThreadId ?? (await createNewThread()).thread_id;
-    const paperIds = composerTags.map((tag) => tag.id);
+    const paperIds = [
+      ...new Set([
+        ...composerTags.map((tag) => tag.id),
+        ...mentionedPaperIdsInText(content, restoredComposerMentions),
+      ]),
+    ];
     setComposerInput("");
     setComposerTags([]);
+    setRestoredComposerMentions([]);
     scrollMessageListToBottom();
     await sendMessage(threadId, content, undefined, paperIds);
   }, [
@@ -3470,6 +3543,7 @@ export default function App() {
     composerTags,
     createNewThread,
     requireInferenceAccess,
+    restoredComposerMentions,
     scrollMessageListToBottom,
     sendMessage,
     streamingThreadId,
@@ -3497,6 +3571,7 @@ export default function App() {
     setSyncConflictState(null);
     setLandingPrompt("");
     setComposerInput("");
+    setRestoredComposerMentions([]);
     setComposerStatus("");
     setMobileSidebarOpen(false);
     setAccountMenuOpen(false);
