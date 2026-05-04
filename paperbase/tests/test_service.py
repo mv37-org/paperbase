@@ -528,6 +528,62 @@ def test_index_writes_manifest_and_artifacts(monkeypatch, service: PaperbaseServ
     assert "raw/source.tar.gz" in files
 
 
+def test_get_figure_serves_eps_and_pdf_raw_fallbacks(service: PaperbaseService):
+    """LaTeX-path figures fall back to raw eps/pdf bytes when Ghostscript /
+    pypdfium2 fail to rasterize. The figure-serving probe must recognize
+    those extensions and return their proper MIME so the UI renders
+    something instead of ``image_url=None``."""
+    paper_id = "arxiv:2401.42420"
+    eps_caption = f"papers/{paper_id}/figures/figure-eps/caption.md"
+    pdf_caption = f"papers/{paper_id}/figures/figure-pdf/caption.md"
+    service.object_store.put_text(eps_caption, "EPS figure caption", content_type="text/markdown")
+    service.object_store.put_text(pdf_caption, "PDF figure caption", content_type="text/markdown")
+    service.object_store.put_bytes(
+        f"papers/{paper_id}/figures/figure-eps/image.eps",
+        b"%!PS-Adobe-3.0 EPSF-3.0\n%%fake eps\n",
+        content_type="application/postscript",
+    )
+    service.object_store.put_bytes(
+        f"papers/{paper_id}/figures/figure-pdf/image.pdf",
+        b"%PDF-1.4\nfake\n",
+        content_type="application/pdf",
+    )
+
+    eps_response = service.get_figure(paper_id, "figure-eps")
+    pdf_response = service.get_figure(paper_id, "figure-pdf")
+
+    assert eps_response.image_url is not None
+    assert eps_response.content_type == "application/postscript"
+    assert pdf_response.image_url is not None
+    assert pdf_response.content_type == "application/pdf"
+
+
+def test_get_figure_prefers_rasterized_png_over_raw_pdf(service: PaperbaseService):
+    """When both a browser-renderable raster and a raw vector copy exist
+    (e.g. a re-index produced both representations), the probe must pick
+    the raster so the UI doesn't fall through to a non-renderable MIME."""
+    paper_id = "arxiv:2401.42421"
+    service.object_store.put_text(
+        f"papers/{paper_id}/figures/figure-1/caption.md",
+        "caption",
+        content_type="text/markdown",
+    )
+    service.object_store.put_bytes(
+        f"papers/{paper_id}/figures/figure-1/image.png",
+        b"\x89PNG\r\n\x1a\n",
+        content_type="image/png",
+    )
+    service.object_store.put_bytes(
+        f"papers/{paper_id}/figures/figure-1/image.pdf",
+        b"%PDF-1.4\n",
+        content_type="application/pdf",
+    )
+
+    response = service.get_figure(paper_id, "figure-1")
+
+    assert response.content_type == "image/png"
+
+
 def test_reindex_replaces_stale_artifacts(monkeypatch, service: PaperbaseService):
     paper = _sample_paper("2401.33333", title="Transformer Paper", abstract="Attention and transformers.")
     monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)

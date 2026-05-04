@@ -6261,17 +6261,37 @@ class PaperbaseService:
             raise HTTPException(status_code=404, detail=f"Preview not available for {paper_id}")
         return PaperPreviewResponse(paper_id=paper_id, image_url=image_url, content_type="image/webp")
 
+    # Extension → content-type for the figure-serving probe. Order is
+    # render-cheap-first so when a figure was stored under multiple
+    # representations (rare, but the LaTeX path has produced both pdf
+    # raw bytes and a png rasterization for the same figure under early
+    # ingest paths) the browser-renderable one wins. eps/pdf cover the
+    # raw-bytes fallback the LaTeX rasterizer takes when Ghostscript /
+    # pypdfium2 fail (#48); without their MIME types here, those figures
+    # came back as ``image_url=None``.
+    _FIGURE_EXTENSION_CONTENT_TYPES: tuple[tuple[str, str], ...] = (
+        ("png", "image/png"),
+        ("jpg", "image/jpeg"),
+        ("jpeg", "image/jpeg"),
+        ("svg", "image/svg+xml"),
+        ("gif", "image/gif"),
+        ("webp", "image/webp"),
+        ("pdf", "application/pdf"),
+        ("eps", "application/postscript"),
+        ("bin", "application/octet-stream"),
+    )
+
     def get_figure(self, paper_id: str, figure_id: str) -> FigureResponse:
         caption_path = f"papers/{paper_id}/figures/{figure_id}/caption.md"
         if not self.object_store.exists(caption_path):
             raise HTTPException(status_code=404, detail=f"Figure {figure_id} not found for {paper_id}")
         image_url = None
         content_type = None
-        for extension in ("png", "jpg", "jpeg", "svg", "gif", "webp", "bin"):
+        for extension, mime in self._FIGURE_EXTENSION_CONTENT_TYPES:
             image_path = f"papers/{paper_id}/figures/{figure_id}/image.{extension}"
             if self.object_store.exists(image_path):
                 image_url = self.object_store.presign_get(image_path, expires_in=self.settings.presign_ttl_seconds)
-                content_type = "image/" + ("jpeg" if extension == "jpg" else extension)
+                content_type = mime
                 break
         return FigureResponse(
             paper_id=paper_id,
