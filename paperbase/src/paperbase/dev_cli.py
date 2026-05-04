@@ -834,6 +834,11 @@ def backfill_paper_authors(*, limit: int, batch_size: int) -> int:
     from sqlalchemy import text as _text
 
     with repo._engine.begin() as conn:  # type: ignore[attr-defined]
+        # Scope to ``index_status='indexed'`` so live-search / related-paper
+        # rows that the repo persists as ``index_status='discovered'`` don't
+        # leak into ``paper_authors``. ``list_top_authors`` aggregates
+        # wholesale, so without this filter the planner could be driven by
+        # off-corpus papers we never actually ingested.
         rows = conn.execute(
             _text(
                 """
@@ -841,6 +846,7 @@ def backfill_paper_authors(*, limit: int, batch_size: int) -> int:
                 FROM papers p
                 LEFT JOIN paper_authors pa ON pa.paper_id = p.paper_id
                 WHERE pa.paper_id IS NULL
+                  AND p.index_status = 'indexed'
                 ORDER BY p.citation_count DESC NULLS LAST
                 LIMIT :limit
                 """

@@ -30,6 +30,7 @@ from sqlalchemy import (
     select,
     text,
     true,
+    update,
 )
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError, OperationalError
@@ -1937,18 +1938,33 @@ class SqlAlchemyPaperRepository(PaperRepository):
         *,
         top_author_s2_id: str | None,
     ) -> PaperResponse | None:
+        # First-write-wins implemented as a single atomic UPDATE rather than
+        # read-then-write so concurrent harvest_chunk workers can't both
+        # observe ``top_author_s2_id IS NULL`` and clobber each other —
+        # only one of the racing UPDATEs matches the WHERE predicate, the
+        # other is a no-op. Clearing (top_author_s2_id=None) is always
+        # honored so operators can explicitly reset; that bypasses the
+        # IS NULL guard via a second UPDATE without it.
         with self._session() as session:
+            if top_author_s2_id is None:
+                session.execute(
+                    update(PaperORM)
+                    .where(PaperORM.paper_id == paper_id)
+                    .values(top_author_s2_id=None, updated_at=utcnow())
+                )
+            else:
+                session.execute(
+                    update(PaperORM)
+                    .where(
+                        PaperORM.paper_id == paper_id,
+                        PaperORM.top_author_s2_id.is_(None),
+                    )
+                    .values(top_author_s2_id=top_author_s2_id, updated_at=utcnow())
+                )
+            session.flush()
             row = session.get(PaperORM, paper_id)
             if row is None:
                 return None
-            # First-write-wins: keep an existing stamp when the caller
-            # is trying to set a new one. Clearing (None) is always
-            # honored so operators can explicitly reset.
-            if top_author_s2_id is not None and row.top_author_s2_id is not None:
-                return _paper_from_orm(row)
-            row.top_author_s2_id = top_author_s2_id
-            row.updated_at = utcnow()
-            session.flush()
             return _paper_from_orm(row)
 
     def replace_paper_authors(
