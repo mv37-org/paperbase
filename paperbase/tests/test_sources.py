@@ -170,7 +170,7 @@ def test_get_related_papers_bounds_retry_budget_on_interactive_rate_limit(monkey
 
 
 # --------------------------------------------------------------------------- #
-# Papers With Code crosslink (#46 layer 1)
+# Hugging Face paper-page crosslink (#46 layer 1)
 # --------------------------------------------------------------------------- #
 
 
@@ -178,8 +178,7 @@ class _StubSession:
     """Minimal requests.Session stub that replays a per-URL response table.
 
     Each entry is ``url_prefix -> _FakeResponse``. Matches on startswith
-    so the two-step PWC lookup (paper lookup then repos list) can use
-    different fixtures for each stage."""
+    so a single test can stub multiple Hugging Face / GitHub routes."""
 
     def __init__(self, routes: dict[str, _FakeResponse]) -> None:
         self.routes = routes
@@ -193,120 +192,93 @@ class _StubSession:
             sep = "&" if "?" in full else "?"
             full = f"{full}{sep}{urlencode(params)}"
         self.calls.append(full)
-        # Sort by prefix length descending so the repos route
-        # (``.../papers/{id}/repositories/``) wins over the paper-lookup
-        # route (``.../papers/``) for the second call.
         for prefix in sorted(self.routes.keys(), key=len, reverse=True):
             if url.startswith(prefix):
                 return self.routes[prefix]
         return _FakeResponse(status_code=404)
 
 
-def test_fetch_papers_with_code_repo_picks_official_entry():
-    """PWC returns multiple repos per paper; only the one flagged
-    ``is_official=True`` should be surfaced. A community reimplementation
-    that happens to rank first must lose to the official entry."""
-    paper_route = _FakeResponse(
-        json_data={"results": [{"id": "paper-xyz"}]},
-    )
-    repos_route = _FakeResponse(
-        json_data={
-            "results": [
-                {"url": "https://github.com/community/reimpl", "is_official": False},
-                {"url": "https://github.com/author/official", "is_official": True},
-                {"url": "https://github.com/another/fork", "is_official": False},
-            ]
-        },
-    )
+def test_fetch_hf_paper_repo_returns_exact_match_github_repo():
+    """The Hugging Face paper search result is only trusted when the
+    exact ``paper.id`` matches the queried arXiv id. When it does and a
+    ``githubRepo`` is present, canonicalize it to repo root."""
     session = _StubSession(
         {
-            "https://paperswithcode.com/api/v1/papers/": paper_route,
-            "https://paperswithcode.com/api/v1/papers/paper-xyz/repositories/": repos_route,
+            "https://huggingface.co/api/papers/search": _FakeResponse(
+                json_data=[
+                    {
+                        "paper": {
+                            "id": "2401.12345",
+                            "githubRepo": "https://github.com/author/official/tree/main",
+                        }
+                    }
+                ]
+            )
         }
     )
-    url = sources.fetch_papers_with_code_repo("2401.12345", session=session)
+    url = sources.fetch_hf_paper_repo("2401.12345", session=session)
     assert url == "https://github.com/author/official"
+    assert session.calls == ["https://huggingface.co/api/papers/search?q=2401.12345"]
 
 
-def test_fetch_papers_with_code_repo_returns_none_when_no_official():
-    """When no repo carries ``is_official=True``, decline rather than
-    fall back to a community reimpl. That decision belongs to the
-    admin override layer, not the primary signal."""
-    paper_route = _FakeResponse(json_data={"results": [{"id": "paper-xyz"}]})
-    repos_route = _FakeResponse(
-        json_data={
-            "results": [
-                {"url": "https://github.com/a/impl", "is_official": False},
-                {"url": "https://github.com/b/impl", "is_official": False},
-            ]
-        },
-    )
+def test_fetch_hf_paper_repo_skips_fuzzy_match_without_exact_id():
+    """Search can return near-matches for short queries. Do not trust a
+    repo link unless the search result's ``paper.id`` exactly equals the
+    requested arXiv id."""
     session = _StubSession(
         {
-            "https://paperswithcode.com/api/v1/papers/": paper_route,
-            "https://paperswithcode.com/api/v1/papers/paper-xyz/repositories/": repos_route,
+            "https://huggingface.co/api/papers/search": _FakeResponse(
+                json_data=[
+                    {
+                        "paper": {
+                            "id": "2401.12346",
+                            "githubRepo": "https://github.com/wrong/repo",
+                        }
+                    }
+                ]
+            )
         }
     )
-    assert sources.fetch_papers_with_code_repo("2401.12345", session=session) is None
+    assert sources.fetch_hf_paper_repo("2401.12345", session=session) is None
 
 
-def test_fetch_papers_with_code_repo_handles_404_and_empty_results():
-    """PWC 404s (paper not in their database) and empty results sets both
-    degrade to None so index-time callers can proceed with the ranker
-    fallback."""
-    # 404
-    session = _StubSession({"https://paperswithcode.com/api/v1/papers/?": _FakeResponse(status_code=404)})
-    assert sources.fetch_papers_with_code_repo("nonexistent", session=session) is None
-    # Empty results
+def test_fetch_hf_paper_repo_returns_none_when_exact_match_has_no_repo():
+    """Hugging Face paper search may know about the paper but not have a
+    linked repo yet. In that case, decline and let the ranker/admin
+    layers decide."""
     session = _StubSession(
-        {"https://paperswithcode.com/api/v1/papers/?": _FakeResponse(json_data={"results": []})}
+        {
+            "https://huggingface.co/api/papers/search": _FakeResponse(
+                json_data=[{"paper": {"id": "2401.12345", "githubRepo": None}}]
+            )
+        }
     )
-    assert sources.fetch_papers_with_code_repo("unknown", session=session) is None
+    assert sources.fetch_hf_paper_repo("2401.12345", session=session) is None
 
 
-def test_fetch_papers_with_code_repo_warns_when_api_redirects_to_html(caplog):
-    """The PWC REST API was deprecated and ``/api/v1/papers/?arxiv_id=...``
-    now 302-redirects to ``huggingface.co/papers/trending``. ``requests``
-    follows the redirect by default, so the helper used to silently
-    barf on ``.json()`` and return None for every paper. Detect the
-    HTML response explicitly so the operator notices instead of layer 1
-    silently no-oping in production (PR #45 review).
-    """
-    import logging
+def test_fetch_hf_paper_repo_handles_non_200_and_non_list_payloads():
+    """Non-200 responses and unexpected payload shapes both degrade to
+    None so index-time callers can proceed with the ranker fallback."""
+    session = _StubSession({"https://huggingface.co/api/papers/search": _FakeResponse(status_code=404)})
+    assert sources.fetch_hf_paper_repo("nonexistent", session=session) is None
 
-    # Re-arm the once-only warning sentinel so this test sees the log
-    # regardless of which other test ran first.
-    sources._PWC_DEAD_API_WARNED = False
-    html_response = _FakeResponse(
-        status_code=200,
-        text="<!DOCTYPE html><html>trending papers</html>",
-        headers={"content-type": "text/html; charset=utf-8"},
-    )
     session = _StubSession(
-        {"https://paperswithcode.com/api/v1/papers/": html_response}
+        {"https://huggingface.co/api/papers/search": _FakeResponse(json_data={"paper": {"id": "x"}})}
     )
-    with caplog.at_level(logging.WARNING, logger="paperbase.sources"):
-        result = sources.fetch_papers_with_code_repo("2401.12345", session=session)
-    assert result is None
-    assert any(
-        "Papers With Code API returned non-JSON" in record.getMessage()
-        for record in caplog.records
-    ), "expected pwc.api_dead warning but log was: " + repr(
-        [r.getMessage() for r in caplog.records]
-    )
+    assert sources.fetch_hf_paper_repo("unknown", session=session) is None
 
 
-def test_fetch_papers_with_code_repo_degrades_gracefully_on_network_error():
+def test_fetch_hf_paper_repo_degrades_gracefully_on_network_error():
     """Network failures (timeouts, DNS issues, connection refused) must
     not propagate — the whole point of having a ranker fallback is that
-    index-time indexing can't be blocked on PWC uptime."""
+    index-time indexing can't be blocked on Hugging Face uptime."""
     import requests
 
     class FailingSession:
         def get(self, *args, **kwargs):
             raise requests.ConnectionError("simulated network failure")
 
-    assert sources.fetch_papers_with_code_repo("2401.12345", session=FailingSession()) is None
+    assert sources.fetch_hf_paper_repo("2401.12345", session=FailingSession()) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -488,7 +460,7 @@ def test_verify_repo_owns_paper_short_title_does_not_fire():
 
 
 def test_verify_repo_owns_paper_degrades_gracefully_on_network_error():
-    """Same robustness contract as the PWC adapter — index-time
+    """Same robustness contract as the HF paper-page adapter — index-time
     indexing must not be blocked on GitHub uptime. Network
     exceptions return False so the caller can fall through."""
     import requests

@@ -1,15 +1,16 @@
 """Benchmark: code_url quality, old (PR #45 first-match-wins) vs new (#46
-3-layer admin > PWC > ranker), against the 10-paper landmark fixture from
-issue #46.
+3-layer admin > Hugging Face paper page > ranker), against the 10-paper
+landmark fixture from issue #46.
 
 Reads paper text from the local ``.paperbase-data/papers/arxiv:{id}/`` tree
-so the benchmark is fully offline EXCEPT for an optional PWC layer-1 probe
-(``--with-pwc``).
+so the benchmark is fully offline EXCEPT for an optional Hugging Face
+paper-page layer-1 probe (``--with-hf``; ``--with-pwc`` kept as a
+backward-compatible alias).
 
 Run from repo root::
 
     .venv/bin/python benchmarks/code_url_benchmark.py
-    .venv/bin/python benchmarks/code_url_benchmark.py --with-pwc
+    .venv/bin/python benchmarks/code_url_benchmark.py --with-hf
 """
 
 from __future__ import annotations
@@ -302,7 +303,7 @@ class Verdict:
     truth: str | None
     legacy: str | None
     new_ranker: str | None
-    new_pwc: str | None  # populated only when --with-pwc
+    new_crosslink: str | None  # populated only when --with-hf/--with-pwc
     new_verified: str | None = None  # populated only when --with-verifier
     new_combined: str | None = None  # populated only when --with-combined
 
@@ -323,8 +324,8 @@ class Verdict:
     def new_ranker_status(self) -> str:
         return self._classify(self.new_ranker, self.truth)
 
-    def new_pwc_status(self) -> str:
-        return self._classify(self.new_pwc, self.truth)
+    def new_crosslink_status(self) -> str:
+        return self._classify(self.new_crosslink, self.truth)
 
     def new_verified_status(self) -> str:
         return self._classify(self.new_verified, self.truth)
@@ -371,10 +372,10 @@ def _print_summary(label: str, scores: dict[str, int]) -> None:
     print(f"  None (where truth was populated):   {scores['none_when_truth_populated']}/{total}")
 
 
-def _print_table(rows: list[Verdict], with_pwc: bool, with_combined: bool = False) -> None:
+def _print_table(rows: list[Verdict], with_hf: bool, with_combined: bool = False) -> None:
     header = f"{'arxiv_id':<12}  {'legacy':<46}  {'new(ranker)':<46}"
-    if with_pwc:
-        header += f"  {'new(+pwc)':<46}"
+    if with_hf:
+        header += f"  {'new(+hf)':<46}"
     if with_combined:
         header += f"  {'new(combined)':<46}"
     header += f"  {'truth':<40}"
@@ -385,17 +386,17 @@ def _print_table(rows: list[Verdict], with_pwc: bool, with_combined: bool = Fals
         ranker = (row.new_ranker or "—")[:44]
         truth = (row.truth or "(None)")[:38]
         line = f"{row.arxiv_id:<12}  {legacy:<46}  {ranker:<46}"
-        if with_pwc:
-            pwc = (row.new_pwc or "—")[:44]
-            line += f"  {pwc:<46}"
+        if with_hf:
+            crosslink = (row.new_crosslink or "—")[:44]
+            line += f"  {crosslink:<46}"
         if with_combined:
             combined = (row.new_combined or "—")[:44]
             line += f"  {combined:<46}"
         line += f"  {truth:<40}"
         print(line)
         statuses = f"  └─ legacy: {row.legacy_status()}; ranker: {row.new_ranker_status()}"
-        if with_pwc:
-            statuses += f"; +pwc: {row.new_pwc_status()}"
+        if with_hf:
+            statuses += f"; +hf: {row.new_crosslink_status()}"
         if with_combined:
             statuses += f"; combined: {row.new_combined_status()}"
         print(statuses)
@@ -404,9 +405,11 @@ def _print_table(rows: list[Verdict], with_pwc: bool, with_combined: bool = Fals
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--with-hf",
         "--with-pwc",
+        dest="with_hf",
         action="store_true",
-        help="Probe Papers With Code for layer-1 results (real network call).",
+        help="Probe Hugging Face paper-page githubRepo crosslinks for layer-1 results (real network call).",
     )
     parser.add_argument(
         "--fetch-missing",
@@ -440,7 +443,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     rows: list[Verdict] = []
-    pwc_lookup = None
+    hf_lookup = None
     verifier = None
     # Token resolution order: explicit env var first (so a CI run can
     # override without touching .env), then ``Settings.github_token``
@@ -497,10 +500,10 @@ def main(argv: list[str] | None = None) -> int:
 
         sources._fetch_readme = cached_fetch_readme
 
-    if args.with_pwc:
+    if args.with_hf:
         from paperbase import sources
 
-        pwc_lookup = sources.fetch_papers_with_code_repo
+        hf_lookup = sources.fetch_hf_paper_repo
     if args.with_verifier:
         from paperbase import sources
 
@@ -520,16 +523,16 @@ def main(argv: list[str] | None = None) -> int:
         new_ranker = rank_github_candidates(
             candidates, abstract=abstract, body=body, authors=authors
         )
-        new_pwc: str | None = None
-        if pwc_lookup is not None:
+        new_crosslink: str | None = None
+        if hf_lookup is not None:
             try:
-                new_pwc = pwc_lookup(arxiv_id)
+                new_crosslink = hf_lookup(arxiv_id)
             except Exception as exc:  # pragma: no cover — network flake
-                new_pwc = f"<error: {type(exc).__name__}>"
-            if new_pwc is None and new_ranker is not None:
-                # Fall back to ranker when PWC has no official entry — the
-                # production decision flow does the same.
-                new_pwc = new_ranker.url
+                new_crosslink = f"<error: {type(exc).__name__}>"
+            if new_crosslink is None and new_ranker is not None:
+                # Fall back to ranker when the paper page has no linked repo —
+                # the production decision flow does the same.
+                new_crosslink = new_ranker.url
 
         # Verifier post-filter: take the ranker's pick and confirm via
         # GitHub README that the repo actually references the paper.
@@ -601,7 +604,7 @@ def main(argv: list[str] | None = None) -> int:
                 truth=truth,
                 legacy=legacy,
                 new_ranker=new_ranker.url if new_ranker else None,
-                new_pwc=new_pwc,
+                new_crosslink=new_crosslink,
                 new_verified=new_verified,
                 new_combined=new_combined,
             )
@@ -611,15 +614,15 @@ def main(argv: list[str] | None = None) -> int:
         print("No papers with local data — run `paperbase-dev index` first.")
         return 1
 
-    _print_table(rows, with_pwc=args.with_pwc, with_combined=args.with_combined)
+    _print_table(rows, with_hf=args.with_hf, with_combined=args.with_combined)
 
     legacy_scores = _score(rows, lambda r: r.legacy)
     ranker_scores = _score(rows, lambda r: r.new_ranker)
     _print_summary("Legacy (PR #45 first-match-wins)", legacy_scores)
-    _print_summary("New ranker only (no PWC)", ranker_scores)
-    if args.with_pwc:
-        pwc_scores = _score(rows, lambda r: r.new_pwc)
-        _print_summary("New: PWC + ranker fallback", pwc_scores)
+    _print_summary("New ranker only (no HF paper-page crosslink)", ranker_scores)
+    if args.with_hf:
+        crosslink_scores = _score(rows, lambda r: r.new_crosslink)
+        _print_summary("New: HF paper page + ranker fallback", crosslink_scores)
     if args.with_verifier:
         verified_scores = _score(rows, lambda r: r.new_verified)
         _print_summary("New: ranker + GitHub README verifier", verified_scores)

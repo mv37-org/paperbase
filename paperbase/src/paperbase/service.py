@@ -3420,12 +3420,12 @@ class PaperbaseService:
             )
         return result
 
-    def backfill_code_urls_from_pwc(
+    def backfill_code_urls_from_hf_papers(
         self, *, limit: int = 100_000, page_size: int = 200, dry_run: bool = False
     ) -> dict[str, Any]:
-        """Sweep indexed papers, ask Papers With Code for the official repo,
-        and overwrite ``code_url`` where the source is not ``admin`` (#46
-        cleanup story).
+        """Sweep indexed papers, ask Hugging Face paper search for the
+        paper-page ``githubRepo`` field, and overwrite ``code_url`` where
+        the source is not ``admin`` (#46 cleanup story).
 
         Returns a counts dict so callers (CLI + tests) can verify how
         many rows were inspected vs changed. ``dry_run=True`` logs the
@@ -3433,7 +3433,7 @@ class PaperbaseService:
         run against 10k+ papers.
         """
         total_scanned = 0
-        total_pwc_hits = 0
+        total_crosslink_hits = 0
         total_updated = 0
         total_skipped_admin = 0
         total_unchanged = 0
@@ -3454,12 +3454,12 @@ class PaperbaseService:
                     # newly-created admin pin.
                     total_skipped_admin += 1
                     continue
-                pwc_url = sources.fetch_papers_with_code_repo(paper.arxiv_id)
-                if not pwc_url:
+                crosslink_url = sources.fetch_hf_paper_repo(paper.arxiv_id)
+                if not crosslink_url:
                     total_unchanged += 1
                     continue
-                total_pwc_hits += 1
-                if pwc_url == paper.code_url and paper.code_url_source == "pwc":
+                total_crosslink_hits += 1
+                if crosslink_url == paper.code_url and paper.code_url_source in {"hf_papers", "pwc"}:
                     total_unchanged += 1
                     continue
                 logger.info(
@@ -3470,14 +3470,14 @@ class PaperbaseService:
                         "arxiv_id": paper.arxiv_id,
                         "old_code_url": paper.code_url,
                         "old_source": paper.code_url_source,
-                        "new_code_url": pwc_url,
-                        "new_source": "pwc",
+                        "new_code_url": crosslink_url,
+                        "new_source": "hf_papers",
                         "dry_run": dry_run,
                     },
                 )
                 if not dry_run:
                     self.repository.update_code_url(
-                        paper.paper_id, code_url=pwc_url, code_url_source="pwc"
+                        paper.paper_id, code_url=crosslink_url, code_url_source="hf_papers"
                     )
                     # update_code_url wipes prior code-ingest state on
                     # any URL transition (#45 review). Queue a fresh
@@ -3492,7 +3492,7 @@ class PaperbaseService:
                 break
         return {
             "scanned": total_scanned,
-            "pwc_hits": total_pwc_hits,
+            "crosslink_hits": total_crosslink_hits,
             "updated": total_updated,
             "skipped_admin": total_skipped_admin,
             "unchanged": total_unchanged,
@@ -4992,7 +4992,7 @@ class PaperbaseService:
         # decision from #46. Priority order:
         #   1. admin (already on ``metadata`` from a ``set_admin_code_url``
         #      call or persisted row) — sticky, never overwritten here.
-        #   2. Papers With Code ``is_official`` crosslink, when
+        #   2. Hugging Face paper-page ``githubRepo`` crosslink, when
         #      ``fetch_code_crosslinks_at_index`` is enabled.
         #   3. In-text ranker over all extracted GitHub candidates.
         # Rejected candidates are always stored in ``code_url_candidates``
@@ -5008,12 +5008,12 @@ class PaperbaseService:
             metadata.code_url = existing.code_url
             metadata.code_url_source = "admin"
         else:
-            pwc_url: str | None = None
+            crosslink_url: str | None = None
             if self.settings.fetch_code_crosslinks_at_index:
-                pwc_url = sources.fetch_papers_with_code_repo(metadata.arxiv_id)
-            if pwc_url:
-                metadata.code_url = pwc_url
-                metadata.code_url_source = "pwc"
+                crosslink_url = sources.fetch_hf_paper_repo(metadata.arxiv_id)
+            if crosslink_url:
+                metadata.code_url = crosslink_url
+                metadata.code_url_source = "hf_papers"
             else:
                 winner = rank_github_candidates(
                     candidates,
@@ -5031,9 +5031,9 @@ class PaperbaseService:
                     metadata.code_url = None
                     metadata.code_url_source = None
 
-                # GitHub README verifier (#46 follow-up). PWC's REST API is
-                # gone, so the only remaining external precision signal is
-                # to fetch the candidate repo's README and confirm it
+                # GitHub README verifier (#46 follow-up). This remains an
+                # optional precision filter on top of the in-text ranker:
+                # fetch the candidate repo's README and confirm it
                 # references the paper. Off by default — see config docs
                 # for the precision/recall tradeoff measured on the
                 # 30-paper benchmark.

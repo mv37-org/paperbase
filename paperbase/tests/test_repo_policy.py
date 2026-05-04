@@ -151,7 +151,7 @@ def test_job_orm_carries_priority_for_backfill_starvation_guard():
 
 def test_paper_schema_carries_code_url_provenance_fields():
     """Regression test for #46: the 3-layer code_url decision requires
-    ``code_url_source`` (``extracted``/``pwc``/``admin``) and
+    ``code_url_source`` (``extracted``/``hf_papers``/``admin``) and
     ``code_url_candidates`` (the full ranker input) on the papers table
     so admin pins survive re-index and a later operator can pick an
     alternate repo from the rejected candidates."""
@@ -165,3 +165,13 @@ def test_paper_schema_carries_code_url_provenance_fields():
     paper = PaperMetadata(arxiv_id="2401.99999")
     assert paper.code_url_source is None
     assert paper.code_url_candidates is None
+
+
+def test_code_crosslink_setting_defaults_on(monkeypatch):
+    """The layer-1 Hugging Face paper-page crosslink is intended to run
+    by default on index-time paths; operators can still disable it via
+    env when they want a pure text-only run."""
+    from paperbase.config import Settings
+
+    monkeypatch.delenv("PAPERBASE_FETCH_CODE_CROSSLINKS_AT_INDEX", raising=False)
+    assert Settings(_env_file=None).fetch_code_crosslinks_at_index is True

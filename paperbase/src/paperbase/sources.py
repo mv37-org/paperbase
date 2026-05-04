@@ -633,154 +633,80 @@ def get_related_papers(arxiv_id: str, semantic_scholar_id: str | None, *, limit:
 
 
 # --------------------------------------------------------------------------- #
-# Papers With Code crosslink (#46 layer 1)
+# Hugging Face paper-page crosslink (#46 layer 1)
 # --------------------------------------------------------------------------- #
 
 
-PWC_API = "https://paperswithcode.com/api/v1/papers"
+HF_PAPERS_SEARCH_API = "https://huggingface.co/api/papers/search"
 
 
-_PWC_DEAD_API_WARNED = False
-
-
-def _warn_pwc_api_dead_once(arxiv_id: str, content_type: str, final_url: str) -> None:
-    """Log a single warning the first time the PWC endpoint hands back
-    HTML / a redirect instead of JSON. The PWC REST API was deprecated
-    after #46 was filed; without this signal the helper silently no-ops
-    on every paper, which the original review caught."""
-    global _PWC_DEAD_API_WARNED
-    if _PWC_DEAD_API_WARNED:
-        return
-    _PWC_DEAD_API_WARNED = True
-    logger.warning(
-        "Papers With Code API returned non-JSON; the layer 1 crosslink "
-        "is no-oping. The PWC REST API appears to be deprecated — set "
-        "PAPERBASE_FETCH_CODE_CROSSLINKS_AT_INDEX=0 or remove the "
-        "callers if this stays broken upstream.",
-        extra={
-            "event": "pwc.api_dead",
-            "arxiv_id": arxiv_id,
-            "content_type": content_type,
-            "final_url": final_url,
-        },
-    )
-
-
-def fetch_papers_with_code_repo(
+def fetch_hf_paper_repo(
     arxiv_id: str,
     *,
     session: requests.Session | None = None,
     timeout: float = 10.0,
 ) -> str | None:
-    """Return the canonical GitHub URL that Papers With Code considers the
-    paper's official implementation, or ``None`` (#46 layer 1).
+    """Return the canonical GitHub URL surfaced on Hugging Face's paper
+    page for ``arxiv_id``, or ``None`` (#46 layer 1).
 
-    Prefers the entry whose ``is_official`` flag is true; if no official
-    entry exists, returns ``None`` rather than falling back to a
-    community reimplementation — that decision belongs to the admin
-    override layer, not the primary signal. Network failures / rate
-    limits / missing papers degrade to ``None`` so index-time callers
-    can proceed with the ranker fallback.
-
-    .. note::
-
-       The PWC REST API was deprecated upstream after #46 landed and
-       currently 302-redirects ``/api/v1/papers/?arxiv_id=...`` requests
-       to ``huggingface.co/papers/trending``. When that happens, this
-       helper logs a one-time warning (``pwc.api_dead``) and returns
-       ``None`` so the operator notices instead of every paper silently
-       no-oping at layer 1.
-
-    The endpoint is
-    ``GET {PWC_API}/?arxiv_id=<id>`` which returns a paginated list;
-    the first result is followed via ``{PWC_API}/{id}/repositories/``
-    to enumerate repos with the ``is_official`` flag.
+    Uses the live ``GET /api/papers/search?q=<arxiv_id>`` endpoint, then
+    requires an exact ``paper.id == arxiv_id`` match before trusting the
+    page's ``githubRepo`` field. This avoids fuzzy-search false positives
+    (e.g. ``LoRA``-adjacent papers matching the title query first). When
+    Hugging Face has no repo linked for the exact paper, callers degrade to
+    the in-text ranker / admin override as before.
     """
     if not arxiv_id:
         return None
     client = session or SESSION
     try:
-        paper_response = client.get(
-            f"{PWC_API}/", params={"arxiv_id": arxiv_id}, timeout=timeout
+        response = client.get(
+            HF_PAPERS_SEARCH_API, params={"q": arxiv_id}, timeout=timeout
         )
     except requests.RequestException as exc:
         logger.warning(
-            "Papers With Code lookup failed",
-            extra={"event": "pwc.lookup_failed", "arxiv_id": arxiv_id, "error": str(exc)},
+            "Hugging Face paper search failed",
+            extra={"event": "hf_papers.lookup_failed", "arxiv_id": arxiv_id, "error": str(exc)},
         )
         return None
-    if paper_response.status_code == 404:
-        return None
-    if paper_response.status_code != 200:
+    if response.status_code != 200:
         logger.warning(
-            "Papers With Code non-200",
+            "Hugging Face paper search returned non-200",
             extra={
-                "event": "pwc.non_200",
+                "event": "hf_papers.non_200",
                 "arxiv_id": arxiv_id,
-                "status": paper_response.status_code,
+                "status": response.status_code,
             },
         )
         return None
-    content_type = (paper_response.headers.get("content-type") or "").lower()
-    if "html" in content_type:
-        # PWC API is currently dead: ``/api/v1/papers/`` returns a 302
-        # to huggingface.co/papers/trending. ``requests`` follows the
-        # redirect by default, so we land on a 200 HTML page that
-        # ``.json()`` would silently barf on. Detect the mismatch
-        # explicitly and surface it once.
-        _warn_pwc_api_dead_once(
-            arxiv_id,
-            content_type,
-            getattr(paper_response, "url", "") or f"{PWC_API}/",
-        )
-        return None
     try:
-        paper_body = paper_response.json()
-    except ValueError:
-        _warn_pwc_api_dead_once(
-            arxiv_id,
-            content_type,
-            getattr(paper_response, "url", "") or f"{PWC_API}/",
-        )
-        return None
-    results = paper_body.get("results") or []
-    if not results:
-        return None
-    paper_id = results[0].get("id")
-    if not paper_id:
-        return None
-    try:
-        repos_response = client.get(
-            f"{PWC_API}/{paper_id}/repositories/", timeout=timeout
-        )
-    except requests.RequestException as exc:
-        logger.warning(
-            "Papers With Code repo fetch failed",
-            extra={
-                "event": "pwc.repos_failed",
-                "arxiv_id": arxiv_id,
-                "paper_id": paper_id,
-                "error": str(exc),
-            },
-        )
-        return None
-    if repos_response.status_code != 200:
-        return None
-    try:
-        repos_body = repos_response.json()
+        body = response.json()
     except ValueError:
         return None
-    repo_results = repos_body.get("results") or []
-    for repo in repo_results:
-        if repo.get("is_official") and repo.get("url"):
-            return str(repo["url"])
-    # No official entry: decline rather than guess — the ranker / admin
-    # override is responsible for non-official cases.
+    if not isinstance(body, list):
+        return None
+    from . import code_ingest
+
+    for item in body:
+        if not isinstance(item, dict):
+            continue
+        paper = item.get("paper", item)
+        if not isinstance(paper, dict):
+            continue
+        if str(paper.get("id") or "").strip() != arxiv_id:
+            continue
+        repo = paper.get("githubRepo")
+        if not isinstance(repo, str) or not repo.strip():
+            return None
+        ref = code_ingest.parse_github_url(repo)
+        if ref is None:
+            return None
+        return f"https://github.com/{ref.owner}/{ref.repo}"
     return None
 
 
 # --------------------------------------------------------------------------- #
-# GitHub README verifier (#46 follow-up — alternative to PWC)
+# GitHub README verifier (#46 follow-up — alternative to HF paper-page crosslink)
 # --------------------------------------------------------------------------- #
 
 

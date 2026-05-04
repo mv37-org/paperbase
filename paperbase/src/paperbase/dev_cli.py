@@ -602,9 +602,9 @@ def jobs_retry(*, job_id: str) -> int:
 
 
 def backfill_code_urls(*, limit: int, page_size: int, dry_run: bool) -> int:
-    """One-shot sweep: re-run Papers With Code lookup over indexed papers
-    and overwrite ``papers.code_url`` where the source is not ``admin``
-    (#46).
+    """One-shot sweep: re-run the Hugging Face paper-page code crosslink
+    over indexed papers and overwrite ``papers.code_url`` where the
+    source is not ``admin`` (#46).
 
     ``--dry-run`` logs the would-be diffs without writing — use that on
     first run so an admin can eyeball changes before a live backfill
@@ -613,11 +613,11 @@ def backfill_code_urls(*, limit: int, page_size: int, dry_run: bool) -> int:
     from .service import get_service
 
     service = get_service()
-    result = service.backfill_code_urls_from_pwc(
+    result = service.backfill_code_urls_from_hf_papers(
         limit=limit, page_size=page_size, dry_run=dry_run
     )
     print(f"Scanned:        {result['scanned']}")
-    print(f"PWC hits:       {result['pwc_hits']}")
+    print(f"Crosslink hits: {result['crosslink_hits']}")
     print(f"Updated:        {result['updated']}")
     print(f"Skipped admin:  {result['skipped_admin']}")
     print(f"Unchanged:      {result['unchanged']}")
@@ -851,7 +851,7 @@ def _build_parser() -> argparse.ArgumentParser:
     backfill_code_parser = subparsers.add_parser(
         "backfill-code-urls",
         help=(
-            "Re-run Papers With Code crosslink across indexed papers and "
+            "Re-run the Hugging Face paper-page code crosslink across indexed papers and "
             "overwrite code_url where source is not 'admin' (#46). Supports "
             "--dry-run for a no-write preview."
         ),

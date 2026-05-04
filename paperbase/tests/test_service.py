@@ -4435,7 +4435,7 @@ def test_list_and_read_return_none_for_missing_paper(service: PaperbaseService) 
 
 
 # --------------------------------------------------------------------------- #
-# code_url 3-layer decision (#46): admin > PWC > ranker
+# code_url 3-layer decision (#46): admin > HF paper page > ranker
 # --------------------------------------------------------------------------- #
 
 
@@ -4629,12 +4629,12 @@ def test_admin_pin_survives_reindex_in_index_arxiv_paper(
     assert refreshed.code_url_source == "admin"
 
 
-def test_index_arxiv_paper_prefers_pwc_over_ranker(
+def test_index_arxiv_paper_prefers_hf_papers_over_ranker(
     service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """When the PWC crosslink is enabled and returns an official repo,
-    the ranker's choice is overridden — PWC's human-curated
-    ``is_official`` flag is the authoritative signal (#46 layer 1)."""
+    """When the Hugging Face paper-page crosslink is enabled and returns
+    a repo, the ranker's choice is overridden — the curated
+    ``githubRepo`` field is the authoritative layer-1 signal (#46)."""
     _seed_code_url_paper(service)
 
     from paperbase import sources
@@ -4658,7 +4658,7 @@ def test_index_arxiv_paper_prefers_pwc_over_ranker(
     )
     monkeypatch.setattr(sources, "enrich_with_semantic_scholar", lambda *a, **k: None)
     monkeypatch.setattr(
-        sources, "fetch_papers_with_code_repo", lambda _aid: "https://github.com/pwc/official"
+        sources, "fetch_hf_paper_repo", lambda _aid: "https://github.com/hf/official"
     )
     monkeypatch.setattr(
         "paperbase.service.index_paper_artifacts",
@@ -4669,16 +4669,17 @@ def test_index_arxiv_paper_prefers_pwc_over_ranker(
     )
 
     refreshed = service.index_arxiv_paper("2401.99999", force=True)
-    assert refreshed.code_url == "https://github.com/pwc/official"
-    assert refreshed.code_url_source == "pwc"
+    assert refreshed.code_url == "https://github.com/hf/official"
+    assert refreshed.code_url_source == "hf_papers"
     assert refreshed.code_url_candidates is not None
     assert any("text/ranker" in c for c in refreshed.code_url_candidates)
 
 
-def test_index_arxiv_paper_falls_back_to_ranker_when_pwc_empty(
+def test_index_arxiv_paper_falls_back_to_ranker_when_hf_page_empty(
     service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """With PWC enabled but returning no official match, the ranker
+    """With the Hugging Face paper-page crosslink enabled but returning
+    no repo, the ranker
     picks the in-text winner (#46 layer 2)."""
     _seed_code_url_paper(service)
 
@@ -4702,7 +4703,7 @@ def test_index_arxiv_paper_falls_back_to_ranker_when_pwc_empty(
         ),
     )
     monkeypatch.setattr(sources, "enrich_with_semantic_scholar", lambda *a, **k: None)
-    monkeypatch.setattr(sources, "fetch_papers_with_code_repo", lambda _aid: None)
+    monkeypatch.setattr(sources, "fetch_hf_paper_repo", lambda _aid: None)
     monkeypatch.setattr(
         "paperbase.service.index_paper_artifacts",
         lambda metadata: ExtractionOutput(
@@ -4859,11 +4860,11 @@ def test_index_arxiv_paper_returns_none_on_three_way_ambiguity(
     assert len(refreshed.code_url_candidates) == 3
 
 
-def test_backfill_code_urls_from_pwc_respects_admin_pin(
+def test_backfill_code_urls_from_hf_papers_respects_admin_pin(
     service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Core regression: the backfill CLI must never overwrite an
-    operator-pinned ``code_url``, even if PWC has a different repo on
+    operator-pinned ``code_url``, even if Hugging Face has a different repo on
     file for that paper. Protects admin labor from automated cleanup."""
     pinned_id = _seed_code_url_paper(
         service,
@@ -4882,15 +4883,16 @@ def test_backfill_code_urls_from_pwc_respects_admin_pin(
 
     monkeypatch.setattr(
         sources,
-        "fetch_papers_with_code_repo",
-        lambda arxiv_id: f"https://github.com/pwc/{arxiv_id.replace('.', '-')}",
+        "fetch_hf_paper_repo",
+        lambda arxiv_id: f"https://github.com/hf/{arxiv_id.replace('.', '-')}",
     )
 
-    result = service.backfill_code_urls_from_pwc(limit=10, page_size=10, dry_run=False)
+    result = service.backfill_code_urls_from_hf_papers(limit=10, page_size=10, dry_run=False)
     # Repo-level filter drops admin rows up front; only the extracted
     # paper reaches the backfill loop.
     assert result["scanned"] == 1
     assert result["updated"] == 1
+    assert result["crosslink_hits"] == 1
 
     pinned = service.repository.get_paper(pinned_id)
     assert pinned is not None
@@ -4899,8 +4901,8 @@ def test_backfill_code_urls_from_pwc_respects_admin_pin(
 
     updated = service.repository.get_paper(extracted_id)
     assert updated is not None
-    assert updated.code_url == "https://github.com/pwc/2401-00002"
-    assert updated.code_url_source == "pwc"
+    assert updated.code_url == "https://github.com/hf/2401-00002"
+    assert updated.code_url_source == "hf_papers"
 
 
 def test_backfill_code_urls_dry_run_does_not_write(
@@ -4917,10 +4919,10 @@ def test_backfill_code_urls_dry_run_does_not_write(
     from paperbase import sources
 
     monkeypatch.setattr(
-        sources, "fetch_papers_with_code_repo", lambda _aid: "https://github.com/pwc/new"
+        sources, "fetch_hf_paper_repo", lambda _aid: "https://github.com/hf/new"
     )
 
-    result = service.backfill_code_urls_from_pwc(limit=10, page_size=10, dry_run=True)
+    result = service.backfill_code_urls_from_hf_papers(limit=10, page_size=10, dry_run=True)
     assert result["updated"] == 1
     assert result["dry_run"] is True
 

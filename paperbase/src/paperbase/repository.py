@@ -120,7 +120,8 @@ class PaperORM(Base):
     # Provenance of ``code_url`` (#46). One of:
     # - ``None``: legacy-extracted (pre-#46) or never set.
     # - ``"extracted"``: ranker picked from in-text GitHub URL candidates.
-    # - ``"pwc"``: Papers With Code returned an ``is_official=True`` repo.
+    # - ``"hf_papers"``: Hugging Face paper search returned a ``githubRepo``
+    #   for the exact arXiv-id match.
     # - ``"admin"``: operator pinned via PATCH /v1/papers/{id}/code-url;
     #   never overwritten by automatic re-index.
     code_url_source: Mapped[str | None] = mapped_column(String(16), nullable=True)
