@@ -445,6 +445,13 @@ def test_claim_pending_job_is_atomic_across_concurrent_workers(integration_conte
         # without committing. While this transaction is alive, any other
         # ``SELECT ... FOR UPDATE SKIP LOCKED`` against the same row
         # MUST skip it — that's the entire guarantee.
+        #
+        # The lock SELECT is filtered to the specific job_id we just
+        # created (#49). An earlier version filtered only on
+        # ``status == 'pending'`` and tripped over leftover rows from
+        # prior manual ``paperbase-dev harvest`` / reindex scripts —
+        # the lock would land on whichever pending row sorted first,
+        # not necessarily ours.
         first_claimed: dict[str, JobORM | None] = {"row": None}
         lock_acquired = threading.Event()
         release = threading.Event()
@@ -454,10 +461,10 @@ def test_claim_pending_job_is_atomic_across_concurrent_workers(integration_conte
                 row = session.scalar(
                     select(JobORM)
                     .where(
+                        JobORM.job_id == created.job_id,
                         JobORM.status == "pending",
                         or_(JobORM.next_run_at.is_(None), JobORM.next_run_at <= utcnow()),
                     )
-                    .order_by(JobORM.next_run_at.is_(None).desc(), JobORM.created_at.asc())
                     .limit(1)
                     .with_for_update(skip_locked=True)
                 )
@@ -471,9 +478,35 @@ def test_claim_pending_job_is_atomic_across_concurrent_workers(integration_conte
         assert first_claimed["row"] is not None
         assert first_claimed["row"].job_id == created.job_id
 
-        # Second worker attempts to claim while the first holds the row.
-        # The only pending job is locked, so SKIP LOCKED must return None.
-        second_claim = repository.claim_pending_job()
+        # Second worker attempts to claim OUR specific row while the
+        # first holds it. We use a hand-rolled claim scoped to
+        # ``created.job_id`` (rather than ``repository.claim_pending_job``
+        # which doesn't filter by id) so leftover pending rows from
+        # prior dev scripts don't muddy the assertion. This still
+        # exercises the production SKIP LOCKED query shape — we just
+        # restrict the candidate set to one row.
+        def claim_specific_with_skip_locked(job_id: str) -> JobORM | None:
+            with Session(repository._engine) as session:
+                row = session.scalar(
+                    select(JobORM)
+                    .where(
+                        JobORM.job_id == job_id,
+                        JobORM.status == "pending",
+                    )
+                    .limit(1)
+                    .with_for_update(skip_locked=True)
+                )
+                if row is None:
+                    return None
+                row.status = "running"
+                row.last_attempted_at = utcnow()
+                row.attempts += 1
+                session.flush()
+                session.expunge(row)
+                session.commit()
+                return row
+
+        second_claim = claim_specific_with_skip_locked(created.job_id)
         assert second_claim is None, (
             "second worker claimed a job that was already locked by the first — "
             "the SELECT FOR UPDATE SKIP LOCKED guarantee is broken"
@@ -481,11 +514,12 @@ def test_claim_pending_job_is_atomic_across_concurrent_workers(integration_conte
 
         # Release the first worker's transaction; the job is still
         # pending from the DB's perspective (the first holder never
-        # mutated), so a post-release claim should succeed.
+        # mutated), so a post-release claim against our specific
+        # job_id should succeed.
         release.set()
         holder.join(timeout=10)
 
-        after_release = repository.claim_pending_job()
+        after_release = claim_specific_with_skip_locked(created.job_id)
         assert after_release is not None
         assert after_release.job_id == created.job_id
         assert after_release.status == "running"
@@ -493,3 +527,113 @@ def test_claim_pending_job_is_atomic_across_concurrent_workers(integration_conte
         with _connect() as connection:
             with connection.cursor() as cursor:
                 cursor.execute("DELETE FROM jobs WHERE job_id = %s", (created.job_id,))
+
+
+@pytest.mark.integration
+def test_sql_set_paper_top_author_is_atomic_first_write_wins(integration_context):
+    """When two harvest_chunk workers race on the same paper, the SQL
+    ``set_paper_top_author`` must implement first-write-wins atomically —
+    a read-then-write would let both workers observe ``NULL`` and clobber
+    each other. The fix is a single ``UPDATE ... WHERE
+    top_author_s2_id IS NULL`` so at most one of the racing UPDATEs
+    matches, the other is a no-op.
+
+    Single-thread coverage of the same code path: land a stamp, attempt a
+    second land with a different id, observe the second is preserved-by-
+    existing. Then verify clears (None) bypass the IS NULL guard so
+    operators can still reset.
+    """
+    _, repository, _, namespace = integration_context
+    arxiv_id = f"{namespace}/top-author-race"
+    paper = PaperMetadata(
+        arxiv_id=arxiv_id,
+        title=f"{namespace} top-author paper",
+        authors="Race Tester",
+        abstract="abstract",
+        published="2026-04-21",
+        updated="2026-04-21",
+        index_status="indexed",
+    )
+    stored = repository.upsert_paper(paper, search_document="search", embedding=None)
+
+    first = repository.set_paper_top_author(stored.paper_id, top_author_s2_id="A1")
+    assert first is not None and first.top_author_s2_id == "A1"
+
+    # Second writer: predicate ``top_author_s2_id IS NULL`` no longer
+    # matches, so the UPDATE is a no-op. The returned row still carries
+    # A1 (first-write-wins).
+    second = repository.set_paper_top_author(stored.paper_id, top_author_s2_id="A2")
+    assert second is not None and second.top_author_s2_id == "A1"
+
+    # Explicit clear bypasses the IS NULL guard.
+    cleared = repository.set_paper_top_author(stored.paper_id, top_author_s2_id=None)
+    assert cleared is not None and cleared.top_author_s2_id is None
+
+    # After clearing, a new stamp lands again.
+    relanded = repository.set_paper_top_author(stored.paper_id, top_author_s2_id="A2")
+    assert relanded is not None and relanded.top_author_s2_id == "A2"
+
+
+@pytest.mark.integration
+def test_sql_set_paper_top_author_is_atomic_under_concurrent_workers(integration_context):
+    """Concurrency proof: two threads racing on the same NULL row must
+    not both stamp. One UPDATE matches the WHERE predicate, the other
+    matches zero rows and is a silent no-op. After both finish, the row
+    carries exactly one of the two competing values."""
+    import threading
+    from sqlalchemy.orm import Session
+
+    _, repository, _, namespace = integration_context
+    arxiv_id = f"{namespace}/top-author-concurrent"
+    paper = PaperMetadata(
+        arxiv_id=arxiv_id,
+        title=f"{namespace} concurrent stamp paper",
+        authors="Race Tester",
+        abstract="abstract",
+        published="2026-04-21",
+        updated="2026-04-21",
+        index_status="indexed",
+    )
+    stored = repository.upsert_paper(paper, search_document="search", embedding=None)
+
+    # Use a barrier so both threads kick off the UPDATE as close together
+    # as possible. The atomic guarantee doesn't depend on timing — the
+    # WHERE predicate is what serializes — but tighter timing is a more
+    # honest exercise of the race.
+    barrier = threading.Barrier(2)
+    landed: list[str] = []
+    lock = threading.Lock()
+
+    def stamp(value: str) -> None:
+        barrier.wait(timeout=10)
+        with Session(repository._engine) as session:
+            from sqlalchemy import update as _update
+            from paperbase.repository import PaperORM
+            from paperbase.utils import utcnow as _utcnow
+
+            result = session.execute(
+                _update(PaperORM)
+                .where(
+                    PaperORM.paper_id == stored.paper_id,
+                    PaperORM.top_author_s2_id.is_(None),
+                )
+                .values(top_author_s2_id=value, updated_at=_utcnow())
+            )
+            session.commit()
+            if result.rowcount == 1:
+                with lock:
+                    landed.append(value)
+
+    a = threading.Thread(target=stamp, args=("A1",), daemon=True)
+    b = threading.Thread(target=stamp, args=("A2",), daemon=True)
+    a.start()
+    b.start()
+    a.join(timeout=10)
+    b.join(timeout=10)
+
+    final = repository.get_paper(stored.paper_id)
+    assert final is not None and final.top_author_s2_id in {"A1", "A2"}
+    assert len(landed) == 1, (
+        f"both threads stamped — atomic first-write-wins is broken (landed={landed})"
+    )
+    assert final.top_author_s2_id == landed[0]

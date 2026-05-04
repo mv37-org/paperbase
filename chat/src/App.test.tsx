@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const apiMocks = vi.hoisted(() => {
@@ -38,6 +38,7 @@ const apiMocks = vi.hoisted(() => {
     createProject: vi.fn(),
     createThread: vi.fn(),
     deleteProject: vi.fn(),
+    deletePythonFile: vi.fn(),
     deleteThread: vi.fn(),
     getBrowserPaper: vi.fn(),
     getBrowserPaperFigure: vi.fn(),
@@ -110,6 +111,7 @@ vi.mock("./api", () => ({
   createProject: apiMocks.createProject,
   createThread: apiMocks.createThread,
   deleteProject: apiMocks.deleteProject,
+  deletePythonFile: apiMocks.deletePythonFile,
   deleteThread: apiMocks.deleteThread,
   getBrowserPaper: apiMocks.getBrowserPaper,
   getBrowserPaperFigure: apiMocks.getBrowserPaperFigure,
@@ -178,13 +180,15 @@ import App from "./App";
 
 const OPEN_TABS_KEY = "paperbase-open-tabs";
 const PENDING_PROMPT_KEY = "paperbase-pending-prompt";
+const SELECTED_PROJECT_KEY = "paperbase-selected-project";
 
 function authenticatedSession(
   overrides: Partial<{
-    remaining_free_responses: number;
+    has_openai_api_key: boolean;
     has_anthropic_api_key: boolean;
     csrf_token: string | null;
     settings: Partial<{
+      openai_api_key_hint: string;
       anthropic_api_key_hint: string;
       has_modal_credentials: boolean;
       modal_token_id_hint: string;
@@ -203,11 +207,11 @@ function authenticatedSession(
       user_id: "user_1",
       email: "user@example.com",
       display_name: "User Example",
-      free_responses_used: 0,
     },
-    remaining_free_responses: overrides.remaining_free_responses ?? 3,
-    has_anthropic_api_key: overrides.has_anthropic_api_key ?? false,
+    has_openai_api_key: overrides.has_openai_api_key ?? overrides.has_anthropic_api_key ?? true,
+    has_anthropic_api_key: overrides.has_anthropic_api_key ?? overrides.has_openai_api_key ?? true,
     settings: {
+      openai_api_key_hint: "",
       anthropic_api_key_hint: "",
       has_modal_credentials: false,
       modal_token_id_hint: "",
@@ -220,6 +224,70 @@ function authenticatedSession(
       ...overrides.settings,
     },
     csrf_token: overrides.csrf_token ?? "csrf-123",
+  };
+}
+
+function threadItemResponse(
+  itemId: string,
+  itemType: string,
+  role: string,
+  contentText = "",
+  overrides: Partial<{
+    thread_id: string;
+    turn_id: string;
+    phase: "commentary" | "final_answer" | null;
+    call_id: string | null;
+    name: string | null;
+    content_json: unknown;
+    citations: unknown[];
+    created_at: string;
+    status: string;
+  }> = {},
+) {
+  return {
+    item_id: itemId,
+    thread_id: overrides.thread_id ?? "thread_1",
+    turn_id: overrides.turn_id ?? "turn_1",
+    item_type: itemType,
+    role,
+    phase: overrides.phase ?? null,
+    call_id: overrides.call_id ?? null,
+    name: overrides.name ?? null,
+    content_text: contentText,
+    content_json: overrides.content_json,
+    citations: overrides.citations ?? [],
+    created_at: overrides.created_at ?? "2026-04-21T00:00:00Z",
+    status: overrides.status ?? "completed",
+  };
+}
+
+function turnResponse(
+  turnId: string,
+  threadId: string,
+  items: ReturnType<typeof threadItemResponse>[] = [],
+  overrides: Partial<{
+    status: string;
+    provider_response_id: string;
+    started_at: string;
+    completed_at: string | null;
+    usage: Record<string, unknown> | null;
+    diff_summary: string;
+    changed_paths: string[];
+    exec_session_ids: string[];
+  }> = {},
+) {
+  return {
+    turn_id: turnId,
+    thread_id: threadId,
+    status: overrides.status ?? "completed",
+    provider_response_id: overrides.provider_response_id ?? "resp_1",
+    started_at: overrides.started_at ?? "2026-04-21T00:00:00Z",
+    completed_at: overrides.completed_at ?? "2026-04-21T00:00:01Z",
+    usage: overrides.usage ?? null,
+    diff_summary: overrides.diff_summary ?? "",
+    changed_paths: overrides.changed_paths ?? [],
+    exec_session_ids: overrides.exec_session_ids ?? [],
+    items,
   };
 }
 
@@ -243,6 +311,11 @@ function threadResponse(
   projectId = "proj_1",
   projectName = "General",
 ) {
+  const assistantItem = threadItemResponse("msg_1", "assistant_message", "assistant", content, {
+    thread_id: threadId,
+    turn_id: "turn_1",
+    phase: "final_answer",
+  });
   return {
     thread_id: threadId,
     project_id: projectId,
@@ -251,6 +324,8 @@ function threadResponse(
     title,
     created_at: "2026-04-21T00:00:00Z",
     updated_at: "2026-04-21T00:00:00Z",
+    items: [assistantItem],
+    turns: [turnResponse("turn_1", threadId, [assistantItem])],
     messages: [
       {
         message_id: "msg_1",
@@ -259,6 +334,7 @@ function threadResponse(
         citations: [],
         created_at: "2026-04-21T00:00:00Z",
         status: "completed",
+        phase: "final_answer",
       },
     ],
   };
@@ -286,20 +362,27 @@ function pythonFileResponse(
   filename = "something.py",
   content = "",
   projectId = "proj_1",
+  repoPath?: string,
 ) {
   return {
     file_id: fileId,
     project_id: projectId,
     filename,
     file_kind: filename.endsWith(".ipynb") ? "notebook" : "python",
-    repo_path: filename.endsWith(".ipynb") ? `notebooks/${filename}` : `src/${filename}`,
+    repo_path:
+      repoPath ?? (filename.endsWith(".ipynb") ? `notebooks/${filename}` : `src/${filename}`),
     content,
     created_at: "2026-04-21T00:00:00Z",
     updated_at: "2026-04-21T00:00:00Z",
   };
 }
 
-function projectItemFile(fileId: string, filename = "something.py", projectId = "proj_1") {
+function projectItemFile(
+  fileId: string,
+  filename = "something.py",
+  projectId = "proj_1",
+  repoPath?: string,
+) {
   return {
     item_id: fileId,
     item_kind: "python_file",
@@ -312,7 +395,8 @@ function projectItemFile(fileId: string, filename = "something.py", projectId = 
     last_message_preview: "",
     filename,
     file_kind: filename.endsWith(".ipynb") ? "notebook" : "python",
-    repo_path: filename.endsWith(".ipynb") ? `notebooks/${filename}` : `src/${filename}`,
+    repo_path:
+      repoPath ?? (filename.endsWith(".ipynb") ? `notebooks/${filename}` : `src/${filename}`),
   };
 }
 
@@ -383,6 +467,8 @@ function emptyThreadResponse(threadId: string, projectId = "proj_1", projectName
     title: "New chat",
     created_at: "2026-04-21T00:00:00Z",
     updated_at: "2026-04-21T00:00:00Z",
+    items: [],
+    turns: [],
     messages: [],
   };
 }
@@ -436,6 +522,12 @@ describe("App", () => {
     apiMocks.createThread.mockResolvedValue(threadResponse("thread_2", "New chat"));
     apiMocks.createPythonFile.mockResolvedValue(pythonFileResponse("file_1"));
     apiMocks.deleteProject.mockResolvedValue({ status: "deleted" });
+    apiMocks.deletePythonFile.mockResolvedValue({
+      file_id: "file_1",
+      project_id: "proj_1",
+      filename: "something.py",
+      deleted: true,
+    });
     apiMocks.deleteThread.mockResolvedValue({ status: "deleted" });
     apiMocks.importProjectNotebook.mockResolvedValue(
       pythonFileResponse("file_2", "notebook.ipynb", "# %%\nprint('notebook')\n"),
@@ -526,7 +618,6 @@ describe("App", () => {
     apiMocks.loadSession.mockResolvedValue({
       authenticated: false,
       user: null,
-      remaining_free_responses: 0,
       has_anthropic_api_key: false,
       csrf_token: null,
     });
@@ -552,6 +643,72 @@ describe("App", () => {
     });
     expect(apiMocks.getThread).toHaveBeenCalledWith("thread_1");
     expect(apiMocks.loadProjects).toHaveBeenCalledTimes(1);
+    const tabElements = [...document.querySelectorAll<HTMLElement>(".chat-tab")];
+    const restoredTab = tabElements.find((element) =>
+      element.textContent?.includes("Restored research thread"),
+    );
+    expect(restoredTab?.querySelector(".chat-tab-thread-indicator")).toBeNull();
+    expect(document.querySelectorAll(".chat-tab-thread-indicator")).toHaveLength(0);
+    const debugStrip = screen.getByTestId("thread-debug-strip");
+    expect(debugStrip.textContent).toContain("user user_1");
+    expect(debugStrip.textContent).toContain("project proj_1");
+    expect(debugStrip.textContent).toContain("thread thread_1");
+    expect(debugStrip.textContent).toContain("assistant msg_1");
+    expect(screen.getByRole("button", { name: "Copy chat debug bundle" })).toBeTruthy();
+  });
+
+  it("restores the previously selected project and keeps only that tree expanded", async () => {
+    localStorage.setItem(SELECTED_PROJECT_KEY, "proj_2");
+    localStorage.setItem(OPEN_TABS_KEY, JSON.stringify(["thread_1"]));
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.loadProjects.mockResolvedValue({
+      projects: [projectSummary("proj_1", "General"), projectSummary("proj_2", "Agents", 0)],
+    });
+    apiMocks.getThread.mockResolvedValue(
+      threadResponse(
+        "thread_1",
+        "Restored research thread",
+        "Grounded answer",
+        "proj_1",
+        "General",
+      ),
+    );
+    apiMocks.loadProjectItems.mockImplementation(
+      async (projectId: string, limit = 25, offset = 0, itemKind?: "thread" | "python_file") => {
+        const allItems =
+          projectId === "proj_2"
+            ? [projectItemThread("thread_2", "Agents thread", projectId)]
+            : [projectItemThread("thread_1", "General thread", projectId)];
+        const filteredItems = itemKind
+          ? allItems.filter((item) => item.item_kind === itemKind)
+          : allItems;
+        const pageItems = filteredItems.slice(offset, offset + limit);
+        return {
+          ...projectItemsPage(projectId, pageItems),
+          offset,
+          limit,
+          total_count: filteredItems.length,
+          has_more: offset + pageItems.length < filteredItems.length,
+        };
+      },
+    );
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Agents thread")).toBeTruthy();
+    });
+    expect(screen.queryByText("General thread")).toBeNull();
+    expect(apiMocks.loadProjectItems).toHaveBeenCalledWith("proj_2", 5, 0, "python_file");
+    expect(apiMocks.loadProjectItems).toHaveBeenCalledWith("proj_2", 5, 0, "thread");
+    expect(apiMocks.loadProjectItems).not.toHaveBeenCalledWith("proj_1", 5, 0, "python_file");
+    expect(apiMocks.loadProjectItems).not.toHaveBeenCalledWith("proj_1", 5, 0, "thread");
+
+    const activeProject = document.querySelector<HTMLElement>(".project-card.active");
+    expect(activeProject?.textContent).toContain("Agents");
+    const expandedProjects = [...document.querySelectorAll<HTMLElement>(".project-group.expanded")];
+    expect(expandedProjects).toHaveLength(1);
+    expect(expandedProjects[0]?.textContent).toContain("Agents");
   });
 
   it("loads project sessions lazily when a project is expanded", async () => {
@@ -672,6 +829,69 @@ describe("App", () => {
     expect(await screen.findByText("analysis-6.py")).toBeTruthy();
   });
 
+  it("shows repo path context for duplicate Python basenames in the sidebar and tabs", async () => {
+    localStorage.setItem(
+      OPEN_TABS_KEY,
+      JSON.stringify([
+        { kind: "python_file", id: "file_1" },
+        { kind: "python_file", id: "file_2" },
+      ]),
+    );
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.loadProjectItems.mockImplementation(
+      async (projectId: string, limit = 25, offset = 0, itemKind?: "thread" | "python_file") => {
+        const allItems =
+          itemKind === "python_file"
+            ? [
+                projectItemFile("file_1", "train.py", projectId, "src/models/train.py"),
+                projectItemFile("file_2", "train.py", projectId, "experiments/models/train.py"),
+              ]
+            : [projectItemThread("thread_1", "Recovered thread", projectId)];
+        const pageItems = allItems.slice(offset, offset + limit);
+        return {
+          ...projectItemsPage(projectId, pageItems),
+          offset,
+          limit,
+          total_count: allItems.length,
+          has_more: offset + pageItems.length < allItems.length,
+        };
+      },
+    );
+    apiMocks.getPythonFile.mockImplementation(async (fileId: string) => {
+      if (fileId === "file_1") {
+        return pythonFileResponse(
+          "file_1",
+          "train.py",
+          "print('a')\n",
+          "proj_1",
+          "src/models/train.py",
+        );
+      }
+      return pythonFileResponse(
+        "file_2",
+        "train.py",
+        "print('b')\n",
+        "proj_1",
+        "experiments/models/train.py",
+      );
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Close src/models/train.py" })).toBeTruthy();
+    });
+    expect(screen.getByRole("button", { name: "Close experiments/models/train.py" })).toBeTruthy();
+
+    fireEvent.click(screen.getAllByText("General")[0]!);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("train.py")).toHaveLength(2);
+    });
+    expect(screen.getAllByText("src/models/train.py").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("experiments/models/train.py").length).toBeGreaterThan(0);
+  });
+
   it("paginates project sessions inside the sessions section", async () => {
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());
     apiMocks.loadProjectItems.mockImplementation(
@@ -712,7 +932,11 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Show more" }));
 
     await waitFor(() => {
-      expect(apiMocks.loadProjectItems).toHaveBeenCalledWith("proj_1", 5, 5, "thread");
+      expect(
+        apiMocks.loadProjectItems.mock.calls.some(
+          (call) => call[0] === "proj_1" && call[2] > 0 && call[3] === "thread",
+        ),
+      ).toBe(true);
     });
     expect(await screen.findByText("Session 6")).toBeTruthy();
   });
@@ -800,6 +1024,7 @@ describe("App", () => {
     });
     expect(screen.getByRole("button", { name: "Add python file" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Add notes" })).toBeTruthy();
+    expect(screen.queryByTestId("thread-debug-strip")).toBeNull();
 
     fireEvent.click(screen.getByLabelText("Open empty state project picker"));
 
@@ -1210,6 +1435,127 @@ describe("App", () => {
     expect(apiMocks.createPythonFile).not.toHaveBeenCalled();
   });
 
+  it("shows a first-chat setup checklist when project agent prerequisites are missing", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Prepare the agent before the first chat")).toBeTruthy();
+    });
+    const checklist = screen.getByLabelText("Agent setup checklist");
+    expect(
+      within(checklist).getByText(
+        /Add your OpenAI API key and connect anything else missing for .* so the first chat can run cleanly\./,
+      ),
+    ).toBeTruthy();
+    expect(within(checklist).getByText("GitHub connection")).toBeTruthy();
+    expect(within(checklist).getByText("OpenAI API key")).toBeTruthy();
+    expect(within(checklist).getByText("Sandbox credentials")).toBeTruthy();
+    expect(checklist.querySelector(".chat-setup-provider-mark.provider-modal")).toBeTruthy();
+    expect(checklist.querySelector(".chat-setup-provider-mark.modal")).toBeNull();
+    expect(screen.getByRole("button", { name: "Open GitHub setup" })).toBeTruthy();
+    expect(screen.getByLabelText("OpenAI API key configured")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open sandbox setup" })).toBeTruthy();
+  });
+
+  it("dismisses the first-chat setup checklist", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Prepare the agent before the first chat")).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss setup checklist" }));
+
+    await waitFor(() => {
+      expect(screen.queryByText("Prepare the agent before the first chat")).toBeNull();
+    });
+  });
+
+  it("opens settings from the first-chat setup checklist", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Prepare the agent before the first chat")).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Open GitHub setup" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Manage GitHub connection for repositories.")).toBeTruthy();
+    });
+  });
+
+  it("renders assistant commentary as its own labeled message", async () => {
+    const commentaryItem = threadItemResponse(
+      "item_commentary",
+      "assistant_message",
+      "assistant",
+      "I'm checking the repo layout before I edit anything.",
+      {
+        thread_id: "thread_1",
+        turn_id: "turn_1",
+        phase: "commentary",
+      },
+    );
+    const finalItem = threadItemResponse(
+      "item_final",
+      "assistant_message",
+      "assistant",
+      "Final answer",
+      {
+        thread_id: "thread_1",
+        turn_id: "turn_1",
+        phase: "final_answer",
+      },
+    );
+    apiMocks.getThread.mockResolvedValue({
+      thread_id: "thread_1",
+      project_id: "proj_1",
+      project_name: "General",
+      project_instructions: "",
+      title: "Recovered thread",
+      created_at: "2026-04-21T00:00:00Z",
+      updated_at: "2026-04-21T00:00:00Z",
+      items: [commentaryItem, finalItem],
+      turns: [turnResponse("turn_1", "thread_1", [commentaryItem, finalItem])],
+      messages: [
+        {
+          message_id: "item_commentary",
+          role: "assistant",
+          content_markdown: "I'm checking the repo layout before I edit anything.",
+          citations: [],
+          created_at: "2026-04-21T00:00:00Z",
+          status: "completed",
+          phase: "commentary",
+        },
+        {
+          message_id: "item_final",
+          role: "assistant",
+          content_markdown: "Final answer",
+          citations: [],
+          created_at: "2026-04-21T00:00:01Z",
+          status: "completed",
+          phase: "final_answer",
+        },
+      ],
+    });
+    localStorage.setItem(OPEN_TABS_KEY, JSON.stringify(["thread_1"]));
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Commentary")).toBeTruthy();
+    });
+    expect(screen.getByText("I'm checking the repo layout before I edit anything.")).toBeTruthy();
+    expect(screen.getByText("Final answer")).toBeTruthy();
+  });
+
   it("creates a Python file and saves it explicitly to GitHub", async () => {
     apiMocks.loadSession.mockResolvedValue(
       authenticatedSession({
@@ -1368,10 +1714,155 @@ describe("App", () => {
       expectedRemoteHeadSha: null,
       conflictResolutions: [],
     });
-    expect(apiMocks.runPythonFile).toHaveBeenCalledWith("file_1");
+    expect(apiMocks.runPythonFile).toHaveBeenCalledWith("file_1", "full");
     await waitFor(() => {
       expect(screen.getByText("Latest run")).toBeTruthy();
     });
+  });
+
+  it("persists dirty project drafts before project-code chat turns", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.loadProjectItems.mockImplementation(
+      async (projectId: string, limit = 25, offset = 0, itemKind?: "thread" | "python_file") => {
+        const allItems =
+          itemKind === "python_file"
+            ? [projectItemFile("file_1", "agent.py", projectId, "src/agent.py")]
+            : [projectItemThread("thread_1", "Recovered thread", projectId)];
+        const pageItems = allItems.slice(offset, offset + limit);
+        return {
+          ...projectItemsPage(projectId, pageItems),
+          offset,
+          limit,
+          total_count: allItems.length,
+          has_more: false,
+        };
+      },
+    );
+    apiMocks.getPythonFile.mockResolvedValue(
+      pythonFileResponse("file_1", "agent.py", "print('base')\n", "proj_1", "src/agent.py"),
+    );
+    apiMocks.updatePythonFile.mockResolvedValue(
+      pythonFileResponse("file_1", "agent.py", "print('dirty')\n", "proj_1", "src/agent.py"),
+    );
+    apiMocks.sendThreadMessageStream.mockRejectedValue(
+      new apiMocks.StreamingChatError("stream failed", true),
+    );
+    apiMocks.sendThreadMessage.mockResolvedValue({
+      thread: threadResponse("thread_1", "Recovered thread", "Code answer"),
+      assistant_message: {
+        message_id: "msg_2",
+        role: "assistant",
+        content_markdown: "Code answer",
+        citations: [],
+        created_at: "2026-04-21T00:00:00Z",
+        status: "completed",
+      },
+      has_anthropic_api_key: false,
+      state: "completed",
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+    fireEvent.click(screen.getAllByText("General")[0]!);
+    fireEvent.click(await screen.findByText("agent.py"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("monaco-editor")).toBeTruthy();
+    });
+    fireEvent.change(screen.getByTestId("monaco-editor"), {
+      target: { value: "print('dirty')\n" },
+    });
+
+    fireEvent.click(screen.getAllByText("Recovered thread")[0]!);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("mention-input-chat")).toBeTruthy();
+    });
+    fireEvent.change(screen.getByLabelText("mention-input-chat"), {
+      target: { value: "edit src/agent.py to add a torch smoke run" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
+      expect(apiMocks.updatePythonFile).toHaveBeenCalledWith("file_1", {
+        content: "print('dirty')\n",
+      });
+    });
+    await waitFor(() => {
+      expect(apiMocks.sendThreadMessage).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("does not persist dirty project drafts for non-coding chat turns", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.loadProjectItems.mockImplementation(
+      async (projectId: string, limit = 25, offset = 0, itemKind?: "thread" | "python_file") => {
+        const allItems =
+          itemKind === "python_file"
+            ? [projectItemFile("file_1", "agent.py", projectId, "src/agent.py")]
+            : [projectItemThread("thread_1", "Recovered thread", projectId)];
+        const pageItems = allItems.slice(offset, offset + limit);
+        return {
+          ...projectItemsPage(projectId, pageItems),
+          offset,
+          limit,
+          total_count: allItems.length,
+          has_more: false,
+        };
+      },
+    );
+    apiMocks.getPythonFile.mockResolvedValue(
+      pythonFileResponse("file_1", "agent.py", "print('base')\n", "proj_1", "src/agent.py"),
+    );
+    apiMocks.sendThreadMessageStream.mockRejectedValue(
+      new apiMocks.StreamingChatError("stream failed", true),
+    );
+    apiMocks.sendThreadMessage.mockResolvedValue({
+      thread: threadResponse("thread_1", "Recovered thread", "Research answer"),
+      assistant_message: {
+        message_id: "msg_2",
+        role: "assistant",
+        content_markdown: "Research answer",
+        citations: [],
+        created_at: "2026-04-21T00:00:00Z",
+        status: "completed",
+      },
+      has_anthropic_api_key: false,
+      state: "completed",
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+    fireEvent.click(screen.getAllByText("General")[0]!);
+    fireEvent.click(await screen.findByText("agent.py"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("monaco-editor")).toBeTruthy();
+    });
+    fireEvent.change(screen.getByTestId("monaco-editor"), {
+      target: { value: "print('dirty')\n" },
+    });
+
+    fireEvent.click(screen.getAllByText("Recovered thread")[0]!);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("mention-input-chat")).toBeTruthy();
+    });
+    fireEvent.change(screen.getByLabelText("mention-input-chat"), {
+      target: { value: "Summarize the benchmark papers" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
+      expect(apiMocks.sendThreadMessage).toHaveBeenCalledTimes(1);
+    });
+    expect(apiMocks.updatePythonFile).not.toHaveBeenCalled();
   });
 
   it("opens the project menu from the action button", async () => {
@@ -1413,6 +1904,87 @@ describe("App", () => {
     });
   });
 
+  it("shows rename and delete actions for code files and removes deleted files", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.loadProjectItems.mockImplementation(
+      async (projectId: string, limit = 25, offset = 0, itemKind?: "thread" | "python_file") => {
+        const allItems = [
+          projectItemThread("thread_1", "Recovered thread", projectId),
+          projectItemFile("file_1", "agent.py", projectId),
+        ];
+        const filteredItems = itemKind
+          ? allItems.filter((item) => item.item_kind === itemKind)
+          : allItems;
+        const pageItems = filteredItems.slice(offset, offset + limit);
+        return {
+          ...projectItemsPage(projectId, pageItems),
+          offset,
+          limit,
+          total_count: filteredItems.length,
+          has_more: offset + pageItems.length < filteredItems.length,
+        };
+      },
+    );
+    apiMocks.deletePythonFile.mockResolvedValue({
+      file_id: "file_1",
+      project_id: "proj_1",
+      filename: "agent.py",
+      deleted: true,
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+    fireEvent.click(screen.getAllByText("General")[0]!);
+
+    await waitFor(() => {
+      expect(screen.getByText("agent.py")).toBeTruthy();
+    });
+
+    expect(screen.getByLabelText("Rename agent.py")).toBeTruthy();
+    fireEvent.click(screen.getByLabelText("Delete agent.py"));
+    fireEvent.click(screen.getByRole("button", { name: "Delete file" }));
+
+    await waitFor(() => {
+      expect(apiMocks.deletePythonFile).toHaveBeenCalledWith("file_1");
+    });
+    await waitFor(() => {
+      expect(screen.queryByText("agent.py")).toBeNull();
+    });
+  });
+
+  it("can delete the General project and falls back to a create-project-only state", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.loadProjects
+      .mockResolvedValueOnce({
+        projects: [projectSummary("proj_1", "General")],
+      })
+      .mockResolvedValueOnce({
+        projects: [],
+      });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByLabelText("Open project menu for General"));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Delete project" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete project" }));
+
+    await waitFor(() => {
+      expect(apiMocks.deleteProject).toHaveBeenCalledWith("proj_1");
+    });
+    await waitFor(() => {
+      expect(screen.getByText("Create a project to get started")).toBeTruthy();
+    });
+    expect(screen.queryByLabelText("mention-input-chat")).toBeNull();
+    expect(screen.queryByText("Add python file")).toBeNull();
+  });
+
   it("opens the cited-paper drawer from the URL state", async () => {
     window.history.replaceState({}, "", "/?paper=arxiv:2401.12345&paperPath=sections%2Fintro.md");
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());
@@ -1444,7 +2016,6 @@ describe("App", () => {
         created_at: "2026-04-21T00:00:00Z",
         status: "completed",
       },
-      remaining_free_responses: 2,
       has_anthropic_api_key: false,
       state: "completed",
     });
@@ -1459,7 +2030,62 @@ describe("App", () => {
     });
   });
 
-  it("shows a re-enter-key message when the saved Anthropic key is invalid", async () => {
+  it("preserves pending landing mentions when an API key gate restores the prompt into the chat composer", async () => {
+    sessionStorage.setItem(
+      PENDING_PROMPT_KEY,
+      JSON.stringify({
+        prompt: "Summarize @Mentioned Paper",
+        paperIds: ["arxiv:2401.12345"],
+        mentions: [{ id: "arxiv:2401.12345", title: "Mentioned Paper" }],
+      }),
+    );
+    apiMocks.loadSession.mockResolvedValue(
+      authenticatedSession({ has_openai_api_key: false, has_anthropic_api_key: false }),
+    );
+    apiMocks.api.mockResolvedValue(authenticatedSession());
+    apiMocks.createThread.mockResolvedValue(emptyThreadResponse("thread_2"));
+    apiMocks.sendThreadMessageStream.mockResolvedValue(undefined);
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect((screen.getByLabelText("mention-input-chat") as HTMLInputElement).value).toBe(
+        "Summarize @Mentioned Paper",
+      );
+    });
+    await waitFor(() => {
+      expect(document.querySelector("#settings-anthropic-form")).toBeTruthy();
+    });
+
+    fireEvent.change(screen.getByLabelText("OpenAI API key"), {
+      target: { value: "sk-test-pending-mention" },
+    });
+    fireEvent.submit(document.querySelector("#settings-anthropic-form") as HTMLFormElement);
+
+    await waitFor(() => {
+      expect(apiMocks.api).toHaveBeenCalledWith("/v1/browser/settings/openai-key", {
+        method: "PUT",
+        body: JSON.stringify({ api_key: "sk-test-pending-mention" }),
+      });
+    });
+    await waitFor(() => {
+      expect(document.querySelector("#settings-anthropic-form")).toBeNull();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
+      expect(apiMocks.sendThreadMessageStream).toHaveBeenCalledTimes(1);
+    });
+    expect(apiMocks.sendThreadMessageStream.mock.calls[0]?.[1]).toEqual(
+      expect.objectContaining({
+        content: "Summarize @Mentioned Paper",
+        paper_ids: ["arxiv:2401.12345"],
+      }),
+    );
+  });
+
+  it("shows a re-enter-key message when the saved OpenAI key is invalid", async () => {
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());
     apiMocks.createThread.mockResolvedValue(emptyThreadResponse("thread_2"));
     apiMocks.sendThreadMessageStream.mockImplementation(
@@ -1469,21 +2095,10 @@ describe("App", () => {
         onEvent: (eventName: string, payload: unknown) => void,
       ) => {
         onEvent("api_key_required", {
-          thread: {
-            ...emptyThreadResponse("thread_2"),
-            messages: [
-              {
-                message_id: "msg_user",
-                role: "user",
-                content_markdown: "Need help",
-                citations: [],
-                created_at: "2026-04-21T00:00:00Z",
-                status: "completed",
-              },
-            ],
-          },
-          assistant_message: null,
-          remaining_free_responses: 0,
+          thread: emptyThreadResponse("thread_2"),
+          turn: turnResponse("turn_invalid", "thread_2", [], { status: "failed" }),
+          final_item: null,
+          has_openai_api_key: false,
           has_anthropic_api_key: false,
           state: "api_key_invalid",
         });
@@ -1503,7 +2118,7 @@ describe("App", () => {
     await waitFor(() => {
       expect(
         screen.getByText(
-          "Your saved Anthropic API key could not be decrypted. Add it again in Settings.",
+          "Your saved OpenAI API key could not be decrypted. Add it again in Settings.",
         ),
       ).toBeTruthy();
     });
@@ -1528,25 +2143,61 @@ describe("App", () => {
         options?: { signal?: AbortSignal },
       ) => {
         streamSignal = options?.signal;
+        onEvent("turn_started", {
+          turn: turnResponse("turn_2", "thread_2", [], {
+            status: "running",
+            completed_at: null,
+          }),
+        });
         onEvent("usage", {
           model: "claude-opus-4-7",
           input_tokens: 117900,
           output_tokens: 100,
-          cache_creation_input_tokens: 0,
-          cache_read_input_tokens: 0,
           total_tokens: 118000,
           context_window_tokens: 258000,
         });
-        onEvent("tool_start", {
-          tool_call_id: "tool_1",
-          tool_name: "paperbase_search",
-          label: 'paper search for "grounding"',
+        onEvent("item_started", {
+          item: threadItemResponse("item_tool_1", "function_call", "assistant", "", {
+            thread_id: "thread_2",
+            turn_id: "turn_2",
+            call_id: "tool_1",
+            name: "paperbase_search",
+            content_json: { query: "grounding" },
+            status: "in_progress",
+          }),
         });
-        onEvent("tool_done", {
-          tool_call_id: "tool_1",
-          tool_name: "paperbase_search",
-          label: 'paper search for "grounding"',
-          is_error: false,
+        onEvent("item_completed", {
+          item: threadItemResponse("item_tool_1", "function_call", "assistant", "", {
+            thread_id: "thread_2",
+            turn_id: "turn_2",
+            call_id: "tool_1",
+            name: "paperbase_search",
+            content_json: { query: "grounding" },
+          }),
+        });
+        onEvent("item_started", {
+          item: threadItemResponse("item_tool_1_output", "function_call_output", "tool", "", {
+            thread_id: "thread_2",
+            turn_id: "turn_2",
+            call_id: "tool_1",
+            name: "paperbase_search",
+            status: "in_progress",
+          }),
+        });
+        onEvent("item_completed", {
+          item: threadItemResponse(
+            "item_tool_1_output",
+            "function_call_output",
+            "tool",
+            '{\n  "result_set_id": "rs_1"\n}',
+            {
+              thread_id: "thread_2",
+              turn_id: "turn_2",
+              call_id: "tool_1",
+              name: "paperbase_search",
+              content_json: { result_set_id: "rs_1" },
+            },
+          ),
         });
         await streamDone;
       },
@@ -1566,8 +2217,20 @@ describe("App", () => {
       expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
     });
     await waitFor(() => {
+      expect(document.querySelectorAll(".chat-tab-thread-indicator")).toHaveLength(1);
+    });
+    await waitFor(() => {
       expect(screen.getByText('Did paper search for "grounding"')).toBeTruthy();
     });
+    const toolActivitySummary = screen
+      .getByText('Did paper search for "grounding"')
+      .closest("summary");
+    expect(toolActivitySummary?.textContent).toContain("Command and output");
+    fireEvent.click(toolActivitySummary!);
+    expect(screen.getByText("Command")).toBeTruthy();
+    expect(screen.getByText("Output")).toBeTruthy();
+    expect(screen.getByText(/paperbase_search\(\{/)).toBeTruthy();
+    expect(screen.getByText(/"result_set_id": "rs_1"/)).toBeTruthy();
     await waitFor(() => {
       expect(
         screen.getByRole("button", {
@@ -1599,7 +2262,369 @@ describe("App", () => {
       releaseStream?.();
       await streamDone;
     });
+
+    await waitFor(() => {
+      expect(document.querySelectorAll(".chat-tab-thread-indicator")).toHaveLength(0);
+    });
     randomSpy.mockRestore();
+  });
+
+  it("shows project coding activity copy and a live Python preview while code streams", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.createThread.mockResolvedValue(emptyThreadResponse("thread_2"));
+    apiMocks.getThread.mockResolvedValue(
+      threadResponse("thread_2", "New chat", "```python\ndef train():\n    return 1\n```"),
+    );
+
+    let releaseStream: (() => void) | null = null;
+    const streamDone = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+
+    apiMocks.sendThreadMessageStream.mockImplementation(
+      async (
+        _threadId: string,
+        _payload: unknown,
+        onEvent: (eventName: string, payload: unknown) => void,
+      ) => {
+        const toolItem = threadItemResponse("item_patch", "function_call", "assistant", "", {
+          thread_id: "thread_2",
+          turn_id: "turn_project_preview",
+          call_id: "tool_1",
+          name: "project_apply_patch",
+          content_json: {
+            repo_path: "src/train.py",
+            old_string: "",
+            new_string: "def train():\n    return 1\n",
+          },
+          status: "in_progress",
+        });
+        const assistantItem = threadItemResponse("msg_2", "assistant_message", "assistant", "", {
+          thread_id: "thread_2",
+          turn_id: "turn_project_preview",
+          status: "in_progress",
+        });
+        onEvent("turn_started", {
+          turn: turnResponse("turn_project_preview", "thread_2", [], {
+            status: "running",
+            completed_at: null,
+          }),
+        });
+        onEvent("item_started", { item: toolItem });
+        onEvent("item_started", { item: assistantItem });
+        onEvent("item_delta", {
+          item_id: "msg_2",
+          delta: "```python\ndef train():\n    return 1\n",
+          delta_type: "output_text",
+        });
+        await streamDone;
+        onEvent("item_completed", {
+          item: { ...toolItem, status: "completed" },
+        });
+        onEvent("item_started", {
+          item: threadItemResponse("item_patch_output", "function_call_output", "tool", "", {
+            thread_id: "thread_2",
+            turn_id: "turn_project_preview",
+            call_id: "tool_1",
+            name: "project_apply_patch",
+            status: "in_progress",
+          }),
+        });
+        onEvent("item_completed", {
+          item: threadItemResponse(
+            "item_patch_output",
+            "function_call_output",
+            "tool",
+            '{\n  "status": "ok"\n}',
+            {
+              thread_id: "thread_2",
+              turn_id: "turn_project_preview",
+              call_id: "tool_1",
+              name: "project_apply_patch",
+              content_json: { status: "ok" },
+            },
+          ),
+        });
+        const completedAssistantItem = threadItemResponse(
+          "msg_2",
+          "assistant_message",
+          "assistant",
+          "```python\ndef train():\n    return 1\n```",
+          {
+            thread_id: "thread_2",
+            turn_id: "turn_project_preview",
+            phase: "final_answer",
+          },
+        );
+        onEvent("item_completed", {
+          item: completedAssistantItem,
+        });
+        const completedThread = {
+          ...threadResponse("thread_2", "New chat", "```python\ndef train():\n    return 1\n```"),
+          items: [completedAssistantItem],
+          turns: [turnResponse("turn_project_preview", "thread_2", [completedAssistantItem])],
+        };
+        onEvent("turn_completed", {
+          thread: completedThread,
+          turn: turnResponse("turn_project_preview", "thread_2", [completedAssistantItem]),
+          final_item: completedAssistantItem,
+          has_openai_api_key: false,
+          has_anthropic_api_key: false,
+          state: "completed",
+        });
+      },
+    );
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Start new research in")).toBeTruthy();
+    });
+    fireEvent.change(screen.getByLabelText("mention-input-chat"), {
+      target: { value: "write a training script" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Patching src/train.py...")).toBeTruthy();
+    });
+    const preview = await screen.findByTestId("streaming-code-preview");
+    expect(within(preview).getByText("Writing code")).toBeTruthy();
+    expect(preview.textContent).toContain("python");
+    expect(preview.textContent).toContain("1");
+    expect(preview.textContent).toContain("2");
+    expect(preview.textContent).toContain("def train():");
+    expect(document.querySelector(".code-snippet-token.keyword")?.textContent).toBe("def");
+
+    await act(async () => {
+      releaseStream?.();
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("streaming-code-preview")).toBeNull();
+    });
+  });
+
+  it("hides the live code preview once the fenced block closes during the stream", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.createThread.mockResolvedValue(emptyThreadResponse("thread_2"));
+
+    let allowFenceClose: (() => void) | null = null;
+    const waitForFenceClose = new Promise<void>((resolve) => {
+      allowFenceClose = resolve;
+    });
+    let releaseStream: (() => void) | null = null;
+    const streamDone = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+
+    apiMocks.sendThreadMessageStream.mockImplementation(
+      async (
+        _threadId: string,
+        _payload: unknown,
+        onEvent: (eventName: string, payload: unknown) => void,
+      ) => {
+        const assistantItem = threadItemResponse("msg_2", "assistant_message", "assistant", "", {
+          thread_id: "thread_2",
+          turn_id: "turn_fence",
+          status: "in_progress",
+        });
+        onEvent("turn_started", {
+          turn: turnResponse("turn_fence", "thread_2", [], {
+            status: "running",
+            completed_at: null,
+          }),
+        });
+        onEvent("item_started", { item: assistantItem });
+        onEvent("item_delta", {
+          item_id: "msg_2",
+          delta: "```python\ndef train():\n    return 1\n",
+          delta_type: "output_text",
+        });
+        await waitForFenceClose;
+        onEvent("item_delta", {
+          item_id: "msg_2",
+          delta: "```\n\nThis script is ready to run.",
+          delta_type: "output_text",
+        });
+        await streamDone;
+        const completedAssistantItem = threadItemResponse(
+          "msg_2",
+          "assistant_message",
+          "assistant",
+          "```python\ndef train():\n    return 1\n```\n\nThis script is ready to run.",
+          {
+            thread_id: "thread_2",
+            turn_id: "turn_fence",
+            phase: "final_answer",
+          },
+        );
+        onEvent("item_completed", { item: completedAssistantItem });
+        onEvent("turn_completed", {
+          thread: {
+            ...threadResponse(
+              "thread_2",
+              "New chat",
+              "```python\ndef train():\n    return 1\n```\n\nThis script is ready to run.",
+            ),
+            items: [completedAssistantItem],
+            turns: [turnResponse("turn_fence", "thread_2", [completedAssistantItem])],
+          },
+          turn: turnResponse("turn_fence", "thread_2", [completedAssistantItem]),
+          final_item: completedAssistantItem,
+          has_openai_api_key: false,
+          has_anthropic_api_key: false,
+          state: "completed",
+        });
+      },
+    );
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Start new research in")).toBeTruthy();
+    });
+    fireEvent.change(screen.getByLabelText("mention-input-chat"), {
+      target: { value: "write a training script with a short explanation" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    const preview = await screen.findByTestId("streaming-code-preview");
+    expect(preview.textContent).toContain("def train():");
+
+    await act(async () => {
+      allowFenceClose?.();
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("streaming-code-preview")).toBeNull();
+    });
+
+    await act(async () => {
+      releaseStream?.();
+    });
+  });
+
+  it("refreshes project code items after coding-tool turns complete", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.createThread.mockResolvedValue(emptyThreadResponse("thread_2"));
+    apiMocks.getThread.mockResolvedValue(threadResponse("thread_2", "New chat", "Created trainer"));
+
+    let pythonItems: Array<ReturnType<typeof projectItemFile>> = [];
+    apiMocks.loadProjectItems.mockImplementation(
+      async (projectId: string, limit = 25, offset = 0, itemKind?: "thread" | "python_file") => {
+        const allItems = [
+          projectItemThread("thread_1", "Recovered thread", projectId),
+          ...pythonItems,
+        ];
+        const filteredItems = itemKind
+          ? allItems.filter((item) => item.item_kind === itemKind)
+          : allItems;
+        const pageItems = filteredItems.slice(offset, offset + limit);
+        return {
+          ...projectItemsPage(projectId, pageItems),
+          offset,
+          limit,
+          total_count: filteredItems.length,
+          has_more: offset + pageItems.length < filteredItems.length,
+        };
+      },
+    );
+    apiMocks.sendThreadMessageStream.mockImplementation(
+      async (
+        _threadId: string,
+        _payload: unknown,
+        onEvent: (eventName: string, payload: unknown) => void,
+      ) => {
+        const toolItem = threadItemResponse("item_write", "function_call", "assistant", "", {
+          thread_id: "thread_2",
+          turn_id: "turn_refresh",
+          call_id: "tool_1",
+          name: "project_write_file",
+          content_json: { repo_path: "src/trainer.py", content: "print('trainer')" },
+          status: "in_progress",
+        });
+        onEvent("turn_started", {
+          turn: turnResponse("turn_refresh", "thread_2", [], {
+            status: "running",
+            completed_at: null,
+          }),
+        });
+        onEvent("item_started", { item: toolItem });
+        onEvent("item_completed", {
+          item: { ...toolItem, status: "completed" },
+        });
+        pythonItems = [projectItemFile("file_2", "trainer.py", "proj_1", "src/trainer.py")];
+        onEvent("item_started", {
+          item: threadItemResponse("item_write_output", "function_call_output", "tool", "", {
+            thread_id: "thread_2",
+            turn_id: "turn_refresh",
+            call_id: "tool_1",
+            name: "project_write_file",
+            status: "in_progress",
+          }),
+        });
+        onEvent("item_completed", {
+          item: threadItemResponse(
+            "item_write_output",
+            "function_call_output",
+            "tool",
+            '{\n  "repo_path": "src/trainer.py"\n}',
+            {
+              thread_id: "thread_2",
+              turn_id: "turn_refresh",
+              call_id: "tool_1",
+              name: "project_write_file",
+              content_json: { repo_path: "src/trainer.py" },
+            },
+          ),
+        });
+        const finalItem = threadItemResponse(
+          "msg_2",
+          "assistant_message",
+          "assistant",
+          "Created trainer.py",
+          {
+            thread_id: "thread_2",
+            turn_id: "turn_refresh",
+            phase: "final_answer",
+          },
+        );
+        onEvent("item_completed", { item: finalItem });
+        onEvent("turn_completed", {
+          thread: {
+            ...threadResponse("thread_2", "New chat", "Created trainer.py"),
+            items: [finalItem],
+            turns: [turnResponse("turn_refresh", "thread_2", [finalItem])],
+          },
+          turn: turnResponse("turn_refresh", "thread_2", [finalItem]),
+          final_item: finalItem,
+          has_openai_api_key: false,
+          has_anthropic_api_key: false,
+          state: "completed",
+        });
+      },
+    );
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+    fireEvent.click(screen.getAllByText("General")[0]!);
+
+    await waitFor(() => {
+      expect(screen.getByText("No code files yet.")).toBeTruthy();
+    });
+
+    fireEvent.change(screen.getByLabelText("mention-input-chat"), {
+      target: { value: "create a trainer module" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("trainer.py")).toBeTruthy();
+    });
   });
 
   it("keeps the context usage control in the composer after streaming completes", async () => {
@@ -1611,43 +2636,63 @@ describe("App", () => {
         _payload: unknown,
         onEvent: (eventName: string, payload: unknown) => void,
       ) => {
-        onEvent("assistant_start", {
-          assistant_message: {
-            message_id: "msg_stream",
-            role: "assistant",
-            content_markdown: "",
-            citations: [],
-            created_at: "2026-04-21T00:00:00Z",
-            status: "streaming",
+        const assistantItem = threadItemResponse(
+          "msg_stream",
+          "assistant_message",
+          "assistant",
+          "",
+          {
+            thread_id: "thread_2",
+            turn_id: "turn_usage",
+            status: "in_progress",
           },
+        );
+        onEvent("turn_started", {
+          turn: turnResponse("turn_usage", "thread_2", [], {
+            status: "running",
+            completed_at: null,
+          }),
         });
+        onEvent("item_started", { item: assistantItem });
         onEvent("usage", {
           model: "claude-opus-4-7",
           input_tokens: 117900,
           output_tokens: 100,
-          cache_creation_input_tokens: 0,
-          cache_read_input_tokens: 0,
           total_tokens: 118000,
           context_window_tokens: 258000,
         });
-        onEvent("done", {
-          assistant_message: {
-            message_id: "msg_stream",
-            role: "assistant",
-            content_markdown: "Grounded streamed answer",
-            citations: [],
-            created_at: "2026-04-21T00:00:00Z",
-            status: "completed",
+        onEvent("item_delta", {
+          item_id: "msg_stream",
+          delta: "Grounded streamed answer",
+          delta_type: "output_text",
+        });
+        const finalItem = threadItemResponse(
+          "msg_stream",
+          "assistant_message",
+          "assistant",
+          "Grounded streamed answer",
+          {
+            thread_id: "thread_2",
+            turn_id: "turn_usage",
+            phase: "final_answer",
           },
-          remaining_free_responses: 2,
+        );
+        onEvent("item_completed", { item: finalItem });
+        onEvent("turn_completed", {
+          thread: {
+            ...threadResponse("thread_2", "New chat", "Grounded streamed answer"),
+            items: [finalItem],
+            turns: [turnResponse("turn_usage", "thread_2", [finalItem])],
+          },
+          turn: turnResponse("turn_usage", "thread_2", [finalItem]),
+          final_item: finalItem,
+          has_openai_api_key: false,
           has_anthropic_api_key: false,
           state: "completed",
           usage: {
             model: "claude-opus-4-7",
             input_tokens: 117900,
             output_tokens: 100,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
             total_tokens: 118000,
             context_window_tokens: 258000,
           },
@@ -1694,70 +2739,122 @@ describe("App", () => {
         _payload: unknown,
         onEvent: (eventName: string, payload: unknown) => void,
       ) => {
-        onEvent("compaction_start", {
-          compaction_message: {
-            message_id: "msg_compact",
-            role: "user",
-            kind: "compaction",
-            content_markdown: "Compacting conversation...",
-            citations: [],
-            created_at: "2026-04-21T00:00:00Z",
-            status: "streaming",
+        const compactionItem = threadItemResponse(
+          "msg_compact",
+          "compaction",
+          "assistant",
+          "Compacting conversation...",
+          {
+            thread_id: "thread_compact",
+            turn_id: "turn_compact",
+            status: "in_progress",
           },
+        );
+        onEvent("turn_started", {
+          turn: turnResponse("turn_compact", "thread_compact", [], {
+            status: "running",
+            completed_at: null,
+          }),
         });
-        onEvent("compaction_done", {
-          compaction_message: {
-            message_id: "msg_compact",
-            role: "user",
-            kind: "compaction",
-            content_markdown: "## Compacted Conversation\n\nPreserved the current task.",
-            citations: [],
-            created_at: "2026-04-21T00:00:00Z",
-            status: "completed",
+        onEvent("item_started", { item: compactionItem });
+        const completedCompactionItem = threadItemResponse(
+          "msg_compact",
+          "compaction",
+          "assistant",
+          "## Compacted Conversation\n\nPreserved the current task.",
+          {
+            thread_id: "thread_compact",
+            turn_id: "turn_compact",
           },
-          messages: [
+        );
+        onEvent("item_completed", {
+          item: completedCompactionItem,
+        });
+        const toolItem = threadItemResponse(
+          "item_after_compact",
+          "function_call",
+          "assistant",
+          "",
+          {
+            thread_id: "thread_compact",
+            turn_id: "turn_compact",
+            call_id: "tool_after_compact",
+            name: "paperbase_search",
+            content_json: { query: "context" },
+            status: "in_progress",
+          },
+        );
+        onEvent("item_started", {
+          item: toolItem,
+        });
+        onEvent("item_completed", {
+          item: { ...toolItem, status: "completed" },
+        });
+        onEvent("item_started", {
+          item: threadItemResponse(
+            "item_after_compact_output",
+            "function_call_output",
+            "tool",
+            "",
             {
-              message_id: "msg_compact",
-              role: "user",
-              kind: "compaction",
-              content_markdown: "## Compacted Conversation\n\nPreserved the current task.",
-              citations: [],
-              created_at: "2026-04-21T00:00:00Z",
-              status: "completed",
+              thread_id: "thread_compact",
+              turn_id: "turn_compact",
+              call_id: "tool_after_compact",
+              name: "paperbase_search",
+              status: "in_progress",
             },
-          ],
+          ),
         });
-        onEvent("tool_start", {
-          tool_call_id: "tool_after_compact",
-          tool_name: "paperbase_search",
-          label: 'paper search for "context"',
+        onEvent("item_completed", {
+          item: threadItemResponse(
+            "item_after_compact_output",
+            "function_call_output",
+            "tool",
+            '{\n  "result_set_id": "rs_after_compact"\n}',
+            {
+              thread_id: "thread_compact",
+              turn_id: "turn_compact",
+              call_id: "tool_after_compact",
+              name: "paperbase_search",
+              content_json: { result_set_id: "rs_after_compact" },
+            },
+          ),
         });
-        onEvent("tool_done", {
-          tool_call_id: "tool_after_compact",
-          tool_name: "paperbase_search",
-          label: 'paper search for "context"',
-          is_error: false,
+        onEvent("item_started", {
+          item: threadItemResponse("msg_answer", "assistant_message", "assistant", "", {
+            thread_id: "thread_compact",
+            turn_id: "turn_compact",
+            status: "in_progress",
+          }),
         });
-        onEvent("assistant_start", {
-          assistant_message: {
-            message_id: "msg_answer",
-            role: "assistant",
-            content_markdown: "",
-            citations: [],
-            created_at: "2026-04-21T00:00:01Z",
-            status: "streaming",
+        const finalItem = threadItemResponse(
+          "msg_answer",
+          "assistant_message",
+          "assistant",
+          "Answer after compaction",
+          {
+            thread_id: "thread_compact",
+            turn_id: "turn_compact",
+            phase: "final_answer",
           },
+        );
+        onEvent("item_completed", {
+          item: finalItem,
         });
-        onEvent("done", {
-          assistant_message: {
-            message_id: "msg_answer",
-            role: "assistant",
-            content_markdown: "Answer after compaction",
-            citations: [],
-            created_at: "2026-04-21T00:00:01Z",
-            status: "completed",
+        onEvent("turn_completed", {
+          thread: {
+            ...threadResponse("thread_compact", "New chat", "Answer after compaction"),
+            items: [completedCompactionItem, finalItem],
+            turns: [
+              turnResponse("turn_compact", "thread_compact", [completedCompactionItem, finalItem]),
+            ],
           },
-          remaining_free_responses: 2,
+          turn: turnResponse("turn_compact", "thread_compact", [
+            completedCompactionItem,
+            finalItem,
+          ]),
+          final_item: finalItem,
+          has_openai_api_key: false,
           has_anthropic_api_key: false,
           state: "completed",
           usage: null,
@@ -1799,16 +2896,18 @@ describe("App", () => {
       expect(screen.getByRole("tab", { name: "Inference", selected: true })).toBeTruthy();
     });
     expect(screen.getByRole("tab", { name: "Sandbox" })).toBeTruthy();
-    expect(screen.getByRole("tab", { name: "Version control" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "GitHub" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "Appearance" })).toBeTruthy();
     expect(screen.queryByRole("tab", { name: "Notifications" })).toBeNull();
     expect(document.querySelector("#auth-modal-title")).toBeNull();
     expect(document.querySelector(".settings-section-title")?.textContent).toBe("Inference");
-    expect(screen.getAllByText("Manage Anthropic inference API key.")).toHaveLength(1);
+    expect(screen.getAllByText("Manage OpenAI inference API key.")).toHaveLength(1);
 
     fireEvent.click(screen.getByRole("tab", { name: "Sandbox" }));
     expect(document.querySelector(".settings-section-title")?.textContent).toBe("Sandbox");
     expect(screen.getAllByText("Manage Modal sandbox credentials.")).toHaveLength(1);
+    expect(screen.getByLabelText("Modal token ID")).toBeTruthy();
+    expect(screen.getByLabelText("Modal token secret")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("tab", { name: "Appearance" }));
     expect(document.querySelector(".settings-section-title")?.textContent).toBe("Appearance");
@@ -1859,20 +2958,18 @@ describe("App", () => {
       });
     });
     await waitFor(() => {
-      expect(screen.getByText("Dark mode enabled.")).toBeTruthy();
-    });
-    expect(document.querySelector(".settings-tab-panels > #modal-flash")).toBeTruthy();
-    expect(document.querySelector(".modal-panel > #modal-flash")).toBeNull();
-    await waitFor(() => {
       expect(document.body.classList.contains("authenticated-theme-dark")).toBe(true);
     });
+    await waitFor(() => {
+      expect(document.querySelector("#auth-modal")?.classList.contains("hidden")).toBe(true);
+    });
+    expect(document.querySelector("#auth-modal.hidden")).toBeTruthy();
   });
 
   it("sets explicit autocomplete hints on auth and settings key inputs", async () => {
     apiMocks.loadSession.mockResolvedValueOnce({
       authenticated: false,
       user: null,
-      remaining_free_responses: 3,
       has_anthropic_api_key: false,
       settings: {
         anthropic_api_key_hint: "",
@@ -1899,6 +2996,9 @@ describe("App", () => {
       document.querySelector("#login-form input[name='password']")?.getAttribute("autocomplete"),
     ).toBe("current-password");
     expect(
+      document.querySelector("#login-form input[name='password']")?.getAttribute("minlength"),
+    ).toBe("8");
+    expect(
       document
         .querySelector("#signup-form input[name='display_name']")
         ?.getAttribute("autocomplete"),
@@ -1907,15 +3007,26 @@ describe("App", () => {
       document.querySelector("#signup-form input[name='password']")?.getAttribute("autocomplete"),
     ).toBe("new-password");
     expect(
+      document.querySelector("#signup-form input[name='password']")?.getAttribute("minlength"),
+    ).toBe("8");
+    expect(
       document.querySelector("#reset-form input[name='token']")?.getAttribute("autocomplete"),
     ).toBe("one-time-code");
     expect(
+      document.querySelector("#reset-form input[name='token']")?.getAttribute("minlength"),
+    ).toBe("8");
+    expect(
       document.querySelector("#reset-form input[name='password']")?.getAttribute("autocomplete"),
     ).toBe("new-password");
+    expect(
+      document.querySelector("#reset-form input[name='password']")?.getAttribute("minlength"),
+    ).toBe("8");
 
     unmount();
 
-    apiMocks.loadSession.mockResolvedValueOnce(authenticatedSession());
+    apiMocks.loadSession.mockResolvedValueOnce(
+      authenticatedSession({ has_openai_api_key: false, has_anthropic_api_key: false }),
+    );
 
     render(<App />);
 

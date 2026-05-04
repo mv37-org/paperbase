@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import difflib
 import json
 import logging
+import os
 import re
+import shlex
+import shutil
+import subprocess
+import sys
 import tempfile
+import threading
 from collections.abc import Generator, Iterator
 from dataclasses import dataclass
 from dataclasses import field
@@ -39,15 +46,25 @@ from .extractors import (
     table_index_payload,
     table_json_bytes,
 )
-from .llm import AnthropicChatModelClient, ChatModelClient, ChatModelUsage, response_usage
+from .llm import (
+    OpenAIResponsesChatModelClient,
+    Prompt,
+    ResponseEnvelope,
+    ResponseEvent,
+    ResponseItem,
+    ChatModelClient,
+    ChatModelUsage,
+)
 from .models import (
     BrowserSessionResponse,
     BrowserUser,
     BrowserUserSettingsResponse,
     ChatCitation,
     ChatMessageResponse,
+    ChatThreadItemResponse,
     ChatThreadListResponse,
     ChatThreadResponse,
+    ChatTurnResponse,
     CodeContextResponse,
     CodeEligibility,
     CodeFileListResponse,
@@ -89,7 +106,7 @@ from .models import (
     ResetPasswordRequest,
     ResultSetResponse,
     RunPythonFileResponse,
-    SaveAnthropicKeyRequest,
+    SaveOpenAIKeyRequest,
     SaveModalCredentialsRequest,
     SearchPaperResult,
     SearchRequest,
@@ -133,6 +150,35 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # Matches ``C:/...`` / ``C:\...`` / ``c:/...`` but deliberately NOT bare
 # ``a:b.txt`` or ``v:1/notes.md``, which are valid GitHub filenames.
 _DRIVE_PREFIX_RE = re.compile(r"^[A-Za-z]:[\\/]")
+_PROMPT_ASSET_ROOT = Path(__file__).resolve().parent / "prompt_assets"
+_PROJECT_WORKSPACE_BINARY_EXTENSIONS = {
+    ".7z",
+    ".a",
+    ".bin",
+    ".class",
+    ".dll",
+    ".dylib",
+    ".exe",
+    ".gif",
+    ".gz",
+    ".ico",
+    ".jar",
+    ".jpeg",
+    ".jpg",
+    ".npy",
+    ".npz",
+    ".pdf",
+    ".pkl",
+    ".png",
+    ".pyc",
+    ".so",
+    ".tar",
+    ".tif",
+    ".tiff",
+    ".wav",
+    ".webp",
+    ".zip",
+}
 
 
 def _validate_date(value: str, *, name: str) -> None:
@@ -231,6 +277,101 @@ _FORCE_TOOL_QUERY_RE = re.compile(
     re.IGNORECASE,
 )
 
+_CHAT_TITLE_TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:['-][A-Za-z0-9]+)*")
+_CHAT_TITLE_STOP_WORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "but",
+    "by",
+    "can",
+    "could",
+    "for",
+    "from",
+    "help",
+    "i",
+    "if",
+    "in",
+    "into",
+    "is",
+    "it",
+    "me",
+    "my",
+    "of",
+    "on",
+    "or",
+    "our",
+    "please",
+    "show",
+    "tell",
+    "that",
+    "the",
+    "this",
+    "to",
+    "us",
+    "we",
+    "with",
+    "would",
+}
+
+_PROJECT_CODE_DIRECT_TOOL_RE = re.compile(r"\b(project_(?:list_files|read_file|grep|touch|edit|delete|run))\b", re.IGNORECASE)
+_PROJECT_CODE_ACTION_RE = re.compile(
+    r"\b("
+    r"write|save|create|make|add|implement|edit|modify|update|refactor|fix|rename|delete|remove|read|show|open|grep|search|run"
+    r")\b",
+    re.IGNORECASE,
+)
+_PROJECT_CODE_WRITE_ACTION_RE = re.compile(
+    r"\b("
+    r"write|save|create|make|add|implement|edit|modify|update|refactor|fix|rename|delete|remove"
+    r")\b",
+    re.IGNORECASE,
+)
+_PROJECT_CODE_TARGET_RE = re.compile(
+    r"\b("
+    r"code|python|pytorch|torch|script|module|file|files|function|class|train(?:ing)?|eval(?:uation)?|workflow|repo|project"
+    r")\b",
+    re.IGNORECASE,
+)
+_PROJECT_CODE_PATH_HINT_RE = re.compile(r"(?:^|[\s`'\"])([A-Za-z0-9_./-]+\.py)(?:$|[\s`'\",.:;!?])")
+_PROJECT_CODE_WRITE_TOOL_RE = re.compile(r"\b(project_(?:touch|edit|delete))\b", re.IGNORECASE)
+_PROJECT_CODE_SNIPPET_RE = re.compile(
+    r"\b(snippet|example|sample|template|starter|boilerplate)\b",
+    re.IGNORECASE,
+)
+_PROJECT_CODE_BUILD_OBJECT_RE = re.compile(
+    r"\b("
+    r"sgd|adam|optimizer|optimiser|scheduler|model|network|layer|loss|dataset|dataloader|loader|"
+    r"pipeline|trainer|baseline|agent|parser|client|server|api|cli|demo|prototype"
+    r")\b",
+    re.IGNORECASE,
+)
+_PROJECT_CODE_CONFIRMATION_RE = re.compile(
+    r"^\s*(?:"
+    r"yes|yeah|yep|yup|sure|ok(?:ay)?|please|please do|go ahead|do it|do that|"
+    r"save it|save that|write it|write that|create it|create that|make it|make that|"
+    r"edit it|edit that|update it|update that|run it|run that"
+    r")\s*[.!?]*\s*$",
+    re.IGNORECASE,
+)
+_PROJECT_CODE_RETRY_RE = re.compile(
+    r"^\s*(?:try again|retry|please retry|again|one more time|try it again|retry that)\s*[.!?]*\s*$",
+    re.IGNORECASE,
+)
+_PROJECT_CODE_FOLLOWUP_PROMPT_RE = re.compile(
+    r"\b(want me to|should i|would you like me to|i can|if you want|if you'd like)\b",
+    re.IGNORECASE,
+)
+_PROJECT_CODE_FAILURE_FOLLOWUP_RE = re.compile(
+    r"\b(wasn't able to persist code|no project file was changed|tell me the exact file|please retry)\b",
+    re.IGNORECASE,
+)
+_PYTHON_FENCE_RE = re.compile(r"(?ms)(```|~~~)\s*(?:python|py)\s*\n.+?\n\1")
+
 _INLINE_SOURCE_ID_RE = re.compile(r"\[(S\d+)\]")
 _PYTHON_FILENAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _GITHUB_REPO_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -298,6 +439,23 @@ def _normalize_repo_path(value: str) -> str:
     return parsed.as_posix()
 
 
+def _normalize_project_code_repo_path(value: str) -> str:
+    path = _normalize_repo_path(value)
+    if not path.lower().endswith(".py"):
+        raise HTTPException(status_code=422, detail="Use a valid Python repository path")
+    return path
+
+
+def _normalize_project_workspace_repo_path(value: str) -> str:
+    path = _normalize_repo_path(value)
+    if path == ".paperbase" or path.startswith(".paperbase/"):
+        raise HTTPException(status_code=422, detail="The .paperbase manifest path is reserved")
+    suffix = PurePosixPath(path).suffix.lower()
+    if suffix in _PROJECT_WORKSPACE_BINARY_EXTENSIONS:
+        raise HTTPException(status_code=422, detail="Only text workspace files are supported")
+    return path
+
+
 def _file_kind_for_repo_path(path: str) -> str:
     lower_path = path.lower()
     if lower_path.endswith(".py"):
@@ -305,6 +463,23 @@ def _file_kind_for_repo_path(path: str) -> str:
     if lower_path.endswith(".ipynb"):
         return "notebook"
     raise HTTPException(status_code=422, detail=f"Repository path '{path}' is not importable")
+
+
+def _workspace_file_kind_for_repo_path(path: str) -> str:
+    lower_path = path.lower()
+    if lower_path.endswith(".py"):
+        return "python"
+    if lower_path.endswith(".ipynb"):
+        return "notebook"
+    return "text"
+
+
+@lru_cache(maxsize=None)
+def _load_prompt_asset(relative_path: str) -> str:
+    target = (_PROMPT_ASSET_ROOT / relative_path).resolve()
+    if _PROMPT_ASSET_ROOT not in target.parents:
+        raise RuntimeError(f"Prompt asset path escapes asset root: {relative_path}")
+    return target.read_text(encoding="utf-8").strip()
 
 
 def _notebook_to_python_source(raw_notebook: str) -> str:
@@ -825,31 +1000,205 @@ def _query_variants(question: str) -> list[str]:
     return deduped[:5]
 
 
+def _format_chat_title_word(word: str) -> str:
+    if not word:
+        return word
+    if word.isupper():
+        return word
+    if any(char.isupper() for char in word[1:]):
+        return word
+    return word.capitalize()
+
+
+def _summarize_chat_title(content: str) -> str:
+    tokens = _CHAT_TITLE_TOKEN_RE.findall(content)
+    if not tokens:
+        return "New chat"
+    informative_tokens = [token for token in tokens if token.lower() not in _CHAT_TITLE_STOP_WORDS]
+    source_tokens = informative_tokens if len(informative_tokens) >= 3 else tokens
+    desired_count = min(5, max(3, len(source_tokens)))
+    selected_tokens = source_tokens[:desired_count]
+    if len(selected_tokens) < 3 and len(tokens) >= 3:
+        selected_tokens = tokens[:3]
+    return " ".join(_format_chat_title_word(token) for token in selected_tokens).strip() or "New chat"
+
+
 def _question_mentions_uploads(question: str) -> bool:
     lowered = question.lower()
     return any(token in lowered for token in ("upload", "uploaded", "document", "documents", "docs", "notes", "note"))
 
 
-def _should_offer_chat_tools(question: str, request: SendChatMessageRequest) -> bool:
-    if not (request.include_papers or request.include_uploads):
+def _question_has_project_code_intent(question: str) -> bool:
+    if not question.strip():
         return False
-    if request.tag_filters:
+    if _PROJECT_CODE_DIRECT_TOOL_RE.search(question):
         return True
-    if request.include_uploads and _question_mentions_uploads(question):
+    if _PROJECT_CODE_PATH_HINT_RE.search(question) and (
+        _PROJECT_CODE_ACTION_RE.search(question) or any(token in question.lower() for token in ("read", "edit", "run"))
+    ):
         return True
-    if request.include_papers and _GROUNDING_INTENT_RE.search(question):
+    if _PROJECT_CODE_SNIPPET_RE.search(question) and (
+        _PROJECT_CODE_TARGET_RE.search(question) or _PROJECT_CODE_BUILD_OBJECT_RE.search(question)
+    ):
         return True
-    return False
+    if _PROJECT_CODE_ACTION_RE.search(question) and (
+        _PROJECT_CODE_SNIPPET_RE.search(question) or _PROJECT_CODE_BUILD_OBJECT_RE.search(question)
+    ):
+        return True
+    return bool(_PROJECT_CODE_ACTION_RE.search(question) and _PROJECT_CODE_TARGET_RE.search(question))
 
 
-def _should_force_chat_tool_use(question: str, request: SendChatMessageRequest) -> bool:
-    if not _should_offer_chat_tools(question, request):
+def _question_is_project_code_confirmation(question: str) -> bool:
+    return bool(_PROJECT_CODE_CONFIRMATION_RE.match(question.strip()))
+
+
+def _question_is_project_code_retry(question: str) -> bool:
+    return bool(_PROJECT_CODE_RETRY_RE.match(question.strip()))
+
+
+def _last_pending_project_code_followup(thread: ChatThreadResponse | None) -> ChatMessageResponse | None:
+    if thread is None or not thread.messages:
+        return None
+    assistant_index: int | None = None
+    for index in range(len(thread.messages) - 1, -1, -1):
+        message = thread.messages[index]
+        if message.kind == "compaction" or not message.content_markdown.strip():
+            continue
+        if message.role == "assistant":
+            assistant_index = index
+            break
+        if message.role == "user":
+            return None
+    if assistant_index is None:
+        return None
+    assistant_message = thread.messages[assistant_index]
+    prior_user_message = next(
+        (
+            message
+            for message in reversed(thread.messages[:assistant_index])
+            if message.role == "user" and message.kind != "compaction" and message.content_markdown.strip()
+        ),
+        None,
+    )
+    if prior_user_message is None or not _question_has_project_code_intent(prior_user_message.content_markdown):
+        return None
+    assistant_text = assistant_message.content_markdown.strip()
+    lowered = assistant_text.lower()
+    if _PROJECT_CODE_FAILURE_FOLLOWUP_RE.search(assistant_text):
+        return assistant_message
+    if not (_PROJECT_CODE_FOLLOWUP_PROMPT_RE.search(assistant_text) or assistant_text.endswith("?")):
+        return None
+    if _PROJECT_CODE_ACTION_RE.search(assistant_text) and (
+        _PROJECT_CODE_TARGET_RE.search(assistant_text)
+        or _PROJECT_CODE_PATH_HINT_RE.search(assistant_text)
+        or "project" in lowered
+    ):
+        return assistant_message
+    if _PROJECT_CODE_PATH_HINT_RE.search(assistant_text) and "project" in lowered:
+        return assistant_message
+    return None
+
+
+def _question_confirms_pending_project_code_followup(question: str, *, thread: ChatThreadResponse | None) -> bool:
+    return (
+        (_question_is_project_code_confirmation(question) or _question_is_project_code_retry(question))
+        and _last_pending_project_code_followup(thread) is not None
+    )
+
+
+def _pending_project_code_followup_requires_write(thread: ChatThreadResponse | None) -> bool:
+    assistant_message = _last_pending_project_code_followup(thread)
+    if assistant_message is None:
         return False
-    if request.tag_filters:
+    assistant_text = assistant_message.content_markdown.strip()
+    return bool(_PROJECT_CODE_WRITE_ACTION_RE.search(assistant_text) or "into your project" in assistant_text.lower())
+
+
+def _should_offer_research_chat_tools(question: str, request: SendChatMessageRequest) -> bool:
+    return True
+
+
+def _should_offer_project_code_tools(question: str, *, thread: ChatThreadResponse | None) -> bool:
+    return bool(thread and thread.project_id)
+
+
+def _should_require_project_code_write(question: str, *, thread: ChatThreadResponse | None) -> bool:
+    if not _should_offer_project_code_tools(question, thread=thread):
+        return False
+    if _question_confirms_pending_project_code_followup(question, thread=thread):
+        return _pending_project_code_followup_requires_write(thread)
+    if _PROJECT_CODE_WRITE_TOOL_RE.search(question):
         return True
-    if _query_signals_recency(question):
+    if _PROJECT_CODE_SNIPPET_RE.search(question) and (
+        _PROJECT_CODE_TARGET_RE.search(question) or _PROJECT_CODE_BUILD_OBJECT_RE.search(question)
+    ):
         return True
-    return bool(_FORCE_TOOL_QUERY_RE.search(question))
+    if _PROJECT_CODE_WRITE_ACTION_RE.search(question) and _PROJECT_CODE_BUILD_OBJECT_RE.search(question):
+        return True
+    return bool(_PROJECT_CODE_WRITE_ACTION_RE.search(question) and _PROJECT_CODE_TARGET_RE.search(question))
+
+
+def _project_code_tool_use_completed_write(tool_use: dict[str, Any], *, is_error: bool) -> bool:
+    if is_error:
+        return False
+    tool_name = str(tool_use.get("name") or "").strip().lower()
+    if tool_name == "project_touch":
+        tool_input = tool_use.get("input")
+        if not isinstance(tool_input, dict):
+            return False
+        return bool(str(tool_input.get("content") or "").strip())
+    return tool_name in {"project_edit", "project_delete"}
+
+
+def _project_code_tool_use_completed_read(tool_use: dict[str, Any], *, is_error: bool) -> bool:
+    if is_error:
+        return False
+    tool_name = str(tool_use.get("name") or "").strip().lower()
+    return tool_name == "project_read_file"
+
+
+def _answer_contains_python_snippet(answer: str) -> bool:
+    if not answer.strip():
+        return False
+    return bool(_PYTHON_FENCE_RE.search(answer))
+
+
+def _project_code_write_retry_prompt() -> str:
+    return (
+        "No managed project Python file has been updated yet. "
+        "This turn still requires successful project_* tool calls before any user-facing narrative text. "
+        "If the target file already exists, update it with project_edit instead of claiming success. "
+        "If the target file exists and is empty, you may populate it with project_edit using old_string=\"\"."
+    )
+
+
+def _project_code_write_failure_answer() -> str:
+    return (
+        "I wasn't able to persist code into a managed project Python file in this turn, so no project file was changed. "
+        "Please retry, or tell me the exact file you want updated."
+    )
+
+
+def _project_code_answer_requires_persisted_python(
+    answer: str,
+    *,
+    thread: ChatThreadResponse | None,
+    project_write_completed: bool,
+    project_read_completed: bool,
+) -> bool:
+    if thread is None or not thread.project_id:
+        return False
+    if not _answer_contains_python_snippet(answer):
+        return False
+    return not (project_write_completed or project_read_completed)
+
+
+def _should_offer_chat_tools(question: str, request: SendChatMessageRequest, *, thread: ChatThreadResponse | None) -> bool:
+    return _should_offer_research_chat_tools(question, request) or _should_offer_project_code_tools(question, thread=thread)
+
+
+def _should_force_chat_tool_use(question: str, request: SendChatMessageRequest, *, thread: ChatThreadResponse | None) -> bool:
+    return _should_offer_chat_tools(question, request, thread=thread)
 
 
 def _sanitize_inline_citations(answer: str, citations: list[ChatCitation]) -> str:
@@ -894,6 +1243,18 @@ def _truncate_tool_text(text: str, *, limit: int) -> tuple[str, bool]:
     return f"{clipped}\n\n[truncated]", True
 
 
+def _merge_chat_usage(previous: ChatModelUsage | None, current: ChatModelUsage | None) -> ChatModelUsage | None:
+    if previous is None:
+        return current
+    if current is None:
+        return previous
+    return ChatModelUsage(
+        input_tokens=previous.input_tokens + current.input_tokens,
+        output_tokens=previous.output_tokens + current.output_tokens,
+        total_tokens=previous.total_tokens + current.total_tokens,
+    )
+
+
 def _extract_message_text(payload: dict[str, Any]) -> str:
     parts = [item.get("text", "") for item in payload.get("content", []) if item.get("type") == "text"]
     return "\n".join(part for part in parts if part).strip()
@@ -906,6 +1267,15 @@ def _anthropic_context_window_tokens(model_name: str) -> int:
     return 200_000
 
 
+def _openai_context_window_tokens(model_name: str) -> int:
+    normalized = model_name.strip().lower().replace(".", "-")
+    if normalized.startswith("gpt-5"):
+        return 400_000
+    if normalized.startswith("gpt-4.1") or normalized.startswith("gpt-4o"):
+        return 128_000
+    return 128_000
+
+
 _CHAT_TOOL_MAX_ROUNDS = 4
 _CHAT_TOOL_MAX_CALLS_PER_ROUND = 6
 _CHAT_TOOL_MAX_FILE_CHARS = 12_000
@@ -914,6 +1284,168 @@ _CHAT_TOOL_MAX_FILE_LIST = 200
 _CHAT_COMPACTION_THRESHOLD_RATIO = 0.9
 _CHAT_COMPACTION_MAX_PER_TURN = 2
 _CHAT_COMPACTION_PLACEHOLDER = "Compacting conversation..."
+_CHAT_TOOL_DIRECT_EXPOSURE_THRESHOLD = 100
+_CHAT_TURN_DIFF_MAX_CHARS = 12_000
+_PROJECT_EXEC_DEFAULT_WAIT_SECONDS = 5
+_PROJECT_EXEC_MAX_WAIT_SECONDS = 60
+_PROJECT_EXEC_LOG_CHAR_LIMIT = 12_000
+
+
+@dataclass(frozen=True)
+class ChatSamplingPrompt:
+    input: list[dict[str, Any]]
+    base_instructions: str
+    tools: list[dict[str, Any]] = field(default_factory=list)
+    tool_choice: dict[str, Any] | None = None
+    parallel_tool_calls: bool = False
+
+
+@dataclass(frozen=True)
+class ChatTurnItem:
+    kind: str
+    role: str
+    content: str | list[dict[str, Any]]
+
+    def as_model_input(self) -> dict[str, Any]:
+        return {"role": self.role, "content": self.content}
+
+
+@dataclass
+class ChatTurnDiffTracker:
+    original_contents: dict[str, str | None] = field(default_factory=dict)
+    current_contents: dict[str, str | None] = field(default_factory=dict)
+
+    def record(self, *, repo_path: str, before: str | None, after: str | None) -> None:
+        if repo_path not in self.original_contents:
+            self.original_contents[repo_path] = before
+        self.current_contents[repo_path] = after
+
+    def changed_files(self) -> list[str]:
+        changed = [
+            path
+            for path, before in self.original_contents.items()
+            if self.current_contents.get(path) != before
+        ]
+        return sorted(changed)
+
+    def unified_diff(self, *, limit_chars: int = _CHAT_TURN_DIFF_MAX_CHARS) -> str:
+        rendered: list[str] = []
+        for repo_path in self.changed_files():
+            before = self.original_contents.get(repo_path)
+            after = self.current_contents.get(repo_path)
+            before_lines = [] if before is None else before.splitlines()
+            after_lines = [] if after is None else after.splitlines()
+            diff = "\n".join(
+                difflib.unified_diff(
+                    before_lines,
+                    after_lines,
+                    fromfile=f"a/{repo_path}",
+                    tofile=f"b/{repo_path}",
+                    lineterm="",
+                )
+            ).strip()
+            if diff:
+                rendered.append(diff)
+        combined = "\n\n".join(rendered).strip()
+        clipped, truncated = _truncate_tool_text(combined, limit=limit_chars)
+        if truncated and clipped.endswith("[truncated]"):
+            return clipped
+        return clipped
+
+
+@dataclass
+class ChatTurnState:
+    active_goal: str
+    inspected_files: set[str] = field(default_factory=set)
+    running_exec_session_ids: set[str] = field(default_factory=set)
+    diff_tracker: ChatTurnDiffTracker = field(default_factory=ChatTurnDiffTracker)
+
+    def note_inspected(self, *repo_paths: str) -> None:
+        for repo_path in repo_paths:
+            if repo_path:
+                self.inspected_files.add(repo_path)
+
+    def note_exec_session(self, exec_id: str, *, running: bool) -> None:
+        if not exec_id:
+            return
+        if running:
+            self.running_exec_session_ids.add(exec_id)
+        else:
+            self.running_exec_session_ids.discard(exec_id)
+
+    def visible_summary(self) -> str:
+        parts = ["Current turn state:"]
+        goal = self.active_goal.strip()
+        if goal:
+            parts.append(f"- Active goal: {goal}")
+        inspected = sorted(self.inspected_files)
+        if inspected:
+            parts.append(f"- Files inspected: {', '.join(inspected)}")
+        changed = self.diff_tracker.changed_files()
+        if changed:
+            parts.append(f"- Files changed: {', '.join(changed)}")
+            diff = self.diff_tracker.unified_diff()
+            if diff:
+                parts.extend(["- Unified diff summary:", "```diff", diff, "```"])
+        running_execs = sorted(self.running_exec_session_ids)
+        if running_execs:
+            parts.append(f"- Running exec sessions: {', '.join(running_execs)}")
+        return "\n".join(parts)
+
+
+@dataclass(frozen=True)
+class ChatToolSpecEntry:
+    spec: dict[str, Any]
+    supports_parallel: bool = False
+    deferred: bool = False
+
+    @property
+    def name(self) -> str:
+        return str(self.spec.get("name") or "").strip()
+
+
+class ChatToolRouter:
+    def __init__(
+        self,
+        entries: list[ChatToolSpecEntry],
+        *,
+        direct_exposure_threshold: int = _CHAT_TOOL_DIRECT_EXPOSURE_THRESHOLD,
+        aliases: dict[str, str] | None = None,
+    ) -> None:
+        direct_entries = [entry for entry in entries if not entry.deferred]
+        optional_entries = [entry for entry in entries if entry.deferred]
+        if len(direct_entries) + len(optional_entries) <= direct_exposure_threshold:
+            direct_entries.extend(optional_entries)
+            optional_entries = []
+        self._direct_entries = direct_entries
+        self._deferred_entries = optional_entries
+        self._by_name = {entry.name: entry for entry in direct_entries + optional_entries}
+        self._aliases = dict(aliases or {})
+
+    def model_visible_specs(self) -> list[dict[str, Any]]:
+        return [entry.spec for entry in self._direct_entries]
+
+    def deferred_specs(self) -> list[dict[str, Any]]:
+        return [entry.spec for entry in self._deferred_entries]
+
+    def find_spec(self, tool_name: str) -> ChatToolSpecEntry | None:
+        direct = self._by_name.get(tool_name)
+        if direct is not None:
+            return direct
+        alias_target = self._aliases.get(tool_name)
+        if alias_target is None:
+            return None
+        return self._by_name.get(alias_target)
+
+    def tool_supports_parallel(self, tool_name: str) -> bool:
+        entry = self.find_spec(tool_name)
+        return bool(entry and entry.supports_parallel)
+
+    def parallel_tool_calls_enabled(self) -> bool:
+        return any(entry.supports_parallel for entry in self._direct_entries)
+
+    def has_tool_prefix(self, prefix: str) -> bool:
+        return any(entry.name.startswith(prefix) for entry in self._direct_entries)
 
 
 @dataclass
@@ -921,6 +1453,17 @@ class ChatCitationRegistry:
     citations: list[ChatCitation] = field(default_factory=list)
     _by_key: dict[tuple[str, str], ChatCitation] = field(default_factory=dict)
     _next_source_index: int = 1
+
+    def seed(self, *, key: tuple[str, str], citation: ChatCitation) -> ChatCitation:
+        existing = self._by_key.get(key)
+        if existing is not None:
+            return existing
+        self._by_key[key] = citation
+        self.citations.append(citation)
+        match = re.fullmatch(r"S(\d+)", citation.source_id)
+        if match is not None:
+            self._next_source_index = max(self._next_source_index, int(match.group(1)) + 1)
+        return citation
 
     def register(
         self,
@@ -956,18 +1499,76 @@ class ChatCitationRegistry:
 @dataclass
 class PreparedChatGeneration:
     thread: ChatThreadResponse
-    user_message: ChatMessageResponse
+    turn: ChatTurnResponse
+    user_item: ChatThreadItemResponse
     resolved_user: BrowserUser
-    api_key_value: str | None
-    using_free_tier: bool
-    api_key_state: str = "completed"
+    api_key_value: str
 
 
 @dataclass
 class ChatTurnContext:
-    messages: list[dict[str, Any]]
-    active_message_ids: list[str]
+    items: list[dict[str, Any]]
+    active_item_ids: list[str]
     compactions_used: int = 0
+
+    @property
+    def prompt_input(self) -> list[dict[str, Any]]:
+        return list(self.items)
+
+
+@dataclass
+class ChatToolRoundsResult:
+    context: ChatTurnContext
+    citation_registry: ChatCitationRegistry
+    require_project_code_write: bool = False
+    project_write_completed: bool = False
+    project_read_completed: bool = False
+
+
+@dataclass
+class ChatTurnExecutionResult:
+    turn: ChatTurnResponse
+    final_item: ChatThreadItemResponse | None
+    citation_registry: ChatCitationRegistry
+    usage: ChatModelUsage | None = None
+
+
+@dataclass
+class ProjectExecSession:
+    exec_id: str
+    thread_id: str
+    project_id: str
+    command: list[str]
+    workspace_path: str
+    started_at: object
+    process: subprocess.Popen[str]
+    status: str = "running"
+    exit_code: int | None = None
+    finished_at: object | None = None
+    stdout_chunks: list[str] = field(default_factory=list)
+    stderr_chunks: list[str] = field(default_factory=list)
+    completion_event: threading.Event = field(default_factory=threading.Event)
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def snapshot(self, *, log_limit: int = _PROJECT_EXEC_LOG_CHAR_LIMIT) -> dict[str, Any]:
+        with self.lock:
+            stdout, stdout_truncated = _truncate_tool_text("".join(self.stdout_chunks), limit=log_limit)
+            stderr, stderr_truncated = _truncate_tool_text("".join(self.stderr_chunks), limit=log_limit)
+            return {
+                "exec_id": self.exec_id,
+                "thread_id": self.thread_id,
+                "project_id": self.project_id,
+                "command": self.command,
+                "workspace_path": self.workspace_path,
+                "status": self.status,
+                "exit_code": self.exit_code,
+                "started_at": self.started_at.isoformat() if hasattr(self.started_at, "isoformat") else self.started_at,
+                "finished_at": self.finished_at.isoformat() if hasattr(self.finished_at, "isoformat") else self.finished_at,
+                "stdout": stdout,
+                "stderr": stderr,
+                "stdout_truncated": stdout_truncated,
+                "stderr_truncated": stderr_truncated,
+            }
 
 
 class PaperbaseService:
@@ -988,27 +1589,27 @@ class PaperbaseService:
         self.embeddings = OptionalEmbeddingProvider(settings)
         self.reranker = OptionalReranker(settings)
         self.email_sender = email_sender or ResendEmailSender(settings)
-        self.chat_model = chat_model or AnthropicChatModelClient(settings)
+        self.chat_model = chat_model or OpenAIResponsesChatModelClient(settings)
         self.secret_cipher = SecretCipher(settings)
         self.github_repo_manager = github_repo_manager or GitHubProjectRepoManager()
         self.modal_runner = modal_runner or ModalPythonRunner()
+        self._project_exec_sessions: dict[str, ProjectExecSession] = {}
+        self._project_exec_index: dict[tuple[str, str], set[str]] = {}
+        self._project_exec_lock = threading.Lock()
 
     def init(self) -> None:
         self.repository.init()
-
-    def _remaining_free_responses(self, user: BrowserUser) -> int:
-        return max(self.settings.free_chat_response_limit - user.free_responses_used, 0)
 
     def _browser_user_settings_response(
         self,
         user: BrowserUser,
         *,
-        anthropic_api_key_hint: str = "",
+        openai_api_key_hint: str = "",
     ) -> BrowserUserSettingsResponse:
         settings = self.repository.get_browser_user_settings(user.user_id)  # type: ignore[attr-defined]
         return settings.model_copy(
             update={
-                "anthropic_api_key_hint": anthropic_api_key_hint,
+                "openai_api_key_hint": openai_api_key_hint,
                 "github_oauth_available": bool(self.settings.github_client_id and self.settings.github_client_secret),
                 "github_manage_access_url": (
                     f"https://github.com/settings/connections/applications/{self.settings.github_client_id}"
@@ -1021,15 +1622,14 @@ class PaperbaseService:
     def _browser_session_response(self, user: BrowserUser | None) -> BrowserSessionResponse:
         if user is None:
             return BrowserSessionResponse(authenticated=False)
-        api_key_record = self.repository.get_anthropic_api_key_record(user.user_id)  # type: ignore[attr-defined]
+        api_key_record = self.repository.get_openai_api_key_record(user.user_id)  # type: ignore[attr-defined]
         return BrowserSessionResponse(
             authenticated=True,
             user=user,
-            remaining_free_responses=self._remaining_free_responses(user),
-            has_anthropic_api_key=api_key_record is not None,
+            has_openai_api_key=api_key_record is not None,
             settings=self._browser_user_settings_response(
                 user,
-                anthropic_api_key_hint=(api_key_record or {}).get("api_key_hint", ""),
+                openai_api_key_hint=(api_key_record or {}).get("api_key_hint", ""),
             ),
         )
 
@@ -1042,6 +1642,7 @@ class PaperbaseService:
             display_name=request.display_name.strip(),
             password_hash=hash_password(request.password),
         )
+        self.repository.ensure_default_project(user.user_id)  # type: ignore[attr-defined]
         session_token = self._create_browser_session(user.user_id)
         return self._browser_session_response(user), session_token
 
@@ -1120,17 +1721,23 @@ class PaperbaseService:
         session_token = self._create_browser_session(user.user_id)
         return self._browser_session_response(user), session_token
 
-    def save_user_anthropic_key(self, user: BrowserUser, request: SaveAnthropicKeyRequest) -> BrowserSessionResponse:
-        self.repository.save_anthropic_api_key(  # type: ignore[attr-defined]
+    def save_user_openai_key(self, user: BrowserUser, request: SaveOpenAIKeyRequest) -> BrowserSessionResponse:
+        self.repository.save_openai_api_key(  # type: ignore[attr-defined]
             user_id=user.user_id,
             encrypted_api_key=self.secret_cipher.encrypt(request.api_key.strip()),
             hint=api_key_hint(request.api_key),
         )
         return self._browser_session_response(user)
 
-    def delete_user_anthropic_key(self, user: BrowserUser) -> BrowserSessionResponse:
-        self.repository.delete_anthropic_api_key(user.user_id)  # type: ignore[attr-defined]
+    def delete_user_openai_key(self, user: BrowserUser) -> BrowserSessionResponse:
+        self.repository.delete_openai_api_key(user.user_id)  # type: ignore[attr-defined]
         return self._browser_session_response(user)
+
+    def save_user_anthropic_key(self, user: BrowserUser, request: SaveOpenAIKeyRequest) -> BrowserSessionResponse:
+        return self.save_user_openai_key(user, request)
+
+    def delete_user_anthropic_key(self, user: BrowserUser) -> BrowserSessionResponse:
+        return self.delete_user_openai_key(user)
 
     def save_user_modal_credentials(
         self,
@@ -1292,7 +1899,6 @@ class PaperbaseService:
         return ChatThreadListResponse(threads=self.repository.list_chat_threads(user.user_id))  # type: ignore[attr-defined]
 
     def list_projects(self, user: BrowserUser) -> ProjectListResponse:
-        self.repository.ensure_default_project(user.user_id)  # type: ignore[attr-defined]
         return ProjectListResponse(projects=self.repository.list_projects(user.user_id))  # type: ignore[attr-defined]
 
     def _github_access(self, user: BrowserUser) -> tuple[dict[str, str], str]:
@@ -1528,8 +2134,6 @@ class PaperbaseService:
         project = self.repository.get_project(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
         if project is None:
             raise HTTPException(status_code=404, detail="Project not found")
-        if project.is_default:
-            raise HTTPException(status_code=400, detail="Default project cannot be deleted")
         deleted = self.repository.delete_project(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
         if not deleted:
             raise HTTPException(status_code=404, detail="Project not found")
@@ -1627,6 +2231,722 @@ class PaperbaseService:
             raise HTTPException(status_code=404, detail="Python file not found")
         return python_file
 
+    def list_project_workspace_files(self, user: BrowserUser, project_id: str) -> list[PythonFileResponse]:
+        project = self.repository.get_project(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        project_files = self.repository.list_project_python_files(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+        )
+        if project_files is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        return sorted(project_files, key=lambda item: item.repo_path)
+
+    def list_project_code_files(self, user: BrowserUser, project_id: str) -> list[PythonFileResponse]:
+        return [
+            project_file
+            for project_file in self.list_project_workspace_files(user, project_id)
+            if project_file.file_kind == "python"
+        ]
+
+    def _get_project_workspace_file(self, user: BrowserUser, project_id: str, repo_path: str) -> PythonFileResponse:
+        project = self.repository.get_project(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        normalized_repo_path = _normalize_project_workspace_repo_path(repo_path)
+        project_file = self.repository.get_project_python_file_by_path(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+            repo_path=normalized_repo_path,
+        )
+        if project_file is None:
+            raise HTTPException(status_code=404, detail="Project workspace file not found")
+        return project_file
+
+    def _get_project_code_file(self, user: BrowserUser, project_id: str, repo_path: str) -> PythonFileResponse:
+        project_file = self._get_project_workspace_file(user, project_id, repo_path)
+        if project_file.file_kind != "python":
+            raise HTTPException(status_code=404, detail="Project code file not found")
+        return project_file
+
+    def read_project_workspace_file(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        repo_path: str,
+        *,
+        start_line: int | None = None,
+        end_line: int | None = None,
+    ) -> dict[str, Any]:
+        project_file = self._get_project_workspace_file(user, project_id, repo_path)
+        all_lines = project_file.content.splitlines()
+        total_lines = len(all_lines)
+        start = 1 if start_line is None else start_line
+        end = total_lines if end_line is None else end_line
+        if start < 1 or end < start:
+            raise HTTPException(status_code=422, detail="Use a valid line range")
+        start = min(start, total_lines + 1 if total_lines == 0 else total_lines)
+        end = min(end, total_lines)
+        numbered_lines = [
+            {"line_number": line_number, "text": all_lines[line_number - 1]}
+            for line_number in range(start, end + 1)
+        ]
+        rendered = "\n".join(f"{line['line_number']}: {line['text']}" for line in numbered_lines)
+        return {
+            "file_id": project_file.file_id,
+            "repo_path": project_file.repo_path,
+            "filename": project_file.filename,
+            "file_kind": project_file.file_kind,
+            "start_line": start,
+            "end_line": end if total_lines else 0,
+            "total_lines": total_lines,
+            "content": rendered,
+            "lines": numbered_lines,
+        }
+
+    def read_project_code_file(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        repo_path: str,
+        *,
+        start_line: int | None = None,
+        end_line: int | None = None,
+    ) -> dict[str, Any]:
+        project_file = self._get_project_code_file(user, project_id, repo_path)
+        return self.read_project_workspace_file(
+            user,
+            project_id,
+            project_file.repo_path,
+            start_line=start_line,
+            end_line=end_line,
+        )
+
+    def grep_project_workspace(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        *,
+        pattern: str,
+        literal: bool = False,
+        case_sensitive: bool = False,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        query = str(pattern or "").strip()
+        if not query:
+            raise HTTPException(status_code=422, detail="Pattern is required")
+        flags = 0 if case_sensitive else re.IGNORECASE
+        try:
+            matcher = re.compile(re.escape(query) if literal else query, flags)
+        except re.error as exc:
+            raise HTTPException(status_code=422, detail=f"Invalid grep pattern: {exc}") from exc
+        matches: list[dict[str, Any]] = []
+        for project_file in self.list_project_workspace_files(user, project_id):
+            for line_number, line in enumerate(project_file.content.splitlines(), start=1):
+                if not matcher.search(line):
+                    continue
+                matches.append(
+                    {
+                        "file_id": project_file.file_id,
+                        "repo_path": project_file.repo_path,
+                        "filename": project_file.filename,
+                        "file_kind": project_file.file_kind,
+                        "line_number": line_number,
+                        "line": line,
+                    }
+                )
+                if len(matches) >= limit:
+                    return {
+                        "pattern": query,
+                        "literal": literal,
+                        "case_sensitive": case_sensitive,
+                        "matches": matches,
+                        "truncated": True,
+                    }
+        return {
+            "pattern": query,
+            "literal": literal,
+            "case_sensitive": case_sensitive,
+            "matches": matches,
+            "truncated": False,
+        }
+
+    def grep_project_code(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        *,
+        pattern: str,
+        literal: bool = False,
+        case_sensitive: bool = False,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        workspace_result = self.grep_project_workspace(
+            user,
+            project_id,
+            pattern=pattern,
+            literal=literal,
+            case_sensitive=case_sensitive,
+            limit=limit,
+        )
+        workspace_result["matches"] = [
+            match for match in workspace_result["matches"] if match.get("file_kind") == "python"
+        ]
+        return workspace_result
+
+    def create_project_workspace_file(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        *,
+        repo_path: str,
+        content: str = "",
+    ) -> PythonFileResponse:
+        self._get_github_connection(user)
+        project = self.repository.get_project(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        normalized_repo_path = _normalize_project_workspace_repo_path(repo_path)
+        existing = self.repository.get_project_python_file_by_path(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+            repo_path=normalized_repo_path,
+        )
+        if existing is not None:
+            raise HTTPException(status_code=409, detail=f"Project workspace file '{normalized_repo_path}' already exists")
+        file_kind = _workspace_file_kind_for_repo_path(normalized_repo_path)
+        created = self.repository.create_python_file(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+            filename=Path(normalized_repo_path).name,
+            repo_path=normalized_repo_path,
+            file_kind=file_kind,
+            content=content,
+        )
+        if created is None:
+            raise HTTPException(status_code=500, detail="Project workspace file could not be created")
+        return created
+
+    def write_project_workspace_file(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        *,
+        repo_path: str,
+        content: str,
+    ) -> dict[str, Any]:
+        self._get_github_connection(user)
+        normalized_repo_path = _normalize_project_workspace_repo_path(repo_path)
+        existing = self.repository.get_project_python_file_by_path(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+            repo_path=normalized_repo_path,
+        )
+        if existing is None:
+            created = self.create_project_workspace_file(
+                user,
+                project_id,
+                repo_path=normalized_repo_path,
+                content=content,
+            )
+            return {
+                "file_id": created.file_id,
+                "repo_path": created.repo_path,
+                "filename": created.filename,
+                "file_kind": created.file_kind,
+                "content": created.content,
+                "created": True,
+                "replaced": False,
+            }
+        updated = self.repository.update_python_file(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            file_id=existing.file_id,
+            content=content,
+        )
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Project workspace file not found")
+        return {
+            "file_id": updated.file_id,
+            "repo_path": updated.repo_path,
+            "filename": updated.filename,
+            "file_kind": updated.file_kind,
+            "content": updated.content,
+            "created": False,
+            "replaced": True,
+        }
+
+    def create_project_python_file(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        *,
+        repo_path: str,
+        content: str = "",
+    ) -> PythonFileResponse:
+        return self.create_project_workspace_file(
+            user,
+            project_id,
+            repo_path=_normalize_project_code_repo_path(repo_path),
+            content=content,
+        )
+
+    def apply_patch_project_workspace_file(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        *,
+        repo_path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False,
+    ) -> dict[str, Any]:
+        self._get_github_connection(user)
+        project_file = self._get_project_workspace_file(user, project_id, repo_path)
+        if old_string == "":
+            if not new_string.strip():
+                raise HTTPException(status_code=422, detail="new_string must be non-empty when populating an empty file")
+            if project_file.content != "":
+                raise HTTPException(status_code=422, detail="old_string is required unless the file is empty")
+            match_count = 1
+            updated_content = new_string
+        else:
+            match_count = project_file.content.count(old_string)
+            if match_count == 0:
+                raise HTTPException(status_code=409, detail=f"Exact text was not found in '{project_file.repo_path}'")
+            if match_count > 1 and not replace_all:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Exact text matched {match_count} times in '{project_file.repo_path}'. Read the file and retry with a unique snippet or replace_all=true.",
+                )
+            updated_content = (
+                project_file.content.replace(old_string, new_string)
+                if replace_all
+                else project_file.content.replace(old_string, new_string, 1)
+            )
+        if updated_content == project_file.content:
+            raise HTTPException(status_code=409, detail=f"Patch did not change '{project_file.repo_path}'")
+        updated = self.repository.update_python_file(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            file_id=project_file.file_id,
+            content=updated_content,
+        )
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Project workspace file not found")
+        return {
+            "file_id": updated.file_id,
+            "repo_path": updated.repo_path,
+            "filename": updated.filename,
+            "file_kind": updated.file_kind,
+            "match_count": match_count,
+            "replace_all": replace_all,
+            "content": updated.content,
+        }
+
+    def edit_project_code_file(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        *,
+        repo_path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False,
+    ) -> dict[str, Any]:
+        return self.apply_patch_project_workspace_file(
+            user,
+            project_id,
+            repo_path=_normalize_project_code_repo_path(repo_path),
+            old_string=old_string,
+            new_string=new_string,
+            replace_all=replace_all,
+        )
+
+    def move_project_workspace_file(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        *,
+        repo_path: str,
+        new_repo_path: str,
+    ) -> dict[str, Any]:
+        self._get_github_connection(user)
+        project_file = self._get_project_workspace_file(user, project_id, repo_path)
+        normalized_new_repo_path = _normalize_project_workspace_repo_path(new_repo_path)
+        if project_file.repo_path == normalized_new_repo_path:
+            raise HTTPException(status_code=409, detail="Move target matches the current repository path")
+        existing_target = self.repository.get_project_python_file_by_path(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+            repo_path=normalized_new_repo_path,
+        )
+        if existing_target is not None:
+            raise HTTPException(status_code=409, detail=f"Project workspace file '{normalized_new_repo_path}' already exists")
+        updated = self.repository.update_python_file(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            file_id=project_file.file_id,
+            repo_path=normalized_new_repo_path,
+        )
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Project workspace file not found")
+        return {
+            "file_id": updated.file_id,
+            "repo_path": updated.repo_path,
+            "filename": updated.filename,
+            "file_kind": updated.file_kind,
+            "previous_repo_path": project_file.repo_path,
+        }
+
+    def delete_project_workspace_file(self, user: BrowserUser, project_id: str, *, repo_path: str) -> dict[str, Any]:
+        self._get_github_connection(user)
+        project_file = self._get_project_workspace_file(user, project_id, repo_path)
+        deleted = self.repository.delete_python_file(user_id=user.user_id, file_id=project_file.file_id)  # type: ignore[attr-defined]
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Project workspace file not found")
+        return {
+            "file_id": project_file.file_id,
+            "repo_path": project_file.repo_path,
+            "filename": project_file.filename,
+            "file_kind": project_file.file_kind,
+            "deleted": True,
+        }
+
+    def delete_project_code_file(self, user: BrowserUser, project_id: str, *, repo_path: str) -> dict[str, Any]:
+        return self.delete_project_workspace_file(
+            user,
+            project_id,
+            repo_path=_normalize_project_code_repo_path(repo_path),
+        )
+
+    def _project_workspace_files_map(self, user: BrowserUser, project_id: str) -> dict[str, PythonFileResponse]:
+        return {
+            project_file.repo_path: project_file
+            for project_file in self.list_project_workspace_files(user, project_id)
+        }
+
+    def _project_workspace_snapshot_files(self, user: BrowserUser, project_id: str) -> dict[str, str]:
+        files: dict[str, str] = {}
+        for project_file in self.list_project_workspace_files(user, project_id):
+            if project_file.file_kind == "notebook":
+                files[project_file.repo_path] = _python_source_to_notebook(project_file.content)
+            else:
+                files[project_file.repo_path] = project_file.content
+        return files
+
+    def _project_exec_command(self, command: str) -> list[str]:
+        parts = shlex.split(str(command or "").strip())
+        if not parts:
+            raise HTTPException(status_code=422, detail="A command is required")
+        if parts[0] in {"python", "python3"}:
+            parts[0] = sys.executable
+        return parts
+
+    def _record_project_exec_output(self, exec_id: str, stream_name: str, stream) -> None:
+        try:
+            for chunk in iter(stream.readline, ""):
+                with self._project_exec_lock:
+                    session = self._project_exec_sessions.get(exec_id)
+                    if session is None:
+                        break
+                    target = session.stdout_chunks if stream_name == "stdout" else session.stderr_chunks
+                    target.append(chunk)
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+    def _watch_project_exec_session(self, exec_id: str) -> None:
+        with self._project_exec_lock:
+            session = self._project_exec_sessions.get(exec_id)
+        if session is None:
+            return
+        exit_code = session.process.wait()
+        finished_at = utcnow()
+        with session.lock:
+            if session.status != "canceled":
+                session.status = "completed" if exit_code == 0 else "failed"
+            session.exit_code = exit_code
+            session.finished_at = finished_at
+            session.completion_event.set()
+        shutil.rmtree(session.workspace_path, ignore_errors=True)
+
+    def _start_project_exec_session(
+        self,
+        *,
+        user: BrowserUser,
+        thread_id: str,
+        project_id: str,
+        command: list[str],
+    ) -> ProjectExecSession:
+        workspace_path = tempfile.mkdtemp(prefix="paperbase-project-exec-")
+        try:
+            for repo_path, content in self._project_workspace_snapshot_files(user, project_id).items():
+                target = Path(workspace_path) / repo_path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
+            env = os.environ.copy()
+            env["PYTHONPATH"] = workspace_path + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+            process = subprocess.Popen(
+                command,
+                cwd=workspace_path,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except Exception:
+            shutil.rmtree(workspace_path, ignore_errors=True)
+            raise
+        session = ProjectExecSession(
+            exec_id=new_id("pex"),
+            thread_id=thread_id,
+            project_id=project_id,
+            command=list(command),
+            workspace_path=workspace_path,
+            started_at=utcnow(),
+            process=process,
+        )
+        with self._project_exec_lock:
+            self._project_exec_sessions[session.exec_id] = session
+            self._project_exec_index.setdefault((thread_id, project_id), set()).add(session.exec_id)
+        if process.stdout is not None:
+            threading.Thread(
+                target=self._record_project_exec_output,
+                args=(session.exec_id, "stdout", process.stdout),
+                daemon=True,
+            ).start()
+        if process.stderr is not None:
+            threading.Thread(
+                target=self._record_project_exec_output,
+                args=(session.exec_id, "stderr", process.stderr),
+                daemon=True,
+            ).start()
+        threading.Thread(target=self._watch_project_exec_session, args=(session.exec_id,), daemon=True).start()
+        return session
+
+    def _get_project_exec_session(self, *, exec_id: str, thread_id: str, project_id: str) -> ProjectExecSession:
+        with self._project_exec_lock:
+            session = self._project_exec_sessions.get(exec_id)
+        if session is None or session.thread_id != thread_id or session.project_id != project_id:
+            raise HTTPException(status_code=404, detail="Project exec session not found")
+        return session
+
+    def project_exec(
+        self,
+        user: BrowserUser,
+        thread_id: str,
+        project_id: str,
+        *,
+        command: str,
+    ) -> dict[str, Any]:
+        session = self._start_project_exec_session(
+            user=user,
+            thread_id=thread_id,
+            project_id=project_id,
+            command=self._project_exec_command(command),
+        )
+        return session.snapshot()
+
+    def project_wait(
+        self,
+        user: BrowserUser,
+        thread_id: str,
+        project_id: str,
+        *,
+        exec_id: str,
+        timeout_seconds: int = _PROJECT_EXEC_DEFAULT_WAIT_SECONDS,
+    ) -> dict[str, Any]:
+        session = self._get_project_exec_session(exec_id=exec_id, thread_id=thread_id, project_id=project_id)
+        session.completion_event.wait(timeout=max(0, min(timeout_seconds, _PROJECT_EXEC_MAX_WAIT_SECONDS)))
+        return session.snapshot()
+
+    def project_cancel(
+        self,
+        user: BrowserUser,
+        thread_id: str,
+        project_id: str,
+        *,
+        exec_id: str,
+    ) -> dict[str, Any]:
+        session = self._get_project_exec_session(exec_id=exec_id, thread_id=thread_id, project_id=project_id)
+        with session.lock:
+            if session.status == "running":
+                session.status = "canceled"
+                try:
+                    session.process.kill()
+                except Exception:
+                    pass
+        session.completion_event.wait(timeout=1)
+        return session.snapshot()
+
+    def project_logs(
+        self,
+        user: BrowserUser,
+        thread_id: str,
+        project_id: str,
+        *,
+        exec_id: str,
+    ) -> dict[str, Any]:
+        session = self._get_project_exec_session(exec_id=exec_id, thread_id=thread_id, project_id=project_id)
+        return session.snapshot()
+
+    def _project_run_command(self, user: BrowserUser, project_id: str, repo_path: str, mode: str) -> list[str]:
+        project_file = self._get_project_workspace_file(user, project_id, repo_path)
+        if project_file.file_kind not in {"python", "notebook"}:
+            raise HTTPException(status_code=422, detail="project_run only supports Python or notebook files")
+        if project_file.file_kind == "notebook":
+            raise HTTPException(status_code=422, detail="project_run does not support notebook files in chat tools yet")
+        command = [sys.executable, project_file.repo_path]
+        entry_source = project_file.content
+        if "--run-mode" in entry_source or "run_mode" in entry_source:
+            command.extend(["--run-mode", mode])
+        return command
+
+    def project_run_tool(
+        self,
+        user: BrowserUser,
+        thread_id: str,
+        project_id: str,
+        *,
+        repo_path: str,
+        mode: str = "full",
+    ) -> dict[str, Any]:
+        normalized_mode = str(mode or "full").strip().lower() or "full"
+        if normalized_mode not in {"smoke", "full"}:
+            raise HTTPException(status_code=422, detail="Run mode must be 'smoke' or 'full'")
+        session = self._start_project_exec_session(
+            user=user,
+            thread_id=thread_id,
+            project_id=project_id,
+            command=self._project_run_command(user, project_id, repo_path, normalized_mode),
+        )
+        session.completion_event.wait(timeout=_PROJECT_EXEC_MAX_WAIT_SECONDS)
+        payload = session.snapshot()
+        payload["mode"] = normalized_mode
+        return payload
+
+    def project_test_tool(self, user: BrowserUser, thread_id: str, project_id: str) -> dict[str, Any]:
+        workspace_files = self._project_workspace_files_map(user, project_id)
+        has_pytest = any(
+            repo_path.startswith("tests/") or PurePosixPath(repo_path).name.startswith("test_")
+            for repo_path in workspace_files
+        )
+        command = [sys.executable, "-m", "pytest", "-q"] if has_pytest else [sys.executable, "-m", "compileall", "."]
+        session = self._start_project_exec_session(
+            user=user,
+            thread_id=thread_id,
+            project_id=project_id,
+            command=command,
+        )
+        session.completion_event.wait(timeout=_PROJECT_EXEC_MAX_WAIT_SECONDS)
+        payload = session.snapshot()
+        payload["tool"] = "project_test"
+        return payload
+
+    def project_lint_tool(self, user: BrowserUser, thread_id: str, project_id: str) -> dict[str, Any]:
+        ruff = shutil.which("ruff")
+        command = [ruff, "check", "."] if ruff else [sys.executable, "-m", "compileall", "."]
+        session = self._start_project_exec_session(
+            user=user,
+            thread_id=thread_id,
+            project_id=project_id,
+            command=command,
+        )
+        session.completion_event.wait(timeout=_PROJECT_EXEC_MAX_WAIT_SECONDS)
+        payload = session.snapshot()
+        payload["tool"] = "project_lint"
+        return payload
+
+    def _project_remote_files(self, user: BrowserUser, project_id: str) -> dict[str, str] | None:
+        sync = self.repository.get_project_repo_sync(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
+        if sync is None or not sync.repo_exists or not sync.github_repo_name:
+            return None
+        try:
+            github = self._get_github_connection(user)
+            access_token = self.secret_cipher.decrypt(github["encrypted_access_token"])
+            manifest_content = self.github_repo_manager.get_file_text(
+                access_token=access_token,
+                owner_login=sync.github_owner_login or github["github_login"],
+                repo_name=sync.github_repo_name,
+                path=".paperbase",
+                ref=sync.base_branch or sync.default_branch or "main",
+            )
+        except Exception:
+            return None
+        remote_files: dict[str, str] = {}
+        for repo_path in sorted(_managed_paths_from_manifest_content(manifest_content)):
+            if repo_path == ".paperbase":
+                continue
+            try:
+                remote_files[repo_path] = self.github_repo_manager.get_file_text(
+                    access_token=access_token,
+                    owner_login=sync.github_owner_login or github["github_login"],
+                    repo_name=sync.github_repo_name,
+                    path=repo_path,
+                    ref=sync.base_branch or sync.default_branch or "main",
+                )
+            except Exception:
+                continue
+        return remote_files
+
+    def project_git_status(self, user: BrowserUser, project_id: str) -> dict[str, Any]:
+        local_files = self._project_workspace_files_map(user, project_id)
+        remote_files = self._project_remote_files(user, project_id) or {}
+        added = sorted(path for path in local_files if path not in remote_files)
+        deleted = sorted(path for path in remote_files if path not in local_files)
+        modified = sorted(
+            path
+            for path, project_file in local_files.items()
+            if path in remote_files
+            and project_file.content
+            != (
+                _notebook_to_python_source_or_raw(remote_files[path])
+                if project_file.file_kind == "notebook"
+                else remote_files[path]
+            )
+        )
+        clean = not (added or deleted or modified)
+        return {
+            "clean": clean,
+            "added": added,
+            "deleted": deleted,
+            "modified": modified,
+            "base_ref": None if not remote_files else "project_repo_sync",
+        }
+
+    def project_git_diff(self, user: BrowserUser, project_id: str) -> dict[str, Any]:
+        local_files = self._project_workspace_files_map(user, project_id)
+        remote_files = self._project_remote_files(user, project_id) or {}
+        diffs: list[str] = []
+        all_paths = sorted(set(local_files) | set(remote_files))
+        for repo_path in all_paths:
+            before = remote_files.get(repo_path)
+            if repo_path in local_files and local_files[repo_path].file_kind == "notebook" and before is not None:
+                before = _notebook_to_python_source_or_raw(before)
+            after = local_files.get(repo_path).content if repo_path in local_files else None
+            before_lines = [] if before is None else before.splitlines()
+            after_lines = [] if after is None else after.splitlines()
+            diff = "\n".join(
+                difflib.unified_diff(
+                    before_lines,
+                    after_lines,
+                    fromfile=f"a/{repo_path}",
+                    tofile=f"b/{repo_path}",
+                    lineterm="",
+                )
+            ).strip()
+            if diff:
+                diffs.append(diff)
+        rendered, truncated = _truncate_tool_text("\n\n".join(diffs).strip(), limit=_CHAT_TURN_DIFF_MAX_CHARS)
+        return {
+            "diff": rendered,
+            "truncated": truncated,
+            "base_ref": None if not remote_files else "project_repo_sync",
+        }
+
     def update_python_file(
         self,
         user: BrowserUser,
@@ -1646,6 +2966,22 @@ class PaperbaseService:
         if python_file is None:
             raise HTTPException(status_code=404, detail="Python file not found")
         return python_file
+
+    def delete_python_file(self, user: BrowserUser, file_id: str) -> dict[str, Any]:
+        self._get_github_connection(user)
+        project_file = self.repository.get_python_file(user_id=user.user_id, file_id=file_id)  # type: ignore[attr-defined]
+        if project_file is None:
+            raise HTTPException(status_code=404, detail="Python file not found")
+        deleted = self.repository.delete_python_file(user_id=user.user_id, file_id=file_id)  # type: ignore[attr-defined]
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Python file not found")
+        return {
+            "file_id": project_file.file_id,
+            "project_id": project_file.project_id,
+            "repo_path": project_file.repo_path,
+            "filename": project_file.filename,
+            "deleted": True,
+        }
 
     def get_project_repo_sync(self, user: BrowserUser, project_id: str) -> ProjectRepoSyncResponse:
         sync = self.repository.get_project_repo_sync(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
@@ -1761,6 +3097,7 @@ class PaperbaseService:
                 "project_file_count": len(project_files),
                 "python_file_count": len([item for item in file_manifests if item["file_kind"] == "python"]),
                 "notebook_file_count": len([item for item in file_manifests if item["file_kind"] == "notebook"]),
+                "text_file_count": len([item for item in file_manifests if item["file_kind"] == "text"]),
                 "managed_paths": managed_paths,
                 "files": file_manifests,
             }
@@ -1871,25 +3208,72 @@ class PaperbaseService:
             raise HTTPException(status_code=500, detail="Project repository metadata could not be saved")
         return saved
 
-    def run_python_file(self, user: BrowserUser, file_id: str) -> RunPythonFileResponse:
-        python_file = self.get_python_file(user, file_id)
+    def run_project_python_file(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        *,
+        repo_path: str,
+        mode: str = "full",
+    ) -> RunPythonFileResponse:
+        project_file = self._get_project_code_file(user, project_id, repo_path)
+        return self._run_project_file_workspace(user, project_id, project_file=project_file, mode=mode)
+
+    def _run_project_file_workspace(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        *,
+        project_file: PythonFileResponse,
+        mode: str,
+    ) -> RunPythonFileResponse:
+        normalized_mode = str(mode or "full").strip().lower() or "full"
+        if normalized_mode not in {"smoke", "full"}:
+            raise HTTPException(status_code=422, detail="Run mode must be 'smoke' or 'full'")
+        project_files = self.repository.list_project_python_files(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+        )
+        if project_files is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        workspace_files: dict[str, str] = {}
+        for item in project_files:
+            if item.file_kind == "python":
+                workspace_files[item.repo_path] = item.content
+            elif item.file_kind == "notebook":
+                workspace_files[item.repo_path] = _python_source_to_notebook(item.content)
+        entrypoint_path = project_file.repo_path
+        if project_file.file_kind == "notebook":
+            entrypoint_path = "__paperbase_notebook_entry__.py"
+            workspace_files[entrypoint_path] = project_file.content
         token_id, token_secret = self._get_modal_credentials(user)
         try:
-            result = self.modal_runner.run(
+            result = self.modal_runner.run_project(
                 token_id=token_id,
                 token_secret=token_secret,
-                code=python_file.content,
+                files=workspace_files,
+                entrypoint_path=entrypoint_path,
+                run_mode=normalized_mode,
             )
         except ModalExecutionError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         return RunPythonFileResponse(
-            file_id=python_file.file_id,
+            file_id=project_file.file_id,
             status=result.status,
             stdout=result.stdout,
             stderr=result.stderr,
             exit_code=result.exit_code,
             started_at=result.started_at,
             finished_at=result.finished_at,
+        )
+
+    def run_python_file(self, user: BrowserUser, file_id: str, *, mode: str = "full") -> RunPythonFileResponse:
+        python_file = self.get_python_file(user, file_id)
+        return self._run_project_file_workspace(
+            user,
+            python_file.project_id,
+            project_file=python_file,
+            mode=mode,
         )
 
     def create_chat_thread(self, user: BrowserUser, request: CreateChatThreadRequest) -> ChatThreadResponse:
@@ -1901,7 +3285,14 @@ class PaperbaseService:
         else:
             project = self.repository.get_default_project(user.user_id)  # type: ignore[attr-defined]
             if project is None:
-                project = self.repository.ensure_default_project(user.user_id)  # type: ignore[attr-defined]
+                first_project = next(iter(self.repository.list_projects(user.user_id)), None)  # type: ignore[attr-defined]
+                if first_project is not None:
+                    project = self.repository.get_project(  # type: ignore[attr-defined]
+                        user_id=user.user_id,
+                        project_id=first_project.project_id,
+                    )
+            if project is None:
+                raise HTTPException(status_code=409, detail="Create a project before starting a chat")
         summary = self.repository.create_chat_thread(  # type: ignore[attr-defined]
             user_id=user.user_id,
             title=request.title.strip() or "New chat",
@@ -1948,21 +3339,108 @@ class PaperbaseService:
         if not deleted:
             raise HTTPException(status_code=404, detail="Chat thread not found")
 
-    def _choose_anthropic_api_key(self, user: BrowserUser) -> tuple[str | None, bool, str]:
-        user_key_record = self.repository.get_anthropic_api_key_record(user.user_id)  # type: ignore[attr-defined]
-        if user.free_responses_used < self.settings.free_chat_response_limit and self.settings.anthropic_api_key:
-            return self.settings.anthropic_api_key, True, "completed"
+    def _choose_openai_api_key(self, user: BrowserUser) -> tuple[str | None, str]:
+        user_key_record = self.repository.get_openai_api_key_record(user.user_id)  # type: ignore[attr-defined]
         if user_key_record:
             try:
-                return self.secret_cipher.decrypt(user_key_record["encrypted_api_key"]), False, "completed"
+                return self.secret_cipher.decrypt(user_key_record["encrypted_api_key"]), "completed"
             except InvalidToken:
                 logger.warning(
-                    "Saved Anthropic API key could not be decrypted; deleting stale record",
-                    extra={"event": "browser.auth.anthropic_key.invalid", "user_id": user.user_id},
+                    "Saved OpenAI API key could not be decrypted; deleting stale record",
+                    extra={"event": "browser.auth.openai_key.invalid", "user_id": user.user_id},
+                )
+                self.repository.delete_openai_api_key(user.user_id)  # type: ignore[attr-defined]
+                return None, "api_key_invalid"
+        legacy_user_key_record = self.repository.get_anthropic_api_key_record(user.user_id)  # type: ignore[attr-defined]
+        if legacy_user_key_record:
+            try:
+                return self.secret_cipher.decrypt(legacy_user_key_record["encrypted_api_key"]), "completed"
+            except InvalidToken:
+                logger.warning(
+                    "Saved legacy Anthropic API key could not be decrypted; deleting stale record",
+                    extra={"event": "browser.auth.openai_key.legacy_invalid", "user_id": user.user_id},
                 )
                 self.repository.delete_anthropic_api_key(user.user_id)  # type: ignore[attr-defined]
-                return None, False, "api_key_invalid"
-        return None, False, "api_key_required"
+                return None, "api_key_invalid"
+        return None, "api_key_required"
+
+    def _choose_anthropic_api_key(self, user: BrowserUser) -> tuple[str | None, bool, str]:
+        return self._choose_openai_api_key(user)
+
+    def _ensure_mentioned_papers_indexed(
+        self, paper_ids: list[str]
+    ) -> Iterator[tuple[str, dict[str, Any]]]:
+        """Resolve each @-mentioned ``paper_id`` and, if the row is not already
+        at ``index_status='indexed'``, synchronously fetch and index it from
+        arXiv before the chat turn runs. Yields SSE-shaped events
+        (``mention_indexing_started`` / ``mention_indexing_completed`` /
+        ``mention_indexing_failed``) so the streaming chat path can surface
+        per-paper progress; the non-streaming caller drains the iterator and
+        discards the events. Failures (unknown paper, missing arxiv_id, or a
+        ``PermanentError`` from ``index_arxiv_paper``) are reported as a
+        ``mention_indexing_failed`` event but do not abort the turn — the chat
+        will simply run without that paper at full fidelity."""
+        seen: set[str] = set()
+        for paper_id in paper_ids:
+            if not paper_id or paper_id in seen:
+                continue
+            seen.add(paper_id)
+            existing = self.repository.get_paper(paper_id)  # type: ignore[attr-defined]
+            if existing is None:
+                yield (
+                    "mention_indexing_failed",
+                    {"paper_id": paper_id, "detail": "Paper not found"},
+                )
+                continue
+            if existing.index_status == "indexed":
+                continue
+            if not existing.arxiv_id:
+                yield (
+                    "mention_indexing_failed",
+                    {
+                        "paper_id": paper_id,
+                        "title": existing.title or "",
+                        "detail": "Paper has no arxiv_id; cannot fetch on demand",
+                    },
+                )
+                continue
+            yield (
+                "mention_indexing_started",
+                {
+                    "paper_id": paper_id,
+                    "arxiv_id": existing.arxiv_id,
+                    "title": existing.title or "",
+                },
+            )
+            try:
+                indexed = self.index_arxiv_paper(existing.arxiv_id, force=False)
+            except Exception as exc:
+                logger.exception(
+                    "On-demand mention indexing failed",
+                    extra={
+                        "event": "chat.mention_indexing_failed",
+                        "paper_id": paper_id,
+                        "arxiv_id": existing.arxiv_id,
+                    },
+                )
+                yield (
+                    "mention_indexing_failed",
+                    {
+                        "paper_id": paper_id,
+                        "arxiv_id": existing.arxiv_id,
+                        "title": existing.title or "",
+                        "detail": str(exc),
+                    },
+                )
+                continue
+            yield (
+                "mention_indexing_completed",
+                {
+                    "paper_id": indexed.paper_id,
+                    "arxiv_id": indexed.arxiv_id,
+                    "title": indexed.title or "",
+                },
+            )
 
     def _prepare_chat_generation(
         self,
@@ -1970,25 +3448,34 @@ class PaperbaseService:
         user: BrowserUser,
         thread_id: str,
         request: SendChatMessageRequest,
+        resolved_user: BrowserUser,
+        api_key_value: str,
     ) -> PreparedChatGeneration:
         thread = self.get_chat_thread(user, thread_id)
         content = request.content.strip()
-        user_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
+        turn = self.repository.create_chat_turn(  # type: ignore[attr-defined]
             thread_id=thread_id,
+            status="running",
+        )
+        user_item = self.repository.add_chat_thread_item(  # type: ignore[attr-defined]
+            thread_id=thread_id,
+            turn_id=turn.turn_id,
+            item_type="user_message",
             role="user",
-            content_markdown=content,
+            content_text=content,
         )
         if thread.title == "New chat":
-            self.repository.rename_chat_thread(thread_id=thread_id, title=content[:60])  # type: ignore[attr-defined]
-        resolved_user = self.repository.get_browser_user_by_id(user.user_id) or user  # type: ignore[attr-defined]
-        api_key_value, using_free_tier, api_key_state = self._choose_anthropic_api_key(resolved_user)
+            self.repository.rename_chat_thread(  # type: ignore[attr-defined]
+                thread_id=thread_id,
+                title=_summarize_chat_title(content),
+            )
+        refreshed = self.get_chat_thread(user, thread_id)
         return PreparedChatGeneration(
-            thread=thread,
-            user_message=user_message,
+            thread=refreshed,
+            turn=turn,
+            user_item=user_item,
             resolved_user=resolved_user,
             api_key_value=api_key_value,
-            using_free_tier=using_free_tier,
-            api_key_state=api_key_state,
         )
 
     def _project_prompt_suffix(self, thread: ChatThreadResponse) -> str:
@@ -2003,85 +3490,132 @@ class PaperbaseService:
             "Treat these instructions as active context for this session."
         )
 
-    def _chat_tool_system_prompt(self, thread: ChatThreadResponse) -> str:
-        return (
-            "You are Paperbase Chat. You have access to Paperbase research tools that can search papers, sections, files, figures, tables, references, related papers, and the user's uploaded documents. "
-            "Use tools aggressively for research-oriented turns. If the user asks about papers, references, findings, comparisons, methods, figures, tables, benchmarks, uploaded notes, or asks for links, do not rely on parametric memory when Paperbase tools can answer. "
-            "Start with discovery tools to find the right papers, then follow up with evidence tools before making specific factual claims. "
-            "Broad discovery tools like paperbase_search, paperbase_get_results, paperbase_get_paper, paperbase_get_related_papers, and paperbase_get_references are for candidate discovery and metadata only. "
-            "They are not citable evidence by themselves. Before making specific factual claims, follow up with evidence tools like paperbase_search_sections, paperbase_read_file, paperbase_get_figure, paperbase_get_table, or paperbase_search_uploaded_sections. "
-            "When a final answer should mention papers, recommendations, or reading lists, gather metadata rich enough to include direct paper links such as html_url or pdf_url when available. "
-            "On turns where you still need tools, emit tool calls only and do not write any user-facing narrative text. "
-            "Once the tool results are sufficient, stop calling tools. The final answer will be generated in a separate step."
-            + self._project_prompt_suffix(thread)
+    def _chat_base_instructions(
+        self,
+        thread: ChatThreadResponse,
+        *,
+        include_research_tools: bool,
+        include_project_code_tools: bool,
+    ) -> str:
+        parts = [_load_prompt_asset("v1/shared_base.md")]
+        if include_project_code_tools and thread.project_id:
+            parts.extend(
+                [
+                    _load_prompt_asset("v1/core_harness.md"),
+                    _load_prompt_asset("v1/coding_core.md"),
+                    _load_prompt_asset("v1/project_coding.md"),
+                ]
+            )
+            if include_research_tools:
+                parts.append(_load_prompt_asset("v1/research_optional.md"))
+        elif include_research_tools:
+            parts.append(_load_prompt_asset("v1/research_base.md"))
+        return "\n\n".join(part for part in parts if part).strip() + self._project_prompt_suffix(thread)
+
+    def _chat_tool_system_prompt(
+        self,
+        thread: ChatThreadResponse,
+        *,
+        include_research_tools: bool,
+        include_project_code_tools: bool,
+    ) -> str:
+        return self._chat_base_instructions(
+            thread,
+            include_research_tools=include_research_tools,
+            include_project_code_tools=include_project_code_tools,
         )
 
     def _chat_answer_system_prompt(self, *, thread: ChatThreadResponse, has_evidence_sources: bool) -> str:
-        if not has_evidence_sources:
-            return (
-                "You are Paperbase Chat. Respond naturally and helpfully in strict GitHub-flavored markdown. "
-                "Output must be valid markdown that a standard parser can render directly, not markdown-like plain text. "
-                "Use markdown syntax exactly: write emphasis as **text** with no extra inner spaces, keep headings/lists/tables on their own lines, and preserve blank lines where block markdown needs them. "
-                "If no evidence sources were gathered for this turn, do not cite sources, do not invent source ids like [S1], "
-                "and do not bring up papers or research context unless the user explicitly asks for them. "
-                "Treat any citations that appeared in earlier turns as historical context only, not as active sources for this reply. "
-                "For casual turns such as greetings or small talk, answer briefly and conversationally."
-                + self._project_prompt_suffix(thread)
-            )
-        return (
-            "You are Paperbase Chat. Answer using the gathered Paperbase tool results when possible. "
-            "Respond in strict GitHub-flavored markdown. Output must be valid markdown that a standard parser can render directly, not markdown-like plain text. "
-            "Use headings, bullets, tables, fenced code blocks, and normal markdown links when they clarify the answer, but only with correct markdown syntax. "
-            "Do not put spaces just inside emphasis delimiters, and do not run prose into list or table blocks. "
-            "When you mention specific research papers, include markdown links to the paper pages or PDFs from the gathered tool results whenever those URLs are available. "
-            "If the user asked for related reading, recommendations, or references, prefer a compact bullet list with paper title plus link before any longer discussion. "
-            "Only cite source ids inline like [S1] when those ids came from evidence-bearing tool results such as section hits, file reads, figure captions, tables, or uploaded-document excerpts. "
-            "Do not cite broad search results or metadata-only results. If the gathered sources are insufficient, say so plainly."
-            + self._project_prompt_suffix(thread)
+        del has_evidence_sources
+        return self._chat_base_instructions(
+            thread,
+            include_research_tools=True,
+            include_project_code_tools=bool(thread.project_id),
         )
 
-    def _chat_message_for_model(self, message: ChatMessageResponse) -> dict[str, Any]:
-        if message.kind == "compaction":
+    def _render_compaction_checkpoint(self, item: ChatThreadItemResponse) -> str:
+        summary = item.content_text.strip() or "Conversation compacted."
+        parts = ["Conversation compaction checkpoint.", "", summary]
+        if item.citations:
+            citation_lines = [
+                f"- [{citation.source_id}] {citation.title} ({citation.source_kind}, {citation.path}): {citation.excerpt}"
+                for citation in item.citations
+            ]
+            parts.extend(["", "## Persisted Source IDs", "", *citation_lines])
+        return "\n".join(parts).strip()
+
+    def _chat_input_item_from_thread_item(self, item: ChatThreadItemResponse) -> dict[str, Any] | None:
+        if item.item_type == "compaction":
             return {
-                "role": "user",
-                "content": f"Conversation compaction checkpoint:\n\n{message.content_markdown}",
+                "type": "message",
+                "role": "developer",
+                "content": self._render_compaction_checkpoint(item),
             }
-        return {"role": message.role, "content": message.content_markdown}
+        if item.item_type == "function_call":
+            arguments = item.content_text
+            if not arguments and item.content_json is not None:
+                arguments = json.dumps(item.content_json, ensure_ascii=False)
+            return {
+                "type": "function_call",
+                "call_id": item.call_id or item.item_id,
+                "name": item.name or "",
+                "arguments": arguments,
+            }
+        if item.item_type == "function_call_output":
+            output = item.content_text
+            if not output and item.content_json is not None:
+                output = json.dumps(item.content_json, ensure_ascii=False)
+            return {
+                "type": "function_call_output",
+                "call_id": item.call_id or "",
+                "output": output,
+            }
+        if item.item_type == "reasoning":
+            if not isinstance(item.content_json, list) or not item.content_json:
+                return None
+            return {
+                "type": "reasoning",
+                "id": item.item_id,
+                "summary": item.content_json,
+            }
+        return {
+            "type": "message",
+            "role": item.role or "assistant",
+            "content": item.content_text,
+        }
 
     def _chat_turn_context(self, prepared: PreparedChatGeneration) -> ChatTurnContext:
-        active_messages = [*prepared.thread.messages, prepared.user_message]
+        prompt_items = [
+            normalized
+            for item in prepared.thread.items
+            if (normalized := self._chat_input_item_from_thread_item(item)) is not None
+        ]
         return ChatTurnContext(
-            messages=[self._chat_message_for_model(message) for message in active_messages],
-            active_message_ids=[message.message_id for message in active_messages],
+            items=prompt_items,
+            active_item_ids=[item.item_id for item in prepared.thread.items],
         )
 
-    def _chat_context_token_count(
-        self,
-        *,
-        api_key: str,
-        messages: list[dict[str, Any]],
-        system_prompt: str,
-        tools: list[dict[str, Any]] | None = None,
-        tool_choice: dict[str, Any] | None = None,
-    ) -> int | None:
-        count_message_tokens = getattr(self.chat_model, "count_message_tokens", None)
-        if count_message_tokens is None:
-            return None
-        return count_message_tokens(
-            api_key=api_key,
-            messages=messages,
-            system_prompt=system_prompt,
-            tools=tools,
-            tool_choice=tool_choice,
-        )
+    def _chat_model_create_response(self, *, api_key: str, prompt: Prompt) -> ResponseEnvelope:
+        return self.chat_model.create_response(api_key=api_key, prompt=prompt)
+
+    def _chat_model_stream_response(self, *, api_key: str, prompt: Prompt) -> Iterator[ResponseEvent]:
+        return self.chat_model.stream_response(api_key=api_key, prompt=prompt)
+
+    def _chat_model_count_tokens(self, *, api_key: str, prompt: Prompt) -> int | None:
+        return self.chat_model.count_prompt_tokens(api_key=api_key, prompt=prompt)
 
     def _chat_context_needs_compaction(self, *, token_count: int | None) -> bool:
         if token_count is None:
             return False
-        context_window = _anthropic_context_window_tokens(self.settings.anthropic_model)
+        context_window = _openai_context_window_tokens(self.settings.openai_model)
         return token_count >= int(context_window * _CHAT_COMPACTION_THRESHOLD_RATIO)
 
-    def _render_compaction_source(self, messages: list[dict[str, Any]], citations: list[ChatCitation]) -> str:
+    def _render_compaction_source(
+        self,
+        messages: list[dict[str, Any]],
+        citations: list[ChatCitation],
+        turn_state: ChatTurnState,
+    ) -> str:
         parts: list[str] = []
         for index, message in enumerate(messages, start=1):
             role = str(message.get("role") or "unknown")
@@ -2091,6 +3625,9 @@ class PaperbaseService:
             else:
                 rendered = json.dumps(content, ensure_ascii=False, indent=2)
             parts.append(f"## Message {index}: {role}\n\n{rendered.strip()}")
+        turn_summary = turn_state.visible_summary().strip()
+        if turn_summary and turn_summary != "Current turn state:":
+            parts.append(f"## Turn State\n\n{turn_summary}")
         if citations:
             citation_lines = [
                 f"- [{citation.source_id}] {citation.title} ({citation.source_kind}, {citation.path}): {citation.excerpt}"
@@ -2099,8 +3636,13 @@ class PaperbaseService:
             parts.append("## Active Source IDs\n\n" + "\n".join(citation_lines))
         return "\n\n".join(parts).strip()
 
-    def _chat_compaction_prompt(self, messages: list[dict[str, Any]], citations: list[ChatCitation]) -> str:
-        source = self._render_compaction_source(messages, citations)
+    def _chat_compaction_prompt(
+        self,
+        messages: list[dict[str, Any]],
+        citations: list[ChatCitation],
+        turn_state: ChatTurnState,
+    ) -> str:
+        source = self._render_compaction_source(messages, citations, turn_state)
         return (
             "Compact the conversation transcript below into a strict GitHub-flavored markdown handoff summary. "
             "Do not answer the user's request. Preserve the user goals, completed work, current turn state, "
@@ -2110,13 +3652,14 @@ class PaperbaseService:
             f"{source}"
         )
 
-    def _create_compaction_placeholder(self, *, thread_id: str) -> ChatMessageResponse:
-        return self.repository.add_chat_message(  # type: ignore[attr-defined]
+    def _create_compaction_placeholder(self, *, thread_id: str, turn_id: str) -> ChatThreadItemResponse:
+        return self.repository.add_chat_thread_item(  # type: ignore[attr-defined]
             thread_id=thread_id,
-            role="user",
-            content_markdown=_CHAT_COMPACTION_PLACEHOLDER,
-            status="streaming",
-            kind="compaction",
+            turn_id=turn_id,
+            item_type="compaction",
+            role="assistant",
+            content_text=_CHAT_COMPACTION_PLACEHOLDER,
+            status="in_progress",
         )
 
     def _finish_chat_compaction(
@@ -2125,52 +3668,63 @@ class PaperbaseService:
         prepared: PreparedChatGeneration,
         context: ChatTurnContext,
         citation_registry: ChatCitationRegistry,
-        placeholder: ChatMessageResponse,
-    ) -> tuple[ChatTurnContext, ChatMessageResponse, ChatThreadResponse]:
+        turn_state: ChatTurnState,
+        placeholder: ChatThreadItemResponse,
+    ) -> tuple[ChatTurnContext, ChatThreadItemResponse, ChatThreadResponse]:
         try:
-            payload = self.chat_model.create_message(
+            payload = self._chat_model_create_response(
                 api_key=prepared.api_key_value or "",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": self._chat_compaction_prompt(context.messages, citation_registry.citations),
-                    }
-                ],
-                system_prompt="",
+                prompt=Prompt(
+                    input=[
+                        {
+                            "role": "user",
+                            "content": self._chat_compaction_prompt(
+                                context.prompt_input,
+                                citation_registry.citations,
+                                turn_state,
+                            ),
+                        }
+                    ],
+                    base_instructions="",
+                ),
             )
-            summary = _extract_message_text(payload).strip()
+            summary = "\n\n".join(
+                item.content_text
+                for item in payload.items
+                if item.item_type in {"message", "assistant_message"}
+            ).strip()
             if not summary:
                 summary = "Conversation compacted, but the compaction model returned an empty summary."
-            compaction_message = self.repository.update_chat_message(  # type: ignore[attr-defined]
-                placeholder.message_id,
-                content_markdown=summary,
+            compaction_message = self.repository.update_chat_thread_item(  # type: ignore[attr-defined]
+                placeholder.item_id,
+                item_type="compaction",
+                phase=None,
+                content_text=summary,
                 citations=[citation.model_dump() for citation in citation_registry.citations],
                 status="completed",
-                kind="compaction",
             )
             if compaction_message is None:
                 raise RuntimeError("Compaction checkpoint vanished while updating")
-            self.repository.archive_chat_messages(  # type: ignore[attr-defined]
-                thread_id=prepared.thread.thread_id,
-                message_ids=context.active_message_ids,
-                archived_by_message_id=compaction_message.message_id,
-            )
             refreshed = self.get_chat_thread(prepared.resolved_user, prepared.thread.thread_id)
             return (
                 ChatTurnContext(
-                    messages=[self._chat_message_for_model(compaction_message)],
-                    active_message_ids=[compaction_message.message_id],
+                    items=[
+                        normalized
+                        for normalized in [self._chat_input_item_from_thread_item(compaction_message)]
+                        if normalized is not None
+                    ],
+                    active_item_ids=[compaction_message.item_id],
                     compactions_used=context.compactions_used + 1,
                 ),
                 compaction_message,
                 refreshed,
             )
         except Exception:
-            self.repository.update_chat_message(  # type: ignore[attr-defined]
-                placeholder.message_id,
-                content_markdown="Conversation compaction failed.",
+            self.repository.update_chat_thread_item(  # type: ignore[attr-defined]
+                placeholder.item_id,
+                item_type="compaction",
+                content_text="Conversation compaction failed.",
                 status="failed",
-                kind="compaction",
             )
             raise
 
@@ -2179,41 +3733,37 @@ class PaperbaseService:
         *,
         prepared: PreparedChatGeneration,
         context: ChatTurnContext,
-        system_prompt: str,
         citation_registry: ChatCitationRegistry,
-        tools: list[dict[str, Any]] | None = None,
-        tool_choice: dict[str, Any] | None = None,
-    ) -> tuple[ChatTurnContext, list[tuple[str, dict[str, Any]]]]:
+        turn_state: ChatTurnState,
+        router: ChatToolRouter,
+    ) -> tuple[ChatTurnContext, Prompt, list[tuple[str, dict[str, Any]]]]:
         events: list[tuple[str, dict[str, Any]]] = []
         while True:
-            token_count = self._chat_context_token_count(
+            prompt = self._chat_sampling_prompt(
+                prepared=prepared,
+                context=context,
+                turn_state=turn_state,
+                router=router,
+            )
+            token_count = self._chat_model_count_tokens(
                 api_key=prepared.api_key_value or "",
-                messages=context.messages,
-                system_prompt=system_prompt,
-                tools=tools,
-                tool_choice=tool_choice,
+                prompt=prompt,
             )
             if not self._chat_context_needs_compaction(token_count=token_count):
-                return context, events
+                return context, prompt, events
             if context.compactions_used >= _CHAT_COMPACTION_MAX_PER_TURN:
                 raise RuntimeError("Conversation context is still too large after compaction")
-            placeholder = self._create_compaction_placeholder(thread_id=prepared.thread.thread_id)
-            events.append(("compaction_start", {"compaction_message": placeholder.model_dump(mode="json")}))
+            placeholder = self._create_compaction_placeholder(thread_id=prepared.thread.thread_id, turn_id=prepared.turn.turn_id)
+            events.append(("item_started", {"item": placeholder.model_dump(mode="json")}))
             next_context, compaction_message, refreshed = self._finish_chat_compaction(
                 prepared=prepared,
                 context=context,
                 citation_registry=citation_registry,
+                turn_state=turn_state,
                 placeholder=placeholder,
             )
-            events.append(
-                (
-                    "compaction_done",
-                    {
-                        "compaction_message": compaction_message.model_dump(mode="json"),
-                        "messages": [message.model_dump(mode="json") for message in refreshed.messages],
-                    },
-                )
-            )
+            del refreshed
+            events.append(("item_completed", {"item": compaction_message.model_dump(mode="json")}))
             context = next_context
 
     def _ensure_chat_context_budget_stream(
@@ -2221,199 +3771,381 @@ class PaperbaseService:
         *,
         prepared: PreparedChatGeneration,
         context: ChatTurnContext,
-        system_prompt: str,
         citation_registry: ChatCitationRegistry,
-        tools: list[dict[str, Any]] | None = None,
-        tool_choice: dict[str, Any] | None = None,
-    ) -> Generator[tuple[str, dict[str, Any]], None, ChatTurnContext]:
-        while True:
-            token_count = self._chat_context_token_count(
-                api_key=prepared.api_key_value or "",
-                messages=context.messages,
-                system_prompt=system_prompt,
-                tools=tools,
-                tool_choice=tool_choice,
-            )
-            if not self._chat_context_needs_compaction(token_count=token_count):
-                return context
-            if context.compactions_used >= _CHAT_COMPACTION_MAX_PER_TURN:
-                raise RuntimeError("Conversation context is still too large after compaction")
-            placeholder = self._create_compaction_placeholder(thread_id=prepared.thread.thread_id)
-            yield ("compaction_start", {"compaction_message": placeholder.model_dump(mode="json")})
-            context, compaction_message, refreshed = self._finish_chat_compaction(
-                prepared=prepared,
-                context=context,
-                citation_registry=citation_registry,
-                placeholder=placeholder,
-            )
-            yield (
-                "compaction_done",
-                {
-                    "compaction_message": compaction_message.model_dump(mode="json"),
-                    "messages": [message.model_dump(mode="json") for message in refreshed.messages],
-                },
-            )
+        turn_state: ChatTurnState,
+        router: ChatToolRouter,
+    ) -> Generator[tuple[str, dict[str, Any]], None, tuple[ChatTurnContext, Prompt]]:
+        context, prompt, events = self._ensure_chat_context_budget(
+            prepared=prepared,
+            context=context,
+            citation_registry=citation_registry,
+            turn_state=turn_state,
+            router=router,
+        )
+        for event in events:
+            yield event
+        return context, prompt
 
-    def _chat_tool_definitions(self, request: SendChatMessageRequest) -> list[dict[str, Any]]:
-        tools: list[dict[str, Any]] = []
-        if not _should_offer_chat_tools(request.content, request):
-            return tools
-        if request.include_papers:
-            tools.extend(
-                [
-                    {
-                        "name": "paperbase_search",
-                        "description": "Search Paperbase papers by topic, title, abstract, or author. Use this to find candidate papers and result-set ids before narrowing to sections or specific files. Set rerank=true for a slower, higher-recall deep-search pass that also surfaces body-content matches.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {
-                                "query": {"type": "string"},
-                                "limit": {"type": "integer", "minimum": 1, "maximum": 20},
-                                "category": {"type": "string"},
-                                "year": {"type": "string"},
-                                "include_live_sources": {"type": "boolean"},
-                                "rerank": {"type": "boolean"},
-                            },
-                            "required": ["query"],
-                        },
+    def _research_chat_tool_specs(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": "paperbase_search",
+                "description": "Search Paperbase papers by topic, title, abstract, or author. Use this to find candidate papers and result-set ids before narrowing to sections or specific files. Set rerank=true for a slower, higher-recall deep-search pass that also surfaces body-content matches.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+                        "category": {"type": "string"},
+                        "year": {"type": "string"},
+                        "include_live_sources": {"type": "boolean"},
+                        "rerank": {"type": "boolean"},
                     },
-                    {
-                        "name": "paperbase_search_sections",
-                        "description": "Search grounded paper sections and captions inside Paperbase. Use this when the user asks about methods, results, experiments, figures, tables, or any specific detail that needs evidence.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {
-                                "query": {"type": "string"},
-                                "limit": {"type": "integer", "minimum": 1, "maximum": 12},
-                                "result_set_id": {"type": "string"},
-                                "paper_ids": {"type": "array", "items": {"type": "string"}},
-                            },
-                            "required": ["query"],
-                        },
+                    "required": ["query"],
+                },
+            },
+            {
+                "name": "paperbase_search_sections",
+                "description": "Search grounded paper sections and captions inside Paperbase. Use this when the user asks about methods, results, experiments, figures, tables, or any specific detail that needs evidence.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 12},
+                        "result_set_id": {"type": "string"},
+                        "paper_ids": {"type": "array", "items": {"type": "string"}},
                     },
-                    {
-                        "name": "paperbase_get_results",
-                        "description": "Load a previously saved search result set by id. Use this when you already have a result_set_id from an earlier tool call and need the shortlisted papers again.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {"result_set_id": {"type": "string"}},
-                            "required": ["result_set_id"],
-                        },
+                    "required": ["query"],
+                },
+            },
+            {
+                "name": "paperbase_get_results",
+                "description": "Load a previously saved search result set by id. Use this when you already have a result_set_id from an earlier tool call and need the shortlisted papers again.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"result_set_id": {"type": "string"}},
+                    "required": ["result_set_id"],
+                },
+            },
+            {
+                "name": "paperbase_grep_results",
+                "description": "Filter a saved result set by a literal or regex-like pattern and get matching previews. Use this after search when you need a narrower subset of papers containing a specific phrase.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "result_set_id": {"type": "string"},
+                        "pattern": {"type": "string"},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 50},
                     },
-                    {
-                        "name": "paperbase_grep_results",
-                        "description": "Filter a saved result set by a literal or regex-like pattern and get matching previews. Use this after search when you need a narrower subset of papers containing a specific phrase.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {
-                                "result_set_id": {"type": "string"},
-                                "pattern": {"type": "string"},
-                                "limit": {"type": "integer", "minimum": 1, "maximum": 50},
-                            },
-                            "required": ["result_set_id", "pattern"],
-                        },
+                    "required": ["result_set_id", "pattern"],
+                },
+            },
+            {
+                "name": "paperbase_get_paper",
+                "description": "Fetch full metadata for a specific paper id. Use this when you need authors, abstract, summary, venue metadata, dates, or citation counts for a paper you already identified.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"paper_id": {"type": "string"}},
+                    "required": ["paper_id"],
+                },
+            },
+            {
+                "name": "paperbase_list_files",
+                "description": "List the extracted files available for a paper. Use this when you need to discover which sections, figure captions, raw files, or tables exist before reading one.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"paper_id": {"type": "string"}},
+                    "required": ["paper_id"],
+                },
+            },
+            {
+                "name": "paperbase_read_file",
+                "description": "Read the textual content of a specific extracted file for a paper. Use this for section markdown, captions, manifests, or other text files when you need exact content.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "paper_id": {"type": "string"},
+                        "path": {"type": "string"},
                     },
-                    {
-                        "name": "paperbase_get_paper",
-                        "description": "Fetch full metadata for a specific paper id. Use this when you need authors, abstract, summary, venue metadata, dates, or citation counts for a paper you already identified.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {"paper_id": {"type": "string"}},
-                            "required": ["paper_id"],
-                        },
+                    "required": ["paper_id", "path"],
+                },
+            },
+            {
+                "name": "paperbase_get_figure",
+                "description": "Fetch figure caption metadata for a paper figure id. Use this when the user asks about a figure or architecture diagram and the caption is the primary evidence.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "paper_id": {"type": "string"},
+                        "figure_id": {"type": "string"},
                     },
-                    {
-                        "name": "paperbase_list_files",
-                        "description": "List the extracted files available for a paper. Use this when you need to discover which sections, figure captions, raw files, or tables exist before reading one.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {"paper_id": {"type": "string"}},
-                            "required": ["paper_id"],
-                        },
+                    "required": ["paper_id", "figure_id"],
+                },
+            },
+            {
+                "name": "paperbase_get_table",
+                "description": "Fetch structured table rows and caption metadata for a paper table id. Use this when the user asks for metrics, benchmarks, ablations, or comparisons stored in a table.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "paper_id": {"type": "string"},
+                        "table_id": {"type": "string"},
                     },
-                    {
-                        "name": "paperbase_read_file",
-                        "description": "Read the textual content of a specific extracted file for a paper. Use this for section markdown, captions, manifests, or other text files when you need exact content.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {
-                                "paper_id": {"type": "string"},
-                                "path": {"type": "string"},
-                            },
-                            "required": ["paper_id", "path"],
-                        },
+                    "required": ["paper_id", "table_id"],
+                },
+            },
+            {
+                "name": "paperbase_get_related_papers",
+                "description": "Fetch related papers for a known paper id. Use this when the user wants similar work, follow-ons, or neighboring papers in the citation graph.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"paper_id": {"type": "string"}},
+                    "required": ["paper_id"],
+                },
+            },
+            {
+                "name": "paperbase_get_references",
+                "description": "Fetch the outgoing references for a paper id. Use this when the user asks what a paper cites or wants the citation graph expanded from a known paper.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "paper_id": {"type": "string"},
+                        "refresh": {"type": "boolean"},
                     },
-                    {
-                        "name": "paperbase_get_figure",
-                        "description": "Fetch figure caption metadata for a paper figure id. Use this when the user asks about a figure or architecture diagram and the caption is the primary evidence.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {
-                                "paper_id": {"type": "string"},
-                                "figure_id": {"type": "string"},
-                            },
-                            "required": ["paper_id", "figure_id"],
-                        },
+                    "required": ["paper_id"],
+                },
+            },
+            {
+                "name": "paperbase_list_uploaded_documents",
+                "description": "List the user's uploaded documents and tags. Use this when you need to discover which uploads are available before searching within them.",
+                "input_schema": {"type": "object", "properties": {}},
+            },
+            {
+                "name": "paperbase_search_uploaded_sections",
+                "description": "Search the user's uploaded documents by content and optional tags. Use this when the question may be answered by uploaded notes, PDFs, or documents rather than indexed papers.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 12},
+                        "tag_filters": {"type": "array", "items": {"type": "string"}},
                     },
-                    {
-                        "name": "paperbase_get_table",
-                        "description": "Fetch structured table rows and caption metadata for a paper table id. Use this when the user asks for metrics, benchmarks, ablations, or comparisons stored in a table.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {
-                                "paper_id": {"type": "string"},
-                                "table_id": {"type": "string"},
-                            },
-                            "required": ["paper_id", "table_id"],
-                        },
+                    "required": ["query"],
+                },
+            },
+        ]
+
+    def _project_chat_tool_specs(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": "project_list_files",
+                "description": "List the current project's repo-relative workspace text files, including Python, notebooks, and other text files created earlier in this chat. Use this before edits when you need to discover which files already exist.",
+                "input_schema": {"type": "object", "properties": {}},
+            },
+            {
+                "name": "project_read_file",
+                "description": "Read a specific workspace text file from the current project, optionally limited to a line range. Read files before patching them.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "repo_path": {"type": "string"},
+                        "start_line": {"type": "integer", "minimum": 1},
+                        "end_line": {"type": "integer", "minimum": 1},
                     },
-                    {
-                        "name": "paperbase_get_related_papers",
-                        "description": "Fetch related papers for a known paper id. Use this when the user wants similar work, follow-ons, or neighboring papers in the citation graph.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {"paper_id": {"type": "string"}},
-                            "required": ["paper_id"],
-                        },
+                    "required": ["repo_path"],
+                },
+            },
+            {
+                "name": "project_grep",
+                "description": "Search the current project's workspace text files by regex or literal pattern and return matching lines with paths and line numbers.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": {"type": "string"},
+                        "literal": {"type": "boolean"},
+                        "case_sensitive": {"type": "boolean"},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 50},
                     },
-                    {
-                        "name": "paperbase_get_references",
-                        "description": "Fetch the outgoing references for a paper id. Use this when the user asks what a paper cites or wants the citation graph expanded from a known paper.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {
-                                "paper_id": {"type": "string"},
-                                "refresh": {"type": "boolean"},
-                            },
-                            "required": ["paper_id"],
-                        },
+                    "required": ["pattern"],
+                },
+            },
+            {
+                "name": "project_write_file",
+                "description": "Create or replace one repo-relative workspace text file in the current project. Use this when you want to write the full file content in one step.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "repo_path": {"type": "string"},
+                        "content": {"type": "string"},
                     },
-                ]
-            )
-        if request.include_uploads:
-            tools.extend(
-                [
-                    {
-                        "name": "paperbase_list_uploaded_documents",
-                        "description": "List the user's uploaded documents and tags. Use this when you need to discover which uploads are available before searching within them.",
-                        "input_schema": {"type": "object", "properties": {}},
+                    "required": ["repo_path"],
+                },
+            },
+            {
+                "name": "project_apply_patch",
+                "description": "Apply an exact-match text patch to one workspace text file. Fails if the old text is missing or ambiguous unless replace_all=true. If the file is empty, you may use old_string='' once to populate it.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "repo_path": {"type": "string"},
+                        "old_string": {"type": "string"},
+                        "new_string": {"type": "string"},
+                        "replace_all": {"type": "boolean"},
                     },
-                    {
-                        "name": "paperbase_search_uploaded_sections",
-                        "description": "Search the user's uploaded documents by content and optional tags. Use this when the question may be answered by uploaded notes, PDFs, or documents rather than indexed papers.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {
-                                "query": {"type": "string"},
-                                "limit": {"type": "integer", "minimum": 1, "maximum": 12},
-                                "tag_filters": {"type": "array", "items": {"type": "string"}},
-                            },
-                            "required": ["query"],
-                        },
+                    "required": ["repo_path", "old_string", "new_string"],
+                },
+            },
+            {
+                "name": "project_move",
+                "description": "Move or rename one workspace file to a new repo-relative path. Use this for renames and path moves only when the destination should replace the current path exactly.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "repo_path": {"type": "string"},
+                        "new_repo_path": {"type": "string"},
                     },
-                ]
-            )
-        return tools
+                    "required": ["repo_path", "new_repo_path"],
+                },
+            },
+            {
+                "name": "project_delete",
+                "description": "Delete one workspace file from the current project by exact repo-relative path. Use this only when the file truly needs deletion, such as an explicit user request or a superseded rename path.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"repo_path": {"type": "string"}},
+                    "required": ["repo_path"],
+                },
+            },
+            {
+                "name": "project_git_status",
+                "description": "Compare the current project workspace against the last synced project repository state when available, or otherwise report the current local-only workspace status.",
+                "input_schema": {"type": "object", "properties": {}},
+            },
+            {
+                "name": "project_git_diff",
+                "description": "Show a unified diff between the current workspace files and the last synced project repository state when available, or otherwise against an empty baseline.",
+                "input_schema": {"type": "object", "properties": {}},
+            },
+            {
+                "name": "project_exec",
+                "description": "Start a long-running command inside the current project's workspace snapshot and return an exec_id that can be polled later.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string"},
+                    },
+                    "required": ["command"],
+                },
+            },
+            {
+                "name": "project_wait",
+                "description": "Wait for a previously started project_exec session and return its latest status and logs.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "exec_id": {"type": "string"},
+                        "timeout_seconds": {"type": "integer", "minimum": 0, "maximum": 60},
+                    },
+                    "required": ["exec_id"],
+                },
+            },
+            {
+                "name": "project_cancel",
+                "description": "Cancel a running project_exec session by exec_id.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "exec_id": {"type": "string"},
+                    },
+                    "required": ["exec_id"],
+                },
+            },
+            {
+                "name": "project_logs",
+                "description": "Read the latest logs for a project_exec session by exec_id.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "exec_id": {"type": "string"},
+                    },
+                    "required": ["exec_id"],
+                },
+            },
+            {
+                "name": "project_test",
+                "description": "Run the project's tests when they exist, or fall back to a compile-style verification pass for Python files.",
+                "input_schema": {"type": "object", "properties": {}},
+            },
+            {
+                "name": "project_lint",
+                "description": "Run lint or a compile-style syntax pass across the project workspace.",
+                "input_schema": {"type": "object", "properties": {}},
+            },
+            {
+                "name": "project_run",
+                "description": "Run one project Python entrypoint with run mode smoke or full. This is a compatibility alias over the stateful execution flow for simple cases.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "repo_path": {"type": "string"},
+                        "mode": {"type": "string", "enum": ["smoke", "full"]},
+                    },
+                    "required": ["repo_path"],
+                },
+            },
+        ]
+
+    def _chat_tool_router(
+        self,
+        request: SendChatMessageRequest,
+        *,
+        thread: ChatThreadResponse | None = None,
+    ) -> ChatToolRouter:
+        entries: list[ChatToolSpecEntry] = []
+        if _should_offer_research_chat_tools(request.content, request):
+            entries.extend(ChatToolSpecEntry(spec=tool) for tool in self._research_chat_tool_specs())
+        if _should_offer_project_code_tools(request.content, thread=thread):
+            entries.extend(ChatToolSpecEntry(spec=tool) for tool in self._project_chat_tool_specs())
+        return ChatToolRouter(
+            entries,
+            aliases={
+                "project_touch": "project_write_file",
+                "project_edit": "project_apply_patch",
+            },
+        )
+
+    def _chat_sampling_prompt(
+        self,
+        *,
+        prepared: PreparedChatGeneration,
+        context: ChatTurnContext,
+        turn_state: ChatTurnState,
+        router: ChatToolRouter,
+    ) -> Prompt:
+        tools = router.model_visible_specs()
+        base_instructions = self._chat_base_instructions(
+            prepared.thread,
+            include_research_tools=router.has_tool_prefix("paperbase_"),
+            include_project_code_tools=router.has_tool_prefix("project_"),
+        )
+        turn_summary = turn_state.visible_summary().strip()
+        if turn_summary and turn_summary != "Current turn state:":
+            base_instructions = f"{base_instructions}\n\n{turn_summary}"
+        return Prompt(
+            input=context.prompt_input,
+            base_instructions=base_instructions,
+            tools=tools,
+            tool_choice="auto" if tools else None,
+            parallel_tool_calls=router.parallel_tool_calls_enabled(),
+        )
+
+    def _chat_tool_definitions(
+        self,
+        request: SendChatMessageRequest,
+        *,
+        thread: ChatThreadResponse | None = None,
+    ) -> list[dict[str, Any]]:
+        return self._chat_tool_router(request, thread=thread).model_visible_specs()
 
     def _paper_path_citation(
         self,
@@ -2462,6 +4194,8 @@ class PaperbaseService:
         tool_input: dict[str, Any],
         user: BrowserUser,
         citation_registry: ChatCitationRegistry,
+        thread_id: str | None = None,
+        project_id: str | None = None,
     ) -> dict[str, Any]:
         if tool_name == "paperbase_search":
             query = str(tool_input.get("query") or "").strip()
@@ -2742,6 +4476,172 @@ class PaperbaseService:
                 )
             return {"query": query, "sections": sections}
 
+        if tool_name.startswith("project_"):
+            if not project_id:
+                raise HTTPException(status_code=409, detail="Project-scoped coding tools require a project thread")
+
+            if tool_name == "project_list_files":
+                project_files = self.list_project_workspace_files(user, project_id)
+                return {
+                    "project_id": project_id,
+                    "files": [
+                        {
+                            "file_id": project_file.file_id,
+                            "repo_path": project_file.repo_path,
+                            "filename": project_file.filename,
+                            "file_kind": project_file.file_kind,
+                            "updated_at": project_file.updated_at.isoformat(),
+                        }
+                        for project_file in project_files[:_CHAT_TOOL_MAX_FILE_LIST]
+                    ],
+                    "truncated": len(project_files) > _CHAT_TOOL_MAX_FILE_LIST,
+                }
+
+            if tool_name == "project_read_file":
+                read_result = self.read_project_workspace_file(
+                    user,
+                    project_id,
+                    str(tool_input.get("repo_path") or "").strip(),
+                    start_line=tool_input.get("start_line") if tool_input.get("start_line") is not None else None,
+                    end_line=tool_input.get("end_line") if tool_input.get("end_line") is not None else None,
+                )
+                trimmed, truncated = _truncate_tool_text(read_result["content"], limit=_CHAT_TOOL_MAX_FILE_CHARS)
+                return {
+                    **read_result,
+                    "content": trimmed,
+                    "truncated": truncated,
+                }
+
+            if tool_name == "project_grep":
+                return self.grep_project_workspace(
+                    user,
+                    project_id,
+                    pattern=str(tool_input.get("pattern") or "").strip(),
+                    literal=_tool_bool(tool_input.get("literal"), default=False),
+                    case_sensitive=_tool_bool(tool_input.get("case_sensitive"), default=False),
+                    limit=_tool_int(tool_input.get("limit"), default=20, maximum=50),
+                )
+
+            if tool_name in {"project_write_file", "project_touch"}:
+                updated = self.write_project_workspace_file(
+                    user,
+                    project_id,
+                    repo_path=str(tool_input.get("repo_path") or "").strip(),
+                    content=str(tool_input.get("content") or ""),
+                )
+                trimmed, truncated = _truncate_tool_text(str(updated.get("content") or ""), limit=_CHAT_TOOL_MAX_FILE_CHARS)
+                return {
+                    **updated,
+                    "project_id": project_id,
+                    "content": trimmed,
+                    "truncated": truncated,
+                }
+
+            if tool_name in {"project_apply_patch", "project_edit"}:
+                updated = self.apply_patch_project_workspace_file(
+                    user,
+                    project_id,
+                    repo_path=str(tool_input.get("repo_path") or "").strip(),
+                    old_string=str(tool_input.get("old_string") or ""),
+                    new_string=str(tool_input.get("new_string") or ""),
+                    replace_all=_tool_bool(tool_input.get("replace_all"), default=False),
+                )
+                trimmed, truncated = _truncate_tool_text(str(updated.get("content") or ""), limit=_CHAT_TOOL_MAX_FILE_CHARS)
+                return {
+                    **updated,
+                    "content": trimmed,
+                    "truncated": truncated,
+                }
+
+            if tool_name == "project_move":
+                return self.move_project_workspace_file(
+                    user,
+                    project_id,
+                    repo_path=str(tool_input.get("repo_path") or "").strip(),
+                    new_repo_path=str(tool_input.get("new_repo_path") or "").strip(),
+                )
+
+            if tool_name == "project_delete":
+                return self.delete_project_workspace_file(
+                    user,
+                    project_id,
+                    repo_path=str(tool_input.get("repo_path") or "").strip(),
+                )
+
+            if tool_name == "project_git_status":
+                return self.project_git_status(user, project_id)
+
+            if tool_name == "project_git_diff":
+                return self.project_git_diff(user, project_id)
+
+            if tool_name == "project_exec":
+                if not thread_id:
+                    raise HTTPException(status_code=409, detail="Project exec requires a thread id")
+                return self.project_exec(
+                    user,
+                    thread_id=thread_id,
+                    project_id=project_id,
+                    command=str(tool_input.get("command") or ""),
+                )
+
+            if tool_name == "project_wait":
+                if not thread_id:
+                    raise HTTPException(status_code=409, detail="Project exec requires a thread id")
+                return self.project_wait(
+                    user,
+                    thread_id=thread_id,
+                    project_id=project_id,
+                    exec_id=str(tool_input.get("exec_id") or ""),
+                    timeout_seconds=_tool_int(
+                        tool_input.get("timeout_seconds"),
+                        default=_PROJECT_EXEC_DEFAULT_WAIT_SECONDS,
+                        minimum=0,
+                        maximum=_PROJECT_EXEC_MAX_WAIT_SECONDS,
+                    ),
+                )
+
+            if tool_name == "project_cancel":
+                if not thread_id:
+                    raise HTTPException(status_code=409, detail="Project exec requires a thread id")
+                return self.project_cancel(
+                    user,
+                    thread_id=thread_id,
+                    project_id=project_id,
+                    exec_id=str(tool_input.get("exec_id") or ""),
+                )
+
+            if tool_name == "project_logs":
+                if not thread_id:
+                    raise HTTPException(status_code=409, detail="Project exec requires a thread id")
+                return self.project_logs(
+                    user,
+                    thread_id=thread_id,
+                    project_id=project_id,
+                    exec_id=str(tool_input.get("exec_id") or ""),
+                )
+
+            if tool_name == "project_test":
+                if not thread_id:
+                    raise HTTPException(status_code=409, detail="Project exec requires a thread id")
+                return self.project_test_tool(user, thread_id=thread_id, project_id=project_id)
+
+            if tool_name == "project_lint":
+                if not thread_id:
+                    raise HTTPException(status_code=409, detail="Project exec requires a thread id")
+                return self.project_lint_tool(user, thread_id=thread_id, project_id=project_id)
+
+            if tool_name == "project_run":
+                mode = str(tool_input.get("mode") or "full").strip().lower() or "full"
+                if not thread_id:
+                    raise HTTPException(status_code=409, detail="Project exec requires a thread id")
+                return self.project_run_tool(
+                    user,
+                    thread_id=thread_id,
+                    project_id=project_id,
+                    repo_path=str(tool_input.get("repo_path") or "").strip(),
+                    mode=mode,
+                )
+
         raise ValueError(f"Unknown tool: {tool_name}")
 
     def _chat_tool_activity_label(self, *, tool_name: str, tool_input: dict[str, Any]) -> str:
@@ -2754,10 +4654,12 @@ class PaperbaseService:
             return text
 
         query = detail(tool_input.get("query"))
-        path = detail(tool_input.get("path"))
+        path = detail(tool_input.get("path")) or detail(tool_input.get("repo_path"))
+        new_path = detail(tool_input.get("new_repo_path"))
         pattern = detail(tool_input.get("pattern"))
         figure_id = detail(tool_input.get("figure_id"))
         table_id = detail(tool_input.get("table_id"))
+        exec_id = detail(tool_input.get("exec_id"))
 
         if tool_name == "paperbase_search":
             return f'paper search for "{query}"' if query else "paper search"
@@ -2785,7 +4687,50 @@ class PaperbaseService:
             return "upload listing"
         if tool_name == "paperbase_search_uploaded_sections":
             return f'uploaded-note search for "{query}"' if query else "uploaded-note search"
+        if tool_name == "project_list_files":
+            return "project file listing"
+        if tool_name == "project_read_file":
+            return f'project file read for "{path}"' if path else "project file read"
+        if tool_name == "project_grep":
+            return f'project grep for "{pattern}"' if pattern else "project grep"
+        if tool_name in {"project_write_file", "project_touch"}:
+            return f'project file write for "{path}"' if path else "project file write"
+        if tool_name in {"project_apply_patch", "project_edit"}:
+            return f'project file patch for "{path}"' if path else "project file patch"
+        if tool_name == "project_move":
+            if path and new_path:
+                return f'project file move from "{path}" to "{new_path}"'
+            return "project file move"
+        if tool_name == "project_delete":
+            return f'project file delete for "{path}"' if path else "project file delete"
+        if tool_name == "project_git_status":
+            return "project git status"
+        if tool_name == "project_git_diff":
+            return "project git diff"
+        if tool_name == "project_exec":
+            return "project exec"
+        if tool_name == "project_wait":
+            return f'project exec wait for "{exec_id}"' if exec_id else "project exec wait"
+        if tool_name == "project_cancel":
+            return f'project exec cancel for "{exec_id}"' if exec_id else "project exec cancel"
+        if tool_name == "project_logs":
+            return f'project exec logs for "{exec_id}"' if exec_id else "project exec logs"
+        if tool_name == "project_test":
+            return "project test"
+        if tool_name == "project_lint":
+            return "project lint"
+        if tool_name == "project_run":
+            return f'project run for "{path}"' if path else "project run"
         return "tool call"
+
+    def _chat_tool_activity_command(self, *, tool_name: str, tool_input: dict[str, Any]) -> str:
+        rendered_input = json.dumps(tool_input, ensure_ascii=False, indent=2)
+        return f"{tool_name}({rendered_input})"
+
+    def _chat_tool_activity_output(self, payload: Any) -> str:
+        if isinstance(payload, (dict, list)):
+            return json.dumps(payload, ensure_ascii=False, indent=2)
+        return str(payload)
 
     def _run_single_chat_tool(
         self,
@@ -2795,6 +4740,8 @@ class PaperbaseService:
         tool_input: dict[str, Any],
         user: BrowserUser,
         citation_registry: ChatCitationRegistry,
+        thread_id: str | None = None,
+        project_id: str | None = None,
     ) -> tuple[dict[str, Any], bool]:
         if index >= _CHAT_TOOL_MAX_CALLS_PER_ROUND:
             return {"error": "Too many tool calls requested in one round"}, True
@@ -2804,6 +4751,8 @@ class PaperbaseService:
                 tool_input=tool_input,
                 user=user,
                 citation_registry=citation_registry,
+                thread_id=thread_id,
+                project_id=project_id,
             )
             return payload, False
         except HTTPException as exc:
@@ -2821,18 +4770,34 @@ class PaperbaseService:
         tool_uses: list[dict[str, Any]],
         user: BrowserUser,
         citation_registry: ChatCitationRegistry,
-    ) -> list[dict[str, Any]]:
+        thread_id: str | None = None,
+        project_id: str | None = None,
+    ) -> tuple[list[dict[str, Any]], bool, bool]:
         blocks: list[dict[str, Any]] = []
+        project_write_completed = False
+        project_read_completed = False
         for index, tool_use in enumerate(tool_uses):
             tool_use_id = str(tool_use.get("id") or "").strip()
             if not tool_use_id:
                 continue
+            tool_name = str(tool_use.get("name") or "").strip()
+            tool_input = tool_use.get("input") if isinstance(tool_use.get("input"), dict) else {}
             payload, is_error = self._run_single_chat_tool(
                 index=index,
-                tool_name=str(tool_use.get("name") or "").strip(),
-                tool_input=tool_use.get("input") if isinstance(tool_use.get("input"), dict) else {},
+                tool_name=tool_name,
+                tool_input=tool_input,
                 user=user,
                 citation_registry=citation_registry,
+                thread_id=thread_id,
+                project_id=project_id,
+            )
+            project_write_completed = project_write_completed or _project_code_tool_use_completed_write(
+                {"name": tool_name, "input": tool_input},
+                is_error=is_error,
+            )
+            project_read_completed = project_read_completed or _project_code_tool_use_completed_read(
+                {"name": tool_name, "input": tool_input},
+                is_error=is_error,
             )
             block = {
                 "type": "tool_result",
@@ -2842,223 +4807,631 @@ class PaperbaseService:
             if is_error:
                 block["is_error"] = True
             blocks.append(block)
-        return blocks
+        return blocks, project_write_completed, project_read_completed
 
-    def _run_chat_tool_rounds(
+    def _workspace_file_content_or_none(self, user: BrowserUser, project_id: str, repo_path: str) -> str | None:
+        try:
+            return self._get_project_workspace_file(user, project_id, repo_path).content
+        except HTTPException as exc:
+            if exc.status_code == 404:
+                return None
+            raise
+
+    def _capture_turn_state_before_tool(
+        self,
+        *,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        user: BrowserUser,
+        project_id: str | None,
+        turn_state: ChatTurnState,
+    ) -> None:
+        if not project_id:
+            return
+        if tool_name in {"project_read_file"}:
+            repo_path = str(tool_input.get("repo_path") or "").strip()
+            if repo_path:
+                turn_state.note_inspected(repo_path)
+            return
+        if tool_name == "project_list_files":
+            return
+        if tool_name == "project_grep":
+            return
+        if tool_name in {"project_write_file", "project_touch", "project_apply_patch", "project_edit", "project_delete"}:
+            repo_path = str(tool_input.get("repo_path") or "").strip()
+            if repo_path:
+                normalized = _normalize_project_workspace_repo_path(repo_path)
+                before = self._workspace_file_content_or_none(user, project_id, normalized)
+                turn_state.diff_tracker.record(repo_path=normalized, before=before, after=before)
+            return
+        if tool_name == "project_move":
+            repo_path = str(tool_input.get("repo_path") or "").strip()
+            new_repo_path = str(tool_input.get("new_repo_path") or "").strip()
+            if repo_path:
+                normalized = _normalize_project_workspace_repo_path(repo_path)
+                before = self._workspace_file_content_or_none(user, project_id, normalized)
+                turn_state.diff_tracker.record(repo_path=normalized, before=before, after=before)
+            if new_repo_path:
+                normalized_new = _normalize_project_workspace_repo_path(new_repo_path)
+                before_new = self._workspace_file_content_or_none(user, project_id, normalized_new)
+                turn_state.diff_tracker.record(repo_path=normalized_new, before=before_new, after=before_new)
+
+    def _update_turn_state_from_tool_result(
+        self,
+        *,
+        tool_name: str,
+        payload: dict[str, Any],
+        is_error: bool,
+        user: BrowserUser,
+        project_id: str | None,
+        turn_state: ChatTurnState,
+    ) -> None:
+        if is_error:
+            return
+        if tool_name == "project_list_files":
+            files = payload.get("files")
+            if isinstance(files, list):
+                turn_state.note_inspected(
+                    *[
+                        str(item.get("repo_path") or "").strip()
+                        for item in files
+                        if isinstance(item, dict) and str(item.get("repo_path") or "").strip()
+                    ]
+                )
+            return
+        if tool_name == "project_read_file":
+            repo_path = str(payload.get("repo_path") or "").strip()
+            if repo_path:
+                turn_state.note_inspected(repo_path)
+            return
+        if tool_name == "project_grep":
+            matches = payload.get("matches")
+            if isinstance(matches, list):
+                turn_state.note_inspected(
+                    *[
+                        str(item.get("repo_path") or "").strip()
+                        for item in matches
+                        if isinstance(item, dict) and str(item.get("repo_path") or "").strip()
+                    ]
+                )
+            return
+        if tool_name in {"project_write_file", "project_touch", "project_apply_patch", "project_edit"}:
+            repo_path = str(payload.get("repo_path") or "").strip()
+            if repo_path and project_id:
+                turn_state.diff_tracker.current_contents[repo_path] = self._workspace_file_content_or_none(
+                    user,
+                    project_id,
+                    repo_path,
+                )
+            return
+        if tool_name == "project_delete":
+            repo_path = str(payload.get("repo_path") or "").strip()
+            if repo_path:
+                turn_state.diff_tracker.current_contents[repo_path] = None
+            return
+        if tool_name == "project_move":
+            previous_repo_path = str(payload.get("previous_repo_path") or "").strip()
+            repo_path = str(payload.get("repo_path") or "").strip()
+            if previous_repo_path:
+                turn_state.diff_tracker.current_contents[previous_repo_path] = None
+            if repo_path and project_id:
+                turn_state.diff_tracker.current_contents[repo_path] = self._workspace_file_content_or_none(
+                    user,
+                    project_id,
+                    repo_path,
+                )
+            return
+        if tool_name in {"project_exec", "project_wait", "project_cancel", "project_logs", "project_test", "project_lint", "project_run"}:
+            exec_id = str(payload.get("exec_id") or "").strip()
+            status = str(payload.get("status") or "").strip().lower()
+            if exec_id:
+                turn_state.note_exec_session(exec_id, running=status in {"running", "queued"})
+
+    def _thread_item_type_from_response_item(self, item: ResponseItem) -> str:
+        mapping = {
+            "assistant_message": "assistant_message",
+            "message": "assistant_message",
+            "reasoning": "reasoning",
+            "function_call": "function_call",
+            "function_call_output": "function_call_output",
+            "custom_tool_call": "custom_tool_call",
+            "custom_tool_call_output": "custom_tool_call_output",
+            "tool_search_call": "tool_search_call",
+            "tool_search_output": "tool_search_output",
+            "web_search_call": "web_search_call",
+        }
+        return mapping.get(item.item_type, "other")
+
+    def _thread_item_role_from_response_item(self, item: ResponseItem) -> str:
+        item_type = self._thread_item_type_from_response_item(item)
+        if item_type in {"function_call_output", "custom_tool_call_output"}:
+            return "tool"
+        if item_type in {"function_call", "custom_tool_call", "tool_search_call", "web_search_call"}:
+            return "assistant"
+        return item.role or "assistant"
+
+    def _response_item_to_thread_item_kwargs(self, item: ResponseItem) -> dict[str, Any]:
+        return {
+            "item_type": self._thread_item_type_from_response_item(item),
+            "role": self._thread_item_role_from_response_item(item),
+            "phase": None,
+            "call_id": item.call_id or item.item_id,
+            "name": item.name or None,
+            "content_text": item.content_text,
+            "content_json": item.content_json,
+            "status": item.status or "completed",
+        }
+
+    def _chat_runtime_mode(self) -> str:
+        mode = str(getattr(self.settings, "chat_runtime_mode", "codex_kernel") or "codex_kernel").strip().lower()
+        return "legacy" if mode == "legacy" else "codex_kernel"
+
+    def _citation_registry_key(self, citation: ChatCitation) -> tuple[str, str]:
+        if citation.source_kind == "paperbase_paper":
+            return ("paperbase_paper", f"{citation.paper_id or citation.title}:{citation.path}")
+        if citation.source_kind == "uploaded_document":
+            return ("uploaded_document", f"{citation.document_id or citation.title}:{citation.path}")
+        return (citation.source_kind, f"{citation.title}:{citation.path}:{citation.source_id}")
+
+    def _seed_chat_citation_registry(
+        self,
+        citation_registry: ChatCitationRegistry,
+        *,
+        items: list[ChatThreadItemResponse],
+    ) -> None:
+        for item in items:
+            for citation in item.citations:
+                citation_registry.seed(
+                    key=self._citation_registry_key(citation),
+                    citation=citation,
+                )
+
+    def _persist_response_item(
+        self,
+        *,
+        thread_id: str,
+        turn_id: str,
+        item: ResponseItem,
+        status: str | None = None,
+    ) -> ChatThreadItemResponse:
+        return self.repository.add_chat_thread_item(  # type: ignore[attr-defined]
+            thread_id=thread_id,
+            turn_id=turn_id,
+            item_id=new_id("item"),
+            **{
+                **self._response_item_to_thread_item_kwargs(item),
+                **({"status": status} if status is not None else {}),
+            },
+        )
+
+    def _log_chat_turn_progress(
+        self,
+        *,
+        event: str,
+        message: str,
+        prepared: PreparedChatGeneration,
+        sample_index: int | None = None,
+        item: ChatThreadItemResponse | ResponseItem | None = None,
+        **metadata: Any,
+    ) -> None:
+        extra: dict[str, Any] = {
+            "event": event,
+            "thread_id": prepared.thread.thread_id,
+            "turn_id": prepared.turn.turn_id,
+            "project_id": prepared.thread.project_id or "",
+        }
+        if sample_index is not None:
+            extra["sample_index"] = sample_index
+        if item is not None:
+            extra["item_id"] = getattr(item, "item_id", "")
+            extra["item_type"] = getattr(item, "item_type", "")
+            extra["item_role"] = getattr(item, "role", "")
+            extra["item_status"] = getattr(item, "status", "")
+            extra["call_id"] = getattr(item, "call_id", "")
+            extra["item_name"] = getattr(item, "name", "")
+            phase = getattr(item, "phase", None)
+            if phase:
+                extra["item_phase"] = phase
+        for key, value in metadata.items():
+            if value is not None:
+                extra[key] = value
+        logger.info(message, extra=extra)
+
+    def _run_chat_turn_engine(
         self,
         *,
         prepared: PreparedChatGeneration,
         user: BrowserUser,
         request: SendChatMessageRequest,
-    ) -> tuple[ChatTurnContext, ChatCitationRegistry]:
+        stream_output: bool = False,
+    ) -> Generator[tuple[str, dict[str, Any]], None, ChatTurnExecutionResult]:
+        del stream_output
         context = self._chat_turn_context(prepared)
         citation_registry = ChatCitationRegistry()
-        tools = self._chat_tool_definitions(request)
-        if not tools:
-            return context, citation_registry
+        self._seed_chat_citation_registry(citation_registry, items=prepared.thread.items)
+        router = self._chat_tool_router(request, thread=prepared.thread)
+        turn_state = ChatTurnState(active_goal=prepared.user_item.content_text)
+        aggregated_usage: ChatModelUsage | None = None
+        self._log_chat_turn_progress(
+            event="chat.turn.started",
+            message="Chat turn started",
+            prepared=prepared,
+            prompt_item_count=len(context.items),
+            direct_tool_count=len(router.model_visible_specs()),
+            deferred_tool_count=len(router.deferred_specs()),
+        )
 
-        tool_system_prompt = self._chat_tool_system_prompt(prepared.thread)
-        force_first_tool = _should_force_chat_tool_use(prepared.user_message.content_markdown, request)
-        for round_index in range(_CHAT_TOOL_MAX_ROUNDS):
-            tool_choice = {"type": "any"} if round_index == 0 and force_first_tool else {"type": "auto"}
-            context, _events = self._ensure_chat_context_budget(
+        for _sample_index in range(_CHAT_TOOL_MAX_ROUNDS + 1):
+            context, prompt, compaction_events = self._ensure_chat_context_budget(
                 prepared=prepared,
                 context=context,
-                system_prompt=tool_system_prompt,
                 citation_registry=citation_registry,
-                tools=tools,
-                tool_choice=tool_choice,
+                turn_state=turn_state,
+                router=router,
             )
-            response = self.chat_model.create_message(
-                api_key=prepared.api_key_value or "",
-                messages=context.messages,
-                system_prompt=tool_system_prompt,
-                tools=tools,
-                tool_choice=tool_choice,
+            self._log_chat_turn_progress(
+                event="chat.turn.step.started",
+                message="Chat turn sampling step started",
+                prepared=prepared,
+                sample_index=_sample_index,
+                prompt_item_count=len(context.items),
+                direct_tool_count=len(prompt.tools),
+                compactions_used=context.compactions_used,
+                parallel_tool_calls=prompt.parallel_tool_calls,
             )
-            assistant_content = [block for block in (response.get("content") or []) if isinstance(block, dict)]
-            tool_uses = [block for block in assistant_content if block.get("type") == "tool_use"]
-            if not tool_uses:
-                break
-            context.messages.append({"role": "assistant", "content": assistant_content})
-            context.messages.append(
-                {
-                    "role": "user",
-                    "content": self._tool_result_blocks(
-                        tool_uses=tool_uses,
+            if compaction_events:
+                self._log_chat_turn_progress(
+                    event="chat.turn.compacted",
+                    message="Chat turn compacted context before sampling",
+                    prepared=prepared,
+                    sample_index=_sample_index,
+                    compaction_event_count=len(compaction_events),
+                    compactions_used=context.compactions_used,
+                )
+            for event in compaction_events:
+                yield event
+
+            response_id = ""
+            step_usage: ChatModelUsage | None = None
+            step_items: dict[str, ChatThreadItemResponse] = {}
+            completed_assistant_item_ids: list[str] = []
+            pending_tool_calls: list[ChatThreadItemResponse] = []
+
+            for event in self._chat_model_stream_response(api_key=prepared.api_key_value or "", prompt=prompt):
+                response_id = response_id or event.response_id
+                if event.type == "response.output_item.added" and event.item is not None:
+                    provider_item_id = event.item.item_id or new_id("item")
+                    persisted_item = self._persist_response_item(
+                        thread_id=prepared.thread.thread_id,
+                        turn_id=prepared.turn.turn_id,
+                        item=event.item,
+                    )
+                    step_items[provider_item_id] = persisted_item
+                    self._log_chat_turn_progress(
+                        event="chat.turn.item.started",
+                        message="Chat turn item started",
+                        prepared=prepared,
+                        sample_index=_sample_index,
+                        item=persisted_item,
+                    )
+                    yield ("item_started", {"item": persisted_item.model_dump(mode="json")})
+                    continue
+                if event.type in {"response.output_text.delta", "response.function_call_arguments.delta"}:
+                    provider_item_id = event.item_id or new_id("item")
+                    persisted_item = step_items.get(provider_item_id)
+                    if persisted_item is None:
+                        role = "assistant" if event.type == "response.output_text.delta" else "assistant"
+                        item_type = "assistant_message" if event.type == "response.output_text.delta" else "function_call"
+                        persisted_item = self.repository.add_chat_thread_item(  # type: ignore[attr-defined]
+                            thread_id=prepared.thread.thread_id,
+                            turn_id=prepared.turn.turn_id,
+                            item_id=new_id("item"),
+                            item_type=item_type,
+                            role=role,
+                            content_text="",
+                            status="in_progress",
+                        )
+                    updated_item = self.repository.update_chat_thread_item(  # type: ignore[attr-defined]
+                        persisted_item.item_id,
+                        content_text=f"{persisted_item.content_text}{event.delta}",
+                        status="in_progress",
+                    )
+                    if updated_item is None:
+                        raise RuntimeError("Streaming item vanished during update")
+                    step_items[provider_item_id] = updated_item
+                    yield (
+                        "item_delta",
+                        {
+                            "item_id": updated_item.item_id,
+                            "delta": event.delta,
+                            "delta_type": "output_text"
+                            if event.type == "response.output_text.delta"
+                            else "function_call_arguments",
+                        },
+                    )
+                    continue
+                if event.type == "response.output_item.done" and event.item is not None:
+                    provider_item_id = event.item.item_id or new_id("item")
+                    persisted_item = step_items.get(provider_item_id)
+                    if persisted_item is None:
+                        persisted_item = self._persist_response_item(
+                            thread_id=prepared.thread.thread_id,
+                            turn_id=prepared.turn.turn_id,
+                            item=event.item,
+                        )
+                    else:
+                        persisted_item = self.repository.update_chat_thread_item(  # type: ignore[attr-defined]
+                            persisted_item.item_id,
+                            item_type=self._thread_item_type_from_response_item(event.item),
+                            name=event.item.name or persisted_item.name,
+                            call_id=event.item.call_id or persisted_item.call_id,
+                            content_text=event.item.content_text or persisted_item.content_text,
+                            content_json=event.item.content_json,
+                            status=event.item.status or "completed",
+                        )
+                    if persisted_item is None:
+                        raise RuntimeError("Completed output item vanished during persistence")
+                    step_items[provider_item_id] = persisted_item
+                    normalized_item = self._chat_input_item_from_thread_item(persisted_item)
+                    if normalized_item is not None:
+                        context.items.append(normalized_item)
+                    self._log_chat_turn_progress(
+                        event="chat.turn.item.completed",
+                        message="Chat turn item completed",
+                        prepared=prepared,
+                        sample_index=_sample_index,
+                        item=persisted_item,
+                    )
+                    if persisted_item.item_type == "assistant_message":
+                        completed_assistant_item_ids.append(provider_item_id)
+                        continue
+                    if persisted_item.item_type in {"function_call", "custom_tool_call"}:
+                        pending_tool_calls.append(persisted_item)
+                    yield ("item_completed", {"item": persisted_item.model_dump(mode="json")})
+                    continue
+                if event.type == "response.completed":
+                    response_id = response_id or event.response_id
+                    step_usage = _merge_chat_usage(step_usage, event.usage)
+                    self._log_chat_turn_progress(
+                        event="chat.turn.step.response.completed",
+                        message="Chat model response stream completed",
+                        prepared=prepared,
+                        sample_index=_sample_index,
+                        response_id=response_id,
+                        input_tokens=step_usage.input_tokens if step_usage is not None else None,
+                        output_tokens=step_usage.output_tokens if step_usage is not None else None,
+                        total_tokens=step_usage.total_tokens if step_usage is not None else None,
+                    )
+
+            aggregated_usage = _merge_chat_usage(aggregated_usage, step_usage)
+            if step_usage is not None:
+                yield ("usage", self._chat_usage_payload(step_usage))
+
+            completed_assistant_items = [
+                step_items[item_id]
+                for item_id in completed_assistant_item_ids
+                if item_id in step_items
+            ]
+            final_item: ChatThreadItemResponse | None = None
+            if completed_assistant_items:
+                for provider_item_id, item in zip(completed_assistant_item_ids[:-1], completed_assistant_items[:-1], strict=False):
+                    updated_item = self.repository.update_chat_thread_item(  # type: ignore[attr-defined]
+                        item.item_id,
+                        phase="commentary",
+                        content_text=_sanitize_inline_citations(item.content_text, citation_registry.citations),
+                        status="completed",
+                    )
+                    if updated_item is not None:
+                        step_items[provider_item_id] = updated_item
+                        yield ("item_completed", {"item": updated_item.model_dump(mode="json")})
+                last_provider_item_id = completed_assistant_item_ids[-1]
+                last_item = completed_assistant_items[-1]
+                last_phase = "commentary" if pending_tool_calls else "final_answer"
+                updated_last_item = self.repository.update_chat_thread_item(  # type: ignore[attr-defined]
+                    last_item.item_id,
+                    phase=last_phase,
+                    content_text=_sanitize_inline_citations(last_item.content_text, citation_registry.citations),
+                    citations=[citation.model_dump() for citation in citation_registry.citations]
+                    if last_phase == "final_answer"
+                    else [],
+                    status="completed",
+                )
+                if updated_last_item is not None:
+                    step_items[last_provider_item_id] = updated_last_item
+                    yield ("item_completed", {"item": updated_last_item.model_dump(mode="json")})
+                    if last_phase == "final_answer":
+                        final_item = updated_last_item
+
+            if not pending_tool_calls:
+                final_turn = self.repository.update_chat_turn(  # type: ignore[attr-defined]
+                    prepared.turn.turn_id,
+                    status="completed",
+                    provider_response_id=response_id,
+                    completed_at=utcnow(),
+                    usage=self._chat_usage_payload(aggregated_usage) if aggregated_usage is not None else None,
+                    diff_summary=turn_state.diff_tracker.unified_diff(),
+                    changed_paths=turn_state.diff_tracker.changed_files(),
+                    exec_session_ids=sorted(turn_state.running_exec_session_ids),
+                )
+                self._log_chat_turn_progress(
+                    event="chat.turn.completed",
+                    message="Chat turn completed",
+                    prepared=prepared,
+                    sample_index=_sample_index,
+                    item=final_item,
+                    changed_path_count=len(turn_state.diff_tracker.changed_files()),
+                    exec_session_count=len(turn_state.running_exec_session_ids),
+                    input_tokens=aggregated_usage.input_tokens if aggregated_usage is not None else None,
+                    output_tokens=aggregated_usage.output_tokens if aggregated_usage is not None else None,
+                    total_tokens=aggregated_usage.total_tokens if aggregated_usage is not None else None,
+                )
+                return ChatTurnExecutionResult(
+                    turn=final_turn or prepared.turn,
+                    final_item=final_item,
+                    citation_registry=citation_registry,
+                    usage=aggregated_usage,
+                )
+
+            self._log_chat_turn_progress(
+                event="chat.turn.tools.queued",
+                message="Chat turn queued tool calls for execution",
+                prepared=prepared,
+                sample_index=_sample_index,
+                pending_tool_call_count=len(pending_tool_calls),
+            )
+            for index, tool_item in enumerate(pending_tool_calls):
+                tool_name = tool_item.name or ""
+                tool_input = tool_item.content_json if isinstance(tool_item.content_json, dict) else {}
+                if not tool_input and tool_item.content_text.strip():
+                    try:
+                        parsed_tool_input = json.loads(tool_item.content_text)
+                        if isinstance(parsed_tool_input, dict):
+                            tool_input = parsed_tool_input
+                    except json.JSONDecodeError:
+                        tool_input = {}
+                self._log_chat_turn_progress(
+                    event="chat.turn.tool.started",
+                    message="Chat tool execution started",
+                    prepared=prepared,
+                    sample_index=_sample_index,
+                    item=tool_item,
+                    tool_name=tool_name,
+                    tool_call_index=index,
+                )
+                if router.find_spec(tool_name) is None:
+                    payload = {"error": f"Unknown tool: {tool_name}"}
+                    is_error = True
+                else:
+                    self._capture_turn_state_before_tool(
+                        tool_name=tool_name,
+                        tool_input=tool_input,
+                        user=user,
+                        project_id=prepared.thread.project_id,
+                        turn_state=turn_state,
+                    )
+                    payload, is_error = self._run_single_chat_tool(
+                        index=index,
+                        tool_name=tool_name,
+                        tool_input=tool_input,
                         user=user,
                         citation_registry=citation_registry,
-                    ),
-                }
-            )
-        return context, citation_registry
-
-    def _run_chat_tool_rounds_stream(
-        self,
-        *,
-        prepared: PreparedChatGeneration,
-        user: BrowserUser,
-        request: SendChatMessageRequest,
-    ) -> Generator[tuple[str, dict[str, Any]], None, tuple[ChatTurnContext, ChatCitationRegistry]]:
-        context = self._chat_turn_context(prepared)
-        citation_registry = ChatCitationRegistry()
-        tools = self._chat_tool_definitions(request)
-        if not tools:
-            return context, citation_registry
-
-        tool_system_prompt = self._chat_tool_system_prompt(prepared.thread)
-        force_first_tool = _should_force_chat_tool_use(prepared.user_message.content_markdown, request)
-        for round_index in range(_CHAT_TOOL_MAX_ROUNDS):
-            tool_choice = {"type": "any"} if round_index == 0 and force_first_tool else {"type": "auto"}
-            context = yield from self._ensure_chat_context_budget_stream(
-                prepared=prepared,
-                context=context,
-                system_prompt=tool_system_prompt,
-                citation_registry=citation_registry,
-                tools=tools,
-                tool_choice=tool_choice,
-            )
-            response = self.chat_model.create_message(
-                api_key=prepared.api_key_value or "",
-                messages=context.messages,
-                system_prompt=tool_system_prompt,
-                tools=tools,
-                tool_choice=tool_choice,
-            )
-            assistant_content = [block for block in (response.get("content") or []) if isinstance(block, dict)]
-            tool_uses = [block for block in assistant_content if block.get("type") == "tool_use"]
-            if not tool_uses:
-                break
-            usage = response_usage(response)
-            if usage is not None:
-                yield ("usage", self._chat_usage_payload(usage))
-            context.messages.append({"role": "assistant", "content": assistant_content})
-            blocks: list[dict[str, Any]] = []
-            for index, tool_use in enumerate(tool_uses):
-                tool_use_id = str(tool_use.get("id") or "").strip()
-                if not tool_use_id:
-                    continue
-                tool_name = str(tool_use.get("name") or "").strip()
-                tool_input = tool_use.get("input") if isinstance(tool_use.get("input"), dict) else {}
-                label = self._chat_tool_activity_label(tool_name=tool_name, tool_input=tool_input)
-                yield (
-                    "tool_start",
-                    {
-                        "tool_call_id": tool_use_id,
-                        "tool_name": tool_name,
-                        "label": label,
-                    },
+                        thread_id=prepared.thread.thread_id,
+                        project_id=prepared.thread.project_id,
+                    )
+                    self._update_turn_state_from_tool_result(
+                        tool_name=tool_name,
+                        payload=payload,
+                        is_error=is_error,
+                        user=user,
+                        project_id=prepared.thread.project_id,
+                        turn_state=turn_state,
+                    )
+                output_item = self.repository.add_chat_thread_item(  # type: ignore[attr-defined]
+                    thread_id=prepared.thread.thread_id,
+                    turn_id=prepared.turn.turn_id,
+                    item_type="function_call_output",
+                    role="tool",
+                    call_id=tool_item.call_id or tool_item.item_id,
+                    name=tool_name,
+                    content_text="",
+                    status="in_progress",
                 )
-                payload, is_error = self._run_single_chat_tool(
-                    index=index,
+                yield ("item_started", {"item": output_item.model_dump(mode="json")})
+                output_text = json.dumps(payload, ensure_ascii=False)
+                completed_output_item = self.repository.update_chat_thread_item(  # type: ignore[attr-defined]
+                    output_item.item_id,
+                    content_text=output_text,
+                    content_json=payload,
+                    status="completed",
+                )
+                if completed_output_item is None:
+                    raise RuntimeError("Tool output item vanished during persistence")
+                normalized_output_item = self._chat_input_item_from_thread_item(completed_output_item)
+                if normalized_output_item is not None:
+                    context.items.append(normalized_output_item)
+                self._log_chat_turn_progress(
+                    event="chat.turn.tool.completed",
+                    message="Chat tool execution completed",
+                    prepared=prepared,
+                    sample_index=_sample_index,
+                    item=completed_output_item,
                     tool_name=tool_name,
-                    tool_input=tool_input,
-                    user=user,
-                    citation_registry=citation_registry,
+                    tool_call_index=index,
+                    is_error=is_error,
                 )
-                yield (
-                    "tool_done",
-                    {
-                        "tool_call_id": tool_use_id,
-                        "tool_name": tool_name,
-                        "label": label,
-                        "is_error": is_error,
-                    },
-                )
-                block = {
-                    "type": "tool_result",
-                    "tool_use_id": tool_use_id,
-                    "content": json.dumps(payload, ensure_ascii=False),
-                }
-                if is_error:
-                    block["is_error"] = True
-                blocks.append(block)
-            context.messages.append({"role": "user", "content": blocks})
-        return context, citation_registry
+                yield ("item_completed", {"item": completed_output_item.model_dump(mode="json")})
+
+        raise RuntimeError("Chat turn exceeded the maximum number of sampling steps")
 
     def _api_key_required_response(
         self,
         *,
         user: BrowserUser,
         thread_id: str,
-        resolved_user: BrowserUser,
         state: str = "api_key_required",
     ) -> SendChatMessageResponse:
         refreshed = self.get_chat_thread(user, thread_id)
         return SendChatMessageResponse(
             thread=refreshed,
-            assistant_message=None,
-            remaining_free_responses=self._remaining_free_responses(resolved_user),
-            has_anthropic_api_key=self.repository.get_anthropic_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
+            turn=None,
+            final_item=None,
+            has_openai_api_key=self.repository.get_openai_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
             state=state,
         )
 
     def _chat_usage_payload(self, usage: ChatModelUsage) -> dict[str, Any]:
-        total_tokens = (
-            usage.input_tokens
-            + usage.output_tokens
-            + usage.cache_creation_input_tokens
-            + usage.cache_read_input_tokens
-        )
         return {
-            "model": self.settings.anthropic_model,
+            "model": self.settings.openai_model,
             "input_tokens": usage.input_tokens,
             "output_tokens": usage.output_tokens,
-            "cache_creation_input_tokens": usage.cache_creation_input_tokens,
-            "cache_read_input_tokens": usage.cache_read_input_tokens,
-            "total_tokens": total_tokens,
-            "context_window_tokens": _anthropic_context_window_tokens(self.settings.anthropic_model),
+            "total_tokens": usage.total_tokens or (usage.input_tokens + usage.output_tokens),
+            "context_window_tokens": _openai_context_window_tokens(self.settings.openai_model),
         }
 
     def send_chat_message(
         self, user: BrowserUser, thread_id: str, request: SendChatMessageRequest
     ) -> SendChatMessageResponse:
-        prepared = self._prepare_chat_generation(user=user, thread_id=thread_id, request=request)
-        if not prepared.api_key_value:
+        resolved_user = self.repository.get_browser_user_by_id(user.user_id) or user  # type: ignore[attr-defined]
+        api_key_value, api_key_state = self._choose_openai_api_key(resolved_user)
+        if not api_key_value:
             return self._api_key_required_response(
                 user=user,
                 thread_id=thread_id,
-                resolved_user=prepared.resolved_user,
-                state=prepared.api_key_state,
+                state=api_key_state,
             )
+        # Drain mention-resolution events. The non-streaming path can't
+        # surface them to the UI, so just run the side effect (fetch + index)
+        # and discard the per-paper events.
+        for _ in self._ensure_mentioned_papers_indexed(request.paper_ids):
+            pass
+        prepared = self._prepare_chat_generation(
+            user=user,
+            thread_id=thread_id,
+            request=request,
+            resolved_user=resolved_user,
+            api_key_value=api_key_value,
+        )
 
-        conversation_context, citation_registry = self._run_chat_tool_rounds(
+        _ = self._chat_runtime_mode()
+        turn_engine = self._run_chat_turn_engine(
             prepared=prepared,
             user=user,
             request=request,
+            stream_output=False,
         )
-        current_turn_citations = citation_registry.citations
-        answer_system_prompt = self._chat_answer_system_prompt(
-            thread=prepared.thread,
-            has_evidence_sources=bool(current_turn_citations),
-        )
-        conversation_context, _events = self._ensure_chat_context_budget(
-            prepared=prepared,
-            context=conversation_context,
-            system_prompt=answer_system_prompt,
-            citation_registry=citation_registry,
-        )
-        answer_payload = self.chat_model.create_message(
-            api_key=prepared.api_key_value,
-            messages=conversation_context.messages,
-            system_prompt=answer_system_prompt,
-        )
-        answer = _sanitize_inline_citations(_extract_message_text(answer_payload), current_turn_citations)
-        assistant_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
-            thread_id=thread_id,
-            role="assistant",
-            content_markdown=answer,
-            citations=[citation.model_dump() for citation in current_turn_citations],
-        )
-        resolved_user = prepared.resolved_user
-        if prepared.using_free_tier:
-            resolved_user = self.repository.increment_free_responses_used(user.user_id) or resolved_user  # type: ignore[attr-defined]
+        while True:
+            try:
+                next(turn_engine)
+            except StopIteration as stop:
+                turn_result = stop.value
+                break
+
         refreshed = self.get_chat_thread(user, thread_id)
         return SendChatMessageResponse(
             thread=refreshed,
-            assistant_message=assistant_message,
-            remaining_free_responses=self._remaining_free_responses(resolved_user),
-            has_anthropic_api_key=self.repository.get_anthropic_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
+            turn=turn_result.turn,
+            final_item=turn_result.final_item,
+            has_openai_api_key=self.repository.get_openai_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
             state="completed",
         )
 
@@ -3068,110 +5441,80 @@ class PaperbaseService:
         thread_id: str,
         request: SendChatMessageRequest,
     ) -> Iterator[tuple[str, dict[str, Any]]]:
-        prepared = self._prepare_chat_generation(user=user, thread_id=thread_id, request=request)
-        if not prepared.api_key_value:
+        resolved_user = self.repository.get_browser_user_by_id(user.user_id) or user  # type: ignore[attr-defined]
+        api_key_value, api_key_state = self._choose_openai_api_key(resolved_user)
+        if not api_key_value:
             yield (
                 "api_key_required",
                 self._api_key_required_response(
                     user=user,
                     thread_id=thread_id,
-                    resolved_user=prepared.resolved_user,
-                    state=prepared.api_key_state,
+                    state=api_key_state,
                 ).model_dump(mode="json"),
             )
             return
+        # Forward per-paper resolve-and-index events to the SSE stream so the
+        # UI can show a "Fetching paper…" state for any unindexed mention.
+        yield from self._ensure_mentioned_papers_indexed(request.paper_ids)
+        prepared = self._prepare_chat_generation(
+            user=user,
+            thread_id=thread_id,
+            request=request,
+            resolved_user=resolved_user,
+            api_key_value=api_key_value,
+        )
 
-        tool_rounds = self._run_chat_tool_rounds_stream(
+        _ = self._chat_runtime_mode()
+        yield ("turn_started", {"turn": prepared.turn.model_dump(mode="json")})
+        turn_engine = self._run_chat_turn_engine(
             prepared=prepared,
             user=user,
             request=request,
+            stream_output=True,
         )
-        while True:
-            try:
-                event_name, payload = next(tool_rounds)
-            except StopIteration as stop:
-                conversation_context, citation_registry = stop.value
-                break
-            yield (event_name, payload)
-        current_turn_citations = citation_registry.citations
-        answer_system_prompt = self._chat_answer_system_prompt(
-            thread=prepared.thread,
-            has_evidence_sources=bool(current_turn_citations),
-        )
-        conversation_context = yield from self._ensure_chat_context_budget_stream(
-            prepared=prepared,
-            context=conversation_context,
-            system_prompt=answer_system_prompt,
-            citation_registry=citation_registry,
-        )
-        assistant_message = self.repository.add_chat_message(  # type: ignore[attr-defined]
-            thread_id=thread_id,
-            role="assistant",
-            content_markdown="",
-            citations=[citation.model_dump() for citation in current_turn_citations],
-            status="streaming",
-        )
-        yield ("assistant_start", {"assistant_message": assistant_message.model_dump(mode="json")})
-
-        chunks: list[str] = []
-        usage_payload: dict[str, Any] | None = None
         try:
-            for stream_event in self.chat_model.stream_message(
-                api_key=prepared.api_key_value,
-                messages=conversation_context.messages,
-                system_prompt=answer_system_prompt,
-            ):
-                if stream_event.usage is not None:
-                    usage_payload = self._chat_usage_payload(stream_event.usage)
-                    yield ("usage", usage_payload)
-                if not stream_event.text:
-                    continue
-                chunks.append(stream_event.text)
-                yield ("delta", {"message_id": assistant_message.message_id, "delta": stream_event.text})
+            while True:
+                try:
+                    event_name, payload = next(turn_engine)
+                except StopIteration as stop:
+                    turn_result = stop.value
+                    break
+                yield (event_name, payload)
         except Exception as exc:
-            failed_message = self.repository.update_chat_message(  # type: ignore[attr-defined]
-                assistant_message.message_id,
-                content_markdown="".join(chunks).strip(),
-                status="failed",
-            )
             logger.exception(
-                "Streaming chat request failed",
+                "Chat turn failed during streaming",
                 extra={
-                    "event": "chat.model.stream.failed",
-                    "thread_id": thread_id,
-                    "message_id": assistant_message.message_id,
+                    "event": "chat.turn.failed",
+                    "thread_id": prepared.thread.thread_id,
+                    "turn_id": prepared.turn.turn_id,
+                    "project_id": prepared.thread.project_id or "",
                 },
             )
+            failed_turn = self.repository.update_chat_turn(  # type: ignore[attr-defined]
+                prepared.turn.turn_id,
+                status="failed",
+                completed_at=utcnow(),
+            )
             yield (
-                "error",
+                "turn_failed",
                 {
-                    "message_id": failed_message.message_id if failed_message else assistant_message.message_id,
-                    "detail": str(exc) or "Streaming request failed",
+                    "turn": (failed_turn or prepared.turn).model_dump(mode="json"),
+                    "detail": str(exc),
                 },
             )
             return
 
-        final_message = self.repository.update_chat_message(  # type: ignore[attr-defined]
-            assistant_message.message_id,
-            content_markdown=_sanitize_inline_citations("".join(chunks).strip(), current_turn_citations),
-            citations=[citation.model_dump() for citation in current_turn_citations],
-            status="completed",
-        )
-        if final_message is None:
-            raise RuntimeError("Assistant message vanished during streaming")
-
-        resolved_user = prepared.resolved_user
-        if prepared.using_free_tier:
-            resolved_user = self.repository.increment_free_responses_used(user.user_id) or resolved_user  # type: ignore[attr-defined]
+        refreshed = self.get_chat_thread(user, thread_id)
 
         yield (
-            "done",
+            "turn_completed",
             {
-                "assistant_message": final_message.model_dump(mode="json"),
-                "remaining_free_responses": self._remaining_free_responses(resolved_user),
-                "has_anthropic_api_key": self.repository.get_anthropic_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
+                "thread": refreshed.model_dump(mode="json"),
+                "turn": turn_result.turn.model_dump(mode="json"),
+                "final_item": turn_result.final_item.model_dump(mode="json") if turn_result.final_item is not None else None,
+                "has_openai_api_key": self.repository.get_openai_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
                 "state": "completed",
-                "usage": usage_payload,
+                "usage": self._chat_usage_payload(turn_result.usage) if turn_result.usage is not None else None,
             },
         )
 
@@ -3383,6 +5726,11 @@ class PaperbaseService:
                 # semantic_scholar_id / tldr without touching index artifacts.
                 self.repository.upsert_paper_shallow(meta)
                 total_updated += 1
+                # #39 PR C: persist S2 author rows alongside the enrichment.
+                if outcome is not None:
+                    author_rows = outcome.authors_by_arxiv.get(meta.arxiv_id) or []
+                    if author_rows:
+                        self.repository.replace_paper_authors(paper.paper_id, authors=author_rows)
 
             after = batch[-1]
             remaining -= len(batch)
@@ -4712,6 +7060,231 @@ class PaperbaseService:
             "skipped": skipped,
         }
 
+    # --- Author-signal harvest (#39 PR C) -------------------------------- #
+
+    def enqueue_harvest_author_job(
+        self,
+        *,
+        min_paper_count: int = 2,
+        min_cite_mass: int = 5_000,
+        max_authors: int = 100,
+        max_papers_per_author: int | None = None,
+        chunk_size: int = 50,
+    ) -> JobResponse:
+        """Queue a ``harvest_author`` planner job (#39 PR C).
+
+        The planner derives the top-author list from the indexed
+        corpus by aggregating ``paper_authors`` ↔ ``papers``,
+        picks the top ``max_authors`` by cite mass, then for each
+        pages S2's ``/author/{id}/papers`` and enqueues
+        ``harvest_chunk`` jobs (``source='s2_author'``) for the
+        arxiv-linked papers.
+
+        Defaults: ``min_cite_mass=5000`` matches the #39 spec
+        threshold ("≥5000 in Computer Science"). Operators raise
+        the bar for tighter coverage or lower it for wider sweep.
+        """
+        if min_paper_count < 1:
+            raise PermanentError("min_paper_count must be >= 1")
+        if min_cite_mass < 0:
+            raise PermanentError("min_cite_mass must be >= 0")
+        if max_authors < 1:
+            raise PermanentError("max_authors must be >= 1")
+        if max_papers_per_author is not None and max_papers_per_author < 1:
+            raise PermanentError("max_papers_per_author must be >= 1 when provided")
+        if chunk_size < 1 or chunk_size > 500:
+            raise PermanentError("chunk_size must be in [1, 500]")
+        job = self.repository.create_job(
+            "harvest_author",
+            {
+                "min_paper_count": int(min_paper_count),
+                "min_cite_mass": int(min_cite_mass),
+                "max_authors": int(max_authors),
+                "max_papers_per_author": max_papers_per_author,
+                "chunk_size": int(chunk_size),
+            },
+        )
+        logger.info(
+            "Created harvest_author job",
+            extra={
+                "event": "jobs.harvest_author.created",
+                "job_id": job.job_id,
+                "min_paper_count": min_paper_count,
+                "min_cite_mass": min_cite_mass,
+                "max_authors": max_authors,
+                "max_papers_per_author": max_papers_per_author,
+                "chunk_size": chunk_size,
+            },
+        )
+        return job
+
+    def run_harvest_author(
+        self,
+        *,
+        min_paper_count: int,
+        min_cite_mass: int,
+        max_authors: int,
+        max_papers_per_author: int | None,
+        chunk_size: int,
+        harvest_id: str | None = None,
+    ) -> dict[str, int]:
+        """Planner: derive top authors from the indexed corpus, then for
+        each page S2 and enqueue ``harvest_chunk`` jobs
+        (``source='s2_author'``) for arxiv-linked papers.
+
+        The chunk payload carries ``arxiv_ids`` plus the
+        ``top_author_s2_id`` so the chunk worker can stamp the
+        provenance column when it indexes each paper.
+        """
+        if min_paper_count < 1:
+            raise PermanentError("min_paper_count must be >= 1")
+        if min_cite_mass < 0:
+            raise PermanentError("min_cite_mass must be >= 0")
+        if max_authors < 1:
+            raise PermanentError("max_authors must be >= 1")
+        if chunk_size < 1 or chunk_size > 500:
+            raise PermanentError("chunk_size must be in [1, 500]")
+
+        run_harvest_id = harvest_id or new_id("harvest")
+        top_authors = self.repository.list_top_authors(
+            min_paper_count=min_paper_count,
+            min_cite_mass=min_cite_mass,
+            limit=max_authors,
+        )
+        chunks_created = 0
+        candidates_emitted = 0
+        authors_visited = 0
+
+        for top_author in top_authors:
+            author_s2_id = top_author["author_s2_id"]
+            authors_visited += 1
+            cursor: int | None = 0
+            per_author_emitted = 0
+            pending_batch: list[str] = []
+
+            def _flush_batch(author_id: str = author_s2_id) -> None:
+                nonlocal chunks_created, pending_batch
+                if not pending_batch:
+                    return
+                self.repository.create_job(
+                    "harvest_chunk",
+                    {
+                        "harvest_id": run_harvest_id,
+                        "source": "s2_author",
+                        "arxiv_ids": list(pending_batch),
+                        "top_author_s2_id": author_id,
+                    },
+                    dedupe_key=(
+                        f"harvest_chunk:{run_harvest_id}:s2_author:{author_id}:"
+                        f"{pending_batch[0]}-{pending_batch[-1]}-{len(pending_batch)}"
+                    ),
+                )
+                chunks_created += 1
+                pending_batch = []
+
+            while cursor is not None:
+                if max_papers_per_author is not None and per_author_emitted >= max_papers_per_author:
+                    break
+                page, next_cursor = sources.fetch_author_papers(
+                    s2_author_id=author_s2_id,
+                    cursor=cursor,
+                )
+                for candidate in page:
+                    if max_papers_per_author is not None and per_author_emitted >= max_papers_per_author:
+                        break
+                    pending_batch.append(candidate.arxiv_id)
+                    candidates_emitted += 1
+                    per_author_emitted += 1
+                    if len(pending_batch) >= chunk_size:
+                        _flush_batch()
+                # Keep paging until S2 itself signals last page (same shape
+                # as the PR #50 / #52 EOF fixes). ``fetch_author_papers``
+                # filters non-arxiv rows client-side and may return an
+                # empty ``page`` while ``next_cursor`` is still set; only
+                # ``next_cursor is None`` means end-of-stream.
+                cursor = next_cursor
+            _flush_batch()
+
+        logger.info(
+            "harvest_author planner enqueued chunks",
+            extra={
+                "event": "harvest_author.planned",
+                "harvest_id": run_harvest_id,
+                "authors_visited": authors_visited,
+                "chunks_created": chunks_created,
+                "candidates_emitted": candidates_emitted,
+            },
+        )
+        return {
+            "authors_visited": authors_visited,
+            "chunks_created": chunks_created,
+            "candidates_emitted": candidates_emitted,
+        }
+
+    def run_harvest_chunk_author(
+        self,
+        *,
+        arxiv_ids: list[str],
+        top_author_s2_id: str | None = None,
+        harvest_id: str | None = None,
+    ) -> dict[str, int]:
+        """Chunk worker for ``source='s2_author'``.
+
+        Iterates ``arxiv_ids``, calls ``index_arxiv_paper``, and stamps
+        ``top_author_s2_id`` via ``set_paper_top_author``. Per-id
+        ``PermanentError`` is swallowed.
+
+        ``arxiv_ids`` is deduped on entry — multiple top authors can
+        surface the same paper, and the planner can produce duplicate
+        ids in a single chunk. ``index_arxiv_paper`` is idempotent so
+        duplicates are safe, but the work is wasted.
+
+        ``stamped`` counts papers whose post-call ``top_author_s2_id``
+        equals what we asked for, so under first-write-wins a paper
+        already stamped by a different author does not get
+        double-counted as our success.
+        """
+        if not arxiv_ids:
+            return {"requested": 0, "indexed": 0, "stamped": 0, "skipped": 0}
+        run_harvest_id = harvest_id or new_id("harvest")
+        # Preserve order while deduping; drop empties up front.
+        deduped_ids = list(dict.fromkeys(aid for aid in arxiv_ids if aid))
+        indexed = 0
+        stamped = 0
+        skipped = len(arxiv_ids) - len(deduped_ids)  # empty/duplicate entries
+        for arxiv_id in deduped_ids:
+            try:
+                stored = self.index_arxiv_paper(arxiv_id, force=False)
+                indexed += 1
+            except PermanentError:
+                skipped += 1
+                continue
+            if top_author_s2_id:
+                updated = self.repository.set_paper_top_author(
+                    stored.paper_id,
+                    top_author_s2_id=top_author_s2_id,
+                )
+                if updated is not None and updated.top_author_s2_id == top_author_s2_id:
+                    stamped += 1
+        logger.info(
+            "harvest_author chunk completed",
+            extra={
+                "event": "harvest_author.chunk_completed",
+                "harvest_id": run_harvest_id,
+                "top_author_s2_id": top_author_s2_id,
+                "requested": len(arxiv_ids),
+                "indexed": indexed,
+                "stamped": stamped,
+                "skipped": skipped,
+            },
+        )
+        return {
+            "requested": len(arxiv_ids),
+            "indexed": indexed,
+            "stamped": stamped,
+            "skipped": skipped,
+        }
+
     def enqueue_latest_sync_job(self) -> JobResponse:
         job = self.repository.create_job(
             "sync_latest",
@@ -4794,6 +7367,13 @@ class PaperbaseService:
                         year=job.payload.get("year"),
                         harvest_id=str(job.payload.get("harvest_id") or job.job_id),
                     )
+                elif source == "s2_author":
+                    # #39 PR C: arxiv_ids list + top_author_s2_id stamp.
+                    self.run_harvest_chunk_author(
+                        arxiv_ids=list(job.payload.get("arxiv_ids", [])),
+                        top_author_s2_id=job.payload.get("top_author_s2_id"),
+                        harvest_id=str(job.payload.get("harvest_id") or job.job_id),
+                    )
                 else:
                     self.run_harvest_chunk(
                         source=source,
@@ -4817,6 +7397,15 @@ class PaperbaseService:
                     venue=str(job.payload["venue"]),
                     year=int(job.payload["year"]),
                     max_papers=job.payload.get("max_papers"),
+                    chunk_size=int(job.payload.get("chunk_size", 50)),
+                    harvest_id=str(job.payload.get("harvest_id") or job.job_id),
+                )
+            elif job.job_type == "harvest_author":
+                self.run_harvest_author(
+                    min_paper_count=int(job.payload.get("min_paper_count", 2)),
+                    min_cite_mass=int(job.payload.get("min_cite_mass", 5_000)),
+                    max_authors=int(job.payload.get("max_authors", 100)),
+                    max_papers_per_author=job.payload.get("max_papers_per_author"),
                     chunk_size=int(job.payload.get("chunk_size", 50)),
                     harvest_id=str(job.payload.get("harvest_id") or job.job_id),
                 )
@@ -4966,7 +7555,7 @@ class PaperbaseService:
         # failure here leaves citation_count=0 rather than blocking ingestion;
         # the enrich_missing_metadata backfill job will pick this paper up
         # later with aggressive retry.
-        sources.enrich_with_semantic_scholar([metadata], max_retries=0)
+        enrich_outcome = sources.enrich_with_semantic_scholar([metadata], max_retries=0)
         # Snapshot an existing admin pin BEFORE the intermediate upsert so
         # it flows through every subsequent upsert on this metadata object.
         # A later ``get_paper_by_arxiv_id`` can't recover the pin because
@@ -4981,6 +7570,14 @@ class PaperbaseService:
             metadata.code_url_source = "admin"
         metadata.index_status = "indexing"
         stored = self.repository.upsert_paper(metadata, search_document=metadata.abstract)
+        # #39 PR C: persist S2 author rows so the top-author discovery
+        # aggregation has data. Skipped silently if enrichment was rate-
+        # limited — the backfill CLI fills in the gap. ``enrich_outcome``
+        # can be None in test contexts that stub the source-layer call.
+        if enrich_outcome is not None:
+            author_rows = enrich_outcome.authors_by_arxiv.get(metadata.arxiv_id) or []
+            if author_rows:
+                self.repository.replace_paper_authors(stored.paper_id, authors=author_rows)
         extraction = index_paper_artifacts(metadata)
 
         metadata.source_type = extraction.source_type
@@ -5489,17 +8086,37 @@ class PaperbaseService:
             raise HTTPException(status_code=404, detail=f"Preview not available for {paper_id}")
         return PaperPreviewResponse(paper_id=paper_id, image_url=image_url, content_type="image/webp")
 
+    # Extension → content-type for the figure-serving probe. Order is
+    # render-cheap-first so when a figure was stored under multiple
+    # representations (rare, but the LaTeX path has produced both pdf
+    # raw bytes and a png rasterization for the same figure under early
+    # ingest paths) the browser-renderable one wins. eps/pdf cover the
+    # raw-bytes fallback the LaTeX rasterizer takes when Ghostscript /
+    # pypdfium2 fail (#48); without their MIME types here, those figures
+    # came back as ``image_url=None``.
+    _FIGURE_EXTENSION_CONTENT_TYPES: tuple[tuple[str, str], ...] = (
+        ("png", "image/png"),
+        ("jpg", "image/jpeg"),
+        ("jpeg", "image/jpeg"),
+        ("svg", "image/svg+xml"),
+        ("gif", "image/gif"),
+        ("webp", "image/webp"),
+        ("pdf", "application/pdf"),
+        ("eps", "application/postscript"),
+        ("bin", "application/octet-stream"),
+    )
+
     def get_figure(self, paper_id: str, figure_id: str) -> FigureResponse:
         caption_path = f"papers/{paper_id}/figures/{figure_id}/caption.md"
         if not self.object_store.exists(caption_path):
             raise HTTPException(status_code=404, detail=f"Figure {figure_id} not found for {paper_id}")
         image_url = None
         content_type = None
-        for extension in ("png", "jpg", "jpeg", "svg", "gif", "webp", "bin"):
+        for extension, mime in self._FIGURE_EXTENSION_CONTENT_TYPES:
             image_path = f"papers/{paper_id}/figures/{figure_id}/image.{extension}"
             if self.object_store.exists(image_path):
                 image_url = self.object_store.presign_get(image_path, expires_in=self.settings.presign_ttl_seconds)
-                content_type = "image/" + ("jpeg" if extension == "jpg" else extension)
+                content_type = mime
                 break
         return FigureResponse(
             paper_id=paper_id,

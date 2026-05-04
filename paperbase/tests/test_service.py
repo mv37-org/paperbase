@@ -22,9 +22,17 @@ from paperbase.browser_code import (
 )
 from paperbase.config import Settings, get_settings
 from paperbase.extractors import ExtractionOutput, FigureArtifact, RawArtifact, SectionArtifact, TableArtifact
-from paperbase.llm import ChatModelStreamEvent, ChatModelUsage
+from paperbase.llm import (
+    ChatModelStreamEvent,
+    ChatModelUsage,
+    Prompt,
+    ResponseEnvelope,
+    ResponseEvent,
+    ResponseItem,
+)
 from paperbase.models import (
     ChatCitation,
+    ChatThreadItemResponse,
     CreateChatThreadRequest,
     CreateProjectGitHubRepoRequest,
     CreateProjectRequest,
@@ -33,6 +41,7 @@ from paperbase.models import (
     ProjectRepoSyncRequest,
     SaveAnthropicKeyRequest,
     SaveModalCredentialsRequest,
+    SaveOpenAIKeyRequest,
     SearchRequest,
     SearchSectionRequest,
     SendChatMessageRequest,
@@ -67,7 +76,16 @@ class FakeChatModel:
         self.token_counts: list[int | None] = []
         self.compaction_summary = "## Compacted Conversation\n\nContinue from this compacted context."
 
-    def count_message_tokens(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+    def count_message_tokens(
+        self,
+        *,
+        api_key: str,
+        messages,
+        system_prompt: str,
+        tools=None,
+        tool_choice=None,
+        parallel_tool_calls=None,
+    ):
         self.count_calls.append(
             {
                 "api_key": api_key,
@@ -75,13 +93,174 @@ class FakeChatModel:
                 "system_prompt": system_prompt,
                 "tools": tools,
                 "tool_choice": tool_choice,
+                "parallel_tool_calls": parallel_tool_calls,
             }
         )
         if self.token_counts:
             return self.token_counts.pop(0)
         return 1
 
-    def create_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+    def _legacy_messages_from_prompt(self, prompt: Prompt) -> list[dict[str, object]]:
+        messages: list[dict[str, object]] = []
+        for item in prompt.input:
+            item_type = str(item.get("type") or "")
+            if item_type == "message":
+                content = item.get("content", "")
+                if isinstance(content, list):
+                    content_text = "\n".join(
+                        str(block.get("text") or "")
+                        for block in content
+                        if isinstance(block, dict)
+                    )
+                else:
+                    content_text = str(content or "")
+                messages.append({"role": str(item.get("role") or "user"), "content": content_text})
+                continue
+            if item_type == "function_call":
+                arguments = str(item.get("arguments") or "").strip()
+                try:
+                    parsed_arguments = json.loads(arguments) if arguments else {}
+                except json.JSONDecodeError:
+                    parsed_arguments = {}
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": str(item.get("id") or item.get("call_id") or "toolu_1"),
+                                "name": str(item.get("name") or ""),
+                                "input": parsed_arguments,
+                            }
+                        ],
+                    }
+                )
+                continue
+            if item_type == "function_call_output":
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": str(item.get("call_id") or ""),
+                                "content": str(item.get("output") or ""),
+                            }
+                        ],
+                    }
+                )
+                continue
+            messages.append({"role": "user", "content": json.dumps(item)})
+        return messages
+
+    def _legacy_kwargs_from_prompt(self, *, api_key: str, prompt: Prompt) -> dict[str, object]:
+        tool_choice = prompt.tool_choice
+        if tool_choice == "auto":
+            tool_choice = {"type": "auto"}
+        elif tool_choice == "required":
+            tool_choice = {"type": "any"}
+        return {
+            "api_key": api_key,
+            "messages": self._legacy_messages_from_prompt(prompt),
+            "system_prompt": prompt.base_instructions,
+            "tools": prompt.tools,
+            "tool_choice": tool_choice,
+            "parallel_tool_calls": prompt.parallel_tool_calls,
+        }
+
+    def _call_legacy(self, method_name: str, **kwargs):
+        method = getattr(self, method_name)
+        try:
+            return method(**kwargs)
+        except TypeError:
+            kwargs.pop("parallel_tool_calls", None)
+            return method(**kwargs)
+
+    def count_prompt_tokens(self, *, api_key: str, prompt: Prompt) -> int | None:
+        return self._call_legacy(
+            "count_message_tokens",
+            **self._legacy_kwargs_from_prompt(api_key=api_key, prompt=prompt),
+        )
+
+    def _response_items_from_legacy_response(
+        self,
+        response: dict[str, object],
+        *,
+        default_assistant_item_id: str = "msg_stream",
+        default_assistant_text: str = "",
+    ) -> list[ResponseItem]:
+        items: list[ResponseItem] = []
+        content_blocks = response.get("content")
+        if not isinstance(content_blocks, list):
+            return items
+        for index, block in enumerate(content_blocks):
+            if not isinstance(block, dict):
+                continue
+            block_type = str(block.get("type") or "")
+            if block_type == "text":
+                text = str(block.get("text") or default_assistant_text)
+                items.append(
+                    ResponseItem(
+                        item_id=default_assistant_item_id,
+                        item_type="assistant_message",
+                        role="assistant",
+                        status="completed",
+                        content_text=text,
+                        raw=block,
+                    )
+                )
+                continue
+            if block_type == "tool_use":
+                tool_id = str(block.get("id") or f"toolu_{index + 1}")
+                items.append(
+                    ResponseItem(
+                        item_id=tool_id,
+                        item_type="function_call",
+                        role="assistant",
+                        status="completed",
+                        call_id=tool_id,
+                        name=str(block.get("name") or ""),
+                        content_json=block.get("input") or {},
+                        raw=block,
+                    )
+                )
+        return items
+
+    def create_response(self, *, api_key: str, prompt: Prompt) -> ResponseEnvelope:
+        response = self._call_legacy(
+            "create_message",
+            **self._legacy_kwargs_from_prompt(api_key=api_key, prompt=prompt),
+        )
+        if not isinstance(response, dict):
+            raise TypeError("Fake chat model expected create_message to return a dict")
+        usage = response.get("usage")
+        if isinstance(usage, dict):
+            chat_usage = ChatModelUsage(
+                input_tokens=int(usage.get("input_tokens") or 0),
+                output_tokens=int(usage.get("output_tokens") or 0),
+                total_tokens=int(usage.get("total_tokens") or 0)
+                or int(usage.get("input_tokens") or 0)
+                + int(usage.get("output_tokens") or 0),
+            )
+        else:
+            chat_usage = None
+        return ResponseEnvelope(
+            response_id="resp_fake_create",
+            items=self._response_items_from_legacy_response(response),
+            usage=chat_usage,
+            raw=response,
+        )
+
+    def create_message(
+        self,
+        *,
+        api_key: str,
+        messages,
+        system_prompt: str,
+        tools=None,
+        tool_choice=None,
+        parallel_tool_calls=None,
+    ):
         self.create_calls.append(
             {
                 "api_key": api_key,
@@ -89,6 +268,7 @@ class FakeChatModel:
                 "system_prompt": system_prompt,
                 "tools": tools,
                 "tool_choice": tool_choice,
+                "parallel_tool_calls": parallel_tool_calls,
             }
         )
         if system_prompt == "" and messages and "Compact the conversation transcript" in str(messages[-1]):
@@ -156,10 +336,25 @@ class FakeChatModel:
                     "text": f"Grounded answer with citations [S1]\n\nAPI key used: {api_key[:6]}",
                 }
             ],
+            "usage": {
+                "input_tokens": self.final_stream_usage.input_tokens,
+                "output_tokens": self.final_stream_usage.output_tokens,
+                "cache_creation_input_tokens": self.final_stream_usage.cache_creation_input_tokens,
+                "cache_read_input_tokens": self.final_stream_usage.cache_read_input_tokens,
+            },
             "stop_reason": "end_turn",
         }
 
-    def stream_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+    def stream_message(
+        self,
+        *,
+        api_key: str,
+        messages,
+        system_prompt: str,
+        tools=None,
+        tool_choice=None,
+        parallel_tool_calls=None,
+    ):
         self.stream_calls.append(
             {
                 "api_key": api_key,
@@ -167,14 +362,152 @@ class FakeChatModel:
                 "system_prompt": system_prompt,
                 "tools": tools,
                 "tool_choice": tool_choice,
+                "parallel_tool_calls": parallel_tool_calls,
             }
         )
+        if tools:
+            tool_names = [tool.get("name") for tool in tools if isinstance(tool, dict)]
+            has_tool_results = any(
+                message.get("role") == "user"
+                and isinstance(message.get("content"), list)
+                and any(block.get("type") == "tool_result" for block in message.get("content"))
+                for message in messages
+                if isinstance(message, dict)
+            )
+            if not has_tool_results:
+                query = "grounding"
+                tool_name = (
+                    "paperbase_search_sections"
+                    if "paperbase_search_sections" in tool_names
+                    else "paperbase_search"
+                    if "paperbase_search" in tool_names
+                    else str(tool_names[0])
+                )
+                yield ChatModelStreamEvent(usage=self.tool_round_usage)
+                yield ChatModelStreamEvent(
+                    response={
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "toolu_search_sections",
+                                "name": tool_name,
+                                "input": {"query": query, "limit": 3},
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": self.tool_round_usage.input_tokens,
+                            "output_tokens": self.tool_round_usage.output_tokens,
+                            "cache_creation_input_tokens": self.tool_round_usage.cache_creation_input_tokens,
+                            "cache_read_input_tokens": self.tool_round_usage.cache_read_input_tokens,
+                        },
+                        "stop_reason": "tool_use",
+                    }
+                )
+                return
         yield ChatModelStreamEvent(usage=self.initial_stream_usage)
         for index, chunk in enumerate(self.stream_chunks):
             if self.fail_stream_after_chunks is not None and index >= self.fail_stream_after_chunks:
                 raise RuntimeError("stream blew up")
             yield ChatModelStreamEvent(text=chunk)
         yield ChatModelStreamEvent(usage=self.final_stream_usage)
+        yield ChatModelStreamEvent(
+            response={
+                "content": [{"type": "text", "text": "".join(self.stream_chunks)}],
+                "usage": {
+                    "input_tokens": self.final_stream_usage.input_tokens,
+                    "output_tokens": self.final_stream_usage.output_tokens,
+                    "cache_creation_input_tokens": self.final_stream_usage.cache_creation_input_tokens,
+                    "cache_read_input_tokens": self.final_stream_usage.cache_read_input_tokens,
+                },
+                "stop_reason": "end_turn",
+            }
+        )
+
+    def stream_response(self, *, api_key: str, prompt: Prompt):
+        assistant_item_id = "msg_stream"
+        response_id = "resp_fake_stream"
+        assistant_started = False
+        assistant_text = ""
+        legacy_kwargs = self._legacy_kwargs_from_prompt(api_key=api_key, prompt=prompt)
+        if self.__class__.stream_message is FakeChatModel.stream_message:
+            legacy_events = [ChatModelStreamEvent(response=self._call_legacy("create_message", **legacy_kwargs))]
+        else:
+            def _stream_with_fallback():
+                try:
+                    yield from self._call_legacy("stream_message", **legacy_kwargs)
+                except AssertionError:
+                    yield ChatModelStreamEvent(response=self._call_legacy("create_message", **legacy_kwargs))
+
+            legacy_events = _stream_with_fallback()
+
+        for legacy_event in legacy_events:
+            if legacy_event.usage is not None:
+                yield ResponseEvent(
+                    type="response.completed",
+                    response_id=response_id,
+                    usage=legacy_event.usage,
+                )
+            if legacy_event.text:
+                if not assistant_started:
+                    assistant_started = True
+                    yield ResponseEvent(
+                        type="response.output_item.added",
+                        response_id=response_id,
+                        item=ResponseItem(
+                            item_id=assistant_item_id,
+                            item_type="assistant_message",
+                            role="assistant",
+                            status="in_progress",
+                        ),
+                    )
+                assistant_text += legacy_event.text
+                yield ResponseEvent(
+                    type="response.output_text.delta",
+                    response_id=response_id,
+                    item_id=assistant_item_id,
+                    delta=legacy_event.text,
+                )
+            if legacy_event.response:
+                response = legacy_event.response
+                items = self._response_items_from_legacy_response(
+                    response,
+                    default_assistant_item_id=assistant_item_id,
+                    default_assistant_text=assistant_text,
+                )
+                for item in items:
+                    if item.item_type != "assistant_message" or not assistant_started:
+                        yield ResponseEvent(
+                            type="response.output_item.added",
+                            response_id=response_id,
+                            item=ResponseItem(
+                                item_id=item.item_id,
+                                item_type=item.item_type,
+                                role=item.role,
+                                status="in_progress" if item.item_type == "assistant_message" else item.status,
+                                call_id=item.call_id,
+                                name=item.name,
+                                content_json=item.content_json,
+                            ),
+                        )
+                    yield ResponseEvent(
+                        type="response.output_item.done",
+                        response_id=response_id,
+                        item=item,
+                    )
+                usage = response.get("usage")
+                if isinstance(usage, dict):
+                    yield ResponseEvent(
+                        type="response.completed",
+                        response_id=response_id,
+                        usage=ChatModelUsage(
+                            input_tokens=int(usage.get("input_tokens") or 0),
+                            output_tokens=int(usage.get("output_tokens") or 0),
+                            total_tokens=int(usage.get("total_tokens") or 0)
+                            or int(usage.get("input_tokens") or 0)
+                            + int(usage.get("output_tokens") or 0),
+                        ),
+                        raw=response,
+                    )
 
 
 class FakeGitHubRepoManager:
@@ -315,6 +648,35 @@ class FakeModalRunner:
             finished_at=finished,
         )
 
+    def run_project(
+        self,
+        *,
+        token_id: str,
+        token_secret: str,
+        files: dict[str, str],
+        entrypoint_path: str,
+        run_mode: str,
+    ) -> ModalRunResult:
+        self.calls.append(
+            {
+                "token_id": token_id,
+                "token_secret": token_secret,
+                "files": files,
+                "entrypoint_path": entrypoint_path,
+                "run_mode": run_mode,
+            }
+        )
+        started = datetime(2026, 4, 22, 0, 0, tzinfo=timezone.utc)
+        finished = datetime(2026, 4, 22, 0, 0, 1, tzinfo=timezone.utc)
+        return ModalRunResult(
+            status="completed",
+            stdout="runner output",
+            stderr="",
+            exit_code=0,
+            started_at=started,
+            finished_at=finished,
+        )
+
 
 def _parse_sse_events(body: str) -> list[tuple[str, dict]]:
     events: list[tuple[str, dict]] = []
@@ -331,6 +693,28 @@ def _parse_sse_events(body: str) -> list[tuple[str, dict]]:
     return events
 
 
+def _event_items(
+    events: list[tuple[str, dict]],
+    *,
+    event_name: str,
+    item_type: str | None = None,
+    phase: str | None = None,
+) -> list[dict]:
+    matches: list[dict] = []
+    for current_name, payload in events:
+        if current_name != event_name:
+            continue
+        item = payload.get("item")
+        if not isinstance(item, dict):
+            continue
+        if item_type is not None and item.get("item_type") != item_type:
+            continue
+        if phase is not None and item.get("phase") != phase:
+            continue
+        matches.append(item)
+    return matches
+
+
 def _auth_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {get_settings().api_key}"}
 
@@ -343,6 +727,10 @@ def _connect_github(service: PaperbaseService, user) -> None:
         access_token="github-access-token",
         scope="repo,read:user",
     )
+
+
+def _save_browser_openai_key(service: PaperbaseService, user, api_key: str = "openai-user-key-999") -> None:
+    service.save_user_openai_key(user, SaveOpenAIKeyRequest(api_key=api_key))
 
 
 def _create_repo_project_request(
@@ -497,6 +885,62 @@ def test_index_writes_manifest_and_artifacts(monkeypatch, service: PaperbaseServ
     assert "tables/table-1.json" in files
     assert "tables/table-1.csv" in files
     assert "raw/source.tar.gz" in files
+
+
+def test_get_figure_serves_eps_and_pdf_raw_fallbacks(service: PaperbaseService):
+    """LaTeX-path figures fall back to raw eps/pdf bytes when Ghostscript /
+    pypdfium2 fail to rasterize. The figure-serving probe must recognize
+    those extensions and return their proper MIME so the UI renders
+    something instead of ``image_url=None``."""
+    paper_id = "arxiv:2401.42420"
+    eps_caption = f"papers/{paper_id}/figures/figure-eps/caption.md"
+    pdf_caption = f"papers/{paper_id}/figures/figure-pdf/caption.md"
+    service.object_store.put_text(eps_caption, "EPS figure caption", content_type="text/markdown")
+    service.object_store.put_text(pdf_caption, "PDF figure caption", content_type="text/markdown")
+    service.object_store.put_bytes(
+        f"papers/{paper_id}/figures/figure-eps/image.eps",
+        b"%!PS-Adobe-3.0 EPSF-3.0\n%%fake eps\n",
+        content_type="application/postscript",
+    )
+    service.object_store.put_bytes(
+        f"papers/{paper_id}/figures/figure-pdf/image.pdf",
+        b"%PDF-1.4\nfake\n",
+        content_type="application/pdf",
+    )
+
+    eps_response = service.get_figure(paper_id, "figure-eps")
+    pdf_response = service.get_figure(paper_id, "figure-pdf")
+
+    assert eps_response.image_url is not None
+    assert eps_response.content_type == "application/postscript"
+    assert pdf_response.image_url is not None
+    assert pdf_response.content_type == "application/pdf"
+
+
+def test_get_figure_prefers_rasterized_png_over_raw_pdf(service: PaperbaseService):
+    """When both a browser-renderable raster and a raw vector copy exist
+    (e.g. a re-index produced both representations), the probe must pick
+    the raster so the UI doesn't fall through to a non-renderable MIME."""
+    paper_id = "arxiv:2401.42421"
+    service.object_store.put_text(
+        f"papers/{paper_id}/figures/figure-1/caption.md",
+        "caption",
+        content_type="text/markdown",
+    )
+    service.object_store.put_bytes(
+        f"papers/{paper_id}/figures/figure-1/image.png",
+        b"\x89PNG\r\n\x1a\n",
+        content_type="image/png",
+    )
+    service.object_store.put_bytes(
+        f"papers/{paper_id}/figures/figure-1/image.pdf",
+        b"%PDF-1.4\n",
+        content_type="application/pdf",
+    )
+
+    response = service.get_figure(paper_id, "figure-1")
+
+    assert response.content_type == "image/png"
 
 
 def test_reindex_replaces_stale_artifacts(monkeypatch, service: PaperbaseService):
@@ -1406,7 +1850,6 @@ def test_browser_auth_and_password_reset_flow(browser_service):
     )
     assert signup.status_code == 200
     assert signup.json()["authenticated"] is True
-    assert signup.json()["remaining_free_responses"] == 3
     csrf_token = signup.json()["csrf_token"]
     assert csrf_token
 
@@ -1500,8 +1943,6 @@ def test_invalid_saved_anthropic_key_is_cleared_and_gates_chat(browser_service):
         encrypted_api_key="stale-invalid-token",
         hint="anth...999",
     )
-    for _ in range(service.settings.free_chat_response_limit):
-        service.repository.increment_free_responses_used(session.user.user_id)  # type: ignore[attr-defined]
 
     thread = service.create_chat_thread(
         session.user,
@@ -1531,6 +1972,154 @@ def test_invalid_saved_anthropic_key_is_cleared_and_gates_chat(browser_service):
     assert service.repository.get_anthropic_api_key_record(session.user.user_id) is None  # type: ignore[attr-defined]
     assert [event_name for event_name, _ in streamed] == ["api_key_required"]
     assert streamed[0][1]["state"] == "api_key_invalid"
+    assert response.thread.messages == []
+    assert streamed[0][1]["thread"]["messages"] == []
+
+
+def test_send_chat_message_indexes_mentioned_paper_on_demand(monkeypatch, browser_service):
+    """A paper mentioned via @-tag that is in the catalog at index_status='discovered'
+    must be fetched and indexed before the chat turn runs, so the model sees a fully
+    indexed paper instead of a metadata stub."""
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="mention@example.com", password="topsecret123", display_name="Mention User")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
+
+    discovered = service.repository.upsert_paper_shallow(  # type: ignore[attr-defined]
+        _sample_paper("2401.99999", title="Mentioned Paper", abstract="Body of work."),
+    )
+    assert discovered.index_status == "discovered"
+
+    fetched: list[tuple[str, bool]] = []
+
+    def fake_index_arxiv_paper(arxiv_id: str, *, paper=None, force: bool = False):
+        fetched.append((arxiv_id, force))
+        indexed = discovered.model_copy(update={"index_status": "indexed"})
+        service.repository.papers[discovered.paper_id] = indexed  # type: ignore[attr-defined]
+        return indexed
+
+    monkeypatch.setattr(service, "index_arxiv_paper", fake_index_arxiv_paper)
+
+    response = service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="Summarize @Mentioned Paper", paper_ids=[discovered.paper_id]),
+    )
+
+    assert fetched == [(discovered.arxiv_id, False)]
+    assert response.assistant_message is not None
+
+
+def test_send_chat_message_skips_indexing_when_paper_is_already_indexed(monkeypatch, browser_service):
+    """A mentioned paper that is already at index_status='indexed' must not trigger
+    a redundant fetch — the resolve helper short-circuits."""
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="indexed-mention@example.com", password="topsecret123", display_name="Indexed Mention")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
+
+    discovered = service.repository.upsert_paper_shallow(  # type: ignore[attr-defined]
+        _sample_paper("2401.88888", title="Already Indexed", abstract="Body."),
+    )
+    indexed = discovered.model_copy(update={"index_status": "indexed"})
+    service.repository.papers[discovered.paper_id] = indexed  # type: ignore[attr-defined]
+
+    fetched: list[str] = []
+
+    def fake_index_arxiv_paper(arxiv_id: str, *, paper=None, force: bool = False):
+        fetched.append(arxiv_id)
+        return indexed
+
+    monkeypatch.setattr(service, "index_arxiv_paper", fake_index_arxiv_paper)
+
+    service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="Hello @Already Indexed", paper_ids=[indexed.paper_id]),
+    )
+
+    assert fetched == []
+
+
+def test_stream_chat_message_emits_mention_indexing_events(monkeypatch, browser_service):
+    """Streaming chat must yield mention_indexing_started/completed events so the UI
+    can show a 'fetching paper' state for any unindexed @-mention."""
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="mention-stream@example.com", password="topsecret123", display_name="Mention Stream")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
+
+    discovered = service.repository.upsert_paper_shallow(  # type: ignore[attr-defined]
+        _sample_paper("2401.77777", title="Streamed Paper", abstract="Body."),
+    )
+
+    def fake_index_arxiv_paper(arxiv_id: str, *, paper=None, force: bool = False):
+        indexed = discovered.model_copy(update={"index_status": "indexed"})
+        service.repository.papers[discovered.paper_id] = indexed  # type: ignore[attr-defined]
+        return indexed
+
+    monkeypatch.setattr(service, "index_arxiv_paper", fake_index_arxiv_paper)
+
+    events = list(
+        service.stream_chat_message(
+            session.user,
+            thread.thread_id,
+            SendChatMessageRequest(content="@Streamed Paper please", paper_ids=[discovered.paper_id]),
+        )
+    )
+
+    event_names = [name for name, _ in events]
+    assert "mention_indexing_started" in event_names
+    assert "mention_indexing_completed" in event_names
+    started_payload = next(payload for name, payload in events if name == "mention_indexing_started")
+    assert started_payload["paper_id"] == discovered.paper_id
+    assert started_payload["arxiv_id"] == discovered.arxiv_id
+
+
+def test_send_chat_message_reports_mention_failure_without_aborting_turn(monkeypatch, browser_service):
+    """If on-demand indexing raises (e.g. arXiv 404 → PermanentError), the chat turn
+    must still complete — the failure is surfaced as an SSE event but does not abort
+    the assistant response."""
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="mention-fail@example.com", password="topsecret123", display_name="Mention Fail")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
+
+    discovered = service.repository.upsert_paper_shallow(  # type: ignore[attr-defined]
+        _sample_paper("2401.66666", title="Doomed Paper", abstract="Body."),
+    )
+
+    def fake_index_arxiv_paper(arxiv_id: str, *, paper=None, force: bool = False):
+        from paperbase.errors import PermanentError
+
+        raise PermanentError(f"Paper {arxiv_id} not found on arXiv")
+
+    monkeypatch.setattr(service, "index_arxiv_paper", fake_index_arxiv_paper)
+
+    events = list(
+        service.stream_chat_message(
+            session.user,
+            thread.thread_id,
+            SendChatMessageRequest(content="@Doomed Paper", paper_ids=[discovered.paper_id]),
+        )
+    )
+
+    failure_events = [payload for name, payload in events if name == "mention_indexing_failed"]
+    assert len(failure_events) == 1
+    assert "not found" in failure_events[0]["detail"]
+    assert any(name == "turn_completed" for name, _ in events)
 
 
 def test_sanitize_inline_citations_preserves_markdown_structure():
@@ -1603,6 +2192,826 @@ def test_python_file_creation_requires_github_and_normalizes_names(browser_servi
     assert second.filename == "something_2.py"
     assert renamed.filename == "analysis.py"
     assert renamed.content == "print('hello')"
+
+
+def test_project_code_paths_allow_duplicate_basenames(browser_service):
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="paths@example.com", password="topsecret123", display_name="Path User")
+    )
+    assert session.user is not None
+    service.save_github_connection(
+        session.user,
+        github_user_id="42",
+        github_login="octocat",
+        access_token="github-access-token",
+        scope="repo,read:user",
+    )
+
+    project_id = service.list_projects(session.user).projects[0].project_id
+    train = service.create_project_python_file(
+        session.user,
+        project_id,
+        repo_path="src/train.py",
+        content="print('train')",
+    )
+    eval_file = service.create_project_python_file(
+        session.user,
+        project_id,
+        repo_path="experiments/train.py",
+        content="print('eval')",
+    )
+
+    files = service.list_project_code_files(session.user, project_id)
+
+    assert train.filename == "train.py"
+    assert eval_file.filename == "train.py"
+    assert {item.repo_path for item in files} == {"experiments/train.py", "src/train.py"}
+
+
+def test_project_code_read_grep_edit_and_delete(browser_service):
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="code-tools@example.com", password="topsecret123", display_name="Code User")
+    )
+    assert session.user is not None
+    service.save_github_connection(
+        session.user,
+        github_user_id="42",
+        github_login="octocat",
+        access_token="github-access-token",
+        scope="repo,read:user",
+    )
+
+    project_id = service.list_projects(session.user).projects[0].project_id
+    created = service.create_project_python_file(
+        session.user,
+        project_id,
+        repo_path="train.py",
+        content="import torch\n\nvalue = 1\nvalue = 1\n",
+    )
+
+    read_result = service.read_project_code_file(session.user, project_id, "train.py", start_line=1, end_line=2)
+    grep_result = service.grep_project_code(session.user, project_id, pattern="torch", literal=True, limit=5)
+
+    assert read_result["repo_path"] == "train.py"
+    assert read_result["total_lines"] == 4
+    assert read_result["content"] == "1: import torch\n2: "
+    assert grep_result["matches"] == [
+        {
+            "file_id": created.file_id,
+            "repo_path": "train.py",
+            "filename": "train.py",
+            "file_kind": "python",
+            "line_number": 1,
+            "line": "import torch",
+        }
+    ]
+
+    with pytest.raises(HTTPException) as exc_info:
+        service.edit_project_code_file(
+            session.user,
+            project_id,
+            repo_path="train.py",
+            old_string="value = 1",
+            new_string="value = 2",
+        )
+    assert exc_info.value.status_code == 409
+
+    edited = service.edit_project_code_file(
+        session.user,
+        project_id,
+        repo_path="train.py",
+        old_string="value = 1",
+        new_string="value = 2",
+        replace_all=True,
+    )
+    deleted = service.delete_project_code_file(session.user, project_id, repo_path="train.py")
+
+    assert edited["match_count"] == 2
+    assert "value = 2" in edited["content"]
+    assert deleted == {
+        "file_id": created.file_id,
+        "repo_path": "train.py",
+        "filename": "train.py",
+        "file_kind": "python",
+        "deleted": True,
+    }
+
+
+def test_project_code_edit_can_populate_an_existing_empty_file(browser_service):
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="empty-edit@example.com", password="topsecret123", display_name="Empty Edit")
+    )
+    assert session.user is not None
+    service.save_github_connection(
+        session.user,
+        github_user_id="42",
+        github_login="octocat",
+        access_token="github-access-token",
+        scope="repo,read:user",
+    )
+
+    project_id = service.list_projects(session.user).projects[0].project_id
+    created = service.create_project_python_file(
+        session.user,
+        project_id,
+        repo_path="src/linear_gd.py",
+        content="",
+    )
+
+    edited = service.edit_project_code_file(
+        session.user,
+        project_id,
+        repo_path="src/linear_gd.py",
+        old_string="",
+        new_string="def train_linear_gd():\n    return 1\n",
+    )
+
+    assert edited["file_id"] == created.file_id
+    assert edited["match_count"] == 1
+    assert edited["content"] == "def train_linear_gd():\n    return 1\n"
+
+
+def test_project_code_edit_rejects_empty_population_with_empty_new_string(browser_service):
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="empty-edit-reject@example.com", password="topsecret123", display_name="Empty Reject")
+    )
+    assert session.user is not None
+    service.save_github_connection(
+        session.user,
+        github_user_id="42",
+        github_login="octocat",
+        access_token="github-access-token",
+        scope="repo,read:user",
+    )
+
+    project_id = service.list_projects(session.user).projects[0].project_id
+    service.create_project_python_file(
+        session.user,
+        project_id,
+        repo_path="src/linear_gd.py",
+        content="",
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        service.edit_project_code_file(
+            session.user,
+            project_id,
+            repo_path="src/linear_gd.py",
+            old_string="",
+            new_string="",
+        )
+
+    assert exc_info.value.status_code == 422
+
+
+def test_project_chat_tools_are_advertised_for_coding_turns(browser_service):
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="coding-chat@example.com", password="topsecret123", display_name="Coding Chat")
+    )
+    assert session.user is not None
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="Project chat"))
+
+    tools = service._chat_tool_definitions(
+        SendChatMessageRequest(content="Create a PyTorch training script and run a smoke test"),
+        thread=thread,
+    )
+    tool_names = {tool["name"] for tool in tools}
+    tools_by_name = {tool["name"]: tool for tool in tools}
+
+    assert {
+        "paperbase_search",
+        "paperbase_search_sections",
+        "paperbase_list_uploaded_documents",
+        "paperbase_search_uploaded_sections",
+        "project_list_files",
+        "project_read_file",
+        "project_grep",
+        "project_write_file",
+        "project_apply_patch",
+        "project_move",
+        "project_delete",
+        "project_git_status",
+        "project_git_diff",
+        "project_exec",
+        "project_wait",
+        "project_cancel",
+        "project_logs",
+        "project_test",
+        "project_lint",
+        "project_run",
+    }.issubset(tool_names)
+    assert "workspace text files" in tools_by_name["project_list_files"]["description"]
+    assert "Create or replace one repo-relative workspace text file" in tools_by_name["project_write_file"]["description"]
+    assert "exact-match text patch" in tools_by_name["project_apply_patch"]["description"]
+    assert "Move or rename one workspace file" in tools_by_name["project_move"]["description"]
+    assert "truly needs deletion" in tools_by_name["project_delete"]["description"]
+    assert "long-running command" in tools_by_name["project_exec"]["description"]
+    assert "last synced project repository state" in tools_by_name["project_git_status"]["description"]
+
+    prompt = service._chat_tool_system_prompt(
+        thread,
+        include_research_tools=True,
+        include_project_code_tools=True,
+    )
+    assert "Once the tool results are sufficient, stop calling tools and answer directly in the same turn." in prompt
+    assert "Use them only when paper evidence" in prompt
+    assert "Operate like a coding agent." in prompt
+    assert "Project workspace tools operate on the current project's repo-relative text files." in prompt
+    assert "Generated runnable code should support smoke-scale validation when practical." in prompt
+    assert "Every tool-enabled turn must begin by leveraging these research tools" not in prompt
+    assert "do not stop tool use until the relevant managed project Python files have actually been created or updated" not in prompt
+
+
+def test_project_snippet_request_uses_auto_tools_and_persists_file():
+    class ProjectSnippetChatModel(FakeChatModel):
+        def create_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+            self.create_calls.append(
+                {
+                    "api_key": api_key,
+                    "messages": messages,
+                    "system_prompt": system_prompt,
+                    "tools": tools,
+                    "tool_choice": tool_choice,
+                }
+            )
+            has_tool_results = any(
+                message.get("role") == "user"
+                and isinstance(message.get("content"), list)
+                and any(block.get("type") == "tool_result" for block in message.get("content"))
+                for message in messages
+                if isinstance(message, dict)
+            )
+            if tools and not has_tool_results:
+                return {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_touch_file",
+                            "name": "project_touch",
+                            "input": {
+                                "repo_path": "src/csv_loader.py",
+                                "content": "import csv\n\n\ndef load_rows(path: str) -> list[dict[str, str]]:\n    with open(path, newline=\"\", encoding=\"utf-8\") as handle:\n        return list(csv.DictReader(handle))\n",
+                            },
+                        }
+                    ],
+                    "stop_reason": "tool_use",
+                }
+            return {
+                "content": [{"type": "text", "text": "Saved the snippet to `src/csv_loader.py`."}],
+                "stop_reason": "end_turn",
+            }
+
+    chat_model = ProjectSnippetChatModel()
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=chat_model,
+        github_repo_manager=FakeGitHubRepoManager(),
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="project-snippet@example.com", password="topsecret123", display_name="Project Snippet")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    _connect_github(service, session.user)
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="Project chat"))
+
+    response = service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="Give me a Python snippet that loads CSV rows into dictionaries"),
+    )
+
+    saved_file = service.repository.get_project_python_file_by_path(  # type: ignore[attr-defined]
+        user_id=session.user.user_id,
+        project_id=thread.project_id,
+        repo_path="src/csv_loader.py",
+    )
+    assert response.assistant_message is not None
+    assert saved_file is not None
+    assert chat_model.create_calls[0]["tool_choice"] == {"type": "auto"}
+    assert len(chat_model.create_calls) == 2
+
+
+def test_project_code_turn_can_read_then_write_then_answer_in_same_loop():
+    class ProjectWriteChatModel(FakeChatModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.round_index = 0
+
+        def create_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+            self.create_calls.append(
+                {
+                    "api_key": api_key,
+                    "messages": messages,
+                    "system_prompt": system_prompt,
+                    "tools": tools,
+                    "tool_choice": tool_choice,
+                }
+            )
+            has_tool_results = any(
+                message.get("role") == "user"
+                and isinstance(message.get("content"), list)
+                and any(block.get("type") == "tool_result" for block in message.get("content"))
+                for message in messages
+                if isinstance(message, dict)
+            )
+            if tools and not has_tool_results:
+                self.round_index += 1
+                return {
+                    "content": [{"type": "tool_use", "id": "toolu_list_files", "name": "project_list_files", "input": {}}],
+                    "stop_reason": "tool_use",
+                }
+            if tools and self.round_index == 1:
+                self.round_index += 1
+                return {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_touch_real_file",
+                            "name": "project_touch",
+                            "input": {
+                                "repo_path": "src/train.py",
+                                "content": "def train():\n    return 1\n",
+                            },
+                        }
+                    ],
+                    "stop_reason": "tool_use",
+                }
+            return {
+                "content": [{"type": "text", "text": "Saved the training module to `src/train.py`."}],
+                "stop_reason": "end_turn",
+            }
+
+    chat_model = ProjectWriteChatModel()
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=chat_model,
+        github_repo_manager=FakeGitHubRepoManager(),
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="project-write@example.com", password="topsecret123", display_name="Project Write")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    _connect_github(service, session.user)
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="Project chat"))
+
+    response = service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="Create a PyTorch training script for this project"),
+    )
+
+    assert response.assistant_message is not None
+    assert service.repository.get_project_python_file_by_path(  # type: ignore[attr-defined]
+        user_id=session.user.user_id,
+        project_id=thread.project_id,
+        repo_path="src/train.py",
+    )
+    assert [call["tool_choice"] for call in chat_model.create_calls[:2]] == [{"type": "auto"}, {"type": "auto"}]
+
+
+def test_project_code_turn_can_recover_from_failed_create_with_edit():
+    class FailedTouchThenEditChatModel(FakeChatModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.round_index = 0
+
+        def create_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+            self.create_calls.append(
+                {
+                    "api_key": api_key,
+                    "messages": messages,
+                    "system_prompt": system_prompt,
+                    "tools": tools,
+                    "tool_choice": tool_choice,
+                }
+            )
+            if tools and self.round_index == 0:
+                self.round_index += 1
+                return {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_bad_touch",
+                            "name": "project_touch",
+                            "input": {
+                                "repo_path": "src/linear_gd.py",
+                                "content": "def train_linear_gd():\n    return 1\n",
+                            },
+                        }
+                    ],
+                    "stop_reason": "tool_use",
+                }
+            if tools and self.round_index == 1:
+                self.round_index += 1
+                return {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_fill_empty_file",
+                            "name": "project_edit",
+                            "input": {
+                                "repo_path": "src/linear_gd.py",
+                                "old_string": "",
+                                "new_string": "def train_linear_gd():\n    return 1\n",
+                            },
+                        }
+                    ],
+                    "stop_reason": "tool_use",
+                }
+            return {
+                "content": [{"type": "text", "text": "Saved the module to `src/linear_gd.py`."}],
+                "stop_reason": "end_turn",
+            }
+
+    chat_model = FailedTouchThenEditChatModel()
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=chat_model,
+        github_repo_manager=FakeGitHubRepoManager(),
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="failed-touch@example.com", password="topsecret123", display_name="Failed Touch")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    _connect_github(service, session.user)
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="Project chat"))
+    service.create_project_python_file(
+        session.user,
+        thread.project_id,
+        repo_path="src/linear_gd.py",
+        content="",
+    )
+
+    response = service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="Write some code to train a small linear gradient descent with pytorch"),
+    )
+
+    saved_file = service.repository.get_project_python_file_by_path(  # type: ignore[attr-defined]
+        user_id=session.user.user_id,
+        project_id=thread.project_id,
+        repo_path="src/linear_gd.py",
+    )
+    assert response.assistant_message is not None
+    assert saved_file is not None
+    assert saved_file.content == "def train_linear_gd():\n    return 1\n"
+    assert [call["tool_choice"] for call in chat_model.create_calls[:2]] == [{"type": "auto"}, {"type": "auto"}]
+
+
+def test_project_thread_can_answer_with_python_without_persisted_write():
+    class UnsavedPythonAnswerChatModel(FakeChatModel):
+        def create_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+            self.create_calls.append(
+                {
+                    "api_key": api_key,
+                    "messages": messages,
+                    "system_prompt": system_prompt,
+                    "tools": tools,
+                    "tool_choice": tool_choice,
+                }
+            )
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "```python\ndef recurse(items):\n    return items\n```",
+                    }
+                ],
+                "stop_reason": "end_turn",
+            }
+
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=UnsavedPythonAnswerChatModel(),
+        github_repo_manager=FakeGitHubRepoManager(),
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="unsaved-python@example.com", password="topsecret123", display_name="Unsaved Python")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="Project chat"))
+
+    response = service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="Explain recursion briefly"),
+    )
+
+    assert response.assistant_message is not None
+    assert response.assistant_message.content_markdown == "```python\ndef recurse(items):\n    return items\n```"
+    assert len(service.chat_model.create_calls) == 1
+    assert service.chat_model.create_calls[0]["tool_choice"] == {"type": "auto"}
+
+
+def test_project_thread_allows_python_answer_after_reading_existing_file():
+    class ReadOnlyPythonAnswerChatModel(FakeChatModel):
+        def create_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+            self.create_calls.append(
+                {
+                    "api_key": api_key,
+                    "messages": messages,
+                    "system_prompt": system_prompt,
+                    "tools": tools,
+                    "tool_choice": tool_choice,
+                }
+            )
+            has_tool_results = any(
+                message.get("role") == "user"
+                and isinstance(message.get("content"), list)
+                and any(block.get("type") == "tool_result" for block in message.get("content"))
+                for message in messages
+                if isinstance(message, dict)
+            )
+            if tools and not has_tool_results:
+                return {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_read_file",
+                            "name": "project_read_file",
+                            "input": {"repo_path": "src/train.py"},
+                        }
+                    ],
+                    "stop_reason": "tool_use",
+                }
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Here is `src/train.py`:\n\n```python\ndef train():\n    return 1\n```",
+                    }
+                ],
+                "stop_reason": "end_turn",
+            }
+
+    chat_model = ReadOnlyPythonAnswerChatModel()
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=chat_model,
+        github_repo_manager=FakeGitHubRepoManager(),
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="read-code@example.com", password="topsecret123", display_name="Read Code")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    _connect_github(service, session.user)
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="Project chat"))
+    service.create_project_python_file(
+        session.user,
+        thread.project_id,
+        repo_path="src/train.py",
+        content="def train():\n    return 1\n",
+    )
+
+    response = service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="Show me src/train.py"),
+    )
+
+    assert response.assistant_message is not None
+    assert response.assistant_message.content_markdown == (
+        "Here is `src/train.py`:\n\n```python\ndef train():\n    return 1\n```"
+    )
+    assert [call["tool_choice"] for call in chat_model.create_calls] == [{"type": "auto"}, {"type": "auto"}]
+
+
+def test_project_confirmation_turn_keeps_project_tools_available():
+    class ProjectConfirmationChatModel(FakeChatModel):
+        def create_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+            self.create_calls.append(
+                {
+                    "api_key": api_key,
+                    "messages": messages,
+                    "system_prompt": system_prompt,
+                    "tools": tools,
+                    "tool_choice": tool_choice,
+                }
+            )
+            has_tool_results = any(
+                message.get("role") == "user"
+                and isinstance(message.get("content"), list)
+                and any(block.get("type") == "tool_result" for block in message.get("content"))
+                for message in messages
+                if isinstance(message, dict)
+            )
+            if tools and not has_tool_results:
+                return {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_touch_file",
+                            "name": "project_touch",
+                            "input": {
+                                "repo_path": "src/linear_gd.py",
+                                "content": "def train_linear_gd():\n    return 1\n",
+                            },
+                        }
+                    ],
+                    "stop_reason": "tool_use",
+                }
+            return {
+                "content": [{"type": "text", "text": "Saved the module to `src/linear_gd.py`."}],
+                "stop_reason": "end_turn",
+            }
+
+    chat_model = ProjectConfirmationChatModel()
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=chat_model,
+        github_repo_manager=FakeGitHubRepoManager(),
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="project-confirm@example.com", password="topsecret123", display_name="Project Confirm")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    _connect_github(service, session.user)
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="Project chat"))
+    service.repository.add_chat_message(  # type: ignore[attr-defined]
+        thread_id=thread.thread_id,
+        role="user",
+        content_markdown="Write some code to train a small linear gradient descent with pytorch",
+    )
+    service.repository.add_chat_message(  # type: ignore[attr-defined]
+        thread_id=thread.thread_id,
+        role="assistant",
+        content_markdown="Want me to save this into your project (e.g. as src/linear_gd.py)?",
+    )
+
+    response = service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="yes"),
+    )
+
+    saved_file = service.repository.get_project_python_file_by_path(  # type: ignore[attr-defined]
+        user_id=session.user.user_id,
+        project_id=thread.project_id,
+        repo_path="src/linear_gd.py",
+    )
+    assert response.assistant_message is not None
+    assert saved_file is not None
+    assert saved_file.content == "def train_linear_gd():\n    return 1\n"
+    assert chat_model.create_calls[0]["tool_choice"] == {"type": "auto"}
+    tool_names = {tool["name"] for tool in chat_model.create_calls[0]["tools"]}
+    assert "project_write_file" in tool_names
+
+
+def test_project_retry_turn_keeps_project_tools_available():
+    class ProjectRetryChatModel(FakeChatModel):
+        def create_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+            self.create_calls.append(
+                {
+                    "api_key": api_key,
+                    "messages": messages,
+                    "system_prompt": system_prompt,
+                    "tools": tools,
+                    "tool_choice": tool_choice,
+                }
+            )
+            has_tool_results = any(
+                message.get("role") == "user"
+                and isinstance(message.get("content"), list)
+                and any(block.get("type") == "tool_result" for block in message.get("content"))
+                for message in messages
+                if isinstance(message, dict)
+            )
+            if tools and not has_tool_results:
+                return {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_fill_empty_file",
+                            "name": "project_edit",
+                            "input": {
+                                "repo_path": "src/linear_gd.py",
+                                "old_string": "",
+                                "new_string": "def train_linear_gd():\n    return 1\n",
+                            },
+                        }
+                    ],
+                    "stop_reason": "tool_use",
+                }
+            return {
+                "content": [{"type": "text", "text": "Saved the module to `src/linear_gd.py`."}],
+                "stop_reason": "end_turn",
+            }
+
+    chat_model = ProjectRetryChatModel()
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=chat_model,
+        github_repo_manager=FakeGitHubRepoManager(),
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="project-retry@example.com", password="topsecret123", display_name="Project Retry")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    _connect_github(service, session.user)
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="Project chat"))
+    service.repository.add_chat_message(  # type: ignore[attr-defined]
+        thread_id=thread.thread_id,
+        role="user",
+        content_markdown="Write some code to train a small linear gradient descent with pytorch",
+    )
+    service.repository.add_chat_message(  # type: ignore[attr-defined]
+        thread_id=thread.thread_id,
+        role="assistant",
+        content_markdown="The file exists but still needs to be updated.",
+    )
+    service.create_project_python_file(
+        session.user,
+        thread.project_id,
+        repo_path="src/linear_gd.py",
+        content="",
+    )
+
+    response = service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="try again"),
+    )
+
+    saved_file = service.repository.get_project_python_file_by_path(  # type: ignore[attr-defined]
+        user_id=session.user.user_id,
+        project_id=thread.project_id,
+        repo_path="src/linear_gd.py",
+    )
+    assert response.assistant_message is not None
+    assert saved_file is not None
+    assert saved_file.content == "def train_linear_gd():\n    return 1\n"
+    assert chat_model.create_calls[0]["tool_choice"] == {"type": "auto"}
+    tool_names = {tool["name"] for tool in chat_model.create_calls[0]["tools"]}
+    assert "project_apply_patch" in tool_names
 
 
 def test_python_file_sync_project_repo_writes_metadata_and_files():
@@ -2230,12 +3639,80 @@ def test_run_python_file_requires_modal_credentials_and_uses_saved_content():
         {
             "token_id": "modal-token-id-999",
             "token_secret": "modal-token-secret-999",
-            "code": "print('run')",
+            "files": {"src/something.py": "print('run')"},
+            "entrypoint_path": "src/something.py",
+            "run_mode": "full",
         }
     ]
 
 
-def test_browser_uploads_and_chat_require_api_key_after_free_quota(monkeypatch, browser_service):
+def test_run_project_python_file_materializes_workspace_and_threads_smoke_mode():
+    modal_runner = FakeModalRunner()
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        modal_runner=modal_runner,
+    )
+
+    session, _ = service.register_browser_user(
+        SignupRequest(email="workspace@example.com", password="topsecret123", display_name="Workspace User")
+    )
+    assert session.user is not None
+    service.save_github_connection(
+        session.user,
+        github_user_id="42",
+        github_login="octocat",
+        access_token="github-access-token",
+        scope="repo,read:user",
+    )
+    service.save_user_modal_credentials(
+        session.user,
+        SaveModalCredentialsRequest(
+            token_id="modal-token-id-999",
+            token_secret="modal-token-secret-999",
+        ),
+    )
+
+    project_id = service.list_projects(session.user).projects[0].project_id
+    service.create_project_python_file(session.user, project_id, repo_path="pkg/__init__.py", content="")
+    service.create_project_python_file(
+        session.user,
+        project_id,
+        repo_path="pkg/utils.py",
+        content="MSG = 'hello'\n",
+    )
+    service.create_project_python_file(
+        session.user,
+        project_id,
+        repo_path="train.py",
+        content="from pkg.utils import MSG\nprint(MSG)\n",
+    )
+
+    result = service.run_project_python_file(session.user, project_id, repo_path="train.py", mode="smoke")
+
+    assert result.status == "completed"
+    assert modal_runner.calls == [
+        {
+            "token_id": "modal-token-id-999",
+            "token_secret": "modal-token-secret-999",
+            "files": {
+                "pkg/__init__.py": "",
+                "pkg/utils.py": "MSG = 'hello'\n",
+                "train.py": "from pkg.utils import MSG\nprint(MSG)\n",
+            },
+            "entrypoint_path": "train.py",
+            "run_mode": "smoke",
+        }
+    ]
+
+
+def test_browser_uploads_and_chat_require_api_key_before_first_turn(monkeypatch, browser_service):
     service, _, chat_model = browser_service
     app.dependency_overrides[get_service] = lambda: service
     client = TestClient(app)
@@ -2271,52 +3748,44 @@ def test_browser_uploads_and_chat_require_api_key_after_free_quota(monkeypatch, 
     thread = client.post("/v1/browser/chats", json={"title": "New chat"}, headers=csrf_headers).json()
     thread_id = thread["thread_id"]
 
-    for _ in range(3):
-        response = client.post(
-            f"/v1/browser/chats/{thread_id}/messages",
-            json={"content": "Explain the methods grounding with citations", "tag_filters": ["methods"]},
-            headers=csrf_headers,
-        )
-        assert response.status_code == 200
-        payload = response.json()
-        assert payload["state"] == "completed"
-        assert payload["assistant_message"]["citations"]
-
     gated = client.post(
         f"/v1/browser/chats/{thread_id}/messages",
-        json={"content": "One more answer please", "tag_filters": ["methods"]},
+        json={"content": "Explain the methods grounding with citations", "tag_filters": ["methods"]},
         headers=csrf_headers,
     )
     assert gated.status_code == 200
     assert gated.json()["state"] == "api_key_required"
+    assert gated.json()["thread"]["messages"] == []
 
     save_key = client.put(
-        "/v1/browser/settings/anthropic-key", json={"api_key": "anthropic-user-key-999"}, headers=csrf_headers
+        "/v1/browser/settings/openai-key", json={"api_key": "openai-user-key-999"}, headers=csrf_headers
     )
     assert save_key.status_code == 200
-    assert save_key.json()["has_anthropic_api_key"] is True
+    assert save_key.json()["has_openai_api_key"] is True
     csrf_headers = {"X-Paperbase-CSRF": save_key.json()["csrf_token"]}
 
     resumed = client.post(
         f"/v1/browser/chats/{thread_id}/messages",
-        json={"content": "Continue with my saved key", "tag_filters": ["methods"]},
+        json={"content": "Explain the methods grounding with citations", "tag_filters": ["methods"]},
         headers=csrf_headers,
     )
     assert resumed.status_code == 200
     assert resumed.json()["state"] == "completed"
+    assert resumed.json()["assistant_message"]["citations"]
     assert chat_model.create_calls
-    assert chat_model.create_calls[0]["tool_choice"] == {"type": "any"}
+    assert chat_model.create_calls[0]["tool_choice"] == {"type": "auto"}
     assert chat_model.create_calls[0]["tools"]
 
     app.dependency_overrides.clear()
 
 
-def test_non_grounded_chat_skips_tools_and_citations(browser_service):
+def test_non_grounded_chat_can_use_tools_without_forcing_research_posture(browser_service):
     service, _, chat_model = browser_service
     session, _ = service.register_browser_user(
         SignupRequest(email="casual@example.com", password="topsecret123", display_name="Casual User")
     )
     assert session.user is not None
+    _save_browser_openai_key(service, session.user)
 
     thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
     response = service.send_chat_message(
@@ -2328,9 +3797,50 @@ def test_non_grounded_chat_skips_tools_and_citations(browser_service):
     assert response.assistant_message is not None
     assert response.assistant_message.citations == []
     assert "[S" not in response.assistant_message.content_markdown
-    assert len(chat_model.create_calls) == 1
-    assert chat_model.create_calls[0]["tools"] is None
-    assert "do not invent source ids" in str(chat_model.create_calls[0]["system_prompt"])
+    assert len(chat_model.create_calls) == 2
+    first_call = chat_model.create_calls[0]
+    assert first_call["tool_choice"] == {"type": "auto"}
+    assert first_call["tools"]
+    first_tool_names = {
+        tool["name"] for tool in first_call["tools"] if isinstance(tool, dict) and "name" in tool
+    }
+    assert "paperbase_search_sections" in first_tool_names
+    assert "paperbase_search_uploaded_sections" in first_tool_names
+    assert "For casual or non-evidence turns, answer directly when tools are unnecessary." in str(
+        first_call["system_prompt"]
+    )
+    assert "Every tool-enabled turn must begin by leveraging these research tools" not in str(
+        first_call["system_prompt"]
+    )
+    assert chat_model.create_calls[1]["tools"]
+    assert chat_model.create_calls[1]["tool_choice"] == {"type": "auto"}
+    assert "do not invent source ids" in str(chat_model.create_calls[-1]["system_prompt"])
+
+
+def test_first_prompt_renames_new_chat_to_short_summary(browser_service):
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="title@example.com", password="topsecret123", display_name="Title User")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
+    first_response = service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="Help me brainstorm a short product name"),
+    )
+
+    assert first_response.thread.title == "Brainstorm Short Product Name"
+
+    second_response = service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="Now focus on a whimsical version"),
+    )
+
+    assert second_response.thread.title == "Brainstorm Short Product Name"
 
 
 def test_chat_context_uses_full_active_thread_history(browser_service):
@@ -2339,6 +3849,7 @@ def test_chat_context_uses_full_active_thread_history(browser_service):
         SignupRequest(email="history@example.com", password="topsecret123", display_name="History User")
     )
     assert session.user is not None
+    _save_browser_openai_key(service, session.user)
 
     thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
     for index in range(8):
@@ -2357,18 +3868,89 @@ def test_chat_context_uses_full_active_thread_history(browser_service):
     answer_call = chat_model.create_calls[-1]
     sent_messages = answer_call["messages"]
     assert isinstance(sent_messages, list)
-    assert len(sent_messages) == 9
+    assert len(sent_messages) == 11
     assert sent_messages[0]["content"] == "Historical message 0"
-    assert sent_messages[-1]["content"] == "Help me brainstorm a short product name"
+    assert sent_messages[7]["content"] == "Historical message 7"
+    assert sent_messages[8]["content"] == "Help me brainstorm a short product name"
+
+
+def test_chat_turn_context_skips_empty_reasoning_items(browser_service):
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="reasoning-context@example.com", password="topsecret123", display_name="Reasoning User")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
+    resolved_user = service.repository.get_browser_user_by_id(session.user.user_id) or session.user  # type: ignore[attr-defined]
+    prepared = service._prepare_chat_generation(
+        user=session.user,
+        thread_id=thread.thread_id,
+        request=SendChatMessageRequest(content="Follow up on the existing plan"),
+        resolved_user=resolved_user,
+        api_key_value="openai-user-key-999",
+    )
+    reasoning_item = ChatThreadItemResponse(
+        item_id="item_reasoning",
+        thread_id=thread.thread_id,
+        turn_id=prepared.turn.turn_id,
+        item_type="reasoning",
+        role="assistant",
+        content_text="",
+        content_json=None,
+        citations=[],
+        created_at=prepared.user_item.created_at,
+        status="completed",
+    )
+    prepared = prepared.__class__(
+        thread=prepared.thread.model_copy(update={"items": [*prepared.thread.items, reasoning_item]}),
+        turn=prepared.turn,
+        user_item=prepared.user_item,
+        resolved_user=prepared.resolved_user,
+        api_key_value=prepared.api_key_value,
+    )
+
+    context = service._chat_turn_context(prepared)
+
+    assert not any(item.get("type") == "reasoning" for item in context.prompt_input)
+
+
+def test_chat_input_function_calls_omit_internal_item_ids(browser_service):
+    service, _, _ = browser_service
+    item = ChatThreadItemResponse(
+        item_id="item_internal",
+        thread_id="thread_test",
+        turn_id="turn_test",
+        item_type="function_call",
+        role="assistant",
+        call_id="call_external",
+        name="project_list_files",
+        content_text="{}",
+        content_json={},
+        citations=[],
+        created_at=datetime.now(timezone.utc),
+        status="completed",
+    )
+
+    normalized = service._chat_input_item_from_thread_item(item)
+
+    assert normalized == {
+        "type": "function_call",
+        "call_id": "call_external",
+        "name": "project_list_files",
+        "arguments": "{}",
+    }
 
 
 def test_stream_chat_compacts_mid_turn_after_tool_results(monkeypatch, browser_service):
     service, _, chat_model = browser_service
-    chat_model.token_counts = [1, 1, 950_000, 1]
+    chat_model.token_counts = [1, 950_000, 1]
     session, _ = service.register_browser_user(
         SignupRequest(email="compact@example.com", password="topsecret123", display_name="Compact User")
     )
     assert session.user is not None
+    _save_browser_openai_key(service, session.user)
 
     monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
     monkeypatch.setattr(
@@ -2389,27 +3971,58 @@ def test_stream_chat_compacts_mid_turn_after_tool_results(monkeypatch, browser_s
         )
     )
 
-    event_names = [event_name for event_name, _ in events]
-    assert "tool_done" in event_names
-    assert event_names.index("compaction_start") > event_names.index("tool_done")
-    assert event_names.index("compaction_done") < event_names.index("assistant_start")
-    compaction_done = dict(events)["compaction_done"]
-    assert compaction_done["compaction_message"]["kind"] == "compaction"
-    assert "Compacted Conversation" in compaction_done["compaction_message"]["content_markdown"]
-    assert [message["kind"] for message in compaction_done["messages"]] == ["compaction"]
+    function_outputs = _event_items(events, event_name="item_completed", item_type="function_call_output")
+    compaction_items = _event_items(events, event_name="item_completed", item_type="compaction")
+    assistant_final_items = _event_items(
+        events,
+        event_name="item_completed",
+        item_type="assistant_message",
+        phase="final_answer",
+    )
+    assert function_outputs
+    assert compaction_items
+    assert assistant_final_items
+    first_function_output_index = next(
+        index
+        for index, (event_name, payload) in enumerate(events)
+        if event_name == "item_completed" and payload.get("item", {}).get("item_type") == "function_call_output"
+    )
+    first_compaction_index = next(
+        index
+        for index, (event_name, payload) in enumerate(events)
+        if event_name == "item_completed" and payload.get("item", {}).get("item_type") == "compaction"
+    )
+    first_final_answer_index = next(
+        index
+        for index, (event_name, payload) in enumerate(events)
+        if event_name == "item_completed"
+        and payload.get("item", {}).get("item_type") == "assistant_message"
+        and payload.get("item", {}).get("phase") == "final_answer"
+    )
+    assert first_compaction_index > first_function_output_index
+    assert first_compaction_index < first_final_answer_index
+    assert compaction_items[0]["item_type"] == "compaction"
+    assert "Compacted Conversation" in compaction_items[0]["content_text"]
 
     compaction_call = next(call for call in chat_model.create_calls if call["system_prompt"] == "")
     assert "Compact the conversation transcript" in str(compaction_call["messages"])
-    assert "tool_result" in str(compaction_call["messages"])
+    assert "Active Source IDs" in str(compaction_call["messages"])
     assert "Explain the methods grounding" in str(compaction_call["messages"])
 
-    final_stream_call = chat_model.stream_calls[-1]
-    assert final_stream_call["messages"][0]["role"] == "user"
-    assert "Conversation compaction checkpoint" in final_stream_call["messages"][0]["content"]
+    final_sample_call = next(
+        call
+        for call in reversed(chat_model.create_calls)
+        if call["system_prompt"] and call["system_prompt"] != ""
+    )
+    assert final_sample_call["messages"][0]["role"] == "developer"
+    assert "Conversation compaction checkpoint" in final_sample_call["messages"][0]["content"]
+    assert chat_model.create_calls
 
     refreshed = service.get_chat_thread(session.user, thread.thread_id)
-    assert [message.kind for message in refreshed.messages] == ["compaction", "default"]
-    assert all("Explain the methods grounding" not in message.content_markdown for message in refreshed.messages)
+    assert refreshed is not None
+    assert any(message.kind == "compaction" for message in refreshed.messages)
+    assert any(message.role == "user" and "Explain the methods grounding" in message.content_markdown for message in refreshed.messages)
+    assert refreshed.messages[-1].citations
 
 
 def test_search_only_tool_results_do_not_create_citations(monkeypatch):
@@ -2471,6 +4084,7 @@ def test_search_only_tool_results_do_not_create_citations(monkeypatch):
         SignupRequest(email="search-only@example.com", password="topsecret123", display_name="Search Only")
     )
     assert session.user is not None
+    _save_browser_openai_key(service, session.user)
 
     monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
     monkeypatch.setattr(
@@ -2494,12 +4108,13 @@ def test_search_only_tool_results_do_not_create_citations(monkeypatch):
     assert "[S" not in response.assistant_message.content_markdown
 
 
-def test_link_requests_force_tool_use_and_prompt_for_paper_links(monkeypatch, browser_service):
+def test_link_requests_expose_metadata_guidance_for_paper_links(monkeypatch, browser_service):
     service, _, chat_model = browser_service
     session, _ = service.register_browser_user(
         SignupRequest(email="links@example.com", password="topsecret123", display_name="Links User")
     )
     assert session.user is not None
+    _save_browser_openai_key(service, session.user)
 
     monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
     monkeypatch.setattr(
@@ -2518,9 +4133,9 @@ def test_link_requests_force_tool_use_and_prompt_for_paper_links(monkeypatch, br
         SendChatMessageRequest(content="Give me links to papers about grounding"),
     )
 
-    assert chat_model.create_calls[0]["tool_choice"] == {"type": "any"}
+    assert chat_model.create_calls[0]["tool_choice"] == {"type": "auto"}
     assert "html_url or pdf_url" in str(chat_model.create_calls[0]["system_prompt"])
-    assert "markdown links to the paper pages or PDFs" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "When the user asks for paper links or reading lists" in str(chat_model.create_calls[0]["system_prompt"])
 
 
 def test_project_defaults_and_thread_snapshots(browser_service):
@@ -2529,6 +4144,7 @@ def test_project_defaults_and_thread_snapshots(browser_service):
         SignupRequest(email="projects@example.com", password="topsecret123", display_name="Project User")
     )
     assert session.user is not None
+    _save_browser_openai_key(service, session.user)
     _connect_github(service, session.user)
 
     initial_projects = service.list_projects(session.user).projects
@@ -2671,9 +4287,11 @@ def test_chat_answer_prompt_requires_strict_markdown(browser_service):
 
     assert "strict GitHub-flavored markdown" in with_evidence
     assert "valid markdown that a standard parser can render directly" in with_evidence
-    assert "Do not put spaces just inside emphasis delimiters" in with_evidence
+    assert "When tools are still needed, emit tool calls only" in with_evidence
+    assert "Once the tool results are sufficient, stop calling tools and answer directly in the same turn." in with_evidence
     assert "strict GitHub-flavored markdown" in without_evidence
     assert "valid markdown that a standard parser can render directly" in without_evidence
+    assert with_evidence == without_evidence
 
 
 def test_empty_chat_can_move_between_projects(browser_service):
@@ -2682,6 +4300,7 @@ def test_empty_chat_can_move_between_projects(browser_service):
         SignupRequest(email="move-empty@example.com", password="topsecret123", display_name="Move Empty")
     )
     assert session.user is not None
+    _save_browser_openai_key(service, session.user)
     _connect_github(service, session.user)
 
     project = service.create_project(
@@ -2714,7 +4333,7 @@ def test_empty_chat_can_move_between_projects(browser_service):
     assert exc.value.status_code == 409
 
 
-def test_delete_project_cascades_threads_and_protects_default(browser_service):
+def test_delete_project_cascades_threads_files_and_allows_default_removal(browser_service):
     service, _, _ = browser_service
     session, _ = service.register_browser_user(
         SignupRequest(email="cascade@example.com", password="topsecret123", display_name="Cascade User")
@@ -2723,26 +4342,38 @@ def test_delete_project_cascades_threads_and_protects_default(browser_service):
     _connect_github(service, session.user)
 
     default_project = service.list_projects(session.user).projects[0]
-    with pytest.raises(HTTPException) as default_exc:
-        service.delete_project(session.user, default_project.project_id)
-    assert default_exc.value.status_code == 400
-
-    project = service.create_project(
-        session.user,
-        _create_repo_project_request("Archive", "Delete me"),
-    )
     thread = service.create_chat_thread(
         session.user,
-        CreateChatThreadRequest(title="Disposable thread", project_id=project.project_id),
+        CreateChatThreadRequest(title="Disposable thread", project_id=default_project.project_id),
     )
+    python_file = service.create_python_file(session.user, default_project.project_id)
 
-    service.delete_project(session.user, project.project_id)
+    service.delete_project(session.user, default_project.project_id)
 
-    remaining_project_ids = {item.project_id for item in service.list_projects(session.user).projects}
-    assert project.project_id not in remaining_project_ids
+    assert service.list_projects(session.user).projects == []
     with pytest.raises(HTTPException) as thread_exc:
         service.get_chat_thread(session.user, thread.thread_id)
     assert thread_exc.value.status_code == 404
+    with pytest.raises(HTTPException) as file_exc:
+        service.get_python_file(session.user, python_file.file_id)
+    assert file_exc.value.status_code == 404
+    with pytest.raises(HTTPException) as create_exc:
+        service.create_chat_thread(
+            session.user,
+            CreateChatThreadRequest(title="Need a project"),
+        )
+    assert create_exc.value.status_code == 409
+
+    replacement_project = service.create_project(
+        session.user,
+        _create_repo_project_request("Replacement", "Rebuild workspace"),
+    )
+    replacement_thread = service.create_chat_thread(
+        session.user,
+        CreateChatThreadRequest(title="Recovered chat"),
+    )
+
+    assert replacement_thread.project_id == replacement_project.project_id
 
 
 def test_browser_chat_stream_emits_citations_and_completion(monkeypatch, browser_service):
@@ -2756,6 +4387,9 @@ def test_browser_chat_stream_emits_citations_and_completion(monkeypatch, browser
     )
     assert signup.status_code == 200
     csrf_headers = {"X-Paperbase-CSRF": signup.json()["csrf_token"]}
+    user = service.repository.get_browser_user_by_id(signup.json()["user"]["user_id"])  # type: ignore[attr-defined]
+    assert user is not None
+    _save_browser_openai_key(service, user)
 
     monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
     monkeypatch.setattr(
@@ -2780,22 +4414,36 @@ def test_browser_chat_stream_emits_citations_and_completion(monkeypatch, browser
         events = _parse_sse_events("".join(response.iter_text()))
 
     event_names = [event_name for event_name, _ in events]
-    assert event_names[:3] == ["usage", "tool_start", "tool_done"]
-    assert events[1][1]["label"]
-    assert "assistant_start" in event_names
+    assert event_names[:3] == ["turn_started", "item_started", "item_completed"]
+    function_call_items = _event_items(events, event_name="item_completed", item_type="function_call")
+    function_output_items = _event_items(events, event_name="item_completed", item_type="function_call_output")
+    assistant_final_items = _event_items(
+        events,
+        event_name="item_completed",
+        item_type="assistant_message",
+        phase="final_answer",
+    )
+    assert function_call_items
+    assert function_call_items[0]["name"] == "paperbase_search_sections"
+    assert function_call_items[0]["content_json"] == {"query": "grounding", "limit": 3}
+    assert function_output_items
+    assert '"sections": [{' in function_output_items[0]["content_text"]
+    assert assistant_final_items
     assert "usage" in event_names
-    assert "delta" in event_names
-    assert event_names[-1] == "done"
-    assistant_start_index = event_names.index("assistant_start")
-    tool_usage_index = 0
-    stream_usage_index = event_names.index("usage", assistant_start_index)
-    assert events[assistant_start_index][1]["assistant_message"]["citations"]
+    assert event_names[-1] == "turn_completed"
+    usage_indices = [index for index, event_name in enumerate(event_names) if event_name == "usage"]
+    assert len(usage_indices) >= 2
+    tool_usage_index = usage_indices[0]
+    final_usage_index = usage_indices[-1]
     assert events[tool_usage_index][1]["input_tokens"] == 84512
     assert events[tool_usage_index][1]["output_tokens"] == 98
-    assert events[tool_usage_index][1]["context_window_tokens"] == 1_000_000
-    assert events[stream_usage_index][1]["input_tokens"] == 11234
-    assert events[-1][1]["assistant_message"]["status"] == "completed"
-    assert events[-1][1]["usage"]["output_tokens"] == 27
+    assert events[tool_usage_index][1]["context_window_tokens"] > 0
+    assert events[tool_usage_index][1]["context_window_tokens"] == events[final_usage_index][1]["context_window_tokens"]
+    assert events[final_usage_index][1]["input_tokens"] == 11234
+    assert assistant_final_items[0]["citations"]
+    assert events[-1][1]["final_item"]["status"] == "completed"
+    assert events[-1][1]["usage"]["output_tokens"] == 125
+    assert service.chat_model.create_calls
 
     refreshed = client.get(f"/v1/browser/chats/{thread_id}").json()
     assert refreshed["messages"][-1]["status"] == "completed"
@@ -2816,10 +4464,6 @@ def test_browser_chat_stream_handles_api_key_required_without_placeholder(browse
     assert signup.status_code == 200
     payload = signup.json()
     csrf_headers = {"X-Paperbase-CSRF": payload["csrf_token"]}
-    user_id = payload["user"]["user_id"]
-
-    for _ in range(3):
-        service.repository.increment_free_responses_used(user_id)  # type: ignore[attr-defined]
 
     thread = client.post("/v1/browser/chats", json={"title": "New chat"}, headers=csrf_headers).json()
     thread_id = thread["thread_id"]
@@ -2836,12 +4480,12 @@ def test_browser_chat_stream_handles_api_key_required_without_placeholder(browse
     assert [event_name for event_name, _ in events] == ["api_key_required"]
     assert events[0][1]["state"] == "api_key_required"
     assert events[0][1]["assistant_message"] is None
-    assert [message["role"] for message in events[0][1]["thread"]["messages"]] == ["user"]
+    assert events[0][1]["thread"]["messages"] == []
 
     app.dependency_overrides.clear()
 
 
-def test_browser_chat_stream_marks_partial_failure(monkeypatch, browser_service):
+def test_browser_chat_stream_falls_back_when_provider_stream_fails_before_text(monkeypatch, browser_service):
     service, _, chat_model = browser_service
     app.dependency_overrides[get_service] = lambda: service
     client = TestClient(app)
@@ -2852,6 +4496,9 @@ def test_browser_chat_stream_marks_partial_failure(monkeypatch, browser_service)
     )
     assert signup.status_code == 200
     csrf_headers = {"X-Paperbase-CSRF": signup.json()["csrf_token"]}
+    user = service.repository.get_browser_user_by_id(signup.json()["user"]["user_id"])  # type: ignore[attr-defined]
+    assert user is not None
+    _save_browser_openai_key(service, user)
 
     monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
     monkeypatch.setattr(
@@ -2862,7 +4509,7 @@ def test_browser_chat_stream_marks_partial_failure(monkeypatch, browser_service)
         "2401.99999",
         paper=_sample_paper("2401.99999", title="Failure Paper", abstract="A paper about stream failure"),
     )
-    chat_model.fail_stream_after_chunks = 1
+    chat_model.fail_stream_after_chunks = 0
 
     thread = client.post("/v1/browser/chats", json={"title": "New chat"}, headers=csrf_headers).json()
     thread_id = thread["thread_id"]
@@ -2877,12 +4524,205 @@ def test_browser_chat_stream_marks_partial_failure(monkeypatch, browser_service)
         events = _parse_sse_events("".join(response.iter_text()))
 
     event_names = [event_name for event_name, _ in events]
-    assert event_names[:4] == ["usage", "tool_start", "tool_done", "assistant_start"]
-    assert "delta" in event_names
-    assert events[-1][0] == "error"
+    assert event_names[-1] == "turn_completed"
+    assert "turn_failed" not in event_names
+    assert chat_model.create_calls
     refreshed = client.get(f"/v1/browser/chats/{thread_id}").json()
-    assert refreshed["messages"][-1]["status"] == "failed"
-    assert refreshed["messages"][-1]["content_markdown"] == "Grounded"
+    assert refreshed["messages"][-1]["status"] == "completed"
+
+    app.dependency_overrides.clear()
+
+
+def test_browser_chat_stream_allows_project_answer_without_persisted_write(browser_service):
+    class ProjectAnswerChatModel(FakeChatModel):
+        def create_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+            self.create_calls.append(
+                {
+                    "api_key": api_key,
+                    "messages": messages,
+                    "system_prompt": system_prompt,
+                    "tools": tools,
+                    "tool_choice": tool_choice,
+                }
+            )
+            return {
+                "content": [{"type": "text", "text": "```python\ndef recurse(items):\n    return items\n```"}],
+                "stop_reason": "end_turn",
+            }
+
+        def stream_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+            raise AssertionError("stream_message should not be used by the codex-style kernel")
+
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=ProjectAnswerChatModel(),
+        github_repo_manager=FakeGitHubRepoManager(),
+    )
+    app.dependency_overrides[get_service] = lambda: service
+    client = TestClient(app)
+
+    signup = client.post(
+        "/v1/browser/auth/signup",
+        json={"email": "stream-code-answer@example.com", "password": "topsecret123", "display_name": "Stream Code"},
+    )
+    assert signup.status_code == 200
+    csrf_headers = {"X-Paperbase-CSRF": signup.json()["csrf_token"]}
+    user = service.repository.get_browser_user_by_id(signup.json()["user"]["user_id"])  # type: ignore[attr-defined]
+    assert user is not None
+    _save_browser_openai_key(service, user)
+
+    thread = client.post("/v1/browser/chats", json={"title": "New chat"}, headers=csrf_headers).json()
+    thread_id = thread["thread_id"]
+
+    with client.stream(
+        "POST",
+        f"/v1/browser/chats/{thread_id}/messages/stream",
+        json={"content": "Explain recursion briefly", "tag_filters": []},
+        headers=csrf_headers,
+    ) as response:
+        assert response.status_code == 200
+        events = _parse_sse_events("".join(response.iter_text()))
+
+    assert events[-1][0] == "turn_completed"
+    assert events[-1][1]["final_item"]["content_text"] == "```python\ndef recurse(items):\n    return items\n```"
+    refreshed = client.get(f"/v1/browser/chats/{thread_id}").json()
+    assert refreshed["messages"][-1]["content_markdown"] == events[-1][1]["final_item"]["content_text"]
+
+    app.dependency_overrides.clear()
+
+
+def test_browser_chat_stream_can_apply_project_edit_and_answer_in_same_loop():
+    class ProjectEditChatModel(FakeChatModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.used_tool = False
+
+        def create_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+            self.create_calls.append(
+                {
+                    "api_key": api_key,
+                    "messages": messages,
+                    "system_prompt": system_prompt,
+                    "tools": tools,
+                    "tool_choice": tool_choice,
+                }
+            )
+            if tools and not self.used_tool:
+                self.used_tool = True
+                return {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_write_file",
+                            "name": "project_write_file",
+                            "input": {
+                                "repo_path": "src/linear_gd.py",
+                                "content": "def train_linear_gd():\n    return 1\n",
+                            },
+                        }
+                    ],
+                    "stop_reason": "tool_use",
+                }
+            return {
+                "content": [{"type": "text", "text": "Saved the module to `src/linear_gd.py`."}],
+                "stop_reason": "end_turn",
+            }
+
+        def stream_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
+            self.stream_calls.append(
+                {
+                    "api_key": api_key,
+                    "messages": messages,
+                    "system_prompt": system_prompt,
+                    "tools": tools,
+                    "tool_choice": tool_choice,
+                }
+            )
+            if tools and not self.used_tool:
+                self.used_tool = True
+                yield ChatModelStreamEvent(
+                    response={
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "toolu_write_file",
+                                "name": "project_write_file",
+                                "input": {
+                                    "repo_path": "src/linear_gd.py",
+                                    "content": "def train_linear_gd():\n    return 1\n",
+                                },
+                            }
+                        ],
+                        "stop_reason": "tool_use",
+                    }
+                )
+                return
+            yield ChatModelStreamEvent(text="Saved the module to `src/linear_gd.py`.")
+            yield ChatModelStreamEvent(
+                response={
+                    "content": [{"type": "text", "text": "Saved the module to `src/linear_gd.py`."}],
+                    "stop_reason": "end_turn",
+                }
+            )
+
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=ProjectEditChatModel(),
+        github_repo_manager=FakeGitHubRepoManager(),
+    )
+    app.dependency_overrides[get_service] = lambda: service
+    client = TestClient(app)
+
+    signup = client.post(
+        "/v1/browser/auth/signup",
+        json={"email": "stream-project-write@example.com", "password": "topsecret123", "display_name": "Stream Write"},
+    )
+    assert signup.status_code == 200
+    csrf_headers = {"X-Paperbase-CSRF": signup.json()["csrf_token"]}
+    user_id = signup.json()["user"]["user_id"]
+    user = service.repository.get_browser_user_by_id(user_id)  # type: ignore[attr-defined]
+    assert user is not None
+    _save_browser_openai_key(service, user)
+    _connect_github(service, user)
+
+    thread = client.post("/v1/browser/chats", json={"title": "New chat"}, headers=csrf_headers).json()
+    thread_id = thread["thread_id"]
+    project_id = thread["project_id"]
+
+    with client.stream(
+        "POST",
+        f"/v1/browser/chats/{thread_id}/messages/stream",
+        json={"content": "Write some code to train a small linear gradient descent with pytorch", "tag_filters": []},
+        headers=csrf_headers,
+    ) as response:
+        assert response.status_code == 200
+        events = _parse_sse_events("".join(response.iter_text()))
+
+    assert events[-1][0] == "turn_completed"
+    saved_file = service.repository.get_project_python_file_by_path(  # type: ignore[attr-defined]
+        user_id=user.user_id,
+        project_id=project_id,
+        repo_path="src/linear_gd.py",
+    )
+    assert saved_file is not None
+    assert saved_file.content == "def train_linear_gd():\n    return 1\n"
+    assert events[-1][1]["final_item"]["content_text"] == "Saved the module to `src/linear_gd.py`."
 
     app.dependency_overrides.clear()
 

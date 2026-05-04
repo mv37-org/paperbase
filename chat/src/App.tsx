@@ -9,6 +9,7 @@ import {
   createProject,
   createThread,
   deleteProject,
+  deletePythonFile,
   deleteThread,
   getBrowserPaper,
   getBrowserPaperFigure,
@@ -41,6 +42,7 @@ import {
   updatePythonFile,
   uploadDocument,
 } from "./api";
+import { CodeSnippet, extractStreamingPythonPreview } from "./CodeSnippet";
 import { LandingMentionEditor } from "./LandingMentionEditor";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 import type {
@@ -49,6 +51,7 @@ import type {
   ChatCitation,
   ChatMessageResponse,
   ChatStreamDoneEvent,
+  ChatThreadItemResponse,
   ChatStreamUsageEvent,
   ChatThreadResponse,
   ChatThreadSummary,
@@ -57,6 +60,7 @@ import type {
   GitHubRepoImportCandidate,
   GitHubRepoMetadataResponse,
   GitHubRepoSummary,
+  MentionTag,
   PaperResponse,
   ProjectFileKind,
   ProjectItemKind,
@@ -76,10 +80,51 @@ const OPEN_TABS_KEY = "paperbase-open-tabs";
 const PENDING_PROMPT_KEY = "paperbase-pending-prompt";
 const RESUME_PROJECT_MODAL_KEY = "paperbase-resume-new-project";
 const SIDEBAR_COLLAPSED_KEY = "paperbase-sidebar-collapsed";
+const SELECTED_PROJECT_KEY = "paperbase-selected-project";
+const DISMISSED_CHAT_SETUP_KEY = "paperbase-dismissed-chat-setup";
 const MAX_OPEN_TABS = 8;
 const MESSAGE_LIST_BOTTOM_THRESHOLD = 40;
 const PROJECT_ITEM_PAGE_SIZE = 5;
 const PROJECT_SIDEBAR_ITEM_KINDS: ProjectItemKind[] = ["python_file", "thread"];
+const CHAT_TITLE_STOP_WORDS = new Set([
+  "a",
+  "an",
+  "and",
+  "are",
+  "as",
+  "at",
+  "be",
+  "but",
+  "by",
+  "can",
+  "could",
+  "for",
+  "from",
+  "help",
+  "i",
+  "if",
+  "in",
+  "into",
+  "is",
+  "it",
+  "me",
+  "my",
+  "of",
+  "on",
+  "or",
+  "our",
+  "please",
+  "show",
+  "tell",
+  "that",
+  "the",
+  "this",
+  "to",
+  "us",
+  "we",
+  "with",
+  "would",
+]);
 type ModalFlashKind = "error" | "note";
 type PaperDrawerState = { paperId: string; path: string } | null;
 type PaperDrawerContent =
@@ -147,11 +192,15 @@ type ProjectModalState = { mode: "create" } | { mode: "edit"; projectId: string 
 type DeleteModalState =
   | { kind: "project"; projectId: string; name: string }
   | { kind: "thread"; projectId: string; threadId: string; title: string }
+  | { kind: "python_file"; projectId: string; fileId: string; title: string }
   | null;
 type ToolActivityEntry = {
   id: string;
   turnIndex: number;
+  toolName?: string;
   label: string;
+  command: string | null;
+  output: string | null;
   status: "running" | "completed";
   startedAt: string;
   finishedAt: string | null;
@@ -176,6 +225,7 @@ const AUTH_VIEW_COPY: Record<AuthView, { title: string; caption: string }> = {
 };
 
 const DEFAULT_BROWSER_SETTINGS: NonNullable<BrowserSessionResponse["settings"]> = {
+  openai_api_key_hint: "",
   anthropic_api_key_hint: "",
   has_modal_credentials: false,
   modal_token_id_hint: "",
@@ -194,7 +244,7 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; caption: string }> 
   {
     id: "inference",
     label: "Inference",
-    caption: "Manage Anthropic inference API key.",
+    caption: "Manage OpenAI inference API key.",
   },
   {
     id: "sandbox",
@@ -203,7 +253,7 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; caption: string }> 
   },
   {
     id: "version-control",
-    label: "Version control",
+    label: "GitHub",
     caption: "Manage GitHub connection for repositories.",
   },
   {
@@ -353,6 +403,15 @@ const THINKING_WORDS = [
   "Synthesizing",
 ];
 
+const PROJECT_CODE_ACTION_RE =
+  /\b(write|create|make|add|implement|edit|modify|update|refactor|fix|rename|delete|remove|read|show|open|grep|search|run)\b/i;
+const PROJECT_CODE_TARGET_RE =
+  /\b(code|python|pytorch|torch|script|module|file|files|function|class|training|train|evaluation|eval|workflow|repo|project)\b/i;
+const PROJECT_CODE_DIRECT_TOOL_RE =
+  /\b(project_(?:list_files|read_file|grep|touch|edit|delete|run))\b/i;
+const PROJECT_CODE_PATH_HINT_RE = /(?:^|[\s`'"])([A-Za-z0-9_./-]+\.py)(?:$|[\s`'",.:;!?])/i;
+const TOOL_ACTIVITY_TARGET_RE = /"([^"]+)"/;
+
 function staticAssetPath(name: string) {
   const path = `${import.meta.env.BASE_URL}${name.replace(/^\/+/, "")}`;
   return `${path}${path.includes("?") ? "&" : "?"}v=${PUBLIC_ASSET_CACHE_KEY}`;
@@ -388,7 +447,7 @@ function projectRepoConflictFromError(error: unknown): ProjectRepoConflictDetail
 function createLocalMessage(
   role: string,
   content_markdown: string,
-  options: Partial<Pick<ChatMessageResponse, "citations" | "status" | "message_id">> = {},
+  options: Partial<Pick<ChatMessageResponse, "citations" | "status" | "message_id" | "phase">> = {},
 ): ChatMessageResponse {
   return {
     message_id: options.message_id ?? `local-${role}-${Math.random().toString(36).slice(2)}`,
@@ -397,6 +456,37 @@ function createLocalMessage(
     citations: options.citations ?? [],
     created_at: new Date().toISOString(),
     status: options.status ?? "completed",
+    phase: options.phase ?? null,
+  };
+}
+
+function messageFromThreadItem(item: ChatThreadItemResponse): ChatMessageResponse | null {
+  if (!["user_message", "assistant_message", "compaction"].includes(item.item_type)) {
+    return null;
+  }
+  return {
+    message_id: item.item_id,
+    role: item.role,
+    content_markdown: item.content_text,
+    citations: item.citations,
+    created_at: item.created_at,
+    status: item.status,
+    kind: item.item_type === "compaction" ? "compaction" : "default",
+    phase: item.phase ?? null,
+  };
+}
+
+function normalizeThreadForState(thread: ChatThreadResponse): ChatThreadResponse {
+  const items = [...(thread.items ?? [])];
+  if (items.length === 0) {
+    return thread;
+  }
+  return {
+    ...thread,
+    items,
+    messages: items
+      .map(messageFromThreadItem)
+      .filter((message): message is ChatMessageResponse => Boolean(message)),
   };
 }
 
@@ -440,16 +530,92 @@ function sourceCardId(messageId: string, sourceId: string) {
   return `source-card-${messageId}-${sourceId}`;
 }
 
-function consumePendingPrompt() {
-  const prompt = sessionStorage.getItem(PENDING_PROMPT_KEY);
-  sessionStorage.removeItem(PENDING_PROMPT_KEY);
-  return prompt ?? "";
+type PendingPromptState = {
+  prompt: string;
+  paperIds: string[];
+  mentions: MentionTag[];
+};
+
+function normalizePendingPromptMentions(value: unknown): MentionTag[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const mentions: MentionTag[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") {
+      continue;
+    }
+    const id = typeof entry.id === "string" ? entry.id : "";
+    if (!id || seen.has(id)) {
+      continue;
+    }
+    seen.add(id);
+    mentions.push({
+      id,
+      title: typeof entry.title === "string" ? entry.title : "",
+    });
+  }
+  return mentions;
 }
 
-function rememberPendingPrompt(prompt: string) {
-  if (prompt.trim()) {
-    sessionStorage.setItem(PENDING_PROMPT_KEY, prompt.trim());
+function mentionedPaperIdsInText(text: string, mentions: MentionTag[]) {
+  const paperIds: string[] = [];
+  const seen = new Set<string>();
+  for (const mention of mentions) {
+    if (!mention.id || seen.has(mention.id)) {
+      continue;
+    }
+    if (mention.title.trim() && !text.includes(`@${mention.title}`)) {
+      continue;
+    }
+    seen.add(mention.id);
+    paperIds.push(mention.id);
   }
+  return paperIds;
+}
+
+function consumePendingPrompt(): PendingPromptState {
+  const raw = sessionStorage.getItem(PENDING_PROMPT_KEY);
+  sessionStorage.removeItem(PENDING_PROMPT_KEY);
+  if (!raw) {
+    return { prompt: "", paperIds: [], mentions: [] };
+  }
+  if (raw.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(raw);
+      const prompt = typeof parsed?.prompt === "string" ? parsed.prompt : "";
+      const legacyPaperIds = Array.isArray(parsed?.paperIds)
+        ? parsed.paperIds.filter((id: unknown): id is string => typeof id === "string")
+        : [];
+      const mentions = normalizePendingPromptMentions(parsed?.mentions);
+      const paperIds = [...new Set([...legacyPaperIds, ...mentions.map((mention) => mention.id)])];
+      return {
+        prompt,
+        paperIds,
+        mentions: mentions.length ? mentions : paperIds.map((id) => ({ id, title: "" })),
+      };
+    } catch {
+      return { prompt: "", paperIds: [], mentions: [] };
+    }
+  }
+  return { prompt: raw, paperIds: [], mentions: [] };
+}
+
+function rememberPendingPrompt(prompt: string, mentions: MentionTag[] = []) {
+  const trimmed = prompt.trim();
+  if (!trimmed) {
+    return;
+  }
+  const normalizedMentions = normalizePendingPromptMentions(mentions);
+  sessionStorage.setItem(
+    PENDING_PROMPT_KEY,
+    JSON.stringify({
+      prompt: trimmed,
+      paperIds: normalizedMentions.map((mention) => mention.id),
+      mentions: normalizedMentions,
+    }),
+  );
 }
 
 function restoreTabs() {
@@ -499,6 +665,62 @@ function isMessageListNearBottom(
 
 function restoreSidebarCollapsed() {
   return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "true";
+}
+
+function restoreSelectedProjectId() {
+  const value = localStorage.getItem(SELECTED_PROJECT_KEY)?.trim();
+  return value ? value : null;
+}
+
+function restoreDismissedChatSetupSignatures() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(DISMISSED_CHAT_SETUP_KEY) ?? "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+    return Object.fromEntries(
+      Object.entries(parsed).filter(
+        ([key, value]) => typeof key === "string" && typeof value === "string",
+      ),
+    ) as Record<string, string>;
+  } catch {
+    return {};
+  }
+}
+
+function formatChatTitleWord(word: string) {
+  if (!word) {
+    return word;
+  }
+  if (word === word.toUpperCase()) {
+    return word;
+  }
+  if (/[A-Z]/.test(word.slice(1))) {
+    return word;
+  }
+  return `${word[0]?.toUpperCase() ?? ""}${word.slice(1).toLowerCase()}`;
+}
+
+function summarizeThreadTitle(content: string) {
+  const tokens = content.match(/[A-Za-z0-9]+(?:['-][A-Za-z0-9]+)*/g) ?? [];
+  if (tokens.length === 0) {
+    return "New chat";
+  }
+  const informativeTokens = tokens.filter(
+    (token) => !CHAT_TITLE_STOP_WORDS.has(token.toLowerCase()),
+  );
+  const sourceTokens = informativeTokens.length >= 3 ? informativeTokens : tokens;
+  const desiredCount = Math.min(5, Math.max(3, sourceTokens.length));
+  let selectedTokens = sourceTokens.slice(0, desiredCount);
+  if (selectedTokens.length < 3 && tokens.length >= 3) {
+    selectedTokens = tokens.slice(0, 3);
+  }
+  return (
+    selectedTokens
+      .map((token) => formatChatTitleWord(token))
+      .join(" ")
+      .trim() || "New chat"
+  );
 }
 
 function displayThreadTitle(title: string) {
@@ -609,9 +831,9 @@ function contextUsageButtonLabel(usage: ChatStreamUsageEvent) {
 
 function apiKeyStateMessage(state: string) {
   if (state === "api_key_invalid") {
-    return "Your saved Anthropic API key could not be decrypted. Add it again in Settings.";
+    return "Your saved OpenAI API key could not be decrypted. Add it again in Settings.";
   }
-  return "You have used your 3 free responses. Add an Anthropic API key to continue.";
+  return "Add an OpenAI API key in Settings before starting a chat.";
 }
 
 function shouldShowThreadInSidebar(thread: ChatThreadSummary) {
@@ -730,8 +952,324 @@ function displayPythonFilename(filename: string) {
   return filename.trim() || "something.py";
 }
 
+function pythonFilenameKey(filename: string) {
+  return displayPythonFilename(filename);
+}
+
+function duplicatePythonFilenameKeys(
+  files: Array<
+    Pick<ProjectItemSummary, "filename" | "title"> | Pick<PythonFileResponse, "filename">
+  >,
+) {
+  const counts = new Map<string, number>();
+  for (const file of files) {
+    const key = pythonFilenameKey("filename" in file ? file.filename : file.title);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return new Set([...counts.entries()].filter(([, count]) => count > 1).map(([key]) => key));
+}
+
+function displayPythonFileTitle(
+  file: Pick<PythonFileResponse, "filename" | "repo_path">,
+  _duplicateKeys: Set<string>,
+) {
+  return displayPythonFilename(file.filename);
+}
+
+function displayPythonFilePathContext(
+  file: Pick<PythonFileResponse, "filename" | "repo_path">,
+  duplicateKeys: Set<string>,
+) {
+  const filename = displayPythonFilename(file.filename);
+  return duplicateKeys.has(filename) ? pythonRepoPathForFile(file) : "";
+}
+
+function displayPythonTabTitle(
+  file: Pick<PythonFileResponse, "filename" | "repo_path">,
+  duplicateKeys: Set<string>,
+) {
+  const filename = displayPythonFilename(file.filename);
+  return duplicateKeys.has(filename) ? pythonRepoPathForFile(file) : filename;
+}
+
+function messageHasProjectCodeIntent(content: string) {
+  if (!content.trim()) {
+    return false;
+  }
+  if (PROJECT_CODE_DIRECT_TOOL_RE.test(content)) {
+    return true;
+  }
+  if (PROJECT_CODE_PATH_HINT_RE.test(content) && /(read|edit|run)/i.test(content)) {
+    return true;
+  }
+  return PROJECT_CODE_ACTION_RE.test(content) && PROJECT_CODE_TARGET_RE.test(content);
+}
+
+function isLocalDebugHost() {
+  try {
+    const { hostname } = new URL(window.location.href);
+    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+  } catch {
+    return false;
+  }
+}
+
+function latestThreadMessageId(
+  thread: ChatThreadResponse,
+  predicate: (message: ChatMessageResponse) => boolean,
+) {
+  for (let index = thread.messages.length - 1; index >= 0; index -= 1) {
+    const message = thread.messages[index];
+    if (message && predicate(message)) {
+      return message.message_id;
+    }
+  }
+  return null;
+}
+
+function buildThreadDebugBundle(thread: ChatThreadResponse, userId: string | null) {
+  const latestMessage = thread.messages[thread.messages.length - 1] ?? null;
+  return {
+    user_id: userId,
+    project_id: thread.project_id,
+    project_name: thread.project_name,
+    thread_id: thread.thread_id,
+    thread_title: thread.title,
+    message_count: thread.messages.length,
+    latest_message_id: latestMessage?.message_id ?? null,
+    latest_user_message_id: latestThreadMessageId(thread, (message) => message.role === "user"),
+    latest_assistant_message_id: latestThreadMessageId(
+      thread,
+      (message) => message.role === "assistant" && message.kind !== "compaction",
+    ),
+    latest_compaction_message_id: latestThreadMessageId(
+      thread,
+      (message) => message.kind === "compaction",
+    ),
+  };
+}
+
+function quotedToolActivityTarget(label: string) {
+  return label.match(TOOL_ACTIVITY_TARGET_RE)?.[1] ?? "";
+}
+
+function toolActivityInputForItem(
+  item: Pick<ChatThreadItemResponse, "content_json" | "content_text">,
+) {
+  if (
+    item.content_json &&
+    typeof item.content_json === "object" &&
+    !Array.isArray(item.content_json)
+  ) {
+    return item.content_json as Record<string, unknown>;
+  }
+  if (item.content_text.trim()) {
+    try {
+      const parsed = JSON.parse(item.content_text);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function toolActivityLabelForItem(
+  item: Pick<ChatThreadItemResponse, "name" | "content_json" | "content_text">,
+) {
+  const toolName = item.name ?? "";
+  const toolInput = toolActivityInputForItem(item);
+  const detail = (value: unknown, limit = 56) => {
+    const text = String(value ?? "").trim();
+    if (!text) {
+      return null;
+    }
+    if (text.length > limit) {
+      return `${text.slice(0, limit - 1).trimEnd()}…`;
+    }
+    return text;
+  };
+
+  const query = detail(toolInput?.query);
+  const path = detail(toolInput?.path) ?? detail(toolInput?.repo_path);
+  const newPath = detail(toolInput?.new_repo_path);
+  const pattern = detail(toolInput?.pattern);
+  const figureId = detail(toolInput?.figure_id);
+  const tableId = detail(toolInput?.table_id);
+  const execId = detail(toolInput?.exec_id);
+
+  if (toolName === "paperbase_search") {
+    return query ? `paper search for "${query}"` : "paper search";
+  }
+  if (toolName === "paperbase_search_sections") {
+    return query ? `section search for "${query}"` : "section search";
+  }
+  if (toolName === "paperbase_get_results") {
+    return "result lookup";
+  }
+  if (toolName === "paperbase_grep_results") {
+    return pattern ? `result filtering for "${pattern}"` : "result filtering";
+  }
+  if (toolName === "paperbase_get_paper") {
+    return "paper lookup";
+  }
+  if (toolName === "paperbase_list_files") {
+    return "file listing";
+  }
+  if (toolName === "paperbase_read_file") {
+    return path ? `file read for "${path}"` : "file read";
+  }
+  if (toolName === "paperbase_get_figure") {
+    return figureId ? `figure lookup for "${figureId}"` : "figure lookup";
+  }
+  if (toolName === "paperbase_get_table") {
+    return tableId ? `table lookup for "${tableId}"` : "table lookup";
+  }
+  if (toolName === "paperbase_get_related_papers") {
+    return "related-paper lookup";
+  }
+  if (toolName === "paperbase_get_references") {
+    return "reference lookup";
+  }
+  if (toolName === "paperbase_list_uploaded_documents") {
+    return "upload listing";
+  }
+  if (toolName === "paperbase_search_uploaded_sections") {
+    return query ? `uploaded-note search for "${query}"` : "uploaded-note search";
+  }
+  if (toolName === "project_list_files") {
+    return "project file listing";
+  }
+  if (toolName === "project_read_file") {
+    return path ? `project file read for "${path}"` : "project file read";
+  }
+  if (toolName === "project_grep") {
+    return pattern ? `project grep for "${pattern}"` : "project grep";
+  }
+  if (toolName === "project_write_file" || toolName === "project_touch") {
+    return path ? `project file write for "${path}"` : "project file write";
+  }
+  if (toolName === "project_apply_patch" || toolName === "project_edit") {
+    return path ? `project file patch for "${path}"` : "project file patch";
+  }
+  if (toolName === "project_move") {
+    if (path && newPath) {
+      return `project file move from "${path}" to "${newPath}"`;
+    }
+    return "project file move";
+  }
+  if (toolName === "project_delete") {
+    return path ? `project file delete for "${path}"` : "project file delete";
+  }
+  if (toolName === "project_git_status") {
+    return "project git status";
+  }
+  if (toolName === "project_git_diff") {
+    return "project git diff";
+  }
+  if (toolName === "project_exec") {
+    return "project exec";
+  }
+  if (toolName === "project_wait") {
+    return execId ? `project exec wait for "${execId}"` : "project exec wait";
+  }
+  if (toolName === "project_cancel") {
+    return execId ? `project exec cancel for "${execId}"` : "project exec cancel";
+  }
+  if (toolName === "project_logs") {
+    return execId ? `project exec logs for "${execId}"` : "project exec logs";
+  }
+  if (toolName === "project_test") {
+    return "project test";
+  }
+  if (toolName === "project_lint") {
+    return "project lint";
+  }
+  if (toolName === "project_run") {
+    return path ? `project run for "${path}"` : "project run";
+  }
+  return toolName || "tool call";
+}
+
+function toolActivityCommandForItem(
+  item: Pick<ChatThreadItemResponse, "name" | "content_json" | "content_text">,
+) {
+  const toolName = item.name ?? "";
+  const toolInput = toolActivityInputForItem(item);
+  if (!toolName) {
+    return item.content_text || null;
+  }
+  if (!toolInput) {
+    return item.content_text || null;
+  }
+  return `${toolName}(${JSON.stringify(toolInput, null, 2)})`;
+}
+
+function formatToolActivityText(
+  activity: Pick<ToolActivityEntry, "label" | "status" | "toolName">,
+) {
+  const running = activity.status === "running";
+  const target = quotedToolActivityTarget(activity.label);
+  switch (activity.toolName) {
+    case "project_list_files":
+      return running ? "Listing files..." : "Listed files";
+    case "project_read_file":
+      return running ? `Reading ${target || "file"}...` : `Read ${target || "file"}`;
+    case "project_grep":
+      return running
+        ? `Searching files${target ? ` for ${target}` : ""}...`
+        : `Searched files${target ? ` for ${target}` : ""}`;
+    case "project_write_file":
+    case "project_touch":
+      return running ? `Writing ${target || "file"}...` : `Wrote ${target || "file"}`;
+    case "project_apply_patch":
+    case "project_edit":
+      return running ? `Patching ${target || "file"}...` : `Patched ${target || "file"}`;
+    case "project_move":
+      return running ? "Moving file..." : "Moved file";
+    case "project_delete":
+      return running ? `Deleting ${target || "file"}...` : `Deleted ${target || "file"}`;
+    case "project_git_status":
+      return running ? "Checking project status..." : "Checked project status";
+    case "project_git_diff":
+      return running ? "Diffing project files..." : "Diffed project files";
+    case "project_exec":
+      return running ? "Starting project command..." : "Started project command";
+    case "project_wait":
+      return running ? "Waiting on project command..." : "Updated project command status";
+    case "project_cancel":
+      return running ? "Canceling project command..." : "Canceled project command";
+    case "project_logs":
+      return running ? "Reading project logs..." : "Read project logs";
+    case "project_test":
+      return running ? "Running project tests..." : "Ran project tests";
+    case "project_lint":
+      return running ? "Running project lint..." : "Ran project lint";
+    case "project_run":
+      return running ? `Running ${target || "file"}...` : `Ran ${target || "file"}`;
+    default:
+      return running ? `Doing ${activity.label}...` : `Did ${activity.label}`;
+  }
+}
+
+function toolActivityHasDetails(activity: Pick<ToolActivityEntry, "command" | "output">) {
+  return Boolean(activity.command || activity.output);
+}
+
+function isStreamingMessageStatus(status: string) {
+  return status === "streaming" || status === "in_progress";
+}
+
 function projectFileKindLabel(fileKind: ProjectFileKind | undefined) {
-  return fileKind === "notebook" ? "Notebook" : "Python";
+  if (fileKind === "notebook") {
+    return "Notebook";
+  }
+  if (fileKind === "text") {
+    return "Text";
+  }
+  return "Python";
 }
 
 function GoogleButton() {
@@ -798,8 +1336,13 @@ export default function App() {
   const [session, setSession] = useState<BrowserSessionResponse | null>(null);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [projectItems, setProjectItems] = useState<Record<string, ProjectItemState>>({});
-  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
-  const [expandedProjectIds, setExpandedProjectIds] = useState<string[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(() =>
+    restoreSelectedProjectId(),
+  );
+  const [expandedProjectIds, setExpandedProjectIds] = useState<string[]>(() => {
+    const restoredProjectId = restoreSelectedProjectId();
+    return restoredProjectId ? [restoredProjectId] : [];
+  });
   const [collapsedProjectCategories, setCollapsedProjectCategories] = useState<
     Record<string, Partial<Record<ProjectSidebarCategoryKey, boolean>>>
   >({});
@@ -854,6 +1397,9 @@ export default function App() {
   const [flashKind, setFlashKind] = useState<ModalFlashKind>("note");
   const [landingPrompt, setLandingPrompt] = useState("");
   const [composerInput, setComposerInput] = useState("");
+  const [composerTags, setComposerTags] = useState<MentionTag[]>([]);
+  const [landingTags, setLandingTags] = useState<MentionTag[]>([]);
+  const [restoredComposerMentions, setRestoredComposerMentions] = useState<MentionTag[]>([]);
   const [composerStatus, setComposerStatus] = useState("");
   const [includeUploads] = useState(true);
   const [includePapers] = useState(true);
@@ -862,6 +1408,9 @@ export default function App() {
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [emptyStateProjectPickerOpen, setEmptyStateProjectPickerOpen] = useState(false);
   const [emptyStateProjectSearch, setEmptyStateProjectSearch] = useState("");
+  const [dismissedChatSetupSignatures, setDismissedChatSetupSignatures] = useState<
+    Record<string, string>
+  >(() => restoreDismissedChatSetupSignatures());
   const notebookUploadInputRef = useRef<HTMLInputElement | null>(null);
   const [streamingThreadId, setStreamingThreadId] = useState<string | null>(null);
   const [threadStreamStates, setThreadStreamStates] = useState<Record<string, ThreadStreamState>>(
@@ -883,7 +1432,7 @@ export default function App() {
 
   const sessionRef = useRef<BrowserSessionResponse | null>(null);
   const projectsRef = useRef<ProjectSummary[]>([]);
-  const selectedProjectIdRef = useRef<string | null>(null);
+  const selectedProjectIdRef = useRef<string | null>(restoreSelectedProjectId());
   const projectItemsRef = useRef<Record<string, ProjectItemState>>({});
   const threadMapRef = useRef<Record<string, ChatThreadResponse>>({});
   const pythonFileMapRef = useRef<Record<string, PythonFileResponse>>({});
@@ -912,6 +1461,14 @@ export default function App() {
 
   useEffect(() => {
     selectedProjectIdRef.current = selectedProjectId;
+  }, [selectedProjectId]);
+
+  useEffect(() => {
+    if (selectedProjectId) {
+      localStorage.setItem(SELECTED_PROJECT_KEY, selectedProjectId);
+      return;
+    }
+    localStorage.removeItem(SELECTED_PROJECT_KEY);
   }, [selectedProjectId]);
 
   useEffect(() => {
@@ -951,6 +1508,10 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(sidebarCollapsed));
   }, [sidebarCollapsed]);
+
+  useEffect(() => {
+    localStorage.setItem(DISMISSED_CHAT_SETUP_KEY, JSON.stringify(dismissedChatSetupSignatures));
+  }, [dismissedChatSetupSignatures]);
 
   useEffect(() => {
     if (!mobileSidebarOpen) {
@@ -1045,6 +1606,7 @@ export default function App() {
 
   const authCopy = AUTH_VIEW_COPY[authView];
   const authenticated = Boolean(session?.authenticated);
+  const localThreadDebugEnabled = useMemo(() => isLocalDebugHost(), []);
   const activeThreadId = activeTab?.kind === "thread" ? activeTab.id : null;
   const activePythonFileId = activeTab?.kind === "python_file" ? activeTab.id : null;
   const activeProjectHomeId = activeTab?.kind === "project_home" ? activeTab.id : null;
@@ -1059,6 +1621,13 @@ export default function App() {
   const activePythonRun = activePythonFileId
     ? (pythonFileRuns[activePythonFileId] ?? { running: false, result: null, error: "" })
     : { running: false, result: null, error: "" };
+  const activeThreadDebugBundle = useMemo(
+    () =>
+      activeThread && localThreadDebugEnabled
+        ? buildThreadDebugBundle(activeThread, session?.user?.user_id ?? null)
+        : null,
+    [activeThread, localThreadDebugEnabled, session?.user?.user_id],
+  );
   const activePythonContent = activePythonDraft?.content ?? activePythonFile?.content ?? "";
   const activeProjectHomeItems = activeProjectHomeId
     ? (projectItems[activeProjectHomeId]?.items ?? [])
@@ -1084,6 +1653,7 @@ export default function App() {
     activeTab == null ||
     (activeTab.kind === "thread" && (!activeThread || activeThread.messages.length === 0));
   const paperDrawerOpen = Boolean(paperDrawer);
+  const hasProjects = projects.length > 0;
   const emptyStateProject =
     projects.find((project) => project.project_id === selectedProjectId) ?? projects[0] ?? null;
   const filteredEmptyStateProjects = useMemo(() => {
@@ -1102,43 +1672,55 @@ export default function App() {
       projects.every((project) => expandedProjectIds.includes(project.project_id)),
     [expandedProjectIds, projects],
   );
-  const openTabItems = useMemo(
-    () =>
-      openTabs.map((tab) => {
-        if (tab.kind === "thread") {
-          const loadedThread = threadMap[tab.id];
-          const title = loadedThread?.title ?? "New chat";
-          return {
-            key: `thread:${tab.id}`,
-            kind: tab.kind,
-            id: tab.id,
-            title: displayThreadTitle(title),
-            tabTitle: truncateTabTitle(title),
-          };
-        }
-        if (tab.kind === "project_home") {
-          const project = projects.find((item) => item.project_id === tab.id);
-          const title = project ? `${project.name} Home` : "Project Home";
-          return {
-            key: `project_home:${tab.id}`,
-            kind: tab.kind,
-            id: tab.id,
-            title,
-            tabTitle: truncateTabTitle(title),
-          };
-        }
-        const loadedFile = pythonFileMap[tab.id];
-        const title = displayPythonFilename(loadedFile?.filename ?? "something.py");
+  const openTabItems = useMemo(() => {
+    const openPythonFiles = openTabs
+      .filter((tab): tab is Extract<OpenTab, { kind: "python_file" }> => tab.kind === "python_file")
+      .map(
+        (tab) =>
+          pythonFileMap[tab.id] ?? { filename: "something.py", repo_path: `src/${tab.id}.py` },
+      );
+    const duplicateKeys = duplicatePythonFilenameKeys(openPythonFiles);
+    return openTabs.map((tab) => {
+      if (tab.kind === "thread") {
+        const loadedThread = threadMap[tab.id];
+        const title = loadedThread?.title ?? "New chat";
         return {
-          key: `python_file:${tab.id}`,
+          key: `thread:${tab.id}`,
           kind: tab.kind,
           id: tab.id,
+          isStreaming: streamingThreadId === tab.id,
+          title: displayThreadTitle(title),
+          tabTitle: truncateTabTitle(title),
+        };
+      }
+      if (tab.kind === "project_home") {
+        const project = projects.find((item) => item.project_id === tab.id);
+        const title = project ? `${project.name} Home` : "Project Home";
+        return {
+          key: `project_home:${tab.id}`,
+          kind: tab.kind,
+          id: tab.id,
+          isStreaming: false,
           title,
           tabTitle: truncateTabTitle(title),
         };
-      }),
-    [openTabs, projects, pythonFileMap, threadMap],
-  );
+      }
+      const loadedFile = pythonFileMap[tab.id];
+      const file = loadedFile ?? {
+        filename: "something.py",
+        repo_path: `src/${tab.id}.py`,
+      };
+      const title = displayPythonTabTitle(file, duplicateKeys);
+      return {
+        key: `python_file:${tab.id}`,
+        kind: tab.kind,
+        id: tab.id,
+        isStreaming: false,
+        title,
+        tabTitle: truncateTabTitle(title),
+      };
+    });
+  }, [openTabs, projects, pythonFileMap, streamingThreadId, threadMap]);
   const hasOpenTabs = openTabItems.length > 0;
   const tabStripStyle = useMemo(
     () =>
@@ -1325,11 +1907,60 @@ export default function App() {
     }
     return {
       email: session.user.email,
-      hasAnthropicApiKey: session.has_anthropic_api_key,
+      hasOpenAIApiKey: session.has_openai_api_key ?? session.has_anthropic_api_key ?? false,
       settings: session.settings ?? DEFAULT_BROWSER_SETTINGS,
     };
   }, [session]);
   const sessionSettings = sessionSummary?.settings ?? DEFAULT_BROWSER_SETTINGS;
+  const hasInferenceAccess = Boolean(sessionSummary?.hasOpenAIApiKey);
+  const chatSetupProjectName = emptyStateProject?.name ?? activeThread?.project_name ?? "Project";
+  const chatSetupItems = [
+    {
+      id: "github",
+      provider: "github",
+      label: "GitHub connection",
+      description: "Needed for the agent to create, edit, and save project files.",
+      actionLabel: sessionSettings.has_github_connection ? "Connected" : "Open GitHub setup",
+      ready: sessionSettings.has_github_connection,
+      required: true,
+      settingsTab: "version-control" as const,
+    },
+    {
+      id: "inference",
+      provider: "openai",
+      label: "OpenAI API key",
+      description:
+        "Needed for the agent to run turns. Add your OpenAI API key before starting chat.",
+      actionLabel: hasInferenceAccess ? "Ready" : "Open OpenAI setup",
+      ready: hasInferenceAccess,
+      required: true,
+      settingsTab: "inference" as const,
+    },
+    {
+      id: "sandbox",
+      provider: "modal",
+      label: "Sandbox credentials",
+      description: "Recommended for run, test, and long-running coding tools.",
+      actionLabel: sessionSettings.has_modal_credentials ? "Ready" : "Open sandbox setup",
+      ready: sessionSettings.has_modal_credentials,
+      required: false,
+      settingsTab: "sandbox" as const,
+    },
+  ];
+  const missingChatSetupSignature = chatSetupItems
+    .filter((item) => !item.ready)
+    .map((item) => item.id)
+    .sort()
+    .join("|");
+  const dismissedChatSetupSignature = emptyStateProject?.project_id
+    ? dismissedChatSetupSignatures[emptyStateProject.project_id]
+    : null;
+  const showChatSetupCard =
+    authenticated &&
+    isChatEmpty &&
+    hasProjects &&
+    missingChatSetupSignature.length > 0 &&
+    dismissedChatSetupSignature !== missingChatSetupSignature;
   const appliedAppearanceTheme = sessionSettings.appearance_theme === "dark" ? "dark" : "light";
   const authenticatedDarkThemeEnabled = authenticated && appliedAppearanceTheme === "dark";
   const activeSettingsConfig = useMemo(
@@ -1485,7 +2116,9 @@ export default function App() {
     (
       threadId: string,
       toolId: string,
-      updates: Partial<Pick<ToolActivityEntry, "finishedAt" | "isError">> = {},
+      updates: Partial<
+        Pick<ToolActivityEntry, "finishedAt" | "isError" | "command" | "output">
+      > = {},
     ) => {
       setToolActivities((current) => {
         const existingEntries = current[threadId] ?? [];
@@ -1500,6 +2133,8 @@ export default function App() {
                   ...entry,
                   status: "completed",
                   finishedAt: updates.finishedAt ?? new Date().toISOString(),
+                  command: updates.command ?? entry.command,
+                  output: updates.output ?? entry.output,
                   isError: updates.isError ?? entry.isError,
                 }
               : entry,
@@ -1672,6 +2307,85 @@ export default function App() {
     [updateProjectItemCache],
   );
 
+  const removePythonFileIdsLocally = useCallback(
+    (fileIds: string[], projectId?: string) => {
+      const ids = new Set(fileIds.filter(Boolean));
+      if (ids.size === 0) {
+        return;
+      }
+      setPythonFileMap((current) => {
+        const next = { ...current };
+        for (const fileId of ids) {
+          delete next[fileId];
+        }
+        return next;
+      });
+      setPythonFileDrafts((current) => {
+        const next = { ...current };
+        for (const fileId of ids) {
+          delete next[fileId];
+        }
+        return next;
+      });
+      setPythonFileRuns((current) => {
+        const next = { ...current };
+        for (const fileId of ids) {
+          delete next[fileId];
+        }
+        return next;
+      });
+      setOpenTabs((current) => {
+        const nextTabs = current.filter(
+          (value) => value.kind !== "python_file" || !ids.has(value.id),
+        );
+        setActiveTab((currentActive) => {
+          if (
+            !currentActive ||
+            currentActive.kind !== "python_file" ||
+            !ids.has(currentActive.id)
+          ) {
+            return currentActive;
+          }
+          return nextTabs[nextTabs.length - 1] ?? null;
+        });
+        return nextTabs;
+      });
+      if (projectId) {
+        updateProjectItemCache(projectId, (current) => {
+          if (!current) {
+            return current;
+          }
+          const nextItems = current.items.filter(
+            (item) => item.item_kind !== "python_file" || !ids.has(item.file_id ?? ""),
+          );
+          const removedCount = current.items.length - nextItems.length;
+          const totalCountByKind = { ...current.totalCountByKind };
+          const nextFileTotal = Math.max(
+            0,
+            (totalCountByKind.python_file ?? projectItemKindCount(current.items, "python_file")) -
+              removedCount,
+          );
+          totalCountByKind.python_file = nextFileTotal;
+          return {
+            ...current,
+            items: nextItems,
+            totalCount: Math.max(0, current.totalCount - removedCount),
+            totalCountByKind,
+            hasMore:
+              current.hasMore || nextItems.length < Math.max(0, current.totalCount - removedCount),
+            hasMoreByKind: {
+              ...current.hasMoreByKind,
+              python_file:
+                Boolean(current.hasMoreByKind?.python_file) ||
+                projectItemKindCount(nextItems, "python_file") < nextFileTotal,
+            },
+          };
+        });
+      }
+    },
+    [updateProjectItemCache],
+  );
+
   const fetchProjectItems = useCallback(
     async (projectId: string, append = false, itemKind?: ProjectItemKind) => {
       const existing = projectItemsRef.current[projectId];
@@ -1819,6 +2533,20 @@ export default function App() {
     [updateProjectItemCache],
   );
 
+  const refreshLoadedProjectCodeItems = useCallback(
+    async (projectId: string) => {
+      if (!projectItemsRef.current[projectId]?.loaded) {
+        return;
+      }
+      try {
+        await fetchProjectItems(projectId, false, "python_file");
+      } catch (error) {
+        console.error(error);
+      }
+    },
+    [fetchProjectItems],
+  );
+
   const moveThreadBetweenProjectItems = useCallback(
     (thread: ChatThreadResponse, previousProjectId: string) => {
       if (previousProjectId && previousProjectId !== thread.project_id) {
@@ -1876,10 +2604,12 @@ export default function App() {
   );
 
   const fetchAndStoreThread = useCallback(
-    async (threadId: string) => {
+    async (threadId: string, selectProject = true) => {
       const thread = await getThread(threadId);
       setThreadMap((current) => ({ ...current, [thread.thread_id]: thread }));
-      setSelectedProjectId(thread.project_id);
+      if (selectProject) {
+        setSelectedProjectId(thread.project_id);
+      }
       upsertThreadIntoProjectItems(thread);
       return thread;
     },
@@ -1897,10 +2627,12 @@ export default function App() {
   );
 
   const fetchAndStorePythonFile = useCallback(
-    async (fileId: string) => {
+    async (fileId: string, selectProject = true) => {
       const file = await getPythonFile(fileId);
       setPythonFileMap((current) => ({ ...current, [file.file_id]: file }));
-      setSelectedProjectId(file.project_id);
+      if (selectProject) {
+        setSelectedProjectId(file.project_id);
+      }
       setPythonFileDrafts((current) => ({
         ...current,
         [file.file_id]: current[file.file_id] ?? { content: file.content, dirty: false },
@@ -1909,6 +2641,39 @@ export default function App() {
       return file;
     },
     [upsertPythonFileIntoProjectItems],
+  );
+
+  const persistPythonFile = useCallback(
+    async (fileId: string, content: string) => {
+      const updated = await updatePythonFile(fileId, { content });
+      setPythonFileMap((current) => ({ ...current, [updated.file_id]: updated }));
+      setPythonFileDrafts((current) => ({
+        ...current,
+        [updated.file_id]: { content: updated.content, dirty: false },
+      }));
+      upsertPythonFileIntoProjectItems(updated);
+      await refreshProjects();
+      return updated;
+    },
+    [refreshProjects, upsertPythonFileIntoProjectItems],
+  );
+
+  const persistDirtyProjectDrafts = useCallback(
+    async (projectId: string) => {
+      const dirtyFileIds = Object.entries(pythonFileDraftsRef.current)
+        .filter(([fileId, draft]) => {
+          const pythonFile = pythonFileMapRef.current[fileId];
+          return Boolean(draft.dirty && pythonFile && pythonFile.project_id === projectId);
+        })
+        .map(([fileId]) => fileId);
+      for (const fileId of dirtyFileIds) {
+        const pythonFile =
+          pythonFileMapRef.current[fileId] ?? (await fetchAndStorePythonFile(fileId));
+        const nextContent = pythonFileDraftsRef.current[fileId]?.content ?? pythonFile.content;
+        await persistPythonFile(fileId, nextContent);
+      }
+    },
+    [fetchAndStorePythonFile, persistPythonFile],
   );
 
   const openPythonFile = useCallback(
@@ -1973,29 +2738,90 @@ export default function App() {
     }
   }, []);
 
+  const copyThreadDebugBundle = useCallback(
+    async (bundle: ReturnType<typeof buildThreadDebugBundle>) => {
+      try {
+        await navigator.clipboard.writeText(JSON.stringify(bundle, null, 2));
+        showNoteFlash("Copied chat debug bundle.");
+      } catch (error) {
+        console.error(error);
+      }
+    },
+    [showNoteFlash],
+  );
+
+  const requireInferenceAccess = useCallback(
+    (currentSession?: BrowserSessionResponse | null) => {
+      const hasOpenAIApiKey = Boolean(
+        currentSession?.has_openai_api_key ??
+        currentSession?.has_anthropic_api_key ??
+        sessionRef.current?.has_openai_api_key ??
+        sessionRef.current?.has_anthropic_api_key,
+      );
+      if (hasOpenAIApiKey) {
+        return true;
+      }
+      const message = apiKeyStateMessage("api_key_required");
+      setComposerStatus(message);
+      showErrorFlash(message);
+      setActiveSettingsTab("inference");
+      setAuthView("settings");
+      setAuthModalOpen(true);
+      return false;
+    },
+    [showErrorFlash],
+  );
+
   const sendMessage = useCallback(
-    async (threadId: string, content: string) => {
-      const optimisticUserMessage = createLocalMessage("user", content);
-      const now = new Date().toISOString();
-      const fallbackThread = threadMapRef.current[threadId];
-      const turnIndex =
-        (fallbackThread?.messages.filter((message) => message.role === "user").length ?? 0) + 1;
-      const fallbackProjectId =
-        fallbackThread?.project_id ??
+    async (
+      threadId: string,
+      content: string,
+      currentSession?: BrowserSessionResponse | null,
+      paperIds: string[] = [],
+    ) => {
+      if (!requireInferenceAccess(currentSession)) {
+        return null;
+      }
+      const existingThread = threadMapRef.current[threadId];
+      const projectIdForTurn =
+        existingThread?.project_id ??
         selectedProjectIdRef.current ??
         projectsRef.current[0]?.project_id ??
         "";
+      if (projectIdForTurn && messageHasProjectCodeIntent(content)) {
+        try {
+          await persistDirtyProjectDrafts(projectIdForTurn);
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : "Project drafts could not be saved.";
+          setComposerStatus(message);
+          if (message.toLowerCase().includes("github")) {
+            showErrorFlash(message);
+            setAuthView("settings");
+            setAuthModalOpen(true);
+          }
+          return null;
+        }
+      }
+      const optimisticUserMessage = createLocalMessage("user", content);
+      const now = new Date().toISOString();
+      const fallbackThread = existingThread;
+      const turnIndex =
+        (fallbackThread?.messages.filter((message) => message.role === "user").length ?? 0) + 1;
+      const fallbackProjectId = projectIdForTurn;
       const fallbackProjectName =
         fallbackThread?.project_name ??
         projectsRef.current.find((project) => project.project_id === fallbackProjectId)?.name ??
         "";
       const fallbackProjectInstructions = fallbackThread?.project_instructions ?? "";
       let assistantStarted = false;
+      let turnUsedProjectCodeTools = false;
       let donePayload: ChatStreamDoneEvent | null = null;
       let gatingPayload: SendChatMessageResponse | null = null;
       let streamError: string | null = null;
       let streamingMessageId: string | null = null;
       const streamAbortController = new AbortController();
+      const optimisticTitle = summarizeThreadTitle(content);
 
       updateThread(threadId, (thread) => ({
         thread_id: thread?.thread_id ?? threadId,
@@ -2004,12 +2830,90 @@ export default function App() {
         project_instructions: thread?.project_instructions ?? fallbackProjectInstructions,
         title:
           (thread?.title ?? "New chat") === "New chat"
-            ? content.slice(0, 60)
+            ? optimisticTitle
             : (thread?.title ?? "New chat"),
         created_at: thread?.created_at ?? now,
         updated_at: now,
         messages: [...(thread?.messages ?? []), optimisticUserMessage],
       }));
+
+      const upsertThreadItemState = (
+        thread: ChatThreadResponse | null,
+        item: ChatThreadItemResponse,
+      ): ChatThreadResponse => {
+        const nextThread =
+          thread ??
+          ({
+            thread_id: threadId,
+            project_id: fallbackProjectId,
+            project_name: fallbackProjectName,
+            project_instructions: fallbackProjectInstructions,
+            title: optimisticTitle,
+            created_at: now,
+            updated_at: now,
+            items: [],
+            turns: [],
+            messages: [],
+          } satisfies ChatThreadResponse);
+        const existingItems = nextThread.items ?? [];
+        const nextItems = existingItems.some((existing) => existing.item_id === item.item_id)
+          ? existingItems.map((existing) => (existing.item_id === item.item_id ? item : existing))
+          : [...existingItems, item];
+        const derivedMessage = messageFromThreadItem(item);
+        let nextMessages = nextThread.messages ?? [];
+        if (derivedMessage) {
+          nextMessages = nextMessages.some(
+            (message) => message.message_id === derivedMessage.message_id,
+          )
+            ? nextMessages.map((message) =>
+                message.message_id === derivedMessage.message_id ? derivedMessage : message,
+              )
+            : [...nextMessages, derivedMessage];
+        }
+        return {
+          ...nextThread,
+          updated_at: new Date().toISOString(),
+          items: nextItems,
+          messages: nextMessages,
+        };
+      };
+
+      const appendItemDeltaState = (
+        thread: ChatThreadResponse | null,
+        itemId: string,
+        delta: string,
+      ): ChatThreadResponse => {
+        const nextThread =
+          thread ??
+          ({
+            thread_id: threadId,
+            project_id: fallbackProjectId,
+            project_name: fallbackProjectName,
+            project_instructions: fallbackProjectInstructions,
+            title: optimisticTitle,
+            created_at: now,
+            updated_at: now,
+            items: [],
+            turns: [],
+            messages: [],
+          } satisfies ChatThreadResponse);
+        const nextItems = (nextThread.items ?? []).map((item) =>
+          item.item_id === itemId
+            ? { ...item, content_text: `${item.content_text}${delta}` }
+            : item,
+        );
+        const nextMessages = (nextThread.messages ?? []).map((message) =>
+          message.message_id === itemId
+            ? { ...message, content_markdown: `${message.content_markdown}${delta}` }
+            : message,
+        );
+        return {
+          ...nextThread,
+          updated_at: new Date().toISOString(),
+          items: nextItems,
+          messages: nextMessages,
+        };
+      };
 
       streamAbortControllerRef.current = streamAbortController;
       setStreamingThreadId(threadId);
@@ -2025,90 +2929,103 @@ export default function App() {
             content,
             include_uploads: includeUploads,
             include_papers: includePapers,
+            paper_ids: paperIds,
           },
           (eventName, payload) => {
-            if (eventName === "compaction_start") {
-              updateThread(threadId, (thread) => ({
-                ...(thread ?? {
-                  thread_id: threadId,
-                  project_id: fallbackProjectId,
-                  project_name: fallbackProjectName,
-                  project_instructions: fallbackProjectInstructions,
-                  title: content.slice(0, 60),
-                  created_at: now,
-                  updated_at: now,
-                  messages: [],
-                }),
-                updated_at: new Date().toISOString(),
-                messages: (thread?.messages ?? []).some(
-                  (message) => message.message_id === payload.compaction_message.message_id,
-                )
-                  ? (thread?.messages ?? []).map((message) =>
-                      message.message_id === payload.compaction_message.message_id
-                        ? payload.compaction_message
-                        : message,
-                    )
-                  : [...(thread?.messages ?? []), payload.compaction_message],
-              }));
+            if (eventName === "turn_started") {
               return;
             }
 
-            if (eventName === "compaction_done") {
-              updateThread(threadId, (thread) => ({
-                ...(thread ?? {
-                  thread_id: threadId,
-                  project_id: fallbackProjectId,
-                  project_name: fallbackProjectName,
-                  project_instructions: fallbackProjectInstructions,
-                  title: content.slice(0, 60),
-                  created_at: now,
-                  updated_at: now,
-                  messages: [],
-                }),
-                updated_at: new Date().toISOString(),
-                messages: payload.messages,
-              }));
+            if (eventName === "mention_indexing_started") {
+              const title = payload.title || payload.arxiv_id || payload.paper_id;
+              setComposerStatus(`Fetching paper: ${title}…`);
+              return;
+            }
+            if (eventName === "mention_indexing_completed") {
+              setComposerStatus("");
+              return;
+            }
+            if (eventName === "mention_indexing_failed") {
+              const title = payload.title || payload.arxiv_id || payload.paper_id;
+              setComposerStatus(
+                payload.detail
+                  ? `Could not fetch ${title}: ${payload.detail}`
+                  : `Could not fetch ${title}`,
+              );
               return;
             }
 
-            if (eventName === "tool_start") {
-              upsertToolActivity(threadId, {
-                id: payload.tool_call_id,
-                turnIndex,
-                label: payload.label,
-                status: "running",
-                startedAt: new Date().toISOString(),
-                finishedAt: null,
-                isError: false,
-              });
+            if (eventName === "item_started") {
+              updateThread(threadId, (thread) => upsertThreadItemState(thread, payload.item));
+              if (payload.item.item_type === "assistant_message") {
+                assistantStarted = true;
+                streamingMessageId = payload.item.item_id;
+                markThreadAssistantStarted(threadId);
+              }
+              if (
+                payload.item.item_type === "function_call" ||
+                payload.item.item_type === "custom_tool_call"
+              ) {
+                const toolName = payload.item.name ?? "";
+                if (toolName.startsWith("project_")) {
+                  turnUsedProjectCodeTools = true;
+                }
+                const toolLabel = toolActivityLabelForItem(payload.item);
+                upsertToolActivity(threadId, {
+                  id: payload.item.call_id ?? payload.item.item_id,
+                  turnIndex,
+                  toolName,
+                  label: toolLabel,
+                  command: toolActivityCommandForItem(payload.item),
+                  output: null,
+                  status: "running",
+                  startedAt: new Date().toISOString(),
+                  finishedAt: null,
+                  isError: false,
+                });
+              }
               return;
             }
 
-            if (eventName === "tool_done") {
-              completeToolActivity(threadId, payload.tool_call_id, {
-                isError: payload.is_error,
-              });
+            if (eventName === "item_delta") {
+              updateThread(threadId, (thread) =>
+                appendItemDeltaState(thread, payload.item_id, payload.delta),
+              );
               return;
             }
 
-            if (eventName === "assistant_start") {
-              assistantStarted = true;
-              streamingMessageId = payload.assistant_message.message_id;
-              markThreadAssistantStarted(threadId);
-              updateThread(threadId, (thread) => ({
-                ...(thread ?? {
-                  thread_id: threadId,
-                  project_id: fallbackProjectId,
-                  project_name: fallbackProjectName,
-                  project_instructions: fallbackProjectInstructions,
-                  title: content.slice(0, 60),
-                  created_at: now,
-                  updated_at: now,
-                  messages: [],
-                }),
-                updated_at: now,
-                messages: [...(thread?.messages ?? []), payload.assistant_message],
-              }));
+            if (eventName === "item_completed") {
+              updateThread(threadId, (thread) => upsertThreadItemState(thread, payload.item));
+              if (
+                payload.item.item_type === "function_call_output" ||
+                payload.item.item_type === "custom_tool_call_output"
+              ) {
+                const toolName = payload.item.name ?? "";
+                completeToolActivity(threadId, payload.item.call_id ?? payload.item.item_id, {
+                  command: null,
+                  output: payload.item.content_text ?? null,
+                  isError:
+                    typeof payload.item.content_json === "object" &&
+                    payload.item.content_json !== null &&
+                    "error" in (payload.item.content_json as Record<string, unknown>),
+                });
+                if (
+                  toolName === "project_write_file" ||
+                  toolName === "project_apply_patch" ||
+                  toolName === "project_move" ||
+                  toolName === "project_touch" ||
+                  toolName === "project_edit" ||
+                  toolName === "project_delete"
+                ) {
+                  void refreshLoadedProjectCodeItems(fallbackProjectId);
+                }
+              }
+              if (
+                payload.item.item_type === "function_call" &&
+                String(payload.item.name ?? "").startsWith("project_")
+              ) {
+                turnUsedProjectCodeTools = true;
+              }
               return;
             }
 
@@ -2118,60 +3035,26 @@ export default function App() {
               return;
             }
 
-            if (eventName === "delta") {
-              updateThread(threadId, (thread) => ({
-                ...(thread ?? {
-                  thread_id: threadId,
-                  project_id: fallbackProjectId,
-                  project_name: fallbackProjectName,
-                  project_instructions: fallbackProjectInstructions,
-                  title: content.slice(0, 60),
-                  created_at: now,
-                  updated_at: now,
-                  messages: [],
-                }),
-                updated_at: new Date().toISOString(),
-                messages: (thread?.messages ?? []).map((message) =>
-                  message.message_id === payload.message_id
-                    ? {
-                        ...message,
-                        content_markdown: `${message.content_markdown}${payload.delta}`,
-                      }
-                    : message,
-                ),
-              }));
-              return;
-            }
-
-            if (eventName === "done") {
+            if (eventName === "turn_completed") {
               donePayload = payload;
               if (payload.usage) {
                 updateThreadStreamUsage(threadId, payload.usage);
                 setThreadUsageSnapshot(threadId, payload.usage);
               }
-              updateThread(threadId, (thread) => ({
-                ...(thread ?? {
-                  thread_id: threadId,
-                  project_id: fallbackProjectId,
-                  project_name: fallbackProjectName,
-                  project_instructions: fallbackProjectInstructions,
-                  title: content.slice(0, 60),
-                  created_at: now,
-                  updated_at: now,
-                  messages: [],
-                }),
-                updated_at: new Date().toISOString(),
-                messages: (thread?.messages ?? []).map((message) =>
-                  message.message_id === payload.assistant_message.message_id
-                    ? payload.assistant_message
-                    : message,
-                ),
+              setThreadMap((current) => ({
+                ...current,
+                [threadId]: normalizeThreadForState(payload.thread),
               }));
               return;
             }
 
             if (eventName === "api_key_required") {
               gatingPayload = payload;
+              return;
+            }
+
+            if (eventName === "turn_failed") {
+              streamError = payload.detail;
               return;
             }
 
@@ -2191,7 +3074,7 @@ export default function App() {
                 project_id: fallbackProjectId,
                 project_name: fallbackProjectName,
                 project_instructions: fallbackProjectInstructions,
-                title: content.slice(0, 60),
+                title: optimisticTitle,
                 created_at: now,
                 updated_at: now,
                 messages: [],
@@ -2213,21 +3096,28 @@ export default function App() {
             content,
             include_uploads: includeUploads,
             include_papers: includePapers,
+            paper_ids: paperIds,
           });
-          setThreadMap((current) => ({ ...current, [threadId]: payload.thread }));
-          setSelectedProjectId(payload.thread.project_id);
-          upsertThreadIntoProjectItems(payload.thread);
+          const normalizedThread = normalizeThreadForState(payload.thread);
+          setThreadMap((current) => ({ ...current, [threadId]: normalizedThread }));
+          setSelectedProjectId(normalizedThread.project_id);
+          upsertThreadIntoProjectItems(normalizedThread);
           setSession((current) =>
             current
               ? {
                   ...current,
-                  remaining_free_responses: payload.remaining_free_responses,
-                  has_anthropic_api_key: payload.has_anthropic_api_key,
+                  has_openai_api_key:
+                    payload.has_openai_api_key ?? payload.has_anthropic_api_key ?? false,
+                  has_anthropic_api_key:
+                    payload.has_openai_api_key ?? payload.has_anthropic_api_key ?? false,
                 }
               : current,
           );
           setComposerStatus("");
           await refreshProjects();
+          if (messageHasProjectCodeIntent(content)) {
+            await refreshLoadedProjectCodeItems(normalizedThread.project_id);
+          }
           if (payload.state === "api_key_required" || payload.state === "api_key_invalid") {
             showErrorFlash(apiKeyStateMessage(payload.state));
             setAuthView("settings");
@@ -2244,7 +3134,7 @@ export default function App() {
               project_id: fallbackProjectId,
               project_name: fallbackProjectName,
               project_instructions: fallbackProjectInstructions,
-              title: content.slice(0, 60),
+              title: optimisticTitle,
               created_at: now,
               updated_at: now,
               messages: [],
@@ -2267,20 +3157,26 @@ export default function App() {
       }
 
       if (gatingPayload) {
-        setThreadMap((current) => ({ ...current, [threadId]: gatingPayload.thread }));
-        setSelectedProjectId(gatingPayload.thread.project_id);
-        upsertThreadIntoProjectItems(gatingPayload.thread);
+        const normalizedThread = normalizeThreadForState(gatingPayload.thread);
+        setThreadMap((current) => ({ ...current, [threadId]: normalizedThread }));
+        setSelectedProjectId(normalizedThread.project_id);
+        upsertThreadIntoProjectItems(normalizedThread);
         setSession((current) =>
           current
             ? {
                 ...current,
-                remaining_free_responses: gatingPayload.remaining_free_responses,
-                has_anthropic_api_key: gatingPayload.has_anthropic_api_key,
+                has_openai_api_key:
+                  gatingPayload.has_openai_api_key ?? gatingPayload.has_anthropic_api_key ?? false,
+                has_anthropic_api_key:
+                  gatingPayload.has_openai_api_key ?? gatingPayload.has_anthropic_api_key ?? false,
               }
             : current,
         );
         setComposerStatus("");
         await refreshProjects();
+        if (turnUsedProjectCodeTools) {
+          await refreshLoadedProjectCodeItems(normalizedThread.project_id);
+        }
         showErrorFlash(apiKeyStateMessage(gatingPayload.state));
         setAuthView("settings");
         setAuthModalOpen(true);
@@ -2292,6 +3188,9 @@ export default function App() {
         const refreshedThread = await fetchAndStoreThread(threadId);
         upsertThreadIntoProjectItems(refreshedThread);
         await refreshProjects();
+        if (turnUsedProjectCodeTools) {
+          await refreshLoadedProjectCodeItems(refreshedThread.project_id);
+        }
         return null;
       }
 
@@ -2300,8 +3199,10 @@ export default function App() {
           current
             ? {
                 ...current,
-                remaining_free_responses: donePayload.remaining_free_responses,
-                has_anthropic_api_key: donePayload.has_anthropic_api_key,
+                has_openai_api_key:
+                  donePayload.has_openai_api_key ?? donePayload.has_anthropic_api_key ?? false,
+                has_anthropic_api_key:
+                  donePayload.has_openai_api_key ?? donePayload.has_anthropic_api_key ?? false,
               }
             : current,
         );
@@ -2309,6 +3210,9 @@ export default function App() {
         const refreshedThread = await fetchAndStoreThread(threadId);
         upsertThreadIntoProjectItems(refreshedThread);
         await refreshProjects();
+        if (turnUsedProjectCodeTools) {
+          await refreshLoadedProjectCodeItems(refreshedThread.project_id);
+        }
         return donePayload;
       }
 
@@ -2324,7 +3228,10 @@ export default function App() {
       includePapers,
       includeUploads,
       markThreadAssistantStarted,
+      persistDirtyProjectDrafts,
+      refreshLoadedProjectCodeItems,
       refreshProjects,
+      requireInferenceAccess,
       setThreadUsageSnapshot,
       showErrorFlash,
       startThreadStreamState,
@@ -2335,58 +3242,84 @@ export default function App() {
     ],
   );
 
-  const bootstrapAuthenticatedUi = useCallback(async () => {
-    await refreshUploads();
-    const loadedProjects = await refreshProjects();
-    const restoredTabs = restoreTabs();
-    const validRestoredTabs: OpenTab[] = [];
-    for (const tab of restoredTabs) {
-      try {
-        if (tab.kind === "thread") {
-          await fetchAndStoreThread(tab.id);
-        } else if (tab.kind === "python_file") {
-          await fetchAndStorePythonFile(tab.id);
-        } else if (!loadedProjects.some((project) => project.project_id === tab.id)) {
-          continue;
-        }
-        validRestoredTabs.push(tab);
-      } catch (error) {
-        console.error(error);
+  const bootstrapAuthenticatedUi = useCallback(
+    async (currentSession?: BrowserSessionResponse | null) => {
+      await refreshUploads();
+      const loadedProjects = await refreshProjects();
+      const persistedSelectedProjectId = restoreSelectedProjectId();
+      const restoredSelectedProjectId =
+        persistedSelectedProjectId &&
+        loadedProjects.some((project) => project.project_id === persistedSelectedProjectId)
+          ? persistedSelectedProjectId
+          : null;
+      const selectedProjectId = restoredSelectedProjectId ?? loadedProjects[0]?.project_id ?? null;
+      selectedProjectIdRef.current = selectedProjectId;
+      setSelectedProjectId(selectedProjectId);
+      setExpandedProjectIds(restoredSelectedProjectId ? [restoredSelectedProjectId] : []);
+      if (
+        restoredSelectedProjectId &&
+        !projectItemsRef.current[restoredSelectedProjectId]?.loaded &&
+        !projectItemsRef.current[restoredSelectedProjectId]?.loading
+      ) {
+        await fetchProjectItems(restoredSelectedProjectId);
       }
-    }
-    setOpenTabs(validRestoredTabs);
+      const restoredTabs = restoreTabs();
+      const validRestoredTabs: OpenTab[] = [];
+      for (const tab of restoredTabs) {
+        try {
+          if (tab.kind === "thread") {
+            await fetchAndStoreThread(tab.id, false);
+          } else if (tab.kind === "python_file") {
+            await fetchAndStorePythonFile(tab.id, false);
+          } else if (!loadedProjects.some((project) => project.project_id === tab.id)) {
+            continue;
+          }
+          validRestoredTabs.push(tab);
+        } catch (error) {
+          console.error(error);
+        }
+      }
+      setOpenTabs(validRestoredTabs);
 
-    const pendingPrompt = consumePendingPrompt().trim();
-    if (pendingPrompt) {
-      const thread = await createNewThread("", loadedProjects[0]?.project_id);
-      setLandingPrompt("");
-      await sendMessage(thread.thread_id, pendingPrompt);
-      return;
-    }
+      const {
+        prompt: pendingPrompt,
+        paperIds: pendingPaperIds,
+        mentions: pendingMentions,
+      } = consumePendingPrompt();
+      const trimmedPendingPrompt = pendingPrompt.trim();
+      if (trimmedPendingPrompt) {
+        if (!requireInferenceAccess(currentSession)) {
+          setComposerInput(trimmedPendingPrompt);
+          setRestoredComposerMentions(pendingMentions);
+          return;
+        }
+        const thread = await createNewThread(
+          "",
+          selectedProjectId ?? loadedProjects[0]?.project_id,
+        );
+        setLandingPrompt("");
+        setLandingTags([]);
+        setRestoredComposerMentions([]);
+        await sendMessage(thread.thread_id, trimmedPendingPrompt, currentSession, pendingPaperIds);
+        return;
+      }
 
-    const firstOpen = validRestoredTabs[0];
-    if (firstOpen) {
-      setActiveTab(firstOpen);
-      setSelectedProjectId(
-        firstOpen.kind === "thread"
-          ? (threadMapRef.current[firstOpen.id]?.project_id ??
-              loadedProjects[0]?.project_id ??
-              null)
-          : (pythonFileMapRef.current[firstOpen.id]?.project_id ??
-              loadedProjects[0]?.project_id ??
-              null),
-      );
-    } else if (loadedProjects[0]) {
-      setSelectedProjectId(loadedProjects[0].project_id);
-    }
-  }, [
-    createNewThread,
-    fetchAndStorePythonFile,
-    fetchAndStoreThread,
-    refreshProjects,
-    refreshUploads,
-    sendMessage,
-  ]);
+      const firstOpen = validRestoredTabs[0];
+      if (firstOpen) {
+        setActiveTab(firstOpen);
+      }
+    },
+    [
+      createNewThread,
+      fetchAndStorePythonFile,
+      fetchProjectItems,
+      fetchAndStoreThread,
+      refreshProjects,
+      refreshUploads,
+      requireInferenceAccess,
+      sendMessage,
+    ],
+  );
 
   useEffect(() => {
     void (async () => {
@@ -2463,7 +3396,7 @@ export default function App() {
         }
       }
       if (nextSession.authenticated) {
-        await bootstrapAuthenticatedUi();
+        await bootstrapAuthenticatedUi(nextSession);
       }
     })().catch((error: unknown) => {
       console.error(error);
@@ -2486,11 +3419,28 @@ export default function App() {
     [clearFlash],
   );
 
+  const openChatSetupSettings = useCallback(
+    (settingsTab: SettingsTab) => {
+      openAuthModal("settings", settingsTab);
+    },
+    [openAuthModal],
+  );
+
+  const dismissChatSetupCard = useCallback(() => {
+    if (!emptyStateProject?.project_id || !missingChatSetupSignature) {
+      return;
+    }
+    setDismissedChatSetupSignatures((current) => ({
+      ...current,
+      [emptyStateProject.project_id]: missingChatSetupSignature,
+    }));
+  }, [emptyStateProject?.project_id, missingChatSetupSignature]);
+
   const handleAuthSuccess = useCallback(
     async (nextSession: BrowserSessionResponse) => {
       setSession(nextSession);
       closeAuthModal();
-      await bootstrapAuthenticatedUi();
+      await bootstrapAuthenticatedUi(nextSession);
     },
     [bootstrapAuthenticatedUi, closeAuthModal],
   );
@@ -2500,15 +3450,28 @@ export default function App() {
     if (!prompt) {
       return;
     }
+    const mentions = landingTags.filter((tag) => tag.id);
     if (!sessionRef.current?.authenticated) {
-      rememberPendingPrompt(prompt);
+      rememberPendingPrompt(prompt, mentions);
       openAuthModal("login");
       return;
     }
+    if (!requireInferenceAccess()) {
+      return;
+    }
     const thread = await createNewThread();
+    const paperIds = mentions.map((tag) => tag.id);
     setLandingPrompt("");
-    await sendMessage(thread.thread_id, prompt);
-  }, [createNewThread, landingPrompt, openAuthModal, sendMessage]);
+    setLandingTags([]);
+    await sendMessage(thread.thread_id, prompt, undefined, paperIds);
+  }, [
+    createNewThread,
+    landingPrompt,
+    landingTags,
+    openAuthModal,
+    requireInferenceAccess,
+    sendMessage,
+  ]);
 
   const handleExample = useCallback(
     async (prompt: string) => {
@@ -2559,14 +3522,28 @@ export default function App() {
     if (!content) {
       return;
     }
+    if (!requireInferenceAccess()) {
+      return;
+    }
     const threadId = activeThreadId ?? (await createNewThread()).thread_id;
+    const paperIds = [
+      ...new Set([
+        ...composerTags.map((tag) => tag.id),
+        ...mentionedPaperIdsInText(content, restoredComposerMentions),
+      ]),
+    ];
     setComposerInput("");
+    setComposerTags([]);
+    setRestoredComposerMentions([]);
     scrollMessageListToBottom();
-    await sendMessage(threadId, content);
+    await sendMessage(threadId, content, undefined, paperIds);
   }, [
     activeThreadId,
     composerInput,
+    composerTags,
     createNewThread,
+    requireInferenceAccess,
+    restoredComposerMentions,
     scrollMessageListToBottom,
     sendMessage,
     streamingThreadId,
@@ -2594,6 +3571,7 @@ export default function App() {
     setSyncConflictState(null);
     setLandingPrompt("");
     setComposerInput("");
+    setRestoredComposerMentions([]);
     setComposerStatus("");
     setMobileSidebarOpen(false);
     setAccountMenuOpen(false);
@@ -2653,11 +3631,11 @@ export default function App() {
     async (projectId: string) => {
       setSelectedProjectId(projectId);
       const expanded = expandedProjectIds.includes(projectId);
-      if (expanded) {
-        setExpandedProjectIds((current) => current.filter((value) => value !== projectId));
+      if (expanded && expandedProjectIds.length === 1) {
+        setExpandedProjectIds([]);
         return;
       }
-      setExpandedProjectIds((current) => [...current, projectId]);
+      setExpandedProjectIds([projectId]);
       if (
         !projectItemsRef.current[projectId]?.loaded &&
         !projectItemsRef.current[projectId]?.loading
@@ -3014,13 +3992,13 @@ export default function App() {
   const saveProjectInferenceKey = useCallback(async () => {
     const apiKey = projectAnthropicKey.trim();
     if (!apiKey) {
-      setProjectAdvancedStatus("Enter an Anthropic API key.");
+      setProjectAdvancedStatus("Enter an OpenAI API key.");
       return;
     }
     setProjectAdvancedSaving("inference");
     setProjectAdvancedStatus("");
     try {
-      const nextSession = await api<BrowserSessionResponse>("/v1/browser/settings/anthropic-key", {
+      const nextSession = await api<BrowserSessionResponse>("/v1/browser/settings/openai-key", {
         method: "PUT",
         body: JSON.stringify({ api_key: apiKey }),
       });
@@ -3076,6 +4054,13 @@ export default function App() {
     [],
   );
 
+  const openDeletePythonFileModal = useCallback(
+    (projectId: string, fileId: string, title: string) => {
+      setDeleteModalState({ kind: "python_file", projectId, fileId, title });
+    },
+    [],
+  );
+
   const closeDeleteModal = useCallback(() => {
     setDeleteModalState(null);
   }, []);
@@ -3102,35 +4087,16 @@ export default function App() {
           .map((item) => item.file_id ?? "");
         await deleteProject(projectId);
         removeThreadIdsLocally([...new Set([...deletedThreadIds, ...cachedThreadIds])], projectId);
-        setPythonFileMap((current) => {
-          const next = { ...current };
-          for (const fileId of [...deletedFileIds, ...cachedFileIds]) {
-            delete next[fileId];
-          }
-          return next;
-        });
-        setPythonFileDrafts((current) => {
-          const next = { ...current };
-          for (const fileId of [...deletedFileIds, ...cachedFileIds]) {
-            delete next[fileId];
-          }
-          return next;
-        });
-        setPythonFileRuns((current) => {
-          const next = { ...current };
-          for (const fileId of [...deletedFileIds, ...cachedFileIds]) {
-            delete next[fileId];
-          }
-          return next;
-        });
+        removePythonFileIdsLocally([...new Set([...deletedFileIds, ...cachedFileIds])], projectId);
         setOpenTabs((current) => {
-          const ids = new Set([...deletedFileIds, ...cachedFileIds]);
-          const nextTabs = current.filter((tab) => tab.kind !== "python_file" || !ids.has(tab.id));
+          const nextTabs = current.filter(
+            (tab) => tab.kind !== "project_home" || tab.id !== projectId,
+          );
           setActiveTab((currentActive) => {
             if (
               !currentActive ||
-              currentActive.kind !== "python_file" ||
-              !ids.has(currentActive.id)
+              currentActive.kind !== "project_home" ||
+              currentActive.id !== projectId
             ) {
               return currentActive;
             }
@@ -3145,16 +4111,26 @@ export default function App() {
         });
         setExpandedProjectIds((current) => current.filter((value) => value !== projectId));
         await refreshProjects();
-      } else {
+      } else if (deleteModalState.kind === "thread") {
         await deleteThread(deleteModalState.threadId);
         removeThreadIdsLocally([deleteModalState.threadId], deleteModalState.projectId);
+        await refreshProjects();
+      } else {
+        await deletePythonFile(deleteModalState.fileId);
+        removePythonFileIdsLocally([deleteModalState.fileId], deleteModalState.projectId);
         await refreshProjects();
       }
       closeDeleteModal();
     } catch (error) {
       setComposerStatus(error instanceof Error ? error.message : "Delete failed.");
     }
-  }, [closeDeleteModal, deleteModalState, refreshProjects, removeThreadIdsLocally]);
+  }, [
+    closeDeleteModal,
+    deleteModalState,
+    refreshProjects,
+    removePythonFileIdsLocally,
+    removeThreadIdsLocally,
+  ]);
 
   const handleProjectStartChat = useCallback(
     async (projectId: string) => {
@@ -3294,21 +4270,6 @@ export default function App() {
       showErrorFlash,
       upsertPythonFileIntoProjectItems,
     ],
-  );
-
-  const persistPythonFile = useCallback(
-    async (fileId: string, content: string) => {
-      const updated = await updatePythonFile(fileId, { content });
-      setPythonFileMap((current) => ({ ...current, [updated.file_id]: updated }));
-      setPythonFileDrafts((current) => ({
-        ...current,
-        [updated.file_id]: { content: updated.content, dirty: false },
-      }));
-      upsertPythonFileIntoProjectItems(updated);
-      await refreshProjects();
-      return updated;
-    },
-    [refreshProjects, upsertPythonFileIntoProjectItems],
   );
 
   const applyConflictResolutionsLocally = useCallback(
@@ -3537,7 +4498,7 @@ export default function App() {
         [fileId]: { running: true, result: null, error: "" },
       }));
       try {
-        const result = await runPythonFile(fileId);
+        const result = await runPythonFile(fileId, "full");
         setPythonFileRuns((current) => ({
           ...current,
           [fileId]: { running: false, result, error: "" },
@@ -3635,7 +4596,7 @@ export default function App() {
         }));
         return;
       }
-      const result = await runPythonFile(activePythonFileId);
+      const result = await runPythonFile(activePythonFileId, "full");
       setPythonFileRuns((current) => ({
         ...current,
         [activePythonFileId]: { running: false, result, error: "" },
@@ -3749,6 +4710,7 @@ export default function App() {
       onChange={setComposerInput}
       onStop={handleStopStreaming}
       onSubmit={() => void handleComposerSubmit()}
+      onTagsChange={setComposerTags}
       placeholder="Ask about the latest agent and AI systems research. Type @ to tag a paper."
       searchPapers={suggestBrowserPapers}
       submitButtonId="composer-send"
@@ -3818,6 +4780,7 @@ export default function App() {
               onAttach={() => openAuthModal("login")}
               onChange={setLandingPrompt}
               onSubmit={() => void handleLandingSubmit()}
+              onTagsChange={setLandingTags}
               searchPapers={suggestBrowserPapers}
               submitButtonId="landing-start-button"
               submitLabel="Start"
@@ -3879,15 +4842,18 @@ export default function App() {
               </div>
               <div className="sidebar-quick-actions">
                 <button
+                  type="button"
                   id="new-chat-button"
                   className="sidebar-quick-action"
-                  onClick={() => void handleNewChat()}
+                  onClick={() => (hasProjects ? void handleNewChat() : openCreateProjectModal())}
                 >
                   <AppIcon
-                    src={staticAssetPath("edit.svg")}
+                    src={staticAssetPath(hasProjects ? "edit.svg" : "new-project.svg")}
                     className="sidebar-quick-action-icon"
                   />
-                  <span className="sidebar-quick-action-label">New chat</span>
+                  <span className="sidebar-quick-action-label">
+                    {hasProjects ? "New chat" : "Create project"}
+                  </span>
                 </button>
                 <button type="button" className="sidebar-quick-action" onClick={handleReadDocs}>
                   <AppIcon
@@ -3934,161 +4900,200 @@ export default function App() {
                 </div>
               </div>
               <div id="project-list" className="project-list">
-                {projects.map((project) => {
-                  const expanded = expandedProjectIds.includes(project.project_id);
-                  const itemState = projectItems[project.project_id];
-                  const collapsedCategories = collapsedProjectCategories[project.project_id] ?? {};
-                  const visibleProjectItems = itemState?.items ?? [];
-                  const codeItems = visibleProjectItems.filter(
-                    (item) => item.item_kind === "python_file",
-                  );
-                  const sessionItems = visibleProjectItems.filter((item) => {
-                    if (item.item_kind !== "thread") {
-                      return false;
-                    }
-                    return shouldShowThreadInSidebar({
-                      thread_id: item.thread_id ?? "",
-                      project_id: item.project_id,
-                      title: item.title,
-                      created_at: item.created_at,
-                      updated_at: item.updated_at,
-                      last_message_preview: item.last_message_preview,
+                {projects.length === 0 ? (
+                  <div className="project-list-empty">
+                    <p>No projects yet.</p>
+                    <button type="button" className="sidebar-link" onClick={openCreateProjectModal}>
+                      Create project
+                    </button>
+                  </div>
+                ) : (
+                  projects.map((project) => {
+                    const expanded = expandedProjectIds.includes(project.project_id);
+                    const itemState = projectItems[project.project_id];
+                    const collapsedCategories =
+                      collapsedProjectCategories[project.project_id] ?? {};
+                    const visibleProjectItems = itemState?.items ?? [];
+                    const codeItems = visibleProjectItems.filter(
+                      (item) => item.item_kind === "python_file",
+                    );
+                    const sessionItems = visibleProjectItems.filter((item) => {
+                      if (item.item_kind !== "thread") {
+                        return false;
+                      }
+                      return shouldShowThreadInSidebar({
+                        thread_id: item.thread_id ?? "",
+                        project_id: item.project_id,
+                        title: item.title,
+                        created_at: item.created_at,
+                        updated_at: item.updated_at,
+                        last_message_preview: item.last_message_preview,
+                      });
                     });
-                  });
-                  const codeHasMore = Boolean(itemState?.hasMoreByKind?.python_file);
-                  const sessionsHasMore = Boolean(itemState?.hasMoreByKind?.thread);
-                  const codeLoadingMore = Boolean(itemState?.loadingMoreByKind?.python_file);
-                  const sessionsLoadingMore = Boolean(itemState?.loadingMoreByKind?.thread);
-                  const allProjectCategoriesCollapsed = PROJECT_SIDEBAR_CATEGORY_KEYS.every((key) =>
-                    Boolean(collapsedCategories[key]),
-                  );
-                  const expandProjectSections = !expanded || allProjectCategoriesCollapsed;
-                  return (
-                    <div
-                      key={project.project_id}
-                      className={`project-group${expanded ? " expanded" : ""}${projectMenuProjectId === project.project_id ? " menu-open" : ""}`}
-                    >
+                    const codeHasMore = Boolean(itemState?.hasMoreByKind?.python_file);
+                    const sessionsHasMore = Boolean(itemState?.hasMoreByKind?.thread);
+                    const codeLoadingMore = Boolean(itemState?.loadingMoreByKind?.python_file);
+                    const sessionsLoadingMore = Boolean(itemState?.loadingMoreByKind?.thread);
+                    const allProjectCategoriesCollapsed = PROJECT_SIDEBAR_CATEGORY_KEYS.every(
+                      (key) => Boolean(collapsedCategories[key]),
+                    );
+                    const expandProjectSections = !expanded || allProjectCategoriesCollapsed;
+                    return (
                       <div
-                        role="button"
-                        tabIndex={0}
-                        className={`project-card${selectedProjectId === project.project_id ? " active" : ""}`}
-                        onClick={() => void handleProjectSelection(project.project_id)}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter" || event.key === " ") {
-                            event.preventDefault();
-                            void handleProjectSelection(project.project_id);
-                          }
-                        }}
-                        title={project.name}
+                        key={project.project_id}
+                        className={`project-group${expanded ? " expanded" : ""}${projectMenuProjectId === project.project_id ? " menu-open" : ""}`}
                       >
-                        <div className="project-card-main">
-                          <AppIcon
-                            src={staticAssetPath(
-                              expanded ? "project-opened.svg" : "project-closed.svg",
-                            )}
-                            className="project-card-icon"
-                          />
-                          <strong className="project-card-title">{project.name}</strong>
-                        </div>
                         <div
-                          className="project-card-actions"
-                          onMouseDown={(event) => event.stopPropagation()}
-                          onClick={(event) => event.stopPropagation()}
-                        >
-                          <button
-                            type="button"
-                            className="sidebar-icon-button project-action-button"
-                            aria-label={
-                              expandProjectSections
-                                ? `Expand all sections in ${project.name}`
-                                : `Collapse all sections in ${project.name}`
+                          role="button"
+                          tabIndex={0}
+                          className={`project-card${selectedProjectId === project.project_id ? " active" : ""}`}
+                          onClick={() => void handleProjectSelection(project.project_id)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter" || event.key === " ") {
+                              event.preventDefault();
+                              void handleProjectSelection(project.project_id);
                             }
-                            onMouseDown={(event) => event.stopPropagation()}
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              void toggleAllProjectCategories(project.project_id);
-                            }}
-                          >
+                          }}
+                          title={project.name}
+                        >
+                          <div className="project-card-main">
                             <AppIcon
                               src={staticAssetPath(
-                                expandProjectSections
-                                  ? "expand-projects.svg"
-                                  : "collapse-projects.svg",
+                                expanded ? "project-opened.svg" : "project-closed.svg",
                               )}
-                              className="project-action-icon"
+                              className="project-card-icon"
                             />
-                          </button>
+                            <strong className="project-card-title">{project.name}</strong>
+                          </div>
                           <div
-                            ref={
-                              projectMenuProjectId === project.project_id ? projectMenuRef : null
-                            }
-                            className="project-menu-wrap"
+                            className="project-card-actions"
                             onMouseDown={(event) => event.stopPropagation()}
+                            onClick={(event) => event.stopPropagation()}
                           >
                             <button
                               type="button"
                               className="sidebar-icon-button project-action-button"
-                              aria-label={`Open project menu for ${project.name}`}
+                              aria-label={
+                                expandProjectSections
+                                  ? `Expand all sections in ${project.name}`
+                                  : `Collapse all sections in ${project.name}`
+                              }
                               onMouseDown={(event) => event.stopPropagation()}
                               onClick={(event) => {
                                 event.stopPropagation();
-                                setSelectedProjectId(project.project_id);
-                                setProjectMenuProjectId((current) =>
-                                  current === project.project_id ? null : project.project_id,
-                                );
+                                void toggleAllProjectCategories(project.project_id);
                               }}
                             >
                               <AppIcon
-                                src={staticAssetPath("menu.svg")}
+                                src={staticAssetPath(
+                                  expandProjectSections
+                                    ? "expand-projects.svg"
+                                    : "collapse-projects.svg",
+                                )}
                                 className="project-action-icon"
                               />
                             </button>
-                            {projectMenuProjectId === project.project_id ? (
-                              <div className="project-menu-popover" role="menu">
-                                <button
-                                  type="button"
-                                  className="project-menu-item"
-                                  role="menuitem"
-                                  onClick={() => openEditProjectModal(project.project_id)}
-                                >
-                                  Rename project
-                                </button>
-                                <button
-                                  type="button"
-                                  className="project-menu-item danger"
-                                  role="menuitem"
-                                  disabled={project.is_default}
-                                  onClick={() =>
-                                    openDeleteProjectModal(project.project_id, project.name)
-                                  }
-                                >
-                                  Delete project
-                                </button>
-                              </div>
-                            ) : null}
+                            <div
+                              ref={
+                                projectMenuProjectId === project.project_id ? projectMenuRef : null
+                              }
+                              className="project-menu-wrap"
+                              onMouseDown={(event) => event.stopPropagation()}
+                            >
+                              <button
+                                type="button"
+                                className="sidebar-icon-button project-action-button"
+                                aria-label={`Open project menu for ${project.name}`}
+                                onMouseDown={(event) => event.stopPropagation()}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  setSelectedProjectId(project.project_id);
+                                  setProjectMenuProjectId((current) =>
+                                    current === project.project_id ? null : project.project_id,
+                                  );
+                                }}
+                              >
+                                <AppIcon
+                                  src={staticAssetPath("menu.svg")}
+                                  className="project-action-icon"
+                                />
+                              </button>
+                              {projectMenuProjectId === project.project_id ? (
+                                <div className="project-menu-popover" role="menu">
+                                  <button
+                                    type="button"
+                                    className="project-menu-item"
+                                    role="menuitem"
+                                    onClick={() => openEditProjectModal(project.project_id)}
+                                  >
+                                    Rename project
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="project-menu-item danger"
+                                    role="menuitem"
+                                    onClick={() =>
+                                      openDeleteProjectModal(project.project_id, project.name)
+                                    }
+                                  >
+                                    Delete project
+                                  </button>
+                                </div>
+                              ) : null}
+                            </div>
                           </div>
                         </div>
-                      </div>
-                      {expanded ? (
-                        <div className="project-session-section">
-                          {itemState?.loading ? (
-                            <div className="project-session-state">Loading items…</div>
-                          ) : null}
-                          {itemState?.error ? (
-                            <div className="project-session-state error">{itemState.error}</div>
-                          ) : null}
-                          {itemState?.loaded ? (
-                            <>
-                              <div className="project-tree">
-                                {PROJECT_PLACEHOLDER_CATEGORIES.map((category) => (
-                                  <div key={category.label} className="project-tree-category">
+                        {expanded ? (
+                          <div className="project-session-section">
+                            {itemState?.loading ? (
+                              <div className="project-session-state">Loading items…</div>
+                            ) : null}
+                            {itemState?.error ? (
+                              <div className="project-session-state error">{itemState.error}</div>
+                            ) : null}
+                            {itemState?.loaded ? (
+                              <>
+                                <div className="project-tree">
+                                  {PROJECT_PLACEHOLDER_CATEGORIES.map((category) => (
+                                    <div key={category.label} className="project-tree-category">
+                                      <div className="project-tree-category-header">
+                                        <button
+                                          type="button"
+                                          className="project-tree-category-label"
+                                          aria-expanded={!collapsedCategories[category.key]}
+                                          onClick={() =>
+                                            toggleProjectCategory(project.project_id, category.key)
+                                          }
+                                        >
+                                          <span
+                                            className="project-tree-category-chevron"
+                                            aria-hidden="true"
+                                          />
+                                          <MaskedAssetIcon
+                                            asset={category.asset}
+                                            className="project-tree-category-icon"
+                                          />
+                                          <span>{category.label}</span>
+                                        </button>
+                                        {category.showCount ? (
+                                          <div className="project-tree-category-actions">
+                                            <em className="project-tree-category-count">0</em>
+                                          </div>
+                                        ) : null}
+                                      </div>
+                                      {!collapsedCategories[category.key] ? (
+                                        <div className="project-tree-empty">Empty</div>
+                                      ) : null}
+                                    </div>
+                                  ))}
+                                  <div className="project-tree-category">
                                     <div className="project-tree-category-header">
                                       <button
                                         type="button"
                                         className="project-tree-category-label"
-                                        aria-expanded={!collapsedCategories[category.key]}
+                                        aria-expanded={!collapsedCategories.sessions}
                                         onClick={() =>
-                                          toggleProjectCategory(project.project_id, category.key)
+                                          toggleProjectCategory(project.project_id, "sessions")
                                         }
                                       >
                                         <span
@@ -4096,252 +5101,269 @@ export default function App() {
                                           aria-hidden="true"
                                         />
                                         <MaskedAssetIcon
-                                          asset={category.asset}
+                                          asset="sessions.svg"
                                           className="project-tree-category-icon"
                                         />
-                                        <span>{category.label}</span>
+                                        <span>Sessions</span>
                                       </button>
-                                      {category.showCount ? (
-                                        <div className="project-tree-category-actions">
-                                          <em className="project-tree-category-count">0</em>
-                                        </div>
-                                      ) : null}
+                                      <div className="project-tree-category-actions">
+                                        <button
+                                          type="button"
+                                          className="sidebar-icon-button project-action-button"
+                                          aria-label={`Start chat in ${project.name}`}
+                                          onClick={() =>
+                                            void handleProjectStartChat(project.project_id)
+                                          }
+                                        >
+                                          <AppIcon
+                                            src={staticAssetPath("edit.svg")}
+                                            className="project-action-icon"
+                                          />
+                                        </button>
+                                      </div>
                                     </div>
-                                    {!collapsedCategories[category.key] ? (
-                                      <div className="project-tree-empty">Empty</div>
+                                    {!collapsedCategories.sessions && sessionItems.length > 0 ? (
+                                      <div className="thread-list project-thread-list project-category-list">
+                                        {sessionItems.map((item) => {
+                                          const title = displayThreadTitle(item.title);
+                                          return (
+                                            <div
+                                              key={item.item_id}
+                                              role="button"
+                                              tabIndex={0}
+                                              className={`thread-card${activeThreadId === item.thread_id ? " active" : ""}`}
+                                              title={title}
+                                              onClick={() =>
+                                                void handleThreadSelection(item.thread_id ?? "")
+                                              }
+                                              onKeyDown={(event) => {
+                                                if (event.key === "Enter" || event.key === " ") {
+                                                  event.preventDefault();
+                                                  void handleThreadSelection(item.thread_id ?? "");
+                                                }
+                                              }}
+                                            >
+                                              <div className="thread-card-copy">
+                                                <strong className="thread-card-title">
+                                                  {title}
+                                                </strong>
+                                              </div>
+                                              <span className="thread-card-age">
+                                                {formatThreadAge(item.updated_at)}
+                                              </span>
+                                              <button
+                                                type="button"
+                                                className="thread-card-delete"
+                                                aria-label={`Delete ${title}`}
+                                                onClick={(event) => {
+                                                  event.stopPropagation();
+                                                  openDeleteThreadModal(
+                                                    project.project_id,
+                                                    item.thread_id ?? "",
+                                                    title,
+                                                  );
+                                                }}
+                                              >
+                                                <AppIcon
+                                                  src={staticAssetPath("delete-session.svg")}
+                                                  className="thread-card-delete-icon"
+                                                />
+                                              </button>
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+                                    ) : !collapsedCategories.sessions ? (
+                                      <div className="project-tree-empty">No sessions yet.</div>
                                     ) : null}
-                                  </div>
-                                ))}
-                                <div className="project-tree-category">
-                                  <div className="project-tree-category-header">
-                                    <button
-                                      type="button"
-                                      className="project-tree-category-label"
-                                      aria-expanded={!collapsedCategories.sessions}
-                                      onClick={() =>
-                                        toggleProjectCategory(project.project_id, "sessions")
-                                      }
-                                    >
-                                      <span
-                                        className="project-tree-category-chevron"
-                                        aria-hidden="true"
-                                      />
-                                      <MaskedAssetIcon
-                                        asset="sessions.svg"
-                                        className="project-tree-category-icon"
-                                      />
-                                      <span>Sessions</span>
-                                    </button>
-                                    <div className="project-tree-category-actions">
+                                    {!collapsedCategories.sessions && sessionsHasMore ? (
                                       <button
                                         type="button"
-                                        className="sidebar-icon-button project-action-button"
-                                        aria-label={`Start chat in ${project.name}`}
+                                        className="project-show-more"
+                                        disabled={sessionsLoadingMore}
                                         onClick={() =>
-                                          void handleProjectStartChat(project.project_id)
+                                          void handleLoadMoreItems(project.project_id, "thread")
                                         }
                                       >
-                                        <AppIcon
-                                          src={staticAssetPath("edit.svg")}
-                                          className="project-action-icon"
-                                        />
+                                        {sessionsLoadingMore ? "Loading..." : "Show more"}
                                       </button>
-                                    </div>
+                                    ) : null}
                                   </div>
-                                  {!collapsedCategories.sessions && sessionItems.length > 0 ? (
-                                    <div className="thread-list project-thread-list project-category-list">
-                                      {sessionItems.map((item) => {
-                                        const title = displayThreadTitle(item.title);
-                                        return (
-                                          <div
-                                            key={item.item_id}
-                                            role="button"
-                                            tabIndex={0}
-                                            className={`thread-card${activeThreadId === item.thread_id ? " active" : ""}`}
-                                            title={title}
-                                            onClick={() =>
-                                              void handleThreadSelection(item.thread_id ?? "")
-                                            }
-                                            onKeyDown={(event) => {
-                                              if (event.key === "Enter" || event.key === " ") {
-                                                event.preventDefault();
-                                                void handleThreadSelection(item.thread_id ?? "");
-                                              }
-                                            }}
+                                  <div className="project-tree-category">
+                                    <div className="project-tree-category-header">
+                                      <button
+                                        type="button"
+                                        className="project-tree-category-label"
+                                        aria-expanded={!collapsedCategories.code}
+                                        onClick={() =>
+                                          toggleProjectCategory(project.project_id, "code")
+                                        }
+                                      >
+                                        <span
+                                          className="project-tree-category-chevron"
+                                          aria-hidden="true"
+                                        />
+                                        <MaskedAssetIcon
+                                          asset="code.svg"
+                                          className="project-tree-category-icon"
+                                        />
+                                        <span>Code</span>
+                                      </button>
+                                      <div className="project-tree-category-actions">
+                                        {project.github_repo_url ? (
+                                          <a
+                                            href={project.github_repo_url}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            className="project-tree-repo-link"
+                                            aria-label={`Open GitHub repository for ${project.name}`}
+                                            title="Open GitHub repository"
+                                            onClick={(event) => event.stopPropagation()}
                                           >
-                                            <div className="thread-card-copy">
-                                              <strong className="thread-card-title">{title}</strong>
-                                            </div>
-                                            <span className="thread-card-age">
-                                              {formatThreadAge(item.updated_at)}
-                                            </span>
-                                            <button
-                                              type="button"
-                                              className="thread-card-delete"
-                                              aria-label={`Delete ${title}`}
-                                              onClick={(event) => {
-                                                event.stopPropagation();
-                                                openDeleteThreadModal(
-                                                  project.project_id,
-                                                  item.thread_id ?? "",
-                                                  title,
-                                                );
-                                              }}
-                                            >
-                                              <AppIcon
-                                                src={staticAssetPath("delete-session.svg")}
-                                                className="thread-card-delete-icon"
-                                              />
-                                            </button>
-                                          </div>
-                                        );
-                                      })}
+                                            <MaskedAssetIcon
+                                              asset="git.svg"
+                                              className="project-tree-repo-icon"
+                                            />
+                                          </a>
+                                        ) : null}
+                                      </div>
                                     </div>
-                                  ) : !collapsedCategories.sessions ? (
-                                    <div className="project-tree-empty">No sessions yet.</div>
-                                  ) : null}
-                                  {!collapsedCategories.sessions && sessionsHasMore ? (
-                                    <button
-                                      type="button"
-                                      className="project-show-more"
-                                      disabled={sessionsLoadingMore}
-                                      onClick={() =>
-                                        void handleLoadMoreItems(project.project_id, "thread")
-                                      }
-                                    >
-                                      {sessionsLoadingMore ? "Loading..." : "Show more"}
-                                    </button>
-                                  ) : null}
-                                </div>
-                                <div className="project-tree-category">
-                                  <div className="project-tree-category-header">
-                                    <button
-                                      type="button"
-                                      className="project-tree-category-label"
-                                      aria-expanded={!collapsedCategories.code}
-                                      onClick={() =>
-                                        toggleProjectCategory(project.project_id, "code")
-                                      }
-                                    >
-                                      <span
-                                        className="project-tree-category-chevron"
-                                        aria-hidden="true"
-                                      />
-                                      <MaskedAssetIcon
-                                        asset="code.svg"
-                                        className="project-tree-category-icon"
-                                      />
-                                      <span>Code</span>
-                                    </button>
-                                    <div className="project-tree-category-actions">
-                                      {project.github_repo_url ? (
-                                        <a
-                                          href={project.github_repo_url}
-                                          target="_blank"
-                                          rel="noreferrer"
-                                          className="project-tree-repo-link"
-                                          aria-label={`Open GitHub repository for ${project.name}`}
-                                          title="Open GitHub repository"
-                                          onClick={(event) => event.stopPropagation()}
-                                        >
-                                          <MaskedAssetIcon
-                                            asset="git.svg"
-                                            className="project-tree-repo-icon"
-                                          />
-                                        </a>
-                                      ) : null}
-                                    </div>
+                                    {!collapsedCategories.code && codeItems.length > 0 ? (
+                                      <div className="thread-list project-thread-list project-category-list">
+                                        {(() => {
+                                          const duplicateKeys =
+                                            duplicatePythonFilenameKeys(codeItems);
+                                          return codeItems.map((item) => {
+                                            const displayFile = {
+                                              filename: item.filename || item.title,
+                                              repo_path: item.repo_path,
+                                            };
+                                            const title = displayPythonFileTitle(
+                                              displayFile,
+                                              duplicateKeys,
+                                            );
+                                            const pathContext = displayPythonFilePathContext(
+                                              displayFile,
+                                              duplicateKeys,
+                                            );
+                                            return (
+                                              <div
+                                                key={item.item_id}
+                                                role="button"
+                                                tabIndex={0}
+                                                className={`thread-card python-file-card${activePythonFileId === item.file_id ? " active" : ""}`}
+                                                title={pathContext || title}
+                                                onClick={() =>
+                                                  void handlePythonFileSelection(item.file_id ?? "")
+                                                }
+                                                onKeyDown={(event) => {
+                                                  if (event.key === "Enter" || event.key === " ") {
+                                                    event.preventDefault();
+                                                    void handlePythonFileSelection(
+                                                      item.file_id ?? "",
+                                                    );
+                                                  }
+                                                }}
+                                              >
+                                                <div className="thread-card-copy python-file-card-copy">
+                                                  <AppIcon
+                                                    src={staticAssetPath(
+                                                      item.file_kind === "notebook"
+                                                        ? "note.svg"
+                                                        : "python.svg",
+                                                    )}
+                                                    className="python-file-card-icon"
+                                                  />
+                                                  <span className="python-file-card-text">
+                                                    <strong className="thread-card-title">
+                                                      {title}
+                                                    </strong>
+                                                    {pathContext ? (
+                                                      <span className="thread-card-subtitle">
+                                                        {pathContext}
+                                                      </span>
+                                                    ) : null}
+                                                  </span>
+                                                </div>
+                                                <span className="thread-card-age">
+                                                  {formatThreadAge(item.updated_at)}
+                                                </span>
+                                                <button
+                                                  type="button"
+                                                  className="thread-card-delete thread-card-rename"
+                                                  aria-label={`Rename ${title}`}
+                                                  onClick={(event) => {
+                                                    event.stopPropagation();
+                                                    void handleRenamePythonFile(item.file_id ?? "");
+                                                  }}
+                                                >
+                                                  <AppIcon
+                                                    src={staticAssetPath("edit.svg")}
+                                                    className="thread-card-delete-icon"
+                                                  />
+                                                </button>
+                                                <button
+                                                  type="button"
+                                                  className="thread-card-delete"
+                                                  aria-label={`Delete ${title}`}
+                                                  onClick={(event) => {
+                                                    event.stopPropagation();
+                                                    openDeletePythonFileModal(
+                                                      item.project_id,
+                                                      item.file_id ?? "",
+                                                      title,
+                                                    );
+                                                  }}
+                                                >
+                                                  <AppIcon
+                                                    src={staticAssetPath("delete-session.svg")}
+                                                    className="thread-card-delete-icon"
+                                                  />
+                                                </button>
+                                              </div>
+                                            );
+                                          });
+                                        })()}
+                                      </div>
+                                    ) : !collapsedCategories.code ? (
+                                      <div className="project-tree-empty">No code files yet.</div>
+                                    ) : null}
+                                    {!collapsedCategories.code && codeHasMore ? (
+                                      <button
+                                        type="button"
+                                        className="project-show-more"
+                                        disabled={codeLoadingMore}
+                                        onClick={() =>
+                                          void handleLoadMoreItems(
+                                            project.project_id,
+                                            "python_file",
+                                          )
+                                        }
+                                      >
+                                        {codeLoadingMore ? "Loading..." : "Show more"}
+                                      </button>
+                                    ) : null}
                                   </div>
-                                  {!collapsedCategories.code && codeItems.length > 0 ? (
-                                    <div className="thread-list project-thread-list project-category-list">
-                                      {codeItems.map((item) => {
-                                        const title = displayPythonFilename(
-                                          item.filename || item.title,
-                                        );
-                                        return (
-                                          <div
-                                            key={item.item_id}
-                                            role="button"
-                                            tabIndex={0}
-                                            className={`thread-card python-file-card${activePythonFileId === item.file_id ? " active" : ""}`}
-                                            title={title}
-                                            onClick={() =>
-                                              void handlePythonFileSelection(item.file_id ?? "")
-                                            }
-                                            onKeyDown={(event) => {
-                                              if (event.key === "Enter" || event.key === " ") {
-                                                event.preventDefault();
-                                                void handlePythonFileSelection(item.file_id ?? "");
-                                              }
-                                            }}
-                                          >
-                                            <div className="thread-card-copy python-file-card-copy">
-                                              <AppIcon
-                                                src={staticAssetPath(
-                                                  item.file_kind === "notebook"
-                                                    ? "note.svg"
-                                                    : "python.svg",
-                                                )}
-                                                className="python-file-card-icon"
-                                              />
-                                              <strong className="thread-card-title">{title}</strong>
-                                            </div>
-                                            <span className="thread-card-age">
-                                              {formatThreadAge(item.updated_at)}
-                                            </span>
-                                            <button
-                                              type="button"
-                                              className="thread-card-delete thread-card-rename"
-                                              aria-label={`Rename ${title}`}
-                                              onClick={(event) => {
-                                                event.stopPropagation();
-                                                void handleRenamePythonFile(item.file_id ?? "");
-                                              }}
-                                            >
-                                              <AppIcon
-                                                src={staticAssetPath("edit.svg")}
-                                                className="thread-card-delete-icon"
-                                              />
-                                            </button>
-                                          </div>
-                                        );
-                                      })}
-                                    </div>
-                                  ) : !collapsedCategories.code ? (
-                                    <div className="project-tree-empty">No code files yet.</div>
-                                  ) : null}
-                                  {!collapsedCategories.code && codeHasMore ? (
-                                    <button
-                                      type="button"
-                                      className="project-show-more"
-                                      disabled={codeLoadingMore}
-                                      onClick={() =>
-                                        void handleLoadMoreItems(project.project_id, "python_file")
-                                      }
-                                    >
-                                      {codeLoadingMore ? "Loading..." : "Show more"}
-                                    </button>
-                                  ) : null}
+                                  <button
+                                    type="button"
+                                    className={`project-tree-home${activeProjectHomeId === project.project_id ? " active" : ""}`}
+                                    onClick={() => openProjectHome(project.project_id)}
+                                  >
+                                    <MaskedAssetIcon
+                                      asset="home.svg"
+                                      className="project-tree-category-icon"
+                                    />
+                                    <span>Home</span>
+                                  </button>
                                 </div>
-                                <button
-                                  type="button"
-                                  className={`project-tree-home${activeProjectHomeId === project.project_id ? " active" : ""}`}
-                                  onClick={() => openProjectHome(project.project_id)}
-                                >
-                                  <MaskedAssetIcon
-                                    asset="home.svg"
-                                    className="project-tree-category-icon"
-                                  />
-                                  <span>Home</span>
-                                </button>
-                              </div>
-                            </>
-                          ) : null}
-                        </div>
-                      ) : null}
-                    </div>
-                  );
-                })}
+                              </>
+                            ) : null}
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  })
+                )}
               </div>
             </section>
 
@@ -4465,7 +5487,12 @@ export default function App() {
                             }
                           }}
                         >
-                          <span className="chat-tab-title">{tab.tabTitle}</span>
+                          <span className="chat-tab-label">
+                            {tab.kind === "thread" && tab.isStreaming ? (
+                              <span className="chat-tab-thread-indicator" aria-hidden="true" />
+                            ) : null}
+                            <span className="chat-tab-title">{tab.tabTitle}</span>
+                          </span>
                         </button>
                         <button
                           type="button"
@@ -4490,6 +5517,29 @@ export default function App() {
               className={`chat-message-list${isChatEmpty ? " empty" : ""}${activeTab?.kind === "python_file" ? " python-file-view" : ""}`}
               onScroll={handleMessageListScroll}
             >
+              {activeTab?.kind === "thread" && activeThreadDebugBundle && !isChatEmpty ? (
+                <div className="chat-thread-debug-strip" data-testid="thread-debug-strip">
+                  <div className="chat-thread-debug-copy-row">
+                    <span className="chat-thread-debug-label">Debug IDs</span>
+                    <button
+                      type="button"
+                      className="chat-thread-debug-copy-button"
+                      aria-label="Copy chat debug bundle"
+                      title="Copy chat debug bundle"
+                      onClick={() => void copyThreadDebugBundle(activeThreadDebugBundle)}
+                    >
+                      Copy
+                    </button>
+                  </div>
+                  <div className="chat-thread-debug-values">
+                    <span>{`user ${activeThreadDebugBundle.user_id ?? "none"}`}</span>
+                    <span>{`project ${activeThreadDebugBundle.project_id}`}</span>
+                    <span>{`thread ${activeThreadDebugBundle.thread_id}`}</span>
+                    <span>{`last ${activeThreadDebugBundle.latest_message_id ?? "none"}`}</span>
+                    <span>{`assistant ${activeThreadDebugBundle.latest_assistant_message_id ?? "none"}`}</span>
+                  </div>
+                </div>
+              ) : null}
               {activeTab?.kind === "project_home" ? (
                 activeProjectHome ? (
                   <div className="project-home-page">
@@ -4651,123 +5701,228 @@ export default function App() {
                       />
                     </button>
                   ) : null}
-                  <div className="chat-empty-state">
-                    <a
-                      className="brandline brandline-link chat-empty-brandline"
-                      href="https://mv37.org"
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      MV37
-                    </a>
-                    <div className="chat-empty-project-row">
-                      <strong>Start new research in</strong>
-                      <div ref={emptyStateProjectPickerRef} className="chat-empty-project-picker">
-                        <button
-                          type="button"
-                          id="empty-state-project-select-trigger"
-                          className="chat-empty-project-trigger"
-                          aria-label="Open empty state project picker"
-                          aria-haspopup="dialog"
-                          aria-expanded={emptyStateProjectPickerOpen}
-                          onClick={() => setEmptyStateProjectPickerOpen((current) => !current)}
-                        >
-                          <span>{emptyStateProject?.name ?? "Project"}</span>
-                        </button>
-                        {emptyStateProjectPickerOpen ? (
-                          <div
-                            className="chat-empty-project-menu"
-                            role="dialog"
-                            aria-label="Choose project"
+                  {hasProjects ? (
+                    <div className="chat-empty-state">
+                      <a
+                        className="brandline brandline-link chat-empty-brandline"
+                        href="https://mv37.org"
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        MV37
+                      </a>
+                      <div className="chat-empty-project-row">
+                        <strong>Start new research in</strong>
+                        <div ref={emptyStateProjectPickerRef} className="chat-empty-project-picker">
+                          <button
+                            type="button"
+                            id="empty-state-project-select-trigger"
+                            className="chat-empty-project-trigger"
+                            aria-label="Open empty state project picker"
+                            aria-haspopup="dialog"
+                            aria-expanded={emptyStateProjectPickerOpen}
+                            onClick={() => setEmptyStateProjectPickerOpen((current) => !current)}
                           >
-                            <div className="chat-empty-project-search-shell">
-                              <input
-                                ref={emptyStateProjectSearchInputRef}
-                                type="text"
-                                className="chat-empty-project-search"
-                                placeholder="Search projects"
-                                aria-label="Search projects"
-                                value={emptyStateProjectSearch}
-                                onChange={(event) => setEmptyStateProjectSearch(event.target.value)}
-                              />
-                            </div>
+                            <span>{emptyStateProject?.name ?? "Project"}</span>
+                          </button>
+                          {emptyStateProjectPickerOpen ? (
                             <div
-                              className="chat-empty-project-options"
-                              role="listbox"
+                              className="chat-empty-project-menu"
+                              role="dialog"
                               aria-label="Choose project"
                             >
-                              {filteredEmptyStateProjects.length > 0 ? (
-                                filteredEmptyStateProjects.map((project) => (
-                                  <button
-                                    key={project.project_id}
-                                    type="button"
-                                    role="option"
-                                    aria-selected={
-                                      emptyStateProject?.project_id === project.project_id
-                                    }
-                                    className={`chat-empty-project-option${emptyStateProject?.project_id === project.project_id ? " active" : ""}`}
-                                    onClick={() => {
-                                      setSelectedProjectId(project.project_id);
-                                      setEmptyStateProjectPickerOpen(false);
-                                    }}
-                                  >
-                                    {project.name}
-                                  </button>
-                                ))
-                              ) : (
-                                <div className="chat-empty-project-empty">
-                                  No projects match this search.
-                                </div>
-                              )}
+                              <div className="chat-empty-project-search-shell">
+                                <input
+                                  ref={emptyStateProjectSearchInputRef}
+                                  type="text"
+                                  className="chat-empty-project-search"
+                                  placeholder="Search projects"
+                                  aria-label="Search projects"
+                                  value={emptyStateProjectSearch}
+                                  onChange={(event) =>
+                                    setEmptyStateProjectSearch(event.target.value)
+                                  }
+                                />
+                              </div>
+                              <div
+                                className="chat-empty-project-options"
+                                role="listbox"
+                                aria-label="Choose project"
+                              >
+                                {filteredEmptyStateProjects.length > 0 ? (
+                                  filteredEmptyStateProjects.map((project) => (
+                                    <button
+                                      key={project.project_id}
+                                      type="button"
+                                      role="option"
+                                      aria-selected={
+                                        emptyStateProject?.project_id === project.project_id
+                                      }
+                                      className={`chat-empty-project-option${emptyStateProject?.project_id === project.project_id ? " active" : ""}`}
+                                      onClick={() => {
+                                        setSelectedProjectId(project.project_id);
+                                        setEmptyStateProjectPickerOpen(false);
+                                      }}
+                                    >
+                                      {project.name}
+                                    </button>
+                                  ))
+                                ) : (
+                                  <div className="chat-empty-project-empty">
+                                    No projects match this search.
+                                  </div>
+                                )}
+                              </div>
+                              <button
+                                type="button"
+                                className="chat-empty-project-create"
+                                onClick={openCreateProjectModal}
+                              >
+                                <AppIcon
+                                  src={staticAssetPath("new-project.svg")}
+                                  className="chat-empty-project-create-icon"
+                                />
+                                <span>Create new project</span>
+                              </button>
+                            </div>
+                          ) : null}
+                        </div>
+                      </div>
+                      {composerStatus ? (
+                        <div className="composer-status inline">{composerStatus}</div>
+                      ) : null}
+                      {composerEditor}
+                      {showChatSetupCard ? (
+                        <section className="chat-setup-card" aria-label="Agent setup checklist">
+                          <div className="chat-setup-header">
+                            <div className="chat-setup-copy">
+                              <h2 className="chat-setup-title">
+                                Prepare the agent before the first chat
+                              </h2>
+                              <p className="chat-setup-note">
+                                Add your OpenAI API key and connect anything else missing for{" "}
+                                {chatSetupProjectName} so the first chat can run cleanly.
+                              </p>
                             </div>
                             <button
                               type="button"
-                              className="chat-empty-project-create"
-                              onClick={openCreateProjectModal}
+                              className="chat-setup-dismiss"
+                              aria-label="Dismiss setup checklist"
+                              onClick={dismissChatSetupCard}
                             >
-                              <AppIcon
-                                src={staticAssetPath("new-project.svg")}
-                                className="chat-empty-project-create-icon"
-                              />
-                              <span>Create new project</span>
+                              ×
                             </button>
                           </div>
-                        ) : null}
+                          <div className="chat-setup-list">
+                            {chatSetupItems.map((item) => (
+                              <div
+                                key={item.id}
+                                className={`chat-setup-item${item.ready ? " ready" : ""}${item.required ? " required" : " optional"}`}
+                              >
+                                <div className="chat-setup-item-main">
+                                  <div
+                                    className={`chat-setup-provider-mark provider-${item.provider}`}
+                                    aria-hidden="true"
+                                  >
+                                    {item.provider === "github" ? (
+                                      <AppIcon
+                                        src={staticAssetPath("github.svg")}
+                                        className="chat-setup-provider-icon"
+                                      />
+                                    ) : item.provider === "openai" ? (
+                                      <span className="chat-setup-provider-text">AI</span>
+                                    ) : (
+                                      <span className="chat-setup-provider-text">M</span>
+                                    )}
+                                  </div>
+                                  <div className="chat-setup-item-copy">
+                                    <div className="chat-setup-item-header">
+                                      <strong>{item.label}</strong>
+                                      {item.ready ? null : (
+                                        <span className="chat-setup-state pending">
+                                          {item.required ? "Required" : "Optional"}
+                                        </span>
+                                      )}
+                                    </div>
+                                    <p>{item.description}</p>
+                                  </div>
+                                </div>
+                                {item.ready ? (
+                                  <span
+                                    className="chat-setup-check"
+                                    aria-label={`${item.label} configured`}
+                                    title="Configured"
+                                  >
+                                    ✓
+                                  </span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    className="chat-setup-action"
+                                    onClick={() => openChatSetupSettings(item.settingsTab)}
+                                  >
+                                    {item.actionLabel}
+                                  </button>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </section>
+                      ) : null}
+                      <div className="chat-empty-actions">
+                        <button
+                          type="button"
+                          className="chat-empty-action-tag python"
+                          onClick={() => void handleCreatePythonFile()}
+                        >
+                          <span className="chat-empty-action-icon" aria-hidden="true">
+                            <EmptyStateActionIcon asset="python.svg" />
+                          </span>
+                          <span className="chat-empty-action-label">Add python file</span>
+                        </button>
+                        <button
+                          type="button"
+                          className="chat-empty-action-tag notes"
+                          onClick={() => notebookUploadInputRef.current?.click()}
+                        >
+                          <span className="chat-empty-action-icon" aria-hidden="true">
+                            <EmptyStateActionIcon asset="note.svg" />
+                          </span>
+                          <span className="chat-empty-action-label">Import notebook</span>
+                        </button>
+                        <button type="button" className="chat-empty-action-tag notes">
+                          <span className="chat-empty-action-icon" aria-hidden="true">
+                            <EmptyStateActionIcon asset="note.svg" />
+                          </span>
+                          <span className="chat-empty-action-label">Add notes</span>
+                        </button>
                       </div>
                     </div>
-                    {composerStatus ? (
-                      <div className="composer-status inline">{composerStatus}</div>
-                    ) : null}
-                    {composerEditor}
-                    <div className="chat-empty-actions">
+                  ) : (
+                    <div className="chat-empty-state chat-empty-projectless-state">
+                      <a
+                        className="brandline brandline-link chat-empty-brandline"
+                        href="https://mv37.org"
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        MV37
+                      </a>
+                      <h1 className="chat-empty-projectless-title">
+                        Create a project to get started
+                      </h1>
+                      <p className="chat-empty-projectless-copy">
+                        Projects hold your chats, Python files, and repo-backed code workspace.
+                      </p>
                       <button
                         type="button"
-                        className="chat-empty-action-tag python"
-                        onClick={() => void handleCreatePythonFile()}
+                        className="primary-button chat-empty-projectless-action"
+                        onClick={openCreateProjectModal}
                       >
-                        <span className="chat-empty-action-icon" aria-hidden="true">
-                          <EmptyStateActionIcon asset="python.svg" />
-                        </span>
-                        <span className="chat-empty-action-label">Add python file</span>
-                      </button>
-                      <button
-                        type="button"
-                        className="chat-empty-action-tag notes"
-                        onClick={() => notebookUploadInputRef.current?.click()}
-                      >
-                        <span className="chat-empty-action-icon" aria-hidden="true">
-                          <EmptyStateActionIcon asset="note.svg" />
-                        </span>
-                        <span className="chat-empty-action-label">Import notebook</span>
-                      </button>
-                      <button type="button" className="chat-empty-action-tag notes">
-                        <span className="chat-empty-action-icon" aria-hidden="true">
-                          <EmptyStateActionIcon asset="note.svg" />
-                        </span>
-                        <span className="chat-empty-action-label">Add notes</span>
+                        Create project
                       </button>
                     </div>
-                  </div>
+                  )}
                 </div>
               ) : (
                 <div className="chat-message-column">
@@ -4775,6 +5930,13 @@ export default function App() {
                     let userTurnIndex = 0;
                     return activeThread.messages.map((message) => {
                       const isCompactionMessage = message.kind === "compaction";
+                      const isCommentaryMessage =
+                        message.role === "assistant" && message.phase === "commentary";
+                      const isStreamingMessage = isStreamingMessageStatus(message.status);
+                      const streamingCodePreview =
+                        message.role === "assistant" && isStreamingMessage && !isCompactionMessage
+                          ? extractStreamingPythonPreview(message.content_markdown)
+                          : null;
                       if (message.role === "user" && !isCompactionMessage) {
                         userTurnIndex += 1;
                       }
@@ -4803,21 +5965,21 @@ export default function App() {
                       return (
                         <Fragment key={message.message_id}>
                           <article
-                            className={`message-row ${isCompactionMessage ? "compaction" : message.role === "assistant" ? "assistant" : "user"} status-${message.status}`}
+                            className={`message-row ${isCompactionMessage ? "compaction" : message.role === "assistant" ? "assistant" : "user"}${isCommentaryMessage ? " commentary" : ""} status-${message.status}`}
                           >
                             {message.status !== "completed" && !isCompactionMessage ? (
                               <div className="message-meta-row">
                                 <span
-                                  className={`message-status-label${message.status === "streaming" ? " thinking-shimmer" : ""}`}
+                                  className={`message-status-label${isStreamingMessage ? " thinking-shimmer" : ""}`}
                                 >
-                                  {message.status === "streaming"
+                                  {isStreamingMessage
                                     ? formatThinkingLabel(activeThreadStreamState?.thinkingWord)
                                     : "Failed"}
                                 </span>
                               </div>
                             ) : null}
                             <div
-                              className={`message-bubble ${isCompactionMessage ? "compaction" : message.role === "assistant" ? "assistant" : "user"}${isCompactionMessage && message.status === "streaming" ? " thinking-shimmer" : ""}`}
+                              className={`message-bubble ${isCompactionMessage ? "compaction" : message.role === "assistant" ? "assistant" : "user"}${isCommentaryMessage ? " commentary" : ""}${isCompactionMessage && isStreamingMessage ? " thinking-shimmer" : ""}`}
                             >
                               {isCompactionMessage ? (
                                 <MarkdownRenderer
@@ -4825,23 +5987,38 @@ export default function App() {
                                   className="message-markdown compaction-markdown"
                                 />
                               ) : message.role === "assistant" ? (
-                                <MarkdownRenderer
-                                  markdown={message.content_markdown}
-                                  className="message-markdown"
-                                  interactiveCitations
-                                  onCitationClick={(sourceId) => {
-                                    const citation = message.citations.find(
-                                      (item) => item.source_id === sourceId,
-                                    );
-                                    if (citation) {
-                                      handleCitationClick(message, citation);
-                                    }
-                                  }}
-                                />
+                                <>
+                                  {isCommentaryMessage ? (
+                                    <div className="assistant-phase-label">Commentary</div>
+                                  ) : null}
+                                  <MarkdownRenderer
+                                    markdown={message.content_markdown}
+                                    className="message-markdown"
+                                    interactiveCitations
+                                    onCitationClick={(sourceId) => {
+                                      const citation = message.citations.find(
+                                        (item) => item.source_id === sourceId,
+                                      );
+                                      if (citation) {
+                                        handleCitationClick(message, citation);
+                                      }
+                                    }}
+                                  />
+                                </>
                               ) : (
                                 <div className="message-plain-text">{message.content_markdown}</div>
                               )}
                             </div>
+                            {streamingCodePreview ? (
+                              <CodeSnippet
+                                code={streamingCodePreview.code}
+                                language={streamingCodePreview.language}
+                                className="preview thinking-shimmer"
+                                headerTitle="Writing code"
+                                headerMeta={streamingCodePreview.language}
+                                dataTestId="streaming-code-preview"
+                              />
+                            ) : null}
                             {message.role === "assistant" && !isCompactionMessage ? (
                               <div className="assistant-hover-actions">
                                 {hoverTime ? (
@@ -4907,13 +6084,44 @@ export default function App() {
                               key={activity.id}
                               className={`tool-activity-row status-${activity.status}${activity.isError ? " error" : ""}`}
                             >
-                              <span
-                                className={`tool-activity-label${activity.status === "running" ? " thinking-shimmer" : ""}`}
-                              >
-                                {activity.status === "running"
-                                  ? `Doing ${activity.label}...`
-                                  : `Did ${activity.label}`}
-                              </span>
+                              {toolActivityHasDetails(activity) ? (
+                                <details className="tool-activity-details">
+                                  <summary className="tool-activity-summary">
+                                    <span
+                                      className={`tool-activity-label${activity.status === "running" ? " thinking-shimmer" : ""}`}
+                                    >
+                                      {formatToolActivityText(activity)}
+                                    </span>
+                                    <span className="tool-activity-summary-hint">
+                                      Command{activity.output ? " and output" : ""}
+                                    </span>
+                                  </summary>
+                                  <div className="tool-activity-content">
+                                    {activity.command ? (
+                                      <div className="tool-activity-detail-block">
+                                        <span className="tool-activity-detail-label">Command</span>
+                                        <pre className="tool-activity-detail-payload">
+                                          {activity.command}
+                                        </pre>
+                                      </div>
+                                    ) : null}
+                                    {activity.output ? (
+                                      <div className="tool-activity-detail-block">
+                                        <span className="tool-activity-detail-label">Output</span>
+                                        <pre className="tool-activity-detail-payload">
+                                          {activity.output}
+                                        </pre>
+                                      </div>
+                                    ) : null}
+                                  </div>
+                                </details>
+                              ) : (
+                                <span
+                                  className={`tool-activity-label${activity.status === "running" ? " thinking-shimmer" : ""}`}
+                                >
+                                  {formatToolActivityText(activity)}
+                                </span>
+                              )}
                             </div>
                           ))}
                           {showThinkingPlaceholder ? (
@@ -5641,25 +6849,27 @@ export default function App() {
                           </div>
                           {projectAdvancedTab === "inference" ? (
                             <section className="project-advanced-group" role="tabpanel">
-                              {sessionSummary?.hasAnthropicApiKey ? (
+                              {sessionSummary?.hasOpenAIApiKey ? (
                                 <div className="settings-secret-row">
                                   <div className="settings-secret-copy">
-                                    <div className="settings-secret-label">Anthropic API key</div>
+                                    <div className="settings-secret-label">OpenAI API key</div>
                                     <div className="settings-secret-value">
-                                      {sessionSettings.anthropic_api_key_hint || "Saved"}
+                                      {sessionSettings.openai_api_key_hint ||
+                                        sessionSettings.anthropic_api_key_hint ||
+                                        "Saved"}
                                     </div>
                                   </div>
                                 </div>
                               ) : (
                                 <div className="project-advanced-form">
                                   <label className="project-field" htmlFor="project-anthropic-key">
-                                    <span>Anthropic API key</span>
+                                    <span>OpenAI API key</span>
                                     <input
                                       id="project-anthropic-key"
                                       name="project_anthropic_key"
                                       type="password"
                                       autoComplete="new-password"
-                                      placeholder="Anthropic API key"
+                                      placeholder="OpenAI API key"
                                       value={projectAnthropicKey}
                                       onChange={(event) =>
                                         setProjectAnthropicKey(event.target.value)
@@ -5800,12 +7010,18 @@ export default function App() {
           </button>
           <div className="modal-heading">
             <h2 className="modal-title">
-              {deleteModalState?.kind === "project" ? "Delete project" : "Delete session"}
+              {deleteModalState?.kind === "project"
+                ? "Delete project"
+                : deleteModalState?.kind === "python_file"
+                  ? "Delete file"
+                  : "Delete session"}
             </h2>
             <p className="modal-caption">
               {deleteModalState?.kind === "project"
-                ? `Delete ${deleteModalState.name} and all of its sessions?`
-                : `Delete ${deleteModalState?.title ?? "this session"}?`}
+                ? `Delete ${deleteModalState.name} and all of its chats and code files?`
+                : deleteModalState?.kind === "python_file"
+                  ? `Delete ${deleteModalState.title}?`
+                  : `Delete ${deleteModalState?.title ?? "this session"}?`}
             </p>
           </div>
           <div className="modal-view visible">
@@ -5815,7 +7031,11 @@ export default function App() {
                 type="button"
                 onClick={() => void confirmDeleteModal()}
               >
-                {deleteModalState?.kind === "project" ? "Delete project" : "Delete session"}
+                {deleteModalState?.kind === "project"
+                  ? "Delete project"
+                  : deleteModalState?.kind === "python_file"
+                    ? "Delete file"
+                    : "Delete session"}
               </button>
               <button className="secondary-button" type="button" onClick={closeDeleteModal}>
                 Cancel
@@ -5884,6 +7104,7 @@ export default function App() {
                 type="password"
                 placeholder="Password"
                 autoComplete="current-password"
+                minLength={8}
                 required
               />
               <button className="primary-button" type="submit">
@@ -5932,6 +7153,7 @@ export default function App() {
                 type="password"
                 placeholder="Password"
                 autoComplete="new-password"
+                minLength={8}
                 required
               />
               <button className="primary-button" type="submit">
@@ -5999,6 +7221,7 @@ export default function App() {
                 placeholder="Reset token"
                 defaultValue={new URLSearchParams(window.location.search).get("reset_token") ?? ""}
                 autoComplete="one-time-code"
+                minLength={8}
                 required
               />
               <input
@@ -6006,6 +7229,7 @@ export default function App() {
                 type="password"
                 placeholder="New password"
                 autoComplete="new-password"
+                minLength={8}
                 required
               />
               <button className="primary-button" type="submit">
@@ -6050,30 +7274,32 @@ export default function App() {
                   >
                     <SettingsSectionHeading
                       title="Inference"
-                      caption="Manage Anthropic inference API key."
+                      caption="Manage OpenAI inference API key."
                     />
-                    {sessionSummary?.hasAnthropicApiKey ? (
+                    {sessionSummary?.hasOpenAIApiKey ? (
                       <div className="settings-secret-row">
                         <div className="settings-secret-copy">
-                          <div className="settings-secret-label">Anthropic API key</div>
+                          <div className="settings-secret-label">OpenAI API key</div>
                           <div className="settings-secret-value">
-                            {sessionSettings.anthropic_api_key_hint || "Saved"}
+                            {sessionSettings.openai_api_key_hint ||
+                              sessionSettings.anthropic_api_key_hint ||
+                              "Saved"}
                           </div>
                         </div>
                         <button
                           id="delete-anthropic-key-button"
                           className="api-key-delete-button"
                           type="button"
-                          aria-label="Delete saved Anthropic API key"
-                          title="Delete saved Anthropic API key"
+                          aria-label="Delete saved OpenAI API key"
+                          title="Delete saved OpenAI API key"
                           onClick={async () => {
                             try {
                               const nextSession = await api<BrowserSessionResponse>(
-                                "/v1/browser/settings/anthropic-key",
+                                "/v1/browser/settings/openai-key",
                                 { method: "DELETE" },
                               );
                               setSession(nextSession);
-                              showNoteFlash("Anthropic API key removed.");
+                              showNoteFlash("OpenAI API key removed.");
                             } catch (error) {
                               showErrorFlash(
                                 error instanceof Error ? error.message : "Deleting API key failed",
@@ -6098,14 +7324,14 @@ export default function App() {
                               new FormData(event.currentTarget).entries(),
                             );
                             const nextSession = await api<BrowserSessionResponse>(
-                              "/v1/browser/settings/anthropic-key",
+                              "/v1/browser/settings/openai-key",
                               {
                                 method: "PUT",
                                 body: JSON.stringify(payload),
                               },
                             );
                             setSession(nextSession);
-                            showNoteFlash("Anthropic API key saved.");
+                            showNoteFlash("OpenAI API key saved.");
                           } catch (error) {
                             showErrorFlash(
                               error instanceof Error ? error.message : "Saving API key failed",
@@ -6113,13 +7339,23 @@ export default function App() {
                           }
                         }}
                       >
-                        <input
-                          name="api_key"
-                          type="password"
-                          placeholder="Anthropic API key"
-                          autoComplete="new-password"
-                          required
-                        />
+                        <div className="settings-field">
+                          <label className="settings-field-label" htmlFor="settings-openai-api-key">
+                            OpenAI API key
+                          </label>
+                          <input
+                            id="settings-openai-api-key"
+                            name="api_key"
+                            type="password"
+                            placeholder="OpenAI API key"
+                            autoComplete="new-password"
+                            aria-describedby="settings-openai-api-key-note"
+                            required
+                          />
+                          <p id="settings-openai-api-key-note" className="settings-field-note">
+                            Stored on this workspace and reused for chat and research turns.
+                          </p>
+                        </div>
                         <div className="settings-footer-actions">
                           <button className="primary-button settings-submit-button" type="submit">
                             Save key
@@ -6206,20 +7442,43 @@ export default function App() {
                           }
                         }}
                       >
-                        <input
-                          name="token_id"
-                          type="password"
-                          placeholder="Modal token ID"
-                          autoComplete="new-password"
-                          required
-                        />
-                        <input
-                          name="token_secret"
-                          type="password"
-                          placeholder="Modal token secret"
-                          autoComplete="new-password"
-                          required
-                        />
+                        <div className="settings-field">
+                          <label className="settings-field-label" htmlFor="settings-modal-token-id">
+                            Modal token ID
+                          </label>
+                          <input
+                            id="settings-modal-token-id"
+                            name="token_id"
+                            type="password"
+                            placeholder="Paste token ID"
+                            autoComplete="new-password"
+                            aria-describedby="settings-modal-token-id-note"
+                            required
+                          />
+                          <p id="settings-modal-token-id-note" className="settings-field-note">
+                            The identifier paired with your sandbox token secret.
+                          </p>
+                        </div>
+                        <div className="settings-field">
+                          <label
+                            className="settings-field-label"
+                            htmlFor="settings-modal-token-secret"
+                          >
+                            Modal token secret
+                          </label>
+                          <input
+                            id="settings-modal-token-secret"
+                            name="token_secret"
+                            type="password"
+                            placeholder="Paste token secret"
+                            autoComplete="new-password"
+                            aria-describedby="settings-modal-token-secret-note"
+                            required
+                          />
+                          <p id="settings-modal-token-secret-note" className="settings-field-note">
+                            Stored for this signed-in workspace and used only for sandbox sessions.
+                          </p>
+                        </div>
                         <div className="settings-footer-actions">
                           <button className="primary-button settings-submit-button" type="submit">
                             Save credentials
@@ -6320,11 +7579,7 @@ export default function App() {
                             },
                           );
                           setSession(nextSession);
-                          showNoteFlash(
-                            appearanceThemeDraft === "dark"
-                              ? "Dark mode enabled."
-                              : "Light mode enabled.",
-                          );
+                          closeAuthModal();
                         } catch (error) {
                           showErrorFlash(
                             error instanceof Error

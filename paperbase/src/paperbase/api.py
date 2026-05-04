@@ -59,10 +59,11 @@ from .models import (
     ProjectResponse,
     ProjectSessionPageResponse,
     PythonFileResponse,
+    RunPythonFileRequest,
     ResetPasswordRequest,
     ResultSetResponse,
     RunPythonFileResponse,
-    SaveAnthropicKeyRequest,
+    SaveOpenAIKeyRequest,
     SaveModalCredentialsRequest,
     SearchClickRequest,
     SearchPaperResult,
@@ -406,6 +407,48 @@ def harvest_venue(
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+class HarvestAuthorRequest(_BaseModel):
+    # Aggregation thresholds for picking top authors from the indexed corpus.
+    # ``min_cite_mass=5000`` matches the #39 spec ("≥5000 citations in CS").
+    # ``min_paper_count=2`` requires the author to have a real publication
+    # footprint in our corpus, not just a single paper that happens to clear
+    # the cite-mass bar — keeps the planner aimed at established researchers
+    # rather than the first author of any one heavily-cited paper.
+    min_paper_count: int = _Field(default=2, ge=1, le=1_000)
+    min_cite_mass: int = _Field(default=5_000, ge=0, le=10_000_000)
+    max_authors: int = _Field(default=100, ge=1, le=10_000)
+    # Bound per-author paging so a prolific author doesn't monopolize the run.
+    max_papers_per_author: int | None = _Field(default=None, ge=1, le=100_000)
+    chunk_size: int = _Field(default=50, ge=1, le=500)
+
+
+@app.post(
+    "/v1/index/harvest-author",
+    response_model=JobResponse,
+    dependencies=[Depends(require_bearer_token)],
+)
+def harvest_author(
+    request: HarvestAuthorRequest,
+    service: PaperbaseService = Depends(get_service),
+) -> JobResponse:
+    """Queue a ``harvest_author`` planner job (#39 PR C). Derives the
+    top-author list from the indexed corpus by aggregating
+    ``paper_authors`` JOIN ``papers``, then for each author pages S2
+    and enqueues ``harvest_chunk`` jobs (``source='s2_author'``)."""
+    from .errors import PermanentError
+
+    try:
+        return service.enqueue_harvest_author_job(
+            min_paper_count=request.min_paper_count,
+            min_cite_mass=request.min_cite_mass,
+            max_authors=request.max_authors,
+            max_papers_per_author=request.max_papers_per_author,
+            chunk_size=request.chunk_size,
+        )
+    except PermanentError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @app.post("/v1/index/summarize-top-cited", response_model=JobResponse, dependencies=[Depends(require_bearer_token)])
 def summarize_top_cited(
     limit: int = Query(default=500_000, ge=1, le=5_000_000),
@@ -425,6 +468,27 @@ def reindex_embeddings(
         limit=limit,
         include_chunks=include_chunks,
         rewrite_existing=rewrite_existing,
+    )
+
+
+@app.post(
+    "/v1/index/enrich-missing-metadata",
+    response_model=JobResponse,
+    dependencies=[Depends(require_bearer_token)],
+)
+def enrich_missing_metadata(
+    limit: int = Query(default=50_000, ge=1, le=5_000_000),
+    min_age_seconds: int = Query(default=3600, ge=0, le=30 * 24 * 3600),
+    service: PaperbaseService = Depends(get_service),
+) -> JobResponse:
+    """Queue an ``enrich_missing_metadata`` job (#38). The worker picks
+    up the job and re-runs Semantic Scholar enrichment for any indexed
+    paper that inline enrichment left unfilled (usually due to transient
+    429s). Asynchronous so a backfill at corpus scale doesn't tie up
+    the serving container."""
+    return service.enqueue_enrich_missing_metadata_job(
+        limit=limit,
+        min_age_seconds=min_age_seconds,
     )
 
 
@@ -945,15 +1009,19 @@ async def browser_github_callback(
         )
 
 
-@app.put("/v1/browser/settings/anthropic-key", response_model=BrowserSessionResponse)
-def browser_save_anthropic_key(
-    request: SaveAnthropicKeyRequest,
+@app.put("/v1/browser/settings/openai-key", response_model=BrowserSessionResponse)
+@app.put("/v1/browser/settings/anthropic-key", response_model=BrowserSessionResponse, include_in_schema=False)
+def browser_save_openai_key(
+    request: SaveOpenAIKeyRequest,
     http_request: Request,
     response: Response,
     user=Depends(require_browser_write_user),
     service: PaperbaseService = Depends(get_service),
 ) -> BrowserSessionResponse:
-    session_response = service.save_user_anthropic_key(user, request)
+    if hasattr(service, "save_user_openai_key"):
+        session_response = service.save_user_openai_key(user, request)
+    else:
+        session_response = service.save_user_anthropic_key(user, request)
     return _browser_session_response_with_csrf(
         session_response,
         request=http_request,
@@ -961,14 +1029,18 @@ def browser_save_anthropic_key(
     )
 
 
-@app.delete("/v1/browser/settings/anthropic-key", response_model=BrowserSessionResponse)
-def browser_delete_anthropic_key(
+@app.delete("/v1/browser/settings/openai-key", response_model=BrowserSessionResponse)
+@app.delete("/v1/browser/settings/anthropic-key", response_model=BrowserSessionResponse, include_in_schema=False)
+def browser_delete_openai_key(
     request: Request,
     response: Response,
     user=Depends(require_browser_write_user),
     service: PaperbaseService = Depends(get_service),
 ) -> BrowserSessionResponse:
-    session_response = service.delete_user_anthropic_key(user)
+    if hasattr(service, "delete_user_openai_key"):
+        session_response = service.delete_user_openai_key(user)
+    else:
+        session_response = service.delete_user_anthropic_key(user)
     return _browser_session_response_with_csrf(
         session_response,
         request=request,
@@ -1228,13 +1300,23 @@ def browser_update_python_file(
     )
 
 
-@app.post("/v1/browser/python-files/{file_id}/run", response_model=RunPythonFileResponse)
-def browser_run_python_file(
+@app.delete("/v1/browser/python-files/{file_id}", response_model=dict[str, object])
+def browser_delete_python_file(
     file_id: str,
     user=Depends(require_browser_write_user),
     service: PaperbaseService = Depends(get_service),
+) -> dict[str, object]:
+    return service.delete_python_file(user, file_id)
+
+
+@app.post("/v1/browser/python-files/{file_id}/run", response_model=RunPythonFileResponse)
+def browser_run_python_file(
+    file_id: str,
+    request: RunPythonFileRequest | None = None,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
 ) -> RunPythonFileResponse:
-    return service.run_python_file(user, file_id)
+    return service.run_python_file(user, file_id, mode=(request.mode if request is not None else "full"))
 
 
 @app.get("/v1/browser/projects/{project_id}/repo-sync", response_model=ProjectRepoSyncResponse)

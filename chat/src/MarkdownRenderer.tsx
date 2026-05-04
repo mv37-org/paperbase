@@ -1,5 +1,10 @@
+import { Children, isValidElement, type ReactNode } from "react";
+import rehypeKatex from "rehype-katex";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+
+import { CodeSnippet, flattenCodeChildren } from "./CodeSnippet";
 
 type MarkdownNode = {
   type: string;
@@ -176,6 +181,38 @@ function citationPlugin() {
   };
 }
 
+function flattenMarkdownCodeChildren(children: ReactNode) {
+  return flattenCodeChildren(children);
+}
+
+function extractMarkdownCodeBlock(children: ReactNode) {
+  let codeChild: { className?: string; children?: ReactNode } | null = null;
+
+  for (const childNode of Children.toArray(children)) {
+    if (typeof childNode === "string") {
+      if (childNode.trim() === "") {
+        continue;
+      }
+      return null;
+    }
+    if (!isValidElement<{ className?: string; children?: ReactNode }>(childNode)) {
+      return null;
+    }
+    if (codeChild) {
+      return null;
+    }
+    codeChild = childNode.props;
+  }
+
+  if (!codeChild) {
+    return null;
+  }
+  return {
+    className: codeChild.className,
+    code: flattenMarkdownCodeChildren(codeChild.children).replace(/\n$/, ""),
+  };
+}
+
 export function MarkdownRenderer({
   markdown,
   className,
@@ -188,7 +225,10 @@ export function MarkdownRenderer({
   return (
     <div className={wrapperClassName}>
       <ReactMarkdown
-        remarkPlugins={interactiveCitations ? [remarkGfm, citationPlugin] : [remarkGfm]}
+        remarkPlugins={
+          interactiveCitations ? [remarkMath, remarkGfm, citationPlugin] : [remarkMath, remarkGfm]
+        }
+        rehypePlugins={[rehypeKatex]}
         components={{
           a: ({ href, children }) => {
             if (href?.startsWith("paperbase-citation:")) {
@@ -214,6 +254,22 @@ export function MarkdownRenderer({
               <table>{children}</table>
             </div>
           ),
+          pre: ({ children }) => {
+            const codeBlock = extractMarkdownCodeBlock(children);
+            if (!codeBlock) {
+              return <pre>{children}</pre>;
+            }
+            const languageMatch = /language-([A-Za-z0-9_+-]+)/.exec(codeBlock.className ?? "");
+            return (
+              <CodeSnippet
+                code={codeBlock.code}
+                language={languageMatch?.[1]}
+                className="message-code-snippet"
+                collapsible
+              />
+            );
+          },
+          code: ({ className, children }) => <code className={className}>{children}</code>,
         }}
       >
         {normalizedMarkdown}

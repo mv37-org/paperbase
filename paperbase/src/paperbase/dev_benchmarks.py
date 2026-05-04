@@ -388,8 +388,9 @@ class _ProfileChatModel:
         system_prompt: str,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: dict[str, str] | None = None,
+        parallel_tool_calls: bool | None = None,
     ) -> dict[str, Any]:
-        del api_key, system_prompt, tool_choice
+        del api_key, system_prompt, tool_choice, parallel_tool_calls
         has_tool_results = any(
             message.get("role") == "user"
             and isinstance(message.get("content"), list)
@@ -421,8 +422,9 @@ class _ProfileChatModel:
         system_prompt: str,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: dict[str, str] | None = None,
+        parallel_tool_calls: bool | None = None,
     ):
-        del api_key, messages, system_prompt, tools, tool_choice
+        del api_key, messages, system_prompt, tools, tool_choice, parallel_tool_calls
         yield "Profiled grounded "
         yield "answer [S1]."
 
@@ -493,7 +495,7 @@ def _patched_attr(target: Any, attribute: str, replacement: Any):
 @contextmanager
 def _patched_indexing(extractions: dict[str, ExtractionOutput]):
     with (
-        _patched_attr(sources, "enrich_with_semantic_scholar", lambda papers, **_: papers),
+        _patched_attr(sources, "enrich_with_semantic_scholar", lambda papers, **_: None),
         _patched_attr(sources, "fetch_hf_paper_repo", lambda *args, **kwargs: None),
         _patched_attr(
             service_module,

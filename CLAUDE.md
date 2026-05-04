@@ -9,6 +9,7 @@ Primary commands:
 - `make setup`
 - `make doctor`
 - `make dev`
+- `make reset-local`
 - `make test-smoke`
 - `make test`
 - `make profile`
@@ -86,6 +87,15 @@ Check at least:
 - any relevant package README in `paperbase/`, `paperbase-plugin/`, or `chat/`
 
 Do not leave workflow changes undocumented.
+
+## Project Code Agent Scope
+
+Browser-chat coding flows are project-scoped, not repo-shell scoped.
+
+- operate on project-scoped repo-relative workspace text files rather than arbitrary paths in this repo
+- read target files before editing and prefer exact-match patch edits over broad rewrites
+- default generated ML code to PyTorch unless the user asks for something else
+- keep runnable entrypoints compatible with `--run-mode smoke|full`
 
 ## Developer Experience Summary
 

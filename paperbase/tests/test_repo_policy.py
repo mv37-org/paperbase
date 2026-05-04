@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import tomllib
 
 from paperbase.config import repo_root
 from paperbase.extractors import ExtractionOutput, build_manifest
@@ -27,6 +28,13 @@ def test_verify_workflow_uses_smoke_on_pull_requests_and_full_test_elsewhere():
     assert "cancel-in-progress: true" in workflow
 
 
+def test_makefile_exposes_reset_local_workflow():
+    makefile = _read_repo_file("Makefile")
+
+    assert "reset-local:" in makefile
+    assert "make reset-local" in makefile
+
+
 def test_profile_workflow_delegates_to_make_profile():
     workflow = _read_repo_file(".github/workflows/profile.yml")
 
@@ -49,6 +57,13 @@ def test_cloudbuild_uses_supported_substitutions_only():
     )
 
     assert invalid == []
+
+
+def test_pyproject_packages_prompt_assets():
+    pyproject = tomllib.loads(_read_repo_file("paperbase/pyproject.toml"))
+    package_data = pyproject["tool"]["setuptools"]["package-data"]["paperbase"]
+
+    assert "prompt_assets/*/*.md" in package_data
 
 
 def test_job_orm_carries_retry_policy_columns():
@@ -128,6 +143,25 @@ def test_paper_schema_carries_venue_signal_fields():
     assert paper.venue is None
     assert paper.venue_year is None
     assert paper.venue_source is None
+
+
+def test_paper_schema_carries_author_signal_fields():
+    """Regression test for #39 PR C: author-signal harvest needs the
+    ``top_author_s2_id`` column on ``papers`` and a separate
+    ``paper_authors`` table so the planner can run the cite-mass
+    aggregation. Locks both."""
+    from paperbase.repository import PaperAuthorORM, PaperORM
+
+    assert "top_author_s2_id" in PaperORM.__table__.columns, (
+        "PaperORM must carry 'top_author_s2_id' for author harvest provenance (#39 PR C)"
+    )
+    for column in ("paper_id", "author_s2_id", "author_name", "author_position"):
+        assert column in PaperAuthorORM.__table__.columns, (
+            f"PaperAuthorORM must carry '{column}' for author harvest (#39 PR C)"
+        )
+
+    paper = PaperMetadata(arxiv_id="2401.99999")
+    assert paper.top_author_s2_id is None
 
 
 def test_job_orm_carries_priority_for_backfill_starvation_guard():

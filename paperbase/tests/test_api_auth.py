@@ -186,6 +186,13 @@ class StubApiService:
             },
         )
 
+    def enqueue_enrich_missing_metadata_job(self, *, limit: int, min_age_seconds: int):
+        self.calls.append(("enqueue_enrich_missing_metadata_job", (limit, min_age_seconds)))
+        return _job(
+            "enrich_missing_metadata",
+            payload={"limit": limit, "min_age_seconds": min_age_seconds},
+        )
+
     def expand_query(self, query: str, *, variants: int = 4) -> list[str]:
         self.calls.append(("expand_query", (query, variants)))
         return [query, f"{query} variant"]
@@ -293,6 +300,10 @@ class StubApiService:
         self.calls.append(("enqueue_harvest_venue_job", kwargs))
         return _job("harvest_venue", payload=kwargs)
 
+    def enqueue_harvest_author_job(self, **kwargs):
+        self.calls.append(("enqueue_harvest_author_job", kwargs))
+        return _job("harvest_author", payload=kwargs)
+
     def retry_dead_job(self, job_id: str):
         self.calls.append(("retry_dead_job", job_id))
         if job_id == "job_nonexistent":
@@ -389,7 +400,6 @@ class StubApiService:
         return BrowserSessionResponse(
             authenticated=True,
             user=user,
-            remaining_free_responses=2,
             has_anthropic_api_key=False,
         )
 
@@ -398,7 +408,6 @@ class StubApiService:
         return BrowserSessionResponse(
             authenticated=True,
             user=user,
-            remaining_free_responses=2,
             has_anthropic_api_key=False,
         )
 
@@ -407,7 +416,6 @@ class StubApiService:
         return BrowserSessionResponse(
             authenticated=True,
             user=user,
-            remaining_free_responses=2,
             has_anthropic_api_key=False,
         )
 
@@ -416,7 +424,6 @@ class StubApiService:
         return BrowserSessionResponse(
             authenticated=True,
             user=user,
-            remaining_free_responses=2,
             has_anthropic_api_key=False,
         )
 
@@ -438,7 +445,6 @@ class StubApiService:
         return BrowserSessionResponse(
             authenticated=True,
             user=user,
-            remaining_free_responses=2,
             has_anthropic_api_key=False,
         )
 
@@ -447,7 +453,6 @@ class StubApiService:
         return BrowserSessionResponse(
             authenticated=True,
             user=user,
-            remaining_free_responses=2,
             has_anthropic_api_key=False,
         )
 
@@ -666,8 +671,17 @@ class StubApiService:
             content=content or "",
         )
 
-    def run_python_file(self, user: BrowserUser, file_id: str) -> RunPythonFileResponse:
-        self.calls.append(("run_python_file", (user.user_id, file_id)))
+    def delete_python_file(self, user: BrowserUser, file_id: str) -> dict[str, object]:
+        self.calls.append(("delete_python_file", (user.user_id, file_id)))
+        return {
+            "file_id": file_id,
+            "project_id": "proj_1",
+            "filename": "something.py",
+            "deleted": True,
+        }
+
+    def run_python_file(self, user: BrowserUser, file_id: str, *, mode: str = "full") -> RunPythonFileResponse:
+        self.calls.append(("run_python_file", (user.user_id, file_id, mode)))
         return RunPythonFileResponse(
             file_id=file_id,
             status="completed",
@@ -756,7 +770,6 @@ class StubApiService:
             BrowserSessionResponse(
                 authenticated=True,
                 user=BrowserUser(user_id="user_google", email=email, display_name=display_name),
-                remaining_free_responses=3,
                 has_anthropic_api_key=False,
             ),
             "google-browser-token",
@@ -1153,8 +1166,13 @@ def test_browser_project_and_chat_write_routes_delegate_with_valid_csrf(api_clie
         json={"filename": "analysis.py", "content": "print('hello')"},
         headers=headers,
     )
+    deleted_python_file = client.delete(
+        "/v1/browser/python-files/file_1",
+        headers=headers,
+    )
     ran_python_file = client.post(
         "/v1/browser/python-files/file_1/run",
+        json={"mode": "smoke"},
         headers=headers,
     )
     synced_project_repo = client.post(
@@ -1179,6 +1197,8 @@ def test_browser_project_and_chat_write_routes_delegate_with_valid_csrf(api_clie
     assert imported_notebook.json()["file_kind"] == "notebook"
     assert updated_python_file.status_code == 200
     assert updated_python_file.json()["filename"] == "analysis.py"
+    assert deleted_python_file.status_code == 200
+    assert deleted_python_file.json()["deleted"] is True
     assert ran_python_file.status_code == 200
     assert ran_python_file.json()["stdout"] == "runner output"
     assert synced_project_repo.status_code == 200
@@ -1195,7 +1215,8 @@ def test_browser_project_and_chat_write_routes_delegate_with_valid_csrf(api_clie
         ("user_1", "proj_2", "demo.ipynb", b'{"nbformat":4}'),
     ) in service.calls
     assert ("update_python_file", ("user_1", "file_1", "analysis.py", "print('hello')")) in service.calls
-    assert ("run_python_file", ("user_1", "file_1")) in service.calls
+    assert ("delete_python_file", ("user_1", "file_1")) in service.calls
+    assert ("run_python_file", ("user_1", "file_1", "smoke")) in service.calls
     assert ("sync_project_repo", ("user_1", "proj_2", "Save analysis.py")) in service.calls
     assert ("delete_chat_thread", ("user_1", "thread_1")) in service.calls
     assert ("delete_project", ("user_1", "proj_2")) in service.calls
@@ -1545,6 +1566,54 @@ def test_harvest_top_cited_endpoint_requires_bearer_token(api_client):
     assert invalid.status_code == 403
 
 
+def test_enrich_missing_metadata_endpoint_delegates_to_service(api_client):
+    """``POST /v1/index/enrich-missing-metadata`` queues an
+    ``enrich_missing_metadata`` job via
+    ``service.enqueue_enrich_missing_metadata_job`` (#38). Asynchronous so
+    a corpus-scale backfill doesn't tie up the serving container."""
+    client, service, settings = api_client
+    headers = {"Authorization": f"Bearer {settings.api_key}"}
+
+    response = client.post(
+        "/v1/index/enrich-missing-metadata?limit=2000&min_age_seconds=600",
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["job_type"] == "enrich_missing_metadata"
+    enqueue_calls = [c for c in service.calls if c[0] == "enqueue_enrich_missing_metadata_job"]
+    assert len(enqueue_calls) == 1
+    assert enqueue_calls[0][1] == (2000, 600)
+
+
+def test_enrich_missing_metadata_endpoint_uses_defaults(api_client):
+    """No query params → server defaults (limit=50_000, min_age_seconds=3600).
+    Default min-age guards against racing inline enrichment on freshly
+    ingested papers."""
+    client, service, settings = api_client
+    headers = {"Authorization": f"Bearer {settings.api_key}"}
+
+    response = client.post("/v1/index/enrich-missing-metadata", headers=headers)
+    assert response.status_code == 200
+    enqueue_calls = [c for c in service.calls if c[0] == "enqueue_enrich_missing_metadata_job"]
+    assert enqueue_calls[-1][1] == (50_000, 3600)
+
+
+def test_enrich_missing_metadata_endpoint_requires_bearer_token(api_client):
+    """Backfill is admin-only. No auth → 401 / invalid auth → 403."""
+    client, _, _ = api_client
+
+    missing = client.post("/v1/index/enrich-missing-metadata")
+    invalid = client.post(
+        "/v1/index/enrich-missing-metadata",
+        headers={"Authorization": "Bearer wrong"},
+    )
+
+    assert missing.status_code == 401
+    assert invalid.status_code == 403
+
+
 def test_harvest_venue_endpoint_delegates_to_service(api_client):
     """``POST /v1/index/harvest-venue`` forwards request fields to
     ``service.enqueue_harvest_venue_job`` and returns the planner job."""
@@ -1606,6 +1675,66 @@ def test_harvest_venue_endpoint_requires_bearer_token(api_client):
         json=body,
     )
 
+    assert missing.status_code == 401
+    assert invalid.status_code == 403
+
+
+def test_harvest_author_endpoint_delegates_to_service(api_client):
+    """``POST /v1/index/harvest-author`` forwards request fields to
+    ``service.enqueue_harvest_author_job`` and returns the planner job."""
+    client, service, settings = api_client
+    headers = {"Authorization": f"Bearer {settings.api_key}"}
+
+    response = client.post(
+        "/v1/index/harvest-author",
+        headers=headers,
+        json={
+            "min_paper_count": 2,
+            "min_cite_mass": 10_000,
+            "max_authors": 50,
+            "max_papers_per_author": 100,
+            "chunk_size": 25,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["job_type"] == "harvest_author"
+    enqueue_calls = [c for c in service.calls if c[0] == "enqueue_harvest_author_job"]
+    assert len(enqueue_calls) == 1
+    kw = enqueue_calls[0][1]
+    assert kw["min_paper_count"] == 2
+    assert kw["min_cite_mass"] == 10_000
+    assert kw["max_authors"] == 50
+    assert kw["max_papers_per_author"] == 100
+    assert kw["chunk_size"] == 25
+
+
+def test_harvest_author_endpoint_uses_defaults_when_omitted(api_client):
+    """Defaults match the #39 spec — min_cite_mass=5000."""
+    client, service, settings = api_client
+    headers = {"Authorization": f"Bearer {settings.api_key}"}
+
+    response = client.post("/v1/index/harvest-author", headers=headers, json={})
+    assert response.status_code == 200
+    enqueue_calls = [c for c in service.calls if c[0] == "enqueue_harvest_author_job"]
+    assert len(enqueue_calls) == 1
+    kw = enqueue_calls[0][1]
+    assert kw["min_cite_mass"] == 5_000
+    assert kw["max_authors"] == 100
+    assert kw["chunk_size"] == 50
+
+
+def test_harvest_author_endpoint_requires_bearer_token(api_client):
+    """Bulk harvest is admin-only. No auth → 401 / invalid auth → 403."""
+    client, _, _ = api_client
+
+    missing = client.post("/v1/index/harvest-author", json={})
+    invalid = client.post(
+        "/v1/index/harvest-author",
+        headers={"Authorization": "Bearer wrong"},
+        json={},
+    )
     assert missing.status_code == 401
     assert invalid.status_code == 403
 

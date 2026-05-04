@@ -1,8 +1,11 @@
 import type {
   BrowserSessionResponse,
+  ChatMessageResponse,
   ChatStreamEventMap,
+  ChatThreadItemResponse,
   ChatThreadListResponse,
   ChatThreadResponse,
+  ChatTurnResponse,
   CreateProjectGitHubRepoPayload,
   FigureResponse,
   FileContentResponse,
@@ -16,6 +19,7 @@ import type {
   ProjectRepoConflictResolution,
   ProjectRepoSyncResponse,
   ProjectListResponse,
+  ProjectRunMode,
   ProjectResponse,
   ProjectSessionPageResponse,
   PythonFileResponse,
@@ -39,6 +43,7 @@ export type SendThreadMessagePayload = {
   content: string;
   include_uploads: boolean;
   include_papers: boolean;
+  paper_ids?: string[];
 };
 
 type StreamEventHandler = <T extends keyof ChatStreamEventMap>(
@@ -108,7 +113,61 @@ function syncBrowserSession(payload: unknown) {
     return;
   }
   const session = payload as BrowserSessionResponse;
+  session.has_anthropic_api_key = session.has_openai_api_key;
+  if (session.settings) {
+    session.settings.anthropic_api_key_hint = session.settings.openai_api_key_hint;
+  }
   browserCsrfToken = session.authenticated ? (session.csrf_token ?? null) : null;
+}
+
+function messageFromItem(item: ChatThreadItemResponse): ChatMessageResponse | null {
+  if (!["user_message", "assistant_message", "compaction"].includes(item.item_type)) {
+    return null;
+  }
+  return {
+    message_id: item.item_id,
+    role: item.role,
+    content_markdown: item.content_text,
+    citations: item.citations,
+    created_at: item.created_at,
+    status: item.status,
+    kind: item.item_type === "compaction" ? "compaction" : "default",
+    phase: item.phase ?? null,
+  };
+}
+
+function hydrateTurn(turn: ChatTurnResponse): ChatTurnResponse {
+  return {
+    ...turn,
+    items: [...(turn.items ?? [])],
+  };
+}
+
+function hydrateThread(thread: ChatThreadResponse): ChatThreadResponse {
+  const items = [...(thread.items ?? [])];
+  return {
+    ...thread,
+    items,
+    turns: (thread.turns ?? []).map(hydrateTurn),
+    messages: items
+      .map(messageFromItem)
+      .filter((message): message is ChatMessageResponse => Boolean(message)),
+  };
+}
+
+function hydrateSendResponse(response: SendChatMessageResponse): SendChatMessageResponse {
+  const finalMessage =
+    response.final_item &&
+    ["user_message", "assistant_message", "compaction"].includes(response.final_item.item_type)
+      ? messageFromItem(response.final_item)
+      : null;
+  return {
+    ...response,
+    thread: hydrateThread(response.thread),
+    turn: response.turn ? hydrateTurn(response.turn) : response.turn,
+    assistant_message: finalMessage,
+    has_anthropic_api_key: response.has_openai_api_key,
+  };
 }
 
 function clearBrowserSessionToken() {
@@ -152,6 +211,7 @@ function chatRequestBody(payload: SendThreadMessagePayload) {
     tag_filters: [],
     include_uploads: payload.include_uploads,
     include_papers: payload.include_papers,
+    paper_ids: payload.paper_ids ?? [],
   });
 }
 
@@ -387,9 +447,19 @@ export function updatePythonFile(
   });
 }
 
-export function runPythonFile(fileId: string) {
+export function deletePythonFile(fileId: string) {
+  return api<{ file_id: string; project_id: string; filename: string; deleted: boolean }>(
+    `/v1/browser/python-files/${fileId}`,
+    {
+      method: "DELETE",
+    },
+  );
+}
+
+export function runPythonFile(fileId: string, mode: ProjectRunMode = "full") {
   return api<RunPythonFileResponse>(`/v1/browser/python-files/${fileId}/run`, {
     method: "POST",
+    body: JSON.stringify({ mode }),
   });
 }
 
@@ -418,21 +488,23 @@ export function syncProjectRepo(
 }
 
 export function getThread(threadId: string) {
-  return api<ChatThreadResponse>(`/v1/browser/chats/${threadId}`, { method: "GET" });
+  return api<ChatThreadResponse>(`/v1/browser/chats/${threadId}`, { method: "GET" }).then(
+    hydrateThread,
+  );
 }
 
 export function createThread(title = "", projectId?: string) {
   return api<ChatThreadResponse>("/v1/browser/chats", {
     method: "POST",
     body: JSON.stringify({ title, project_id: projectId ?? null }),
-  });
+  }).then(hydrateThread);
 }
 
 export function moveThreadToProject(threadId: string, projectId: string) {
   return api<ChatThreadResponse>(`/v1/browser/chats/${threadId}/project`, {
     method: "PATCH",
     body: JSON.stringify({ project_id: projectId }),
-  });
+  }).then(hydrateThread);
 }
 
 export function deleteThread(threadId: string) {
@@ -443,7 +515,7 @@ export function sendThreadMessage(threadId: string, payload: SendThreadMessagePa
   return api<SendChatMessageResponse>(`/v1/browser/chats/${threadId}/messages`, {
     method: "POST",
     body: chatRequestBody(payload),
-  });
+  }).then(hydrateSendResponse);
 }
 
 export async function sendThreadMessageStream(
@@ -490,7 +562,23 @@ export async function sendThreadMessageStream(
       return;
     }
     sawEvent = true;
-    onEvent(parsed.eventName as keyof ChatStreamEventMap, parsed.payload);
+    let payload = parsed.payload as ChatStreamEventMap[keyof ChatStreamEventMap];
+    if (parsed.eventName === "turn_completed") {
+      payload = hydrateSendResponse(
+        payload as SendChatMessageResponse,
+      ) as ChatStreamEventMap[keyof ChatStreamEventMap];
+    } else if (parsed.eventName === "api_key_required") {
+      payload = hydrateSendResponse(
+        payload as SendChatMessageResponse,
+      ) as ChatStreamEventMap[keyof ChatStreamEventMap];
+    } else if (parsed.eventName === "turn_started") {
+      const typed = payload as ChatStreamEventMap["turn_started"];
+      payload = {
+        ...typed,
+        turn: hydrateTurn(typed.turn),
+      } as ChatStreamEventMap[keyof ChatStreamEventMap];
+    }
+    onEvent(parsed.eventName as keyof ChatStreamEventMap, payload);
   };
 
   try {

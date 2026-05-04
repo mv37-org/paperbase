@@ -626,16 +626,36 @@ def backfill_code_urls(*, limit: int, page_size: int, dry_run: bool) -> int:
     return 0
 
 
-def enrich_missing(*, limit: int, min_age_seconds: int, batch_size: int) -> int:
-    """Synchronously run the enrich_missing_metadata pass in the current
-    process. Intended for manual backfill from the CLI; routine operation
-    should go through ``enqueue_enrich_missing_metadata_job`` so the worker
-    does it asynchronously."""
+def enrich_missing(*, limit: int, min_age_seconds: int, batch_size: int, queue: bool = False) -> int:
+    """Backfill Semantic Scholar metadata for indexed papers (#38).
+
+    Two modes:
+
+    - ``--queue`` (preferred for prod-scale backfills): enqueue an
+      ``enrich_missing_metadata`` job that the worker pool processes
+      asynchronously. The serving container is not tied up; this is
+      what an operator would use to backfill the existing corpus
+      after PR C (#39) shipped author-IDs in the inline enrich path.
+    - default (synchronous): run the pass in the current process.
+      Useful for spot-checks during local development; not appropriate
+      for corpus-scale runs because the CLI process holds the work.
+    """
     # Imported lazily so `paperbase-dev --help` does not pull in the whole
     # service graph (which loads heavy embedding/reranker model clients).
     from .service import get_service
 
     service = get_service()
+    if queue:
+        job = service.enqueue_enrich_missing_metadata_job(
+            limit=limit,
+            min_age_seconds=min_age_seconds,
+        )
+        print(
+            f"Queued enrich_missing_metadata {job.job_id}: "
+            f"limit={limit}, min_age_seconds={min_age_seconds}"
+        )
+        return 0
+
     stats_before = service.repository.enrichment_stats()
     result = service.enrich_missing_metadata(
         limit=limit,
@@ -777,6 +797,122 @@ def harvest_venue(
     return 0
 
 
+def harvest_author(
+    *,
+    min_paper_count: int,
+    min_cite_mass: int,
+    max_authors: int,
+    max_papers_per_author: int | None,
+    chunk_size: int,
+) -> int:
+    """Queue an author-signal harvest from the indexed corpus (#39 PR C).
+
+    Derives top authors via ``list_top_authors`` aggregation over
+    ``paper_authors`` JOIN ``papers``, then for each pages S2's
+    ``/author/{id}/papers`` and enqueues ``harvest_chunk`` jobs
+    (``source='s2_author'``). The chunk worker indexes each paper and
+    stamps ``top_author_s2_id`` so analysis can attribute provenance.
+    """
+    from .errors import PermanentError
+    from .service import get_service
+
+    service = get_service()
+    try:
+        job = service.enqueue_harvest_author_job(
+            min_paper_count=min_paper_count,
+            min_cite_mass=min_cite_mass,
+            max_authors=max_authors,
+            max_papers_per_author=max_papers_per_author,
+            chunk_size=chunk_size,
+        )
+    except PermanentError as exc:
+        print(f"Invalid harvest-author request: {exc}")
+        return 1
+    print(
+        f"Queued harvest_author {job.job_id}: "
+        f"min_paper_count={min_paper_count}, min_cite_mass={min_cite_mass}, "
+        f"max_authors={max_authors}, max_papers_per_author={max_papers_per_author}, "
+        f"chunk_size={chunk_size}"
+    )
+    return 0
+
+
+def backfill_paper_authors(*, limit: int, batch_size: int) -> int:
+    """Populate ``paper_authors`` for already-indexed papers that don't
+    yet have author rows (#39 PR C).
+
+    Iterates papers ordered by ``citation_count`` desc (so high-impact
+    papers get covered first), batches their arxiv ids, calls S2's
+    ``/paper/batch`` with ``fields=authors.authorId,authors.name``, and
+    writes ``paper_authors`` rows via ``replace_paper_authors``. Re-
+    runnable: papers that already have rows are skipped.
+    """
+    from . import sources
+    from .models import PaperMetadata
+    from .service import get_service
+
+    service = get_service()
+    repo = service.repository
+
+    # Pick papers without author rows. Use a direct SQL query via the
+    # repository's engine for the SqlAlchemy backend.
+    from sqlalchemy import text as _text
+
+    with repo._engine.begin() as conn:  # type: ignore[attr-defined]
+        # Scope to ``index_status='indexed'`` so live-search / related-paper
+        # rows that the repo persists as ``index_status='discovered'`` don't
+        # leak into ``paper_authors``. ``list_top_authors`` aggregates
+        # wholesale, so without this filter the planner could be driven by
+        # off-corpus papers we never actually ingested.
+        rows = conn.execute(
+            _text(
+                """
+                SELECT p.paper_id, p.arxiv_id
+                FROM papers p
+                LEFT JOIN paper_authors pa ON pa.paper_id = p.paper_id
+                WHERE pa.paper_id IS NULL
+                  AND p.index_status = 'indexed'
+                ORDER BY p.citation_count DESC NULLS LAST
+                LIMIT :limit
+                """
+            ),
+            {"limit": int(limit)},
+        ).fetchall()
+
+    if not rows:
+        print("backfill-paper-authors: no papers needing backfill")
+        return 0
+
+    targets = [(row[0], row[1]) for row in rows]
+    print(f"backfill-paper-authors: {len(targets)} papers to process")
+
+    total_papers_with_authors = 0
+    total_authors_written = 0
+    for offset in range(0, len(targets), batch_size):
+        batch = targets[offset: offset + batch_size]
+        # Construct PaperMetadata stand-ins so enrich's batch path works.
+        metas = [PaperMetadata(arxiv_id=arxiv_id) for _paper_id, arxiv_id in batch]
+        outcome = sources.enrich_with_semantic_scholar(metas, batch_size=len(batch), max_retries=2)
+        for (paper_id, arxiv_id), meta in zip(batch, metas):
+            author_rows = outcome.authors_by_arxiv.get(meta.arxiv_id) or []
+            if not author_rows:
+                continue
+            repo.replace_paper_authors(paper_id, authors=author_rows)
+            total_papers_with_authors += 1
+            total_authors_written += len(author_rows)
+        print(
+            f"  processed {min(offset + batch_size, len(targets))}/{len(targets)} | "
+            f"papers_with_authors={total_papers_with_authors} | "
+            f"authors_written={total_authors_written}"
+        )
+
+    print(
+        f"backfill-paper-authors done: {total_papers_with_authors}/{len(targets)} papers "
+        f"got authors ({total_authors_written} rows total)"
+    )
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Local developer helpers for paperbase.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -890,6 +1026,15 @@ def _build_parser() -> argparse.ArgumentParser:
         default=20,
         help="Semantic Scholar /paper/batch size (max 500 per S2 docs).",
     )
+    enrich_parser.add_argument(
+        "--queue",
+        action="store_true",
+        help=(
+            "Queue an ``enrich_missing_metadata`` job for the worker pool "
+            "instead of running the backfill synchronously in this CLI "
+            "process. Preferred for corpus-scale runs."
+        ),
+    )
     harvest_parser = subparsers.add_parser(
         "harvest",
         help="Queue a historical arxiv backfill by date range (runs at backfill priority).",
@@ -984,6 +1129,71 @@ def _build_parser() -> argparse.ArgumentParser:
         default=50,
         help="arxiv_ids per harvest_chunk (default 50).",
     )
+
+    author_parser = subparsers.add_parser(
+        "harvest-author",
+        help=(
+            "Queue an author-signal harvest (#39 PR C). Derives top "
+            "authors from the indexed corpus and pulls their full "
+            "publication list from S2. Catches frontier work by "
+            "established researchers before citations accumulate."
+        ),
+    )
+    author_parser.add_argument(
+        "--min-paper-count",
+        type=int,
+        default=2,
+        help=(
+            "Min papers in our corpus before an author counts as 'top' "
+            "(default 2). Bumped from 1 so a single heavily-cited paper "
+            "doesn't qualify its first author as 'established'."
+        ),
+    )
+    author_parser.add_argument(
+        "--min-cite-mass",
+        type=int,
+        default=5_000,
+        help="Min summed citation count across an author's corpus papers (default 5000, per #39 spec).",
+    )
+    author_parser.add_argument(
+        "--max-authors",
+        type=int,
+        default=100,
+        help="Stop after harvesting from this many top authors (default 100).",
+    )
+    author_parser.add_argument(
+        "--max-papers-per-author",
+        type=int,
+        default=None,
+        help="Cap S2 paging per author; omit for full publication list.",
+    )
+    author_parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=50,
+        help="arxiv_ids per harvest_chunk (default 50).",
+    )
+
+    backfill_authors_parser = subparsers.add_parser(
+        "backfill-paper-authors",
+        help=(
+            "Populate paper_authors for already-indexed papers (#39 PR C). "
+            "Required after PR C ships before harvest-author can derive "
+            "top authors — earlier ingests didn't capture S2 author IDs."
+        ),
+    )
+    backfill_authors_parser.add_argument(
+        "--limit",
+        type=int,
+        default=10_000,
+        help="Process at most this many papers (default 10k).",
+    )
+    backfill_authors_parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=20,
+        help="S2 batch enrichment batch size (default 20).",
+    )
     return parser
 
 
@@ -1028,6 +1238,7 @@ def main(argv: list[str] | None = None) -> int:
             limit=args.limit,
             min_age_seconds=args.min_age_seconds,
             batch_size=args.batch_size,
+            queue=args.queue,
         )
     if args.command == "harvest":
         if args.categories:
@@ -1053,6 +1264,19 @@ def main(argv: list[str] | None = None) -> int:
             year=args.year,
             max_papers=args.max_papers,
             chunk_size=args.chunk_size,
+        )
+    if args.command == "harvest-author":
+        return harvest_author(
+            min_paper_count=args.min_paper_count,
+            min_cite_mass=args.min_cite_mass,
+            max_authors=args.max_authors,
+            max_papers_per_author=args.max_papers_per_author,
+            chunk_size=args.chunk_size,
+        )
+    if args.command == "backfill-paper-authors":
+        return backfill_paper_authors(
+            limit=args.limit,
+            batch_size=args.batch_size,
         )
 
     parser.error(f"Unsupported command: {args.command}")
