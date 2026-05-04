@@ -17,7 +17,7 @@ from psycopg import sql
 from sqlalchemy.engine import URL, make_url
 
 from .config import Settings, get_settings, repo_root, resolve_repo_path, settings_env_file
-from .dev_benchmarks import profile_hotpaths, record_test_times
+from .dev_benchmarks import profile_hotpaths, record_test_times, run_indexing_census
 from .repository import Base, build_repository
 from .service import PaperbaseService
 from .storage import build_object_store
@@ -811,6 +811,19 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     profile_parser.add_argument("--update-baseline", action="store_true")
 
+    benchmark_parser = subparsers.add_parser(
+        "benchmark",
+        help="Run repo-native benchmark helpers and write reports under benchmarks/out/.",
+    )
+    benchmark_sub = benchmark_parser.add_subparsers(dest="benchmark_command", required=True)
+    benchmark_sub.add_parser(
+        "iq-1",
+        help=(
+            "Run the IQ-1 indexing census. ELI5: count how many papers are really indexed, "
+            "how rich those artifacts are, and how much of the corpus is embedding-searchable."
+        ),
+    )
+
     reindex_parser = subparsers.add_parser(
         "reindex-embeddings",
         help="Queue a paper/chunk embedding rewrite job using the current embedding model.",
@@ -1000,6 +1013,9 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.command == "profile":
         return profile_hotpaths(settings=_settings(), update_baseline=args.update_baseline)
+    if args.command == "benchmark":
+        if args.benchmark_command == "iq-1":
+            return run_indexing_census(settings=_settings())
     if args.command == "reindex-embeddings":
         return reindex_embeddings(
             limit=args.limit,

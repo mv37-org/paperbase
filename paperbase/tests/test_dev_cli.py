@@ -276,6 +276,26 @@ def test_main_dispatches_profile_with_current_settings(monkeypatch):
     assert captured == {"settings": settings, "update_baseline": True}
 
 
+def test_main_dispatches_benchmark_iq1_with_current_settings(monkeypatch):
+    settings = Settings(
+        database_url="postgresql+psycopg:///paperbase",
+        storage_backend="local",
+        local_storage_root=".paperbase-data",
+    )
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr("paperbase.dev_cli._settings", lambda: settings)
+    monkeypatch.setattr(
+        "paperbase.dev_cli.run_indexing_census",
+        lambda *, settings: captured.update({"settings": settings}) or 31,
+    )
+
+    exit_code = main(["benchmark", "iq-1"])
+
+    assert exit_code == 31
+    assert captured == {"settings": settings}
+
+
 def test_main_dispatches_flush_local(monkeypatch):
     monkeypatch.setattr("paperbase.dev_cli.flush_local", lambda: 19)
 

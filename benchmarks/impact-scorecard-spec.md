@@ -263,8 +263,9 @@ Current repo-supported entrypoints:
 - `make doctor`
 - `make test`
 - `make profile`
+- `.venv/bin/paperbase-dev benchmark iq-1`
 
-Today, only the deterministic performance profile is fully implemented as a stable repo command via `make profile`.
+Today, the deterministic performance profile is fully implemented as a stable repo command via `make profile`, and the first scorecard benchmark slice is available as `paperbase-dev benchmark iq-1`.
 
 This spec requires the future benchmark surface to live behind the supported repo workflow, preferably through `paperbase-dev` and exposed at the repo root through `make` targets, rather than through ad hoc shell scripts.
 

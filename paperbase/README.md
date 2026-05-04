@@ -4,6 +4,7 @@
 
 The admin CLI includes:
 
+- `paperbase-dev benchmark iq-1` for a current-snapshot indexing census report under `benchmarks/out/`
 - `paperbase-dev reindex-embeddings` for queuing a full paper/chunk embedding rewrite after an embedding-model change
 - `paperbase-dev jobs list-dead` for dead-letter triage
 - `paperbase-dev jobs retry <job_id>` for promoting a dead job back to pending

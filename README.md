@@ -66,6 +66,7 @@ Optional browser-account settings now hang off the same API env surface:
 
 - deterministic hotpath and test-time artifacts live under `benchmarks/`
 - [benchmarks/impact-scorecard-spec.md](./benchmarks/impact-scorecard-spec.md) defines the scientific measurement spec for indexing quality, retrieval quality, and harness lift with vs without Paperbase
+- `.venv/bin/paperbase-dev benchmark iq-1` runs the first implemented scorecard slice: a current-snapshot indexing census that writes `benchmarks/out/iq1.current.json` and `benchmarks/out/iq1.current.md`
 
 For a full reset of the local database and storage, use:
 

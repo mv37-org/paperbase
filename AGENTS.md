@@ -17,7 +17,7 @@ Use the repo-root `Makefile` as the primary interface:
 
 Do not replace these with ad hoc command sequences in normal work. If you need lower-level helpers, use the installed `paperbase-dev` CLI rather than custom shell scripts.
 
-Operator-facing `paperbase-dev` commands include `jobs list-dead`, `jobs retry <job_id>`, and `harvest`. For harvests, `--limit-per-window` caps each category-window chunk, not the whole category across the requested range.
+Operator-facing `paperbase-dev` commands include `benchmark iq-1`, `jobs list-dead`, `jobs retry <job_id>`, and `harvest`. For harvests, `--limit-per-window` caps each category-window chunk, not the whole category across the requested range.
 
 ## Environment and Local Prerequisites
 
