@@ -264,6 +264,38 @@ def test_fetch_papers_with_code_repo_handles_404_and_empty_results():
     assert sources.fetch_papers_with_code_repo("unknown", session=session) is None
 
 
+def test_fetch_papers_with_code_repo_warns_when_api_redirects_to_html(caplog):
+    """The PWC REST API was deprecated and ``/api/v1/papers/?arxiv_id=...``
+    now 302-redirects to ``huggingface.co/papers/trending``. ``requests``
+    follows the redirect by default, so the helper used to silently
+    barf on ``.json()`` and return None for every paper. Detect the
+    HTML response explicitly so the operator notices instead of layer 1
+    silently no-oping in production (PR #45 review).
+    """
+    import logging
+
+    # Re-arm the once-only warning sentinel so this test sees the log
+    # regardless of which other test ran first.
+    sources._PWC_DEAD_API_WARNED = False
+    html_response = _FakeResponse(
+        status_code=200,
+        text="<!DOCTYPE html><html>trending papers</html>",
+        headers={"content-type": "text/html; charset=utf-8"},
+    )
+    session = _StubSession(
+        {"https://paperswithcode.com/api/v1/papers/": html_response}
+    )
+    with caplog.at_level(logging.WARNING, logger="paperbase.sources"):
+        result = sources.fetch_papers_with_code_repo("2401.12345", session=session)
+    assert result is None
+    assert any(
+        "Papers With Code API returned non-JSON" in record.getMessage()
+        for record in caplog.records
+    ), "expected pwc.api_dead warning but log was: " + repr(
+        [r.getMessage() for r in caplog.records]
+    )
+
+
 def test_fetch_papers_with_code_repo_degrades_gracefully_on_network_error():
     """Network failures (timeouts, DNS issues, connection refused) must
     not propagate — the whole point of having a ranker fallback is that

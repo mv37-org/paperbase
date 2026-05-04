@@ -40,23 +40,36 @@ _GITHUB_URL_TRAILING_JUNK = ".,;:)\"'"
 # ``Supplemental Material`` renders as ``openai/gpt-3supplemental``
 # and the regex captures the whole mash-up. The regex itself can't
 # tell where the URL ends, so we post-process by stripping known
-# noise tokens from the trailing edge of the repo slug. Order
-# matters — longer suffixes first so ``supplementary`` doesn't get
-# stripped to ``supplement`` before the longer match runs.
-_REPO_SLUG_NOISE_SUFFIXES: tuple[str, ...] = (
+# noise tokens from the trailing edge of the repo slug.
+#
+# Two tiers, because the unconditional version of this rule was too
+# aggressive and rewrote legitimate slugs like ``interpretable`` /
+# ``roundtable`` / ``release-notes`` (PR #45 review). The boundary
+# tier requires the suffix to be preceded by a non-letter character
+# (digit, ``-``, ``_``, ``.``) — a strong signal of prose-mash because
+# real repo names that end in these words almost always do so as a
+# continuous lowercase token (``interpretable``, ``roundtable``).
+# The always tier covers ``http``/``https`` only, where any trailing
+# instance is essentially never a repo name and is overwhelmingly a
+# prose-paste artifact (``simclr`` + ``http://...`` mash).
+# Order matters — longer suffixes first so ``supplementary`` doesn't
+# get stripped to ``supplement`` before the longer match runs.
+_REPO_SLUG_NOISE_SUFFIXES_ALWAYS: tuple[str, ...] = (
+    "https",
+    "http",
+)
+_REPO_SLUG_NOISE_SUFFIXES_REQUIRE_BOUNDARY: tuple[str, ...] = (
     "supplementary",
     "supplemental",
     "appendix",
-    "section",
     "material",
     "license",
     "readme",
-    "https",
-    "http",
-    "note",
+    "section",
     "notes",
-    "fig",
+    "note",
     "figure",
+    "fig",
     "table",
 )
 
@@ -66,24 +79,48 @@ def _strip_noise_suffix(slug: str) -> str:
 
     Catches the ``gpt-3supplemental`` / ``simclrhttp`` family of regex
     captures where extraction lost a whitespace boundary between the
-    URL and the surrounding prose. Only fires when the prefix that
-    remains after stripping looks like a real repo name (4+ chars and
-    doesn't end in a separator) so we don't over-correct legitimate
-    repos that happen to end in one of these tokens.
+    URL and the surrounding prose. Conservative by default — for
+    suffixes that overlap with real English words (``table``, ``notes``,
+    ``readme``, ...) only fires when the character before the suffix
+    is a digit, which is the strongest signal of prose-paste because
+    paper / model IDs (``gpt-3``, ``llama-2``, ``yolo-9``) overwhelmingly
+    end in digits and prose words start with letters. Other separators
+    (``-``, ``_``, ``.``) deliberately appear in real repo names like
+    ``release-notes`` / ``repo_appendix`` so they don't qualify as
+    mash-up evidence on their own. ``http`` / ``https`` are the only
+    suffixes we strip unconditionally because they are essentially
+    never legitimate trailing tokens in a repo name.
     """
     if not slug:
         return slug
     lower = slug.lower()
-    for suffix in _REPO_SLUG_NOISE_SUFFIXES:
+    for suffix in _REPO_SLUG_NOISE_SUFFIXES_ALWAYS:
         if lower.endswith(suffix) and len(slug) - len(suffix) >= 4:
-            stripped = slug[: -len(suffix)]
-            # Reject if the prefix ends with a separator — would leave
-            # ``simclr-`` / ``gpt-3-`` style fragments. Trim trailing
-            # separators instead.
-            stripped = stripped.rstrip("-_.")
-            if len(stripped) >= 3:
+            stripped = _trim_repo_slug(slug, suffix)
+            if stripped is not None:
                 return stripped
+    for suffix in _REPO_SLUG_NOISE_SUFFIXES_REQUIRE_BOUNDARY:
+        if not lower.endswith(suffix) or len(slug) - len(suffix) < 4:
+            continue
+        boundary_char = slug[-(len(suffix) + 1)]
+        if not boundary_char.isdigit():
+            # Letter or separator: assume legitimate slug (``interpretable``,
+            # ``roundtable``, ``release-notes``, ``repo_appendix``).
+            continue
+        stripped = _trim_repo_slug(slug, suffix)
+        if stripped is not None:
+            return stripped
     return slug
+
+
+def _trim_repo_slug(slug: str, suffix: str) -> str | None:
+    """Drop ``suffix`` from the tail of ``slug`` and trim trailing
+    separators (so ``gpt-3-`` / ``simclr_`` don't leak through). Returns
+    ``None`` when the resulting prefix is shorter than 3 chars — that
+    suggests the suffix was the dominant content and the original slug
+    was probably legitimate after all."""
+    stripped = slug[: -len(suffix)].rstrip("-_.")
+    return stripped if len(stripped) >= 3 else None
 
 
 @dataclass(frozen=True)

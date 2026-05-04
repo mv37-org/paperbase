@@ -4487,6 +4487,109 @@ def test_set_admin_code_url_pins_and_rejects_unsupported(service: PaperbaseServi
     assert service.set_admin_code_url("paper_unknown", code_url="https://github.com/a/b") is None
 
 
+def test_update_code_url_resets_code_ingest_state_on_url_change(
+    service: PaperbaseService,
+) -> None:
+    """When ``update_code_url`` swaps or clears the URL, the underlying
+    code-ingest state must reset alongside it (#45 review). Otherwise
+    clearing a URL leaves ``code_index_status='indexed'`` plus the old
+    manifest/code chunks served, and swapping repos serves stale
+    metadata until an unrelated reindex catches up."""
+    paper_id = _seed_code_url_paper(
+        service, code_url="https://github.com/a/old", code_url_source="extracted"
+    )
+    # Hand-set the post-ingest state the way a successful ingest_repo
+    # would leave it. The repository's update_code_url must wipe these
+    # on a URL transition.
+    paper = service.repository.papers[paper_id]
+    service.repository.papers[paper_id] = paper.model_copy(
+        update={
+            "code_index_status": "indexed",
+            "code_is_python": True,
+            "code_python_reason": "py-files-found",
+            "code_manifest": {"resolved_sha": "abc123", "code_url": "https://github.com/a/old"},
+        }
+    )
+    service.repository.text_chunks[paper_id] = [
+        {
+            "chunk_id": "chunk_a",
+            "paper_id": paper_id,
+            "path": "README.md",
+            "chunk_kind": "code_readme",
+            "content": "old readme",
+            "chunk_index": 0,
+            "section_depth": 1,
+            "section_order": 0,
+        },
+        {
+            "chunk_id": "chunk_b",
+            "paper_id": paper_id,
+            "path": "sections/intro.md",
+            "chunk_kind": "section",
+            "content": "paper section",
+            "chunk_index": 0,
+            "section_depth": 1,
+            "section_order": 0,
+        },
+    ]
+
+    swapped = service.repository.update_code_url(
+        paper_id, code_url="https://github.com/a/new", code_url_source="admin"
+    )
+    assert swapped is not None
+    assert swapped.code_url == "https://github.com/a/new"
+    assert swapped.code_index_status == "none"
+    assert swapped.code_is_python is None
+    assert swapped.code_python_reason is None
+    assert swapped.code_manifest is None
+    remaining_kinds = {c["chunk_kind"] for c in service.repository.text_chunks[paper_id]}
+    assert remaining_kinds == {"section"}, "section chunks must survive a code-url swap"
+
+    cleared = service.repository.update_code_url(
+        paper_id, code_url=None, code_url_source=None
+    )
+    assert cleared is not None
+    assert cleared.code_url is None
+    assert cleared.code_index_status == "none"
+
+
+def test_set_admin_code_url_enqueues_ingest_repo_on_change(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An admin pinning or swapping a paper's code_url must trigger a
+    fresh ``ingest_repo`` job so the chat surface picks up the new
+    repo's code without waiting on a separate reindex."""
+    paper_id = _seed_code_url_paper(service)
+
+    enqueued: list[tuple[str, bool]] = []
+
+    def fake_enqueue(_paper_id: str, *, force: bool = False):
+        enqueued.append((_paper_id, force))
+
+        class _StubJob:
+            job_id = "job_enq_test"
+
+        return _StubJob()
+
+    monkeypatch.setattr(service, "enqueue_ingest_repo_job", fake_enqueue)
+
+    service.set_admin_code_url(paper_id, code_url="https://github.com/owner/first")
+    assert enqueued == [(paper_id, True)]
+
+    # Same URL: no re-enqueue.
+    service.set_admin_code_url(paper_id, code_url="https://github.com/owner/first")
+    assert len(enqueued) == 1
+
+    # Swap to a new URL: re-enqueue.
+    service.set_admin_code_url(paper_id, code_url="https://github.com/owner/second")
+    assert enqueued[-1] == (paper_id, True)
+    assert len(enqueued) == 2
+
+    # Clear: no enqueue (no new repo to fetch).
+    service.set_admin_code_url(paper_id, code_url=None)
+    assert len(enqueued) == 2
+
+
 def test_admin_pin_survives_reindex_in_index_arxiv_paper(
     service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
 ) -> None:

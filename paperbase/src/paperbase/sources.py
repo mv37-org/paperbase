@@ -640,6 +640,32 @@ def get_related_papers(arxiv_id: str, semantic_scholar_id: str | None, *, limit:
 PWC_API = "https://paperswithcode.com/api/v1/papers"
 
 
+_PWC_DEAD_API_WARNED = False
+
+
+def _warn_pwc_api_dead_once(arxiv_id: str, content_type: str, final_url: str) -> None:
+    """Log a single warning the first time the PWC endpoint hands back
+    HTML / a redirect instead of JSON. The PWC REST API was deprecated
+    after #46 was filed; without this signal the helper silently no-ops
+    on every paper, which the original review caught."""
+    global _PWC_DEAD_API_WARNED
+    if _PWC_DEAD_API_WARNED:
+        return
+    _PWC_DEAD_API_WARNED = True
+    logger.warning(
+        "Papers With Code API returned non-JSON; the layer 1 crosslink "
+        "is no-oping. The PWC REST API appears to be deprecated — set "
+        "PAPERBASE_FETCH_CODE_CROSSLINKS_AT_INDEX=0 or remove the "
+        "callers if this stays broken upstream.",
+        extra={
+            "event": "pwc.api_dead",
+            "arxiv_id": arxiv_id,
+            "content_type": content_type,
+            "final_url": final_url,
+        },
+    )
+
+
 def fetch_papers_with_code_repo(
     arxiv_id: str,
     *,
@@ -655,6 +681,15 @@ def fetch_papers_with_code_repo(
     override layer, not the primary signal. Network failures / rate
     limits / missing papers degrade to ``None`` so index-time callers
     can proceed with the ranker fallback.
+
+    .. note::
+
+       The PWC REST API was deprecated upstream after #46 landed and
+       currently 302-redirects ``/api/v1/papers/?arxiv_id=...`` requests
+       to ``huggingface.co/papers/trending``. When that happens, this
+       helper logs a one-time warning (``pwc.api_dead``) and returns
+       ``None`` so the operator notices instead of every paper silently
+       no-oping at layer 1.
 
     The endpoint is
     ``GET {PWC_API}/?arxiv_id=<id>`` which returns a paginated list;
@@ -686,9 +721,27 @@ def fetch_papers_with_code_repo(
             },
         )
         return None
+    content_type = (paper_response.headers.get("content-type") or "").lower()
+    if "html" in content_type:
+        # PWC API is currently dead: ``/api/v1/papers/`` returns a 302
+        # to huggingface.co/papers/trending. ``requests`` follows the
+        # redirect by default, so we land on a 200 HTML page that
+        # ``.json()`` would silently barf on. Detect the mismatch
+        # explicitly and surface it once.
+        _warn_pwc_api_dead_once(
+            arxiv_id,
+            content_type,
+            getattr(paper_response, "url", "") or f"{PWC_API}/",
+        )
+        return None
     try:
         paper_body = paper_response.json()
     except ValueError:
+        _warn_pwc_api_dead_once(
+            arxiv_id,
+            content_type,
+            getattr(paper_response, "url", "") or f"{PWC_API}/",
+        )
         return None
     results = paper_body.get("results") or []
     if not results:

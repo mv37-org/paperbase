@@ -857,3 +857,58 @@ def test_extract_github_url_keeps_subpath_for_code_ingest_to_normalize():
     url = extract_github_url(body)
     assert url is not None
     assert url.startswith("https://github.com/owner/repo")
+
+
+# --------------------------------------------------------------------------- #
+# Prose-mash suffix repair (#45 review)
+# --------------------------------------------------------------------------- #
+
+
+def test_strip_noise_suffix_repairs_digit_boundary_mashups():
+    """Cases where the previous URL ends in a digit and the prose tail
+    got glued on (PDF→markdown lost the whitespace boundary). The
+    digit-to-letter transition is a strong signal of prose-paste, so
+    these stay repaired."""
+    from paperbase.extractors import _strip_noise_suffix
+
+    assert _strip_noise_suffix("gpt-3supplemental") == "gpt-3"
+    assert _strip_noise_suffix("model-2material") == "model-2"
+
+
+def test_strip_noise_suffix_repairs_http_mashups_unconditionally():
+    """``http`` / ``https`` are essentially never trailing tokens of a
+    real repo name and overwhelmingly indicate prose-paste, so they
+    strip even without a digit boundary (``simclrhttp`` shape)."""
+    from paperbase.extractors import _strip_noise_suffix
+
+    assert _strip_noise_suffix("simclrhttp") == "simclr"
+    assert _strip_noise_suffix("repohttps") == "repo"
+
+
+def test_strip_noise_suffix_preserves_legitimate_word_endings():
+    """Regression for the over-strip arslnb caught on PR #45: real
+    repos like ``interpretable``, ``roundtable``, ``release-notes``
+    were getting rewritten to ``interpre`` / ``round`` / ``release``
+    because the strip was unconditional. The boundary requirement on
+    the word-overlap suffixes (``table``, ``notes``, ``readme``, ...)
+    refuses to strip when the preceding char is a letter — i.e. the
+    suffix is part of a single continuous word, not a prose-paste."""
+    from paperbase.extractors import _strip_noise_suffix
+
+    assert _strip_noise_suffix("interpretable") == "interpretable"
+    assert _strip_noise_suffix("roundtable") == "roundtable"
+    assert _strip_noise_suffix("release-notes") == "release-notes"
+    assert _strip_noise_suffix("readme") == "readme"
+
+
+def test_strip_noise_suffix_does_not_strip_separator_only_boundaries():
+    """Hyphen / underscore / dot before the noise suffix is *not* enough
+    to strip — those are common in real repo names (``release-notes``,
+    ``repo_appendix``, ``v1.notes``). Stripping at separator boundaries
+    is what caused the over-correct cases arslnb caught on PR #45.
+    Digit boundaries remain the only mash-up signal we trust."""
+    from paperbase.extractors import _strip_noise_suffix
+
+    assert _strip_noise_suffix("paper-supplemental") == "paper-supplemental"
+    assert _strip_noise_suffix("repo_appendix") == "repo_appendix"
+    assert _strip_noise_suffix("v1-readme") == "v1-readme"

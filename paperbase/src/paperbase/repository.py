@@ -940,6 +940,15 @@ class PaperRepository(ABC):
         CLI. Does not touch ``code_url_candidates``; those are owned by
         :meth:`upsert_paper` and represent what the ranker saw, not what
         was chosen.
+
+        When the new ``code_url`` differs from the existing one (cleared,
+        swapped, or freshly attached), the prior code-ingest state is
+        reset alongside the URL: ``code_index_status`` returns to
+        ``'none'``, ``code_is_python`` / ``code_python_reason`` /
+        ``code_manifest`` are cleared, and existing code chunks (kinds
+        in :data:`CODE_CHUNK_KINDS`) are deleted. This stops a stale
+        manifest from outliving the repo that produced it. Service
+        callers re-enqueue ``ingest_repo`` for non-null new URLs.
         """
         raise NotImplementedError
 
@@ -1897,9 +1906,29 @@ class SqlAlchemyPaperRepository(PaperRepository):
             row = session.get(PaperORM, paper_id)
             if row is None:
                 return None
+            previous_url = row.code_url
             row.code_url = code_url
             row.code_url_source = code_url_source
             row.updated_at = utcnow()
+            # Reset code-ingest state when the URL changes (cleared,
+            # swapped, or freshly attached). Without this, clearing
+            # ``code_url`` left the row at ``code_index_status='indexed'``
+            # with the previous repo's manifest and code chunks still
+            # served — admins could clear a paper's repo and the chat
+            # still cited the old code. Service-layer callers
+            # (set_admin_code_url / backfill_code_urls) re-enqueue an
+            # ``ingest_repo`` job for non-null new URLs.
+            if previous_url != code_url:
+                row.code_index_status = "none"
+                row.code_is_python = None
+                row.code_python_reason = None
+                row.code_manifest = None
+                session.execute(
+                    delete(TextChunkORM).where(
+                        TextChunkORM.paper_id == paper_id,
+                        TextChunkORM.chunk_kind.in_(CODE_CHUNK_KINDS),
+                    )
+                )
             session.flush()
             return _paper_from_orm(row)
 
@@ -4397,9 +4426,29 @@ class MemoryPaperRepository(PaperRepository):
         existing = self.papers.get(paper_id)
         if existing is None:
             return None
-        updated = existing.model_copy(
-            update={"code_url": code_url, "code_url_source": code_url_source}
-        )
+        updates: dict[str, Any] = {
+            "code_url": code_url,
+            "code_url_source": code_url_source,
+        }
+        # Mirror the SQL backend: any URL transition wipes the prior
+        # code-ingest state so a stale manifest / classification doesn't
+        # outlive the repo it described.
+        if existing.code_url != code_url:
+            updates.update(
+                {
+                    "code_index_status": "none",
+                    "code_is_python": None,
+                    "code_python_reason": None,
+                    "code_manifest": None,
+                }
+            )
+            preserved = [
+                c
+                for c in self.text_chunks.get(paper_id, [])
+                if c["chunk_kind"] not in CODE_CHUNK_KINDS
+            ]
+            self.text_chunks[paper_id] = preserved
+        updated = existing.model_copy(update=updates)
         self.papers[paper_id] = updated
         return updated
 

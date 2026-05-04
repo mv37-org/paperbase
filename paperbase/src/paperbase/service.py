@@ -3479,6 +3479,11 @@ class PaperbaseService:
                     self.repository.update_code_url(
                         paper.paper_id, code_url=pwc_url, code_url_source="pwc"
                     )
+                    # update_code_url wipes prior code-ingest state on
+                    # any URL transition (#45 review). Queue a fresh
+                    # ingest so the chat surface sees the new repo's
+                    # contents without waiting on a manual reindex.
+                    self.enqueue_ingest_repo_job(paper.paper_id, force=True)
                 total_updated += 1
             last = batch[-1]
             after_paper_id = last.paper_id
@@ -3504,10 +3509,18 @@ class PaperbaseService:
         the API surface can return a clean 400. Pins survive re-index
         runs via the ``code_url_source='admin'`` sticky bit checked in
         :meth:`index_arxiv_paper`.
+
+        When the URL changes, the underlying ``update_code_url`` resets
+        the code-ingest state (status, manifest, code chunks) so the
+        paper isn't left serving the previous repo's metadata. For
+        non-null new URLs we then enqueue a fresh ``ingest_repo`` job so
+        the chat surface picks up the new repo's contents without
+        waiting for an unrelated reindex.
         """
         paper = self.repository.get_paper(paper_id)
         if paper is None:
             return None
+        previous_url = paper.code_url
         if code_url is None or not code_url.strip():
             return self.repository.update_code_url(
                 paper_id, code_url=None, code_url_source=None
@@ -3519,9 +3532,12 @@ class PaperbaseService:
                 detail=f"Unsupported code_url: {code_url!r}",
             )
         canonical = f"https://github.com/{ref.owner}/{ref.repo}"
-        return self.repository.update_code_url(
+        updated = self.repository.update_code_url(
             paper_id, code_url=canonical, code_url_source="admin"
         )
+        if updated is not None and previous_url != canonical:
+            self.enqueue_ingest_repo_job(paper_id, force=True)
+        return updated
 
     def enqueue_ingest_repo_job(self, paper_id: str, *, force: bool = False) -> JobResponse:
         """Queue an ``ingest_repo`` job for a single paper (#5).
