@@ -20,12 +20,14 @@ PLUGIN_JUNIT := $(BENCHMARK_OUT_DIR)/plugin.junit.xml
 CHAT_TEST_JSON := $(BENCHMARK_OUT_DIR)/chat.vitest.json
 VP_INSTALL_CMD := curl -fsSL https://vite.plus | bash
 BASELINE_FLAG :=
+BENCHMARK ?= iq-1
+BENCHMARK_ARGS ?=
 
 ifneq ($(UPDATE_BASELINE),)
 BASELINE_FLAG := --update-baseline
 endif
 
-.PHONY: help setup doctor dev reset-local test-smoke test profile clean _require_vp _require_setup _stop_stack
+.PHONY: help setup doctor dev reset-local test-smoke test profile benchmark clean _require_vp _require_setup _stop_stack
 
 SMOKE_BACKEND_TESTS := \
 	paperbase/tests/test_api_auth.py \
@@ -42,6 +44,7 @@ help:
 	@printf "  make test-smoke  Run the PR-oriented smoke gate used by CI.\n"
 	@printf "  make test    Run doctor, init-local, run-prereq verification, lint, chat checks/tests/build, pytest, and timing comparisons.\n"
 	@printf "  make profile Run doctor, init-local, run-prereq verification, deterministic hotpath profiling, and baseline comparisons.\n"
+	@printf "  make benchmark BENCHMARK=iq-1  Run a repo-native benchmark with optional BENCHMARK_ARGS.\n"
 	@printf "  make clean   Stop local services and remove generated logs, caches, and frontend output.\n"
 
 setup:
@@ -137,6 +140,14 @@ profile:
 	@"$(PAPERBASE_DEV)" init-local
 	@"$(PAPERBASE_DEV)" verify-run --mode profile
 	@"$(PAPERBASE_DEV)" profile $(BASELINE_FLAG)
+
+benchmark:
+	@$(MAKE) --no-print-directory _require_vp
+	@$(MAKE) --no-print-directory _require_setup
+	@"$(PAPERBASE_DEV)" doctor --mode profile
+	@"$(PAPERBASE_DEV)" init-local
+	@"$(PAPERBASE_DEV)" verify-run --mode profile
+	@"$(PAPERBASE_DEV)" benchmark run "$(BENCHMARK)" $(BENCHMARK_ARGS)
 
 clean:
 	@$(MAKE) --no-print-directory _stop_stack

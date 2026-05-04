@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import cProfile
+from collections.abc import Callable
 from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -21,6 +22,22 @@ import psycopg
 from psycopg.rows import dict_row
 from sqlalchemy.engine import make_url
 
+try:
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn, TimeElapsedColumn
+    from rich.table import Table
+except Exception:  # pragma: no cover - exercised through the plain-text fallback
+    Console = None
+    Panel = None
+    Progress = None
+    SpinnerColumn = None
+    TextColumn = None
+    BarColumn = None
+    TaskProgressColumn = None
+    TimeElapsedColumn = None
+    Table = None
+
 from . import service as service_module
 from . import sources
 from .config import Settings, repo_root
@@ -34,6 +51,145 @@ from .storage import build_object_store
 BENCHMARK_ENV_LABEL = "local-dev"
 BENCHMARK_QUERY_TOKEN = "zzbench"
 BENCHMARK_USER_EMAIL = "bench+profile@paperbase.local"
+
+
+@dataclass(frozen=True, slots=True)
+class BenchmarkDefinition:
+    benchmark_id: str
+    title: str
+    eli5: str
+    tier: str
+    outputs: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class BenchmarkRunOptions:
+    verbose: bool = False
+    use_rich: bool = True
+
+
+class _BenchmarkUi:
+    def __init__(self, *, definition: BenchmarkDefinition, options: BenchmarkRunOptions) -> None:
+        self.definition = definition
+        self.options = options
+        self.rich_enabled = bool(options.use_rich and Console and Table and Panel and Progress)
+        self.console = Console() if self.rich_enabled and Console else None
+        self.progress = None
+        self.progress_task_id: int | None = None
+        self.progress_total = 0
+
+    def start(self) -> None:
+        if self.rich_enabled and self.console and Panel:
+            self.console.print(
+                Panel.fit(
+                    self.definition.eli5,
+                    title=f"{self.definition.benchmark_id.upper()} · {self.definition.title}",
+                    border_style="cyan",
+                )
+            )
+            return
+        print(f"{self.definition.benchmark_id}: {self.definition.title}")
+        print(f"ELI5: {self.definition.eli5}")
+
+    def announce(self, message: str) -> None:
+        if self.rich_enabled and self.console:
+            self.console.print(f"[cyan]{message}[/cyan]")
+            return
+        print(message)
+
+    def detail(self, message: str) -> None:
+        if not self.options.verbose:
+            return
+        if self.rich_enabled and self.console:
+            self.console.print(f"[dim]{message}[/dim]")
+            return
+        print(message)
+
+    def start_stage(self, label: str, *, total: int | None = None) -> None:
+        self.finish_stage()
+        if total is None or total <= 0:
+            suffix = f" ({total} items)" if total == 0 else ""
+            self.announce(f"{label}{suffix}")
+            return
+        self.progress_total = total
+        if self.rich_enabled and self.console and Progress:
+            self.progress = Progress(
+                SpinnerColumn(),
+                TextColumn("{task.description}"),
+                BarColumn(),
+                TaskProgressColumn(),
+                TimeElapsedColumn(),
+                console=self.console,
+            )
+            self.progress.start()
+            self.progress_task_id = self.progress.add_task(label, total=total)
+            return
+        self.announce(f"{label} ({total} items)")
+
+    def advance(self, amount: int = 1) -> None:
+        if self.progress is not None and self.progress_task_id is not None:
+            self.progress.advance(self.progress_task_id, amount)
+
+    def finish_stage(self, *, message: str | None = None) -> None:
+        if self.progress is not None and self.progress_task_id is not None:
+            self.progress.update(self.progress_task_id, completed=self.progress_total)
+            self.progress.stop()
+        self.progress = None
+        self.progress_task_id = None
+        self.progress_total = 0
+        if message:
+            self.announce(message)
+
+    def render_catalog(self, definitions: list[BenchmarkDefinition]) -> None:
+        if self.rich_enabled and self.console and Table:
+            table = Table(title="Available Benchmarks")
+            table.add_column("ID", style="bold cyan")
+            table.add_column("Title")
+            table.add_column("Tier")
+            table.add_column("ELI5")
+            table.add_column("Outputs")
+            for definition in definitions:
+                table.add_row(
+                    definition.benchmark_id,
+                    definition.title,
+                    definition.tier,
+                    definition.eli5,
+                    "\n".join(definition.outputs),
+                )
+            self.console.print(table)
+            return
+        print("Available benchmarks:")
+        for definition in definitions:
+            print(
+                f"  {definition.benchmark_id}: {definition.title} [{definition.tier}] "
+                f"- {definition.eli5}"
+            )
+            print(f"    outputs: {', '.join(definition.outputs)}")
+
+    def render_summary(
+        self,
+        *,
+        headline_rows: list[tuple[str, str]],
+        output_rows: list[tuple[str, str]],
+    ) -> None:
+        if self.rich_enabled and self.console and Table:
+            summary = Table(title=f"{self.definition.benchmark_id.upper()} Summary")
+            summary.add_column("Metric")
+            summary.add_column("Value", justify="right", style="bold")
+            for label, value in headline_rows:
+                summary.add_row(label, value)
+            outputs = Table(title="Artifacts")
+            outputs.add_column("Kind")
+            outputs.add_column("Path")
+            for label, value in output_rows:
+                outputs.add_row(label, value)
+            self.console.print(summary)
+            self.console.print(outputs)
+            return
+        for label, value in headline_rows:
+            print(f"{label:<22} {value}")
+        for label, value in output_rows:
+            print(f"{label:<22} {value}")
 
 
 def _repo_root() -> Path:
@@ -93,6 +249,28 @@ def _iq1_current_path() -> Path:
 
 def _iq1_current_md_path() -> Path:
     return _out_dir() / "iq1.current.md"
+
+
+def benchmark_definitions() -> list[BenchmarkDefinition]:
+    return [
+        BenchmarkDefinition(
+            benchmark_id="iq-1",
+            title="Indexing census",
+            eli5=(
+                "Count how many papers are really indexed, how rich those artifacts are, "
+                "and how much of the corpus is embedding-searchable."
+            ),
+            tier="representative",
+            outputs=("benchmarks/out/iq1.current.json", "benchmarks/out/iq1.current.md"),
+        )
+    ]
+
+
+def _benchmark_definition(benchmark_id: str) -> BenchmarkDefinition:
+    for definition in benchmark_definitions():
+        if definition.benchmark_id == benchmark_id:
+            return definition
+    raise KeyError(f"Unknown benchmark id: {benchmark_id}")
 
 
 def _ensure_benchmark_dirs() -> None:
@@ -354,11 +532,19 @@ def _distribution(counter: Counter[str], *, denominator: int) -> list[dict[str, 
     return rows
 
 
-def _preview_paper_ids(*, paper_ids: list[str], object_store) -> set[str]:
+def _preview_paper_ids(
+    *,
+    paper_ids: list[str],
+    object_store,
+    on_checked: Callable[[str, bool], None] | None = None,
+) -> set[str]:
     preview_ids: set[str] = set()
     for paper_id in paper_ids:
-        if object_store.exists(f"papers/{paper_id}/preview/first-page-top.webp"):
+        exists = object_store.exists(f"papers/{paper_id}/preview/first-page-top.webp")
+        if exists:
             preview_ids.add(paper_id)
+        if on_checked is not None:
+            on_checked(paper_id, exists)
     return preview_ids
 
 
@@ -653,51 +839,107 @@ def _render_iq1_markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def run_indexing_census(*, settings: Settings) -> int:
-    _ensure_benchmark_dirs()
-    rows = _load_iq1_rows(settings)
-    object_store = build_object_store(settings)
-    preview_paper_ids = _preview_paper_ids(
-        paper_ids=[str(row.get("paper_id")) for row in rows if row.get("paper_id")],
-        object_store=object_store,
+def _iq1_summary_rows(report: dict[str, Any]) -> list[tuple[str, str]]:
+    population = report["population"]
+    return [
+        ("Indexed papers", f"{population['indexed_papers']}/{population['total_papers']}"),
+        ("Rich-source rate", _format_ratio(report["source_richness"]["rich_index_rate"])),
+        ("Paper embeddings", _format_ratio(report["embedding_coverage"]["paper_embedding_rate"])),
+        ("Chunk embeddings", _format_ratio(report["embedding_coverage"]["chunk_embedding_rate"])),
+        ("Preview coverage", _format_ratio(report["artifact_completeness"]["papers_with_preview_rate"])),
+        ("Index job success", _format_ratio(report["reliability"]["terminal_success_rate"])),
+        ("Index job retry rate", _format_ratio(report["reliability"]["retry_rate"])),
+    ]
+
+
+def list_benchmarks_cli(*, use_rich: bool = True) -> int:
+    ui = _BenchmarkUi(
+        definition=BenchmarkDefinition(
+            benchmark_id="catalog",
+            title="Benchmark catalog",
+            eli5="Show the repo-native benchmarks you can run from paperbase-dev.",
+            tier="info",
+            outputs=(),
+        ),
+        options=BenchmarkRunOptions(verbose=False, use_rich=use_rich),
     )
+    ui.render_catalog(benchmark_definitions())
+    return 0
+
+
+def run_named_benchmark(
+    *,
+    benchmark_id: str,
+    settings: Settings,
+    verbose: bool = False,
+    use_rich: bool = True,
+) -> int:
+    if benchmark_id == "iq-1":
+        return run_indexing_census(
+            settings=settings,
+            verbose=verbose,
+            use_rich=use_rich,
+        )
+    raise KeyError(f"Unknown benchmark id: {benchmark_id}")
+
+
+def run_indexing_census(
+    *,
+    settings: Settings,
+    verbose: bool = False,
+    use_rich: bool = True,
+) -> int:
+    _ensure_benchmark_dirs()
+    definition = _benchmark_definition("iq-1")
+    ui = _BenchmarkUi(definition=definition, options=BenchmarkRunOptions(verbose=verbose, use_rich=use_rich))
+    ui.start()
+
+    ui.start_stage("Loading paper and chunk telemetry")
+    rows = _load_iq1_rows(settings)
+    ui.finish_stage(message=f"Loaded {len(rows)} paper rows from Postgres.")
+
+    object_store = build_object_store(settings)
+    paper_ids = [str(row.get("paper_id")) for row in rows if row.get("paper_id")]
+    checked = 0
+
+    def _on_preview_checked(_paper_id: str, _exists: bool) -> None:
+        nonlocal checked
+        checked += 1
+        ui.advance()
+        if verbose and not ui.rich_enabled and (checked % 250 == 0 or checked == len(paper_ids)):
+            ui.detail(f"Checked {checked}/{len(paper_ids)} preview artifacts.")
+
+    ui.start_stage("Checking preview artifacts", total=len(paper_ids))
+    preview_paper_ids = _preview_paper_ids(
+        paper_ids=paper_ids,
+        object_store=object_store,
+        on_checked=_on_preview_checked,
+    )
+    ui.finish_stage(message=f"Found preview artifacts for {len(preview_paper_ids)} papers.")
+
+    ui.start_stage("Loading index job telemetry")
     index_job_stats = _load_iq1_index_job_stats(settings)
+    ui.finish_stage(message=f"Loaded {index_job_stats['total_jobs']} index_paper job rows.")
+
+    ui.start_stage("Assembling benchmark report")
     report = _build_iq1_report(
         rows=rows,
         preview_paper_ids=preview_paper_ids,
         index_job_stats=index_job_stats,
         settings=settings,
     )
+    ui.finish_stage(message="Computed IQ-1 census metrics.")
+
+    ui.start_stage("Writing benchmark artifacts")
     _write_json(_iq1_current_path(), report)
     _write_text(_iq1_current_md_path(), _render_iq1_markdown(report))
-
-    population = report["population"]
-    print(f"Wrote indexing census JSON: {_iq1_current_path()}")
-    print(f"Wrote indexing census Markdown: {_iq1_current_md_path()}")
-    print(f"Indexed papers:         {population['indexed_papers']}/{population['total_papers']}")
-    print(
-        "Rich-source rate:      "
-        f"{_format_ratio(report['source_richness']['rich_index_rate'])}"
-    )
-    print(
-        "Paper embeddings:      "
-        f"{_format_ratio(report['embedding_coverage']['paper_embedding_rate'])}"
-    )
-    print(
-        "Chunk embeddings:      "
-        f"{_format_ratio(report['embedding_coverage']['chunk_embedding_rate'])}"
-    )
-    print(
-        "Preview coverage:      "
-        f"{_format_ratio(report['artifact_completeness']['papers_with_preview_rate'])}"
-    )
-    print(
-        "Index job success:     "
-        f"{_format_ratio(report['reliability']['terminal_success_rate'])}"
-    )
-    print(
-        "Index job retry rate:  "
-        f"{_format_ratio(report['reliability']['retry_rate'])}"
+    ui.finish_stage(message="Wrote JSON and Markdown reports.")
+    ui.render_summary(
+        headline_rows=_iq1_summary_rows(report),
+        output_rows=[
+            ("JSON report", str(_iq1_current_path())),
+            ("Markdown report", str(_iq1_current_md_path())),
+        ],
     )
     return 0
 

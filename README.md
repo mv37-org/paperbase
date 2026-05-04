@@ -53,6 +53,7 @@ Optional browser-account settings now hang off the same API env surface:
 - `make test-smoke` runs the PR-oriented CI smoke gate: lint, chat checks/tests/build, a focused backend subset, and plugin tests
 - `make test` runs `ruff check`, `vp check`, a frontend build, backend tests, and plugin tests
 - `make profile` runs the deterministic hotpath profiling flow used for performance tracking
+- `make benchmark BENCHMARK=iq-1 BENCHMARK_ARGS="--verbose"` runs a repo-native benchmark through the supported benchmark workflow
 - `make clean` stops local services and removes generated logs, caches, and frontend output
 
 ## CI
@@ -66,7 +67,11 @@ Optional browser-account settings now hang off the same API env surface:
 
 - deterministic hotpath and test-time artifacts live under `benchmarks/`
 - [benchmarks/impact-scorecard-spec.md](./benchmarks/impact-scorecard-spec.md) defines the scientific measurement spec for indexing quality, retrieval quality, and harness lift with vs without Paperbase
-- `.venv/bin/paperbase-dev benchmark iq-1` runs the first implemented scorecard slice: a current-snapshot indexing census that writes `benchmarks/out/iq1.current.json` and `benchmarks/out/iq1.current.md`
+- `make benchmark BENCHMARK=iq-1 BENCHMARK_ARGS="--verbose"` is the easiest way to run the first implemented scorecard slice
+- `.venv/bin/paperbase-dev benchmark list` shows the available repo-native benchmarks
+- `.venv/bin/paperbase-dev benchmark run iq-1 --verbose` runs the first implemented scorecard slice: a current-snapshot indexing census that writes `benchmarks/out/iq1.current.json` and `benchmarks/out/iq1.current.md`
+- `.venv/bin/paperbase-dev benchmark iq-1 --verbose` remains as a compatibility alias for the direct IQ-1 runner
+- benchmark runs use a `rich`-backed live terminal UI during local dev and automatically fall back to plain text when the richer UI is unavailable
 
 For a full reset of the local database and storage, use:
 

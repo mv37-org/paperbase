@@ -4,7 +4,14 @@ import json
 from datetime import UTC, datetime, timedelta
 
 from paperbase.config import Settings
-from paperbase.dev_benchmarks import _build_iq1_report, _render_iq1_markdown, run_indexing_census
+from paperbase.dev_benchmarks import (
+    _build_iq1_report,
+    _render_iq1_markdown,
+    benchmark_definitions,
+    list_benchmarks_cli,
+    run_indexing_census,
+    run_named_benchmark,
+)
 
 
 def test_build_iq1_report_computes_core_census_metrics():
@@ -231,3 +238,58 @@ def test_run_indexing_census_writes_json_and_markdown_reports(monkeypatch, tmp_p
     assert payload["population"]["total_papers"] == 1
     assert payload["artifact_completeness"]["papers_with_preview"] == 1
     assert "# IQ-1 Indexing Census" in markdown_report.read_text(encoding="utf-8")
+
+
+def test_list_benchmarks_cli_plain_lists_catalog(capsys):
+    exit_code = list_benchmarks_cli(use_rich=False)
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert "Available benchmarks:" in output
+    assert "iq-1: Indexing census" in output
+    assert "benchmarks/out/iq1.current.json" in output
+
+
+def test_run_named_benchmark_dispatches_iq1(monkeypatch):
+    settings = Settings(
+        database_url="postgresql+psycopg:///paperbase",
+        storage_backend="local",
+        local_storage_root=".paperbase-data",
+    )
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "paperbase.dev_benchmarks.run_indexing_census",
+        lambda *, settings, verbose, use_rich: captured.update(
+            {
+                "settings": settings,
+                "verbose": verbose,
+                "use_rich": use_rich,
+            }
+        )
+        or 43,
+    )
+
+    exit_code = run_named_benchmark(
+        benchmark_id="iq-1",
+        settings=settings,
+        verbose=True,
+        use_rich=False,
+    )
+
+    assert exit_code == 43
+    assert captured == {
+        "settings": settings,
+        "verbose": True,
+        "use_rich": False,
+    }
+
+
+def test_benchmark_definitions_include_iq1():
+    definitions = benchmark_definitions()
+
+    assert [definition.benchmark_id for definition in definitions] == ["iq-1"]
+    assert definitions[0].outputs == (
+        "benchmarks/out/iq1.current.json",
+        "benchmarks/out/iq1.current.md",
+    )

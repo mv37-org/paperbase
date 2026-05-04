@@ -35,6 +35,13 @@ def test_makefile_exposes_reset_local_workflow():
     assert "make reset-local" in makefile
 
 
+def test_makefile_exposes_benchmark_workflow():
+    makefile = _read_repo_file("Makefile")
+
+    assert "benchmark:" in makefile
+    assert "make benchmark" in makefile
+
+
 def test_profile_workflow_delegates_to_make_profile():
     workflow = _read_repo_file(".github/workflows/profile.yml")
 
@@ -64,6 +71,13 @@ def test_pyproject_packages_prompt_assets():
     package_data = pyproject["tool"]["setuptools"]["package-data"]["paperbase"]
 
     assert "prompt_assets/*/*.md" in package_data
+
+
+def test_pyproject_dev_dependencies_include_rich_for_benchmark_ui():
+    pyproject = tomllib.loads(_read_repo_file("paperbase/pyproject.toml"))
+    dev_dependencies = pyproject["project"]["optional-dependencies"]["dev"]
+
+    assert "rich>=13" in dev_dependencies
 
 
 def test_job_orm_carries_retry_policy_columns():
