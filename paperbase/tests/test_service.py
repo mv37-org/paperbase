@@ -6297,3 +6297,501 @@ def test_list_and_read_return_none_for_missing_paper(service: PaperbaseService) 
     assert service.read_paper_code_file("paper_does_not_exist", "README.md") is None
     assert service.search_paper_code("paper_does_not_exist", "x") is None
     assert service.get_paper_code_context("paper_does_not_exist", "x") is None
+
+
+# --------------------------------------------------------------------------- #
+# code_url 3-layer decision (#46): admin > HF paper page > ranker
+# --------------------------------------------------------------------------- #
+
+
+def _seed_code_url_paper(
+    service: PaperbaseService,
+    *,
+    arxiv_id: str = "2401.99999",
+    code_url: str | None = None,
+    code_url_source: str | None = None,
+) -> str:
+    from datetime import UTC, datetime as _datetime
+
+    paper = PaperMetadata(
+        arxiv_id=arxiv_id,
+        title="Test Paper",
+        authors="Alice, Bob",
+        abstract="x",
+        categories="cs.AI",
+        primary_category="cs.AI",
+        published="2024-01-01",
+        updated="2024-01-01",
+        code_url=code_url,
+        code_url_source=code_url_source,
+        index_status="indexed",
+        indexed_at=_datetime(2024, 1, 1, tzinfo=UTC),
+    )
+    stored = service.repository.upsert_paper(paper, search_document="x", embedding=None)
+    return stored.paper_id
+
+
+def test_set_admin_code_url_pins_and_rejects_unsupported(service: PaperbaseService) -> None:
+    paper_id = _seed_code_url_paper(service)
+    pinned = service.set_admin_code_url(paper_id, code_url="https://github.com/owner/official")
+    assert pinned is not None
+    assert pinned.code_url == "https://github.com/owner/official"
+    assert pinned.code_url_source == "admin"
+
+    cleared = service.set_admin_code_url(paper_id, code_url=None)
+    assert cleared is not None
+    assert cleared.code_url is None
+    assert cleared.code_url_source is None
+
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as excinfo:
+        service.set_admin_code_url(paper_id, code_url="https://gitlab.com/x/y")
+    assert excinfo.value.status_code == 400
+
+    assert service.set_admin_code_url("paper_unknown", code_url="https://github.com/a/b") is None
+
+
+def test_update_code_url_resets_code_ingest_state_on_url_change(
+    service: PaperbaseService,
+) -> None:
+    """When ``update_code_url`` swaps or clears the URL, the underlying
+    code-ingest state must reset alongside it (#45 review). Otherwise
+    clearing a URL leaves ``code_index_status='indexed'`` plus the old
+    manifest/code chunks served, and swapping repos serves stale
+    metadata until an unrelated reindex catches up."""
+    paper_id = _seed_code_url_paper(
+        service, code_url="https://github.com/a/old", code_url_source="extracted"
+    )
+    # Hand-set the post-ingest state the way a successful ingest_repo
+    # would leave it. The repository's update_code_url must wipe these
+    # on a URL transition.
+    paper = service.repository.papers[paper_id]
+    service.repository.papers[paper_id] = paper.model_copy(
+        update={
+            "code_index_status": "indexed",
+            "code_is_python": True,
+            "code_python_reason": "py-files-found",
+            "code_manifest": {"resolved_sha": "abc123", "code_url": "https://github.com/a/old"},
+        }
+    )
+    service.repository.text_chunks[paper_id] = [
+        {
+            "chunk_id": "chunk_a",
+            "paper_id": paper_id,
+            "path": "README.md",
+            "chunk_kind": "code_readme",
+            "content": "old readme",
+            "chunk_index": 0,
+            "section_depth": 1,
+            "section_order": 0,
+        },
+        {
+            "chunk_id": "chunk_b",
+            "paper_id": paper_id,
+            "path": "sections/intro.md",
+            "chunk_kind": "section",
+            "content": "paper section",
+            "chunk_index": 0,
+            "section_depth": 1,
+            "section_order": 0,
+        },
+    ]
+
+    swapped = service.repository.update_code_url(
+        paper_id, code_url="https://github.com/a/new", code_url_source="admin"
+    )
+    assert swapped is not None
+    assert swapped.code_url == "https://github.com/a/new"
+    assert swapped.code_index_status == "none"
+    assert swapped.code_is_python is None
+    assert swapped.code_python_reason is None
+    assert swapped.code_manifest is None
+    remaining_kinds = {c["chunk_kind"] for c in service.repository.text_chunks[paper_id]}
+    assert remaining_kinds == {"section"}, "section chunks must survive a code-url swap"
+
+    cleared = service.repository.update_code_url(
+        paper_id, code_url=None, code_url_source=None
+    )
+    assert cleared is not None
+    assert cleared.code_url is None
+    assert cleared.code_index_status == "none"
+
+
+def test_set_admin_code_url_enqueues_ingest_repo_on_change(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An admin pinning or swapping a paper's code_url must trigger a
+    fresh ``ingest_repo`` job so the chat surface picks up the new
+    repo's code without waiting on a separate reindex."""
+    paper_id = _seed_code_url_paper(service)
+
+    enqueued: list[tuple[str, bool]] = []
+
+    def fake_enqueue(_paper_id: str, *, force: bool = False):
+        enqueued.append((_paper_id, force))
+
+        class _StubJob:
+            job_id = "job_enq_test"
+
+        return _StubJob()
+
+    monkeypatch.setattr(service, "enqueue_ingest_repo_job", fake_enqueue)
+
+    service.set_admin_code_url(paper_id, code_url="https://github.com/owner/first")
+    assert enqueued == [(paper_id, True)]
+
+    # Same URL: no re-enqueue.
+    service.set_admin_code_url(paper_id, code_url="https://github.com/owner/first")
+    assert len(enqueued) == 1
+
+    # Swap to a new URL: re-enqueue.
+    service.set_admin_code_url(paper_id, code_url="https://github.com/owner/second")
+    assert enqueued[-1] == (paper_id, True)
+    assert len(enqueued) == 2
+
+    # Clear: no enqueue (no new repo to fetch).
+    service.set_admin_code_url(paper_id, code_url=None)
+    assert len(enqueued) == 2
+
+
+def test_admin_pin_survives_reindex_in_index_arxiv_paper(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 3-layer decision in ``index_arxiv_paper`` must leave a paper's
+    admin-pinned ``code_url`` untouched, even when the paper text
+    contains a different high-confidence candidate (#46 sticky rule)."""
+    paper_id = _seed_code_url_paper(service)
+    service.set_admin_code_url(paper_id, code_url="https://github.com/admin/pinned")
+
+    from paperbase import sources
+    from paperbase.extractors import ExtractionOutput
+
+    def fake_get_paper_details(arxiv_id: str):
+        return PaperMetadata(
+            arxiv_id=arxiv_id,
+            title="Test Paper Refresh",
+            authors="Alice, Bob",
+            abstract="We release code at https://github.com/text/advertised.",
+            categories="cs.AI",
+            primary_category="cs.AI",
+            published="2024-01-01",
+            updated="2024-01-01",
+        )
+
+    monkeypatch.setattr(sources, "get_paper_details", fake_get_paper_details)
+    monkeypatch.setattr(sources, "enrich_with_semantic_scholar", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda metadata: ExtractionOutput(
+            source_type="abstract-only",
+            text_markdown="# Test\n\nSee https://github.com/text/advertised for details.\n",
+        ),
+    )
+
+    refreshed = service.index_arxiv_paper("2401.99999", force=True)
+    assert refreshed.code_url == "https://github.com/admin/pinned"
+    assert refreshed.code_url_source == "admin"
+
+
+def test_index_arxiv_paper_prefers_hf_papers_over_ranker(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the Hugging Face paper-page crosslink is enabled and returns
+    a repo, the ranker's choice is overridden — the curated
+    ``githubRepo`` field is the authoritative layer-1 signal (#46)."""
+    _seed_code_url_paper(service)
+
+    from paperbase import sources
+    from paperbase.extractors import ExtractionOutput
+
+    service.settings.fetch_code_crosslinks_at_index = True
+
+    monkeypatch.setattr(
+        sources,
+        "get_paper_details",
+        lambda aid: PaperMetadata(
+            arxiv_id=aid,
+            title="T",
+            authors="A",
+            abstract="",
+            categories="cs.AI",
+            primary_category="cs.AI",
+            published="2024-01-01",
+            updated="2024-01-01",
+        ),
+    )
+    monkeypatch.setattr(sources, "enrich_with_semantic_scholar", lambda *a, **k: None)
+    monkeypatch.setattr(
+        sources, "fetch_hf_paper_repo", lambda _aid: "https://github.com/hf/official"
+    )
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda metadata: ExtractionOutput(
+            source_type="abstract-only",
+            text_markdown="See https://github.com/text/ranker for code.\n",
+        ),
+    )
+
+    refreshed = service.index_arxiv_paper("2401.99999", force=True)
+    assert refreshed.code_url == "https://github.com/hf/official"
+    assert refreshed.code_url_source == "hf_papers"
+    assert refreshed.code_url_candidates is not None
+    assert any("text/ranker" in c for c in refreshed.code_url_candidates)
+
+
+def test_index_arxiv_paper_falls_back_to_ranker_when_hf_page_empty(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the Hugging Face paper-page crosslink enabled but returning
+    no repo, the ranker
+    picks the in-text winner (#46 layer 2)."""
+    _seed_code_url_paper(service)
+
+    from paperbase import sources
+    from paperbase.extractors import ExtractionOutput
+
+    service.settings.fetch_code_crosslinks_at_index = True
+
+    monkeypatch.setattr(
+        sources,
+        "get_paper_details",
+        lambda aid: PaperMetadata(
+            arxiv_id=aid,
+            title="T",
+            authors="A",
+            abstract="",
+            categories="cs.AI",
+            primary_category="cs.AI",
+            published="2024-01-01",
+            updated="2024-01-01",
+        ),
+    )
+    monkeypatch.setattr(sources, "enrich_with_semantic_scholar", lambda *a, **k: None)
+    monkeypatch.setattr(sources, "fetch_hf_paper_repo", lambda _aid: None)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda metadata: ExtractionOutput(
+            source_type="abstract-only",
+            text_markdown="Code at https://github.com/text/winner.\n",
+        ),
+    )
+
+    refreshed = service.index_arxiv_paper("2401.99999", force=True)
+    assert refreshed.code_url == "https://github.com/text/winner"
+    assert refreshed.code_url_source == "extracted"
+
+
+def test_index_arxiv_paper_verifier_demotes_unverified_pick(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for the #46 follow-up GitHub README verifier:
+    when ``verify_code_url_via_github_readme`` is on and the verifier
+    rejects the ranker's pick (README does not reference the arxiv id
+    or title), ``code_url`` must demote to ``None`` rather than stick
+    with an unverified guess. This is the precision-filter behavior
+    measured at 0/30 wrong on the landmark benchmark."""
+    _seed_code_url_paper(service)
+
+    from paperbase import sources
+    from paperbase.extractors import ExtractionOutput
+
+    service.settings.fetch_code_crosslinks_at_index = False
+    service.settings.verify_code_url_via_github_readme = True
+
+    monkeypatch.setattr(
+        sources,
+        "get_paper_details",
+        lambda aid: PaperMetadata(
+            arxiv_id=aid,
+            title="T",
+            authors="A",
+            abstract="",
+            categories="cs.AI",
+            primary_category="cs.AI",
+            published="2024-01-01",
+            updated="2024-01-01",
+        ),
+    )
+    monkeypatch.setattr(sources, "enrich_with_semantic_scholar", lambda *a, **k: None)
+    # Stub the verifier to always reject — simulates the GPT-3
+    # ``gpt-3supplemental`` 404 case or the ``tensorflow/models`` /
+    # GraphSAGE case where the README does not mention the paper.
+    monkeypatch.setattr(sources, "verify_repo_owns_paper", lambda *a, **k: False)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda metadata: ExtractionOutput(
+            source_type="abstract-only",
+            text_markdown="Code at https://github.com/text/winner.\n",
+        ),
+    )
+
+    refreshed = service.index_arxiv_paper("2401.99999", force=True)
+    assert refreshed.code_url is None
+    assert refreshed.code_url_source is None
+    # Candidate set is still preserved for admin / future agent use.
+    assert refreshed.code_url_candidates == ["https://github.com/text/winner"]
+
+
+def test_index_arxiv_paper_verifier_keeps_verified_pick(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifier accepting the ranker's pick must leave it intact —
+    the precision filter only kicks out unverified picks."""
+    _seed_code_url_paper(service)
+
+    from paperbase import sources
+    from paperbase.extractors import ExtractionOutput
+
+    service.settings.fetch_code_crosslinks_at_index = False
+    service.settings.verify_code_url_via_github_readme = True
+
+    monkeypatch.setattr(
+        sources,
+        "get_paper_details",
+        lambda aid: PaperMetadata(
+            arxiv_id=aid,
+            title="T",
+            authors="A",
+            abstract="",
+            categories="cs.AI",
+            primary_category="cs.AI",
+            published="2024-01-01",
+            updated="2024-01-01",
+        ),
+    )
+    monkeypatch.setattr(sources, "enrich_with_semantic_scholar", lambda *a, **k: None)
+    monkeypatch.setattr(sources, "verify_repo_owns_paper", lambda *a, **k: True)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda metadata: ExtractionOutput(
+            source_type="abstract-only",
+            text_markdown="Code at https://github.com/text/winner.\n",
+        ),
+    )
+
+    refreshed = service.index_arxiv_paper("2401.99999", force=True)
+    assert refreshed.code_url == "https://github.com/text/winner"
+    assert refreshed.code_url_source == "extracted"
+
+
+def test_index_arxiv_paper_returns_none_on_three_way_ambiguity(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Three+ candidates clustered at the top: ``code_url`` must
+    resolve to ``None`` so ``ingest_repo`` is not auto-enqueued
+    against an uncertain repo. This is arslnb's "ambiguity → None"
+    rule from the PR #45 review, post-tuning: 2-way ties get a
+    first-mention tiebreaker (CoT-style false positives), 3+-way
+    ties stay None (the case the rule actually targets)."""
+    _seed_code_url_paper(service)
+
+    from paperbase import sources
+    from paperbase.extractors import ExtractionOutput
+
+    service.settings.fetch_code_crosslinks_at_index = False
+
+    monkeypatch.setattr(
+        sources,
+        "get_paper_details",
+        lambda aid: PaperMetadata(
+            arxiv_id=aid,
+            title="T",
+            authors="A",
+            abstract="",
+            categories="cs.AI",
+            primary_category="cs.AI",
+            published="2024-01-01",
+            updated="2024-01-01",
+        ),
+    )
+    monkeypatch.setattr(sources, "enrich_with_semantic_scholar", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda metadata: ExtractionOutput(
+            source_type="abstract-only",
+            text_markdown=(
+                "See https://github.com/owner/datasetA, "
+                "https://github.com/owner/datasetB, and "
+                "https://github.com/owner/method in the code.\n"
+            ),
+        ),
+    )
+
+    refreshed = service.index_arxiv_paper("2401.99999", force=True)
+    assert refreshed.code_url is None
+    assert refreshed.code_url_source is None
+    assert refreshed.code_url_candidates is not None
+    assert len(refreshed.code_url_candidates) == 3
+
+
+def test_backfill_code_urls_from_hf_papers_respects_admin_pin(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Core regression: the backfill CLI must never overwrite an
+    operator-pinned ``code_url``, even if Hugging Face has a different repo on
+    file for that paper. Protects admin labor from automated cleanup."""
+    pinned_id = _seed_code_url_paper(
+        service,
+        arxiv_id="2401.00001",
+        code_url="https://github.com/admin/pinned",
+        code_url_source="admin",
+    )
+    extracted_id = _seed_code_url_paper(
+        service,
+        arxiv_id="2401.00002",
+        code_url="https://github.com/regex/guess",
+        code_url_source="extracted",
+    )
+
+    from paperbase import sources
+
+    monkeypatch.setattr(
+        sources,
+        "fetch_hf_paper_repo",
+        lambda arxiv_id: f"https://github.com/hf/{arxiv_id.replace('.', '-')}",
+    )
+
+    result = service.backfill_code_urls_from_hf_papers(limit=10, page_size=10, dry_run=False)
+    # Repo-level filter drops admin rows up front; only the extracted
+    # paper reaches the backfill loop.
+    assert result["scanned"] == 1
+    assert result["updated"] == 1
+    assert result["crosslink_hits"] == 1
+
+    pinned = service.repository.get_paper(pinned_id)
+    assert pinned is not None
+    assert pinned.code_url == "https://github.com/admin/pinned"
+    assert pinned.code_url_source == "admin"
+
+    updated = service.repository.get_paper(extracted_id)
+    assert updated is not None
+    assert updated.code_url == "https://github.com/hf/2401-00002"
+    assert updated.code_url_source == "hf_papers"
+
+
+def test_backfill_code_urls_dry_run_does_not_write(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--dry-run`` must report the would-be diff count without
+    mutating the paper row — the operator needs to eyeball changes
+    before a real run touches thousands of rows."""
+    paper_id = _seed_code_url_paper(
+        service,
+        code_url="https://github.com/stale/guess",
+        code_url_source="extracted",
+    )
+    from paperbase import sources
+
+    monkeypatch.setattr(
+        sources, "fetch_hf_paper_repo", lambda _aid: "https://github.com/hf/new"
+    )
+
+    result = service.backfill_code_urls_from_hf_papers(limit=10, page_size=10, dry_run=True)
+    assert result["updated"] == 1
+    assert result["dry_run"] is True
+
+    paper = service.repository.get_paper(paper_id)
+    assert paper is not None
+    assert paper.code_url == "https://github.com/stale/guess"
+    assert paper.code_url_source == "extracted"

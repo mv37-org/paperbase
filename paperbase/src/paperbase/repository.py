@@ -191,6 +191,19 @@ class PaperORM(Base):
     code_is_python: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     code_python_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     code_manifest: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    # Provenance of ``code_url`` (#46). One of:
+    # - ``None``: legacy-extracted (pre-#46) or never set.
+    # - ``"extracted"``: ranker picked from in-text GitHub URL candidates.
+    # - ``"hf_papers"``: Hugging Face paper search returned a ``githubRepo``
+    #   for the exact arXiv-id match.
+    # - ``"admin"``: operator pinned via PATCH /v1/papers/{id}/code-url;
+    #   never overwritten by automatic re-index.
+    code_url_source: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # Full candidate set surfaced by the in-text ranker (#46). Preserved
+    # alongside the chosen ``code_url`` so admins can pick an alternate
+    # via the override endpoint and so future agent-side logic can
+    # consult the rejected candidates without re-scanning paper text.
+    code_url_candidates: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     # Peer-review venue signal (#39 PR B). venue is the S2 canonical venue
     # string (e.g. "International Conference on Learning Representations").
     # venue_year is the conference year. venue_source records provenance
@@ -797,6 +810,8 @@ def _paper_from_orm(row: PaperORM) -> PaperResponse:
         influential_citation_count=row.influential_citation_count,
         semantic_scholar_id=row.semantic_scholar_id,
         code_url=row.code_url,
+        code_url_source=row.code_url_source,
+        code_url_candidates=list(row.code_url_candidates or []) or None,
         code_index_status=row.code_index_status or "none",
         code_is_python=row.code_is_python,
         code_python_reason=row.code_python_reason,
@@ -1191,6 +1206,32 @@ class PaperRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def update_code_url(
+        self,
+        paper_id: str,
+        *,
+        code_url: str | None,
+        code_url_source: str | None,
+    ) -> PaperResponse | None:
+        """Persist a ``code_url`` / ``code_url_source`` transition (#46).
+
+        Single atomic write used by the admin override and the backfill
+        CLI. Does not touch ``code_url_candidates``; those are owned by
+        :meth:`upsert_paper` and represent what the ranker saw, not what
+        was chosen.
+
+        When the new ``code_url`` differs from the existing one (cleared,
+        swapped, or freshly attached), the prior code-ingest state is
+        reset alongside the URL: ``code_index_status`` returns to
+        ``'none'``, ``code_is_python`` / ``code_python_reason`` /
+        ``code_manifest`` are cleared, and existing code chunks (kinds
+        in :data:`CODE_CHUNK_KINDS`) are deleted. This stops a stale
+        manifest from outliving the repo that produced it. Service
+        callers re-enqueue ``ingest_repo`` for non-null new URLs.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     def list_papers_needing_summary(
         self,
         *,
@@ -1236,6 +1277,22 @@ class PaperRepository(ABC):
         has no S2 id, AND has zero citations. The age floor keeps the
         backfill job from racing with inline enrichment on freshly-ingested
         papers.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_papers_for_code_url_backfill(
+        self,
+        *,
+        limit: int,
+        after_paper_id: str | None = None,
+    ) -> list[PaperResponse]:
+        """Page indexed papers for the ``backfill-code-urls`` CLI (#46).
+
+        Skips rows whose ``code_url_source='admin'`` so operator pins are
+        never touched by the backfill job. Keyset-paginated by
+        ``paper_id`` ascending so a long-running backfill that gets
+        interrupted can resume without re-processing earlier rows.
         """
         raise NotImplementedError
 
@@ -1535,6 +1592,12 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS top_author_s2_id VARCHAR(64)")
             )
             connection.execute(
+                text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS code_url_source VARCHAR(16)")
+            )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS code_url_candidates JSONB")
+            )
+            connection.execute(
                 text(f"ALTER TABLE IF EXISTS text_chunks ADD COLUMN IF NOT EXISTS embedding {vector_type}")
             )
             connection.execute(
@@ -1826,6 +1889,8 @@ class SqlAlchemyPaperRepository(PaperRepository):
             influential_citation_count=paper.influential_citation_count,
             semantic_scholar_id=paper.semantic_scholar_id,
             code_url=paper.code_url,
+            code_url_source=paper.code_url_source,
+            code_url_candidates=list(paper.code_url_candidates or []) or None,
             source_type=paper.source_type,
             index_status=paper.index_status,
             search_document=search_document,
@@ -1852,6 +1917,8 @@ class SqlAlchemyPaperRepository(PaperRepository):
             "influential_citation_count": paper.influential_citation_count,
             "semantic_scholar_id": paper.semantic_scholar_id,
             "code_url": paper.code_url,
+            "code_url_source": paper.code_url_source,
+            "code_url_candidates": list(paper.code_url_candidates or []) or None,
             "source_type": paper.source_type,
             "index_status": paper.index_status,
             "search_document": search_document,
@@ -2248,6 +2315,43 @@ class SqlAlchemyPaperRepository(PaperRepository):
             )
         return results
 
+    def update_code_url(
+        self,
+        paper_id: str,
+        *,
+        code_url: str | None,
+        code_url_source: str | None,
+    ) -> PaperResponse | None:
+        with self._session() as session:
+            row = session.get(PaperORM, paper_id)
+            if row is None:
+                return None
+            previous_url = row.code_url
+            row.code_url = code_url
+            row.code_url_source = code_url_source
+            row.updated_at = utcnow()
+            # Reset code-ingest state when the URL changes (cleared,
+            # swapped, or freshly attached). Without this, clearing
+            # ``code_url`` left the row at ``code_index_status='indexed'``
+            # with the previous repo's manifest and code chunks still
+            # served — admins could clear a paper's repo and the chat
+            # still cited the old code. Service-layer callers
+            # (set_admin_code_url / backfill_code_urls) re-enqueue an
+            # ``ingest_repo`` job for non-null new URLs.
+            if previous_url != code_url:
+                row.code_index_status = "none"
+                row.code_is_python = None
+                row.code_python_reason = None
+                row.code_manifest = None
+                session.execute(
+                    delete(TextChunkORM).where(
+                        TextChunkORM.paper_id == paper_id,
+                        TextChunkORM.chunk_kind.in_(CODE_CHUNK_KINDS),
+                    )
+                )
+            session.flush()
+            return _paper_from_orm(row)
+
     def list_papers_needing_summary(
         self,
         *,
@@ -2410,6 +2514,27 @@ class SqlAlchemyPaperRepository(PaperRepository):
         sql = text(base_sql.format(after_predicate=after_predicate))
         with self._session() as session:
             rows = session.scalars(select(PaperORM).from_statement(sql).params(**params)).all()
+        return [_paper_from_orm(row) for row in rows]
+
+    def list_papers_for_code_url_backfill(
+        self,
+        *,
+        limit: int,
+        after_paper_id: str | None = None,
+    ) -> list[PaperResponse]:
+        query = (
+            select(PaperORM)
+            .where(PaperORM.index_status == "indexed")
+            .where(
+                (PaperORM.code_url_source.is_(None))
+                | (PaperORM.code_url_source != "admin")
+            )
+        )
+        if after_paper_id:
+            query = query.where(PaperORM.paper_id > after_paper_id)
+        query = query.order_by(PaperORM.paper_id.asc()).limit(limit)
+        with self._session() as session:
+            rows = session.scalars(query).all()
         return [_paper_from_orm(row) for row in rows]
 
     def enrichment_stats(self) -> dict[str, int]:
@@ -4994,6 +5119,42 @@ class MemoryPaperRepository(PaperRepository):
         results.sort(key=lambda item: item.score or 0, reverse=True)
         return results[:limit]
 
+    def update_code_url(
+        self,
+        paper_id: str,
+        *,
+        code_url: str | None,
+        code_url_source: str | None,
+    ) -> PaperResponse | None:
+        existing = self.papers.get(paper_id)
+        if existing is None:
+            return None
+        updates: dict[str, Any] = {
+            "code_url": code_url,
+            "code_url_source": code_url_source,
+        }
+        # Mirror the SQL backend: any URL transition wipes the prior
+        # code-ingest state so a stale manifest / classification doesn't
+        # outlive the repo it described.
+        if existing.code_url != code_url:
+            updates.update(
+                {
+                    "code_index_status": "none",
+                    "code_is_python": None,
+                    "code_python_reason": None,
+                    "code_manifest": None,
+                }
+            )
+            preserved = [
+                c
+                for c in self.text_chunks.get(paper_id, [])
+                if c["chunk_kind"] not in CODE_CHUNK_KINDS
+            ]
+            self.text_chunks[paper_id] = preserved
+        updated = existing.model_copy(update=updates)
+        self.papers[paper_id] = updated
+        return updated
+
     def list_papers_needing_summary(
         self,
         *,
@@ -5092,6 +5253,22 @@ class MemoryPaperRepository(PaperRepository):
                 return paper.paper_id > after.paper_id
 
             candidates = [paper for paper in candidates if _after(paper)]
+        return candidates[:limit]
+
+    def list_papers_for_code_url_backfill(
+        self,
+        *,
+        limit: int,
+        after_paper_id: str | None = None,
+    ) -> list[PaperResponse]:
+        candidates = [
+            paper
+            for paper in self.papers.values()
+            if paper.index_status == "indexed" and paper.code_url_source != "admin"
+        ]
+        candidates.sort(key=lambda p: p.paper_id)
+        if after_paper_id:
+            candidates = [p for p in candidates if p.paper_id > after_paper_id]
         return candidates[:limit]
 
     def enrichment_stats(self) -> dict[str, int]:

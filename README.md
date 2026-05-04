@@ -40,6 +40,7 @@ Optional browser-account settings now hang off the same API env surface:
 
 - `PAPERBASE_GOOGLE_*` powers Google sign-in
 - `PAPERBASE_GITHUB_*` powers the in-app GitHub connection flow and project repo sync
+- `PAPERBASE_FETCH_CODE_CROSSLINKS_AT_INDEX` controls the default-on Hugging Face paper-page lookup that prefers an exact arXiv-id `githubRepo` match over raw text extraction; turn it off for pure text-only harvests
 - logged-in users can store Anthropic keys, Modal sandbox credentials, a signed-in-only light/dark appearance preference, and a weekly papers review email preference
 
 ## Commands
@@ -87,6 +88,16 @@ Worker job triage goes through the same admin CLI:
 .venv/bin/paperbase-dev jobs list-dead
 .venv/bin/paperbase-dev jobs retry <job_id>
 ```
+
+Code-url cleanup can be re-run with the same admin CLI:
+
+```bash
+.venv/bin/paperbase-dev backfill-code-urls --dry-run
+.venv/bin/paperbase-dev backfill-code-urls
+```
+
+The backfill uses Hugging Face paper search's exact arXiv-id match before
+falling back to the in-text GitHub ranker.
 
 Historical arXiv backfills are queued with:
 

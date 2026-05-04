@@ -37,6 +37,8 @@ from .config import Settings, get_settings
 from .emailer import EmailSender, ResendEmailSender
 from .extractors import (
     build_manifest,
+    extract_github_candidates,
+    rank_github_candidates,
     extract_uploaded_document,
     figure_index_payload,
     index_paper_artifacts,
@@ -5766,6 +5768,125 @@ class PaperbaseService:
             )
         return result
 
+    def backfill_code_urls_from_hf_papers(
+        self, *, limit: int = 100_000, page_size: int = 200, dry_run: bool = False
+    ) -> dict[str, Any]:
+        """Sweep indexed papers, ask Hugging Face paper search for the
+        paper-page ``githubRepo`` field, and overwrite ``code_url`` where
+        the source is not ``admin`` (#46 cleanup story).
+
+        Returns a counts dict so callers (CLI + tests) can verify how
+        many rows were inspected vs changed. ``dry_run=True`` logs the
+        diffs without writing — use that to sanity-check before a real
+        run against 10k+ papers.
+        """
+        total_scanned = 0
+        total_crosslink_hits = 0
+        total_updated = 0
+        total_skipped_admin = 0
+        total_unchanged = 0
+        after_paper_id: str | None = None
+        remaining = limit
+        while remaining > 0:
+            batch_size = min(page_size, remaining)
+            batch = self.repository.list_papers_for_code_url_backfill(
+                limit=batch_size, after_paper_id=after_paper_id
+            )
+            if not batch:
+                break
+            for paper in batch:
+                total_scanned += 1
+                if paper.code_url_source == "admin":
+                    # Defensive — the repo method already filters these out,
+                    # but a race during long backfill shouldn't clobber a
+                    # newly-created admin pin.
+                    total_skipped_admin += 1
+                    continue
+                crosslink_url = sources.fetch_hf_paper_repo(paper.arxiv_id)
+                if not crosslink_url:
+                    total_unchanged += 1
+                    continue
+                total_crosslink_hits += 1
+                if crosslink_url == paper.code_url and paper.code_url_source in {"hf_papers", "pwc"}:
+                    total_unchanged += 1
+                    continue
+                logger.info(
+                    "Code URL backfill diff",
+                    extra={
+                        "event": "code_url.backfill.diff",
+                        "paper_id": paper.paper_id,
+                        "arxiv_id": paper.arxiv_id,
+                        "old_code_url": paper.code_url,
+                        "old_source": paper.code_url_source,
+                        "new_code_url": crosslink_url,
+                        "new_source": "hf_papers",
+                        "dry_run": dry_run,
+                    },
+                )
+                if not dry_run:
+                    self.repository.update_code_url(
+                        paper.paper_id, code_url=crosslink_url, code_url_source="hf_papers"
+                    )
+                    # update_code_url wipes prior code-ingest state on
+                    # any URL transition (#45 review). Queue a fresh
+                    # ingest so the chat surface sees the new repo's
+                    # contents without waiting on a manual reindex.
+                    self.enqueue_ingest_repo_job(paper.paper_id, force=True)
+                total_updated += 1
+            last = batch[-1]
+            after_paper_id = last.paper_id
+            remaining -= len(batch)
+            if len(batch) < batch_size:
+                break
+        return {
+            "scanned": total_scanned,
+            "crosslink_hits": total_crosslink_hits,
+            "updated": total_updated,
+            "skipped_admin": total_skipped_admin,
+            "unchanged": total_unchanged,
+            "dry_run": dry_run,
+        }
+
+    def set_admin_code_url(self, paper_id: str, *, code_url: str | None) -> PaperResponse | None:
+        """Pin ``papers.code_url`` to an operator-chosen value (#46 layer 3).
+
+        Passing ``code_url=None`` clears the pin (and any extracted URL
+        alongside it, returning the paper to "no code attached"). Any
+        non-empty value must parse through ``code_ingest.parse_github_url``
+        — unsupported hosts / malformed strings raise ``HTTPException`` so
+        the API surface can return a clean 400. Pins survive re-index
+        runs via the ``code_url_source='admin'`` sticky bit checked in
+        :meth:`index_arxiv_paper`.
+
+        When the URL changes, the underlying ``update_code_url`` resets
+        the code-ingest state (status, manifest, code chunks) so the
+        paper isn't left serving the previous repo's metadata. For
+        non-null new URLs we then enqueue a fresh ``ingest_repo`` job so
+        the chat surface picks up the new repo's contents without
+        waiting for an unrelated reindex.
+        """
+        paper = self.repository.get_paper(paper_id)
+        if paper is None:
+            return None
+        previous_url = paper.code_url
+        if code_url is None or not code_url.strip():
+            return self.repository.update_code_url(
+                paper_id, code_url=None, code_url_source=None
+            )
+        ref = code_ingest.parse_github_url(code_url)
+        if ref is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported code_url: {code_url!r}",
+            )
+        canonical = f"https://github.com/{ref.owner}/{ref.repo}"
+        updated = self.repository.update_code_url(
+            paper_id, code_url=canonical, code_url_source="admin"
+        )
+        if updated is not None and previous_url != canonical:
+            self.enqueue_ingest_repo_job(paper_id, force=True)
+        return updated
+
     def enqueue_ingest_repo_job(self, paper_id: str, *, force: bool = False) -> JobResponse:
         """Queue an ``ingest_repo`` job for a single paper (#5).
 
@@ -7435,6 +7556,18 @@ class PaperbaseService:
         # the enrich_missing_metadata backfill job will pick this paper up
         # later with aggressive retry.
         enrich_outcome = sources.enrich_with_semantic_scholar([metadata], max_retries=0)
+        # Snapshot an existing admin pin BEFORE the intermediate upsert so
+        # it flows through every subsequent upsert on this metadata object.
+        # A later ``get_paper_by_arxiv_id`` can't recover the pin because
+        # this upsert would have wiped it onto an empty code_url (#46).
+        existing_for_admin = self.repository.get_paper_by_arxiv_id(metadata.arxiv_id)
+        if (
+            existing_for_admin is not None
+            and existing_for_admin.code_url_source == "admin"
+            and existing_for_admin.code_url
+        ):
+            metadata.code_url = existing_for_admin.code_url
+            metadata.code_url_source = "admin"
         metadata.index_status = "indexing"
         stored = self.repository.upsert_paper(metadata, search_document=metadata.abstract)
         # #39 PR C: persist S2 author rows so the top-author discovery
@@ -7451,6 +7584,70 @@ class PaperbaseService:
         metadata.index_status = "indexed"
         metadata.indexed_at = utcnow()
         metadata.summary_short, metadata.summary_eli5 = build_paper_summaries(metadata, extraction, self.settings)
+
+        # Populate ``code_url`` + ``code_url_source`` with the 3-layer
+        # decision from #46. Priority order:
+        #   1. admin (already on ``metadata`` from a ``set_admin_code_url``
+        #      call or persisted row) — sticky, never overwritten here.
+        #   2. Hugging Face paper-page ``githubRepo`` crosslink, when
+        #      ``fetch_code_crosslinks_at_index`` is enabled.
+        #   3. In-text ranker over all extracted GitHub candidates.
+        # Rejected candidates are always stored in ``code_url_candidates``
+        # so admins + future agent-side logic can revisit them without
+        # re-scanning paper text.
+        candidates = extract_github_candidates(
+            metadata.abstract or "", extraction.text_markdown or ""
+        )
+        metadata.code_url_candidates = [c.url for c in candidates] or None
+        existing = self.repository.get_paper_by_arxiv_id(metadata.arxiv_id)
+        if existing is not None and existing.code_url_source == "admin" and existing.code_url:
+            # Admin pin survives re-index regardless of what's in the paper.
+            metadata.code_url = existing.code_url
+            metadata.code_url_source = "admin"
+        else:
+            crosslink_url: str | None = None
+            if self.settings.fetch_code_crosslinks_at_index:
+                crosslink_url = sources.fetch_hf_paper_repo(metadata.arxiv_id)
+            if crosslink_url:
+                metadata.code_url = crosslink_url
+                metadata.code_url_source = "hf_papers"
+            else:
+                winner = rank_github_candidates(
+                    candidates,
+                    abstract=metadata.abstract or "",
+                    body=extraction.text_markdown or "",
+                    authors=metadata.authors or "",
+                )
+                if winner is not None:
+                    metadata.code_url = winner.url
+                    metadata.code_url_source = "extracted"
+                else:
+                    # Ambiguous / no candidates: decline rather than best-guess
+                    # so the code-ingest pipeline (#41) does not auto-enqueue
+                    # an ingest job against a repo we are not confident about.
+                    metadata.code_url = None
+                    metadata.code_url_source = None
+
+                # GitHub README verifier (#46 follow-up). This remains an
+                # optional precision filter on top of the in-text ranker:
+                # fetch the candidate repo's README and confirm it
+                # references the paper. Off by default — see config docs
+                # for the precision/recall tradeoff measured on the
+                # 30-paper benchmark.
+                if (
+                    winner is not None
+                    and self.settings.verify_code_url_via_github_readme
+                ):
+                    verified = sources.verify_repo_owns_paper(
+                        winner.owner,
+                        winner.repo,
+                        metadata.arxiv_id,
+                        title=metadata.title or None,
+                        token=self.settings.github_token,
+                    )
+                    if not verified:
+                        metadata.code_url = None
+                        metadata.code_url_source = None
 
         search_document_parts = [metadata.title, metadata.tldr, metadata.summary_short, extraction.text_markdown]
         search_document = "\n\n".join(part for part in search_document_parts if part)

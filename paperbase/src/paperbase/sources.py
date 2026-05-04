@@ -731,3 +731,561 @@ def get_related_papers(arxiv_id: str, semantic_scholar_id: str | None, *, limit:
             )
         )
     return results
+
+
+# --------------------------------------------------------------------------- #
+# Hugging Face paper-page crosslink (#46 layer 1)
+# --------------------------------------------------------------------------- #
+
+
+HF_PAPERS_SEARCH_API = "https://huggingface.co/api/papers/search"
+
+
+def fetch_hf_paper_repo(
+    arxiv_id: str,
+    *,
+    session: requests.Session | None = None,
+    timeout: float = 10.0,
+) -> str | None:
+    """Return the canonical GitHub URL surfaced on Hugging Face's paper
+    page for ``arxiv_id``, or ``None`` (#46 layer 1).
+
+    Uses the live ``GET /api/papers/search?q=<arxiv_id>`` endpoint, then
+    requires an exact ``paper.id == arxiv_id`` match before trusting the
+    page's ``githubRepo`` field. This avoids fuzzy-search false positives
+    (e.g. ``LoRA``-adjacent papers matching the title query first). When
+    Hugging Face has no repo linked for the exact paper, callers degrade to
+    the in-text ranker / admin override as before.
+    """
+    if not arxiv_id:
+        return None
+    client = session or SESSION
+    try:
+        response = client.get(
+            HF_PAPERS_SEARCH_API, params={"q": arxiv_id}, timeout=timeout
+        )
+    except requests.RequestException as exc:
+        logger.warning(
+            "Hugging Face paper search failed",
+            extra={"event": "hf_papers.lookup_failed", "arxiv_id": arxiv_id, "error": str(exc)},
+        )
+        return None
+    if response.status_code != 200:
+        logger.warning(
+            "Hugging Face paper search returned non-200",
+            extra={
+                "event": "hf_papers.non_200",
+                "arxiv_id": arxiv_id,
+                "status": response.status_code,
+            },
+        )
+        return None
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    if not isinstance(body, list):
+        return None
+    from . import code_ingest
+
+    for item in body:
+        if not isinstance(item, dict):
+            continue
+        paper = item.get("paper", item)
+        if not isinstance(paper, dict):
+            continue
+        if str(paper.get("id") or "").strip() != arxiv_id:
+            continue
+        repo = paper.get("githubRepo")
+        if not isinstance(repo, str) or not repo.strip():
+            return None
+        ref = code_ingest.parse_github_url(repo)
+        if ref is None:
+            return None
+        return f"https://github.com/{ref.owner}/{ref.repo}"
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# GitHub README verifier (#46 follow-up — alternative to HF paper-page crosslink)
+# --------------------------------------------------------------------------- #
+
+
+_GITHUB_API_BASE = "https://api.github.com"
+
+
+# Affiliation patterns mapped to canonical GitHub org slugs (#46 follow-up
+# layer — recall booster for papers whose body doesn't link the repo).
+# Used by ``find_official_repo_via_affiliation`` to scope a GitHub search
+# to the paper's authors' organizations. Patterns are matched
+# case-insensitively against the full paper text (authors + abstract).
+_LAB_AFFILIATIONS: dict[str, tuple[str, ...]] = {
+    "facebookresearch": (
+        "facebook ai research",
+        "facebook ai",
+        "fair labs",
+        " fair ",
+        "meta ai",
+        "@fb.com",
+        "@meta.com",
+    ),
+    "google-research": (
+        "google research",
+        "google brain",
+        "@google.com",
+    ),
+    "openai": (
+        "openai",
+        "@openai.com",
+    ),
+    "microsoft": (
+        "microsoft research",
+        "@microsoft.com",
+    ),
+    "deepmind": (
+        "deepmind",
+        "@deepmind.com",
+    ),
+    "huggingface": (
+        "hugging face",
+        "@huggingface.co",
+    ),
+    "nvidia": (
+        "nvidia research",
+        "@nvidia.com",
+    ),
+    "salesforce": (
+        "salesforce research",
+        "@salesforce.com",
+    ),
+    "allenai": (
+        "allen institute for ai",
+        "allenai",
+        "@allenai.org",
+    ),
+    "anthropic": (
+        "anthropic",
+        "@anthropic.com",
+    ),
+}
+
+
+_TITLE_STOPWORDS: frozenset[str] = frozenset(
+    {
+        "a", "an", "the", "is", "are", "of", "for", "with", "to", "in",
+        "on", "and", "or", "by", "via", "from", "as", "at", "we", "our",
+        "deep", "neural", "learning", "models", "model", "networks",
+        "network", "using", "based",
+    }
+)
+
+
+def _title_keywords(title: str) -> list[str]:
+    """Pull significant keyword tokens out of a paper title for searching.
+
+    Drops stopwords + noise tokens that show up in nearly every ML title
+    ("learning", "neural", "network", etc.) so the search query points at
+    the paper's distinguishing concept rather than noise.
+    """
+    if not title:
+        return []
+    words = re.findall(r"[a-zA-Z][a-zA-Z0-9\-]+", title.lower())
+    return [w for w in words if w not in _TITLE_STOPWORDS and len(w) >= 3]
+
+
+_ACRONYM_RE = re.compile(r"\(([A-Za-z][A-Za-z0-9]{1,8})\)")
+
+
+def _abstract_acronyms(abstract: str) -> list[str]:
+    """Extract parenthetical acronyms from an abstract.
+
+    Many ML papers introduce a model via ``Masked Autoencoders (MAE)``
+    or ``Bidirectional Encoder Representations from Transformers (BERT)``.
+    The acronym is what the official repo is typically named after, so
+    using it as a search keyword often finds the canonical repo where a
+    title-keyword search would miss it (``masked`` finds Mask2Former
+    before it finds ``facebookresearch/mae``).
+    """
+    if not abstract:
+        return []
+    return [match.lower() for match in _ACRONYM_RE.findall(abstract) if len(match) >= 2]
+
+
+def _significant_repo_tokens(repo: str) -> list[str]:
+    """Tokenize a repo name into searchable parts. ``vision_transformer``
+    splits to ``["vision", "transformer"]``; ``LoRA`` stays as one token."""
+    if not repo:
+        return []
+    parts = re.findall(r"[a-zA-Z][a-zA-Z0-9]+", repo.lower())
+    return [p for p in parts if len(p) >= 3]
+
+
+def detect_paper_affiliations(text: str) -> list[str]:
+    """Return GitHub org slugs the paper authors are affiliated with,
+    based on substring matches against ``_LAB_AFFILIATIONS``. Used both
+    by the verifier (as an additional evidence signal) and by the
+    affiliation-based recall booster.
+    """
+    if not text:
+        return []
+    lower = text.lower()
+    matched: list[str] = []
+    for org, patterns in _LAB_AFFILIATIONS.items():
+        for pattern in patterns:
+            if pattern in lower:
+                matched.append(org)
+                break
+    return matched
+
+
+# Markers that indicate a README's main heading describes a third-party
+# reimplementation rather than the paper's own code. Used by
+# verify_repo_owns_paper to gate the heading-match signal — a heading
+# like "Unofficial PyTorch implementation of <paper title>" otherwise
+# fires the same +2 as the official repo's heading.
+_UNOFFICIAL_HEADING_RE = re.compile(
+    r"^\s*(?:un[\s\-]?official|re[\s\-]?implementation|third[\s\-]?party"
+    r"|reimpl|reproduction|port\b|fork\b|implementation\s+of)",
+    re.IGNORECASE,
+)
+
+
+def _first_h1(readme: str) -> str:
+    """Return the first ``# `` (level-1) heading line of a README, or
+    the empty string when the README has no H1. Used by the verifier's
+    heading-match signal."""
+    for line in readme.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("# ") and not stripped.startswith("## "):
+            return stripped[2:].strip()
+    return ""
+
+
+def _fetch_readme(
+    owner: str,
+    repo: str,
+    *,
+    token: str | None,
+    session: requests.Session | None,
+    timeout: float,
+) -> str | None:
+    """Fetch the README text from GitHub or return None on any failure."""
+    if not owner or not repo:
+        return None
+    client = session or SESSION
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "paperbase-code-verify",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        response = client.get(
+            f"{_GITHUB_API_BASE}/repos/{owner}/{repo}/readme",
+            headers=headers,
+            timeout=timeout,
+        )
+    except requests.RequestException as exc:
+        logger.warning(
+            "GitHub README fetch failed",
+            extra={
+                "event": "code_verify.fetch_failed",
+                "owner": owner,
+                "repo": repo,
+                "error": str(exc),
+            },
+        )
+        return None
+    if response.status_code != 200:
+        return None
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    content_b64 = payload.get("content", "")
+    if not content_b64:
+        return None
+    import base64
+
+    try:
+        return base64.b64decode(content_b64).decode("utf-8", errors="replace")
+    except Exception:  # pragma: no cover — malformed base64
+        return None
+
+
+def verify_repo_owns_paper(
+    owner: str,
+    repo: str,
+    arxiv_id: str,
+    *,
+    title: str | None = None,
+    authors: str | None = None,
+    abstract: str | None = None,
+    token: str | None = None,
+    session: requests.Session | None = None,
+    timeout: float = 10.0,
+    threshold: int = 2,
+) -> bool:
+    """Score-based "is this repo the paper's official code?" check.
+
+    Replaces the original binary verifier with a multi-evidence scoring
+    rule so a repo whose README focuses on usage rather than citation
+    (LLaMA, Llama 2) can still be accepted when other corroborating
+    signals fire. Each signal contributes points; ``score >= threshold``
+    accepts.
+
+    Signals:
+    - ``+3`` arxiv id verbatim or as ``arxiv.org/abs/<id>`` in README
+    - ``+2`` paper title (≥ 20 chars) appears verbatim in README
+    - ``+1`` repo name token appears in title (e.g. repo ``llama`` and
+      title contains "LLaMA"), 4+ char tokens only to avoid noise
+    - ``+1`` repo owner is a known ML lab (``_LAB_AFFILIATIONS``) AND
+      that lab is detected in the paper authors / abstract
+    - ``-∞`` (False) if the README request 404s — the repo doesn't
+      exist (e.g. ``openai/gpt-3supplemental`` from a text-layout bug)
+
+    The default ``threshold=2`` keeps precision high — any single weak
+    signal alone (just a repo-name match) does not accept; arxiv id
+    alone does (worth 3 by itself).
+    """
+    if not owner or not repo or not arxiv_id:
+        return False
+    readme = _fetch_readme(owner, repo, token=token, session=session, timeout=timeout)
+    if readme is None:
+        return False
+    score = 0
+    readme_lower = readme.lower()
+    if arxiv_id in readme:
+        score += 3
+    elif f"arxiv.org/abs/{arxiv_id}" in readme_lower:
+        score += 3
+    title_in_readme = bool(
+        title and len(title) >= 20 and title.lower() in readme_lower
+    )
+    # Repo-name affinity. The strongest version is when the repo name
+    # IS the paper's primary keyword (LLaMA repo for "LLaMA: Open and
+    # Efficient ...") or matches a parenthetical acronym from the
+    # abstract (MAE repo for "Masked Autoencoders (MAE) Are Scalable
+    # ..."). Those signals are worth +2 because repos named after the
+    # paper's distinguishing concept are almost certainly the official
+    # implementation. A weaker overlap-anywhere check still earns +1.
+    repo_overlap_strong = False
+    repo_overlap_weak = False
+    if title:
+        primary_keywords: list[str] = _title_keywords(title)
+        acronyms = _abstract_acronyms(abstract or "")
+        repo_tokens = set(_significant_repo_tokens(repo))
+        # Also include the raw lowercased repo name (no token split), so
+        # concatenated repo names like ``barlowtwins`` participate in
+        # prefix-match against title keywords like ``barlow``.
+        repo_full = repo.lower()
+
+        def _matches(candidate: str) -> bool:
+            """Match a candidate token to the repo name. Token-membership
+            check fires only for single-token repos (``mae`` matches
+            ``mae``); multi-token repos (``intrinsic-private-sgd``)
+            require the candidate to either equal the full repo name or
+            prefix-match it from the start. Without this restriction,
+            generic acronyms like ``SGD`` would match any repo whose
+            name happens to contain ``-sgd-`` as one of several tokens
+            (the ResNet → ``microsoft/intrinsic-private-sgd`` false
+            positive from the 30-paper benchmark)."""
+            if not candidate or len(candidate) < 3:
+                return False
+            cand = candidate.lower()
+            # Token-membership only when the repo is a single token —
+            # the candidate IS the entire repo name.
+            if len(repo_tokens) == 1 and cand in repo_tokens:
+                return True
+            # Full repo-name equality.
+            if cand == repo_full:
+                return True
+            # Prefix-match either direction with a 4-char floor on the
+            # shorter side so ``se`` doesn't match ``senet`` accidentally
+            # but ``barlow`` matches ``barlowtwins``.
+            if len(cand) >= 4 and repo_full.startswith(cand):
+                return True
+            if len(repo_full) >= 4 and cand.startswith(repo_full):
+                return True
+            return False
+
+        primary_set = set(primary_keywords[:1]) | set(acronyms)
+        repo_overlap_strong = any(_matches(t) for t in primary_set)
+        repo_overlap_weak = any(
+            _matches(t) for t in primary_keywords if len(t) >= 4
+        )
+        if repo_overlap_strong:
+            score += 2
+        elif repo_overlap_weak:
+            score += 1
+    # Title-in-README is only credited when corroborated by repo-name
+    # overlap. A bare title-in-README is too generous: famous papers
+    # (ResNet, BERT, GPT) get cited in countless unrelated repos'
+    # READMEs, and we don't want ``microsoft/intrinsic-privacy`` to
+    # accept just because its README mentions ResNet's title as a
+    # baseline. Pairing with repo-name overlap separates authorship
+    # ("repo IS named after this paper, AND README has the title")
+    # from citation ("README mentions paper but repo is unrelated").
+    if title_in_readme and (repo_overlap_strong or repo_overlap_weak):
+        score += 2
+    # README first-heading match. A repo's main README heading reflects
+    # its identity. When the heading contains the full paper title and
+    # is not marked as a third-party reimplementation, that is strong
+    # standalone evidence the repo IS the paper's implementation —
+    # independent of repo-name overlap. Closes the SENet
+    # (``hujie-frank/senet``) recall gap: the repo name is an acronym
+    # the verifier can't relate to the title tokens "Squeeze",
+    # "Excitation", "Networks", but the README heading IS the title.
+    # Does not re-introduce the ResNet → ``microsoft/intrinsic-priva``
+    # false positive: that repo's first heading is "Introduction", not
+    # the ResNet title.
+    if title and len(title) >= 20:
+        first_heading = _first_h1(readme)
+        if first_heading and title.lower() in first_heading.lower():
+            if not _UNOFFICIAL_HEADING_RE.match(first_heading):
+                score += 2
+    # Owner-affiliation affinity: repo owner is a known ML lab AND that
+    # lab appears in the paper authors/abstract.
+    if owner.lower() in _LAB_AFFILIATIONS:
+        paper_text = " ".join(filter(None, (authors, abstract)))
+        if owner.lower() in detect_paper_affiliations(paper_text):
+            score += 1
+    return score >= threshold
+
+
+def find_official_repo_via_affiliation(
+    arxiv_id: str,
+    *,
+    title: str,
+    authors: str = "",
+    abstract: str = "",
+    token: str | None = None,
+    session: requests.Session | None = None,
+    timeout: float = 15.0,
+) -> str | None:
+    """Recall booster (#46 follow-up layer 3) for papers whose body
+    doesn't link a GitHub repo. Detects the paper's lab affiliation
+    from author/abstract text, searches that lab's GitHub org for a
+    repo whose name matches the paper's primary keyword, and verifies
+    the top hit's README references the paper.
+
+    Returns the canonical GitHub URL or ``None`` when:
+    - no affiliation could be detected
+    - the search returns no candidates
+    - no candidate passes ``verify_repo_owns_paper``
+
+    Costs one GitHub Search API call per detected affiliation plus one
+    README fetch per top-N search hit. Off the on-demand index path —
+    only fires when the ranker has nothing.
+    """
+    if not arxiv_id or not title:
+        return None
+    paper_text = " ".join(filter(None, (authors, abstract)))
+    affiliations = detect_paper_affiliations(paper_text)
+    if not affiliations:
+        return None
+    # Search query candidates, ordered by specificity. Acronyms first
+    # (e.g. ``MAE`` finds ``facebookresearch/mae`` directly where the
+    # title keyword ``masked`` finds Mask2Former / Mask-Predict before
+    # the actual repo). Title's first non-stopword keyword as the
+    # fallback.
+    queries: list[str] = []
+    queries.extend(_abstract_acronyms(abstract or ""))
+    keywords = _title_keywords(title)
+    if keywords:
+        queries.append(keywords[0])
+    if not queries:
+        return None
+    # Dedupe while preserving order.
+    seen: set[str] = set()
+    unique_queries = [q for q in queries if not (q in seen or seen.add(q))]
+    client = session or SESSION
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "paperbase-code-verify",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    for org in affiliations:
+        for query in unique_queries:
+            try:
+                response = client.get(
+                    f"{_GITHUB_API_BASE}/search/repositories",
+                    params={
+                        "q": f"{query} org:{org} in:name,description",
+                        "sort": "stars",
+                        "order": "desc",
+                        "per_page": 5,
+                    },
+                    headers=headers,
+                    timeout=timeout,
+                )
+            except requests.RequestException as exc:
+                logger.warning(
+                    "GitHub search by affiliation failed",
+                    extra={
+                        "event": "code_verify.search_failed",
+                        "org": org,
+                        "query": query,
+                        "error": str(exc),
+                    },
+                )
+                continue
+            if response.status_code != 200:
+                # 403 with X-RateLimit-Remaining: 0 means we burned the
+                # search-API budget (10 req/min anonymous, 30 with a
+                # token). Surface this distinctly so the benchmark and
+                # operators can tell rate-limit misses from genuine
+                # "no matching repo" misses.
+                rate_remaining = response.headers.get("X-RateLimit-Remaining")
+                rate_reset = response.headers.get("X-RateLimit-Reset")
+                logger.warning(
+                    "GitHub search by affiliation returned non-200",
+                    extra={
+                        "event": "code_verify.search_non_200",
+                        "org": org,
+                        "query": query,
+                        "status": response.status_code,
+                        "rate_remaining": rate_remaining,
+                        "rate_reset": rate_reset,
+                    },
+                )
+                continue
+            try:
+                items = response.json().get("items", [])[:5]
+            except ValueError:
+                continue
+            for item in items:
+                owner = item.get("owner", {}).get("login")
+                repo = item.get("name")
+                if not owner or not repo:
+                    continue
+                # Affiliation search casts a wide net — any repo at the
+                # lab matching a keyword. Require ``threshold=4`` so
+                # the weak combo "primary-keyword prefix-match (+2) +
+                # affiliation (+1)" cannot accept on its own. With a
+                # GitHub token raising the rate-limit ceiling, this
+                # combo started firing on the BatchNorm →
+                # ``google-research/batch-ppo`` and ResNet →
+                # ``microsoft/ResiDual`` cases — both are different
+                # papers from the same lab whose names happen to
+                # share a generic ML word with the searched title.
+                # Threshold 4 needs at least one strong, paper-
+                # specific signal: arxiv id in README (+3, the case
+                # that recovers MAE), or title-in-README corroborated
+                # by repo-name overlap (+2 + +2), or first-heading
+                # match (+2) on top of the keyword overlap.
+                if verify_repo_owns_paper(
+                    owner,
+                    repo,
+                    arxiv_id,
+                    title=title,
+                    authors=authors,
+                    abstract=abstract,
+                    token=token,
+                    session=session,
+                    timeout=timeout,
+                    threshold=4,
+                ):
+                    return f"https://github.com/{owner}/{repo}"
+    return None

@@ -601,6 +601,31 @@ def jobs_retry(*, job_id: str) -> int:
     return 0
 
 
+def backfill_code_urls(*, limit: int, page_size: int, dry_run: bool) -> int:
+    """One-shot sweep: re-run the Hugging Face paper-page code crosslink
+    over indexed papers and overwrite ``papers.code_url`` where the
+    source is not ``admin`` (#46).
+
+    ``--dry-run`` logs the would-be diffs without writing — use that on
+    first run so an admin can eyeball changes before a live backfill
+    against thousands of papers.
+    """
+    from .service import get_service
+
+    service = get_service()
+    result = service.backfill_code_urls_from_hf_papers(
+        limit=limit, page_size=page_size, dry_run=dry_run
+    )
+    print(f"Scanned:        {result['scanned']}")
+    print(f"Crosslink hits: {result['crosslink_hits']}")
+    print(f"Updated:        {result['updated']}")
+    print(f"Skipped admin:  {result['skipped_admin']}")
+    print(f"Unchanged:      {result['unchanged']}")
+    if dry_run:
+        print("[dry-run] no writes performed; rerun without --dry-run to apply.")
+    return 0
+
+
 def enrich_missing(*, limit: int, min_age_seconds: int, batch_size: int, queue: bool = False) -> int:
     """Backfill Semantic Scholar metadata for indexed papers (#38).
 
@@ -959,6 +984,18 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     retry_parser.add_argument("job_id", help="Job id (e.g. job_abc123).")
 
+    backfill_code_parser = subparsers.add_parser(
+        "backfill-code-urls",
+        help=(
+            "Re-run the Hugging Face paper-page code crosslink across indexed papers and "
+            "overwrite code_url where source is not 'admin' (#46). Supports "
+            "--dry-run for a no-write preview."
+        ),
+    )
+    backfill_code_parser.add_argument("--limit", type=int, default=100_000)
+    backfill_code_parser.add_argument("--page-size", type=int, default=200)
+    backfill_code_parser.add_argument("--dry-run", action="store_true")
+
     enrich_parser = subparsers.add_parser(
         "enrich-missing",
         help=(
@@ -1192,6 +1229,10 @@ def main(argv: list[str] | None = None) -> int:
             return jobs_list_dead(limit=args.limit)
         if args.jobs_command == "retry":
             return jobs_retry(job_id=args.job_id)
+    if args.command == "backfill-code-urls":
+        return backfill_code_urls(
+            limit=args.limit, page_size=args.page_size, dry_run=args.dry_run
+        )
     if args.command == "enrich-missing":
         return enrich_missing(
             limit=args.limit,
