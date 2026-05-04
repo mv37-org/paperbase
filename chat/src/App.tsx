@@ -530,16 +530,36 @@ function sourceCardId(messageId: string, sourceId: string) {
   return `source-card-${messageId}-${sourceId}`;
 }
 
-function consumePendingPrompt() {
-  const prompt = sessionStorage.getItem(PENDING_PROMPT_KEY);
+function consumePendingPrompt(): { prompt: string; paperIds: string[] } {
+  const raw = sessionStorage.getItem(PENDING_PROMPT_KEY);
   sessionStorage.removeItem(PENDING_PROMPT_KEY);
-  return prompt ?? "";
+  if (!raw) {
+    return { prompt: "", paperIds: [] };
+  }
+  if (raw.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(raw);
+      const prompt = typeof parsed?.prompt === "string" ? parsed.prompt : "";
+      const paperIds = Array.isArray(parsed?.paperIds)
+        ? parsed.paperIds.filter((id: unknown): id is string => typeof id === "string")
+        : [];
+      return { prompt, paperIds };
+    } catch {
+      return { prompt: "", paperIds: [] };
+    }
+  }
+  return { prompt: raw, paperIds: [] };
 }
 
-function rememberPendingPrompt(prompt: string) {
-  if (prompt.trim()) {
-    sessionStorage.setItem(PENDING_PROMPT_KEY, prompt.trim());
+function rememberPendingPrompt(prompt: string, paperIds: string[] = []) {
+  const trimmed = prompt.trim();
+  if (!trimmed) {
+    return;
   }
+  sessionStorage.setItem(
+    PENDING_PROMPT_KEY,
+    JSON.stringify({ prompt: trimmed, paperIds }),
+  );
 }
 
 function restoreTabs() {
@@ -3204,10 +3224,11 @@ export default function App() {
       }
       setOpenTabs(validRestoredTabs);
 
-      const pendingPrompt = consumePendingPrompt().trim();
-      if (pendingPrompt) {
+      const { prompt: pendingPrompt, paperIds: pendingPaperIds } = consumePendingPrompt();
+      const trimmedPendingPrompt = pendingPrompt.trim();
+      if (trimmedPendingPrompt) {
         if (!requireInferenceAccess(currentSession)) {
-          setComposerInput(pendingPrompt);
+          setComposerInput(trimmedPendingPrompt);
           return;
         }
         const thread = await createNewThread(
@@ -3215,7 +3236,13 @@ export default function App() {
           selectedProjectId ?? loadedProjects[0]?.project_id,
         );
         setLandingPrompt("");
-        await sendMessage(thread.thread_id, pendingPrompt, currentSession);
+        setLandingTags([]);
+        await sendMessage(
+          thread.thread_id,
+          trimmedPendingPrompt,
+          currentSession,
+          pendingPaperIds,
+        );
         return;
       }
 
@@ -3365,8 +3392,9 @@ export default function App() {
     if (!prompt) {
       return;
     }
+    const paperIds = landingTags.map((tag) => tag.id);
     if (!sessionRef.current?.authenticated) {
-      rememberPendingPrompt(prompt);
+      rememberPendingPrompt(prompt, paperIds);
       openAuthModal("login");
       return;
     }
@@ -3374,7 +3402,6 @@ export default function App() {
       return;
     }
     const thread = await createNewThread();
-    const paperIds = landingTags.map((tag) => tag.id);
     setLandingPrompt("");
     setLandingTags([]);
     await sendMessage(thread.thread_id, prompt, undefined, paperIds);
