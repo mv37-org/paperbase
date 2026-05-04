@@ -145,6 +145,25 @@ def test_paper_schema_carries_venue_signal_fields():
     assert paper.venue_source is None
 
 
+def test_paper_schema_carries_author_signal_fields():
+    """Regression test for #39 PR C: author-signal harvest needs the
+    ``top_author_s2_id`` column on ``papers`` and a separate
+    ``paper_authors`` table so the planner can run the cite-mass
+    aggregation. Locks both."""
+    from paperbase.repository import PaperAuthorORM, PaperORM
+
+    assert "top_author_s2_id" in PaperORM.__table__.columns, (
+        "PaperORM must carry 'top_author_s2_id' for author harvest provenance (#39 PR C)"
+    )
+    for column in ("paper_id", "author_s2_id", "author_name", "author_position"):
+        assert column in PaperAuthorORM.__table__.columns, (
+            f"PaperAuthorORM must carry '{column}' for author harvest (#39 PR C)"
+        )
+
+    paper = PaperMetadata(arxiv_id="2401.99999")
+    assert paper.top_author_s2_id is None
+
+
 def test_job_orm_carries_priority_for_backfill_starvation_guard():
     """Regression test for #33: harvest jobs must run at lower priority than
     interactive on-demand work so a multi-year backfill cannot starve

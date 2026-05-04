@@ -41,6 +41,8 @@ class PaperMetadata(BaseModel):
     venue: str | None = None
     venue_year: int | None = None
     venue_source: str | None = None
+    # Author-signal harvest provenance (#39 PR C). See PaperORM.top_author_s2_id.
+    top_author_s2_id: str | None = None
     source_type: str | None = None
     index_status: str = "discovered"
     indexed_at: datetime | None = None

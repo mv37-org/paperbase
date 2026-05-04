@@ -407,6 +407,48 @@ def harvest_venue(
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+class HarvestAuthorRequest(_BaseModel):
+    # Aggregation thresholds for picking top authors from the indexed corpus.
+    # ``min_cite_mass=5000`` matches the #39 spec ("≥5000 citations in CS").
+    # ``min_paper_count=2`` requires the author to have a real publication
+    # footprint in our corpus, not just a single paper that happens to clear
+    # the cite-mass bar — keeps the planner aimed at established researchers
+    # rather than the first author of any one heavily-cited paper.
+    min_paper_count: int = _Field(default=2, ge=1, le=1_000)
+    min_cite_mass: int = _Field(default=5_000, ge=0, le=10_000_000)
+    max_authors: int = _Field(default=100, ge=1, le=10_000)
+    # Bound per-author paging so a prolific author doesn't monopolize the run.
+    max_papers_per_author: int | None = _Field(default=None, ge=1, le=100_000)
+    chunk_size: int = _Field(default=50, ge=1, le=500)
+
+
+@app.post(
+    "/v1/index/harvest-author",
+    response_model=JobResponse,
+    dependencies=[Depends(require_bearer_token)],
+)
+def harvest_author(
+    request: HarvestAuthorRequest,
+    service: PaperbaseService = Depends(get_service),
+) -> JobResponse:
+    """Queue a ``harvest_author`` planner job (#39 PR C). Derives the
+    top-author list from the indexed corpus by aggregating
+    ``paper_authors`` JOIN ``papers``, then for each author pages S2
+    and enqueues ``harvest_chunk`` jobs (``source='s2_author'``)."""
+    from .errors import PermanentError
+
+    try:
+        return service.enqueue_harvest_author_job(
+            min_paper_count=request.min_paper_count,
+            min_cite_mass=request.min_cite_mass,
+            max_authors=request.max_authors,
+            max_papers_per_author=request.max_papers_per_author,
+            chunk_size=request.chunk_size,
+        )
+    except PermanentError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @app.post("/v1/index/summarize-top-cited", response_model=JobResponse, dependencies=[Depends(require_bearer_token)])
 def summarize_top_cited(
     limit: int = Query(default=500_000, ge=1, le=5_000_000),

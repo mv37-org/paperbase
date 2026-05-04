@@ -6,8 +6,9 @@ import logging
 import re
 import time
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import requests
 
@@ -345,17 +346,94 @@ def fetch_venue_accepted(
 
 
 @dataclass(slots=True)
+class AuthorPaperCandidate:
+    """One arxiv-resolved paper from S2's ``/author/{id}/papers`` endpoint
+    (#39 PR C). The chunk worker uses this to ingest the paper from
+    arxiv via ``index_arxiv_paper`` and stamp ``top_author_s2_id`` so
+    later analysis can identify which top author surfaced it.
+    """
+
+    arxiv_id: str
+    semantic_scholar_id: str
+    title: str
+    citation_count: int
+    year: int | None
+
+
+def fetch_author_papers(
+    *,
+    s2_author_id: str,
+    cursor: int = 0,
+    page_size: int = 1000,
+    timeout_seconds: int = 30,
+) -> tuple[list[AuthorPaperCandidate], int | None]:
+    """Page S2 ``/author/{id}/papers`` for arxiv-linked papers by one author.
+
+    Returns ``(candidates, next_cursor)``. ``next_cursor`` is the
+    integer offset to pass on the next call, or ``None`` when the
+    response indicates the last page (no ``next`` field).
+
+    Papers without an arxiv id are filtered out client-side — there is
+    nothing we can ingest for them. Sort order is whatever S2 returns
+    by default (typically newest first, which suits the "frontier work
+    by established researcher" use case from #39).
+    """
+    if not s2_author_id or not s2_author_id.strip():
+        raise ValueError("s2_author_id must not be empty")
+    if cursor < 0:
+        raise ValueError(f"cursor must be >= 0, got {cursor}")
+    if page_size < 1 or page_size > 1000:
+        raise ValueError(f"page_size must be in [1, 1000], got {page_size}")
+    response = SESSION.get(
+        f"{S2_API}/author/{s2_author_id.strip()}/papers",
+        params={
+            "fields": "externalIds,title,year,citationCount",
+            "offset": cursor,
+            "limit": page_size,
+        },
+        timeout=timeout_seconds,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    raw = payload.get("data") or []
+    next_offset = payload.get("next")
+    out: list[AuthorPaperCandidate] = []
+    for item in raw:
+        external_ids = item.get("externalIds") or {}
+        arxiv_id = external_ids.get("ArXiv")
+        if not arxiv_id:
+            continue
+        out.append(
+            AuthorPaperCandidate(
+                arxiv_id=canonical_arxiv_id(arxiv_id),
+                semantic_scholar_id=item.get("paperId") or "",
+                title=item.get("title") or "",
+                citation_count=item.get("citationCount") or 0,
+                year=item.get("year"),
+            )
+        )
+    return out, next_offset if isinstance(next_offset, int) else None
+
+
+@dataclass(slots=True)
 class EnrichmentOutcome:
     """Result of a Semantic Scholar enrichment pass.
 
     Callers use the counts to log observability (doctor reports success
     rate at scale) and to decide whether to enqueue a backfill job.
+
+    ``authors_by_arxiv`` (added for #39 PR C) maps arxiv id to the list
+    of ``{"s2_id": str, "name": str, "position": int}`` author rows
+    parsed from the S2 response. Service-layer callers persist these
+    rows to ``paper_authors`` so the top-author discovery aggregation
+    can run over the indexed corpus.
     """
     attempted: int = 0
     enriched: int = 0
     skipped_empty: int = 0
     batches_failed: int = 0
     batches_succeeded: int = 0
+    authors_by_arxiv: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
 
     @property
     def success_rate(self) -> float:
@@ -382,7 +460,11 @@ def _s2_batch_with_retry(
             response = SESSION.post(
                 f"{S2_API}/paper/batch",
                 json={"ids": ids},
-                params={"fields": "citationCount,influentialCitationCount,externalIds,tldr"},
+                # ``authors.authorId`` + ``authors.name`` added for #39 PR C —
+                # the service layer reads these from EnrichmentOutcome and
+                # persists them to ``paper_authors`` for the top-author
+                # discovery aggregation.
+                params={"fields": "citationCount,influentialCitationCount,externalIds,tldr,authors.authorId,authors.name"},
                 timeout=timeout_seconds,
             )
         except requests.RequestException as exc:
@@ -486,6 +568,25 @@ def enrich_with_semantic_scholar(
             tldr_text = tldr_payload.get("text") if isinstance(tldr_payload, dict) else None
             if tldr_text:
                 paper.tldr = tldr_text
+            # #39 PR C: surface structured author rows so the service layer
+            # can persist them to ``paper_authors``. Skipped when S2 returns
+            # no authors field (rare, but the get() guard avoids a KeyError).
+            authors_raw = item.get("authors") or []
+            if authors_raw:
+                rows: list[dict[str, Any]] = []
+                for position, author in enumerate(authors_raw, start=1):
+                    if not isinstance(author, dict):
+                        continue
+                    s2_id = (author.get("authorId") or "").strip()
+                    if not s2_id:
+                        continue
+                    rows.append({
+                        "s2_id": s2_id,
+                        "name": author.get("name") or "",
+                        "position": position,
+                    })
+                if rows:
+                    outcome.authors_by_arxiv[paper.arxiv_id] = rows
             outcome.enriched += 1
         if offset + batch_size < len(papers):
             time.sleep(inter_batch_sleep_seconds)
