@@ -2030,6 +2030,61 @@ describe("App", () => {
     });
   });
 
+  it("preserves pending landing mentions when an API key gate restores the prompt into the chat composer", async () => {
+    sessionStorage.setItem(
+      PENDING_PROMPT_KEY,
+      JSON.stringify({
+        prompt: "Summarize @Mentioned Paper",
+        paperIds: ["arxiv:2401.12345"],
+        mentions: [{ id: "arxiv:2401.12345", title: "Mentioned Paper" }],
+      }),
+    );
+    apiMocks.loadSession.mockResolvedValue(
+      authenticatedSession({ has_openai_api_key: false, has_anthropic_api_key: false }),
+    );
+    apiMocks.api.mockResolvedValue(authenticatedSession());
+    apiMocks.createThread.mockResolvedValue(emptyThreadResponse("thread_2"));
+    apiMocks.sendThreadMessageStream.mockResolvedValue(undefined);
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect((screen.getByLabelText("mention-input-chat") as HTMLInputElement).value).toBe(
+        "Summarize @Mentioned Paper",
+      );
+    });
+    await waitFor(() => {
+      expect(document.querySelector("#settings-anthropic-form")).toBeTruthy();
+    });
+
+    fireEvent.change(screen.getByLabelText("OpenAI API key"), {
+      target: { value: "sk-test-pending-mention" },
+    });
+    fireEvent.submit(document.querySelector("#settings-anthropic-form") as HTMLFormElement);
+
+    await waitFor(() => {
+      expect(apiMocks.api).toHaveBeenCalledWith("/v1/browser/settings/openai-key", {
+        method: "PUT",
+        body: JSON.stringify({ api_key: "sk-test-pending-mention" }),
+      });
+    });
+    await waitFor(() => {
+      expect(document.querySelector("#settings-anthropic-form")).toBeNull();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
+      expect(apiMocks.sendThreadMessageStream).toHaveBeenCalledTimes(1);
+    });
+    expect(apiMocks.sendThreadMessageStream.mock.calls[0]?.[1]).toEqual(
+      expect.objectContaining({
+        content: "Summarize @Mentioned Paper",
+        paper_ids: ["arxiv:2401.12345"],
+      }),
+    );
+  });
+
   it("shows a re-enter-key message when the saved OpenAI key is invalid", async () => {
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());
     apiMocks.createThread.mockResolvedValue(emptyThreadResponse("thread_2"));

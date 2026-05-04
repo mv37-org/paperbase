@@ -60,6 +60,7 @@ import type {
   GitHubRepoImportCandidate,
   GitHubRepoMetadataResponse,
   GitHubRepoSummary,
+  MentionTag,
   PaperResponse,
   ProjectFileKind,
   ProjectItemKind,
@@ -529,16 +530,92 @@ function sourceCardId(messageId: string, sourceId: string) {
   return `source-card-${messageId}-${sourceId}`;
 }
 
-function consumePendingPrompt() {
-  const prompt = sessionStorage.getItem(PENDING_PROMPT_KEY);
-  sessionStorage.removeItem(PENDING_PROMPT_KEY);
-  return prompt ?? "";
+type PendingPromptState = {
+  prompt: string;
+  paperIds: string[];
+  mentions: MentionTag[];
+};
+
+function normalizePendingPromptMentions(value: unknown): MentionTag[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const mentions: MentionTag[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") {
+      continue;
+    }
+    const id = typeof entry.id === "string" ? entry.id : "";
+    if (!id || seen.has(id)) {
+      continue;
+    }
+    seen.add(id);
+    mentions.push({
+      id,
+      title: typeof entry.title === "string" ? entry.title : "",
+    });
+  }
+  return mentions;
 }
 
-function rememberPendingPrompt(prompt: string) {
-  if (prompt.trim()) {
-    sessionStorage.setItem(PENDING_PROMPT_KEY, prompt.trim());
+function mentionedPaperIdsInText(text: string, mentions: MentionTag[]) {
+  const paperIds: string[] = [];
+  const seen = new Set<string>();
+  for (const mention of mentions) {
+    if (!mention.id || seen.has(mention.id)) {
+      continue;
+    }
+    if (mention.title.trim() && !text.includes(`@${mention.title}`)) {
+      continue;
+    }
+    seen.add(mention.id);
+    paperIds.push(mention.id);
   }
+  return paperIds;
+}
+
+function consumePendingPrompt(): PendingPromptState {
+  const raw = sessionStorage.getItem(PENDING_PROMPT_KEY);
+  sessionStorage.removeItem(PENDING_PROMPT_KEY);
+  if (!raw) {
+    return { prompt: "", paperIds: [], mentions: [] };
+  }
+  if (raw.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(raw);
+      const prompt = typeof parsed?.prompt === "string" ? parsed.prompt : "";
+      const legacyPaperIds = Array.isArray(parsed?.paperIds)
+        ? parsed.paperIds.filter((id: unknown): id is string => typeof id === "string")
+        : [];
+      const mentions = normalizePendingPromptMentions(parsed?.mentions);
+      const paperIds = [...new Set([...legacyPaperIds, ...mentions.map((mention) => mention.id)])];
+      return {
+        prompt,
+        paperIds,
+        mentions: mentions.length ? mentions : paperIds.map((id) => ({ id, title: "" })),
+      };
+    } catch {
+      return { prompt: "", paperIds: [], mentions: [] };
+    }
+  }
+  return { prompt: raw, paperIds: [], mentions: [] };
+}
+
+function rememberPendingPrompt(prompt: string, mentions: MentionTag[] = []) {
+  const trimmed = prompt.trim();
+  if (!trimmed) {
+    return;
+  }
+  const normalizedMentions = normalizePendingPromptMentions(mentions);
+  sessionStorage.setItem(
+    PENDING_PROMPT_KEY,
+    JSON.stringify({
+      prompt: trimmed,
+      paperIds: normalizedMentions.map((mention) => mention.id),
+      mentions: normalizedMentions,
+    }),
+  );
 }
 
 function restoreTabs() {
@@ -1320,6 +1397,9 @@ export default function App() {
   const [flashKind, setFlashKind] = useState<ModalFlashKind>("note");
   const [landingPrompt, setLandingPrompt] = useState("");
   const [composerInput, setComposerInput] = useState("");
+  const [composerTags, setComposerTags] = useState<MentionTag[]>([]);
+  const [landingTags, setLandingTags] = useState<MentionTag[]>([]);
+  const [restoredComposerMentions, setRestoredComposerMentions] = useState<MentionTag[]>([]);
   const [composerStatus, setComposerStatus] = useState("");
   const [includeUploads] = useState(true);
   const [includePapers] = useState(true);
@@ -2693,7 +2773,12 @@ export default function App() {
   );
 
   const sendMessage = useCallback(
-    async (threadId: string, content: string, currentSession?: BrowserSessionResponse | null) => {
+    async (
+      threadId: string,
+      content: string,
+      currentSession?: BrowserSessionResponse | null,
+      paperIds: string[] = [],
+    ) => {
       if (!requireInferenceAccess(currentSession)) {
         return null;
       }
@@ -2844,9 +2929,29 @@ export default function App() {
             content,
             include_uploads: includeUploads,
             include_papers: includePapers,
+            paper_ids: paperIds,
           },
           (eventName, payload) => {
             if (eventName === "turn_started") {
+              return;
+            }
+
+            if (eventName === "mention_indexing_started") {
+              const title = payload.title || payload.arxiv_id || payload.paper_id;
+              setComposerStatus(`Fetching paper: ${title}…`);
+              return;
+            }
+            if (eventName === "mention_indexing_completed") {
+              setComposerStatus("");
+              return;
+            }
+            if (eventName === "mention_indexing_failed") {
+              const title = payload.title || payload.arxiv_id || payload.paper_id;
+              setComposerStatus(
+                payload.detail
+                  ? `Could not fetch ${title}: ${payload.detail}`
+                  : `Could not fetch ${title}`,
+              );
               return;
             }
 
@@ -2991,6 +3096,7 @@ export default function App() {
             content,
             include_uploads: includeUploads,
             include_papers: includePapers,
+            paper_ids: paperIds,
           });
           const normalizedThread = normalizeThreadForState(payload.thread);
           setThreadMap((current) => ({ ...current, [threadId]: normalizedThread }));
@@ -3175,10 +3281,16 @@ export default function App() {
       }
       setOpenTabs(validRestoredTabs);
 
-      const pendingPrompt = consumePendingPrompt().trim();
-      if (pendingPrompt) {
+      const {
+        prompt: pendingPrompt,
+        paperIds: pendingPaperIds,
+        mentions: pendingMentions,
+      } = consumePendingPrompt();
+      const trimmedPendingPrompt = pendingPrompt.trim();
+      if (trimmedPendingPrompt) {
         if (!requireInferenceAccess(currentSession)) {
-          setComposerInput(pendingPrompt);
+          setComposerInput(trimmedPendingPrompt);
+          setRestoredComposerMentions(pendingMentions);
           return;
         }
         const thread = await createNewThread(
@@ -3186,7 +3298,9 @@ export default function App() {
           selectedProjectId ?? loadedProjects[0]?.project_id,
         );
         setLandingPrompt("");
-        await sendMessage(thread.thread_id, pendingPrompt, currentSession);
+        setLandingTags([]);
+        setRestoredComposerMentions([]);
+        await sendMessage(thread.thread_id, trimmedPendingPrompt, currentSession, pendingPaperIds);
         return;
       }
 
@@ -3336,8 +3450,9 @@ export default function App() {
     if (!prompt) {
       return;
     }
+    const mentions = landingTags.filter((tag) => tag.id);
     if (!sessionRef.current?.authenticated) {
-      rememberPendingPrompt(prompt);
+      rememberPendingPrompt(prompt, mentions);
       openAuthModal("login");
       return;
     }
@@ -3345,9 +3460,18 @@ export default function App() {
       return;
     }
     const thread = await createNewThread();
+    const paperIds = mentions.map((tag) => tag.id);
     setLandingPrompt("");
-    await sendMessage(thread.thread_id, prompt);
-  }, [createNewThread, landingPrompt, openAuthModal, requireInferenceAccess, sendMessage]);
+    setLandingTags([]);
+    await sendMessage(thread.thread_id, prompt, undefined, paperIds);
+  }, [
+    createNewThread,
+    landingPrompt,
+    landingTags,
+    openAuthModal,
+    requireInferenceAccess,
+    sendMessage,
+  ]);
 
   const handleExample = useCallback(
     async (prompt: string) => {
@@ -3402,14 +3526,24 @@ export default function App() {
       return;
     }
     const threadId = activeThreadId ?? (await createNewThread()).thread_id;
+    const paperIds = [
+      ...new Set([
+        ...composerTags.map((tag) => tag.id),
+        ...mentionedPaperIdsInText(content, restoredComposerMentions),
+      ]),
+    ];
     setComposerInput("");
+    setComposerTags([]);
+    setRestoredComposerMentions([]);
     scrollMessageListToBottom();
-    await sendMessage(threadId, content);
+    await sendMessage(threadId, content, undefined, paperIds);
   }, [
     activeThreadId,
     composerInput,
+    composerTags,
     createNewThread,
     requireInferenceAccess,
+    restoredComposerMentions,
     scrollMessageListToBottom,
     sendMessage,
     streamingThreadId,
@@ -3437,6 +3571,7 @@ export default function App() {
     setSyncConflictState(null);
     setLandingPrompt("");
     setComposerInput("");
+    setRestoredComposerMentions([]);
     setComposerStatus("");
     setMobileSidebarOpen(false);
     setAccountMenuOpen(false);
@@ -4575,6 +4710,7 @@ export default function App() {
       onChange={setComposerInput}
       onStop={handleStopStreaming}
       onSubmit={() => void handleComposerSubmit()}
+      onTagsChange={setComposerTags}
       placeholder="Ask about the latest agent and AI systems research. Type @ to tag a paper."
       searchPapers={suggestBrowserPapers}
       submitButtonId="composer-send"
@@ -4644,6 +4780,7 @@ export default function App() {
               onAttach={() => openAuthModal("login")}
               onChange={setLandingPrompt}
               onSubmit={() => void handleLandingSubmit()}
+              onTagsChange={setLandingTags}
               searchPapers={suggestBrowserPapers}
               submitButtonId="landing-start-button"
               submitLabel="Start"

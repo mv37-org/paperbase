@@ -136,6 +136,7 @@ The browser chat experience is project-based:
 - `Save` creates a single Paperbase-managed GitHub commit for the current project, and `Run` saves first, then executes the full saved project workspace through the user’s Modal sandbox credentials with `full` mode by default
 - project sync writes only Paperbase-managed paths tracked in `.paperbase`, preserving unrelated files in existing repositories
 - if GitHub has moved ahead since the last project save, Paperbase opens a Monaco conflict-resolution flow before creating the next commit
+- @-mentioning a paper in the chat composer sends the paper's id with the request; if the row is not yet at `index_status='indexed'` the send path synchronously fetches and indexes it from arXiv before the chat turn runs, with `mention_indexing_*` SSE events surfacing fetch progress on the streaming endpoint
 
 `make dev` runs all of these locally:
 

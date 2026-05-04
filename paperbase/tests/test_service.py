@@ -1976,6 +1976,152 @@ def test_invalid_saved_anthropic_key_is_cleared_and_gates_chat(browser_service):
     assert streamed[0][1]["thread"]["messages"] == []
 
 
+def test_send_chat_message_indexes_mentioned_paper_on_demand(monkeypatch, browser_service):
+    """A paper mentioned via @-tag that is in the catalog at index_status='discovered'
+    must be fetched and indexed before the chat turn runs, so the model sees a fully
+    indexed paper instead of a metadata stub."""
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="mention@example.com", password="topsecret123", display_name="Mention User")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
+
+    discovered = service.repository.upsert_paper_shallow(  # type: ignore[attr-defined]
+        _sample_paper("2401.99999", title="Mentioned Paper", abstract="Body of work."),
+    )
+    assert discovered.index_status == "discovered"
+
+    fetched: list[tuple[str, bool]] = []
+
+    def fake_index_arxiv_paper(arxiv_id: str, *, paper=None, force: bool = False):
+        fetched.append((arxiv_id, force))
+        indexed = discovered.model_copy(update={"index_status": "indexed"})
+        service.repository.papers[discovered.paper_id] = indexed  # type: ignore[attr-defined]
+        return indexed
+
+    monkeypatch.setattr(service, "index_arxiv_paper", fake_index_arxiv_paper)
+
+    response = service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="Summarize @Mentioned Paper", paper_ids=[discovered.paper_id]),
+    )
+
+    assert fetched == [(discovered.arxiv_id, False)]
+    assert response.assistant_message is not None
+
+
+def test_send_chat_message_skips_indexing_when_paper_is_already_indexed(monkeypatch, browser_service):
+    """A mentioned paper that is already at index_status='indexed' must not trigger
+    a redundant fetch — the resolve helper short-circuits."""
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="indexed-mention@example.com", password="topsecret123", display_name="Indexed Mention")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
+
+    discovered = service.repository.upsert_paper_shallow(  # type: ignore[attr-defined]
+        _sample_paper("2401.88888", title="Already Indexed", abstract="Body."),
+    )
+    indexed = discovered.model_copy(update={"index_status": "indexed"})
+    service.repository.papers[discovered.paper_id] = indexed  # type: ignore[attr-defined]
+
+    fetched: list[str] = []
+
+    def fake_index_arxiv_paper(arxiv_id: str, *, paper=None, force: bool = False):
+        fetched.append(arxiv_id)
+        return indexed
+
+    monkeypatch.setattr(service, "index_arxiv_paper", fake_index_arxiv_paper)
+
+    service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="Hello @Already Indexed", paper_ids=[indexed.paper_id]),
+    )
+
+    assert fetched == []
+
+
+def test_stream_chat_message_emits_mention_indexing_events(monkeypatch, browser_service):
+    """Streaming chat must yield mention_indexing_started/completed events so the UI
+    can show a 'fetching paper' state for any unindexed @-mention."""
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="mention-stream@example.com", password="topsecret123", display_name="Mention Stream")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
+
+    discovered = service.repository.upsert_paper_shallow(  # type: ignore[attr-defined]
+        _sample_paper("2401.77777", title="Streamed Paper", abstract="Body."),
+    )
+
+    def fake_index_arxiv_paper(arxiv_id: str, *, paper=None, force: bool = False):
+        indexed = discovered.model_copy(update={"index_status": "indexed"})
+        service.repository.papers[discovered.paper_id] = indexed  # type: ignore[attr-defined]
+        return indexed
+
+    monkeypatch.setattr(service, "index_arxiv_paper", fake_index_arxiv_paper)
+
+    events = list(
+        service.stream_chat_message(
+            session.user,
+            thread.thread_id,
+            SendChatMessageRequest(content="@Streamed Paper please", paper_ids=[discovered.paper_id]),
+        )
+    )
+
+    event_names = [name for name, _ in events]
+    assert "mention_indexing_started" in event_names
+    assert "mention_indexing_completed" in event_names
+    started_payload = next(payload for name, payload in events if name == "mention_indexing_started")
+    assert started_payload["paper_id"] == discovered.paper_id
+    assert started_payload["arxiv_id"] == discovered.arxiv_id
+
+
+def test_send_chat_message_reports_mention_failure_without_aborting_turn(monkeypatch, browser_service):
+    """If on-demand indexing raises (e.g. arXiv 404 → PermanentError), the chat turn
+    must still complete — the failure is surfaced as an SSE event but does not abort
+    the assistant response."""
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="mention-fail@example.com", password="topsecret123", display_name="Mention Fail")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
+
+    discovered = service.repository.upsert_paper_shallow(  # type: ignore[attr-defined]
+        _sample_paper("2401.66666", title="Doomed Paper", abstract="Body."),
+    )
+
+    def fake_index_arxiv_paper(arxiv_id: str, *, paper=None, force: bool = False):
+        from paperbase.errors import PermanentError
+
+        raise PermanentError(f"Paper {arxiv_id} not found on arXiv")
+
+    monkeypatch.setattr(service, "index_arxiv_paper", fake_index_arxiv_paper)
+
+    events = list(
+        service.stream_chat_message(
+            session.user,
+            thread.thread_id,
+            SendChatMessageRequest(content="@Doomed Paper", paper_ids=[discovered.paper_id]),
+        )
+    )
+
+    failure_events = [payload for name, payload in events if name == "mention_indexing_failed"]
+    assert len(failure_events) == 1
+    assert "not found" in failure_events[0]["detail"]
+    assert any(name == "turn_completed" for name, _ in events)
+
+
 def test_sanitize_inline_citations_preserves_markdown_structure():
     answer = """# Findings
 

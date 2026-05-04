@@ -703,6 +703,11 @@ class SendChatMessageRequest(BaseModel):
     tag_filters: list[str] = Field(default_factory=list)
     include_uploads: bool = True
     include_papers: bool = True
+    # Paper IDs the user @-mentioned in the composer. The send path resolves
+    # each id and fetches+indexes it from arXiv if it is not already at
+    # index_status='indexed', so the chat turn always sees a fully indexed
+    # paper for anything the user tagged.
+    paper_ids: list[str] = Field(default_factory=list)
 
 
 class SendChatMessageResponse(BaseModel):

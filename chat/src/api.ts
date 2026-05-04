@@ -43,6 +43,7 @@ export type SendThreadMessagePayload = {
   content: string;
   include_uploads: boolean;
   include_papers: boolean;
+  paper_ids?: string[];
 };
 
 type StreamEventHandler = <T extends keyof ChatStreamEventMap>(
@@ -210,6 +211,7 @@ function chatRequestBody(payload: SendThreadMessagePayload) {
     tag_filters: [],
     include_uploads: payload.include_uploads,
     include_papers: payload.include_papers,
+    paper_ids: payload.paper_ids ?? [],
   });
 }
 
