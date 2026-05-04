@@ -227,6 +227,515 @@ Representative and publishable studies will benefit from additional events:
 
 These are not required to define the metrics, but they improve preference labeling and downstream outcome measurement.
 
+## Benchmark suite
+
+This scorecard should be implemented as a series of benchmarks, not one monolithic run.
+
+Each benchmark must declare:
+
+- benchmark id
+- benchmark tier
+- target population
+- primary metrics
+- whether the benchmark is hardware-sensitive
+- whether the benchmark is expected to be representative, canary-only, or stress-only
+
+### Benchmark catalogue
+
+| ID | Benchmark | Goal | Primary outputs | Representative? | Hardware-sensitive? |
+| --- | --- | --- | --- | --- | --- |
+| `IQ-1` | Indexing census | Measure corpus-wide indexing coverage and quality telemetry | `source_type`, artifact coverage, embedding coverage, freshness, reliability | yes | low |
+| `IQ-2` | Stratified extraction audit | Human-audit extraction fidelity on a representative sample | rubric scores, answerability, weighted pass rates | yes | low |
+| `IQ-3` | Indexing stress audit | Audit rare or fragile extraction paths | same as `IQ-2`, stratified to hard cases | no, stress-only | low |
+| `RQ-1` | Paper retrieval canary | Fast regression detection on fixed paper-search queries | hit@1/3/5/10 | no, canary-only | low |
+| `RQ-2` | Representative real-query paper retrieval | Estimate real paper-search quality | weighted paper hit@k, MRR, no-click rate | yes | low |
+| `RQ-3` | Representative section retrieval | Estimate passage/evidence retrieval quality | weighted section hit@k, evidence recall | yes | low |
+| `RQ-4` | Retrieval stress suite | Exercise difficult but important query classes | per-class hit@k on typo, acronym, long-tail, figure/table, code cases | no, stress-only | low |
+| `HL-1` | Harness A/B representative task panel | Estimate end-to-end task lift with vs without Paperbase | task success, grounding, unsupported claims, cost | yes | medium |
+| `HL-2` | Harness A/B stress panel | Measure lift on rare but strategically important tasks | same as `HL-1` on figure/table/code/comparison tasks | no, stress-only | medium |
+| `PF-1` | Deterministic hotpath profile | Track backend hotpath latency drift | wall-clock hotpaths, SQL plan deltas | no, engineering-only | high |
+| `PF-2` | End-to-end cost and latency profile | Track user-facing cost under fixed harness settings | latency, tool calls, tokens, throughput | no unless hardware is fixed | high |
+
+### Current and target execution surfaces
+
+Current repo-supported entrypoints:
+
+- `make doctor`
+- `make test`
+- `make profile`
+
+Today, only the deterministic performance profile is fully implemented as a stable repo command via `make profile`.
+
+This spec requires the future benchmark surface to live behind the supported repo workflow, preferably through `paperbase-dev` and exposed at the repo root through `make` targets, rather than through ad hoc shell scripts.
+
+Until dedicated runners exist, benchmark studies should still follow the execution controls in this document and store versioned outputs under `benchmarks/`.
+
+## Execution controls
+
+These controls are mandatory. The goal is to keep benchmark outcomes from being dominated by:
+
+- paper selection artifacts
+- machine differences
+- external API drift
+- cache luck
+- query leakage
+- judge leakage
+
+### Paper neutrality controls
+
+Paper-specific skew is one of the easiest ways to fool ourselves. A benchmark that over-indexes on famous, highly cited, or already hand-curated papers can overstate quality badly.
+
+Mandatory controls:
+
+- cap the number of benchmark items contributed by any one paper on representative panels
+- keep train, development, and holdout splits paper-disjoint where feasible
+- report both weighted population averages and paper-macro averages when a benchmark contains multiple items per paper
+- cluster confidence intervals by paper for paper-derived tasks and queries
+- stratify by paper attributes that can distort results:
+  - source type
+  - primary category family
+  - publication year bucket
+  - citation bucket
+  - artifact richness bucket
+- blind human raters to title, authors, venue, and citation count when those fields are not needed for the judgment
+
+Recommended v1 paper caps:
+
+- representative retrieval panels: no more than 3 labeled queries per paper
+- representative harness panels: no more than 2 tasks per paper unless the task family explicitly requires multiple evidence modes from the same paper
+- canary and stress panels may exceed these caps, but must be labeled as such
+
+### Hardware neutrality controls
+
+Hardware neutrality does not mean pretending hardware does not matter. It means separating:
+
+- content-quality benchmarks, which should be nearly hardware-agnostic
+- performance benchmarks, which are inherently hardware-sensitive
+
+Mandatory controls:
+
+- never pool latency numbers across materially different hardware classes into one headline metric
+- for paired A/B studies, run both conditions on the same host class and software image
+- record a hardware fingerprint for every run:
+  - CPU model
+  - GPU model if present
+  - RAM
+  - operating system
+  - Python version
+  - database version
+  - embedding and reranker model ids
+- report wall-clock performance only within fixed hardware tracks
+- prefer relative deltas over cross-machine absolute comparisons
+- for quality benchmarks, treat wall-clock latency as a secondary metric, not the primary outcome
+
+Recommended hardware tracks:
+
+- `local-cpu`
+- `local-gpu`
+- `cloud-cpu`
+- `cloud-gpu`
+
+Do not compare a `local-cpu` absolute p95 latency to a `cloud-gpu` absolute p95 latency and call that a product result.
+
+### External source neutrality controls
+
+External APIs change. Live search backends change. Enrichment changes. Those sources are useful, but they are hostile to reproducibility.
+
+Mandatory controls for primary offline quality benchmarks:
+
+- freeze the indexed corpus snapshot
+- set `include_live_sources=False`
+- freeze model ids
+- freeze the benchmark item list version
+- freeze the labels version
+
+If a benchmark explicitly measures live-source behavior, it must be reported as a separate benchmark with:
+
+- run timestamp
+- external providers used
+- exact request settings
+
+Live-source runs are product telemetry or exploratory studies unless repeated over multiple windows with explicit controls.
+
+### Order, cache, and warmup controls
+
+Mandatory controls:
+
+- randomize benchmark item order within each run where order effects are plausible
+- for paired A/B benchmarks, randomize which condition runs first per item
+- use fresh namespaces or fresh threads so state does not leak across conditions
+- declare one cache policy and stick to it for the benchmark:
+  - cold-cache
+  - warm-cache after fixed warmup
+- if warm-cache is used, warm both conditions symmetrically
+
+Recommended default:
+
+- quality benchmarks: warm model weights, fresh task/thread state
+- performance benchmarks: publish both cold and warm numbers when feasible, but keep one as the primary track
+
+### Repetition and replication controls
+
+Mandatory controls:
+
+- repeat stochastic harness runs
+- rerun performance benchmarks multiple times
+- use time-separated study windows for publishable representative studies
+
+Recommended defaults:
+
+- retrieval quality on a frozen corpus: one retrieval pass is acceptable if the system is deterministic
+- harness quality on stochastic models: at least 3 repeats per task-condition for representative gate studies, 5 for publishable studies
+- hotpath performance: at least 5 full benchmark runs on the same hardware track before updating baselines
+
+### Contamination controls
+
+Mandatory controls:
+
+- benchmark items sampled from real user traffic must exclude synthetic tool reformulations
+- benchmark items used as canaries should not be the only items used during development decisions
+- labels must not be authored from a single system's ranking alone
+- if prompts or retrieval heuristics are tuned on one panel, the final claim must use a paper-disjoint or time-disjoint holdout
+
+## How to run each benchmark
+
+These runbooks define the benchmark procedure. Where the repo already has a stable command, use it. Where a dedicated runner does not yet exist, treat this as the required protocol for the future `paperbase-dev` implementation.
+
+### `IQ-1`: Indexing census
+
+Purpose:
+
+- measure corpus-wide indexing telemetry without hand-label bias
+
+How to run:
+
+1. Declare the study window and target population.
+2. Snapshot all papers indexed in that window.
+3. Export paper-level fields needed for measurement:
+   - `source_type`
+   - indexing timestamps
+   - embedding presence
+   - artifact counts from manifests and chunks
+4. Compute all metrics over the full snapshot, not a sample.
+5. Report by relevant strata:
+   - source type
+   - category family
+   - publication year bucket
+   - ingest mode if available
+
+Bias controls:
+
+- this is a census, so the main risks are instrumentation and survivorship bias, not sampling variance
+- failed and partial index attempts must remain in reliability denominators
+- do not filter away `abstract-only` or failed cases because they are inconvenient
+
+Hardware controls:
+
+- none for the primary metrics beyond provenance capture, because the outputs are telemetry summaries
+
+Primary use:
+
+- representative system-state reporting
+
+### `IQ-2`: Stratified extraction audit
+
+Purpose:
+
+- judge whether indexed artifacts are actually readable and useful
+
+How to run:
+
+1. Draw a stratified sample from indexed papers in the study window.
+2. Oversample fragile strata such as `pdf` and `abstract-only`.
+3. Create an audit packet per paper containing only the artifact views needed for judgment.
+4. Blind raters to title, authors, venue, and citation count where feasible.
+5. Collect independent ratings on the frozen rubric.
+6. Adjudicate disagreements.
+7. Weight results back to the indexed-paper population.
+
+Bias controls:
+
+- stratified sampling with inclusion probabilities
+- paper caps do not apply because the unit is paper itself
+- raters must not know whether a paper is a famous landmark unless that information is unavoidable
+
+Hardware controls:
+
+- none for the primary metrics beyond provenance capture
+
+Primary use:
+
+- representative extraction fidelity estimate
+
+### `IQ-3`: Indexing stress audit
+
+Purpose:
+
+- stress-test rare extraction paths that are too sparse to dominate representative panels
+
+How to run:
+
+1. Construct a fixed panel of hard papers:
+   - scanned PDFs
+   - figure-heavy papers
+   - table-heavy papers
+   - LaTeX include trees
+   - papers that previously failed extraction
+2. Reindex them under controlled conditions.
+3. Run the same rubric as `IQ-2`.
+4. Report separately from representative estimates.
+
+Bias controls:
+
+- do not fold stress-panel results into representative headline metrics
+
+Hardware controls:
+
+- same as `IQ-2`
+
+Primary use:
+
+- failure discovery and regression diagnosis
+
+### `RQ-1`: Paper retrieval canary
+
+Purpose:
+
+- catch obvious paper-ranking regressions quickly
+
+How to run:
+
+1. Use a fixed, versioned query set.
+2. Use a frozen corpus snapshot.
+3. Disable live sources.
+4. Run retrieval deterministically and compute hit@k.
+
+Bias controls:
+
+- canary set must not be the sole basis for product claims
+- cap overrepresented landmark papers where possible
+
+Hardware controls:
+
+- quality outputs are primary; latency is secondary
+
+Primary use:
+
+- PR and local regression detection
+
+### `RQ-2`: Representative real-query paper retrieval
+
+Purpose:
+
+- estimate real paper-search quality on the actual user-query distribution
+
+How to run:
+
+1. Select a time window of eligible explicit user searches.
+2. Collapse bursts into canonical query intents.
+3. Draw a stratified sample from those canonical intents.
+4. Label acceptable papers without exposing a single candidate system's ranking as the gold source.
+5. Evaluate retrieval on a frozen corpus snapshot with live sources disabled.
+6. Compute weighted hit@k and behavioral metrics separately.
+
+Bias controls:
+
+- sample from all eligible queries, not just clicked queries
+- cap the number of sampled queries per paper
+- cluster uncertainty by paper and by user when appropriate
+- keep the final evaluation window time-disjoint from tuning data
+
+Hardware controls:
+
+- quality metrics are primary
+- if latency is reported, it must come from a fixed hardware track
+
+Primary use:
+
+- representative retrieval gate
+
+### `RQ-3`: Representative section retrieval
+
+Purpose:
+
+- measure whether the system finds the right evidence passage, not just the right paper
+
+How to run:
+
+1. Start from evidence-seeking queries or task prompts.
+2. Label acceptable evidence paths or spans.
+3. Evaluate section search on a frozen corpus snapshot.
+4. Compute weighted section hit@k and evidence recall.
+
+Bias controls:
+
+- cap overrepresented papers
+- allow multiple acceptable evidence locations when the paper contains repeated or equivalent support
+- use pooled candidate systems if retrieval outputs help annotation
+
+Hardware controls:
+
+- same as `RQ-2`
+
+Primary use:
+
+- representative evidence retrieval estimate
+
+### `RQ-4`: Retrieval stress suite
+
+Purpose:
+
+- characterize known weak spots that may not be frequent enough to dominate representative traffic
+
+How to run:
+
+1. Build fixed hard subsets:
+   - typo-heavy
+   - acronym-only
+   - long pasted text
+   - long-tail author queries
+   - code-linked paper queries
+   - figure/table requests
+2. Evaluate with the same frozen corpus and label policy as the representative suites.
+3. Report per-subset metrics only.
+
+Bias controls:
+
+- never weight this stress panel into representative product averages unless the weighting scheme is explicitly justified
+
+Hardware controls:
+
+- same as `RQ-2`
+
+Primary use:
+
+- stress diagnosis and targeted improvements
+
+### `HL-1`: Harness A/B representative task panel
+
+Purpose:
+
+- estimate end-to-end task lift with and without Paperbase for a fixed harness and model
+
+How to run:
+
+1. Sample realistic tasks from the target harness population.
+2. Keep the model, prompt family, and non-Paperbase tool surface fixed.
+3. Run paired conditions:
+   - without Paperbase
+   - with Paperbase
+4. Randomize condition order per task.
+5. Use fresh threads or fresh state for each condition.
+6. Repeat runs when the model is stochastic.
+7. Blind judges to condition during scoring.
+
+Bias controls:
+
+- representative task sampling
+- cap tasks per paper
+- keep paper-disjoint holdouts if the task bank is reused during development
+- separate task success from grounding quality during scoring
+
+Hardware controls:
+
+- run both A and B on the same hardware track
+- report quality as primary and latency/cost as secondary
+- do not pool runs from materially different hardware classes into one latency claim
+
+Primary use:
+
+- representative harness lift estimate
+
+### `HL-2`: Harness A/B stress panel
+
+Purpose:
+
+- estimate Paperbase lift on rare but strategically important task families
+
+How to run:
+
+1. Build fixed stress tasks for:
+   - figure interpretation
+   - table extraction
+   - code-linked paper analysis
+   - cross-paper comparison
+   - adversarial ambiguity
+2. Run the same paired design as `HL-1`.
+3. Report separately from representative task panels.
+
+Bias controls:
+
+- no representative claims from this panel alone
+
+Hardware controls:
+
+- same-host paired runs
+
+Primary use:
+
+- high-value failure discovery
+
+### `PF-1`: Deterministic hotpath profile
+
+Purpose:
+
+- catch performance regressions in indexing and retrieval hotpaths
+
+How to run:
+
+1. Use the supported repo workflow:
+   - `make doctor`
+   - `make profile`
+2. Run on a quiet machine in a declared hardware track.
+3. Rerun at least 5 times before accepting a new baseline update for publishable trend claims.
+4. Report median and spread, not only one run.
+
+Bias controls:
+
+- none related to paper representativeness, because this is an engineering performance benchmark, not a product outcome benchmark
+- do not use `PF-1` to argue that retrieval quality improved
+
+Hardware controls:
+
+- strict same-hardware comparison
+- capture hardware fingerprint and database versions
+- compare deltas within track only
+
+Primary use:
+
+- engineering performance regression tracking
+
+### `PF-2`: End-to-end cost and latency profile
+
+Purpose:
+
+- measure user-visible cost under controlled harness settings
+
+How to run:
+
+1. Fix harness, model, prompt family, and benchmark task set.
+2. Run all conditions on the same hardware track.
+3. Capture:
+   - total latency
+   - time to first meaningful output when available
+   - tool calls
+   - token usage
+4. Repeat runs and report distributions.
+
+Bias controls:
+
+- do not confuse this with a representative quality benchmark
+- if the task set is a canary or stress panel, label it as such
+
+Hardware controls:
+
+- strict same-host or same-class comparison
+- no cross-hardware absolute claims
+
+Primary use:
+
+- cost-quality tradeoff analysis
+
 ## Sampling design
 
 ### Indexing quality sampling
