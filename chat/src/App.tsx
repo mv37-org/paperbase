@@ -15,6 +15,7 @@ import {
   getBrowserPaperFigure,
   getBrowserPaperFile,
   getBrowserPaperTable,
+  getBootstrapSession,
   getProjectRepoSync,
   getPythonFile,
   githubLoginUrl,
@@ -1256,7 +1257,8 @@ function EmptyStateActionIcon({ asset }: { asset: string }) {
 }
 
 export default function App() {
-  const [session, setSession] = useState<BrowserSessionResponse | null>(null);
+  const bootstrapSession = useMemo(() => getBootstrapSession(), []);
+  const [session, setSession] = useState<BrowserSessionResponse | null>(bootstrapSession);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [projectItems, setProjectItems] = useState<Record<string, ProjectItemState>>({});
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(() =>
@@ -1313,7 +1315,7 @@ export default function App() {
   const [syncConflictState, setSyncConflictState] = useState<SyncConflictState>(null);
   const [authView, setAuthView] = useState<AuthView>("login");
   const [authModalOpen, setAuthModalOpen] = useState(false);
-  const [authReady, setAuthReady] = useState(false);
+  const [authReady, setAuthReady] = useState(Boolean(bootstrapSession));
   const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTab>("inference");
   const [appearanceThemeDraft, setAppearanceThemeDraft] = useState<AppearanceTheme>("light");
   const [flash, setFlash] = useState("");
@@ -3254,7 +3256,7 @@ export default function App() {
         const nextUrl = `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`;
         window.history.replaceState({}, "", nextUrl);
       }
-      const nextSession = await loadSession();
+      const nextSession = bootstrapSession ?? (await loadSession());
       setSession(nextSession);
       setAuthReady(true);
       if (
@@ -3289,7 +3291,7 @@ export default function App() {
       setComposerStatus("The chat app could not reach paperbase.");
       setAuthReady(true);
     });
-  }, [bootstrapAuthenticatedUi, showErrorFlash, showNoteFlash]);
+  }, [bootstrapAuthenticatedUi, bootstrapSession, showErrorFlash, showNoteFlash]);
 
   const openAuthModal = useCallback(
     (view: AuthView, settingsTab: SettingsTab = "inference") => {

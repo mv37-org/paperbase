@@ -104,6 +104,7 @@ The repo has four moving pieces:
 - `paperbase-plugin/` contains the MCP bridge used by Codex and Claude Code
 - `chat/` contains the React frontend
 - `paperbase/src/paperbase/static/` is generated build output, not source
+- the `paperbase-api` root HTML response injects the current browser session into the shell so the frontend can boot without an immediate session fetch and can apply signed-in theme state before React mounts
 
 `paperbase-api` and `paperbase-worker` are the same codebase and image with different entrypoints:
 
