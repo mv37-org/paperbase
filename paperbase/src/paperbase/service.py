@@ -3365,6 +3365,81 @@ class PaperbaseService:
     def _choose_anthropic_api_key(self, user: BrowserUser) -> tuple[str | None, bool, str]:
         return self._choose_openai_api_key(user)
 
+    def _ensure_mentioned_papers_indexed(
+        self, paper_ids: list[str]
+    ) -> Iterator[tuple[str, dict[str, Any]]]:
+        """Resolve each @-mentioned ``paper_id`` and, if the row is not already
+        at ``index_status='indexed'``, synchronously fetch and index it from
+        arXiv before the chat turn runs. Yields SSE-shaped events
+        (``mention_indexing_started`` / ``mention_indexing_completed`` /
+        ``mention_indexing_failed``) so the streaming chat path can surface
+        per-paper progress; the non-streaming caller drains the iterator and
+        discards the events. Failures (unknown paper, missing arxiv_id, or a
+        ``PermanentError`` from ``index_arxiv_paper``) are reported as a
+        ``mention_indexing_failed`` event but do not abort the turn — the chat
+        will simply run without that paper at full fidelity."""
+        seen: set[str] = set()
+        for paper_id in paper_ids:
+            if not paper_id or paper_id in seen:
+                continue
+            seen.add(paper_id)
+            existing = self.repository.get_paper(paper_id)  # type: ignore[attr-defined]
+            if existing is None:
+                yield (
+                    "mention_indexing_failed",
+                    {"paper_id": paper_id, "detail": "Paper not found"},
+                )
+                continue
+            if existing.index_status == "indexed":
+                continue
+            if not existing.arxiv_id:
+                yield (
+                    "mention_indexing_failed",
+                    {
+                        "paper_id": paper_id,
+                        "title": existing.title or "",
+                        "detail": "Paper has no arxiv_id; cannot fetch on demand",
+                    },
+                )
+                continue
+            yield (
+                "mention_indexing_started",
+                {
+                    "paper_id": paper_id,
+                    "arxiv_id": existing.arxiv_id,
+                    "title": existing.title or "",
+                },
+            )
+            try:
+                indexed = self.index_arxiv_paper(existing.arxiv_id, force=False)
+            except Exception as exc:
+                logger.exception(
+                    "On-demand mention indexing failed",
+                    extra={
+                        "event": "chat.mention_indexing_failed",
+                        "paper_id": paper_id,
+                        "arxiv_id": existing.arxiv_id,
+                    },
+                )
+                yield (
+                    "mention_indexing_failed",
+                    {
+                        "paper_id": paper_id,
+                        "arxiv_id": existing.arxiv_id,
+                        "title": existing.title or "",
+                        "detail": str(exc),
+                    },
+                )
+                continue
+            yield (
+                "mention_indexing_completed",
+                {
+                    "paper_id": indexed.paper_id,
+                    "arxiv_id": indexed.arxiv_id,
+                    "title": indexed.title or "",
+                },
+            )
+
     def _prepare_chat_generation(
         self,
         *,
@@ -5322,6 +5397,11 @@ class PaperbaseService:
                 thread_id=thread_id,
                 state=api_key_state,
             )
+        # Drain mention-resolution events. The non-streaming path can't
+        # surface them to the UI, so just run the side effect (fetch + index)
+        # and discard the per-paper events.
+        for _ in self._ensure_mentioned_papers_indexed(request.paper_ids):
+            pass
         prepared = self._prepare_chat_generation(
             user=user,
             thread_id=thread_id,
@@ -5371,6 +5451,9 @@ class PaperbaseService:
                 ).model_dump(mode="json"),
             )
             return
+        # Forward per-paper resolve-and-index events to the SSE stream so the
+        # UI can show a "Fetching paper…" state for any unindexed mention.
+        yield from self._ensure_mentioned_papers_indexed(request.paper_ids)
         prepared = self._prepare_chat_generation(
             user=user,
             thread_id=thread_id,

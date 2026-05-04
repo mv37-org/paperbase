@@ -60,6 +60,7 @@ import type {
   GitHubRepoImportCandidate,
   GitHubRepoMetadataResponse,
   GitHubRepoSummary,
+  MentionTag,
   PaperResponse,
   ProjectFileKind,
   ProjectItemKind,
@@ -1320,6 +1321,8 @@ export default function App() {
   const [flashKind, setFlashKind] = useState<ModalFlashKind>("note");
   const [landingPrompt, setLandingPrompt] = useState("");
   const [composerInput, setComposerInput] = useState("");
+  const [composerTags, setComposerTags] = useState<MentionTag[]>([]);
+  const [landingTags, setLandingTags] = useState<MentionTag[]>([]);
   const [composerStatus, setComposerStatus] = useState("");
   const [includeUploads] = useState(true);
   const [includePapers] = useState(true);
@@ -2693,7 +2696,12 @@ export default function App() {
   );
 
   const sendMessage = useCallback(
-    async (threadId: string, content: string, currentSession?: BrowserSessionResponse | null) => {
+    async (
+      threadId: string,
+      content: string,
+      currentSession?: BrowserSessionResponse | null,
+      paperIds: string[] = [],
+    ) => {
       if (!requireInferenceAccess(currentSession)) {
         return null;
       }
@@ -2844,9 +2852,29 @@ export default function App() {
             content,
             include_uploads: includeUploads,
             include_papers: includePapers,
+            paper_ids: paperIds,
           },
           (eventName, payload) => {
             if (eventName === "turn_started") {
+              return;
+            }
+
+            if (eventName === "mention_indexing_started") {
+              const title = payload.title || payload.arxiv_id || payload.paper_id;
+              setComposerStatus(`Fetching paper: ${title}…`);
+              return;
+            }
+            if (eventName === "mention_indexing_completed") {
+              setComposerStatus("");
+              return;
+            }
+            if (eventName === "mention_indexing_failed") {
+              const title = payload.title || payload.arxiv_id || payload.paper_id;
+              setComposerStatus(
+                payload.detail
+                  ? `Could not fetch ${title}: ${payload.detail}`
+                  : `Could not fetch ${title}`,
+              );
               return;
             }
 
@@ -2991,6 +3019,7 @@ export default function App() {
             content,
             include_uploads: includeUploads,
             include_papers: includePapers,
+            paper_ids: paperIds,
           });
           const normalizedThread = normalizeThreadForState(payload.thread);
           setThreadMap((current) => ({ ...current, [threadId]: normalizedThread }));
@@ -3345,9 +3374,18 @@ export default function App() {
       return;
     }
     const thread = await createNewThread();
+    const paperIds = landingTags.map((tag) => tag.id);
     setLandingPrompt("");
-    await sendMessage(thread.thread_id, prompt);
-  }, [createNewThread, landingPrompt, openAuthModal, requireInferenceAccess, sendMessage]);
+    setLandingTags([]);
+    await sendMessage(thread.thread_id, prompt, undefined, paperIds);
+  }, [
+    createNewThread,
+    landingPrompt,
+    landingTags,
+    openAuthModal,
+    requireInferenceAccess,
+    sendMessage,
+  ]);
 
   const handleExample = useCallback(
     async (prompt: string) => {
@@ -3402,12 +3440,15 @@ export default function App() {
       return;
     }
     const threadId = activeThreadId ?? (await createNewThread()).thread_id;
+    const paperIds = composerTags.map((tag) => tag.id);
     setComposerInput("");
+    setComposerTags([]);
     scrollMessageListToBottom();
-    await sendMessage(threadId, content);
+    await sendMessage(threadId, content, undefined, paperIds);
   }, [
     activeThreadId,
     composerInput,
+    composerTags,
     createNewThread,
     requireInferenceAccess,
     scrollMessageListToBottom,
@@ -4575,6 +4616,7 @@ export default function App() {
       onChange={setComposerInput}
       onStop={handleStopStreaming}
       onSubmit={() => void handleComposerSubmit()}
+      onTagsChange={setComposerTags}
       placeholder="Ask about the latest agent and AI systems research. Type @ to tag a paper."
       searchPapers={suggestBrowserPapers}
       submitButtonId="composer-send"
@@ -4644,6 +4686,7 @@ export default function App() {
               onAttach={() => openAuthModal("login")}
               onChange={setLandingPrompt}
               onSubmit={() => void handleLandingSubmit()}
+              onTagsChange={setLandingTags}
               searchPapers={suggestBrowserPapers}
               submitButtonId="landing-start-button"
               submitLabel="Start"
