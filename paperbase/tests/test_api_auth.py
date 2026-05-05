@@ -271,6 +271,10 @@ class StubApiService:
             content_type="image/webp",
         )
 
+    def get_paper_preview_content(self, paper_id: str) -> tuple[bytes, str]:
+        self.calls.append(("get_paper_preview_content", paper_id))
+        return (b"preview-bytes", "image/webp")
+
     def list_files(self, paper_id: str) -> FileListResponse:
         self.calls.append(("list_files", paper_id))
         return FileListResponse(
@@ -294,6 +298,10 @@ class StubApiService:
             url=f"https://signed.example/{paper_id}/{quote(path, safe='/')}",
             content_type="application/pdf",
         )
+
+    def get_paper_asset_content(self, paper_id: str, path: str) -> tuple[bytes, str]:
+        self.calls.append(("get_paper_asset_content", (paper_id, path)))
+        return (b"%PDF-1.4", "application/pdf")
 
     def get_results(self, result_set_id: str) -> ResultSetResponse:
         self.calls.append(("get_results", result_set_id))
@@ -1627,6 +1635,19 @@ def test_browser_preview_route_returns_signed_url_and_no_store_cache(api_client)
     assert ("get_paper_preview", "arxiv:2401.54321") in service.calls
 
 
+def test_browser_preview_content_route_streams_bytes_and_no_store_cache(api_client):
+    client, service, settings = api_client
+    client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
+
+    response = client.get("/v1/browser/papers/arxiv:2401.54321/preview/content")
+
+    assert response.status_code == 200
+    assert response.content == b"preview-bytes"
+    assert response.headers["content-type"] == "image/webp"
+    assert response.headers["Cache-Control"] == "no-store"
+    assert ("get_paper_preview_content", "arxiv:2401.54321") in service.calls
+
+
 def test_browser_preview_route_requires_browser_session(api_client):
     client, _, _ = api_client
 
@@ -1642,6 +1663,20 @@ def test_browser_preview_route_returns_404_when_preview_missing(api_client):
     response = client.get("/v1/browser/papers/missing/preview")
 
     assert response.status_code == 404
+
+
+def test_browser_admin_asset_content_route_streams_bytes_and_no_store_cache(api_client):
+    client, service, settings = api_client
+    service.browser_user = service.browser_user.model_copy(update={"is_admin": True})
+    client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
+
+    response = client.get("/v1/browser/admin/papers/arxiv:2401.54321/asset-content/bundle.pdf")
+
+    assert response.status_code == 200
+    assert response.content == b"%PDF-1.4"
+    assert response.headers["content-type"] == "application/pdf"
+    assert response.headers["Cache-Control"] == "no-store"
+    assert ("get_paper_asset_content", ("arxiv:2401.54321", "bundle.pdf")) in service.calls
 
 
 def test_harvest_endpoint_delegates_to_service(api_client):

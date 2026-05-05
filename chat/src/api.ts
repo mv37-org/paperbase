@@ -46,6 +46,17 @@ const API_BASE = resolveApiBase(CONFIGURED_API_BASE);
 
 let browserCsrfToken: string | null = null;
 
+function apiUrl(path: string) {
+  return `${API_BASE}${path}`;
+}
+
+function encodePathPreservingSlashes(path: string) {
+  return path
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+}
+
 export type SendThreadMessagePayload = {
   content: string;
   include_uploads: boolean;
@@ -84,6 +95,16 @@ export class ApiError extends Error {
     this.status = status;
     this.payload = payload;
   }
+}
+
+export function browserPaperPreviewContentUrl(paperId: string) {
+  return apiUrl(`/v1/browser/papers/${encodeURIComponent(paperId)}/preview/content`);
+}
+
+export function browserAdminPaperAssetContentUrl(paperId: string, path: string) {
+  return apiUrl(
+    `/v1/browser/admin/papers/${encodeURIComponent(paperId)}/asset-content/${encodePathPreservingSlashes(path)}`,
+  );
 }
 
 export function resolveApiBase(rawBase: string, currentPageUrl = window.location.href) {

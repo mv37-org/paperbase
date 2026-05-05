@@ -521,8 +521,18 @@ function jobTypeLabel(jobType: string) {
 type AdminJobTrigger = {
   label: string;
   title: string;
-  tone: "manual" | "scheduled";
+  tone: "internal" | "requested" | "scheduled" | "unknown";
 };
+
+const REQUESTED_JOB_TYPES = new Set([
+  "enrich_missing_metadata",
+  "harvest_range",
+  "harvest_top_cited",
+  "harvest_venue",
+  "index_paper",
+]);
+
+const INTERNAL_JOB_TYPES = new Set(["ingest_repo", "reindex_embeddings", "summarize_top_cited"]);
 
 function adminJobTrigger(job: AdminJobOverviewRow): AdminJobTrigger {
   if (
@@ -536,10 +546,24 @@ function adminJobTrigger(job: AdminJobOverviewRow): AdminJobTrigger {
       tone: "scheduled",
     };
   }
+  if (REQUESTED_JOB_TYPES.has(job.job_type)) {
+    return {
+      label: "Requested",
+      title: `On-demand request · ${jobTypeLabel(job.job_type).toLowerCase()}`,
+      tone: "requested",
+    };
+  }
+  if (INTERNAL_JOB_TYPES.has(job.job_type)) {
+    return {
+      label: "Internal",
+      title: `System generated · ${jobTypeLabel(job.job_type).toLowerCase()}`,
+      tone: "internal",
+    };
+  }
   return {
-    label: "Manual",
-    title: `User queued · ${jobTypeLabel(job.job_type).toLowerCase()}`,
-    tone: "manual",
+    label: "Unknown",
+    title: `Origin unknown · ${jobTypeLabel(job.job_type).toLowerCase()}`,
+    tone: "unknown",
   };
 }
 
@@ -2489,127 +2513,254 @@ export function AdminOpsPanel({
               <h2 id="admin-paper-title">
                 {paperDetail?.title ?? selectedJobPaper.title ?? selectedJobPaper.paper_id}
               </h2>
-              <span>{selectedJobPaper.arxiv_id ?? selectedJobPaper.paper_id}</span>
+              <div className="admin-paper-modal-header-links">
+                {currentArxivUrl ? (
+                  <a href={currentArxivUrl} target="_blank" rel="noreferrer">
+                    {currentArxivId ? `Open arXiv ${currentArxivId}` : "Open paper"}
+                  </a>
+                ) : null}
+                {paperDetail?.pdf_url ? (
+                  <a href={paperDetail.pdf_url} target="_blank" rel="noreferrer">
+                    PDF
+                  </a>
+                ) : null}
+              </div>
             </div>
-            <div className="admin-paper-modal-tabs" role="tablist" aria-label="Paper detail views">
-              {(["screenshot", "metadata", "filestructure"] as PaperModalTab[]).map((tab) => (
-                <button
-                  key={tab}
-                  type="button"
-                  role="tab"
-                  aria-selected={paperModalTab === tab}
-                  className={`admin-paper-tab${paperModalTab === tab ? " active" : ""}`}
-                  onClick={() => setPaperModalTab(tab)}
+            <div className="admin-paper-modal-divider" />
+            <div className="admin-paper-modal-layout">
+              <div className="admin-paper-modal-sidebar">
+                <div
+                  className="admin-paper-modal-tabs"
+                  role="tablist"
+                  aria-label="Paper detail views"
+                  aria-orientation="vertical"
                 >
-                  {tab === "screenshot"
-                    ? "Screenshot"
-                    : tab === "metadata"
-                      ? "Metadata"
-                      : "Filestructure"}
-                </button>
-              ))}
-            </div>
-
-            {paperModalError ? (
-              <div className="admin-jobs-inline-error">{paperModalError}</div>
-            ) : null}
-            {paperModalLoading ? <div className="admin-jobs-empty">Loading paper...</div> : null}
-
-            {!paperModalLoading && paperModalTab === "screenshot" ? (
-              <div className="admin-paper-modal-body">
-                {paperPreview ? (
-                  <img
-                    className="admin-paper-preview"
-                    src={paperPreview.image_url}
-                    alt={paperDetail?.title ?? selectedJobPaper.paper_id}
-                  />
-                ) : (
-                  <div className="admin-jobs-empty">No screenshot available for this paper.</div>
-                )}
-              </div>
-            ) : null}
-
-            {!paperModalLoading && paperModalTab === "metadata" ? (
-              <div className="admin-paper-modal-body admin-paper-metadata">
-                {metadataRows(paperDetail, selectedJobPaper).map(([label, value]) => (
-                  <div key={label} className="admin-paper-metadata-row">
-                    <span>{label}</span>
-                    <strong>{value}</strong>
-                  </div>
-                ))}
-              </div>
-            ) : null}
-
-            {!paperModalLoading && paperModalTab === "filestructure" ? (
-              <div className="admin-paper-modal-body admin-paper-files">
-                <div className="admin-paper-file-list">
-                  {paperFilesError ? (
-                    <div className="admin-jobs-inline-error">{paperFilesError}</div>
-                  ) : null}
-                  {paperFilesLoading ? (
-                    <div className="admin-jobs-empty">Loading files...</div>
-                  ) : null}
-                  {!paperFilesLoading && paperFiles.length === 0 ? (
-                    <div className="admin-jobs-empty">No files found for this paper.</div>
-                  ) : null}
-                  {!paperFilesLoading
-                    ? paperFiles.map((file) => (
-                        <button
-                          key={file.path}
-                          type="button"
-                          className={`admin-paper-file-row${selectedFilePath === file.path ? " active" : ""}`}
-                          onClick={() => void openFile(file)}
-                        >
-                          <span>{file.path}</span>
-                          <span>{file.content_type ?? "file"}</span>
-                        </button>
-                      ))
-                    : null}
-                </div>
-                <div className="admin-paper-file-preview">
-                  {selectedFileError ? (
-                    <div className="admin-jobs-inline-error">{selectedFileError}</div>
-                  ) : null}
-                  {selectedFileLoading ? (
-                    <div className="admin-jobs-empty">Opening file...</div>
-                  ) : null}
-                  {!selectedFileLoading && selectedFileContent ? (
-                    <pre className="admin-paper-file-text">{selectedFileContent.content}</pre>
-                  ) : null}
-                  {!selectedFileLoading && selectedAsset && assetKind(selectedAsset) === "image" ? (
-                    <img
-                      className="admin-paper-preview"
-                      src={selectedAsset.url}
-                      alt={selectedAsset.path}
-                    />
-                  ) : null}
-                  {!selectedFileLoading && selectedAsset && assetKind(selectedAsset) === "pdf" ? (
-                    <iframe
-                      className="admin-paper-pdf-frame"
-                      src={selectedAsset.url}
-                      title={selectedAsset.path}
-                    />
-                  ) : null}
-                  {!selectedFileLoading && selectedAsset && assetKind(selectedAsset) === "file" ? (
-                    <a
-                      href={selectedAsset.url}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="admin-paper-file-link"
+                  {(["screenshot", "metadata", "files"] as PaperModalTab[]).map((tab) => (
+                    <button
+                      key={tab}
+                      type="button"
+                      role="tab"
+                      aria-selected={paperModalTab === tab}
+                      className={`admin-paper-tab${paperModalTab === tab ? " active" : ""}`}
+                      onClick={() => setPaperModalTab(tab)}
                     >
-                      Open file
-                    </a>
-                  ) : null}
-                  {!selectedFileLoading &&
-                  !selectedFileContent &&
-                  !selectedAsset &&
-                  !selectedFileError &&
-                  selectedJobPaper ? (
-                    <div className="admin-jobs-empty">Pick a file to inspect.</div>
-                  ) : null}
+                      {tab === "screenshot"
+                        ? "Screenshot"
+                        : tab === "metadata"
+                          ? "Metadata"
+                          : "File structure"}
+                    </button>
+                  ))}
+                </div>
+                <div className="admin-paper-sidebar-card">
+                  <span className="admin-paper-sidebar-label">Quick facts</span>
+                  <div className="admin-paper-sidebar-facts">
+                    <div>
+                      <span>Status</span>
+                      <strong>{paperDetail?.index_status ?? selectedJobPaper.outcome}</strong>
+                    </div>
+                    <div>
+                      <span>Published</span>
+                      <strong>{paperDetail?.published ?? "—"}</strong>
+                    </div>
+                    <div>
+                      <span>Preview</span>
+                      <strong>{paperPreview ? "Available" : "Missing"}</strong>
+                    </div>
+                    <div>
+                      <span>Files</span>
+                      <strong>
+                        {paperFiles.length > 0
+                          ? `${paperFiles.length} files`
+                          : paperModalTab === "files" && !paperFilesLoading
+                            ? "0 files"
+                            : "—"}
+                      </strong>
+                    </div>
+                    <div>
+                      <span>Folders</span>
+                      <strong>
+                        {paperFiles.length > 0
+                          ? `${paperFolderCount} folders`
+                          : paperModalTab === "files" && !paperFilesLoading
+                            ? "0 folders"
+                            : "—"}
+                      </strong>
+                    </div>
+                  </div>
+                </div>
+                <div className="admin-paper-sidebar-card">
+                  <span className="admin-paper-sidebar-label">Links</span>
+                  <div className="admin-paper-sidebar-links">
+                    {currentArxivUrl ? (
+                      <a href={currentArxivUrl} target="_blank" rel="noreferrer">
+                        arXiv page
+                      </a>
+                    ) : null}
+                    {paperDetail?.pdf_url ? (
+                      <a href={paperDetail.pdf_url} target="_blank" rel="noreferrer">
+                        PDF
+                      </a>
+                    ) : null}
+                    {paperDetail?.html_url && paperDetail.html_url !== currentArxivUrl ? (
+                      <a href={paperDetail.html_url} target="_blank" rel="noreferrer">
+                        Publisher page
+                      </a>
+                    ) : null}
+                  </div>
                 </div>
               </div>
-            ) : null}
+              <div className="admin-paper-modal-main">
+                {paperModalError ? (
+                  <div className="admin-jobs-inline-error">{paperModalError}</div>
+                ) : null}
+                {paperModalLoading ? (
+                  <div className="admin-jobs-empty">Loading paper...</div>
+                ) : null}
+
+                {!paperModalLoading && paperModalTab === "screenshot" ? (
+                  <div className="admin-paper-modal-body">
+                    <div className="admin-paper-section-header">
+                      <h3>First-page screenshot</h3>
+                      <span>Stored preview</span>
+                    </div>
+                    {paperPreview ? (
+                      <div className="admin-paper-preview-stage">
+                        <img
+                          className="admin-paper-preview"
+                          src={paperPreviewUrl}
+                          alt={paperDetail?.title ?? selectedJobPaper.paper_id}
+                        />
+                      </div>
+                    ) : (
+                      <div className="admin-jobs-empty">
+                        No screenshot available for this paper.
+                      </div>
+                    )}
+                  </div>
+                ) : null}
+
+                {!paperModalLoading && paperModalTab === "metadata" ? (
+                  <div className="admin-paper-modal-body">
+                    <div className="admin-paper-section-header">
+                      <h3>Metadata</h3>
+                      <span>Compact paper record</span>
+                    </div>
+                    <div className="admin-paper-metadata">
+                      {metadataRows(paperDetail, selectedJobPaper).map(([label, value]) => (
+                        <div key={label} className="admin-paper-metadata-row">
+                          <span>{label}</span>
+                          <strong>{value}</strong>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+
+                {!paperModalLoading && paperModalTab === "files" ? (
+                  <div className="admin-paper-modal-body">
+                    <div className="admin-paper-section-header">
+                      <h3>File structure</h3>
+                      <span>
+                        {paperFiles.length > 0
+                          ? `${paperFiles.length} files across ${paperFolderCount} folders`
+                          : "Browse stored artifacts"}
+                      </span>
+                    </div>
+                    <div className="admin-paper-files">
+                      <div className="admin-paper-file-list">
+                        {paperFilesError ? (
+                          <div className="admin-jobs-inline-error">{paperFilesError}</div>
+                        ) : null}
+                        {paperFilesLoading ? (
+                          <div className="admin-jobs-empty">Loading files...</div>
+                        ) : null}
+                        {!paperFilesLoading && paperFiles.length === 0 ? (
+                          <div className="admin-jobs-empty">No files found for this paper.</div>
+                        ) : null}
+                        {!paperFilesLoading && paperFiles.length > 0 ? (
+                          <PaperFileTreeList
+                            expandedFolders={expandedFolders}
+                            onOpenFile={(file) => void openFile(file)}
+                            onToggleFolder={(path) =>
+                              setExpandedFolders((current) => ({
+                                ...current,
+                                [path]: !(current[path] ?? true),
+                              }))
+                            }
+                            selectedFilePath={selectedFilePath}
+                            tree={paperFileTree}
+                          />
+                        ) : null}
+                      </div>
+                      <div className="admin-paper-file-preview">
+                        <div className="admin-paper-file-preview-header">
+                          <strong>{selectedFilePath ?? "File preview"}</strong>
+                          {selectedAsset && selectedAssetPreviewUrl ? (
+                            <a
+                              href={selectedAssetPreviewUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="admin-paper-file-link"
+                            >
+                              Open raw file
+                            </a>
+                          ) : null}
+                        </div>
+                        {selectedFileError ? (
+                          <div className="admin-jobs-inline-error">{selectedFileError}</div>
+                        ) : null}
+                        {selectedFileLoading ? (
+                          <div className="admin-jobs-empty">Opening file...</div>
+                        ) : null}
+                        {!selectedFileLoading && selectedFileContent ? (
+                          <pre className="admin-paper-file-text">{selectedFileContent.content}</pre>
+                        ) : null}
+                        {!selectedFileLoading &&
+                        selectedAsset &&
+                        assetKind(selectedAsset) === "image" ? (
+                          <div className="admin-paper-preview-stage">
+                            <img
+                              className="admin-paper-preview"
+                              src={selectedAssetPreviewUrl}
+                              alt={selectedAsset.path}
+                            />
+                          </div>
+                        ) : null}
+                        {!selectedFileLoading &&
+                        selectedAsset &&
+                        assetKind(selectedAsset) === "pdf" ? (
+                          <iframe
+                            className="admin-paper-pdf-frame"
+                            src={selectedAssetPreviewUrl}
+                            title={selectedAsset.path}
+                          />
+                        ) : null}
+                        {!selectedFileLoading &&
+                        selectedAsset &&
+                        assetKind(selectedAsset) === "file" ? (
+                          <a
+                            href={selectedAssetPreviewUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="admin-paper-file-link"
+                          >
+                            Open file
+                          </a>
+                        ) : null}
+                        {!selectedFileLoading &&
+                        !selectedFileContent &&
+                        !selectedAsset &&
+                        !selectedFileError &&
+                        selectedJobPaper ? (
+                          <div className="admin-jobs-empty">Pick a file to inspect.</div>
+                        ) : null}
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            </div>
           </div>
         </div>
       ) : null}

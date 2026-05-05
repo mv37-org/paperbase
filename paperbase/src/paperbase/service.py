@@ -16,6 +16,7 @@ import sys
 import tempfile
 import threading
 from urllib import error as urllib_error
+from urllib.parse import quote
 from urllib import request as urllib_request
 from collections.abc import Generator, Iterator
 from dataclasses import dataclass
@@ -8152,6 +8153,34 @@ class PaperbaseService:
             raise HTTPException(status_code=404, detail=f"Manifest for {paper_id} not found")
         return ManifestResponse(paper_id=paper_id, manifest=json.loads(self.object_store.get_text(path)))
 
+    def _browser_app_url(self, path: str) -> str:
+        base = self.settings.chat_public_url.rstrip("/")
+        if not base:
+            return path
+        return f"{base}{path}"
+
+    def _paper_artifact_location(self, paper_id: str, path: str) -> tuple[str, str]:
+        self.get_paper(paper_id)
+        safe_path = _normalize_paper_artifact_path(path)
+        full_path = f"papers/{paper_id}/{safe_path}"
+        if not self.object_store.exists(full_path):
+            raise HTTPException(status_code=404, detail=f"File {safe_path} not found for {paper_id}")
+        return safe_path, full_path
+
+    def _paper_artifact_content_type(self, paper_id: str, safe_path: str) -> str | None:
+        files = {item.path: item for item in self.list_files(paper_id).files}
+        content_type = files.get(safe_path, FileObject(path=safe_path, size=0)).content_type
+        if content_type:
+            return content_type
+        return mimetypes.guess_type(safe_path)[0]
+
+    def _preview_object_path(self, paper_id: str) -> str:
+        self.get_paper(paper_id)
+        preview_path = f"papers/{paper_id}/preview/first-page-top.webp"
+        if not self.object_store.exists(preview_path):
+            raise HTTPException(status_code=404, detail=f"Preview not found for {paper_id}")
+        return preview_path
+
     def list_files(self, paper_id: str) -> FileListResponse:
         self.get_paper(paper_id)
         prefix = f"papers/{paper_id}/"
@@ -8163,10 +8192,7 @@ class PaperbaseService:
         return FileListResponse(paper_id=paper_id, files=files)
 
     def read_file(self, paper_id: str, path: str) -> FileContentResponse:
-        safe_path = _normalize_paper_artifact_path(path)
-        full_path = f"papers/{paper_id}/{safe_path}"
-        if not self.object_store.exists(full_path):
-            raise HTTPException(status_code=404, detail=f"File {safe_path} not found for {paper_id}")
+        safe_path, full_path = self._paper_artifact_location(paper_id, path)
         try:
             content = self.object_store.get_text(full_path)
         except UnicodeDecodeError as exc:
@@ -8174,18 +8200,17 @@ class PaperbaseService:
         return FileContentResponse(paper_id=paper_id, path=safe_path, content=content)
 
     def get_paper_asset(self, paper_id: str, path: str) -> PaperAssetResponse:
-        self.get_paper(paper_id)
-        safe_path = _normalize_paper_artifact_path(path)
-        full_path = f"papers/{paper_id}/{safe_path}"
-        if not self.object_store.exists(full_path):
-            raise HTTPException(status_code=404, detail=f"File {safe_path} not found for {paper_id}")
-        url = self.object_store.presign_get(full_path, expires_in=self.settings.presign_ttl_seconds)
-        if not url:
-            raise HTTPException(status_code=404, detail=f"File {safe_path} is not available for {paper_id}")
-        files = {item.path: item for item in self.list_files(paper_id).files}
-        content_type = files.get(safe_path, FileObject(path=safe_path, size=0)).content_type
-        if not content_type:
-            content_type = mimetypes.guess_type(safe_path)[0]
+        safe_path, full_path = self._paper_artifact_location(paper_id, path)
+        if self.settings.storage_backend in {"local", "memory"}:
+            url = self._browser_app_url(
+                "/v1/browser/admin/papers/"
+                f"{quote(paper_id, safe='')}/asset-content/{quote(safe_path, safe='/')}"
+            )
+        else:
+            url = self.object_store.presign_get(full_path, expires_in=self.settings.presign_ttl_seconds)
+            if not url:
+                raise HTTPException(status_code=404, detail=f"File {safe_path} is not available for {paper_id}")
+        content_type = self._paper_artifact_content_type(paper_id, safe_path)
         return PaperAssetResponse(
             paper_id=paper_id,
             path=safe_path,
@@ -8193,20 +8218,33 @@ class PaperbaseService:
             content_type=content_type,
         )
 
+    def get_paper_asset_content(self, paper_id: str, path: str) -> tuple[bytes, str | None]:
+        safe_path, full_path = self._paper_artifact_location(paper_id, path)
+        return self.object_store.get_bytes(full_path), self._paper_artifact_content_type(paper_id, safe_path)
+
     def get_paper_preview(self, paper_id: str) -> PaperPreviewResponse:
         """Return a short-lived signed URL for the paper's first-page preview.
 
         Fixed-function: the object path is resolved server-side from ``paper_id`` only.
         Raises 404 when the paper or the preview artifact is missing.
         """
-        self.get_paper(paper_id)
-        preview_path = f"papers/{paper_id}/preview/first-page-top.webp"
-        if not self.object_store.exists(preview_path):
-            raise HTTPException(status_code=404, detail=f"Preview not found for {paper_id}")
-        image_url = self.object_store.presign_get(preview_path, expires_in=self.settings.presign_ttl_seconds)
-        if not image_url:
-            raise HTTPException(status_code=404, detail=f"Preview not available for {paper_id}")
+        preview_path = self._preview_object_path(paper_id)
+        if self.settings.storage_backend in {"local", "memory"}:
+            image_url = self._browser_app_url(
+                f"/v1/browser/papers/{quote(paper_id, safe='')}/preview/content"
+            )
+        else:
+            image_url = self.object_store.presign_get(
+                preview_path,
+                expires_in=self.settings.presign_ttl_seconds,
+            )
+            if not image_url:
+                raise HTTPException(status_code=404, detail=f"Preview not available for {paper_id}")
         return PaperPreviewResponse(paper_id=paper_id, image_url=image_url, content_type="image/webp")
+
+    def get_paper_preview_content(self, paper_id: str) -> tuple[bytes, str]:
+        preview_path = self._preview_object_path(paper_id)
+        return self.object_store.get_bytes(preview_path), "image/webp"
 
     def get_figure(self, paper_id: str, figure_id: str) -> FigureResponse:
         caption_path = f"papers/{paper_id}/figures/{figure_id}/caption.md"

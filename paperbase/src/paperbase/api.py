@@ -734,6 +734,18 @@ def browser_get_paper_preview(
     return preview
 
 
+@app.get("/v1/browser/papers/{paper_id}/preview/content")
+def browser_get_paper_preview_content(
+    paper_id: str,
+    user=Depends(require_browser_user),
+    service: PaperbaseService = Depends(get_service),
+) -> Response:
+    payload, content_type = service.get_paper_preview_content(paper_id)
+    response = Response(content=payload, media_type=content_type)
+    set_no_store_headers(response)
+    return response
+
+
 @app.get("/v1/browser/papers/{paper_id}/tables/{table_id}", response_model=TableResponse)
 def browser_get_paper_table(
     paper_id: str,
@@ -877,6 +889,19 @@ def browser_admin_get_paper_asset(
     asset = service.get_paper_asset(paper_id, path)
     set_no_store_headers(response)
     return asset
+
+
+@app.get("/v1/browser/admin/papers/{paper_id}/asset-content/{path:path}")
+def browser_admin_get_paper_asset_content(
+    paper_id: str,
+    path: str,
+    user=Depends(require_browser_admin_user),
+    service: PaperbaseService = Depends(get_service),
+) -> Response:
+    payload, content_type = service.get_paper_asset_content(paper_id, path)
+    response = Response(content=payload, media_type=content_type)
+    set_no_store_headers(response)
+    return response
 
 
 @app.get("/v1/jobs/{job_id}", response_model=JobResponse, dependencies=[Depends(require_bearer_token)])

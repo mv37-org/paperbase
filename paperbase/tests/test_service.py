@@ -2162,7 +2162,7 @@ def test_admin_paper_listing_filters_and_sorts(service):
     assert [paper.paper_id for paper in results] == ["arxiv:2401.11111"]
 
 
-def test_get_paper_asset_returns_signed_url(service):
+def test_get_paper_asset_returns_browser_content_url_for_local_storage(service):
     paper = _sample_paper("2401.33333", title="Artifact Paper", abstract="Artifact abstract.")
     paper.index_status = "indexed"
     service.repository.upsert_paper(paper)  # type: ignore[attr-defined]
@@ -2175,8 +2175,41 @@ def test_get_paper_asset_returns_signed_url(service):
     asset = service.get_paper_asset("arxiv:2401.33333", "bundle.pdf")
 
     assert asset.paper_id == "arxiv:2401.33333"
-    assert asset.url == "memory://papers/arxiv:2401.33333/bundle.pdf"
+    assert asset.url == "http://127.0.0.1:8080/v1/browser/admin/papers/arxiv%3A2401.33333/asset-content/bundle.pdf"
     assert asset.content_type == "application/pdf"
+
+
+def test_get_paper_preview_content_returns_bytes(service):
+    paper = _sample_paper("2401.33334", title="Artifact Bytes", abstract="Artifact abstract.")
+    paper.index_status = "indexed"
+    service.repository.upsert_paper(paper)  # type: ignore[attr-defined]
+    service.object_store.put_bytes(  # type: ignore[attr-defined]
+        "papers/arxiv:2401.33334/preview/first-page-top.webp",
+        b"preview-bytes",
+        content_type="image/webp",
+    )
+
+    payload, content_type = service.get_paper_preview_content("arxiv:2401.33334")
+
+    assert payload == b"preview-bytes"
+    assert content_type == "image/webp"
+
+
+def test_get_paper_preview_returns_browser_content_url_for_local_storage(service):
+    paper = _sample_paper("2401.33335", title="Preview Paper", abstract="Artifact abstract.")
+    paper.index_status = "indexed"
+    service.repository.upsert_paper(paper)  # type: ignore[attr-defined]
+    service.object_store.put_bytes(  # type: ignore[attr-defined]
+        "papers/arxiv:2401.33335/preview/first-page-top.webp",
+        b"preview-bytes",
+        content_type="image/webp",
+    )
+
+    preview = service.get_paper_preview("arxiv:2401.33335")
+
+    assert preview.paper_id == "arxiv:2401.33335"
+    assert preview.image_url == "http://127.0.0.1:8080/v1/browser/papers/arxiv%3A2401.33335/preview/content"
+    assert preview.content_type == "image/webp"
 
 
 def test_invalid_saved_anthropic_key_is_cleared_and_gates_chat(browser_service):
