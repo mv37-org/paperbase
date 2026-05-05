@@ -3248,6 +3248,65 @@ describe("App", () => {
     });
   });
 
+  it("prevents duplicate create-job submissions while queueing", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession({ is_admin: true }));
+    let resolveQueue: (value: unknown) => void = () => {};
+    apiMocks.queueBrowserAdminPaperIndex.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveQueue = resolve;
+        }),
+    );
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Control panel" })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Control panel" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Control panel" })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Create job" }));
+    fireEvent.click(screen.getByRole("button", { name: /Single paper/i }));
+    fireEvent.change(screen.getByLabelText("arXiv ID"), {
+      target: { value: "2401.12345" },
+    });
+
+    const form = document.querySelector(".admin-create-job-form") as HTMLFormElement;
+    fireEvent.submit(form);
+    fireEvent.submit(form);
+
+    await waitFor(() => {
+      expect(apiMocks.queueBrowserAdminPaperIndex).toHaveBeenCalledTimes(1);
+    });
+    expect(form.getAttribute("aria-busy")).toBe("true");
+    expect((screen.getByRole("button", { name: "Queuing..." }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+
+    await act(async () => {
+      resolveQueue({
+        job_id: "job_admin_1",
+        job_type: "index_paper",
+        status: "pending",
+        payload: {},
+        attempts: 0,
+        max_attempts: 3,
+        priority: -10,
+        created_at: "2026-04-21T00:00:00Z",
+        updated_at: "2026-04-21T00:00:00Z",
+      });
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "Queuing..." })).toBeNull();
+    });
+  });
+
   it("shows field help for create-job forms and falls back to optional defaults", async () => {
     apiMocks.loadSession.mockResolvedValue(authenticatedSession({ is_admin: true }));
 

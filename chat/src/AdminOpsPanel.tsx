@@ -1,4 +1,11 @@
-import { type ComponentPropsWithoutRef, type ReactNode, useEffect, useMemo, useState } from "react";
+import {
+  type ComponentPropsWithoutRef,
+  type ReactNode,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { EChartsOption } from "echarts";
 import ReactECharts from "echarts-for-react";
 
@@ -1139,6 +1146,7 @@ export function AdminOpsPanel({
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [createJobKind, setCreateJobKind] = useState<CreateJobKind | null>(null);
   const [createSubmitting, setCreateSubmitting] = useState(false);
+  const createSubmittingRef = useRef(false);
 
   const [selectedJobPaper, setSelectedJobPaper] = useState<AdminJobPaperResponse | null>(null);
   const [paperModalTab, setPaperModalTab] = useState<PaperModalTab>("screenshot");
@@ -1328,9 +1336,10 @@ export function AdminOpsPanel({
   }
 
   async function submitCreateJob(formData: FormData) {
-    if (!createJobKind) {
+    if (!createJobKind || createSubmittingRef.current) {
       return;
     }
+    createSubmittingRef.current = true;
     setCreateSubmitting(true);
     try {
       if (createJobKind === "index_paper") {
@@ -1374,6 +1383,7 @@ export function AdminOpsPanel({
     } catch (error) {
       onError(panelErrorMessage(error, "Job could not be queued."));
     } finally {
+      createSubmittingRef.current = false;
       setCreateSubmitting(false);
     }
   }
@@ -1617,7 +1627,11 @@ export function AdminOpsPanel({
               setCreateJobKind(null);
             }}
           />
-          <div className="modal-panel admin-create-job-modal">
+          <div
+            className={`modal-panel admin-create-job-modal${
+              activeCreateJob ? " admin-create-job-modal-form" : ""
+            }`}
+          >
             <button
               type="button"
               className="modal-close"
@@ -1656,6 +1670,7 @@ export function AdminOpsPanel({
             ) : (
               <form
                 className="admin-create-job-form"
+                aria-busy={createSubmitting}
                 onSubmit={async (event) => {
                   event.preventDefault();
                   await submitCreateJob(new FormData(event.currentTarget));

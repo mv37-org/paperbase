@@ -5676,6 +5676,16 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
   padding: 0 32px 32px;
 }
 
+.admin-create-job-modal-form h2 {
+  padding: 24px 24px 14px;
+  padding-right: 56px;
+}
+
+.admin-create-job-modal-form .admin-create-job-form {
+  gap: 10px;
+  padding: 0 24px 24px;
+}
+
 .admin-create-job-option {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -5746,7 +5756,7 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
   justify-content: flex-end;
   gap: 8px;
   flex-wrap: wrap;
-  margin-top: 4px;
+  margin-top: 2px;
 }
 
 .admin-create-job-grid {
