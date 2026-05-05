@@ -5257,6 +5257,7 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
   display: grid;
   gap: 0;
   padding: 0 0 18px;
+  border-top: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
 }
 
@@ -5499,6 +5500,14 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
   font-weight: 600;
   letter-spacing: 0.05em;
   text-transform: uppercase;
+}
+
+.admin-jobs-table th:first-child {
+  padding-left: 24px;
+}
+
+.admin-jobs-table th:last-child {
+  padding-right: 24px;
 }
 
 .admin-jobs-row {
