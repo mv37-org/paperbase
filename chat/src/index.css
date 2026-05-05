@@ -5257,7 +5257,7 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
 .admin-jobs-timeline-panel {
   display: grid;
   gap: 0;
-  padding: 0 0 18px;
+  padding: 0;
   border-top: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
 }
@@ -5300,7 +5300,7 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
 }
 
 .admin-jobs-window-button {
-  min-width: 168px;
+  min-width: 144px;
   min-height: 24px;
   height: 24px;
   max-height: 24px;
@@ -5499,6 +5499,7 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
 }
 
 .admin-jobs-table th {
+  background: rgba(249, 246, 240, 0.9);
   color: var(--muted);
   font-size: 11px;
   font-weight: 600;
