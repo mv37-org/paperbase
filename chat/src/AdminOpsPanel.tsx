@@ -11,6 +11,8 @@ import type { EChartsOption } from "echarts";
 import ReactECharts from "echarts-for-react";
 
 import {
+  browserAdminPaperAssetContentUrl,
+  browserPaperPreviewContentUrl,
   getBrowserAdminPaperAsset,
   getBrowserAdminPaperFile,
   getBrowserPaper,
@@ -52,7 +54,21 @@ type CreateJobKind =
   | "harvest_venue"
   | "enrich_missing_metadata";
 
-type PaperModalTab = "screenshot" | "metadata" | "filestructure";
+type PaperModalTab = "screenshot" | "metadata" | "files";
+
+type FileTreeNode =
+  | {
+      kind: "file";
+      name: string;
+      path: string;
+      file: FileObject;
+    }
+  | {
+      kind: "folder";
+      name: string;
+      path: string;
+      children: FileTreeNode[];
+    };
 
 const TEXT_FILE_EXTENSIONS = new Set([
   ".csv",
@@ -575,6 +591,96 @@ function assetKind(asset: PaperAssetResponse | null) {
   return "file";
 }
 
+function paperArxivId(paper: PaperResponse | null, entry: AdminJobPaperResponse | null) {
+  return paper?.arxiv_id?.trim() || entry?.arxiv_id?.trim() || "";
+}
+
+function paperArxivUrl(paper: PaperResponse | null, entry: AdminJobPaperResponse | null) {
+  const arxivId = paperArxivId(paper, entry);
+  if (arxivId) {
+    return `https://arxiv.org/abs/${arxivId}`;
+  }
+  if (paper?.html_url?.trim()) {
+    return paper.html_url.trim();
+  }
+  return "";
+}
+
+function buildFileTree(files: FileObject[]): FileTreeNode[] {
+  type MutableFolderNode = {
+    name: string;
+    path: string;
+    folders: Map<string, MutableFolderNode>;
+    files: FileTreeNode[];
+  };
+
+  const root: MutableFolderNode = {
+    name: "",
+    path: "",
+    folders: new Map(),
+    files: [],
+  };
+
+  for (const file of files) {
+    const parts = file.path.split("/").filter(Boolean);
+    if (parts.length === 0) {
+      continue;
+    }
+    const fileName = parts.at(-1) ?? file.path;
+    let current = root;
+    let currentPath = "";
+    for (const part of parts.slice(0, -1)) {
+      currentPath = currentPath ? `${currentPath}/${part}` : part;
+      const existing = current.folders.get(part);
+      if (existing) {
+        current = existing;
+        continue;
+      }
+      const created: MutableFolderNode = {
+        name: part,
+        path: currentPath,
+        folders: new Map(),
+        files: [],
+      };
+      current.folders.set(part, created);
+      current = created;
+    }
+    current.files.push({
+      kind: "file",
+      name: fileName,
+      path: file.path,
+      file,
+    });
+  }
+
+  const sortByName = (left: { name: string }, right: { name: string }) =>
+    left.name.localeCompare(right.name);
+
+  function finalize(node: MutableFolderNode): FileTreeNode[] {
+    const folders = Array.from(node.folders.values())
+      .sort(sortByName)
+      .map((folder) => ({
+        kind: "folder" as const,
+        name: folder.name,
+        path: folder.path,
+        children: finalize(folder),
+      }));
+    const files = [...node.files].sort(sortByName);
+    return [...folders, ...files];
+  }
+
+  return finalize(root);
+}
+
+function countTreeFolders(nodes: FileTreeNode[]): number {
+  return nodes.reduce((count, node) => {
+    if (node.kind !== "folder") {
+      return count;
+    }
+    return count + 1 + countTreeFolders(node.children);
+  }, 0);
+}
+
 function selectTimelineBucket(spanMs: number) {
   return (
     TIMELINE_BUCKETS.find(
@@ -890,6 +996,56 @@ function metadataRows(paper: PaperResponse | null, entry: AdminJobPaperResponse 
     ["Citations", paper ? String(paper.citation_count) : "—"],
     ["Source type", paper?.source_type ?? "—"],
   ];
+}
+
+function PaperFileTreeList({
+  expandedFolders,
+  onOpenFile,
+  onToggleFolder,
+  selectedFilePath,
+  tree,
+}: {
+  expandedFolders: Record<string, boolean>;
+  onOpenFile: (file: FileObject) => void;
+  onToggleFolder: (path: string) => void;
+  selectedFilePath: string | null;
+  tree: FileTreeNode[];
+}) {
+  function renderNode(node: FileTreeNode, depth: number): ReactNode {
+    const paddingLeft = 12 + depth * 14;
+    if (node.kind === "folder") {
+      const expanded = expandedFolders[node.path] ?? true;
+      return (
+        <div key={node.path} className="admin-paper-tree-folder">
+          <button
+            type="button"
+            className="admin-paper-tree-folder-toggle"
+            style={{ paddingLeft }}
+            onClick={() => onToggleFolder(node.path)}
+            aria-expanded={expanded}
+          >
+            <span className="admin-paper-tree-glyph">{expanded ? "v" : ">"}</span>
+            <span>{node.name}</span>
+          </button>
+          {expanded ? node.children.map((child) => renderNode(child, depth + 1)) : null}
+        </div>
+      );
+    }
+    return (
+      <button
+        key={node.path}
+        type="button"
+        className={`admin-paper-tree-file${selectedFilePath === node.path ? " active" : ""}`}
+        style={{ paddingLeft }}
+        onClick={() => onOpenFile(node.file)}
+      >
+        <span>{node.name}</span>
+        <span>{node.file.content_type ?? "file"}</span>
+      </button>
+    );
+  }
+
+  return <div className="admin-paper-tree">{tree.map((node) => renderNode(node, 0))}</div>;
 }
 
 function CreateJobFieldHeader({
@@ -1421,11 +1577,23 @@ export function AdminOpsPanel({
   const [selectedAsset, setSelectedAsset] = useState<PaperAssetResponse | null>(null);
   const [selectedFileLoading, setSelectedFileLoading] = useState(false);
   const [selectedFileError, setSelectedFileError] = useState("");
+  const [expandedFolders, setExpandedFolders] = useState<Record<string, boolean>>({});
 
   const activeCreateJob = useMemo(
     () => JOB_TYPE_OPTIONS.find((option) => option.kind === createJobKind) ?? null,
     [createJobKind],
   );
+  const paperFileTree = useMemo(() => buildFileTree(paperFiles), [paperFiles]);
+  const paperFolderCount = useMemo(() => countTreeFolders(paperFileTree), [paperFileTree]);
+  const currentArxivId = paperArxivId(paperDetail, selectedJobPaper);
+  const currentArxivUrl = paperArxivUrl(paperDetail, selectedJobPaper);
+  const paperPreviewUrl = selectedJobPaper
+    ? browserPaperPreviewContentUrl(selectedJobPaper.paper_id)
+    : "";
+  const selectedAssetPreviewUrl =
+    selectedAsset && selectedJobPaper
+      ? browserAdminPaperAssetContentUrl(selectedJobPaper.paper_id, selectedAsset.path)
+      : "";
 
   const timeWindow = useMemo(
     () =>
@@ -1544,6 +1712,7 @@ export function AdminOpsPanel({
       setSelectedAsset(null);
       setSelectedFileLoading(false);
       setSelectedFileError("");
+      setExpandedFolders({});
       return;
     }
 
@@ -1556,6 +1725,7 @@ export function AdminOpsPanel({
     setSelectedFileContent(null);
     setSelectedAsset(null);
     setSelectedFileError("");
+    setExpandedFolders({});
 
     void (async () => {
       try {
@@ -1586,7 +1756,7 @@ export function AdminOpsPanel({
   }, [selectedJobPaper]);
 
   useEffect(() => {
-    if (!selectedJobPaper || paperModalTab !== "filestructure") {
+    if (!selectedJobPaper || paperModalTab !== "files") {
       return;
     }
     let cancelled = false;
@@ -1897,13 +2067,15 @@ export function AdminOpsPanel({
             <div className="admin-jobs-header-main">
               <button
                 type="button"
-                className="admin-jobs-back-icon"
+                className="admin-jobs-icon-button"
                 aria-label="Back to jobs"
                 onClick={onBackToJobs}
               >
                 ←
               </button>
-              <h1>Indexed papers</h1>
+              <h1 className="admin-jobs-paper-heading">
+                Papers in <code>{view.rootJobId}</code>
+              </h1>
             </div>
             <div className="admin-jobs-paper-meta">
               <span>
@@ -1915,7 +2087,34 @@ export function AdminOpsPanel({
                         jobPapersPageEnd,
                       )} of ${formatWholeNumber(jobPapersTotalCount)}`}
               </span>
-              <code>{view.rootJobId}</code>
+              <div className="admin-jobs-paper-pagination">
+                <button
+                  type="button"
+                  className="admin-jobs-icon-button admin-jobs-paper-nav"
+                  aria-label="Previous page"
+                  disabled={jobPapersLoading || !jobPapersHasPrevious}
+                  onClick={() => {
+                    setSelectedJobPaper(null);
+                    setJobPapersOffset((current) =>
+                      Math.max(0, current - ADMIN_JOB_PAPERS_PAGE_SIZE),
+                    );
+                  }}
+                >
+                  ←
+                </button>
+                <button
+                  type="button"
+                  className="admin-jobs-icon-button admin-jobs-paper-nav"
+                  aria-label="Next page"
+                  disabled={jobPapersLoading || !jobPapersHasMore}
+                  onClick={() => {
+                    setSelectedJobPaper(null);
+                    setJobPapersOffset((current) => current + ADMIN_JOB_PAPERS_PAGE_SIZE);
+                  }}
+                >
+                  →
+                </button>
+              </div>
             </div>
           </div>
 
@@ -2007,43 +2206,6 @@ export function AdminOpsPanel({
                 </table>
               </div>
             ) : null}
-            <div className="admin-jobs-results-bar">
-              <span>
-                {jobPapersLoading && jobPapersTotalCount === 0
-                  ? "Loading papers..."
-                  : jobPapersTotalCount === 0
-                    ? "No tracked papers yet"
-                    : `${formatWholeNumber(jobPapersPageStart)}-${formatWholeNumber(
-                        jobPapersPageEnd,
-                      )} of ${formatWholeNumber(jobPapersTotalCount)}`}
-              </span>
-              <div className="admin-jobs-results-actions">
-                <button
-                  type="button"
-                  className="admin-compact-action admin-compact-action-secondary"
-                  disabled={jobPapersLoading || !jobPapersHasPrevious}
-                  onClick={() => {
-                    setSelectedJobPaper(null);
-                    setJobPapersOffset((current) =>
-                      Math.max(0, current - ADMIN_JOB_PAPERS_PAGE_SIZE),
-                    );
-                  }}
-                >
-                  Prev
-                </button>
-                <button
-                  type="button"
-                  className="admin-compact-action admin-compact-action-secondary"
-                  disabled={jobPapersLoading || !jobPapersHasMore}
-                  onClick={() => {
-                    setSelectedJobPaper(null);
-                    setJobPapersOffset((current) => current + ADMIN_JOB_PAPERS_PAGE_SIZE);
-                  }}
-                >
-                  Next
-                </button>
-              </div>
-            </div>
           </div>
         </>
       )}

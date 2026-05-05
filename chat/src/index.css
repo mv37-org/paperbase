@@ -5140,7 +5140,16 @@ textarea {
   min-width: 0;
 }
 
-.admin-jobs-back-icon {
+.admin-jobs-paper-heading {
+  min-width: 0;
+}
+
+.admin-jobs-paper-heading code {
+  font-size: 0.62em;
+  font-weight: 500;
+}
+
+.admin-jobs-icon-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -5156,8 +5165,13 @@ textarea {
   line-height: 1;
 }
 
-.admin-jobs-back-icon:hover,
-.admin-jobs-back-icon:focus-visible {
+.admin-jobs-icon-button:disabled {
+  opacity: 0.42;
+  cursor: default;
+}
+
+.admin-jobs-icon-button:hover:not(:disabled),
+.admin-jobs-icon-button:focus-visible:not(:disabled) {
   border-color: rgba(43, 98, 228, 0.24);
   background: rgba(43, 98, 228, 0.06);
   outline: none;
@@ -5173,6 +5187,18 @@ textarea {
   font-size: 12px;
   letter-spacing: 0.03em;
   white-space: nowrap;
+}
+
+.admin-jobs-paper-pagination {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.admin-jobs-paper-nav {
+  width: 22px;
+  height: 22px;
+  font-size: 13px;
 }
 
 .admin-jobs-header-actions {
@@ -5316,7 +5342,6 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
   gap: 4px;
 }
 
-.admin-jobs-results-bar,
 .admin-jobs-table th,
 .admin-paper-metadata-row span,
 .admin-paper-secondary {
@@ -5493,23 +5518,6 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
   min-width: 0;
   border-radius: 2px 2px 0 0;
   background: linear-gradient(180deg, rgba(27, 22, 17, 0.1), rgba(27, 22, 17, 0.03));
-}
-
-.admin-jobs-results-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 12px 24px;
-  border-top: 1px solid var(--line);
-  color: var(--muted);
-  font-size: 13px;
-}
-
-.admin-jobs-results-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
 }
 
 .admin-jobs-chart-empty-note {

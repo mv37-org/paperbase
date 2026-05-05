@@ -3181,12 +3181,14 @@ describe("App", () => {
 
       fireEvent.click(within(screen.getByRole("table")).getByRole("button", { name: "2" }));
       await waitFor(() => {
-        expect(screen.getByRole("heading", { name: "Indexed papers" })).toBeTruthy();
+        expect(screen.getByRole("heading", { name: "Papers in job_root_1" })).toBeTruthy();
       });
       const backButton = screen.getByRole("button", { name: "Back to jobs" });
       expect(backButton.textContent).toBe("←");
-      expect(screen.getAllByText("1-2 of 3").length).toBeGreaterThan(0);
-      expect(screen.getByText("job_root_1")).toBeTruthy();
+      expect(screen.getByText("1-2 of 3")).toBeTruthy();
+      expect(screen.queryAllByText("job_root_1")).toHaveLength(1);
+      expect(screen.getByRole("button", { name: "Previous page" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Next page" })).toBeTruthy();
       const statusSummary = screen.getByRole("group", { name: "Indexed paper outcomes" });
       expect(within(statusSummary).getByText("Indexed")).toBeTruthy();
       expect(within(statusSummary).getByText("Skipped: Already indexed")).toBeTruthy();
@@ -3581,13 +3583,13 @@ describe("App", () => {
       fireEvent.click(indexedPapersButton);
 
       await waitFor(() => {
-        expect(screen.getByRole("heading", { name: "Indexed papers" })).toBeTruthy();
+        expect(screen.getByRole("heading", { name: "Papers in job_root_1" })).toBeTruthy();
       });
       expect(apiMocks.loadBrowserAdminJobPapers).toHaveBeenNthCalledWith(1, "job_root_1", 0, 100);
       expect(screen.getByText("Page One Paper")).toBeTruthy();
       expect(screen.getAllByText("1-1 of 140").length).toBeGreaterThan(0);
 
-      fireEvent.click(screen.getByRole("button", { name: "Next" }));
+      fireEvent.click(screen.getByRole("button", { name: "Next page" }));
 
       await waitFor(() => {
         expect(apiMocks.loadBrowserAdminJobPapers).toHaveBeenNthCalledWith(
