@@ -5454,12 +5454,12 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
 .admin-jobs-chart-empty-note {
   position: absolute;
   left: 50%;
-  bottom: 72px;
+  top: 50%;
   display: grid;
   gap: 4px;
   justify-items: center;
   width: min(320px, calc(100% - 48px));
-  transform: translateX(-50%);
+  transform: translate(-50%, -50%);
   color: rgba(107, 98, 89, 0.92);
   font-size: 11px;
   line-height: 1.45;
@@ -5571,7 +5571,7 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
   display: inline-flex;
   align-items: center;
   padding: 2px 8px;
-  border-radius: 999px;
+  border-radius: 4px;
   background: rgba(27, 22, 17, 0.06);
   font-weight: 600;
 }
@@ -5602,17 +5602,13 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
 }
 
 .admin-jobs-expanded-row td {
-  padding: 0 24px 10px;
+  padding: 10px 24px;
   background: rgba(27, 22, 17, 0.025);
 }
 
 .admin-jobs-expanded {
   display: grid;
   gap: 4px;
-  padding: 10px 12px;
-  border: 1px solid rgba(27, 22, 17, 0.08);
-  border-radius: 4px;
-  background: rgba(255, 255, 255, 0.45);
   color: var(--muted);
   font-family: "JetBrains Mono", "SFMono-Regular", monospace;
 }
@@ -7459,11 +7455,6 @@ body.authenticated-theme-dark .admin-jobs-row:hover {
 
 body.authenticated-theme-dark .admin-jobs-row.expanded,
 body.authenticated-theme-dark .admin-jobs-expanded-row td {
-  background: rgba(255, 255, 255, 0.04);
-}
-
-body.authenticated-theme-dark .admin-jobs-expanded {
-  border-color: rgba(223, 232, 244, 0.12);
   background: rgba(255, 255, 255, 0.04);
 }
 
