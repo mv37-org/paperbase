@@ -211,10 +211,17 @@ vi.mock("echarts-for-react", () => ({
     style,
   }: {
     className?: string;
-    option?: { dataZoom?: unknown; grid?: unknown; series?: unknown; yAxis?: unknown };
+    option?: {
+      dataZoom?: unknown;
+      grid?: unknown;
+      series?: unknown;
+      xAxis?: unknown;
+      yAxis?: unknown;
+    };
     style?: { height?: string; width?: string };
   }) => {
     const grid = option?.grid && typeof option.grid === "object" ? option.grid : {};
+    const xAxis = option?.xAxis && typeof option.xAxis === "object" ? option.xAxis : {};
     const yAxis = option?.yAxis && typeof option.yAxis === "object" ? option.yAxis : {};
     const series = Array.isArray(option?.series) ? option.series : [];
     const seriesObjects = series.filter(
@@ -227,6 +234,14 @@ vi.mock("echarts-for-react", () => ({
         data-grid-bottom={String((grid as Record<string, unknown>).bottom ?? "")}
         data-grid-left={String((grid as Record<string, unknown>).left ?? "")}
         data-has-data-zoom={option && "dataZoom" in option ? "true" : "false"}
+        data-x-axis-label-show={String(
+          ((xAxis as Record<string, unknown>).axisLabel as Record<string, unknown> | undefined)
+            ?.show ?? "",
+        )}
+        data-x-axis-label-interval={String(
+          ((xAxis as Record<string, unknown>).axisLabel as Record<string, unknown> | undefined)
+            ?.interval ?? "",
+        )}
         data-series-colors={seriesObjects
           .map((seriesItem) => {
             const itemStyle = seriesItem.itemStyle;
@@ -3103,9 +3118,10 @@ describe("App", () => {
       });
       expect(await screen.findByTestId("admin-jobs-chart")).toBeTruthy();
       const chart = screen.getByTestId("admin-jobs-chart-inner");
-      expect(chart.getAttribute("data-grid-bottom")).toBe("0");
+      expect(chart.getAttribute("data-grid-bottom")).toBe("26");
       expect(chart.getAttribute("data-grid-left")).toBe("0");
       expect(chart.getAttribute("data-has-data-zoom")).toBe("false");
+      expect(chart.getAttribute("data-x-axis-label-show")).toBe("true");
       expect(chart.getAttribute("data-series-names")).toBe("Indexed,Skipped,Failed");
       expect(chart.getAttribute("data-series-colors")).toBe("#432818,#99582a,#b42318");
       expect(chart.getAttribute("data-series-stacks")).toBe(

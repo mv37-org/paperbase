@@ -1131,6 +1131,9 @@ function JobsTimeline({
   const isZeroTimeline = timeline.maxTotal === 0;
 
   const option = useMemo<EChartsOption>(() => {
+    const axisLabelInterval =
+      timeline.buckets.length <= 8 ? 0 : Math.max(0, Math.ceil(timeline.buckets.length / 8) - 1);
+
     return {
       animation: false,
       animationDuration: 0,
@@ -1143,7 +1146,7 @@ function JobsTimeline({
         color: theme.text,
         fontFamily: '"JetBrains Mono", "SFMono-Regular", monospace',
       },
-      grid: { top: 8, right: 0, bottom: 0, left: 0 },
+      grid: { top: 8, right: 0, bottom: 26, left: 0 },
       tooltip: {
         trigger: "axis",
         axisPointer: {
@@ -1179,12 +1182,14 @@ function JobsTimeline({
         type: "category",
         data: timeline.buckets.map((bucket) => bucket.axisLabel),
         boundaryGap: true,
-        axisLine: { lineStyle: { color: theme.line } },
+        axisLine: { show: true, lineStyle: { color: theme.line } },
         axisTick: { show: false },
         axisLabel: {
           color: theme.axisText,
           hideOverlap: true,
-          show: false,
+          show: true,
+          margin: 10,
+          interval: axisLabelInterval,
         },
       },
       yAxis: {
