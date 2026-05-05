@@ -9,10 +9,14 @@ import type {
   CreateProjectGitHubRepoPayload,
   FigureResponse,
   FileContentResponse,
+  FileListResponse,
   GitHubRepoImportCandidateResponse,
   GitHubRepoListResponse,
   GitHubRepoMetadataResponse,
+  JobResponse,
   MentionSuggestionResult,
+  PaperAssetResponse,
+  PaperPreviewResponse,
   PaperResponse,
   ProjectItemKind,
   ProjectItemPageResponse,
@@ -634,6 +638,10 @@ export function getBrowserPaper(paperId: string) {
   return api<PaperResponse>(`/v1/browser/papers/${paperId}`, { method: "GET" });
 }
 
+export function getBrowserPaperPreview(paperId: string) {
+  return api<PaperPreviewResponse>(`/v1/browser/papers/${paperId}/preview`, { method: "GET" });
+}
+
 export function getBrowserPaperFile(paperId: string, path: string) {
   return api<FileContentResponse>(`/v1/browser/papers/${paperId}/files/${path}`, { method: "GET" });
 }
@@ -646,4 +654,93 @@ export function getBrowserPaperFigure(paperId: string, figureId: string) {
 
 export function getBrowserPaperTable(paperId: string, tableId: string) {
   return api<TableResponse>(`/v1/browser/papers/${paperId}/tables/${tableId}`, { method: "GET" });
+}
+
+export function loadBrowserAdminJobs(status = "all", limit = 50) {
+  const params = new URLSearchParams({ status, limit: String(limit) });
+  return api<JobResponse[]>(`/v1/browser/admin/jobs?${params.toString()}`, { method: "GET" });
+}
+
+export function retryBrowserAdminJob(jobId: string) {
+  return api<JobResponse>(`/v1/browser/admin/jobs/${jobId}/retry`, { method: "POST" });
+}
+
+export function queueBrowserAdminPaperIndex(arxivId: string, force = false) {
+  const params = new URLSearchParams({ force: String(force) });
+  return api<JobResponse>(
+    `/v1/browser/admin/index/papers/arxiv/${encodeURIComponent(arxivId)}?${params.toString()}`,
+    { method: "POST" },
+  );
+}
+
+export function queueBrowserAdminHarvestRange(payload: {
+  categories: string[];
+  start_date: string;
+  end_date: string;
+  limit_per_window?: number | null;
+  chunk_months: number;
+  source?: string;
+}) {
+  return api<JobResponse>("/v1/browser/admin/index/harvest", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function queueBrowserAdminHarvestTopCited(payload: {
+  min_citations: number;
+  max_papers?: number | null;
+  chunk_size: number;
+}) {
+  return api<JobResponse>("/v1/browser/admin/index/harvest-top-cited", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function queueBrowserAdminHarvestVenue(payload: {
+  venue: string;
+  year: number;
+  max_papers?: number | null;
+  chunk_size: number;
+}) {
+  return api<JobResponse>("/v1/browser/admin/index/harvest-venue", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function queueBrowserAdminEnrichMissingMetadata(limit = 50000, minAgeSeconds = 3600) {
+  const params = new URLSearchParams({
+    limit: String(limit),
+    min_age_seconds: String(minAgeSeconds),
+  });
+  return api<JobResponse>(`/v1/browser/admin/index/enrich-missing-metadata?${params.toString()}`, {
+    method: "POST",
+  });
+}
+
+export function loadBrowserAdminPapers(query = "", indexStatus = "all", limit = 50) {
+  const params = new URLSearchParams({
+    q: query,
+    index_status: indexStatus,
+    limit: String(limit),
+  });
+  return api<PaperResponse[]>(`/v1/browser/admin/papers?${params.toString()}`, { method: "GET" });
+}
+
+export function loadBrowserAdminPaperFiles(paperId: string) {
+  return api<FileListResponse>(`/v1/browser/admin/papers/${paperId}/files`, { method: "GET" });
+}
+
+export function getBrowserAdminPaperFile(paperId: string, path: string) {
+  return api<FileContentResponse>(`/v1/browser/admin/papers/${paperId}/files/${path}`, {
+    method: "GET",
+  });
+}
+
+export function getBrowserAdminPaperAsset(paperId: string, path: string) {
+  return api<PaperAssetResponse>(`/v1/browser/admin/papers/${paperId}/assets/${path}`, {
+    method: "GET",
+  });
 }

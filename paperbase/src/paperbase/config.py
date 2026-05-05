@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
+import re
 from functools import lru_cache
 from pathlib import Path
 
@@ -26,6 +28,8 @@ DEFAULT_AI_CATEGORIES = [
     "cs.HC",
     "cs.CR",
 ]
+
+_ADMIN_EMAIL_SPLIT_RE = re.compile(r"[\s,]+")
 
 
 def repo_root(start: Path | None = None) -> Path | None:
@@ -88,6 +92,7 @@ class Settings(BaseSettings):
     browser_session_ttl_seconds: int = Field(default=60 * 60 * 24 * 30)
     browser_session_secure: bool = Field(default=False)
     password_reset_ttl_seconds: int = Field(default=60 * 60)
+    admin_emails: str = Field(default="")
     resend_api_key: str | None = None
     resend_from_email: str = Field(default="Paperbase <auth@paperbase.local>")
     google_client_id: str | None = None
@@ -184,6 +189,28 @@ class Settings(BaseSettings):
             return self.encryption_key
         digest = hashlib.sha256(self.app_secret.encode("utf-8")).digest()
         return base64.urlsafe_b64encode(digest).decode("ascii")
+
+    @property
+    def admin_email_allowlist(self) -> frozenset[str]:
+        raw = (self.admin_emails or "").strip()
+        if not raw:
+            return frozenset()
+        values: list[str]
+        if raw.startswith("["):
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                parsed = raw
+            if isinstance(parsed, list):
+                values = [str(item) for item in parsed]
+            else:
+                values = [str(parsed)]
+        else:
+            values = _ADMIN_EMAIL_SPLIT_RE.split(raw)
+        return frozenset(value.strip().lower() for value in values if value.strip())
+
+    def is_admin_email(self, email: str) -> bool:
+        return email.strip().lower() in self.admin_email_allowlist
 
 
 @lru_cache(maxsize=1)

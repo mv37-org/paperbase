@@ -40,6 +40,7 @@ Optional browser-account settings now hang off the same API env surface:
 
 - `PAPERBASE_GOOGLE_*` powers Google sign-in
 - `PAPERBASE_GITHUB_*` powers the in-app GitHub connection flow and project repo sync
+- `PAPERBASE_ADMIN_EMAILS` is a comma-separated allowlist for the signed-in admin operations tab
 - logged-in users can store Anthropic keys, Modal sandbox credentials, a signed-in-only light/dark appearance preference, and a weekly papers review email preference
 
 ## Commands
@@ -142,6 +143,7 @@ The browser chat experience is project-based:
 - local `localhost` chat threads render a compact debug strip with the current user, project, thread, and latest message ids so Codex can inspect backend state from a pasted bundle without displacing the empty-chat layout
 - notebooks are converted with Jupytext to `py:percent` source for editing/running, then regenerated back to `.ipynb` when saved to GitHub
 - signed-in pages support a persisted appearance setting, so the sidebar, chat shell, markdown surfaces, drawers, and modals can switch between light and dark mode without affecting the public landing page
+- allowlisted admin emails also get an Admin settings tab for queuing backfills, inspecting jobs, and browsing stored paper artifacts through the browser session
 - creating, importing, or saving project files requires a connected GitHub account with repo access
 - the coding agent is PyTorch-first for generated ML code, uses a Codex-style single turn loop with `tool_choice=auto`, prefers reading and patching existing workspace files before broad rewrites, exposes research tools as optional support rather than the primary posture on project threads, can edit repo-relative text files beyond just managed `.py` sources, keeps turn-local diff and exec-session state visible to the model during long turns and compaction, streams final answers live instead of buffering them until the end, and can run stateful project commands with follow-up wait/log/cancel steps alongside compatibility `project_run` smoke/full entrypoints
 - `Save` creates a single Paperbase-managed GitHub commit for the current project, and `Run` saves first, then executes the full saved project workspace through the user’s Modal sandbox credentials with `full` mode by default

@@ -174,6 +174,13 @@ class FileContentResponse(BaseModel):
     content: str
 
 
+class PaperAssetResponse(BaseModel):
+    paper_id: str
+    path: str
+    url: str
+    content_type: str | None = None
+
+
 class FigureResponse(BaseModel):
     paper_id: str
     figure_id: str
@@ -220,6 +227,7 @@ class BrowserUser(BaseModel):
     user_id: str
     email: str
     display_name: str = ""
+    is_admin: bool = False
 
 
 class BrowserUserSettingsResponse(BaseModel):

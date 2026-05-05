@@ -4618,10 +4618,11 @@ textarea {
   text-transform: uppercase;
 }
 
-.settings-field input {
+.settings-field input,
+.settings-field select,
+.settings-field textarea {
   width: 100%;
   min-height: 38px;
-  height: 38px;
   padding: 0 12px;
   border: 1px solid rgba(27, 22, 17, 0.14);
   border-radius: var(--radius);
@@ -4635,7 +4636,20 @@ textarea {
     background-color 120ms ease;
 }
 
-.settings-field input:focus {
+.settings-field input,
+.settings-field select {
+  height: 38px;
+}
+
+.settings-field textarea {
+  min-height: 88px;
+  padding: 10px 12px;
+  resize: vertical;
+}
+
+.settings-field input:focus,
+.settings-field select:focus,
+.settings-field textarea:focus {
   border-color: rgba(27, 22, 17, 0.28);
   box-shadow: 0 0 0 3px rgba(27, 22, 17, 0.06);
 }
@@ -4699,6 +4713,284 @@ textarea {
   font-family: "JetBrains Mono", "SFMono-Regular", monospace;
   font-size: 12px;
   line-height: 1.4;
+}
+
+.admin-ops-grid {
+  display: grid;
+  gap: 14px;
+}
+
+.admin-ops-card {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(27, 22, 17, 0.02);
+}
+
+.admin-ops-card-heading {
+  display: grid;
+  gap: 4px;
+}
+
+.admin-ops-card-heading h4,
+.admin-ops-card-title,
+.admin-ops-subheading,
+.admin-ops-paper-header h5 {
+  margin: 0;
+}
+
+.admin-ops-card-heading p,
+.admin-ops-paper-header p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.admin-ops-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.admin-ops-form {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(27, 22, 17, 0.08);
+  border-radius: var(--radius);
+  background: #ffffff;
+}
+
+.admin-ops-card-title,
+.admin-ops-subheading {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.admin-ops-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.admin-ops-checkbox input {
+  width: auto;
+  min-height: 0;
+  height: auto;
+  margin: 0;
+}
+
+.admin-ops-submit {
+  width: 100%;
+  min-height: 34px;
+  font-size: 12px;
+}
+
+.admin-ops-inline-fields,
+.admin-ops-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: flex-end;
+}
+
+.admin-ops-inline-fields > *,
+.admin-ops-toolbar-field {
+  flex: 1 1 0;
+  min-width: 140px;
+}
+
+.admin-ops-toolbar-field-wide {
+  min-width: 220px;
+}
+
+.admin-ops-inline-note,
+.admin-ops-inline-error,
+.admin-ops-job-secondary,
+.admin-ops-paper-meta,
+.admin-ops-file-row span:last-child {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.admin-ops-inline-error {
+  color: #b42318;
+}
+
+.admin-ops-table-shell,
+.admin-ops-paper-list,
+.admin-ops-file-list,
+.admin-ops-pre {
+  max-height: 360px;
+  overflow: auto;
+}
+
+.admin-ops-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.admin-ops-table th,
+.admin-ops-table td {
+  padding: 10px 8px;
+  border-top: 1px solid rgba(27, 22, 17, 0.08);
+  text-align: left;
+  vertical-align: top;
+}
+
+.admin-ops-table th {
+  padding-top: 0;
+  border-top: 0;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.admin-ops-status-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(27, 22, 17, 0.08);
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.admin-ops-status-pill.status-completed {
+  background: rgba(18, 120, 72, 0.12);
+  color: #127848;
+}
+
+.admin-ops-status-pill.status-running {
+  background: rgba(23, 111, 230, 0.12);
+  color: #176fe6;
+}
+
+.admin-ops-status-pill.status-pending {
+  background: rgba(180, 83, 9, 0.12);
+  color: #9a5300;
+}
+
+.admin-ops-status-pill.status-dead,
+.admin-ops-status-pill.status-failed {
+  background: rgba(180, 35, 24, 0.12);
+  color: #b42318;
+}
+
+.admin-ops-table-button {
+  min-height: 30px;
+  font-size: 12px;
+}
+
+.admin-ops-details summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.admin-ops-details pre,
+.admin-ops-pre {
+  margin: 8px 0 0;
+  padding: 12px;
+  border-radius: var(--radius);
+  background: #11161d;
+  color: #f5f7fb;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.admin-ops-paper-layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.admin-ops-paper-list,
+.admin-ops-paper-detail,
+.admin-ops-file-list {
+  display: grid;
+  gap: 8px;
+}
+
+.admin-ops-paper-row,
+.admin-ops-file-row {
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  padding: 10px;
+  border: 1px solid rgba(27, 22, 17, 0.08);
+  border-radius: var(--radius);
+  background: #ffffff;
+  text-align: left;
+  cursor: pointer;
+}
+
+.admin-ops-paper-row.active,
+.admin-ops-file-row.active {
+  border-color: rgba(23, 111, 230, 0.28);
+  box-shadow: 0 0 0 3px rgba(23, 111, 230, 0.08);
+}
+
+.admin-ops-paper-title,
+.admin-ops-job-primary {
+  font-weight: 600;
+}
+
+.admin-ops-paper-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 140px;
+  gap: 12px;
+  align-items: start;
+}
+
+.admin-ops-preview,
+.admin-ops-asset-image {
+  width: 100%;
+  border: 1px solid rgba(27, 22, 17, 0.08);
+  border-radius: var(--radius);
+  background: #ffffff;
+}
+
+.admin-ops-file-section {
+  display: grid;
+  gap: 8px;
+}
+
+.admin-ops-asset-shell {
+  display: grid;
+  gap: 8px;
+}
+
+.admin-ops-asset-frame {
+  width: 100%;
+  min-height: 420px;
+  border: 1px solid rgba(27, 22, 17, 0.08);
+  border-radius: var(--radius);
+  background: #ffffff;
+}
+
+.admin-ops-asset-link {
+  color: #176fe6;
+  text-decoration: none;
+}
+
+@media (max-width: 980px) {
+  .admin-ops-paper-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-ops-paper-header {
+    grid-template-columns: 1fr;
+  }
 }
 
 .settings-actions {

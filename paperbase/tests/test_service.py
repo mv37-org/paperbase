@@ -1871,6 +1871,63 @@ def test_browser_settings_round_trip(browser_service):
     assert disconnected.settings.has_github_connection is False
 
 
+def test_browser_session_marks_admin_users():
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            admin_emails="admin@example.com",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=FakeChatModel(),
+        github_repo_manager=FakeGitHubRepoManager(),
+    )
+
+    session, raw_token = service.register_browser_user(
+        SignupRequest(email="admin@example.com", password="topsecret123", display_name="Admin User")
+    )
+
+    assert session.user is not None
+    assert session.user.is_admin is True
+    current_user = service.get_current_browser_user(raw_token)
+    assert current_user is not None
+    assert current_user.is_admin is True
+
+
+def test_admin_paper_listing_filters_and_sorts(service):
+    first = _sample_paper("2401.11111", title="Benchmark Systems", abstract="Grounding benchmark.")
+    first.index_status = "indexed"
+    first.indexed_at = datetime(2026, 4, 21, tzinfo=timezone.utc)
+    second = _sample_paper("2401.22222", title="Other Work", abstract="Other abstract.")
+    second.index_status = "discovered"
+    service.repository.upsert_paper(first)  # type: ignore[attr-defined]
+    service.repository.upsert_paper(second)  # type: ignore[attr-defined]
+
+    results = service.list_papers(query="benchmark", index_status="indexed", limit=10)
+
+    assert [paper.paper_id for paper in results] == ["arxiv:2401.11111"]
+
+
+def test_get_paper_asset_returns_signed_url(service):
+    paper = _sample_paper("2401.33333", title="Artifact Paper", abstract="Artifact abstract.")
+    paper.index_status = "indexed"
+    service.repository.upsert_paper(paper)  # type: ignore[attr-defined]
+    service.object_store.put_bytes(  # type: ignore[attr-defined]
+        "papers/arxiv:2401.33333/bundle.pdf",
+        b"%PDF-1.4",
+        content_type="application/pdf",
+    )
+
+    asset = service.get_paper_asset("arxiv:2401.33333", "bundle.pdf")
+
+    assert asset.paper_id == "arxiv:2401.33333"
+    assert asset.url == "memory://papers/arxiv:2401.33333/bundle.pdf"
+    assert asset.content_type == "application/pdf"
+
+
 def test_invalid_saved_anthropic_key_is_cleared_and_gates_chat(browser_service):
     service, _, _ = browser_service
     session, _ = service.register_browser_user(

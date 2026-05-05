@@ -4,6 +4,7 @@ export interface BrowserUser {
   user_id: string;
   email: string;
   display_name: string;
+  is_admin?: boolean;
 }
 
 export interface BrowserUserSettingsResponse {
@@ -54,10 +55,51 @@ export interface PaperResponse {
   indexed_at?: string | null;
 }
 
+export interface JobResponse {
+  job_id: string;
+  job_type: string;
+  status: string;
+  payload: Record<string, unknown>;
+  error?: string | null;
+  attempts: number;
+  max_attempts: number;
+  next_run_at?: string | null;
+  last_attempted_at?: string | null;
+  priority: number;
+  created_at: string;
+  updated_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+}
+
 export interface FileContentResponse {
   paper_id: string;
   path: string;
   content: string;
+}
+
+export interface FileObject {
+  path: string;
+  size: number;
+  content_type?: string | null;
+}
+
+export interface FileListResponse {
+  paper_id: string;
+  files: FileObject[];
+}
+
+export interface PaperAssetResponse {
+  paper_id: string;
+  path: string;
+  url: string;
+  content_type?: string | null;
+}
+
+export interface PaperPreviewResponse {
+  paper_id: string;
+  image_url: string;
+  content_type: string;
 }
 
 export interface FigureResponse {

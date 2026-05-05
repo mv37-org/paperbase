@@ -282,6 +282,59 @@ describe("chat api", () => {
     expect(new Headers(deleteInit?.headers).get("X-Paperbase-CSRF")).toBe("csrf-123");
   });
 
+  it("calls browser-admin job endpoints with the browser session CSRF token", async () => {
+    const fetchMock = vi
+      .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          authenticated: true,
+          user: {
+            user_id: "user_1",
+            email: "admin@example.com",
+            display_name: "Admin",
+            is_admin: true,
+          },
+          has_anthropic_api_key: false,
+          csrf_token: "csrf-123",
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          job_id: "job_admin_1",
+          job_type: "index_paper",
+          status: "pending",
+          payload: { arxiv_id: "2401.12345", force: true },
+          attempts: 0,
+          max_attempts: 3,
+          priority: -10,
+          created_at: "2026-04-21T00:00:00Z",
+          updated_at: "2026-04-21T00:00:00Z",
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse([]));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await loadApiModule();
+
+    await api.loadSession();
+    await api.queueBrowserAdminPaperIndex("2401.12345", true);
+    await api.loadBrowserAdminJobs("all", 75);
+
+    const [queuePath, queueInit] = fetchMock.mock.calls[1] as FetchCall;
+    const queueUrl = new URL(String(queuePath), "http://localhost");
+    expect(`${queueUrl.pathname}${queueUrl.search}`).toBe(
+      "/v1/browser/admin/index/papers/arxiv/2401.12345?force=true",
+    );
+    expect(queueInit?.method).toBe("POST");
+    expect(new Headers(queueInit?.headers).get("X-Paperbase-CSRF")).toBe("csrf-123");
+
+    const [listPath, listInit] = fetchMock.mock.calls[2] as FetchCall;
+    const listUrl = new URL(String(listPath), "http://localhost");
+    expect(`${listUrl.pathname}${listUrl.search}`).toBe(
+      "/v1/browser/admin/jobs?status=all&limit=75",
+    );
+    expect(listInit?.method).toBe("GET");
+  });
+
   it("loads and mutates projects through the browser endpoints", async () => {
     const fetchMock = vi
       .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()

@@ -40,7 +40,10 @@ const apiMocks = vi.hoisted(() => {
     deleteProject: vi.fn(),
     deletePythonFile: vi.fn(),
     deleteThread: vi.fn(),
+    getBrowserAdminPaperAsset: vi.fn(),
+    getBrowserAdminPaperFile: vi.fn(),
     getBrowserPaper: vi.fn(),
+    getBrowserPaperPreview: vi.fn(),
     getBrowserPaperFigure: vi.fn(),
     getBrowserPaperFile: vi.fn(),
     getBrowserPaperTable: vi.fn(),
@@ -53,6 +56,9 @@ const apiMocks = vi.hoisted(() => {
     loadGitHubRepositories: vi.fn(),
     loadGitHubRepoImportCandidates: vi.fn(),
     loadGitHubRepoMetadata: vi.fn(),
+    loadBrowserAdminJobs: vi.fn(),
+    loadBrowserAdminPaperFiles: vi.fn(),
+    loadBrowserAdminPapers: vi.fn(),
     loadProjectItems: vi.fn(),
     loadProjectSessions: vi.fn(),
     loadProjects: vi.fn(),
@@ -91,6 +97,12 @@ const apiMocks = vi.hoisted(() => {
     moveThreadToProject: vi.fn(),
     logoutBrowserSession: vi.fn(),
     postForm: vi.fn(),
+    queueBrowserAdminEnrichMissingMetadata: vi.fn(),
+    queueBrowserAdminHarvestRange: vi.fn(),
+    queueBrowserAdminHarvestTopCited: vi.fn(),
+    queueBrowserAdminHarvestVenue: vi.fn(),
+    queueBrowserAdminPaperIndex: vi.fn(),
+    retryBrowserAdminJob: vi.fn(),
     runPythonFile: vi.fn(),
     sendThreadMessage: vi.fn(),
     sendThreadMessageStream: vi.fn(),
@@ -113,7 +125,10 @@ vi.mock("./api", () => ({
   deleteProject: apiMocks.deleteProject,
   deletePythonFile: apiMocks.deletePythonFile,
   deleteThread: apiMocks.deleteThread,
+  getBrowserAdminPaperAsset: apiMocks.getBrowserAdminPaperAsset,
+  getBrowserAdminPaperFile: apiMocks.getBrowserAdminPaperFile,
   getBrowserPaper: apiMocks.getBrowserPaper,
+  getBrowserPaperPreview: apiMocks.getBrowserPaperPreview,
   getBrowserPaperFigure: apiMocks.getBrowserPaperFigure,
   getBrowserPaperFile: apiMocks.getBrowserPaperFile,
   getBrowserPaperTable: apiMocks.getBrowserPaperTable,
@@ -126,6 +141,9 @@ vi.mock("./api", () => ({
   loadGitHubRepositories: apiMocks.loadGitHubRepositories,
   loadGitHubRepoImportCandidates: apiMocks.loadGitHubRepoImportCandidates,
   loadGitHubRepoMetadata: apiMocks.loadGitHubRepoMetadata,
+  loadBrowserAdminJobs: apiMocks.loadBrowserAdminJobs,
+  loadBrowserAdminPaperFiles: apiMocks.loadBrowserAdminPaperFiles,
+  loadBrowserAdminPapers: apiMocks.loadBrowserAdminPapers,
   loadProjectItems: apiMocks.loadProjectItems,
   loadProjectSessions: apiMocks.loadProjectSessions,
   loadProjects: apiMocks.loadProjects,
@@ -134,6 +152,12 @@ vi.mock("./api", () => ({
   moveThreadToProject: apiMocks.moveThreadToProject,
   logoutBrowserSession: apiMocks.logoutBrowserSession,
   postForm: apiMocks.postForm,
+  queueBrowserAdminEnrichMissingMetadata: apiMocks.queueBrowserAdminEnrichMissingMetadata,
+  queueBrowserAdminHarvestRange: apiMocks.queueBrowserAdminHarvestRange,
+  queueBrowserAdminHarvestTopCited: apiMocks.queueBrowserAdminHarvestTopCited,
+  queueBrowserAdminHarvestVenue: apiMocks.queueBrowserAdminHarvestVenue,
+  queueBrowserAdminPaperIndex: apiMocks.queueBrowserAdminPaperIndex,
+  retryBrowserAdminJob: apiMocks.retryBrowserAdminJob,
   runPythonFile: apiMocks.runPythonFile,
   sendThreadMessage: apiMocks.sendThreadMessage,
   sendThreadMessageStream: apiMocks.sendThreadMessageStream,
@@ -187,6 +211,7 @@ function authenticatedSession(
     has_openai_api_key: boolean;
     has_anthropic_api_key: boolean;
     csrf_token: string | null;
+    is_admin: boolean;
     settings: Partial<{
       openai_api_key_hint: string;
       anthropic_api_key_hint: string;
@@ -207,6 +232,7 @@ function authenticatedSession(
       user_id: "user_1",
       email: "user@example.com",
       display_name: "User Example",
+      is_admin: overrides.is_admin ?? false,
     },
     has_openai_api_key: overrides.has_openai_api_key ?? overrides.has_anthropic_api_key ?? true,
     has_anthropic_api_key: overrides.has_anthropic_api_key ?? overrides.has_openai_api_key ?? true,
@@ -600,6 +626,94 @@ describe("App", () => {
       table_id: "table-1",
       caption: "Table caption",
       rows: [["Metric", "Value"]],
+    });
+    apiMocks.getBrowserPaperPreview.mockResolvedValue({
+      paper_id: "arxiv:2401.12345",
+      image_url: "https://example.test/preview.webp",
+      content_type: "image/webp",
+    });
+    apiMocks.loadBrowserAdminJobs.mockResolvedValue([]);
+    apiMocks.loadBrowserAdminPapers.mockResolvedValue([]);
+    apiMocks.loadBrowserAdminPaperFiles.mockResolvedValue({
+      paper_id: "arxiv:2401.12345",
+      files: [],
+    });
+    apiMocks.getBrowserAdminPaperFile.mockResolvedValue({
+      paper_id: "arxiv:2401.12345",
+      path: "text/full.md",
+      content: "full text",
+    });
+    apiMocks.getBrowserAdminPaperAsset.mockResolvedValue({
+      paper_id: "arxiv:2401.12345",
+      path: "preview/first-page-top.webp",
+      url: "https://example.test/preview.webp",
+      content_type: "image/webp",
+    });
+    apiMocks.queueBrowserAdminPaperIndex.mockResolvedValue({
+      job_id: "job_admin_1",
+      job_type: "index_paper",
+      status: "pending",
+      payload: {},
+      attempts: 0,
+      max_attempts: 3,
+      priority: -10,
+      created_at: "2026-04-21T00:00:00Z",
+      updated_at: "2026-04-21T00:00:00Z",
+    });
+    apiMocks.queueBrowserAdminHarvestRange.mockResolvedValue({
+      job_id: "job_admin_range",
+      job_type: "harvest_range",
+      status: "pending",
+      payload: {},
+      attempts: 0,
+      max_attempts: 3,
+      priority: 10,
+      created_at: "2026-04-21T00:00:00Z",
+      updated_at: "2026-04-21T00:00:00Z",
+    });
+    apiMocks.queueBrowserAdminHarvestTopCited.mockResolvedValue({
+      job_id: "job_admin_top",
+      job_type: "harvest_top_cited",
+      status: "pending",
+      payload: {},
+      attempts: 0,
+      max_attempts: 3,
+      priority: 10,
+      created_at: "2026-04-21T00:00:00Z",
+      updated_at: "2026-04-21T00:00:00Z",
+    });
+    apiMocks.queueBrowserAdminHarvestVenue.mockResolvedValue({
+      job_id: "job_admin_venue",
+      job_type: "harvest_venue",
+      status: "pending",
+      payload: {},
+      attempts: 0,
+      max_attempts: 3,
+      priority: 10,
+      created_at: "2026-04-21T00:00:00Z",
+      updated_at: "2026-04-21T00:00:00Z",
+    });
+    apiMocks.queueBrowserAdminEnrichMissingMetadata.mockResolvedValue({
+      job_id: "job_admin_enrich",
+      job_type: "enrich_missing_metadata",
+      status: "pending",
+      payload: {},
+      attempts: 0,
+      max_attempts: 3,
+      priority: 10,
+      created_at: "2026-04-21T00:00:00Z",
+      updated_at: "2026-04-21T00:00:00Z",
+    });
+    apiMocks.retryBrowserAdminJob.mockResolvedValue({
+      job_id: "job_admin_retry",
+      job_type: "index_paper",
+      status: "pending",
+      payload: { retried: true },
+      attempts: 0,
+      max_attempts: 3,
+      priority: -10,
+      created_at: "2026-04-21T00:00:00Z",
+      updated_at: "2026-04-21T00:00:00Z",
     });
     apiMocks.syncProjectRepo.mockResolvedValue(repoSyncResponse("proj_1", true));
     apiMocks.updatePythonFile.mockImplementation(
@@ -2843,6 +2957,7 @@ describe("App", () => {
     expect(screen.getByRole("tab", { name: "Sandbox" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "GitHub" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "Appearance" })).toBeTruthy();
+    expect(screen.queryByRole("tab", { name: "Admin" })).toBeNull();
     expect(screen.queryByRole("tab", { name: "Notifications" })).toBeNull();
     expect(document.querySelector("#auth-modal-title")).toBeNull();
     expect(document.querySelector(".settings-section-title")?.textContent).toBe("Inference");
@@ -2859,6 +2974,37 @@ describe("App", () => {
     expect(screen.getAllByText("Choose the theme for signed-in pages.")).toHaveLength(1);
     expect(screen.getByRole("radio", { name: /Light/i })).toBeTruthy();
     expect(screen.getByRole("radio", { name: /Dark/i })).toBeTruthy();
+  });
+
+  it("shows the admin settings tab only for admin users and loads admin data", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession({ is_admin: true }));
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(document.querySelector("#account-menu-button")).toBeTruthy();
+    });
+
+    fireEvent.click(document.querySelector("#account-menu-button") as HTMLElement);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Settings" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("tab", { name: "Admin" })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("tab", { name: "Admin" }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("Queue backfills, inspect jobs, and browse paper artifacts in storage."),
+      ).toBeTruthy();
+    });
+    await waitFor(() => {
+      expect(apiMocks.loadBrowserAdminJobs).toHaveBeenCalledWith("all", 75);
+    });
+    await waitFor(() => {
+      expect(apiMocks.loadBrowserAdminPapers).toHaveBeenCalledWith("", "indexed", 50);
+    });
   });
 
   it("applies dark mode only after saving the appearance setting", async () => {

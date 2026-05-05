@@ -5,6 +5,7 @@ from __future__ import annotations
 import difflib
 import json
 import logging
+import mimetypes
 import os
 import re
 import shlex
@@ -84,6 +85,7 @@ from .models import (
     LoginRequest,
     ManifestResponse,
     PaperMetadata,
+    PaperAssetResponse,
     PaperPreviewResponse,
     PaperResponse,
     GitHubRepoBranchSummary,
@@ -176,6 +178,14 @@ _PROJECT_WORKSPACE_BINARY_EXTENSIONS = {
     ".wav",
     ".webp",
     ".zip",
+}
+_TEXTUAL_MIME_PREFIXES = ("text/",)
+_TEXTUAL_MIME_TYPES = {
+    "application/json",
+    "application/ld+json",
+    "application/xml",
+    "application/x-yaml",
+    "image/svg+xml",
 }
 
 
@@ -452,6 +462,23 @@ def _normalize_project_workspace_repo_path(value: str) -> str:
     if suffix in _PROJECT_WORKSPACE_BINARY_EXTENSIONS:
         raise HTTPException(status_code=422, detail="Only text workspace files are supported")
     return path
+
+
+def _normalize_paper_artifact_path(value: str) -> str:
+    path = (value or "").strip()
+    if not path or "\\" in path:
+        raise HTTPException(status_code=422, detail="Use a valid paper artifact path")
+    parsed = PurePosixPath(path)
+    if parsed.is_absolute() or any(part in {"", ".", ".."} for part in parsed.parts):
+        raise HTTPException(status_code=422, detail="Use a valid paper artifact path")
+    return parsed.as_posix()
+
+
+def _is_textual_content_type(content_type: str | None) -> bool:
+    if not content_type:
+        return False
+    normalized = content_type.split(";", 1)[0].strip().lower()
+    return normalized.startswith(_TEXTUAL_MIME_PREFIXES) or normalized in _TEXTUAL_MIME_TYPES
 
 
 def _file_kind_for_repo_path(path: str) -> str:
@@ -1617,7 +1644,16 @@ class PaperbaseService:
             }
         )
 
+    def _decorate_browser_user(self, user: BrowserUser | None) -> BrowserUser | None:
+        if user is None:
+            return None
+        is_admin = self.settings.is_admin_email(user.email)
+        if user.is_admin == is_admin:
+            return user
+        return user.model_copy(update={"is_admin": is_admin})
+
     def _browser_session_response(self, user: BrowserUser | None) -> BrowserSessionResponse:
+        user = self._decorate_browser_user(user)
         if user is None:
             return BrowserSessionResponse(authenticated=False)
         api_key_record = self.repository.get_openai_api_key_record(user.user_id)  # type: ignore[attr-defined]
@@ -1675,7 +1711,8 @@ class PaperbaseService:
     def get_current_browser_user(self, raw_token: str | None) -> BrowserUser | None:
         if not raw_token:
             return None
-        return self.repository.get_browser_user_by_session_token_hash(token_hash(raw_token))  # type: ignore[attr-defined]
+        user = self.repository.get_browser_user_by_session_token_hash(token_hash(raw_token))  # type: ignore[attr-defined]
+        return self._decorate_browser_user(user)
 
     def logout_browser_session(self, raw_token: str | None) -> None:
         if raw_token:
@@ -7034,6 +7071,17 @@ class PaperbaseService:
         return self.list_jobs_by_status("dead", limit=limit)
 
     def list_jobs_by_status(self, status: str, *, limit: int = 50) -> list[JobResponse]:
+        if status == "all":
+            jobs: list[JobResponse] = []
+            seen: set[str] = set()
+            for bucket in ("pending", "running", "completed", "dead", "failed"):
+                for job in self.repository.list_jobs_by_status(bucket, limit=limit):
+                    if job.job_id in seen:
+                        continue
+                    seen.add(job.job_id)
+                    jobs.append(job)
+            jobs.sort(key=lambda job: job.updated_at, reverse=True)
+            return jobs[:limit]
         if status == "dead":
             jobs = [
                 *self.repository.list_jobs_by_status("dead", limit=limit),
@@ -7042,6 +7090,15 @@ class PaperbaseService:
             jobs.sort(key=lambda job: job.updated_at, reverse=True)
             return jobs[:limit]
         return self.repository.list_jobs_by_status(status, limit=limit)
+
+    def list_papers(
+        self,
+        *,
+        query: str | None = None,
+        index_status: str | None = None,
+        limit: int = 50,
+    ) -> list[PaperResponse]:
+        return self.repository.list_papers(query=query, index_status=index_status, limit=limit)
 
     def sync_latest_papers(self, *, days: int, categories: list[str], limit_per_category: int) -> list[PaperResponse]:
         logger.info(
@@ -7523,6 +7580,7 @@ class PaperbaseService:
         return ManifestResponse(paper_id=paper_id, manifest=json.loads(self.object_store.get_text(path)))
 
     def list_files(self, paper_id: str) -> FileListResponse:
+        self.get_paper(paper_id)
         prefix = f"papers/{paper_id}/"
         objects = self.object_store.list_prefix(prefix)
         files = [
@@ -7532,10 +7590,35 @@ class PaperbaseService:
         return FileListResponse(paper_id=paper_id, files=files)
 
     def read_file(self, paper_id: str, path: str) -> FileContentResponse:
-        full_path = f"papers/{paper_id}/{path}"
+        safe_path = _normalize_paper_artifact_path(path)
+        full_path = f"papers/{paper_id}/{safe_path}"
         if not self.object_store.exists(full_path):
-            raise HTTPException(status_code=404, detail=f"File {path} not found for {paper_id}")
-        return FileContentResponse(paper_id=paper_id, path=path, content=self.object_store.get_text(full_path))
+            raise HTTPException(status_code=404, detail=f"File {safe_path} not found for {paper_id}")
+        try:
+            content = self.object_store.get_text(full_path)
+        except UnicodeDecodeError as exc:
+            raise HTTPException(status_code=415, detail=f"File {safe_path} is not a UTF-8 text artifact") from exc
+        return FileContentResponse(paper_id=paper_id, path=safe_path, content=content)
+
+    def get_paper_asset(self, paper_id: str, path: str) -> PaperAssetResponse:
+        self.get_paper(paper_id)
+        safe_path = _normalize_paper_artifact_path(path)
+        full_path = f"papers/{paper_id}/{safe_path}"
+        if not self.object_store.exists(full_path):
+            raise HTTPException(status_code=404, detail=f"File {safe_path} not found for {paper_id}")
+        url = self.object_store.presign_get(full_path, expires_in=self.settings.presign_ttl_seconds)
+        if not url:
+            raise HTTPException(status_code=404, detail=f"File {safe_path} is not available for {paper_id}")
+        files = {item.path: item for item in self.list_files(paper_id).files}
+        content_type = files.get(safe_path, FileObject(path=safe_path, size=0)).content_type
+        if not content_type:
+            content_type = mimetypes.guess_type(safe_path)[0]
+        return PaperAssetResponse(
+            paper_id=paper_id,
+            path=safe_path,
+            url=url,
+            content_type=content_type,
+        )
 
     def get_paper_preview(self, paper_id: str) -> PaperPreviewResponse:
         """Return a short-lived signed URL for the paper's first-page preview.

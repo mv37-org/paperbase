@@ -22,5 +22,6 @@ The browser backend now persists first-class projects in addition to chat sessio
 - project descriptions are copied onto new chat threads as snapped prompt context so existing chats stay stable when a project is edited later
 - project files store their repo path and kind (`python` or `notebook`), with notebooks converted through Jupytext for Python-source editing and regenerated to `.ipynb` during repo sync
 - repo sync overlays only paths tracked in `.paperbase`, so unrelated existing-repo content is preserved
+- allowlisted browser users (`PAPERBASE_ADMIN_EMAILS`) also get an admin-only operations tab for queueing harvest/index jobs, reading job errors, and browsing stored paper artifacts
 
 Use the repo-root [README](../README.md) for setup, env, and supported commands.

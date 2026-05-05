@@ -27,6 +27,7 @@ from paperbase.models import (
     ChatThreadListResponse,
     ChatThreadResponse,
     ChatThreadSummary,
+    FileContentResponse,
     FileListResponse,
     FileObject,
     GitHubRepoBranchSummary,
@@ -36,6 +37,7 @@ from paperbase.models import (
     GitHubRepoMetadataResponse,
     GitHubRepoSummary,
     JobResponse,
+    PaperAssetResponse,
     PaperPreviewResponse,
     PaperResponse,
     ProjectItemPageResponse,
@@ -243,6 +245,16 @@ class StubApiService:
         self.calls.append(("get_paper", paper_id))
         return _paper("2401.54321")
 
+    def list_papers(
+        self,
+        *,
+        query: str | None = None,
+        index_status: str | None = None,
+        limit: int = 50,
+    ) -> list[PaperResponse]:
+        self.calls.append(("list_papers", (query, index_status, limit)))
+        return [_paper("2401.54321")]
+
     def get_paper_preview(self, paper_id: str) -> PaperPreviewResponse:
         self.calls.append(("get_paper_preview", paper_id))
         if paper_id == "missing":
@@ -259,6 +271,23 @@ class StubApiService:
         return FileListResponse(
             paper_id=paper_id,
             files=[FileObject(path="text/full.md", size=10, content_type="text/markdown")],
+        )
+
+    def read_file(self, paper_id: str, path: str) -> FileContentResponse:
+        self.calls.append(("read_file", (paper_id, path)))
+        return FileContentResponse(
+            paper_id=paper_id,
+            path=path,
+            content=f"Contents for {path}",
+        )
+
+    def get_paper_asset(self, paper_id: str, path: str) -> PaperAssetResponse:
+        self.calls.append(("get_paper_asset", (paper_id, path)))
+        return PaperAssetResponse(
+            paper_id=paper_id,
+            path=path,
+            url=f"https://signed.example/{paper_id}/{quote(path, safe='/')}",
+            content_type="application/pdf",
         )
 
     def get_results(self, result_set_id: str) -> ResultSetResponse:
@@ -305,6 +334,10 @@ class StubApiService:
         if job_id == "job_nonexistent":
             return None
         return _job("index_paper", payload={"job_id": job_id, "retried": True})
+
+    def enqueue_index_job(self, arxiv_id: str, *, force: bool = False):
+        self.calls.append(("enqueue_index_job", (arxiv_id, force)))
+        return _job("index_paper", payload={"arxiv_id": arxiv_id, "force": force})
 
     def record_search_click(self, query_id: str, paper_id: str) -> bool:
         self.calls.append(("record_search_click", (query_id, paper_id)))
@@ -1029,6 +1062,124 @@ def test_browser_get_routes_accept_session_cookie_without_csrf(api_client):
         ("user_1", "octocat", "existing-repo", "dev"),
     ) in service.calls
     assert ("get_chat_thread", ("user_1", "thread_1")) in service.calls
+
+
+def test_browser_admin_read_routes_require_admin_session(api_client):
+    client, _, settings = api_client
+    client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
+
+    response = client.get("/v1/browser/admin/jobs?status=all&limit=5")
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Admin access required"
+
+
+def test_browser_admin_routes_delegate_for_admin_users(api_client):
+    client, service, settings = api_client
+    service.browser_user = service.browser_user.model_copy(update={"is_admin": True})
+    client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
+    csrf = csrf_token_for_session("browser-session-token", settings)
+    headers = {
+        "Origin": settings.browser_origin,
+        "X-Paperbase-CSRF": csrf,
+    }
+
+    jobs = client.get("/v1/browser/admin/jobs?status=all&limit=5")
+    papers = client.get("/v1/browser/admin/papers?q=benchmark&index_status=indexed&limit=3")
+    files = client.get("/v1/browser/admin/papers/arxiv:2401.54321/files")
+    file_contents = client.get("/v1/browser/admin/papers/arxiv:2401.54321/files/text/full.md")
+    asset = client.get("/v1/browser/admin/papers/arxiv:2401.54321/assets/bundle.pdf")
+    retried = client.post("/v1/browser/admin/jobs/job_dead_1/retry", headers=headers)
+    indexed = client.post("/v1/browser/admin/index/papers/arxiv/2401.54321?force=true", headers=headers)
+    harvest = client.post(
+        "/v1/browser/admin/index/harvest",
+        json={
+            "categories": ["cs.LG"],
+            "start_date": "2025-01-01",
+            "end_date": "2025-03-31",
+            "chunk_months": 3,
+            "limit_per_window": 100,
+        },
+        headers=headers,
+    )
+    top_cited = client.post(
+        "/v1/browser/admin/index/harvest-top-cited",
+        json={"min_citations": 50, "max_papers": 200, "chunk_size": 25},
+        headers=headers,
+    )
+    venue = client.post(
+        "/v1/browser/admin/index/harvest-venue",
+        json={"venue": "ICLR", "year": 2024, "max_papers": 200, "chunk_size": 25},
+        headers=headers,
+    )
+    enriched = client.post(
+        "/v1/browser/admin/index/enrich-missing-metadata?limit=123&min_age_seconds=7200",
+        headers=headers,
+    )
+
+    assert jobs.status_code == 200
+    assert jobs.json()[0]["payload"]["job_id"] == "dead_all"
+    assert papers.status_code == 200
+    assert papers.json()[0]["paper_id"] == "arxiv:2401.54321"
+    assert files.status_code == 200
+    assert files.json()["files"][0]["path"] == "text/full.md"
+    assert file_contents.status_code == 200
+    assert file_contents.json()["content"] == "Contents for text/full.md"
+    assert asset.status_code == 200
+    assert asset.json()["url"].startswith("https://signed.example/")
+    assert asset.headers["Cache-Control"] == "no-store"
+    assert retried.status_code == 200
+    assert retried.json()["payload"]["retried"] is True
+    assert indexed.status_code == 200
+    assert indexed.json()["payload"] == {"arxiv_id": "2401.54321", "force": True}
+    assert harvest.status_code == 200
+    assert top_cited.status_code == 200
+    assert venue.status_code == 200
+    assert enriched.status_code == 200
+    assert ("list_jobs_by_status", ("all", 5)) in service.calls
+    assert ("list_papers", ("benchmark", "indexed", 3)) in service.calls
+    assert ("list_files", "arxiv:2401.54321") in service.calls
+    assert ("read_file", ("arxiv:2401.54321", "text/full.md")) in service.calls
+    assert ("get_paper_asset", ("arxiv:2401.54321", "bundle.pdf")) in service.calls
+    assert ("retry_dead_job", "job_dead_1") in service.calls
+    assert ("enqueue_index_job", ("2401.54321", True)) in service.calls
+    assert (
+        "enqueue_harvest_range_job",
+        {
+            "categories": ["cs.LG"],
+            "start_date": "2025-01-01",
+            "end_date": "2025-03-31",
+            "limit_per_window": 100,
+            "chunk_months": 3,
+            "source": "arxiv",
+        },
+    ) in service.calls
+    assert (
+        "enqueue_harvest_top_cited_job",
+        {"min_citations": 50, "max_papers": 200, "chunk_size": 25},
+    ) in service.calls
+    assert (
+        "enqueue_harvest_venue_job",
+        {"venue": "ICLR", "year": 2024, "max_papers": 200, "chunk_size": 25},
+    ) in service.calls
+    assert ("enqueue_enrich_missing_metadata_job", (123, 7200)) in service.calls
+
+
+def test_browser_admin_write_routes_reject_non_admin_users(api_client):
+    client, _, settings = api_client
+    client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
+    csrf = csrf_token_for_session("browser-session-token", settings)
+
+    response = client.post(
+        "/v1/browser/admin/jobs/job_dead_1/retry",
+        headers={
+            "Origin": settings.browser_origin,
+            "X-Paperbase-CSRF": csrf,
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Admin access required"
 
 
 def test_browser_delete_anthropic_key_requires_valid_csrf(api_client):

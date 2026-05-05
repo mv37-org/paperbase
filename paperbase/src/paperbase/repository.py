@@ -9,7 +9,7 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import PurePosixPath
 from typing import Any, TypeVar
 
@@ -1017,6 +1017,16 @@ class PaperRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def list_papers(
+        self,
+        *,
+        query: str | None = None,
+        index_status: str | None = None,
+        limit: int = 50,
+    ) -> list[PaperResponse]:
+        raise NotImplementedError
+
+    @abstractmethod
     def replace_text_chunks(self, paper_id: str, chunks: list[dict[str, Any]]) -> None:
         raise NotImplementedError
 
@@ -1826,6 +1836,33 @@ class SqlAlchemyPaperRepository(PaperRepository):
         with self._session() as session:
             row = session.scalar(select(PaperORM).where(PaperORM.arxiv_id == arxiv_id))
             return _paper_from_orm(row) if row else None
+
+    def list_papers(
+        self,
+        *,
+        query: str | None = None,
+        index_status: str | None = None,
+        limit: int = 50,
+    ) -> list[PaperResponse]:
+        statement = (
+            select(PaperORM)
+            .order_by(PaperORM.indexed_at.desc().nullslast(), PaperORM.updated_at.desc(), PaperORM.paper_id.asc())
+            .limit(limit)
+        )
+        if index_status and index_status != "all":
+            statement = statement.where(PaperORM.index_status == index_status)
+        if query:
+            needle = f"%{query.strip().lower()}%"
+            statement = statement.where(
+                or_(
+                    func.lower(PaperORM.title).like(needle),
+                    func.lower(PaperORM.arxiv_id).like(needle),
+                    func.lower(PaperORM.authors).like(needle),
+                )
+            )
+        with self._session() as session:
+            rows = session.scalars(statement).all()
+        return [_paper_from_orm(row) for row in rows]
 
     def replace_text_chunks(self, paper_id: str, chunks: list[dict[str, Any]]) -> None:
         # Wrapped in deadlock-retry per #51. The DELETE + INSERT pattern
@@ -4609,6 +4646,32 @@ class MemoryPaperRepository(PaperRepository):
 
     def get_paper_by_arxiv_id(self, arxiv_id: str) -> PaperResponse | None:
         return self.papers.get(canonical_paper_id(arxiv_id))
+
+    def list_papers(
+        self,
+        *,
+        query: str | None = None,
+        index_status: str | None = None,
+        limit: int = 50,
+    ) -> list[PaperResponse]:
+        query_lower = (query or "").strip().lower()
+        candidates = list(self.papers.values())
+        if index_status and index_status != "all":
+            candidates = [paper for paper in candidates if paper.index_status == index_status]
+        if query_lower:
+            candidates = [
+                paper
+                for paper in candidates
+                if query_lower in paper.title.lower()
+                or query_lower in paper.arxiv_id.lower()
+                or query_lower in paper.authors.lower()
+            ]
+        floor = datetime.min.replace(tzinfo=timezone.utc)
+        candidates.sort(key=lambda paper: paper.paper_id)
+        candidates.sort(key=lambda paper: paper.updated or "", reverse=True)
+        candidates.sort(key=lambda paper: paper.indexed_at or floor, reverse=True)
+        candidates.sort(key=lambda paper: paper.indexed_at is None)
+        return candidates[:limit]
 
     def replace_text_chunks(self, paper_id: str, chunks: list[dict[str, Any]]) -> None:
         # Match the SQL path: assign a stable chunk_id so downstream updates

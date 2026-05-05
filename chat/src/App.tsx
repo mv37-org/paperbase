@@ -42,6 +42,7 @@ import {
   updatePythonFile,
   uploadDocument,
 } from "./api";
+import { AdminOpsPanel } from "./AdminOpsPanel";
 import { CodeSnippet, extractStreamingPythonPreview } from "./CodeSnippet";
 import { LandingMentionEditor } from "./LandingMentionEditor";
 import { MarkdownRenderer } from "./MarkdownRenderer";
@@ -237,9 +238,13 @@ const DEFAULT_BROWSER_SETTINGS: NonNullable<BrowserSessionResponse["settings"]> 
 };
 
 type AppearanceTheme = "light" | "dark";
-type SettingsTab = "inference" | "sandbox" | "version-control" | "appearance";
+type SettingsTab = "inference" | "sandbox" | "version-control" | "appearance" | "admin";
 
-const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; caption: string }> = [
+const BASE_SETTINGS_TABS: Array<{
+  id: Exclude<SettingsTab, "admin">;
+  label: string;
+  caption: string;
+}> = [
   {
     id: "inference",
     label: "Inference",
@@ -262,12 +267,19 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; caption: string }> 
   },
 ];
 
+const ADMIN_SETTINGS_TAB: { id: SettingsTab; label: string; caption: string } = {
+  id: "admin",
+  label: "Admin",
+  caption: "Queue indexing jobs and inspect stored paper artifacts.",
+};
+
 const normalizeSettingsTab = (value: string | null): SettingsTab | null => {
   if (
     value === "inference" ||
     value === "sandbox" ||
     value === "version-control" ||
-    value === "appearance"
+    value === "appearance" ||
+    value === "admin"
   ) {
     return value;
   }
@@ -1827,11 +1839,19 @@ export default function App() {
     }
     return {
       email: session.user.email,
+      isAdmin: Boolean(session.user.is_admin),
       hasOpenAIApiKey: session.has_openai_api_key ?? session.has_anthropic_api_key ?? false,
       settings: session.settings ?? DEFAULT_BROWSER_SETTINGS,
     };
   }, [session]);
   const sessionSettings = sessionSummary?.settings ?? DEFAULT_BROWSER_SETTINGS;
+  const settingsTabs = useMemo(
+    () =>
+      sessionSummary?.isAdmin
+        ? [...BASE_SETTINGS_TABS, ADMIN_SETTINGS_TAB]
+        : [...BASE_SETTINGS_TABS],
+    [sessionSummary?.isAdmin],
+  );
   const hasInferenceAccess = Boolean(sessionSummary?.hasOpenAIApiKey);
   const chatSetupProjectName = emptyStateProject?.name ?? activeThread?.project_name ?? "Project";
   const chatSetupItems = [
@@ -1884,10 +1904,16 @@ export default function App() {
   const appliedAppearanceTheme = sessionSettings.appearance_theme === "dark" ? "dark" : "light";
   const authenticatedDarkThemeEnabled = authenticated && appliedAppearanceTheme === "dark";
   const activeSettingsConfig = useMemo(
-    () => SETTINGS_TABS.find((tab) => tab.id === activeSettingsTab) ?? SETTINGS_TABS[0],
-    [activeSettingsTab],
+    () => settingsTabs.find((tab) => tab.id === activeSettingsTab) ?? settingsTabs[0],
+    [activeSettingsTab, settingsTabs],
   );
   const authCaption = authView === "settings" ? activeSettingsConfig.caption : authCopy.caption;
+
+  useEffect(() => {
+    if (!settingsTabs.some((tab) => tab.id === activeSettingsTab)) {
+      setActiveSettingsTab("inference");
+    }
+  }, [activeSettingsTab, settingsTabs]);
 
   useEffect(() => {
     setAppearanceThemeDraft(appliedAppearanceTheme);
@@ -7107,7 +7133,7 @@ export default function App() {
           >
             <div className="settings-panel">
               <div className="settings-tabs" role="tablist" aria-label="Settings sections">
-                {SETTINGS_TABS.map((tab) => (
+                {settingsTabs.map((tab) => (
                   <button
                     key={tab.id}
                     type="button"
@@ -7502,6 +7528,10 @@ export default function App() {
                       </div>
                     </form>
                   </section>
+                ) : null}
+
+                {activeSettingsTab === "admin" ? (
+                  <AdminOpsPanel onError={showErrorFlash} onNote={showNoteFlash} />
                 ) : null}
               </div>
             </div>
