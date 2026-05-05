@@ -1411,8 +1411,6 @@ def _openai_context_window_tokens(model_name: str) -> int:
     return 128_000
 
 
-_CHAT_TOOL_MAX_ROUNDS = 4
-_CHAT_TOOL_MAX_CALLS_PER_ROUND = 6
 _CHAT_TOOL_MAX_FILE_CHARS = 12_000
 _CHAT_TOOL_MAX_TABLE_ROWS = 40
 _CHAT_TOOL_MAX_FILE_LIST = 200
@@ -4934,7 +4932,6 @@ class PaperbaseService:
     def _run_single_chat_tool(
         self,
         *,
-        index: int,
         tool_name: str,
         tool_input: dict[str, Any],
         user: BrowserUser,
@@ -4942,8 +4939,6 @@ class PaperbaseService:
         thread_id: str | None = None,
         project_id: str | None = None,
     ) -> tuple[dict[str, Any], bool]:
-        if index >= _CHAT_TOOL_MAX_CALLS_PER_ROUND:
-            return {"error": "Too many tool calls requested in one round"}, True
         try:
             payload = self._execute_chat_tool(
                 tool_name=tool_name,
@@ -4975,14 +4970,13 @@ class PaperbaseService:
         blocks: list[dict[str, Any]] = []
         project_write_completed = False
         project_read_completed = False
-        for index, tool_use in enumerate(tool_uses):
+        for tool_use in tool_uses:
             tool_use_id = str(tool_use.get("id") or "").strip()
             if not tool_use_id:
                 continue
             tool_name = str(tool_use.get("name") or "").strip()
             tool_input = tool_use.get("input") if isinstance(tool_use.get("input"), dict) else {}
             payload, is_error = self._run_single_chat_tool(
-                index=index,
                 tool_name=tool_name,
                 tool_input=tool_input,
                 user=user,
@@ -5260,7 +5254,10 @@ class PaperbaseService:
             deferred_tool_count=len(router.deferred_specs()),
         )
 
-        for _sample_index in range(_CHAT_TOOL_MAX_ROUNDS + 1):
+        # Match Codex's task loop: keep sampling while the model emits tool calls.
+        # Completion is the first model response that yields no tool follow-up.
+        _sample_index = 0
+        while True:
             context, prompt, compaction_events = self._ensure_chat_context_budget(
                 prepared=prepared,
                 context=context,
@@ -5509,7 +5506,6 @@ class PaperbaseService:
                         turn_state=turn_state,
                     )
                     payload, is_error = self._run_single_chat_tool(
-                        index=index,
                         tool_name=tool_name,
                         tool_input=tool_input,
                         user=user,
@@ -5559,8 +5555,7 @@ class PaperbaseService:
                     is_error=is_error,
                 )
                 yield ("item_completed", {"item": completed_output_item.model_dump(mode="json")})
-
-        raise RuntimeError("Chat turn exceeded the maximum number of sampling steps")
+            _sample_index += 1
 
     def _api_key_required_response(
         self,

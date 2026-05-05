@@ -4532,6 +4532,111 @@ def test_stream_chat_compacts_mid_turn_after_tool_results(monkeypatch, browser_s
     assert refreshed.messages[-1].citations
 
 
+def test_stream_chat_continues_past_previous_sampling_step_cap():
+    class ExtendedToolLoopChatModel(FakeChatModel):
+        def stream_message(
+            self,
+            *,
+            api_key: str,
+            messages,
+            system_prompt: str,
+            tools=None,
+            tool_choice=None,
+            parallel_tool_calls=None,
+        ):
+            self.stream_calls.append(
+                {
+                    "api_key": api_key,
+                    "messages": messages,
+                    "system_prompt": system_prompt,
+                    "tools": tools,
+                    "tool_choice": tool_choice,
+                    "parallel_tool_calls": parallel_tool_calls,
+                }
+            )
+            tool_result_count = sum(
+                1
+                for message in messages
+                if isinstance(message, dict)
+                and message.get("role") == "user"
+                and isinstance(message.get("content"), list)
+                and any(
+                    isinstance(block, dict) and block.get("type") == "tool_result"
+                    for block in message.get("content")
+                )
+            )
+            if tool_result_count < 6:
+                next_round = tool_result_count + 1
+                yield ChatModelStreamEvent(
+                    response={
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": f"toolu_loop_{next_round}",
+                                "name": "paperbase_get_results",
+                                "input": {"result_set_id": f"rs_missing_{next_round}"},
+                            }
+                        ],
+                        "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
+                        "stop_reason": "tool_use",
+                    }
+                )
+                return
+            yield ChatModelStreamEvent(
+                response={
+                    "content": [{"type": "text", "text": "Finished after extended tool loop."}],
+                    "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                    "stop_reason": "end_turn",
+                }
+            )
+
+    chat_model = ExtendedToolLoopChatModel()
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=chat_model,
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="loop@example.com", password="topsecret123", display_name="Loop User")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
+
+    events = list(
+        service.stream_chat_message(
+            session.user,
+            thread.thread_id,
+            SendChatMessageRequest(content="Use research tools until you can answer", tag_filters=[]),
+        )
+    )
+
+    assert [event_name for event_name, _ in events][-1] == "turn_completed"
+    assert "turn_failed" not in [event_name for event_name, _ in events]
+    function_outputs = _event_items(
+        events,
+        event_name="item_completed",
+        item_type="function_call_output",
+    )
+    final_items = _event_items(
+        events,
+        event_name="item_completed",
+        item_type="assistant_message",
+        phase="final_answer",
+    )
+    assert len(function_outputs) == 6
+    assert final_items
+    assert final_items[-1]["content_text"] == "Finished after extended tool loop."
+    assert len(chat_model.stream_calls) == 7
+
+
 def test_search_only_tool_results_do_not_create_citations(monkeypatch):
     class SearchOnlyChatModel(FakeChatModel):
         def create_message(self, *, api_key: str, messages, system_prompt: str, tools=None, tool_choice=None):
