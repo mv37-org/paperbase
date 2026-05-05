@@ -1400,7 +1400,10 @@ export function AdminOpsPanel({
       {view.kind === "jobs" ? (
         <>
           <div className="admin-jobs-header">
-            <h1>Control panel</h1>
+            <div className="admin-jobs-header-title">
+              <h1>Control panel</h1>
+              <p>Queue and monitor jobs</p>
+            </div>
             <div className="admin-jobs-header-actions">
               <JobsWindowControl
                 customRange={customRange}
