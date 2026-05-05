@@ -14,6 +14,7 @@ import sys
 import tempfile
 import threading
 from collections.abc import Generator, Iterator
+from contextvars import ContextVar
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import timedelta
@@ -124,7 +125,7 @@ from .models import (
     UploadListResponse,
     UploadedDocumentResponse,
 )
-from .repository import PaperRepository, build_repository
+from .repository import JOB_LEASE_SECONDS, PaperRepository, build_repository
 from .security import (
     SecretCipher,
     api_key_hint,
@@ -137,11 +138,13 @@ from .security import (
 from .summaries import build_paper_summaries
 from .storage import ObjectStore, build_object_store
 from . import sources
-from .errors import PermanentError, RetryableError
+from .errors import JobCanceled, PermanentError, RetryableError
 from .utils import new_id, slugify, utcnow
 
 
 logger = logging.getLogger(__name__)
+_CURRENT_JOB: ContextVar[JobResponse | None] = ContextVar("paperbase_current_job", default=None)
+JOB_HEARTBEAT_INTERVAL_SECONDS = 60
 
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -1596,9 +1599,45 @@ class PaperbaseService:
         self._project_exec_sessions: dict[str, ProjectExecSession] = {}
         self._project_exec_index: dict[tuple[str, str], set[str]] = {}
         self._project_exec_lock = threading.Lock()
+        self._worker_id = f"{os.environ.get('HOSTNAME') or 'local'}:{os.getpid()}:{new_id('worker')}"
 
     def init(self) -> None:
         self.repository.init()
+
+    def _start_job_heartbeat(self, job: JobResponse) -> tuple[threading.Event, threading.Thread | None]:
+        if not job.lease_token:
+            return threading.Event(), None
+        stop = threading.Event()
+
+        def _loop() -> None:
+            while not stop.wait(JOB_HEARTBEAT_INTERVAL_SECONDS):
+                refreshed = self.repository.heartbeat_job(
+                    job.job_id,
+                    lease_token=job.lease_token or "",
+                    worker_id=self._worker_id,
+                    lease_seconds=JOB_LEASE_SECONDS,
+                )
+                if refreshed is None:
+                    logger.warning(
+                        "Job heartbeat lost its lease",
+                        extra={"event": "jobs.heartbeat_lost", "job_id": job.job_id},
+                    )
+                    return
+
+        thread = threading.Thread(
+            target=_loop,
+            name=f"paperbase-job-heartbeat-{job.job_id}",
+            daemon=True,
+        )
+        thread.start()
+        return stop, thread
+
+    def _raise_if_current_job_canceled(self) -> None:
+        job = _CURRENT_JOB.get()
+        if job is None or not job.lease_token:
+            return
+        if self.repository.is_job_cancel_requested(job.job_id, lease_token=job.lease_token):
+            raise JobCanceled(f"Job {job.job_id} was canceled")
 
     def _browser_user_settings_response(
         self,
@@ -5585,6 +5624,7 @@ class PaperbaseService:
         after: PaperResponse | None = None
 
         while remaining > 0:
+            self._raise_if_current_job_canceled()
             batch = self.repository.list_papers_needing_embedding_backfill(
                 limit=min(page, remaining),
                 include_chunks=include_chunks,
@@ -5602,11 +5642,13 @@ class PaperbaseService:
             vectors = self.embeddings.encode_paper_batch(pairs)
             if vectors is not None and len(vectors) == len(batch):
                 for paper, vector in zip(batch, vectors):
+                    self._raise_if_current_job_canceled()
                     self.repository.update_paper_embedding(paper.paper_id, vector)
                     papers_updated += 1
 
             if include_chunks:
                 for paper in batch:
+                    self._raise_if_current_job_canceled()
                     chunks = self.repository.list_chunks_missing_embedding(
                         paper.paper_id,
                         include_existing=rewrite_existing,
@@ -5615,12 +5657,14 @@ class PaperbaseService:
                         continue
                     cap = self.settings.chunk_max_chars + self.settings.chunk_overlap_chars
                     for start in range(0, len(chunks), chunk_page):
+                        self._raise_if_current_job_canceled()
                         chunk_batch = chunks[start : start + chunk_page]
                         chunk_inputs = [(chunk.get("content") or "")[:cap] for chunk in chunk_batch]
                         chunk_vectors = self.embeddings.encode_batch(chunk_inputs)
                         if chunk_vectors is None or len(chunk_vectors) != len(chunk_batch):
                             continue
                         for chunk, vector in zip(chunk_batch, chunk_vectors):
+                            self._raise_if_current_job_canceled()
                             self.repository.update_chunk_embedding(chunk["chunk_id"], vector)
                             chunks_updated += 1
 
@@ -5691,6 +5735,7 @@ class PaperbaseService:
         after: PaperResponse | None = None
 
         while remaining > 0:
+            self._raise_if_current_job_canceled()
             batch = self.repository.list_papers_needing_enrichment(
                 limit=min(page_size, remaining),
                 min_age_seconds=min_age_seconds,
@@ -5719,6 +5764,7 @@ class PaperbaseService:
             outcome = sources.enrich_with_semantic_scholar(metas, batch_size=batch_size)
             total_batches_failed += outcome.batches_failed
             for paper, meta in zip(batch, metas):
+                self._raise_if_current_job_canceled()
                 if not (meta.semantic_scholar_id or (meta.citation_count and meta.citation_count > 0)):
                     continue
                 # Re-use the shallow upsert path to persist enrichment —
@@ -5921,6 +5967,7 @@ class PaperbaseService:
         read-only ingestion foundation; indexing the extracted files into
         ``text_chunks`` is PR 2 scope.
         """
+        self._raise_if_current_job_canceled()
         paper = self.repository.get_paper(paper_id)
         if paper is None:
             return None
@@ -5951,6 +5998,7 @@ class PaperbaseService:
                 token=self.settings.github_token,
                 max_bytes=self.settings.code_repo_max_archive_bytes,
             )
+            self._raise_if_current_job_canceled()
             prev_manifest = paper.code_manifest or {}
             if (
                 not force
@@ -5961,6 +6009,7 @@ class PaperbaseService:
             ):
                 # Same commit as last time — restore the terminal state after
                 # the transient indexing marker and skip re-extracting.
+                self._raise_if_current_job_canceled()
                 return self.repository.update_code_ingest_state(
                     paper_id,
                     status="indexed",
@@ -5976,6 +6025,7 @@ class PaperbaseService:
                     max_stored_file_bytes=self.settings.code_repo_max_stored_file_bytes,
                     max_scanned_files=self.settings.code_repo_max_scanned_files,
                 )
+                self._raise_if_current_job_canceled()
                 is_python, reason = code_ingest.classify_python(report)
                 # Selective code indexing (#5 PR 2): only Python-eligible
                 # repos get high-signal chunks (README / docs / manifests /
@@ -5986,6 +6036,7 @@ class PaperbaseService:
                 code_chunks = (
                     code_ingest.build_code_chunks(scratch, report) if is_python else []
                 )
+                self._raise_if_current_job_canceled()
                 indexed_paths = sorted({chunk.repo_path for chunk in code_chunks})
                 manifest = code_ingest.build_manifest(
                     code_url=code_url,
@@ -5997,6 +6048,7 @@ class PaperbaseService:
                 )
                 manifest["indexed_paths"] = indexed_paths
                 code_prefix = f"papers/{paper_id}/code"
+                self._raise_if_current_job_canceled()
                 self.object_store.delete_prefix(f"{code_prefix}/")
                 self.object_store.put_bytes(
                     f"{code_prefix}/raw/source.tar.gz",
@@ -6009,6 +6061,7 @@ class PaperbaseService:
                     content_type="application/json",
                 )
                 for rel in report.stored_paths:
+                    self._raise_if_current_job_canceled()
                     source = scratch / rel
                     if not source.exists():
                         continue
@@ -6030,6 +6083,7 @@ class PaperbaseService:
                         for idx, chunk in enumerate(code_chunks)
                     ],
                 )
+            self._raise_if_current_job_canceled()
             logger.info(
                 "Completed code ingest",
                 extra={
@@ -6367,11 +6421,13 @@ class PaperbaseService:
 
         with ThreadPoolExecutor(max_workers=concurrency) as pool:
             while remaining > 0:
+                self._raise_if_current_job_canceled()
                 page_size = min(window, remaining)
                 batch = self.repository.list_papers_needing_summary(limit=page_size, after=after)
                 if not batch:
                     break
                 for paper in batch:
+                    self._raise_if_current_job_canceled()
                     if len(in_flight) >= window:
                         _drain(wait_all=False)
                     in_flight.add(pool.submit(_summarize_one, paper))
@@ -6485,7 +6541,9 @@ class PaperbaseService:
         windows = _month_windows(start_date, end_date, chunk_months=chunk_months)
         chunks_created = 0
         for category in categories:
+            self._raise_if_current_job_canceled()
             for win_start, win_end in windows:
+                self._raise_if_current_job_canceled()
                 self.repository.create_job(
                     "harvest_chunk",
                     {
@@ -6584,6 +6642,7 @@ class PaperbaseService:
         fetched_this_page = 0
         indexed = 0
         for paper in page:
+            self._raise_if_current_job_canceled()
             if cap is not None and running_fetched + fetched_this_page >= cap:
                 break
             fetched_this_page += 1
@@ -6755,6 +6814,7 @@ class PaperbaseService:
             pending_batch = []
 
         while True:
+            self._raise_if_current_job_canceled()
             if max_papers is not None and candidates_emitted >= max_papers:
                 break
             page, next_cursor = sources.fetch_top_cited_cs(
@@ -6763,6 +6823,7 @@ class PaperbaseService:
             )
             pages_fetched += 1
             for candidate in page:
+                self._raise_if_current_job_canceled()
                 if max_papers is not None and candidates_emitted >= max_papers:
                     break
                 pending_batch.append(candidate.arxiv_id)
@@ -6818,6 +6879,7 @@ class PaperbaseService:
         indexed = 0
         skipped = 0
         for arxiv_id in arxiv_ids:
+            self._raise_if_current_job_canceled()
             if not arxiv_id:
                 skipped += 1
                 continue
@@ -6949,6 +7011,7 @@ class PaperbaseService:
             pending_batch = []
 
         while True:
+            self._raise_if_current_job_canceled()
             if max_papers is not None and candidates_emitted >= max_papers:
                 break
             page, next_cursor = sources.fetch_venue_accepted(
@@ -6958,6 +7021,7 @@ class PaperbaseService:
             )
             pages_fetched += 1
             for candidate in page:
+                self._raise_if_current_job_canceled()
                 if max_papers is not None and candidates_emitted >= max_papers:
                     break
                 pending_batch.append({
@@ -7020,6 +7084,7 @@ class PaperbaseService:
         stamped = 0
         skipped = 0
         for entry in papers:
+            self._raise_if_current_job_canceled()
             arxiv_id = (entry or {}).get("arxiv_id") or ""
             if not arxiv_id:
                 skipped += 1
@@ -7156,6 +7221,7 @@ class PaperbaseService:
         authors_visited = 0
 
         for top_author in top_authors:
+            self._raise_if_current_job_canceled()
             author_s2_id = top_author["author_s2_id"]
             authors_visited += 1
             cursor: int | None = 0
@@ -7183,6 +7249,7 @@ class PaperbaseService:
                 pending_batch = []
 
             while cursor is not None:
+                self._raise_if_current_job_canceled()
                 if max_papers_per_author is not None and per_author_emitted >= max_papers_per_author:
                     break
                 page, next_cursor = sources.fetch_author_papers(
@@ -7190,6 +7257,7 @@ class PaperbaseService:
                     cursor=cursor,
                 )
                 for candidate in page:
+                    self._raise_if_current_job_canceled()
                     if max_papers_per_author is not None and per_author_emitted >= max_papers_per_author:
                         break
                     pending_batch.append(candidate.arxiv_id)
@@ -7253,6 +7321,7 @@ class PaperbaseService:
         stamped = 0
         skipped = len(arxiv_ids) - len(deduped_ids)  # empty/duplicate entries
         for arxiv_id in deduped_ids:
+            self._raise_if_current_job_canceled()
             try:
                 stored = self.index_arxiv_paper(arxiv_id, force=False)
                 indexed += 1
@@ -7307,7 +7376,7 @@ class PaperbaseService:
         return job
 
     def process_next_job(self) -> JobResponse | None:
-        job = self.repository.claim_pending_job()
+        job = self.repository.claim_pending_job(worker_id=self._worker_id, lease_seconds=JOB_LEASE_SECONDS)
         if job is None:
             return None
         logger.info(
@@ -7318,7 +7387,10 @@ class PaperbaseService:
                 "job_type": job.job_type,
             },
         )
+        heartbeat_stop, heartbeat_thread = self._start_job_heartbeat(job)
+        current_job_token = _CURRENT_JOB.set(job)
         try:
+            self._raise_if_current_job_canceled()
             if job.job_type == "index_paper":
                 self.index_arxiv_paper(job.payload["arxiv_id"], force=bool(job.payload.get("force")))
             elif job.job_type == "sync_latest":
@@ -7430,7 +7502,8 @@ class PaperbaseService:
                 )
             else:
                 raise ValueError(f"Unsupported job type: {job.job_type}")
-            self.repository.mark_job_completed(job.job_id)
+            self._raise_if_current_job_canceled()
+            self.repository.mark_job_completed(job.job_id, lease_token=job.lease_token)
             logger.info(
                 "Completed job",
                 extra={
@@ -7439,8 +7512,23 @@ class PaperbaseService:
                     "job_type": job.job_type,
                 },
             )
+        except JobCanceled:
+            self.repository.mark_job_canceled(job.job_id, lease_token=job.lease_token)
+            logger.info(
+                "Canceled job",
+                extra={
+                    "event": "jobs.canceled",
+                    "job_id": job.job_id,
+                    "job_type": job.job_type,
+                },
+            )
         except Exception as exc:  # pragma: no cover - surfaced via job state and API
             self._handle_job_failure(job, exc)
+        finally:
+            _CURRENT_JOB.reset(current_job_token)
+            heartbeat_stop.set()
+            if heartbeat_thread is not None:
+                heartbeat_thread.join(timeout=1)
         return self.repository.get_job(job.job_id)
 
     def _handle_job_failure(self, job: JobResponse, exc: Exception) -> None:
@@ -7460,6 +7548,7 @@ class PaperbaseService:
             str(exc),
             permanent=permanent,
             next_run_at=next_run_at,
+            lease_token=job.lease_token,
         )
         logger.exception(
             "Job failed",
@@ -7479,6 +7568,11 @@ class PaperbaseService:
         """Promote a dead job back to pending with attempts reset. Returns
         the updated job, or None if the id isn't dead/failed."""
         return self.repository.requeue_dead_job(job_id)
+
+    def cancel_job(self, job_id: str) -> JobResponse | None:
+        """Cancel a pending job immediately or request cooperative
+        cancellation from the worker currently holding the running lease."""
+        return self.repository.cancel_job(job_id)
 
     def list_dead_jobs(self, *, limit: int = 50) -> list[JobResponse]:
         return self.list_jobs_by_status("dead", limit=limit)
@@ -7506,9 +7600,11 @@ class PaperbaseService:
         indexed: list[PaperResponse] = []
         seen: set[str] = set()
         for category in categories:
+            self._raise_if_current_job_canceled()
             papers = sources.fetch_recent(category, days=days, max_results=limit_per_category)
             sources.enrich_with_semantic_scholar(papers)
             for paper in papers:
+                self._raise_if_current_job_canceled()
                 if paper.arxiv_id in seen:
                     continue
                 seen.add(paper.arxiv_id)
@@ -7526,6 +7622,7 @@ class PaperbaseService:
     def index_arxiv_paper(
         self, arxiv_id: str, *, paper: PaperMetadata | None = None, force: bool = False
     ) -> PaperResponse:
+        self._raise_if_current_job_canceled()
         existing = self.repository.get_paper_by_arxiv_id(arxiv_id)
         if existing and existing.index_status == "indexed" and not force:
             logger.info(
@@ -7547,6 +7644,7 @@ class PaperbaseService:
             },
         )
         metadata = paper or sources.get_paper_details(arxiv_id)
+        self._raise_if_current_job_canceled()
         if metadata is None:
             # Worker context: a missing arxiv id will never resolve, so this
             # must dead-letter rather than spin through the retry ladder.
@@ -7556,6 +7654,7 @@ class PaperbaseService:
         # the enrich_missing_metadata backfill job will pick this paper up
         # later with aggressive retry.
         enrich_outcome = sources.enrich_with_semantic_scholar([metadata], max_retries=0)
+        self._raise_if_current_job_canceled()
         # Snapshot an existing admin pin BEFORE the intermediate upsert so
         # it flows through every subsequent upsert on this metadata object.
         # A later ``get_paper_by_arxiv_id`` can't recover the pin because
@@ -7579,6 +7678,7 @@ class PaperbaseService:
             if author_rows:
                 self.repository.replace_paper_authors(stored.paper_id, authors=author_rows)
         extraction = index_paper_artifacts(metadata)
+        self._raise_if_current_job_canceled()
 
         metadata.source_type = extraction.source_type
         metadata.index_status = "indexed"
@@ -7684,6 +7784,7 @@ class PaperbaseService:
         ]
 
         for section_order, section in enumerate(extraction.sections):
+            self._raise_if_current_job_canceled()
             section_path = f"{prefix}/sections/{section.slug}.md"
             self.object_store.put_text(section_path, section.markdown, content_type="text/markdown")
             section_depth = _section_depth_for(section)
@@ -7712,6 +7813,7 @@ class PaperbaseService:
                 content_type="application/json",
             )
             for figure_order, figure in enumerate(extraction.figures):
+                self._raise_if_current_job_canceled()
                 caption_path = f"{prefix}/figures/{figure.figure_id}/caption.md"
                 self.object_store.put_text(caption_path, figure.caption, content_type="text/markdown")
                 text_chunks.append(
@@ -7735,6 +7837,7 @@ class PaperbaseService:
                 content_type="application/json",
             )
             for table_order, table in enumerate(extraction.tables):
+                self._raise_if_current_job_canceled()
                 json_path = f"{prefix}/tables/{table.table_id}.json"
                 csv_path = f"{prefix}/tables/{table.table_id}.csv"
                 self.object_store.put_bytes(json_path, table_json_bytes(table), content_type="application/json")
@@ -7757,6 +7860,7 @@ class PaperbaseService:
         # sections/tables stay focused.
         chunk_texts: list[str] = []
         for chunk in text_chunks:
+            self._raise_if_current_job_canceled()
             cap = (
                 4000
                 if chunk["chunk_kind"] == "full_text"
@@ -7764,11 +7868,13 @@ class PaperbaseService:
             )
             chunk_texts.append((chunk["content"] or "")[:cap])
         chunk_embeddings = self.embeddings.encode_batch(chunk_texts)
+        self._raise_if_current_job_canceled()
         if chunk_embeddings is not None and len(chunk_embeddings) == len(text_chunks):
             for chunk, vector in zip(text_chunks, chunk_embeddings):
                 chunk["embedding"] = vector
 
         for artifact in extraction.raw_artifacts:
+            self._raise_if_current_job_canceled()
             self.object_store.put_bytes(f"{prefix}/{artifact.path}", artifact.data, content_type=artifact.content_type)
 
         manifest = build_manifest(stored.paper_id, metadata, extraction)

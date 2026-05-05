@@ -84,6 +84,21 @@ def test_job_orm_carries_retry_policy_columns():
     assert default_max_attempts("reindex_embeddings") == 2
 
 
+def test_job_orm_carries_lease_and_cancel_columns():
+    from paperbase.repository import JobORM
+
+    for column in (
+        "worker_id",
+        "lease_token",
+        "heartbeat_at",
+        "lease_expires_at",
+        "cancel_requested_at",
+    ):
+        assert column in JobORM.__table__.columns, (
+            f"JobORM must carry '{column}' for reliable running/stalled/cancel status"
+        )
+
+
 def test_build_manifest_includes_preview_key_in_available_artifacts():
     paper = PaperMetadata(
         arxiv_id="2401.00001",

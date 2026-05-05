@@ -601,6 +601,18 @@ def jobs_retry(*, job_id: str) -> int:
     return 0
 
 
+def jobs_cancel(*, job_id: str) -> int:
+    from .service import get_service
+
+    service = get_service()
+    result = service.cancel_job(job_id)
+    if result is None:
+        print(f"{job_id} is not in a cancelable state (or does not exist).")
+        return 1
+    print(f"Canceled {result.job_id} ({result.job_type}): status={result.status} effective={result.effective_status}")
+    return 0
+
+
 def backfill_code_urls(*, limit: int, page_size: int, dry_run: bool) -> int:
     """One-shot sweep: re-run the Hugging Face paper-page code crosslink
     over indexed papers and overwrite ``papers.code_url`` where the
@@ -983,6 +995,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Promote a dead job back to pending with attempts reset.",
     )
     retry_parser.add_argument("job_id", help="Job id (e.g. job_abc123).")
+    cancel_parser = jobs_sub.add_parser(
+        "cancel",
+        help="Cancel a pending job or request cooperative cancellation for a running job.",
+    )
+    cancel_parser.add_argument("job_id", help="Job id (e.g. job_abc123).")
 
     backfill_code_parser = subparsers.add_parser(
         "backfill-code-urls",
@@ -1229,6 +1246,8 @@ def main(argv: list[str] | None = None) -> int:
             return jobs_list_dead(limit=args.limit)
         if args.jobs_command == "retry":
             return jobs_retry(job_id=args.job_id)
+        if args.jobs_command == "cancel":
+            return jobs_cancel(job_id=args.job_id)
     if args.command == "backfill-code-urls":
         return backfill_code_urls(
             limit=args.limit, page_size=args.page_size, dry_run=args.dry_run

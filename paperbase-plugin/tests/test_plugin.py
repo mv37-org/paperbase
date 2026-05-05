@@ -41,6 +41,9 @@ class StubClient:
     def get_job(self, job_id: str):
         return {"job_id": job_id, "status": "completed"}
 
+    def cancel_job(self, job_id: str):
+        return {"job_id": job_id, "status": "canceled", "effective_status": "canceled"}
+
     def get_results(self, result_set_id: str):
         return {"result_set_id": result_set_id, "papers": []}
 
@@ -159,6 +162,7 @@ async def test_mcp_server_exposes_tools(client_session: ClientSession):
         "index_paper",
         "sync_latest_papers",
         "get_job",
+        "cancel_job",
         "search_papers",
         "search_sections",
         "get_results",

@@ -41,6 +41,12 @@ def get_job(job_id: str) -> dict:
 
 
 @mcp.tool()
+def cancel_job(job_id: str) -> dict:
+    """Cancel a pending job or request cooperative cancellation for a running job."""
+    return get_client().cancel_job(job_id)
+
+
+@mcp.tool()
 def search_papers(query: str, limit: int = 20, category: str | None = None, year: str | None = None, include_live_sources: bool = True) -> dict:
     """Hybrid-search papers and receive a result-set handle for downstream workflows."""
     return get_client().search_papers(

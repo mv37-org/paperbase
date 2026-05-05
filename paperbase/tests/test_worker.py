@@ -115,6 +115,7 @@ def test_run_one_iteration_updates_state_for_completed_jobs():
     assert state.completed_count == 1
     assert state.retry_scheduled_count == 0
     assert state.dead_count == 0
+    assert state.canceled_count == 0
     assert state.last_job_id == "job_done"
     assert state.last_job_type == "index_paper"
     assert state.last_job_status == "completed"
@@ -126,9 +127,10 @@ def test_run_one_iteration_updates_state_for_completed_jobs():
 def test_run_one_iteration_counts_retry_scheduled_and_dead_separately():
     """After the #32 retry policy, ``process_next_job`` returns a
     ``JobResponse`` whose status is one of ``completed`` / ``pending``
-    (transient retry scheduled) / ``dead`` (terminal failure). The worker
-    must track those separately so /metrics can distinguish retry churn
-    from real dead-letter growth, and ``last_terminal_error`` only
+    (transient retry scheduled) / ``dead`` (terminal failure) /
+    ``canceled`` (operator cancellation). The worker must track those
+    separately so /metrics can distinguish retry churn from real dead-letter
+    growth, and ``last_terminal_error`` only
     surfaces errors that actually dead-lettered.
     """
     settings = Settings(
@@ -142,11 +144,12 @@ def test_run_one_iteration_counts_retry_scheduled_and_dead_separately():
             SimpleNamespace(job_id="j1", job_type="index_paper", status="pending", error="upstream 503"),
             SimpleNamespace(job_id="j2", job_type="index_paper", status="dead", error="arxiv 404"),
             SimpleNamespace(job_id="j3", job_type="index_paper", status="completed", error=None),
+            SimpleNamespace(job_id="j4", job_type="index_paper", status="canceled", error=None),
         ]
     )
     state = WorkerState()
 
-    for _ in range(3):
+    for _ in range(4):
         run_one_iteration(
             settings=settings,
             service=service,
@@ -156,10 +159,11 @@ def test_run_one_iteration_counts_retry_scheduled_and_dead_separately():
             state=state,
         )
 
-    assert state.processed_count == 3
+    assert state.processed_count == 4
     assert state.retry_scheduled_count == 1
     assert state.dead_count == 1
     assert state.completed_count == 1
+    assert state.canceled_count == 1
     # last_terminal_error should only pick up dead-lettered errors, not
     # transient ones that were requeued for retry.
     assert state.last_terminal_error == "arxiv 404"
@@ -212,6 +216,7 @@ def test_http_metrics_returns_worker_snapshot(monkeypatch):
         completed_count=2,
         retry_scheduled_count=0,
         dead_count=1,
+        canceled_count=1,
         idle_count=2,
         last_job_id="job_123",
         last_job_type="sync_latest",
@@ -233,6 +238,7 @@ def test_http_metrics_returns_worker_snapshot(monkeypatch):
         "completed_count": 2,
         "retry_scheduled_count": 0,
         "dead_count": 1,
+        "canceled_count": 1,
         "idle_count": 2,
         "last_job_id": "job_123",
         "last_job_type": "sync_latest",

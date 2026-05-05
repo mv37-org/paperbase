@@ -87,7 +87,10 @@ Worker job triage goes through the same admin CLI:
 ```bash
 .venv/bin/paperbase-dev jobs list-dead
 .venv/bin/paperbase-dev jobs retry <job_id>
+.venv/bin/paperbase-dev jobs cancel <job_id>
 ```
+
+Job responses include both raw `status` and server-computed `effective_status`. A running job is `stalled` when its worker lease expires without a heartbeat; pending jobs cancel immediately, while running jobs move through cooperative cancellation.
 
 Code-url cleanup can be re-run with the same admin CLI:
 

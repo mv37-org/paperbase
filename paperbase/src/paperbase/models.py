@@ -151,12 +151,18 @@ class JobResponse(BaseModel):
     job_id: str
     job_type: str
     status: str
+    effective_status: str | None = None
     payload: dict[str, Any]
     error: str | None = None
     attempts: int = 0
     max_attempts: int = 3
     next_run_at: datetime | None = None
     last_attempted_at: datetime | None = None
+    worker_id: str | None = None
+    heartbeat_at: datetime | None = None
+    lease_expires_at: datetime | None = None
+    cancel_requested_at: datetime | None = None
+    lease_token: str | None = Field(default=None, exclude=True)
     # Smaller = claimed first. Interactive on-demand work sits at -10, hourly
     # sync at 0, bulk backfill at 10.
     priority: int = 0
@@ -164,6 +170,12 @@ class JobResponse(BaseModel):
     updated_at: datetime
     started_at: datetime | None = None
     finished_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def _default_effective_status(self):
+        if self.effective_status is None:
+            self.effective_status = self.status
+        return self
 
 
 class FileObject(BaseModel):
