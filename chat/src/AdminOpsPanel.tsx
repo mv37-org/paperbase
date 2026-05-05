@@ -1000,7 +1000,7 @@ function JobsTimeline({
         color: theme.text,
         fontFamily: '"JetBrains Mono", "SFMono-Regular", monospace',
       },
-      grid: { top: 18, right: 0, bottom: 56, left: 56 },
+      grid: { top: 18, right: 0, bottom: 0, left: 0 },
       tooltip: {
         trigger: "axis",
         axisPointer: {
@@ -1039,7 +1039,7 @@ function JobsTimeline({
         axisLabel: {
           color: theme.axisText,
           hideOverlap: true,
-          margin: 12,
+          show: false,
         },
       },
       yAxis: {
@@ -1050,6 +1050,7 @@ function JobsTimeline({
         axisTick: { show: false },
         axisLabel: {
           color: theme.axisText,
+          show: false,
           formatter: (value: number) =>
             value >= 1000 ? `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}k` : `${value}`,
         },
@@ -1057,31 +1058,6 @@ function JobsTimeline({
           lineStyle: { color: theme.line },
         },
       },
-      dataZoom: [
-        {
-          type: "inside",
-          filterMode: "none",
-          zoomLock: false,
-        },
-        {
-          type: "slider",
-          height: 20,
-          bottom: 16,
-          brushSelect: false,
-          borderColor: theme.line,
-          fillerColor: theme.areaFill,
-          backgroundColor: "transparent",
-          handleStyle: {
-            color: theme.accent,
-            borderColor: theme.accent,
-          },
-          moveHandleStyle: { color: "transparent", opacity: 0 },
-          textStyle: {
-            color: theme.axisText,
-            fontFamily: '"JetBrains Mono", "SFMono-Regular", monospace',
-          },
-        },
-      ],
       series: [
         {
           name: "Indexed papers",

@@ -205,9 +205,24 @@ vi.mock("@monaco-editor/react", () => ({
 }));
 
 vi.mock("echarts-for-react", () => ({
-  default: ({ className }: { className?: string }) => (
-    <div data-testid="admin-jobs-chart-inner" className={className} />
-  ),
+  default: ({
+    className,
+    option,
+  }: {
+    className?: string;
+    option?: { dataZoom?: unknown; grid?: unknown };
+  }) => {
+    const grid = option?.grid && typeof option.grid === "object" ? option.grid : {};
+    return (
+      <div
+        data-testid="admin-jobs-chart-inner"
+        className={className}
+        data-grid-bottom={String((grid as Record<string, unknown>).bottom ?? "")}
+        data-grid-left={String((grid as Record<string, unknown>).left ?? "")}
+        data-has-data-zoom={option && "dataZoom" in option ? "true" : "false"}
+      />
+    );
+  },
 }));
 
 import App from "./App";
@@ -3054,6 +3069,10 @@ describe("App", () => {
         expect(screen.getByRole("heading", { name: "Control panel" })).toBeTruthy();
       });
       expect(screen.getByTestId("admin-jobs-chart")).toBeTruthy();
+      const chart = screen.getByTestId("admin-jobs-chart-inner");
+      expect(chart.getAttribute("data-grid-bottom")).toBe("0");
+      expect(chart.getAttribute("data-grid-left")).toBe("0");
+      expect(chart.getAttribute("data-has-data-zoom")).toBe("false");
       expect(screen.queryByRole("button", { name: "Close Control panel" })).toBeNull();
       expect(apiMocks.loadBrowserAdminJobsOverview).toHaveBeenCalledWith(200);
 
