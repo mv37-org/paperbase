@@ -115,6 +115,7 @@ class Settings(BaseSettings):
     gcs_service_account_json: str | None = None
     presign_ttl_seconds: int = 3600
     sync_interval_seconds: int = 3600
+    worker_status_url: str | None = None
     worker_poll_interval_seconds: int = 10
     worker_auto_sync_latest: bool = Field(default=True)
     worker_initial_sync_latest: bool = Field(default=True)

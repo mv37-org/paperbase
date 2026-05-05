@@ -140,6 +140,7 @@ class GrepResponse(BaseModel):
 
 class JobResponse(BaseModel):
     job_id: str
+    root_job_id: str | None = None
     job_type: str
     status: str
     payload: dict[str, Any]
@@ -155,6 +156,73 @@ class JobResponse(BaseModel):
     updated_at: datetime
     started_at: datetime | None = None
     finished_at: datetime | None = None
+
+
+class JobPaperRecord(BaseModel):
+    job_id: str
+    paper_id: str
+    arxiv_id: str | None = None
+    title: str | None = None
+    outcome: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class AdminWorkerSummary(BaseModel):
+    status: str
+    stalled: bool = False
+    reachable: bool = False
+    source: str = "unavailable"
+    last_loop_at: datetime | None = None
+    retry_scheduled_count: int = 0
+    dead_count: int = 0
+    last_error: str | None = None
+    last_terminal_error: str | None = None
+
+
+class AdminJobOverviewRow(BaseModel):
+    job_id: str
+    root_job_id: str
+    job_type: str
+    status: str
+    display_status: str
+    payload: dict[str, Any]
+    error: str | None = None
+    attempts: int = 0
+    max_attempts: int = 3
+    priority: int = 0
+    created_at: datetime
+    updated_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    is_synthetic: bool = False
+    tracking_available: bool = False
+    indexed_paper_count: int | None = None
+    latest_status_summary: str = ""
+    child_job_count: int = 0
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class AdminJobsOverviewResponse(BaseModel):
+    jobs: list[AdminJobOverviewRow]
+    worker: AdminWorkerSummary | None = None
+
+
+class AdminJobPaperResponse(BaseModel):
+    root_job_id: str
+    job_id: str
+    paper_id: str
+    arxiv_id: str | None = None
+    title: str | None = None
+    outcome: str
+    created_at: datetime
+    updated_at: datetime
+    paper: PaperResponse | None = None
+
+
+class AdminJobPapersResponse(BaseModel):
+    root_job_id: str
+    papers: list[AdminJobPaperResponse]
 
 
 class FileObject(BaseModel):

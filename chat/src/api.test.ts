@@ -301,6 +301,7 @@ describe("chat api", () => {
       .mockResolvedValueOnce(
         jsonResponse({
           job_id: "job_admin_1",
+          root_job_id: "job_admin_1",
           job_type: "index_paper",
           status: "pending",
           payload: { arxiv_id: "2401.12345", force: true },
@@ -311,13 +312,17 @@ describe("chat api", () => {
           updated_at: "2026-04-21T00:00:00Z",
         }),
       )
-      .mockResolvedValueOnce(jsonResponse([]));
+      .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(jsonResponse({ jobs: [], worker: null }))
+      .mockResolvedValueOnce(jsonResponse({ root_job_id: "job_admin_1", papers: [] }));
     vi.stubGlobal("fetch", fetchMock);
     const api = await loadApiModule();
 
     await api.loadSession();
     await api.queueBrowserAdminPaperIndex("2401.12345", true);
     await api.loadBrowserAdminJobs("all", 75);
+    await api.loadBrowserAdminJobsOverview(75);
+    await api.loadBrowserAdminJobPapers("job_admin_1");
 
     const [queuePath, queueInit] = fetchMock.mock.calls[1] as FetchCall;
     const queueUrl = new URL(String(queuePath), "http://localhost");
@@ -333,6 +338,18 @@ describe("chat api", () => {
       "/v1/browser/admin/jobs?status=all&limit=75",
     );
     expect(listInit?.method).toBe("GET");
+
+    const [overviewPath, overviewInit] = fetchMock.mock.calls[3] as FetchCall;
+    const overviewUrl = new URL(String(overviewPath), "http://localhost");
+    expect(`${overviewUrl.pathname}${overviewUrl.search}`).toBe(
+      "/v1/browser/admin/jobs/overview?limit=75",
+    );
+    expect(overviewInit?.method).toBe("GET");
+
+    const [papersPath, papersInit] = fetchMock.mock.calls[4] as FetchCall;
+    const papersUrl = new URL(String(papersPath), "http://localhost");
+    expect(papersUrl.pathname).toBe("/v1/browser/admin/jobs/job_admin_1/papers");
+    expect(papersInit?.method).toBe("GET");
   });
 
   it("loads and mutates projects through the browser endpoints", async () => {

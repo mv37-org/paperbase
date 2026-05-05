@@ -887,6 +887,33 @@ def test_index_writes_manifest_and_artifacts(monkeypatch, service: PaperbaseServ
     assert "raw/source.tar.gz" in files
 
 
+def test_index_job_tracks_papers_for_admin_overview(monkeypatch, service: PaperbaseService):
+    paper = _sample_paper("2401.77777", title="Tracked Paper", abstract="Tracked abstract.")
+    monkeypatch.setattr("paperbase.service.sources.get_paper_details", lambda arxiv_id: paper)
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda current_paper: _rich_extraction(text="Tracked text"),
+    )
+
+    job = service.enqueue_index_job(paper.arxiv_id)
+    completed = service.process_next_job()
+
+    assert completed is not None
+    assert completed.job_id == job.job_id
+    assert completed.root_job_id == job.job_id
+
+    overview = service.get_admin_jobs_overview(limit=10)
+    tracked_row = next(row for row in overview.jobs if row.job_id == job.job_id)
+    assert tracked_row.indexed_paper_count == 1
+    assert tracked_row.tracking_available is True
+
+    job_papers = service.get_admin_job_papers(job.job_id)
+    assert len(job_papers.papers) == 1
+    assert job_papers.papers[0].paper_id == "arxiv:2401.77777"
+    assert job_papers.papers[0].outcome == "indexed"
+
+
 def test_reindex_replaces_stale_artifacts(monkeypatch, service: PaperbaseService):
     paper = _sample_paper("2401.33333", title="Transformer Paper", abstract="Attention and transformers.")
     monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)

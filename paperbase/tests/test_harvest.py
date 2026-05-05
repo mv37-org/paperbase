@@ -99,6 +99,26 @@ def test_run_harvest_range_planner_enqueues_one_chunk_per_category_per_window():
     assert categories == ["cs.CL", "cs.LG"]
     windows = sorted({(job.payload["start_date"], job.payload["end_date"]) for job in chunk_jobs})
     assert windows == [("2020-01-01", "2020-03-31"), ("2020-04-01", "2020-06-30")]
+    assert len({job.root_job_id for job in chunk_jobs}) == 1
+
+
+def test_harvest_chunks_inherit_root_job_id():
+    service = _service()
+
+    service.run_harvest_range(
+        source="arxiv",
+        categories=["cs.LG"],
+        start_date="2020-01-01",
+        end_date="2020-03-31",
+        limit_per_window=None,
+        chunk_months=3,
+        harvest_id="harvest_root_1",
+        root_job_id="harvest_root_1",
+    )
+
+    chunk_jobs = [job for job in service.repository.jobs.values() if job.job_type == "harvest_chunk"]
+    assert len(chunk_jobs) == 1
+    assert chunk_jobs[0].root_job_id == "harvest_root_1"
 
 
 def test_memory_repository_reuses_duplicate_job_dedupe_key():

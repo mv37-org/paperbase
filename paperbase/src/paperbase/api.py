@@ -30,6 +30,8 @@ from .auth import (
 from .config import get_settings
 from .logging_utils import build_log_config
 from .models import (
+    AdminJobPapersResponse,
+    AdminJobsOverviewResponse,
     BrowserSessionResponse,
     ChatThreadListResponse,
     ChatThreadResponse,
@@ -737,6 +739,15 @@ def browser_get_paper_table(
     return service.get_table(paper_id, table_id)
 
 
+@app.get("/v1/browser/admin/jobs/overview", response_model=AdminJobsOverviewResponse)
+def browser_admin_jobs_overview(
+    limit: int = Query(default=50, ge=1, le=200),
+    user=Depends(require_browser_admin_user),
+    service: PaperbaseService = Depends(get_service),
+) -> AdminJobsOverviewResponse:
+    return service.get_admin_jobs_overview(limit=limit)
+
+
 @app.get("/v1/browser/admin/jobs", response_model=list[JobResponse])
 def browser_admin_list_jobs(
     status: str = Query(
@@ -748,6 +759,15 @@ def browser_admin_list_jobs(
     service: PaperbaseService = Depends(get_service),
 ) -> list[JobResponse]:
     return service.list_jobs_by_status(status, limit=limit)
+
+
+@app.get("/v1/browser/admin/jobs/{root_job_id}/papers", response_model=AdminJobPapersResponse)
+def browser_admin_job_papers(
+    root_job_id: str,
+    user=Depends(require_browser_admin_user),
+    service: PaperbaseService = Depends(get_service),
+) -> AdminJobPapersResponse:
+    return service.get_admin_job_papers(root_job_id)
 
 
 @app.post("/v1/browser/admin/jobs/{job_id}/retry", response_model=JobResponse)

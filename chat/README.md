@@ -9,7 +9,7 @@ The landing prompt and authenticated chat composer both support live `@` paper m
 The authenticated sidebar is project-first, with a small signed-in Browse area above projects:
 
 - `Trending papers` currently opens an empty placeholder workspace page
-- allowlisted admins also get an `Admin panel` workspace page in that Browse section
+- allowlisted admins also get an `Admin panel` jobs workspace in that Browse section
 - projects expand and collapse independently and lazily fetch mixed project items
 - each project can start new chats, be renamed, or be deleted from the sidebar, but new projects require a connected GitHub repo
 - the new-project modal lists accessible GitHub repos in a custom dropdown, with "Create new repo" as the first option and `main` fixed for newly created repos

@@ -131,12 +131,14 @@ type PaperDrawerContent =
   | { kind: "markdown"; path: string; file: FileContentResponse }
   | { kind: "figure"; path: string; figure: FigureResponse }
   | { kind: "table"; path: string; table: TableResponse };
-type WorkspacePageId = "trending_papers" | "admin_panel";
 type OpenTab =
   | { kind: "thread"; id: string }
   | { kind: "python_file"; id: string }
-  | { kind: "project_home"; id: string }
-  | { kind: "workspace_page"; id: WorkspacePageId };
+  | { kind: "project_home"; id: string };
+type WorkspaceView =
+  | { kind: "trending" }
+  | { kind: "admin_jobs" }
+  | { kind: "admin_job_papers"; rootJobId: string };
 type ProjectSidebarCategoryKey = "notes" | "sessions" | "code";
 type ProjectItemState = {
   items: ProjectItemSummary[];
@@ -300,21 +302,14 @@ const buildProjectCategoryCollapseState = (collapsed: boolean) =>
     Record<ProjectSidebarCategoryKey, boolean>
   >;
 const WORKSPACE_SIDEBAR_ITEMS = [
-  { id: "trending_papers", label: "Trending papers", asset: "docs.svg" },
-  { id: "admin_panel", label: "Admin panel", asset: "settings.svg", adminOnly: true },
+  { id: "trending", label: "Trending papers", asset: "docs.svg" },
+  { id: "admin_jobs", label: "Admin panel", asset: "settings.svg", adminOnly: true },
 ] satisfies Array<{
-  id: WorkspacePageId;
+  id: "trending" | "admin_jobs";
   label: string;
   asset: string;
   adminOnly?: boolean;
 }>;
-
-function workspacePageTitle(pageId: WorkspacePageId) {
-  if (pageId === "admin_panel") {
-    return "Admin panel";
-  }
-  return "Trending papers";
-}
 
 function SettingsSectionHeading({ title, caption }: { title: string; caption: string }) {
   return (
@@ -540,10 +535,6 @@ function rememberPendingPrompt(prompt: string) {
   }
 }
 
-function isWorkspacePageId(value: string): value is WorkspacePageId {
-  return value === "trending_papers" || value === "admin_panel";
-}
-
 function restoreTabs() {
   try {
     const parsed = JSON.parse(localStorage.getItem(OPEN_TABS_KEY) ?? "[]");
@@ -569,10 +560,6 @@ function restoreTabs() {
           value.kind === "project_home"
         ) {
           restored.push({ kind: value.kind, id: value.id });
-          continue;
-        }
-        if (value.kind === "workspace_page" && isWorkspacePageId(value.id)) {
-          restored.push({ kind: "workspace_page", id: value.id });
         }
       }
     }
@@ -1285,6 +1272,7 @@ export default function App() {
   const [pythonFileRuns, setPythonFileRuns] = useState<Record<string, PythonFileRunState>>({});
   const [openTabs, setOpenTabs] = useState<OpenTab[]>([]);
   const [activeTab, setActiveTab] = useState<OpenTab | null>(null);
+  const [workspaceView, setWorkspaceView] = useState<WorkspaceView | null>(null);
   const [projectMenuProjectId, setProjectMenuProjectId] = useState<string | null>(null);
   const [projectModalState, setProjectModalState] = useState<ProjectModalState | null>(null);
   const [projectFormName, setProjectFormName] = useState("");
@@ -1432,6 +1420,12 @@ export default function App() {
   }, [openTabs]);
 
   useEffect(() => {
+    if (activeTab !== null) {
+      setWorkspaceView(null);
+    }
+  }, [activeTab]);
+
+  useEffect(() => {
     setSidebarCollapsed(restoreSidebarCollapsed());
   }, []);
 
@@ -1540,7 +1534,12 @@ export default function App() {
   const activeThreadId = activeTab?.kind === "thread" ? activeTab.id : null;
   const activePythonFileId = activeTab?.kind === "python_file" ? activeTab.id : null;
   const activeProjectHomeId = activeTab?.kind === "project_home" ? activeTab.id : null;
-  const activeWorkspacePageId = activeTab?.kind === "workspace_page" ? activeTab.id : null;
+  const activeWorkspacePageId =
+    workspaceView?.kind === "admin_jobs" || workspaceView?.kind === "admin_job_papers"
+      ? "admin_jobs"
+      : workspaceView?.kind === "trending"
+        ? "trending"
+        : null;
   const activeThread = activeThreadId ? (threadMap[activeThreadId] ?? null) : null;
   const activePythonFile = activePythonFileId ? (pythonFileMap[activePythonFileId] ?? null) : null;
   const activeProjectHome = activeProjectHomeId
@@ -1581,8 +1580,9 @@ export default function App() {
       selectedSyncConflict.local_content)
     : "";
   const isChatEmpty =
-    activeTab == null ||
-    (activeTab.kind === "thread" && (!activeThread || activeThread.messages.length === 0));
+    activeTab == null
+      ? workspaceView == null
+      : activeTab.kind === "thread" && (!activeThread || activeThread.messages.length === 0);
   const paperDrawerOpen = Boolean(paperDrawer);
   const hasProjects = projects.length > 0;
   const emptyStateProject =
@@ -1629,17 +1629,6 @@ export default function App() {
         const title = project ? `${project.name} Home` : "Project Home";
         return {
           key: `project_home:${tab.id}`,
-          kind: tab.kind,
-          id: tab.id,
-          isStreaming: false,
-          title,
-          tabTitle: truncateTabTitle(title),
-        };
-      }
-      if (tab.kind === "workspace_page") {
-        const title = workspacePageTitle(tab.id);
-        return {
-          key: `workspace_page:${tab.id}`,
           kind: tab.kind,
           id: tab.id,
           isStreaming: false,
@@ -2649,9 +2638,15 @@ export default function App() {
     setSelectedProjectId(projectId);
   }, []);
 
-  const openWorkspacePage = useCallback((pageId: WorkspacePageId) => {
-    setOpenTabs((current) => appendOpenTab(current, { kind: "workspace_page", id: pageId }));
-    setActiveTab({ kind: "workspace_page", id: pageId });
+  const openWorkspacePage = useCallback((pageId: "trending" | "admin_jobs") => {
+    setWorkspaceView(pageId === "trending" ? { kind: "trending" } : { kind: "admin_jobs" });
+    setMobileSidebarOpen(false);
+    setAccountMenuOpen(false);
+    setProjectMenuProjectId(null);
+  }, []);
+
+  const openAdminJobPapers = useCallback((rootJobId: string) => {
+    setWorkspaceView({ kind: "admin_job_papers", rootJobId });
     setMobileSidebarOpen(false);
     setAccountMenuOpen(false);
     setProjectMenuProjectId(null);
@@ -3207,10 +3202,6 @@ export default function App() {
             await fetchAndStoreThread(tab.id, false);
           } else if (tab.kind === "python_file") {
             await fetchAndStorePythonFile(tab.id, false);
-          } else if (tab.kind === "workspace_page") {
-            if (tab.id === "admin_panel" && !currentSession?.user?.is_admin) {
-              continue;
-            }
           } else if (!loadedProjects.some((project) => project.project_id === tab.id)) {
             continue;
           }
@@ -5391,10 +5382,8 @@ export default function App() {
                               void handleThreadSelection(tab.id);
                             } else if (tab.kind === "python_file") {
                               void handlePythonFileSelection(tab.id);
-                            } else if (tab.kind === "project_home") {
-                              openProjectHome(tab.id);
                             } else {
-                              openWorkspacePage(tab.id);
+                              openProjectHome(tab.id);
                             }
                           }
                         }}
@@ -5408,10 +5397,8 @@ export default function App() {
                               void handleThreadSelection(tab.id);
                             } else if (tab.kind === "python_file") {
                               void handlePythonFileSelection(tab.id);
-                            } else if (tab.kind === "project_home") {
-                              openProjectHome(tab.id);
                             } else {
-                              openWorkspacePage(tab.id);
+                              openProjectHome(tab.id);
                             }
                           }}
                         >
@@ -5468,22 +5455,8 @@ export default function App() {
                   </div>
                 </div>
               ) : null}
-              {activeTab?.kind === "workspace_page" ? (
-                activeTab.id === "admin_panel" ? (
-                  sessionSummary?.isAdmin ? (
-                    <div className="workspace-page workspace-page-wide">
-                      <AdminOpsPanel onError={showErrorFlash} onNote={showNoteFlash} />
-                    </div>
-                  ) : (
-                    <div className="workspace-page">
-                      <div className="workspace-page-header">
-                        <span>Admin panel</span>
-                        <h1>Admin access required</h1>
-                        <p>This area is only available to allowlisted admin accounts.</p>
-                      </div>
-                    </div>
-                  )
-                ) : (
+              {workspaceView ? (
+                workspaceView.kind === "trending" ? (
                   <div className="workspace-page">
                     <div className="workspace-page-header">
                       <span>Trending papers</span>
@@ -5491,6 +5464,28 @@ export default function App() {
                       <p>
                         This view is still empty. The sidebar slot is in place for the next pass.
                       </p>
+                    </div>
+                  </div>
+                ) : sessionSummary?.isAdmin ? (
+                  <div className="workspace-page workspace-page-wide">
+                    <AdminOpsPanel
+                      view={
+                        workspaceView.kind === "admin_job_papers"
+                          ? { kind: "papers", rootJobId: workspaceView.rootJobId }
+                          : { kind: "jobs" }
+                      }
+                      onBackToJobs={() => setWorkspaceView({ kind: "admin_jobs" })}
+                      onError={showErrorFlash}
+                      onNote={showNoteFlash}
+                      onOpenJobPapers={openAdminJobPapers}
+                    />
+                  </div>
+                ) : (
+                  <div className="workspace-page">
+                    <div className="workspace-page-header">
+                      <span>Admin panel</span>
+                      <h1>Admin access required</h1>
+                      <p>This area is only available to allowlisted admin accounts.</p>
                     </div>
                   </div>
                 )

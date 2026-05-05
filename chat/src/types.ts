@@ -57,6 +57,7 @@ export interface PaperResponse {
 
 export interface JobResponse {
   job_id: string;
+  root_job_id?: string | null;
   job_type: string;
   status: string;
   payload: Record<string, unknown>;
@@ -70,6 +71,63 @@ export interface JobResponse {
   updated_at: string;
   started_at?: string | null;
   finished_at?: string | null;
+}
+
+export interface AdminWorkerSummary {
+  status: string;
+  stalled: boolean;
+  reachable: boolean;
+  source: string;
+  last_loop_at?: string | null;
+  retry_scheduled_count: number;
+  dead_count: number;
+  last_error?: string | null;
+  last_terminal_error?: string | null;
+}
+
+export interface AdminJobOverviewRow {
+  job_id: string;
+  root_job_id: string;
+  job_type: string;
+  status: string;
+  display_status: string;
+  payload: Record<string, unknown>;
+  error?: string | null;
+  attempts: number;
+  max_attempts: number;
+  priority: number;
+  created_at: string;
+  updated_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  is_synthetic: boolean;
+  tracking_available: boolean;
+  indexed_paper_count?: number | null;
+  latest_status_summary: string;
+  child_job_count: number;
+  details: Record<string, unknown>;
+}
+
+export interface AdminJobsOverviewResponse {
+  jobs: AdminJobOverviewRow[];
+  worker?: AdminWorkerSummary | null;
+}
+
+export interface AdminJobPaperResponse {
+  root_job_id: string;
+  job_id: string;
+  paper_id: string;
+  arxiv_id?: string | null;
+  title?: string | null;
+  outcome: string;
+  created_at: string;
+  updated_at: string;
+  paper?: PaperResponse | null;
+}
+
+export interface AdminJobPapersResponse {
+  root_job_id: string;
+  papers: AdminJobPaperResponse[];
 }
 
 export interface FileContentResponse {

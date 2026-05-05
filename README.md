@@ -40,7 +40,8 @@ Optional browser-account settings now hang off the same API env surface:
 
 - `PAPERBASE_GOOGLE_*` powers Google sign-in
 - `PAPERBASE_GITHUB_*` powers the in-app GitHub connection flow and project repo sync
-- `PAPERBASE_ADMIN_EMAILS` is a comma-separated allowlist for the signed-in admin panel
+- `PAPERBASE_ADMIN_EMAILS` is a comma-separated allowlist for the signed-in admin jobs workspace
+- `PAPERBASE_WORKER_STATUS_URL` lets the API read worker `/health` and `/metrics` so the admin jobs table can surface `stalled` runs
 - logged-in users can store Anthropic keys, Modal sandbox credentials, a signed-in-only light/dark appearance preference, and a weekly papers review email preference
 
 ## Commands
@@ -129,7 +130,7 @@ The browser chat experience is project-based:
 - the new-project modal can refresh the accessible repo list, link to GitHub's Paperbase access settings, and expose optional inference/sandbox credential fields
 - existing repos expose a branch picker and optional import selection for `.py` and `.ipynb` files; new repos start on a fixed `main` branch
 - the sidebar lazily loads mixed project items per project, persists the last selected project across reloads, and reopens with only that project tree expanded by default
-- the sidebar also exposes a signed-in Browse section with a `Trending papers` placeholder page for all users and an `Admin panel` workspace page for allowlisted admins
+- the sidebar also exposes a signed-in Browse section with a non-tabbed `Trending papers` placeholder page for all users and a non-tabbed `Admin panel` jobs workspace for allowlisted admins
 - the empty first-chat state now shows a dismissible setup checklist for GitHub, inference, and sandbox access so users can connect required services before the coding agent hits save/run failures
 - project descriptions are snapped onto new sessions as per-session prompt context, so later project edits do not rewrite existing chats
 - once the first user prompt lands in a `New chat` thread, Paperbase renames the session to a compact 3-5 word summary and keeps that title for later turns
@@ -144,7 +145,7 @@ The browser chat experience is project-based:
 - local `localhost` chat threads render a compact debug strip with the current user, project, thread, and latest message ids so Codex can inspect backend state from a pasted bundle without displacing the empty-chat layout
 - notebooks are converted with Jupytext to `py:percent` source for editing/running, then regenerated back to `.ipynb` when saved to GitHub
 - signed-in pages support a persisted appearance setting, so the sidebar, chat shell, markdown surfaces, drawers, and modals can switch between light and dark mode without affecting the public landing page
-- allowlisted admin emails also get an Admin panel workspace page for queuing backfills, inspecting jobs, and browsing stored paper artifacts through the browser session
+- allowlisted admin emails also get an Admin panel jobs workspace for creating one-off indexing/backfill jobs, monitoring env-driven latest-sync runs, drilling into tracked indexed papers, and browsing stored paper artifacts through the browser session
 - creating, importing, or saving project files requires a connected GitHub account with repo access
 - the coding agent is PyTorch-first for generated ML code, uses a Codex-style single turn loop with `tool_choice=auto`, prefers reading and patching existing workspace files before broad rewrites, exposes research tools as optional support rather than the primary posture on project threads, can edit repo-relative text files beyond just managed `.py` sources, keeps turn-local diff and exec-session state visible to the model during long turns and compaction, streams final answers live instead of buffering them until the end, and can run stateful project commands with follow-up wait/log/cancel steps alongside compatibility `project_run` smoke/full entrypoints
 - `Save` creates a single Paperbase-managed GitHub commit for the current project, and `Run` saves first, then executes the full saved project workspace through the user’s Modal sandbox credentials with `full` mode by default

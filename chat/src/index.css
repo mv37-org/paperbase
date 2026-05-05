@@ -5081,8 +5081,350 @@ textarea {
   text-decoration: none;
 }
 
+.admin-jobs-shell {
+  display: grid;
+  gap: 20px;
+}
+
+.admin-jobs-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.admin-jobs-header h1,
+.admin-paper-modal-header h2 {
+  margin: 0;
+}
+
+.admin-jobs-header-papers {
+  justify-content: flex-start;
+  align-items: center;
+}
+
+.admin-jobs-create-button {
+  min-height: 36px;
+}
+
+.admin-jobs-inline-error,
+.admin-jobs-empty,
+.admin-paper-secondary,
+.admin-jobs-expanded,
+.admin-create-job-summary span,
+.admin-create-job-summary em,
+.admin-paper-modal-header span,
+.admin-paper-file-row span:last-child {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.admin-jobs-inline-error {
+  color: #b42318;
+}
+
+.admin-jobs-table-shell {
+  overflow: auto;
+}
+
+.admin-jobs-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.admin-jobs-table th,
+.admin-jobs-table td {
+  padding: 12px 8px;
+  border-bottom: 1px solid rgba(27, 22, 17, 0.08);
+  text-align: left;
+  vertical-align: top;
+}
+
+.admin-jobs-table th {
+  padding-top: 0;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.admin-jobs-row {
+  transition: background 140ms ease;
+}
+
+.admin-paper-row {
+  cursor: pointer;
+}
+
+.admin-jobs-row:hover {
+  background: rgba(27, 22, 17, 0.03);
+}
+
+.admin-jobs-expand,
+.admin-jobs-link-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.admin-jobs-expand span:first-child {
+  width: 12px;
+  text-align: center;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.admin-jobs-link-button {
+  color: #176fe6;
+}
+
+.admin-jobs-status {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(27, 22, 17, 0.08);
+  font-weight: 600;
+}
+
+.admin-jobs-status.status-running {
+  background: rgba(23, 111, 230, 0.12);
+  color: #176fe6;
+}
+
+.admin-jobs-status.status-pending,
+.admin-jobs-status.status-scheduled,
+.admin-jobs-status.status-skipped {
+  background: rgba(180, 83, 9, 0.12);
+  color: #9a5300;
+}
+
+.admin-jobs-status.status-completed,
+.admin-jobs-status.status-indexed {
+  background: rgba(18, 120, 72, 0.12);
+  color: #127848;
+}
+
+.admin-jobs-status.status-error,
+.admin-jobs-status.status-stalled,
+.admin-jobs-status.status-failed {
+  background: rgba(180, 35, 24, 0.12);
+  color: #b42318;
+}
+
+.admin-jobs-expanded-row td {
+  padding-top: 0;
+}
+
+.admin-jobs-expanded {
+  display: grid;
+  gap: 4px;
+  padding: 0 0 12px 20px;
+}
+
+.admin-paper-primary {
+  font-weight: 600;
+}
+
+.admin-create-job-modal {
+  width: min(680px, calc(100vw - 32px));
+  max-height: min(88vh, 840px);
+  overflow: auto;
+}
+
+.admin-create-job-modal h2 {
+  margin: 0 0 16px;
+}
+
+.admin-create-job-chooser,
+.admin-create-job-form {
+  display: grid;
+  gap: 12px;
+}
+
+.admin-create-job-option {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  padding: 12px 0;
+  border: 0;
+  border-top: 1px solid rgba(27, 22, 17, 0.08);
+  background: none;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+
+.admin-create-job-option:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.admin-create-job-option span,
+.admin-create-job-option em {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.admin-create-job-summary {
+  display: grid;
+  gap: 4px;
+}
+
+.admin-create-job-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.admin-create-job-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.admin-paper-modal {
+  width: min(1040px, calc(100vw - 32px));
+  max-height: min(90vh, 920px);
+  overflow: auto;
+}
+
+.admin-paper-modal-header {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 12px;
+  padding-right: 32px;
+}
+
+.admin-paper-modal-tabs {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.admin-paper-tab {
+  padding: 0 0 6px;
+  border: 0;
+  border-bottom: 1px solid transparent;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+}
+
+.admin-paper-tab.active {
+  border-bottom-color: currentColor;
+  color: var(--ink);
+}
+
+.admin-paper-modal-body {
+  min-height: 280px;
+}
+
+.admin-paper-preview {
+  width: 100%;
+  border-radius: var(--radius);
+  border: 1px solid rgba(27, 22, 17, 0.08);
+  background: #ffffff;
+}
+
+.admin-paper-metadata {
+  display: grid;
+  gap: 10px;
+}
+
+.admin-paper-metadata-row {
+  display: grid;
+  gap: 2px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(27, 22, 17, 0.08);
+}
+
+.admin-paper-metadata-row span {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.admin-paper-metadata-row strong {
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.admin-paper-files {
+  display: grid;
+  grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
+  gap: 16px;
+}
+
+.admin-paper-file-list,
+.admin-paper-file-preview {
+  display: grid;
+  gap: 8px;
+  min-height: 280px;
+}
+
+.admin-paper-file-row {
+  display: grid;
+  gap: 2px;
+  width: 100%;
+  padding: 10px 0;
+  border: 0;
+  border-bottom: 1px solid rgba(27, 22, 17, 0.08);
+  background: none;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+
+.admin-paper-file-row.active {
+  color: #176fe6;
+}
+
+.admin-paper-file-text {
+  margin: 0;
+  padding: 14px;
+  border-radius: var(--radius);
+  background: #11161d;
+  color: #f5f7fb;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.admin-paper-pdf-frame {
+  width: 100%;
+  min-height: 520px;
+  border: 1px solid rgba(27, 22, 17, 0.08);
+  border-radius: var(--radius);
+  background: #ffffff;
+}
+
+.admin-paper-file-link {
+  color: #176fe6;
+  text-decoration: none;
+}
+
 @media (max-width: 980px) {
   .admin-ops-paper-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-create-job-grid,
+  .admin-paper-files {
     grid-template-columns: 1fr;
   }
 

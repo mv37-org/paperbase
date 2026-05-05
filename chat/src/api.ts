@@ -1,4 +1,6 @@
 import type {
+  AdminJobPapersResponse,
+  AdminJobsOverviewResponse,
   BrowserSessionResponse,
   ChatMessageResponse,
   ChatStreamEventMap,
@@ -659,6 +661,19 @@ export function getBrowserPaperTable(paperId: string, tableId: string) {
 export function loadBrowserAdminJobs(status = "all", limit = 50) {
   const params = new URLSearchParams({ status, limit: String(limit) });
   return api<JobResponse[]>(`/v1/browser/admin/jobs?${params.toString()}`, { method: "GET" });
+}
+
+export function loadBrowserAdminJobsOverview(limit = 50) {
+  const params = new URLSearchParams({ limit: String(limit) });
+  return api<AdminJobsOverviewResponse>(`/v1/browser/admin/jobs/overview?${params.toString()}`, {
+    method: "GET",
+  });
+}
+
+export function loadBrowserAdminJobPapers(rootJobId: string) {
+  return api<AdminJobPapersResponse>(`/v1/browser/admin/jobs/${rootJobId}/papers`, {
+    method: "GET",
+  });
 }
 
 export function retryBrowserAdminJob(jobId: string) {

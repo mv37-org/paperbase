@@ -85,11 +85,15 @@ def test_job_orm_carries_retry_policy_columns():
     columns on the jobs table plus a ``dead`` terminal state. This locks the
     schema so a future migration can't accidentally drop the retry fields.
     """
-    from paperbase.repository import JobORM, default_max_attempts
+    from paperbase.repository import JobORM, JobPaperORM, default_max_attempts
 
-    for column in ("attempts", "max_attempts", "next_run_at", "last_attempted_at", "dedupe_key"):
+    for column in ("attempts", "max_attempts", "next_run_at", "last_attempted_at", "dedupe_key", "root_job_id"):
         assert column in JobORM.__table__.columns, (
             f"JobORM must carry '{column}' for the worker retry policy"
+        )
+    for column in ("job_id", "paper_id", "outcome", "updated_at"):
+        assert column in JobPaperORM.__table__.columns, (
+            f"JobPaperORM must carry '{column}' for tracked job papers"
         )
 
     # Per-job-type attempt budgets per the #32 spec.

@@ -21,6 +21,10 @@ from paperbase.auth import (
 )
 from paperbase.config import Settings, get_settings
 from paperbase.models import (
+    AdminJobOverviewRow,
+    AdminJobPaperResponse,
+    AdminJobPapersResponse,
+    AdminJobsOverviewResponse,
     BrowserSessionResponse,
     BrowserUser,
     ChatMessageResponse,
@@ -62,6 +66,7 @@ NOW = datetime(2026, 4, 21, tzinfo=timezone.utc)
 def _job(job_type: str, *, payload: dict[str, object] | None = None) -> JobResponse:
     return JobResponse(
         job_id=f"job_{job_type}",
+        root_job_id=f"job_{job_type}",
         job_type=job_type,
         status="pending",
         payload=payload or {},
@@ -316,6 +321,51 @@ class StubApiService:
     def list_jobs_by_status(self, status: str, *, limit: int = 50) -> list[JobResponse]:
         self.calls.append(("list_jobs_by_status", (status, limit)))
         return [_job("index_paper", payload={"job_id": f"dead_{status}"})]
+
+    def get_admin_jobs_overview(self, *, limit: int = 50) -> AdminJobsOverviewResponse:
+        self.calls.append(("get_admin_jobs_overview", limit))
+        return AdminJobsOverviewResponse(
+            jobs=[
+                AdminJobOverviewRow(
+                    job_id="job_root_1",
+                    root_job_id="job_root_1",
+                    job_type="harvest_range",
+                    status="completed",
+                    display_status="completed",
+                    payload={},
+                    attempts=1,
+                    max_attempts=3,
+                    priority=10,
+                    created_at=NOW,
+                    updated_at=NOW,
+                    tracking_available=True,
+                    indexed_paper_count=2,
+                    latest_status_summary="1 completed · 1 total",
+                    child_job_count=0,
+                    details={},
+                )
+            ],
+            worker=None,
+        )
+
+    def get_admin_job_papers(self, root_job_id: str) -> AdminJobPapersResponse:
+        self.calls.append(("get_admin_job_papers", root_job_id))
+        return AdminJobPapersResponse(
+            root_job_id=root_job_id,
+            papers=[
+                AdminJobPaperResponse(
+                    root_job_id=root_job_id,
+                    job_id="job_chunk_1",
+                    paper_id="arxiv:2401.54321",
+                    arxiv_id="2401.54321",
+                    title="Benchmark Paper",
+                    outcome="indexed",
+                    created_at=NOW,
+                    updated_at=NOW,
+                    paper=_paper("2401.54321"),
+                )
+            ],
+        )
 
     def enqueue_harvest_range_job(self, **kwargs):
         self.calls.append(("enqueue_harvest_range_job", kwargs))
@@ -1085,6 +1135,8 @@ def test_browser_admin_routes_delegate_for_admin_users(api_client):
     }
 
     jobs = client.get("/v1/browser/admin/jobs?status=all&limit=5")
+    overview = client.get("/v1/browser/admin/jobs/overview?limit=7")
+    job_papers = client.get("/v1/browser/admin/jobs/job_root_1/papers")
     papers = client.get("/v1/browser/admin/papers?q=benchmark&index_status=indexed&limit=3")
     files = client.get("/v1/browser/admin/papers/arxiv:2401.54321/files")
     file_contents = client.get("/v1/browser/admin/papers/arxiv:2401.54321/files/text/full.md")
@@ -1119,6 +1171,10 @@ def test_browser_admin_routes_delegate_for_admin_users(api_client):
 
     assert jobs.status_code == 200
     assert jobs.json()[0]["payload"]["job_id"] == "dead_all"
+    assert overview.status_code == 200
+    assert overview.json()["jobs"][0]["job_id"] == "job_root_1"
+    assert job_papers.status_code == 200
+    assert job_papers.json()["papers"][0]["paper_id"] == "arxiv:2401.54321"
     assert papers.status_code == 200
     assert papers.json()[0]["paper_id"] == "arxiv:2401.54321"
     assert files.status_code == 200
@@ -1137,6 +1193,8 @@ def test_browser_admin_routes_delegate_for_admin_users(api_client):
     assert venue.status_code == 200
     assert enriched.status_code == 200
     assert ("list_jobs_by_status", ("all", 5)) in service.calls
+    assert ("get_admin_jobs_overview", 7) in service.calls
+    assert ("get_admin_job_papers", "job_root_1") in service.calls
     assert ("list_papers", ("benchmark", "indexed", 3)) in service.calls
     assert ("list_files", "arxiv:2401.54321") in service.calls
     assert ("read_file", ("arxiv:2401.54321", "text/full.md")) in service.calls

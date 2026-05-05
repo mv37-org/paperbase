@@ -47,6 +47,7 @@ from .models import (
     ChatTurnResponse,
     GrepPaperMatch,
     IntegrationProbeComponent,
+    JobPaperRecord,
     JobResponse,
     PaperMetadata,
     PaperResponse,
@@ -310,6 +311,7 @@ class JobORM(Base):
     __tablename__ = "jobs"
 
     job_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    root_job_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     job_type: Mapped[str] = mapped_column(String(64), index=True)
     dedupe_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
     # `pending`, `running`, `completed`, or `dead`. The old `failed` terminal
@@ -332,6 +334,18 @@ class JobORM(Base):
     updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
     started_at: Mapped[Any | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[Any | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class JobPaperORM(Base):
+    __tablename__ = "job_papers"
+
+    job_id: Mapped[str] = mapped_column(String(64), ForeignKey("jobs.job_id"), primary_key=True)
+    paper_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    arxiv_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    outcome: Mapped[str] = mapped_column(String(32), default="indexed", index=True)
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
 class SearchLogORM(Base):
@@ -1272,6 +1286,7 @@ class PaperRepository(ABC):
         max_attempts: int | None = None,
         priority: int | None = None,
         dedupe_key: str | None = None,
+        root_job_id: str | None = None,
     ) -> JobResponse:
         raise NotImplementedError
 
@@ -1308,6 +1323,30 @@ class PaperRepository(ABC):
 
     @abstractmethod
     def list_jobs_by_status(self, status: str, *, limit: int = 50) -> list[JobResponse]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_recent_jobs(self, *, limit: int = 200) -> list[JobResponse]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_jobs_for_root(self, root_job_id: str) -> list[JobResponse]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def record_job_paper(
+        self,
+        job_id: str,
+        paper_id: str,
+        *,
+        outcome: str,
+        arxiv_id: str | None = None,
+        title: str | None = None,
+    ) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_job_papers_for_root(self, root_job_id: str) -> list[JobPaperRecord]:
         raise NotImplementedError
 
     @abstractmethod
@@ -1527,6 +1566,12 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     "ADD COLUMN IF NOT EXISTS appearance_theme VARCHAR(16) DEFAULT 'light'"
                 )
             )
+            connection.execute(
+                text(
+                    "ALTER TABLE IF EXISTS jobs "
+                    "ADD COLUMN IF NOT EXISTS root_job_id VARCHAR(64)"
+                )
+            )
         Base.metadata.create_all(self._engine)
         with self._engine.begin() as connection:
             # search_tsv is added after create_all() so it works for both
@@ -1645,9 +1690,24 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 text("CREATE INDEX IF NOT EXISTS jobs_priority ON jobs (priority)")
             )
             connection.execute(
+                text("CREATE INDEX IF NOT EXISTS jobs_root_job_id ON jobs (root_job_id)")
+            )
+            connection.execute(
                 text(
                     "CREATE UNIQUE INDEX IF NOT EXISTS jobs_dedupe_key_unique "
                     "ON jobs (dedupe_key) WHERE dedupe_key IS NOT NULL"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS job_papers_outcome_idx "
+                    "ON job_papers (outcome)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS job_papers_updated_at_idx "
+                    "ON job_papers (updated_at DESC)"
                 )
             )
             connection.execute(
@@ -4300,13 +4360,16 @@ class SqlAlchemyPaperRepository(PaperRepository):
         max_attempts: int | None = None,
         priority: int | None = None,
         dedupe_key: str | None = None,
+        root_job_id: str | None = None,
     ) -> JobResponse:
         if dedupe_key:
             existing = self._get_job_by_dedupe_key(dedupe_key)
             if existing is not None:
                 return existing
+        job_id = new_id("job")
         job = JobORM(
-            job_id=new_id("job"),
+            job_id=job_id,
+            root_job_id=root_job_id or job_id,
             job_type=job_type,
             dedupe_key=dedupe_key,
             status="pending",
@@ -4340,6 +4403,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
             return None
         return JobResponse(
             job_id=row.job_id,
+            root_job_id=row.root_job_id,
             job_type=row.job_type,
             status=row.status,
             payload=row.payload,
@@ -4471,6 +4535,71 @@ class SqlAlchemyPaperRepository(PaperRepository):
             ).all()
         return [self.get_job(row.job_id) for row in rows if row is not None]  # type: ignore[list-item]
 
+    def list_recent_jobs(self, *, limit: int = 200) -> list[JobResponse]:
+        with self._session() as session:
+            rows = session.scalars(select(JobORM).order_by(JobORM.updated_at.desc()).limit(limit)).all()
+        return [self.get_job(row.job_id) for row in rows if row is not None]  # type: ignore[list-item]
+
+    def list_jobs_for_root(self, root_job_id: str) -> list[JobResponse]:
+        with self._session() as session:
+            rows = session.scalars(
+                select(JobORM)
+                .where(JobORM.root_job_id == root_job_id)
+                .order_by(JobORM.updated_at.desc())
+            ).all()
+        return [self.get_job(row.job_id) for row in rows if row is not None]  # type: ignore[list-item]
+
+    def record_job_paper(
+        self,
+        job_id: str,
+        paper_id: str,
+        *,
+        outcome: str,
+        arxiv_id: str | None = None,
+        title: str | None = None,
+    ) -> None:
+        statement = insert(JobPaperORM).values(
+            job_id=job_id,
+            paper_id=paper_id,
+            arxiv_id=arxiv_id,
+            title=title,
+            outcome=outcome,
+            created_at=utcnow(),
+            updated_at=utcnow(),
+        )
+        statement = statement.on_conflict_do_update(
+            index_elements=[JobPaperORM.job_id, JobPaperORM.paper_id],
+            set_={
+                "arxiv_id": arxiv_id,
+                "title": title,
+                "outcome": outcome,
+                "updated_at": utcnow(),
+            },
+        )
+        with self._session() as session:
+            session.execute(statement)
+
+    def list_job_papers_for_root(self, root_job_id: str) -> list[JobPaperRecord]:
+        with self._session() as session:
+            rows = session.scalars(
+                select(JobPaperORM)
+                .join(JobORM, JobORM.job_id == JobPaperORM.job_id)
+                .where(JobORM.root_job_id == root_job_id)
+                .order_by(JobPaperORM.updated_at.desc())
+            ).all()
+        return [
+            JobPaperRecord(
+                job_id=row.job_id,
+                paper_id=row.paper_id,
+                arxiv_id=row.arxiv_id,
+                title=row.title,
+                outcome=row.outcome,
+                created_at=row.created_at,
+                updated_at=row.updated_at,
+            )
+            for row in rows
+        ]
+
     def cleanup_expired_results(self) -> None:
         with self._session() as session:
             expired_ids = session.scalars(
@@ -4550,6 +4679,7 @@ class MemoryPaperRepository(PaperRepository):
         self.project_repo_syncs: dict[str, ProjectRepoSyncResponse] = {}
         self.search_logs: dict[str, dict[str, Any]] = {}
         self.job_dedupe_keys: dict[str, str] = {}
+        self.job_papers: dict[tuple[str, str], JobPaperRecord] = {}
 
     def init(self) -> None:
         return None
@@ -6209,13 +6339,16 @@ class MemoryPaperRepository(PaperRepository):
         max_attempts: int | None = None,
         priority: int | None = None,
         dedupe_key: str | None = None,
+        root_job_id: str | None = None,
     ) -> JobResponse:
         if dedupe_key:
             existing_id = self.job_dedupe_keys.get(dedupe_key)
             if existing_id is not None and existing_id in self.jobs:
                 return self.jobs[existing_id]
+        job_id = new_id("job")
         job = JobResponse(
-            job_id=new_id("job"),
+            job_id=job_id,
+            root_job_id=root_job_id or job_id,
             job_type=job_type,
             status="pending",
             payload=payload,
@@ -6336,6 +6469,43 @@ class MemoryPaperRepository(PaperRepository):
         jobs = [job for job in self.jobs.values() if job.status == status]
         jobs.sort(key=lambda item: item.updated_at, reverse=True)
         return jobs[:limit]
+
+    def list_recent_jobs(self, *, limit: int = 200) -> list[JobResponse]:
+        jobs = sorted(self.jobs.values(), key=lambda item: item.updated_at, reverse=True)
+        return jobs[:limit]
+
+    def list_jobs_for_root(self, root_job_id: str) -> list[JobResponse]:
+        jobs = [job for job in self.jobs.values() if job.root_job_id == root_job_id]
+        jobs.sort(key=lambda item: item.updated_at, reverse=True)
+        return jobs
+
+    def record_job_paper(
+        self,
+        job_id: str,
+        paper_id: str,
+        *,
+        outcome: str,
+        arxiv_id: str | None = None,
+        title: str | None = None,
+    ) -> None:
+        key = (job_id, paper_id)
+        existing = self.job_papers.get(key)
+        created_at = existing.created_at if existing is not None else utcnow()
+        self.job_papers[key] = JobPaperRecord(
+            job_id=job_id,
+            paper_id=paper_id,
+            arxiv_id=arxiv_id,
+            title=title,
+            outcome=outcome,
+            created_at=created_at,
+            updated_at=utcnow(),
+        )
+
+    def list_job_papers_for_root(self, root_job_id: str) -> list[JobPaperRecord]:
+        job_ids = {job.job_id for job in self.jobs.values() if job.root_job_id == root_job_id}
+        records = [record for record in self.job_papers.values() if record.job_id in job_ids]
+        records.sort(key=lambda item: item.updated_at, reverse=True)
+        return records
 
     def cleanup_expired_results(self) -> None:
         now = utcnow()

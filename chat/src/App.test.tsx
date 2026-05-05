@@ -56,7 +56,9 @@ const apiMocks = vi.hoisted(() => {
     loadGitHubRepositories: vi.fn(),
     loadGitHubRepoImportCandidates: vi.fn(),
     loadGitHubRepoMetadata: vi.fn(),
+    loadBrowserAdminJobPapers: vi.fn(),
     loadBrowserAdminJobs: vi.fn(),
+    loadBrowserAdminJobsOverview: vi.fn(),
     loadBrowserAdminPaperFiles: vi.fn(),
     loadBrowserAdminPapers: vi.fn(),
     loadProjectItems: vi.fn(),
@@ -141,7 +143,9 @@ vi.mock("./api", () => ({
   loadGitHubRepositories: apiMocks.loadGitHubRepositories,
   loadGitHubRepoImportCandidates: apiMocks.loadGitHubRepoImportCandidates,
   loadGitHubRepoMetadata: apiMocks.loadGitHubRepoMetadata,
+  loadBrowserAdminJobPapers: apiMocks.loadBrowserAdminJobPapers,
   loadBrowserAdminJobs: apiMocks.loadBrowserAdminJobs,
+  loadBrowserAdminJobsOverview: apiMocks.loadBrowserAdminJobsOverview,
   loadBrowserAdminPaperFiles: apiMocks.loadBrowserAdminPaperFiles,
   loadBrowserAdminPapers: apiMocks.loadBrowserAdminPapers,
   loadProjectItems: apiMocks.loadProjectItems,
@@ -632,7 +636,15 @@ describe("App", () => {
       image_url: "https://example.test/preview.webp",
       content_type: "image/webp",
     });
+    apiMocks.loadBrowserAdminJobPapers.mockResolvedValue({
+      root_job_id: "job_root_1",
+      papers: [],
+    });
     apiMocks.loadBrowserAdminJobs.mockResolvedValue([]);
+    apiMocks.loadBrowserAdminJobsOverview.mockResolvedValue({
+      jobs: [],
+      worker: null,
+    });
     apiMocks.loadBrowserAdminPapers.mockResolvedValue([]);
     apiMocks.loadBrowserAdminPaperFiles.mockResolvedValue({
       paper_id: "arxiv:2401.12345",
@@ -2948,6 +2960,7 @@ describe("App", () => {
         ),
       ).toBeTruthy();
     });
+    expect(screen.queryByRole("button", { name: "Close Trending papers" })).toBeNull();
 
     fireEvent.click(document.querySelector("#account-menu-button") as HTMLElement);
     fireEvent.click(screen.getByRole("menuitem", { name: "Settings" }));
@@ -2979,6 +2992,46 @@ describe("App", () => {
 
   it("opens the sidebar admin panel for admin users and keeps it out of settings", async () => {
     apiMocks.loadSession.mockResolvedValue(authenticatedSession({ is_admin: true }));
+    apiMocks.loadBrowserAdminJobsOverview.mockResolvedValue({
+      jobs: [
+        {
+          job_id: "job_root_1",
+          root_job_id: "job_root_1",
+          job_type: "harvest_range",
+          status: "completed",
+          display_status: "completed",
+          payload: {},
+          attempts: 1,
+          max_attempts: 3,
+          priority: 10,
+          created_at: "2026-04-21T00:00:00Z",
+          updated_at: "2026-04-21T01:00:00Z",
+          is_synthetic: false,
+          tracking_available: true,
+          indexed_paper_count: 2,
+          latest_status_summary: "1 completed · 1 total",
+          child_job_count: 0,
+          details: {},
+        },
+      ],
+      worker: null,
+    });
+    apiMocks.loadBrowserAdminJobPapers.mockResolvedValue({
+      root_job_id: "job_root_1",
+      papers: [
+        {
+          root_job_id: "job_root_1",
+          job_id: "job_chunk_1",
+          paper_id: "arxiv:2401.12345",
+          arxiv_id: "2401.12345",
+          title: "Benchmark Paper",
+          outcome: "indexed",
+          created_at: "2026-04-21T00:00:00Z",
+          updated_at: "2026-04-21T01:10:00Z",
+          paper: null,
+        },
+      ],
+    });
 
     render(<App />);
 
@@ -2989,16 +3042,17 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Admin panel" }));
 
     await waitFor(() => {
-      expect(
-        screen.getByText("Queue backfills, inspect jobs, and browse paper artifacts in storage."),
-      ).toBeTruthy();
+      expect(screen.getByRole("heading", { name: "Jobs" })).toBeTruthy();
     });
+    expect(screen.queryByRole("button", { name: "Close Admin panel" })).toBeNull();
+    expect(apiMocks.loadBrowserAdminJobsOverview).toHaveBeenCalledWith(75);
+
+    fireEvent.click(within(screen.getByRole("table")).getByRole("button", { name: "2" }));
     await waitFor(() => {
-      expect(apiMocks.loadBrowserAdminJobs).toHaveBeenCalledWith("all", 75);
+      expect(screen.getByRole("heading", { name: "Indexed papers" })).toBeTruthy();
     });
-    await waitFor(() => {
-      expect(apiMocks.loadBrowserAdminPapers).toHaveBeenCalledWith("", "indexed", 50);
-    });
+    expect(screen.queryByRole("button", { name: "Close Admin panel" })).toBeNull();
+    expect(apiMocks.loadBrowserAdminJobPapers).toHaveBeenCalledWith("job_root_1");
 
     fireEvent.click(document.querySelector("#account-menu-button") as HTMLElement);
     fireEvent.click(screen.getByRole("menuitem", { name: "Settings" }));
