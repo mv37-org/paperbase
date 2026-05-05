@@ -5300,16 +5300,17 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
 }
 
 .admin-jobs-window-button {
-  min-width: 144px;
+  width: 100px;
+  min-width: 100px;
   min-height: 24px;
   height: 24px;
   max-height: 24px;
 }
 
-.admin-jobs-window-chevron {
-  font-size: 10px;
-  line-height: 1;
-  margin-left: 2px;
+.admin-jobs-window-button > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .admin-jobs-window-menu {
@@ -5415,7 +5416,7 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
 
 .admin-jobs-skeleton-grid {
   position: absolute;
-  inset: 22px 0 52px;
+  inset: 22px 0 0;
   display: grid;
   align-content: space-between;
   pointer-events: none;
@@ -5428,7 +5429,7 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
 
 .admin-jobs-skeleton-bars {
   position: absolute;
-  inset: 30px 0 56px;
+  inset: 30px 0 0;
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
@@ -5440,7 +5441,7 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
   width: 100%;
   max-width: 10px;
   min-width: 0;
-  border-radius: 4px 4px 0 0;
+  border-radius: 2px 2px 0 0;
   background: linear-gradient(180deg, rgba(27, 22, 17, 0.1), rgba(27, 22, 17, 0.03));
 }
 

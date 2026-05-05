@@ -168,7 +168,7 @@ const JOBS_TIME_RANGE_PRESETS: JobsTimeRangePreset[] = [
   { id: "14d", label: "Last 2 weeks", durationMs: 14 * DAY_MS },
 ];
 
-const TIMELINE_SKELETON_BAR_HEIGHTS = Array.from({ length: 72 }, (_, index) => {
+const TIMELINE_SKELETON_BAR_HEIGHTS = Array.from({ length: 88 }, (_, index) => {
   const pattern = [0.1, 0.28, 0.18, 0.42, 0.24, 0.52, 0.3, 0.46];
   const step = Math.floor(index / pattern.length) % 3;
   return Math.min(pattern[index % pattern.length] + step * 0.05, 0.7);
@@ -906,9 +906,6 @@ function JobsWindowControl({
         onClick={() => setMenuOpen((open) => !open)}
       >
         <span>{selectedLabel}</span>
-        <span className="admin-jobs-window-chevron" aria-hidden="true">
-          ▾
-        </span>
       </button>
       {menuOpen ? (
         <div className="admin-jobs-window-menu" role="listbox" aria-label="Jobs window">
