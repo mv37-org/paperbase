@@ -101,6 +101,11 @@ _PACKAGE_DIR = Path(__file__).resolve().parent
 _STATIC_DIR = _PACKAGE_DIR / "static"
 
 
+def _env_flag(name: str) -> bool:
+    value = os.getenv(name, "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _allowed_browser_origins() -> list[str]:
     origins: list[str] = []
     for value in (_app_settings.browser_origin, _app_settings.chat_public_url):
@@ -1502,11 +1507,12 @@ def main() -> None:
 
     settings = get_settings()
     host, port = _resolve_bind_address()
+    reload_enabled = _env_flag("PAPERBASE_API_RELOAD")
     uvicorn.run(
         "paperbase.api:app",
         host=host,
         port=port,
-        reload=False,
+        reload=reload_enabled,
         log_config=build_log_config(component="api", level=settings.log_level, log_format=settings.log_format),
         log_level=settings.log_level.lower(),
     )

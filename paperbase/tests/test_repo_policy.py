@@ -42,6 +42,12 @@ def test_makefile_exposes_benchmark_workflow():
     assert "make benchmark" in makefile
 
 
+def test_makefile_dev_enables_api_reload():
+    makefile = _read_repo_file("Makefile")
+
+    assert 'PAPERBASE_API_RELOAD=1 "$(PAPERBASE_API)"' in makefile
+
+
 def test_profile_workflow_delegates_to_make_profile():
     workflow = _read_repo_file(".github/workflows/profile.yml")
 

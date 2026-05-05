@@ -78,7 +78,7 @@ dev:
 	@set -a; \
 	source ./.env; \
 	set +a; \
-	PYTHONUNBUFFERED=1 "$(PAPERBASE_API)" >"$(RUN_DIR)/api.log" 2>&1 & \
+	PYTHONUNBUFFERED=1 PAPERBASE_API_RELOAD=1 "$(PAPERBASE_API)" >"$(RUN_DIR)/api.log" 2>&1 & \
 	echo $$! >"$(RUN_DIR)/api.pid"; \
 	PYTHONUNBUFFERED=1 "$(PAPERBASE_WORKER)" >"$(RUN_DIR)/worker.log" 2>&1 & \
 	echo $$! >"$(RUN_DIR)/worker.pid"; \

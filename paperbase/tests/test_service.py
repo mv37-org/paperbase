@@ -1204,6 +1204,42 @@ def test_api_bind_address_prefers_explicit_port_then_platform_port(monkeypatch):
     assert _resolve_bind_address() == ("127.0.0.1", 9100)
 
 
+def test_api_main_respects_reload_env(monkeypatch):
+    import paperbase.api as api_module
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(api_module, "get_settings", lambda: Settings(log_level="WARNING", log_format="json"))
+    monkeypatch.setattr(
+        api_module,
+        "build_log_config",
+        lambda *, component, level, log_format: {
+            "component": component,
+            "level": level,
+            "format": log_format,
+        },
+    )
+    monkeypatch.setenv("PAPERBASE_API_RELOAD", "1")
+
+    def fake_uvicorn_run(app, *, host, port, reload, log_config, log_level):
+        captured["app"] = app
+        captured["host"] = host
+        captured["port"] = port
+        captured["reload"] = reload
+        captured["log_config"] = log_config
+        captured["log_level"] = log_level
+
+    monkeypatch.setattr("uvicorn.run", fake_uvicorn_run)
+
+    api_module.main()
+
+    assert captured["app"] == "paperbase.api:app"
+    assert captured["host"] == "0.0.0.0"
+    assert captured["port"] == 8080
+    assert captured["reload"] is True
+    assert captured["log_level"] == "warning"
+
+
 def test_probe_integrations_returns_database_and_storage_status(service: PaperbaseService):
     probe = service.probe_integrations()
 

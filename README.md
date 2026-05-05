@@ -50,7 +50,7 @@ Optional browser-account settings now hang off the same API env surface:
 
 - `make setup` installs the Python packages, chat dependencies, repo hooks, and a starter `.env`
 - `make doctor` verifies `vp`, Python, Postgres, `pgvector`, ports, and the repo env
-- `make dev` initializes the local database and storage, then runs the API, worker, MCP bridge, and chat dev server
+- `make dev` initializes the local database and storage, then runs the API, worker, MCP bridge, and chat dev server; the API auto-reloads backend code changes during local development
 - `make reset-local` stops the local stack, wipes the local database/storage, and recreates the latest schema
 - `make test-smoke` runs the PR-oriented CI smoke gate: lint, chat checks/tests/build, a focused backend subset, and plugin tests
 - `make test` runs `ruff check`, `vp check`, a frontend build, backend tests, and plugin tests
@@ -159,6 +159,7 @@ The browser chat experience is project-based:
 - MCP bridge at `http://127.0.0.1:8090/mcp`
 
 API, worker, and plugin logs go to `.run/`.
+When `make dev` is running, backend route and handler changes should reload into `paperbase-api` automatically without a manual restart.
 
 ## Frontend Output
 

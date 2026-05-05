@@ -43,6 +43,7 @@ import {
   uploadDocument,
 } from "./api";
 import { AdminOpsPanel } from "./AdminOpsPanel";
+import { CredentialFormUsernameField } from "./CredentialFormUsernameField";
 import { CodeSnippet, extractStreamingPythonPreview } from "./CodeSnippet";
 import { LandingMentionEditor } from "./LandingMentionEditor";
 import { MarkdownRenderer } from "./MarkdownRenderer";
@@ -7158,6 +7159,7 @@ export default function App() {
                 }
               }}
             >
+              <CredentialFormUsernameField />
               <input
                 name="token"
                 type="text"
@@ -7282,6 +7284,7 @@ export default function App() {
                           }
                         }}
                       >
+                        <CredentialFormUsernameField email={session?.user?.email ?? ""} />
                         <div className="settings-field">
                           <label className="settings-field-label" htmlFor="settings-openai-api-key">
                             OpenAI API key
@@ -7385,6 +7388,7 @@ export default function App() {
                           }
                         }}
                       >
+                        <CredentialFormUsernameField email={session?.user?.email ?? ""} />
                         <div className="settings-field">
                           <label className="settings-field-label" htmlFor="settings-modal-token-id">
                             Modal token ID
