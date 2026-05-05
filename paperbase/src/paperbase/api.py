@@ -341,7 +341,9 @@ def home(request: Request) -> HTMLResponse:
     html = (_STATIC_DIR / "index.html").read_text(encoding="utf-8")
     api_base_url = _public_base_url(request)
     html = html.replace("__PAPERBASE_BASE_URL__", api_base_url)
-    return HTMLResponse(html)
+    response = HTMLResponse(html)
+    set_no_store_headers(response)
+    return response
 
 
 @app.post("/v1/index/papers/arxiv/{arxiv_id}", response_model=JobResponse, dependencies=[Depends(require_bearer_token)])

@@ -1620,6 +1620,24 @@ def test_retry_job_endpoint_returns_404_for_unknown_job(api_client):
     assert ("retry_dead_job", "job_nonexistent") in service.calls
 
 
+def test_home_route_returns_no_store_cache_headers(api_client, monkeypatch, tmp_path):
+    client, _, _ = api_client
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    (static_dir / "index.html").write_text(
+        '<html><body><script>window.API="__PAPERBASE_BASE_URL__"</script></body></html>',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(api_module, "_STATIC_DIR", static_dir)
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "no-store"
+    assert response.headers["Pragma"] == "no-cache"
+    assert 'window.API="http://testserver"' in response.text
+
+
 def test_browser_preview_route_returns_signed_url_and_no_store_cache(api_client):
     client, service, settings = api_client
     client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
