@@ -502,30 +502,29 @@ function jobTypeLabel(jobType: string) {
   return JOB_TYPE_LABELS[jobType] ?? jobType.replaceAll("_", " ");
 }
 
-function adminJobRunReason(job: AdminJobOverviewRow) {
+type AdminJobTrigger = {
+  label: string;
+  title: string;
+  tone: "manual" | "scheduled";
+};
+
+function adminJobTrigger(job: AdminJobOverviewRow): AdminJobTrigger {
   if (
     job.is_synthetic ||
     job.job_type === "latest_sync_schedule" ||
     job.job_type === "sync_latest"
   ) {
-    return "Env scheduled · latest sync";
+    return {
+      label: "Scheduled",
+      title: "Env scheduled · latest sync",
+      tone: "scheduled",
+    };
   }
-  if (job.job_type === "index_paper") {
-    return "User queued · single paper";
-  }
-  if (job.job_type === "harvest_range") {
-    return "User queued · date range backfill";
-  }
-  if (job.job_type === "harvest_top_cited") {
-    return "User queued · top cited backfill";
-  }
-  if (job.job_type === "harvest_venue") {
-    return "User queued · venue backfill";
-  }
-  if (job.job_type === "enrich_missing_metadata") {
-    return "User queued · metadata enrichment";
-  }
-  return "User queued · manual job";
+  return {
+    label: "Manual",
+    title: `User queued · ${jobTypeLabel(job.job_type).toLowerCase()}`,
+    tone: "manual",
+  };
 }
 
 function panelErrorMessage(error: unknown, fallback: string) {
@@ -1782,7 +1781,7 @@ export function AdminOpsPanel({
                 <thead>
                   <tr>
                     <th>Type</th>
-                    <th>Reason</th>
+                    <th>Trigger</th>
                     <th>ID</th>
                     <th>Status</th>
                     <th>Indexed papers</th>
@@ -1802,6 +1801,7 @@ export function AdminOpsPanel({
                     filteredJobs.map((job) => {
                       const expanded = Boolean(expandedJobIds[job.job_id]);
                       const detailPairs = detailRows(job);
+                      const trigger = adminJobTrigger(job);
                       return (
                         <FragmentRow key={job.job_id}>
                           <tr
@@ -1831,8 +1831,11 @@ export function AdminOpsPanel({
                               </button>
                             </td>
                             <td>
-                              <span className="admin-jobs-run-reason">
-                                {adminJobRunReason(job)}
+                              <span
+                                className={`admin-jobs-trigger-tag trigger-${trigger.tone}`}
+                                title={trigger.title}
+                              >
+                                {trigger.label}
                               </span>
                             </td>
                             <td>

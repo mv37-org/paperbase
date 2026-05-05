@@ -3166,9 +3166,9 @@ describe("App", () => {
       );
       expect((chart as HTMLElement).style.height).toBe("320px");
       expect(
-        within(screen.getByRole("table")).getByRole("columnheader", { name: "Reason" }),
+        within(screen.getByRole("table")).getByRole("columnheader", { name: "Trigger" }),
       ).toBeTruthy();
-      expect(screen.getByText("User queued · date range backfill")).toBeTruthy();
+      expect(screen.getAllByText("Manual").length).toBeGreaterThan(0);
       expect(screen.queryByRole("button", { name: "Close Control panel" })).toBeNull();
       expect(apiMocks.loadBrowserAdminJobsOverview).toHaveBeenCalledWith(200);
 
@@ -3293,12 +3293,12 @@ describe("App", () => {
       fireEvent.click(screen.getByRole("button", { name: "Control panel" }));
 
       await waitFor(() => {
-        expect(screen.getByText("Env scheduled · latest sync")).toBeTruthy();
+        expect(screen.getByTitle("Env scheduled · latest sync")).toBeTruthy();
       });
       expect(
-        within(screen.getByRole("table")).getByRole("columnheader", { name: "Reason" }),
+        within(screen.getByRole("table")).getByRole("columnheader", { name: "Trigger" }),
       ).toBeTruthy();
-      expect(screen.getByText("User queued · date range backfill")).toBeTruthy();
+      expect(screen.getByTitle("User queued · date range")).toBeTruthy();
     } finally {
       dateNowSpy.mockRestore();
     }
