@@ -249,6 +249,8 @@ vi.mock("echarts-for-react", () => ({
             ? ((xAxis as Record<string, unknown>).data as unknown[]).length
             : 0,
         )}
+        data-x-axis-label-align-max={String(xAxisLabel.alignMaxLabel ?? "")}
+        data-x-axis-label-align-min={String(xAxisLabel.alignMinLabel ?? "")}
         data-x-axis-label-font-size={String(xAxisLabel.fontSize ?? "")}
         data-x-axis-label-interval={String(xAxisLabel.interval ?? "")}
         data-x-axis-label-show={String(xAxisLabel.show ?? "")}
@@ -3150,7 +3152,9 @@ describe("App", () => {
       expect(chart.getAttribute("data-grid-bottom")).toBe("26");
       expect(chart.getAttribute("data-grid-left")).toBe("0");
       expect(chart.getAttribute("data-has-data-zoom")).toBe("false");
-      expect(chart.getAttribute("data-x-axis-label-font-size")).toBe("9");
+      expect(chart.getAttribute("data-x-axis-label-align-min")).toBe("left");
+      expect(chart.getAttribute("data-x-axis-label-align-max")).toBe("right");
+      expect(chart.getAttribute("data-x-axis-label-font-size")).toBe("8");
       expect(chart.getAttribute("data-x-axis-label-show")).toBe("true");
       expect(chart.getAttribute("data-x-axis-tick-show")).toBe("true");
       expect(chart.getAttribute("data-x-axis-tick-interval")).toBe("0");
