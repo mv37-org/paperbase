@@ -3041,11 +3041,7 @@ describe("App", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Trending papers" }));
     await waitFor(() => {
-      expect(
-        screen.getByText(
-          "This view is still empty. The sidebar slot is in place for the next pass.",
-        ),
-      ).toBeTruthy();
+      expect(screen.getByTestId("trending-papers-page")).toBeTruthy();
     });
     expect(screen.queryByRole("button", { name: "Close Trending papers" })).toBeNull();
 
