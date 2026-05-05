@@ -5102,7 +5102,7 @@ textarea {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 24px 24px 0;
+  padding: 24px 24px 18px;
 }
 
 .admin-jobs-header h1,
@@ -5122,6 +5122,7 @@ textarea {
 
 .admin-jobs-header-title p {
   margin: 0;
+  padding-bottom: 2px;
   color: var(--muted);
   font-size: 12px;
   line-height: 1.4;
@@ -5299,7 +5300,10 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
 }
 
 .admin-jobs-window-button {
-  min-width: 128px;
+  min-width: 168px;
+  min-height: 24px;
+  height: 24px;
+  max-height: 24px;
 }
 
 .admin-jobs-window-chevron {
