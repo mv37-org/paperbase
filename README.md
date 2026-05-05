@@ -130,7 +130,7 @@ The browser chat experience is project-based:
 - the new-project modal can refresh the accessible repo list, link to GitHub's Paperbase access settings, and expose optional inference/sandbox credential fields
 - existing repos expose a branch picker and optional import selection for `.py` and `.ipynb` files; new repos start on a fixed `main` branch
 - the sidebar lazily loads mixed project items per project, persists the last selected project across reloads, and reopens with only that project tree expanded by default
-- the sidebar also exposes a signed-in Browse section with a non-tabbed `Trending papers` placeholder page for all users and a non-tabbed `Admin panel` jobs workspace for allowlisted admins
+- the product exposes a public-readable `Trending papers` daily feed plus a signed-in Browse entry for the same surface; signed-in users can upvote, comment, and reply, and allowlisted admins also get a non-tabbed `Admin panel` jobs workspace
 - the empty first-chat state now shows a dismissible setup checklist for GitHub, inference, and sandbox access so users can connect required services before the coding agent hits save/run failures
 - project descriptions are snapped onto new sessions as per-session prompt context, so later project edits do not rewrite existing chats
 - once the first user prompt lands in a `New chat` thread, Paperbase renames the session to a compact 3-5 word summary and keeps that title for later turns
