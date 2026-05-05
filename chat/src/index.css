@@ -5430,7 +5430,11 @@ button.admin-compact-action {
   margin: 0 0 16px;
 }
 
-.admin-create-job-chooser,
+.admin-create-job-chooser {
+  display: grid;
+  gap: 0;
+}
+
 .admin-create-job-form {
   display: grid;
   gap: 12px;
@@ -5446,7 +5450,7 @@ button.admin-compact-action {
   padding: 12px 8px;
   border: 0;
   border-top: 1px solid rgba(27, 22, 17, 0.08);
-  border-radius: 8px;
+  border-radius: 0;
   background: none;
   text-align: left;
   cursor: pointer;
