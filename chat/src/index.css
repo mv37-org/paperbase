@@ -5526,6 +5526,7 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
 }
 
 .admin-jobs-row {
+  cursor: pointer;
   transition: background 140ms ease;
 }
 

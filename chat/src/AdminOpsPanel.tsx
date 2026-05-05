@@ -1453,17 +1453,26 @@ export function AdminOpsPanel({
                       const detailPairs = detailRows(job);
                       return (
                         <FragmentRow key={job.job_id}>
-                          <tr className={`admin-jobs-row${expanded ? " expanded" : ""}`}>
+                          <tr
+                            className={`admin-jobs-row${expanded ? " expanded" : ""}`}
+                            onClick={() =>
+                              setExpandedJobIds((current) => ({
+                                ...current,
+                                [job.job_id]: !current[job.job_id],
+                              }))
+                            }
+                          >
                             <td>
                               <button
                                 type="button"
                                 className="admin-jobs-expand"
-                                onClick={() =>
+                                onClick={(event) => {
+                                  event.stopPropagation();
                                   setExpandedJobIds((current) => ({
                                     ...current,
                                     [job.job_id]: !current[job.job_id],
-                                  }))
-                                }
+                                  }));
+                                }}
                                 aria-expanded={expanded}
                               >
                                 <span>{expanded ? "−" : "+"}</span>
@@ -1483,7 +1492,10 @@ export function AdminOpsPanel({
                                 <button
                                   type="button"
                                   className="admin-jobs-link-button"
-                                  onClick={() => onOpenJobPapers(job.root_job_id)}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    onOpenJobPapers(job.root_job_id);
+                                  }}
                                 >
                                   {job.indexed_paper_count ?? 0}
                                 </button>

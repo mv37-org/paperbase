@@ -3057,6 +3057,13 @@ describe("App", () => {
       expect(screen.queryByRole("button", { name: "Close Control panel" })).toBeNull();
       expect(apiMocks.loadBrowserAdminJobsOverview).toHaveBeenCalledWith(200);
 
+      const jobRow = screen.getByText("job_root_1").closest("tr");
+      expect(jobRow).toBeTruthy();
+      fireEvent.click(jobRow as HTMLTableRowElement);
+      await waitFor(() => {
+        expect(screen.getByText("Latest status: 1 completed · 1 total")).toBeTruthy();
+      });
+
       fireEvent.click(within(screen.getByRole("table")).getByRole("button", { name: "2" }));
       await waitFor(() => {
         expect(screen.getByRole("heading", { name: "Indexed papers" })).toBeTruthy();
