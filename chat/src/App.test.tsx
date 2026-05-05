@@ -913,10 +913,10 @@ describe("App", () => {
     render(<App />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Browse trending papers" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Browse Latest and Hottest" })).toBeTruthy();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Browse trending papers" }));
+    fireEvent.click(screen.getByRole("button", { name: "Browse Latest and Hottest" }));
 
     await waitFor(() => {
       expect(screen.getByTestId("trending-papers-page")).toBeTruthy();
@@ -3122,14 +3122,14 @@ describe("App", () => {
     await waitFor(() => {
       expect(document.querySelector("#account-menu-button")).toBeTruthy();
     });
-    expect(screen.getByRole("button", { name: "Trending papers" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Latest and Hottest" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Control panel" })).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "Trending papers" }));
+    fireEvent.click(screen.getByRole("button", { name: "Latest and Hottest" }));
     await waitFor(() => {
       expect(screen.getByTestId("trending-papers-page")).toBeTruthy();
     });
-    expect(screen.queryByRole("button", { name: "Close Trending papers" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Close Latest and Hottest" })).toBeNull();
 
     fireEvent.click(document.querySelector("#account-menu-button") as HTMLElement);
     fireEvent.click(screen.getByRole("menuitem", { name: "Settings" }));

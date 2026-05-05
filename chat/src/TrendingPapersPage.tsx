@@ -260,6 +260,9 @@ export function TrendingPapersPage({
   }, [browseState.paperId]);
 
   const pageTitle = useMemo(() => formatTrendingDate(browseState.date), [browseState.date]);
+  const pageDescription = browseState.paperId
+    ? `Published ${detail?.published ?? browseState.date}. Read the paper, skim the ELI5, and join the discussion.`
+    : `Fresh papers people are opening today. Start with the newest releases, or switch to Upvotes to see what is catching on.`;
 
   const handleSortChange = (sort: TrendingSort) => {
     onChangeBrowseState({ ...browseState, sort });
@@ -341,41 +344,39 @@ export function TrendingPapersPage({
       data-testid="trending-papers-page"
     >
       <header className="workspace-page-header trending-page-header">
-        <span>Trending papers</span>
-        <h1>{browseState.paperId ? (detail?.title ?? "Loading paper") : "Trending papers"}</h1>
-        <p>
-          {browseState.paperId
-            ? `Published ${detail?.published ?? browseState.date} · sorted by ${sortLabel(browseState.sort).toLowerCase()}`
-            : `Top papers published on ${pageTitle}. Sort between the day feed and community upvotes.`}
-        </p>
+        <div className="trending-page-header-copy">
+          <h1>{browseState.paperId ? (detail?.title ?? "Loading paper") : "Latest and Hottest"}</h1>
+          <p>
+            {browseState.paperId ? pageDescription : `${pageDescription} Published ${pageTitle}.`}
+          </p>
+        </div>
+        <div className="trending-page-header-actions">
+          {browseState.paperId ? (
+            <button
+              type="button"
+              className="trending-link-button trending-back-button"
+              onClick={handleBackToFeed}
+            >
+              Back to feed
+            </button>
+          ) : (
+            <div className="trending-sort-toggle" role="tablist" aria-label="Trending sort">
+              {(["default", "upvotes"] as TrendingSort[]).map((sort) => (
+                <button
+                  key={sort}
+                  type="button"
+                  role="tab"
+                  aria-selected={browseState.sort === sort}
+                  className={`trending-sort-button${browseState.sort === sort ? " active" : ""}`}
+                  onClick={() => handleSortChange(sort)}
+                >
+                  {sortLabel(sort)}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
       </header>
-
-      <div className="trending-page-toolbar">
-        {browseState.paperId ? (
-          <button
-            type="button"
-            className="trending-link-button trending-back-button"
-            onClick={handleBackToFeed}
-          >
-            Back to feed
-          </button>
-        ) : (
-          <div className="trending-sort-toggle" role="tablist" aria-label="Trending sort">
-            {(["default", "upvotes"] as TrendingSort[]).map((sort) => (
-              <button
-                key={sort}
-                type="button"
-                role="tab"
-                aria-selected={browseState.sort === sort}
-                className={`trending-sort-button${browseState.sort === sort ? " active" : ""}`}
-                onClick={() => handleSortChange(sort)}
-              >
-                {sortLabel(sort)}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
 
       {!browseState.paperId ? (
         <div className="trending-feed">

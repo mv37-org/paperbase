@@ -305,7 +305,7 @@ const buildProjectCategoryCollapseState = (collapsed: boolean) =>
     Record<ProjectSidebarCategoryKey, boolean>
   >;
 const WORKSPACE_SIDEBAR_ITEMS = [
-  { id: "trending", label: "Trending papers", asset: "docs.svg" },
+  { id: "trending", label: "Latest and Hottest", asset: "docs.svg" },
   { id: "admin_jobs", label: "Control panel", asset: "settings.svg", adminOnly: true },
 ] satisfies Array<{
   id: "trending" | "admin_jobs";
@@ -1686,8 +1686,11 @@ export default function App() {
     });
   }, [openTabs, projects, pythonFileMap, streamingThreadId, threadMap]);
   const hasOpenTabs = openTabItems.length > 0;
+  const isWorkspaceView = workspaceView !== null;
   const isAdminWorkspaceView =
     workspaceView?.kind === "admin_jobs" || workspaceView?.kind === "admin_job_papers";
+  const showOpenTabHeader = hasOpenTabs && !isWorkspaceView;
+  const showThreadStageChrome = !isWorkspaceView && activeTab?.kind === "thread" && !isChatEmpty;
   const tabStripStyle = useMemo(
     () =>
       ({
@@ -4794,7 +4797,7 @@ export default function App() {
                   className="landing-browse-button"
                   onClick={openTrendingFromLanding}
                 >
-                  Browse trending papers
+                  Browse Latest and Hottest
                 </button>
               </div>
               <LandingMentionEditor
@@ -5467,8 +5470,8 @@ export default function App() {
             ) : null}
           </aside>
 
-          <section className={`chat-stage${hasOpenTabs ? "" : " no-tabs"}`}>
-            {hasOpenTabs ? (
+          <section className={`chat-stage${showOpenTabHeader ? "" : " no-tabs"}`}>
+            {showOpenTabHeader ? (
               <header className="chat-stage-header">
                 <div className="chat-stage-header-inner">
                   <button
@@ -5551,10 +5554,10 @@ export default function App() {
 
             <div
               ref={messageListRef}
-              className={`chat-message-list${isChatEmpty ? " empty" : ""}${activeTab?.kind === "python_file" ? " python-file-view" : ""}${isAdminWorkspaceView ? " workspace-admin-view" : ""}`}
+              className={`chat-message-list${isChatEmpty ? " empty" : ""}${activeTab?.kind === "python_file" ? " python-file-view" : ""}${isWorkspaceView ? " workspace-view" : ""}${isAdminWorkspaceView ? " workspace-admin-view" : ""}`}
               onScroll={handleMessageListScroll}
             >
-              {activeTab?.kind === "thread" && activeThreadDebugBundle && !isChatEmpty ? (
+              {showThreadStageChrome && activeThreadDebugBundle ? (
                 <div className="chat-thread-debug-strip" data-testid="thread-debug-strip">
                   <div className="chat-thread-debug-copy-row">
                     <span className="chat-thread-debug-label">Debug IDs</span>
@@ -6210,10 +6213,10 @@ export default function App() {
               )}
             </div>
 
-            {activeTab?.kind === "thread" && !isChatEmpty ? (
+            {showThreadStageChrome ? (
               <div className="chat-composer-fade" aria-hidden="true" />
             ) : null}
-            {showScrollToLatest ? (
+            {showThreadStageChrome && showScrollToLatest ? (
               <button
                 type="button"
                 className="chat-scroll-to-latest"
@@ -6226,7 +6229,7 @@ export default function App() {
                 </svg>
               </button>
             ) : null}
-            {activeTab?.kind === "thread" && !isChatEmpty ? (
+            {showThreadStageChrome ? (
               <>
                 {composerStatus ? <div className="composer-status">{composerStatus}</div> : null}
                 {composerEditor}

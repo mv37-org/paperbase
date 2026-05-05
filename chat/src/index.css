@@ -1594,14 +1594,23 @@ textarea::placeholder,
 }
 
 .trending-page-header {
-  gap: 10px;
-}
-
-.trending-page-toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 24px;
+}
+
+.trending-page-header-copy {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.trending-page-header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-shrink: 0;
 }
 
 .trending-sort-toggle {
@@ -1631,6 +1640,18 @@ textarea::placeholder,
 .trending-sort-button {
   padding: 7px 12px;
   font-size: 13px;
+}
+
+@media (max-width: 720px) {
+  .trending-page-header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .trending-page-header-actions {
+    justify-content: flex-start;
+  }
 }
 
 .trending-sort-button.active,
@@ -2237,6 +2258,10 @@ textarea::placeholder,
 
 .chat-message-list.workspace-admin-view {
   padding: 0 0 240px;
+}
+
+.chat-message-list.workspace-view {
+  padding: 0;
 }
 
 .chat-composer-fade {
