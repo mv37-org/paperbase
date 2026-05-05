@@ -3760,8 +3760,6 @@ describe("App", () => {
 
     const previewFolderButton = screen.getByRole("button", { name: "preview" });
     expect(previewFolderButton).toBeTruthy();
-
-    fireEvent.click(previewFolderButton);
     expect(screen.queryByRole("button", { name: /first-page-top\.webp/i })).toBeNull();
 
     fireEvent.click(previewFolderButton);

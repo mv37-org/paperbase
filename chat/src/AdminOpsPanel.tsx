@@ -1077,7 +1077,7 @@ function PaperFileTreeList({
   function renderNode(node: FileTreeNode, depth: number): ReactNode {
     const paddingLeft = 8 + depth * 12;
     if (node.kind === "folder") {
-      const expanded = expandedFolders[node.path] ?? true;
+      const expanded = expandedFolders[node.path] ?? false;
       return (
         <div key={node.path} className="admin-paper-tree-folder">
           <button
@@ -2731,7 +2731,7 @@ export function AdminOpsPanel({
                             onToggleFolder={(path) =>
                               setExpandedFolders((current) => ({
                                 ...current,
-                                [path]: !(current[path] ?? true),
+                                [path]: !(current[path] ?? false),
                               }))
                             }
                             selectedFilePath={selectedFilePath}
