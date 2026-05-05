@@ -256,12 +256,7 @@ export function AdminOpsPanel({ onError, onNote }: AdminOpsPanelProps) {
   }
 
   return (
-    <section
-      className="settings-section admin-ops-section"
-      role="tabpanel"
-      id="settings-panel-admin"
-      aria-labelledby="settings-tab-admin"
-    >
+    <section className="admin-ops-section">
       <div className="settings-section-heading">
         <h3 className="settings-section-title">Admin</h3>
         <p className="settings-section-copy">

@@ -847,20 +847,10 @@ describe("App", () => {
     const categoryLabels = [
       ...document.querySelectorAll<HTMLElement>(".project-tree-category-label"),
     ].map((element) => element.textContent?.trim());
-    expect(categoryLabels).toEqual([
-      "Workflows",
-      "Experiments",
-      "Data",
-      "Notes",
-      "Sessions",
-      "Code",
-    ]);
-    expect(document.querySelectorAll(".project-tree-category-count")).toHaveLength(2);
+    expect(categoryLabels).toEqual(["Notes", "Sessions", "Code"]);
+    expect(document.querySelectorAll(".project-tree-category-count")).toHaveLength(0);
     expect(screen.getByText("Home")).toBeTruthy();
-    expect(screen.getByText("Workflows")).toBeTruthy();
-    expect(screen.getByText("Experiments")).toBeTruthy();
     expect(screen.getByText("Notes")).toBeTruthy();
-    expect(screen.getByText("Data")).toBeTruthy();
     expect(screen.getByText("Sessions")).toBeTruthy();
     expect(screen.getByText("Code")).toBeTruthy();
     expect(screen.getByLabelText("Collapse all sections in General")).toBeTruthy();
@@ -872,12 +862,12 @@ describe("App", () => {
 
     fireEvent.click(screen.getByLabelText("Collapse all sections in General"));
     expect(screen.queryByText("Recovered thread")).toBeNull();
-    expect(screen.queryByText("Workflows")).toBeNull();
+    expect(screen.queryByText("Notes")).toBeNull();
     expect(screen.queryByText("Home")).toBeNull();
     expect(screen.getByLabelText("Expand all sections in General")).toBeTruthy();
 
     fireEvent.click(screen.getByLabelText("Expand all sections in General"));
-    expect(await screen.findByText("Workflows")).toBeTruthy();
+    expect(await screen.findByText("Notes")).toBeTruthy();
     expect(await screen.findByText("Recovered thread")).toBeTruthy();
 
     fireEvent.click(screen.getByText("Home"));
@@ -2947,6 +2937,17 @@ describe("App", () => {
     await waitFor(() => {
       expect(document.querySelector("#account-menu-button")).toBeTruthy();
     });
+    expect(screen.getByRole("button", { name: "Trending papers" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Admin panel" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Trending papers" }));
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "This view is still empty. The sidebar slot is in place for the next pass.",
+        ),
+      ).toBeTruthy();
+    });
 
     fireEvent.click(document.querySelector("#account-menu-button") as HTMLElement);
     fireEvent.click(screen.getByRole("menuitem", { name: "Settings" }));
@@ -2976,23 +2977,16 @@ describe("App", () => {
     expect(screen.getByRole("radio", { name: /Dark/i })).toBeTruthy();
   });
 
-  it("shows the admin settings tab only for admin users and loads admin data", async () => {
+  it("opens the sidebar admin panel for admin users and keeps it out of settings", async () => {
     apiMocks.loadSession.mockResolvedValue(authenticatedSession({ is_admin: true }));
 
     render(<App />);
 
     await waitFor(() => {
-      expect(document.querySelector("#account-menu-button")).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Admin panel" })).toBeTruthy();
     });
 
-    fireEvent.click(document.querySelector("#account-menu-button") as HTMLElement);
-    fireEvent.click(screen.getByRole("menuitem", { name: "Settings" }));
-
-    await waitFor(() => {
-      expect(screen.getByRole("tab", { name: "Admin" })).toBeTruthy();
-    });
-
-    fireEvent.click(screen.getByRole("tab", { name: "Admin" }));
+    fireEvent.click(screen.getByRole("button", { name: "Admin panel" }));
 
     await waitFor(() => {
       expect(
@@ -3004,6 +2998,13 @@ describe("App", () => {
     });
     await waitFor(() => {
       expect(apiMocks.loadBrowserAdminPapers).toHaveBeenCalledWith("", "indexed", 50);
+    });
+
+    fireEvent.click(document.querySelector("#account-menu-button") as HTMLElement);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Settings" }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole("tab", { name: "Admin" })).toBeNull();
     });
   });
 

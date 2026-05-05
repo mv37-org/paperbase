@@ -131,17 +131,13 @@ type PaperDrawerContent =
   | { kind: "markdown"; path: string; file: FileContentResponse }
   | { kind: "figure"; path: string; figure: FigureResponse }
   | { kind: "table"; path: string; table: TableResponse };
+type WorkspacePageId = "trending_papers" | "admin_panel";
 type OpenTab =
   | { kind: "thread"; id: string }
   | { kind: "python_file"; id: string }
-  | { kind: "project_home"; id: string };
-type ProjectSidebarCategoryKey =
-  | "workflows"
-  | "experiments"
-  | "data"
-  | "notes"
-  | "sessions"
-  | "code";
+  | { kind: "project_home"; id: string }
+  | { kind: "workspace_page"; id: WorkspacePageId };
+type ProjectSidebarCategoryKey = "notes" | "sessions" | "code";
 type ProjectItemState = {
   items: ProjectItemSummary[];
   totalCount: number;
@@ -238,10 +234,10 @@ const DEFAULT_BROWSER_SETTINGS: NonNullable<BrowserSessionResponse["settings"]> 
 };
 
 type AppearanceTheme = "light" | "dark";
-type SettingsTab = "inference" | "sandbox" | "version-control" | "appearance" | "admin";
+type SettingsTab = "inference" | "sandbox" | "version-control" | "appearance";
 
 const BASE_SETTINGS_TABS: Array<{
-  id: Exclude<SettingsTab, "admin">;
+  id: SettingsTab;
   label: string;
   caption: string;
 }> = [
@@ -267,19 +263,12 @@ const BASE_SETTINGS_TABS: Array<{
   },
 ];
 
-const ADMIN_SETTINGS_TAB: { id: SettingsTab; label: string; caption: string } = {
-  id: "admin",
-  label: "Admin",
-  caption: "Queue indexing jobs and inspect stored paper artifacts.",
-};
-
 const normalizeSettingsTab = (value: string | null): SettingsTab | null => {
   if (
     value === "inference" ||
     value === "sandbox" ||
     value === "version-control" ||
-    value === "appearance" ||
-    value === "admin"
+    value === "appearance"
   ) {
     return value;
   }
@@ -304,30 +293,28 @@ const APPEARANCE_OPTIONS: Array<{
 ];
 
 const AUTHENTICATED_DARK_THEME_CLASS = "authenticated-theme-dark";
-const PROJECT_SIDEBAR_CATEGORY_KEYS: ProjectSidebarCategoryKey[] = [
-  "workflows",
-  "experiments",
-  "data",
-  "notes",
-  "sessions",
-  "code",
-];
+const PROJECT_SIDEBAR_CATEGORY_KEYS: ProjectSidebarCategoryKey[] = ["notes", "sessions", "code"];
 const PUBLIC_ASSET_CACHE_KEY = `pb-${Date.now().toString(36)}`;
 const buildProjectCategoryCollapseState = (collapsed: boolean) =>
   Object.fromEntries(PROJECT_SIDEBAR_CATEGORY_KEYS.map((key) => [key, collapsed])) as Partial<
     Record<ProjectSidebarCategoryKey, boolean>
   >;
-const PROJECT_PLACEHOLDER_CATEGORIES = [
-  { key: "workflows", label: "Workflows", asset: "workflow.svg", showCount: true },
-  { key: "experiments", label: "Experiments", asset: "experiments.svg", showCount: true },
-  { key: "data", label: "Data", asset: "data.svg", showCount: false },
-  { key: "notes", label: "Notes", asset: "notes.svg", showCount: false },
+const WORKSPACE_SIDEBAR_ITEMS = [
+  { id: "trending_papers", label: "Trending papers", asset: "docs.svg" },
+  { id: "admin_panel", label: "Admin panel", asset: "settings.svg", adminOnly: true },
 ] satisfies Array<{
-  key: ProjectSidebarCategoryKey;
+  id: WorkspacePageId;
   label: string;
   asset: string;
-  showCount: boolean;
+  adminOnly?: boolean;
 }>;
+
+function workspacePageTitle(pageId: WorkspacePageId) {
+  if (pageId === "admin_panel") {
+    return "Admin panel";
+  }
+  return "Trending papers";
+}
 
 function SettingsSectionHeading({ title, caption }: { title: string; caption: string }) {
   return (
@@ -553,6 +540,10 @@ function rememberPendingPrompt(prompt: string) {
   }
 }
 
+function isWorkspacePageId(value: string): value is WorkspacePageId {
+  return value === "trending_papers" || value === "admin_panel";
+}
+
 function restoreTabs() {
   try {
     const parsed = JSON.parse(localStorage.getItem(OPEN_TABS_KEY) ?? "[]");
@@ -570,12 +561,19 @@ function restoreTabs() {
         typeof value === "object" &&
         "kind" in value &&
         "id" in value &&
-        (value.kind === "thread" ||
-          value.kind === "python_file" ||
-          value.kind === "project_home") &&
         typeof value.id === "string"
       ) {
-        restored.push({ kind: value.kind, id: value.id });
+        if (
+          value.kind === "thread" ||
+          value.kind === "python_file" ||
+          value.kind === "project_home"
+        ) {
+          restored.push({ kind: value.kind, id: value.id });
+          continue;
+        }
+        if (value.kind === "workspace_page" && isWorkspacePageId(value.id)) {
+          restored.push({ kind: "workspace_page", id: value.id });
+        }
       }
     }
     return restored.slice(-MAX_OPEN_TABS);
@@ -1542,6 +1540,7 @@ export default function App() {
   const activeThreadId = activeTab?.kind === "thread" ? activeTab.id : null;
   const activePythonFileId = activeTab?.kind === "python_file" ? activeTab.id : null;
   const activeProjectHomeId = activeTab?.kind === "project_home" ? activeTab.id : null;
+  const activeWorkspacePageId = activeTab?.kind === "workspace_page" ? activeTab.id : null;
   const activeThread = activeThreadId ? (threadMap[activeThreadId] ?? null) : null;
   const activePythonFile = activePythonFileId ? (pythonFileMap[activePythonFileId] ?? null) : null;
   const activeProjectHome = activeProjectHomeId
@@ -1630,6 +1629,17 @@ export default function App() {
         const title = project ? `${project.name} Home` : "Project Home";
         return {
           key: `project_home:${tab.id}`,
+          kind: tab.kind,
+          id: tab.id,
+          isStreaming: false,
+          title,
+          tabTitle: truncateTabTitle(title),
+        };
+      }
+      if (tab.kind === "workspace_page") {
+        const title = workspacePageTitle(tab.id);
+        return {
+          key: `workspace_page:${tab.id}`,
           kind: tab.kind,
           id: tab.id,
           isStreaming: false,
@@ -1845,11 +1855,9 @@ export default function App() {
     };
   }, [session]);
   const sessionSettings = sessionSummary?.settings ?? DEFAULT_BROWSER_SETTINGS;
-  const settingsTabs = useMemo(
-    () =>
-      sessionSummary?.isAdmin
-        ? [...BASE_SETTINGS_TABS, ADMIN_SETTINGS_TAB]
-        : [...BASE_SETTINGS_TABS],
+  const settingsTabs = BASE_SETTINGS_TABS;
+  const workspaceSidebarItems = useMemo(
+    () => WORKSPACE_SIDEBAR_ITEMS.filter((item) => !item.adminOnly || sessionSummary?.isAdmin),
     [sessionSummary?.isAdmin],
   );
   const hasInferenceAccess = Boolean(sessionSummary?.hasOpenAIApiKey);
@@ -2641,6 +2649,14 @@ export default function App() {
     setSelectedProjectId(projectId);
   }, []);
 
+  const openWorkspacePage = useCallback((pageId: WorkspacePageId) => {
+    setOpenTabs((current) => appendOpenTab(current, { kind: "workspace_page", id: pageId }));
+    setActiveTab({ kind: "workspace_page", id: pageId });
+    setMobileSidebarOpen(false);
+    setAccountMenuOpen(false);
+    setProjectMenuProjectId(null);
+  }, []);
+
   const createNewThread = useCallback(
     async (title = "", explicitProjectId?: string) => {
       const projectId =
@@ -3191,6 +3207,10 @@ export default function App() {
             await fetchAndStoreThread(tab.id, false);
           } else if (tab.kind === "python_file") {
             await fetchAndStorePythonFile(tab.id, false);
+          } else if (tab.kind === "workspace_page") {
+            if (tab.id === "admin_panel" && !currentSession?.user?.is_admin) {
+              continue;
+            }
           } else if (!loadedProjects.some((project) => project.project_id === tab.id)) {
             continue;
           }
@@ -4754,6 +4774,28 @@ export default function App() {
               </div>
             </div>
 
+            <section className="sidebar-section sidebar-card workspace-nav-section">
+              <div className="sidebar-section-header">
+                <div className="section-label sidebar-section-label">Browse</div>
+              </div>
+              <div className="workspace-nav-list">
+                {workspaceSidebarItems.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className={`workspace-nav-item${activeWorkspacePageId === item.id ? " active" : ""}`}
+                    onClick={() => openWorkspacePage(item.id)}
+                  >
+                    <AppIcon
+                      src={staticAssetPath(item.asset)}
+                      className="workspace-nav-item-icon"
+                    />
+                    <span className="workspace-nav-item-label">{item.label}</span>
+                  </button>
+                ))}
+              </div>
+            </section>
+
             <section className="sidebar-section sidebar-card history-section">
               <div className="sidebar-section-header">
                 <div className="section-label sidebar-section-label">Projects</div>
@@ -4943,38 +4985,31 @@ export default function App() {
                             {itemState?.loaded ? (
                               <>
                                 <div className="project-tree">
-                                  {PROJECT_PLACEHOLDER_CATEGORIES.map((category) => (
-                                    <div key={category.label} className="project-tree-category">
-                                      <div className="project-tree-category-header">
-                                        <button
-                                          type="button"
-                                          className="project-tree-category-label"
-                                          aria-expanded={!collapsedCategories[category.key]}
-                                          onClick={() =>
-                                            toggleProjectCategory(project.project_id, category.key)
-                                          }
-                                        >
-                                          <span
-                                            className="project-tree-category-chevron"
-                                            aria-hidden="true"
-                                          />
-                                          <MaskedAssetIcon
-                                            asset={category.asset}
-                                            className="project-tree-category-icon"
-                                          />
-                                          <span>{category.label}</span>
-                                        </button>
-                                        {category.showCount ? (
-                                          <div className="project-tree-category-actions">
-                                            <em className="project-tree-category-count">0</em>
-                                          </div>
-                                        ) : null}
-                                      </div>
-                                      {!collapsedCategories[category.key] ? (
-                                        <div className="project-tree-empty">Empty</div>
-                                      ) : null}
+                                  <div className="project-tree-category">
+                                    <div className="project-tree-category-header">
+                                      <button
+                                        type="button"
+                                        className="project-tree-category-label"
+                                        aria-expanded={!collapsedCategories.notes}
+                                        onClick={() =>
+                                          toggleProjectCategory(project.project_id, "notes")
+                                        }
+                                      >
+                                        <span
+                                          className="project-tree-category-chevron"
+                                          aria-hidden="true"
+                                        />
+                                        <MaskedAssetIcon
+                                          asset="notes.svg"
+                                          className="project-tree-category-icon"
+                                        />
+                                        <span>Notes</span>
+                                      </button>
                                     </div>
-                                  ))}
+                                    {!collapsedCategories.notes ? (
+                                      <div className="project-tree-empty">No notes yet.</div>
+                                    ) : null}
+                                  </div>
                                   <div className="project-tree-category">
                                     <div className="project-tree-category-header">
                                       <button
@@ -5356,8 +5391,10 @@ export default function App() {
                               void handleThreadSelection(tab.id);
                             } else if (tab.kind === "python_file") {
                               void handlePythonFileSelection(tab.id);
-                            } else {
+                            } else if (tab.kind === "project_home") {
                               openProjectHome(tab.id);
+                            } else {
+                              openWorkspacePage(tab.id);
                             }
                           }
                         }}
@@ -5371,8 +5408,10 @@ export default function App() {
                               void handleThreadSelection(tab.id);
                             } else if (tab.kind === "python_file") {
                               void handlePythonFileSelection(tab.id);
-                            } else {
+                            } else if (tab.kind === "project_home") {
                               openProjectHome(tab.id);
+                            } else {
+                              openWorkspacePage(tab.id);
                             }
                           }}
                         >
@@ -5429,7 +5468,33 @@ export default function App() {
                   </div>
                 </div>
               ) : null}
-              {activeTab?.kind === "project_home" ? (
+              {activeTab?.kind === "workspace_page" ? (
+                activeTab.id === "admin_panel" ? (
+                  sessionSummary?.isAdmin ? (
+                    <div className="workspace-page workspace-page-wide">
+                      <AdminOpsPanel onError={showErrorFlash} onNote={showNoteFlash} />
+                    </div>
+                  ) : (
+                    <div className="workspace-page">
+                      <div className="workspace-page-header">
+                        <span>Admin panel</span>
+                        <h1>Admin access required</h1>
+                        <p>This area is only available to allowlisted admin accounts.</p>
+                      </div>
+                    </div>
+                  )
+                ) : (
+                  <div className="workspace-page">
+                    <div className="workspace-page-header">
+                      <span>Trending papers</span>
+                      <h1>Trending papers</h1>
+                      <p>
+                        This view is still empty. The sidebar slot is in place for the next pass.
+                      </p>
+                    </div>
+                  </div>
+                )
+              ) : activeTab?.kind === "project_home" ? (
                 activeProjectHome ? (
                   <div className="project-home-page">
                     <div className="project-home-header">
@@ -5450,14 +5515,6 @@ export default function App() {
                       </div>
                       <div className="project-home-stat">
                         <span>Notes</span>
-                        <strong>0</strong>
-                      </div>
-                      <div className="project-home-stat">
-                        <span>Data</span>
-                        <strong>0</strong>
-                      </div>
-                      <div className="project-home-stat">
-                        <span>Experiments</span>
                         <strong>0</strong>
                       </div>
                     </div>
@@ -7528,10 +7585,6 @@ export default function App() {
                       </div>
                     </form>
                   </section>
-                ) : null}
-
-                {activeSettingsTab === "admin" ? (
-                  <AdminOpsPanel onError={showErrorFlash} onNote={showNoteFlash} />
                 ) : null}
               </div>
             </div>
