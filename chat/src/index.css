@@ -5439,6 +5439,7 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
   height: 320px;
   min-height: 0;
   overflow: hidden;
+  border-bottom: 1px solid var(--line);
   background: linear-gradient(180deg, rgba(159, 178, 232, 0.08) 0%, rgba(159, 178, 232, 0) 72%);
 }
 
