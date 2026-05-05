@@ -349,6 +349,13 @@ class JobPaperORM(Base):
     updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+def _validate_job_paper_skip_reason(outcome: str, skip_reason: str | None) -> str | None:
+    normalized = (skip_reason or "").strip()
+    if outcome == "skipped" and not normalized:
+        raise ValueError("skip_reason is required when recording a skipped job paper")
+    return normalized or None
+
+
 class SearchLogORM(Base):
     """Append-only log of /v1/search calls — groundwork for the real-user-query
     benchmark in #21 and for diagnosing ranking regressions at scale.
@@ -4574,13 +4581,14 @@ class SqlAlchemyPaperRepository(PaperRepository):
         title: str | None = None,
         skip_reason: str | None = None,
     ) -> None:
+        validated_skip_reason = _validate_job_paper_skip_reason(outcome, skip_reason)
         statement = insert(JobPaperORM).values(
             job_id=job_id,
             paper_id=paper_id,
             arxiv_id=arxiv_id,
             title=title,
             outcome=outcome,
-            skip_reason=skip_reason,
+            skip_reason=validated_skip_reason,
             created_at=utcnow(),
             updated_at=utcnow(),
         )
@@ -4590,7 +4598,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 "arxiv_id": arxiv_id,
                 "title": title,
                 "outcome": outcome,
-                "skip_reason": skip_reason,
+                "skip_reason": validated_skip_reason,
                 "updated_at": utcnow(),
             },
         )
@@ -6512,6 +6520,7 @@ class MemoryPaperRepository(PaperRepository):
         title: str | None = None,
         skip_reason: str | None = None,
     ) -> None:
+        validated_skip_reason = _validate_job_paper_skip_reason(outcome, skip_reason)
         key = (job_id, paper_id)
         existing = self.job_papers.get(key)
         created_at = existing.created_at if existing is not None else utcnow()
@@ -6521,7 +6530,7 @@ class MemoryPaperRepository(PaperRepository):
             arxiv_id=arxiv_id,
             title=title,
             outcome=outcome,
-            skip_reason=skip_reason,
+            skip_reason=validated_skip_reason,
             created_at=created_at,
             updated_at=utcnow(),
         )

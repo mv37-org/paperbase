@@ -940,6 +940,17 @@ def test_index_job_records_skip_reason_for_already_indexed_paper(monkeypatch, se
     assert job_papers.papers[0].skip_reason == "already_indexed"
 
 
+def test_skipped_job_papers_require_skip_reason(service: PaperbaseService):
+    with pytest.raises(ValueError, match="skip_reason is required"):
+        service.repository.record_job_paper(
+            "job_missing_reason",
+            "arxiv:2401.77779",
+            outcome="skipped",
+            arxiv_id="2401.77779",
+            title="Skipped Without Reason",
+        )
+
+
 def test_admin_jobs_overview_counts_tracked_paper_outcomes(service: PaperbaseService):
     job = service.repository.create_job(
         "harvest_range",

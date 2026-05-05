@@ -7662,6 +7662,7 @@ class PaperbaseService:
                     "event": "index.skipped",
                     "arxiv_id": arxiv_id,
                     "paper_id": existing.paper_id,
+                    "skip_reason": "already_indexed",
                 },
             )
             return existing
