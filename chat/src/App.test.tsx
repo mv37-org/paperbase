@@ -227,6 +227,16 @@ vi.mock("echarts-for-react", () => ({
     const seriesObjects = series.filter(
       (item): item is Record<string, unknown> => Boolean(item) && typeof item === "object",
     );
+    const xAxisLabel =
+      (xAxis as Record<string, unknown>).axisLabel &&
+      typeof (xAxis as Record<string, unknown>).axisLabel === "object"
+        ? ((xAxis as Record<string, unknown>).axisLabel as Record<string, unknown>)
+        : {};
+    const xAxisTick =
+      (xAxis as Record<string, unknown>).axisTick &&
+      typeof (xAxis as Record<string, unknown>).axisTick === "object"
+        ? ((xAxis as Record<string, unknown>).axisTick as Record<string, unknown>)
+        : {};
     return (
       <div
         data-testid="admin-jobs-chart-inner"
@@ -234,14 +244,16 @@ vi.mock("echarts-for-react", () => ({
         data-grid-bottom={String((grid as Record<string, unknown>).bottom ?? "")}
         data-grid-left={String((grid as Record<string, unknown>).left ?? "")}
         data-has-data-zoom={option && "dataZoom" in option ? "true" : "false"}
-        data-x-axis-label-show={String(
-          ((xAxis as Record<string, unknown>).axisLabel as Record<string, unknown> | undefined)
-            ?.show ?? "",
+        data-x-axis-data-count={String(
+          Array.isArray((xAxis as Record<string, unknown>).data)
+            ? ((xAxis as Record<string, unknown>).data as unknown[]).length
+            : 0,
         )}
-        data-x-axis-label-interval={String(
-          ((xAxis as Record<string, unknown>).axisLabel as Record<string, unknown> | undefined)
-            ?.interval ?? "",
-        )}
+        data-x-axis-label-font-size={String(xAxisLabel.fontSize ?? "")}
+        data-x-axis-label-interval={String(xAxisLabel.interval ?? "")}
+        data-x-axis-label-show={String(xAxisLabel.show ?? "")}
+        data-x-axis-tick-show={String(xAxisTick.show ?? "")}
+        data-x-axis-tick-interval={String(xAxisTick.interval ?? "")}
         data-series-colors={seriesObjects
           .map((seriesItem) => {
             const itemStyle = seriesItem.itemStyle;
@@ -3121,7 +3133,11 @@ describe("App", () => {
       expect(chart.getAttribute("data-grid-bottom")).toBe("26");
       expect(chart.getAttribute("data-grid-left")).toBe("0");
       expect(chart.getAttribute("data-has-data-zoom")).toBe("false");
+      expect(chart.getAttribute("data-x-axis-label-font-size")).toBe("9");
       expect(chart.getAttribute("data-x-axis-label-show")).toBe("true");
+      expect(chart.getAttribute("data-x-axis-tick-show")).toBe("true");
+      expect(chart.getAttribute("data-x-axis-tick-interval")).toBe("0");
+      expect(Number(chart.getAttribute("data-x-axis-data-count"))).toBeGreaterThanOrEqual(80);
       expect(chart.getAttribute("data-series-names")).toBe("Indexed,Skipped,Failed");
       expect(chart.getAttribute("data-series-colors")).toBe("#432818,#99582a,#b42318");
       expect(chart.getAttribute("data-series-stacks")).toBe(

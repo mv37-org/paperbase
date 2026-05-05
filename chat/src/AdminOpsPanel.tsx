@@ -127,11 +127,28 @@ const DAY_MS = 24 * HOUR_MS;
 const ADMIN_JOBS_OVERVIEW_LIMIT = 200;
 const ADMIN_JOB_PAPERS_PAGE_SIZE = 100;
 const CUSTOM_TIME_RANGE_ID = "custom";
+const TARGET_TIMELINE_BUCKET_COUNT = 96;
 const TIMELINE_BUCKETS = [
-  { maxSpanMs: 2 * DAY_MS, sizeMs: 45 * 60 * 1000, label: "45-minute buckets" },
-  { maxSpanMs: 14 * DAY_MS, sizeMs: 5 * HOUR_MS, label: "5-hour buckets" },
-  { maxSpanMs: 90 * DAY_MS, sizeMs: 20 * HOUR_MS, label: "20-hour buckets" },
-  { maxSpanMs: 365 * DAY_MS, sizeMs: 6 * DAY_MS, label: "6-day buckets" },
+  { sizeMs: 60 * 1000, label: "1-minute buckets" },
+  { sizeMs: 2 * 60 * 1000, label: "2-minute buckets" },
+  { sizeMs: 5 * 60 * 1000, label: "5-minute buckets" },
+  { sizeMs: 10 * 60 * 1000, label: "10-minute buckets" },
+  { sizeMs: 15 * 60 * 1000, label: "15-minute buckets" },
+  { sizeMs: 20 * 60 * 1000, label: "20-minute buckets" },
+  { sizeMs: 30 * 60 * 1000, label: "30-minute buckets" },
+  { sizeMs: 45 * 60 * 1000, label: "45-minute buckets" },
+  { sizeMs: HOUR_MS, label: "1-hour buckets" },
+  { sizeMs: 90 * 60 * 1000, label: "90-minute buckets" },
+  { sizeMs: 2 * HOUR_MS, label: "2-hour buckets" },
+  { sizeMs: 3 * HOUR_MS, label: "3-hour buckets" },
+  { sizeMs: 4 * HOUR_MS, label: "4-hour buckets" },
+  { sizeMs: 6 * HOUR_MS, label: "6-hour buckets" },
+  { sizeMs: 8 * HOUR_MS, label: "8-hour buckets" },
+  { sizeMs: 12 * HOUR_MS, label: "12-hour buckets" },
+  { sizeMs: DAY_MS, label: "Daily buckets" },
+  { sizeMs: 2 * DAY_MS, label: "2-day buckets" },
+  { sizeMs: 3 * DAY_MS, label: "3-day buckets" },
+  { sizeMs: 6 * DAY_MS, label: "6-day buckets" },
 ];
 const INTEGER_FORMATTER = new Intl.NumberFormat("en-US");
 
@@ -541,7 +558,11 @@ function assetKind(asset: PaperAssetResponse | null) {
 }
 
 function selectTimelineBucket(spanMs: number) {
-  return TIMELINE_BUCKETS.find((bucket) => spanMs <= bucket.maxSpanMs) ?? TIMELINE_BUCKETS.at(-1)!;
+  return (
+    TIMELINE_BUCKETS.find(
+      (bucket) => Math.ceil(spanMs / bucket.sizeMs) <= TARGET_TIMELINE_BUCKET_COUNT,
+    ) ?? TIMELINE_BUCKETS.at(-1)!
+  );
 }
 
 function jobsInTimeWindow(jobs: AdminJobOverviewRow[], timeWindow: JobsTimeWindow) {
@@ -555,11 +576,14 @@ function jobsInTimeWindow(jobs: AdminJobOverviewRow[], timeWindow: JobsTimeWindo
 
 function formatTimelineAxisLabel(timestamp: number, bucketMs: number) {
   const date = new Date(timestamp);
-  const options: Intl.DateTimeFormatOptions =
-    bucketMs < DAY_MS
-      ? { month: "short", day: "numeric", hour: "2-digit" }
-      : { month: "short", day: "numeric" };
-  return date.toLocaleString([], options);
+  if (bucketMs < DAY_MS) {
+    return date.toLocaleString([], {
+      month: "numeric",
+      day: "numeric",
+      hour: "2-digit",
+    });
+  }
+  return date.toLocaleDateString([], { month: "numeric", day: "numeric" });
 }
 
 function formatTimelineTooltipLabel(timestamp: number, bucketMs: number) {
@@ -1132,7 +1156,7 @@ function JobsTimeline({
 
   const option = useMemo<EChartsOption>(() => {
     const axisLabelInterval =
-      timeline.buckets.length <= 8 ? 0 : Math.max(0, Math.ceil(timeline.buckets.length / 8) - 1);
+      timeline.buckets.length <= 16 ? 0 : Math.max(0, Math.ceil(timeline.buckets.length / 14) - 1);
 
     return {
       animation: false,
@@ -1183,12 +1207,19 @@ function JobsTimeline({
         data: timeline.buckets.map((bucket) => bucket.axisLabel),
         boundaryGap: true,
         axisLine: { show: true, lineStyle: { color: theme.line } },
-        axisTick: { show: false },
+        axisTick: {
+          show: true,
+          alignWithLabel: true,
+          interval: 0,
+          length: 3,
+          lineStyle: { color: theme.line },
+        },
         axisLabel: {
           color: theme.axisText,
+          fontSize: 9,
           hideOverlap: true,
           show: true,
-          margin: 10,
+          margin: 6,
           interval: axisLabelInterval,
         },
       },
