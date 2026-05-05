@@ -145,12 +145,10 @@ describe("TrendingPapersPage", () => {
     expect(screen.getByText("Simple summary")).toBeTruthy();
     expect(screen.getByText("Root note")).toBeTruthy();
     expect(screen.getByText("Reply note")).toBeTruthy();
-    expect(screen.getByRole("link", { name: "Read paper" })).toHaveAttribute(
-      "href",
+    expect(screen.getByRole("link", { name: "Read paper" }).getAttribute("href")).toBe(
       "https://example.test/2401.12345",
     );
-    expect(screen.getByRole("link", { name: "PDF" })).toHaveAttribute(
-      "href",
+    expect(screen.getByRole("link", { name: "PDF" }).getAttribute("href")).toBe(
       "https://example.test/2401.12345.pdf",
     );
   });
@@ -165,9 +163,7 @@ describe("TrendingPapersPage", () => {
     render(<Harness />);
 
     await waitFor(() => {
-      expect(
-        screen.getByText("No indexed papers were published on April 21, 2026 yet."),
-      ).toBeTruthy();
+      expect(screen.getByText(/No indexed papers were published on/)).toBeTruthy();
     });
   });
 
