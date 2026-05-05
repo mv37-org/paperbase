@@ -3062,6 +3062,29 @@ describe("App", () => {
     });
   });
 
+  it("shows an empty jobs table when the admin panel has no jobs", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession({ is_admin: true }));
+    apiMocks.loadBrowserAdminJobsOverview.mockResolvedValue({
+      jobs: [],
+      worker: null,
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Admin panel" })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Admin panel" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Jobs" })).toBeTruthy();
+    });
+    const table = screen.getByRole("table");
+    expect(within(table).getByRole("columnheader", { name: "Type" })).toBeTruthy();
+    expect(within(table).getByText("No jobs yet.")).toBeTruthy();
+  });
+
   it("applies dark mode only after saving the appearance setting", async () => {
     apiMocks.loadSession.mockResolvedValue(
       authenticatedSession({

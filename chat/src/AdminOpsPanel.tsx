@@ -531,11 +531,7 @@ export function AdminOpsPanel({
 
           {jobsError ? <div className="admin-jobs-inline-error">{jobsError}</div> : null}
           {jobsLoading ? <div className="admin-jobs-empty">Loading jobs...</div> : null}
-          {!jobsLoading && jobs.length === 0 ? (
-            <div className="admin-jobs-empty">No jobs yet.</div>
-          ) : null}
-
-          {!jobsLoading && jobs.length > 0 ? (
+          {!jobsLoading ? (
             <div className="admin-jobs-table-shell">
               <table className="admin-jobs-table">
                 <thead>
@@ -548,72 +544,80 @@ export function AdminOpsPanel({
                   </tr>
                 </thead>
                 <tbody>
-                  {jobs.map((job) => {
-                    const expanded = Boolean(expandedJobIds[job.job_id]);
-                    const detailPairs = detailRows(job);
-                    return (
-                      <FragmentRow key={job.job_id}>
-                        <tr className="admin-jobs-row">
-                          <td>
-                            <button
-                              type="button"
-                              className="admin-jobs-expand"
-                              onClick={() =>
-                                setExpandedJobIds((current) => ({
-                                  ...current,
-                                  [job.job_id]: !current[job.job_id],
-                                }))
-                              }
-                              aria-expanded={expanded}
-                            >
-                              <span>{expanded ? "−" : "+"}</span>
-                              <span>{jobTypeLabel(job.job_type)}</span>
-                            </button>
-                          </td>
-                          <td>
-                            <code>{job.job_id}</code>
-                          </td>
-                          <td>
-                            <span className={`admin-jobs-status status-${job.display_status}`}>
-                              {statusLabel(job.display_status)}
-                            </span>
-                          </td>
-                          <td>
-                            {job.tracking_available ? (
+                  {jobs.length === 0 ? (
+                    <tr className="admin-jobs-empty-row">
+                      <td colSpan={5}>
+                        <div className="admin-jobs-empty">No jobs yet.</div>
+                      </td>
+                    </tr>
+                  ) : (
+                    jobs.map((job) => {
+                      const expanded = Boolean(expandedJobIds[job.job_id]);
+                      const detailPairs = detailRows(job);
+                      return (
+                        <FragmentRow key={job.job_id}>
+                          <tr className="admin-jobs-row">
+                            <td>
                               <button
                                 type="button"
-                                className="admin-jobs-link-button"
-                                onClick={() => onOpenJobPapers(job.root_job_id)}
+                                className="admin-jobs-expand"
+                                onClick={() =>
+                                  setExpandedJobIds((current) => ({
+                                    ...current,
+                                    [job.job_id]: !current[job.job_id],
+                                  }))
+                                }
+                                aria-expanded={expanded}
                               >
-                                {job.indexed_paper_count ?? 0}
+                                <span>{expanded ? "−" : "+"}</span>
+                                <span>{jobTypeLabel(job.job_type)}</span>
                               </button>
-                            ) : (
-                              <span>—</span>
-                            )}
-                          </td>
-                          <td>{formatTimestamp(job.updated_at)}</td>
-                        </tr>
-                        {expanded ? (
-                          <tr className="admin-jobs-expanded-row">
-                            <td colSpan={5}>
-                              <div className="admin-jobs-expanded">
-                                <div>Latest status: {job.latest_status_summary}</div>
-                                {job.error ? <div>Error: {job.error}</div> : null}
-                                {detailPairs.map(([label, value]) => (
-                                  <div key={label}>
-                                    {label}: {value}
-                                  </div>
-                                ))}
-                                {job.child_job_count > 0 ? (
-                                  <div>Sub-jobs: {job.child_job_count}</div>
-                                ) : null}
-                              </div>
                             </td>
+                            <td>
+                              <code>{job.job_id}</code>
+                            </td>
+                            <td>
+                              <span className={`admin-jobs-status status-${job.display_status}`}>
+                                {statusLabel(job.display_status)}
+                              </span>
+                            </td>
+                            <td>
+                              {job.tracking_available ? (
+                                <button
+                                  type="button"
+                                  className="admin-jobs-link-button"
+                                  onClick={() => onOpenJobPapers(job.root_job_id)}
+                                >
+                                  {job.indexed_paper_count ?? 0}
+                                </button>
+                              ) : (
+                                <span>—</span>
+                              )}
+                            </td>
+                            <td>{formatTimestamp(job.updated_at)}</td>
                           </tr>
-                        ) : null}
-                      </FragmentRow>
-                    );
-                  })}
+                          {expanded ? (
+                            <tr className="admin-jobs-expanded-row">
+                              <td colSpan={5}>
+                                <div className="admin-jobs-expanded">
+                                  <div>Latest status: {job.latest_status_summary}</div>
+                                  {job.error ? <div>Error: {job.error}</div> : null}
+                                  {detailPairs.map(([label, value]) => (
+                                    <div key={label}>
+                                      {label}: {value}
+                                    </div>
+                                  ))}
+                                  {job.child_job_count > 0 ? (
+                                    <div>Sub-jobs: {job.child_job_count}</div>
+                                  ) : null}
+                                </div>
+                              </td>
+                            </tr>
+                          ) : null}
+                        </FragmentRow>
+                      );
+                    })
+                  )}
                 </tbody>
               </table>
             </div>

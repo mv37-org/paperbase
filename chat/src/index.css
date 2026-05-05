@@ -5151,6 +5151,10 @@ textarea {
   text-transform: uppercase;
 }
 
+.admin-jobs-empty-row td {
+  text-align: center;
+}
+
 .admin-jobs-row {
   transition: background 140ms ease;
 }
