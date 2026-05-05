@@ -2444,7 +2444,9 @@ def test_project_chat_tools_are_advertised_for_coding_turns(browser_service):
         include_project_code_tools=True,
     )
     assert "Once the tool results are sufficient, stop calling tools and answer directly in the same turn." in prompt
-    assert "Use them only when paper evidence" in prompt
+    assert "First judge whether the user's request is within Paperbase scope" in prompt
+    assert "For AI, ML, agent, evaluation, architecture, algorithm, or implementation-code requests" in prompt
+    assert "search for relevant papers or uploaded evidence before settling the implementation approach" in prompt
     assert "Operate like a coding agent." in prompt
     assert "Project workspace tools operate on the current project's repo-relative text files." in prompt
     assert "Generated runnable code should support smoke-scale validation when practical." in prompt
@@ -3804,7 +3806,7 @@ def test_browser_uploads_and_chat_require_api_key_before_first_turn(monkeypatch,
     app.dependency_overrides.clear()
 
 
-def test_non_grounded_chat_can_use_tools_without_forcing_research_posture(browser_service):
+def test_off_topic_chat_prompt_redirects_without_forcing_research_posture(browser_service):
     service, _, chat_model = browser_service
     session, _ = service.register_browser_user(
         SignupRequest(email="casual@example.com", password="topsecret123", display_name="Casual User")
@@ -3831,9 +3833,8 @@ def test_non_grounded_chat_can_use_tools_without_forcing_research_posture(browse
     }
     assert "paperbase_search_sections" in first_tool_names
     assert "paperbase_search_uploaded_sections" in first_tool_names
-    assert "For casual or non-evidence turns, answer directly when tools are unnecessary." in str(
-        first_call["system_prompt"]
-    )
+    assert "If the request is outside Paperbase scope, politely redirect the user back" in str(first_call["system_prompt"])
+    assert "do not call tools just to answer an off-topic request" in str(first_call["system_prompt"])
     assert "Every tool-enabled turn must begin by leveraging these research tools" not in str(
         first_call["system_prompt"]
     )
