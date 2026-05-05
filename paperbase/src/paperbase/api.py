@@ -723,7 +723,6 @@ def browser_get_trending_paper(
 @app.get("/v1/browser/trending/papers/{paper_id}/preview/content")
 def browser_get_trending_paper_preview_content(
     paper_id: str,
-    response: Response,
     service: PaperbaseService = Depends(get_service),
 ) -> Response:
     payload, content_type = service.get_browser_trending_paper_preview_content(paper_id)

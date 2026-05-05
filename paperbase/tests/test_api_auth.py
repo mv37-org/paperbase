@@ -41,9 +41,11 @@ from paperbase.models import (
     GitHubRepoMetadataResponse,
     GitHubRepoSummary,
     JobResponse,
+    PaperCommentsResponse,
     PaperAssetResponse,
     PaperPreviewResponse,
     PaperResponse,
+    PaperVoteSummary,
     ProjectItemPageResponse,
     ProjectItemSummary,
     ProjectListResponse,
@@ -54,6 +56,8 @@ from paperbase.models import (
     ResultSetResponse,
     RunPythonFileResponse,
     SearchPaperResult,
+    TrendingFeedResponse,
+    TrendingPaperDetailResponse,
     UploadListResponse,
 )
 from paperbase.security import csrf_token_for_session
@@ -259,6 +263,99 @@ class StubApiService:
     ) -> list[PaperResponse]:
         self.calls.append(("list_papers", (query, index_status, limit)))
         return [_paper("2401.54321")]
+
+    def list_browser_trending_papers(
+        self,
+        *,
+        date: str,
+        sort: str,
+        viewer: BrowserUser | None = None,
+    ) -> TrendingFeedResponse:
+        self.calls.append(("list_browser_trending_papers", (date, sort, viewer.user_id if viewer else None)))
+        paper = _paper("2401.54321")
+        return TrendingFeedResponse(
+            date=date,
+            sort=sort,  # type: ignore[arg-type]
+            papers=[
+                {
+                    "paper_id": paper.paper_id,
+                    "arxiv_id": paper.arxiv_id,
+                    "title": paper.title,
+                    "authors": paper.authors,
+                    "published": paper.published,
+                    "html_url": paper.html_url,
+                    "pdf_url": paper.pdf_url,
+                    "image_url": "/v1/browser/trending/papers/arxiv%3A2401.54321/preview/content",
+                    "upvote_count": 7,
+                    "viewer_has_upvoted": viewer is not None,
+                }
+            ],
+        )
+
+    def get_browser_trending_paper(
+        self,
+        paper_id: str,
+        *,
+        viewer: BrowserUser | None = None,
+    ) -> TrendingPaperDetailResponse:
+        self.calls.append(("get_browser_trending_paper", (paper_id, viewer.user_id if viewer else None)))
+        paper = _paper("2401.54321")
+        return TrendingPaperDetailResponse(
+            paper_id=paper.paper_id,
+            arxiv_id=paper.arxiv_id,
+            title=paper.title,
+            authors=paper.authors,
+            published=paper.published,
+            primary_category=paper.primary_category,
+            categories=paper.categories,
+            summary_eli5=paper.summary_eli5,
+            html_url=paper.html_url,
+            pdf_url=paper.pdf_url,
+            image_url="/v1/browser/trending/papers/arxiv%3A2401.54321/preview/content",
+            upvote_count=7,
+            viewer_has_upvoted=viewer is not None,
+            comments=[],
+        )
+
+    def get_browser_trending_paper_preview_content(self, paper_id: str) -> tuple[bytes, str]:
+        self.calls.append(("get_browser_trending_paper_preview_content", paper_id))
+        return (b"trending-preview-bytes", "image/webp")
+
+    def set_browser_trending_paper_upvote(
+        self,
+        paper_id: str,
+        *,
+        user: BrowserUser,
+        upvoted: bool,
+    ) -> PaperVoteSummary:
+        self.calls.append(("set_browser_trending_paper_upvote", (paper_id, user.user_id, upvoted)))
+        return PaperVoteSummary(paper_id=paper_id, upvote_count=8 if upvoted else 7, viewer_has_upvoted=upvoted)
+
+    def create_browser_trending_paper_comment(
+        self,
+        paper_id: str,
+        *,
+        user: BrowserUser,
+        request,
+    ) -> PaperCommentsResponse:
+        self.calls.append(
+            ("create_browser_trending_paper_comment", (paper_id, user.user_id, request.body, request.parent_comment_id))
+        )
+        return PaperCommentsResponse(
+            paper_id=paper_id,
+            comments=[
+                {
+                    "comment_id": "pcmt_1",
+                    "paper_id": paper_id,
+                    "parent_comment_id": None,
+                    "author": {"user_id": user.user_id, "display_name": user.display_name},
+                    "body": request.body,
+                    "created_at": NOW,
+                    "updated_at": NOW,
+                    "replies": [],
+                }
+            ],
+        )
 
     def get_paper_preview(self, paper_id: str) -> PaperPreviewResponse:
         self.calls.append(("get_paper_preview", paper_id))
@@ -1636,6 +1733,82 @@ def test_home_route_returns_no_store_cache_headers(api_client, monkeypatch, tmp_
     assert response.headers["Cache-Control"] == "no-store"
     assert response.headers["Pragma"] == "no-cache"
     assert 'window.API="http://testserver"' in response.text
+
+
+def test_browser_trending_feed_is_public(api_client):
+    client, service, _ = api_client
+
+    response = client.get("/v1/browser/trending?date=2026-04-21&sort=upvotes")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["date"] == "2026-04-21"
+    assert payload["sort"] == "upvotes"
+    assert payload["papers"][0]["paper_id"] == "arxiv:2401.54321"
+    assert ("list_browser_trending_papers", ("2026-04-21", "upvotes", None)) in service.calls
+
+
+def test_browser_trending_detail_is_public(api_client):
+    client, service, _ = api_client
+
+    response = client.get("/v1/browser/trending/papers/arxiv:2401.54321")
+
+    assert response.status_code == 200
+    assert response.json()["paper_id"] == "arxiv:2401.54321"
+    assert ("get_browser_trending_paper", ("arxiv:2401.54321", None)) in service.calls
+
+
+def test_browser_trending_preview_content_is_public_and_no_store(api_client):
+    client, service, _ = api_client
+
+    response = client.get("/v1/browser/trending/papers/arxiv:2401.54321/preview/content")
+
+    assert response.status_code == 200
+    assert response.content == b"trending-preview-bytes"
+    assert response.headers["Cache-Control"] == "no-store"
+    assert ("get_browser_trending_paper_preview_content", "arxiv:2401.54321") in service.calls
+
+
+def test_browser_trending_upvote_requires_session_and_csrf(api_client):
+    client, _, settings = api_client
+
+    unauthenticated = client.put("/v1/browser/trending/papers/arxiv:2401.54321/upvote")
+
+    client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
+    missing_csrf = client.put("/v1/browser/trending/papers/arxiv:2401.54321/upvote")
+
+    assert unauthenticated.status_code == 401
+    assert missing_csrf.status_code == 403
+
+
+def test_browser_trending_upvote_and_comment_write_routes_use_authenticated_browser_user(api_client):
+    client, service, settings = api_client
+    client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
+    csrf = csrf_token_for_session("browser-session-token", settings)
+    headers = {
+        "Origin": settings.browser_origin,
+        "X-Paperbase-CSRF": csrf,
+    }
+
+    upvote = client.put("/v1/browser/trending/papers/arxiv:2401.54321/upvote", headers=headers)
+    comment = client.post(
+        "/v1/browser/trending/papers/arxiv:2401.54321/comments",
+        headers=headers,
+        json={"body": "Useful paper", "parent_comment_id": None},
+    )
+
+    assert upvote.status_code == 200
+    assert upvote.json()["viewer_has_upvoted"] is True
+    assert comment.status_code == 200
+    assert comment.json()["comments"][0]["body"] == "Useful paper"
+    assert (
+        "set_browser_trending_paper_upvote",
+        ("arxiv:2401.54321", "user_1", True),
+    ) in service.calls
+    assert (
+        "create_browser_trending_paper_comment",
+        ("arxiv:2401.54321", "user_1", "Useful paper", None),
+    ) in service.calls
 
 
 def test_browser_preview_route_returns_signed_url_and_no_store_cache(api_client):

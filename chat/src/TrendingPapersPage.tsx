@@ -285,6 +285,8 @@ export function TrendingPapersPage({
         : await upvoteBrowserTrendingPaper(paperId);
       setFeed((current) => applyVoteToFeed(current, paperId, summary));
       setDetail((current) => applyVoteToDetail(current, paperId, summary));
+    } catch (error) {
+      console.error(error);
     } finally {
       setVotePendingPaperId(null);
     }
@@ -324,6 +326,8 @@ export function TrendingPapersPage({
       } else {
         setCommentDraft("");
       }
+    } catch (error) {
+      console.error(error);
     } finally {
       setCommentSubmittingTarget(null);
     }

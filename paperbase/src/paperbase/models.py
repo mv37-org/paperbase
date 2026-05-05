@@ -129,6 +129,9 @@ class CreatePaperCommentRequest(BaseModel):
     parent_comment_id: str | None = None
 
 
+PaperCommentResponse.model_rebuild()
+
+
 class SearchRequest(BaseModel):
     query: str
     limit: int = Field(default=20, ge=1, le=100)
