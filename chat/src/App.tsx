@@ -2686,30 +2686,36 @@ export default function App() {
     setSelectedProjectId(projectId);
   }, []);
 
-  const openWorkspacePage = useCallback((pageId: "trending" | "admin_jobs") => {
-    if (pageId === "trending") {
-      updateTrendingBrowseState({
-        date: trendingBrowseState?.date ?? localDateString(),
-        sort: trendingBrowseState?.sort ?? "default",
-        paperId: trendingBrowseState?.paperId ?? null,
-      });
-      setWorkspaceView({ kind: "trending" });
-    } else {
-      updateTrendingBrowseState(null);
-      setWorkspaceView({ kind: "admin_jobs" });
-    }
-    setMobileSidebarOpen(false);
-    setAccountMenuOpen(false);
-    setProjectMenuProjectId(null);
-  }, [trendingBrowseState, updateTrendingBrowseState]);
+  const openWorkspacePage = useCallback(
+    (pageId: "trending" | "admin_jobs") => {
+      if (pageId === "trending") {
+        updateTrendingBrowseState({
+          date: trendingBrowseState?.date ?? localDateString(),
+          sort: trendingBrowseState?.sort ?? "default",
+          paperId: trendingBrowseState?.paperId ?? null,
+        });
+        setWorkspaceView({ kind: "trending" });
+      } else {
+        updateTrendingBrowseState(null);
+        setWorkspaceView({ kind: "admin_jobs" });
+      }
+      setMobileSidebarOpen(false);
+      setAccountMenuOpen(false);
+      setProjectMenuProjectId(null);
+    },
+    [trendingBrowseState, updateTrendingBrowseState],
+  );
 
-  const openAdminJobPapers = useCallback((rootJobId: string) => {
-    updateTrendingBrowseState(null);
-    setWorkspaceView({ kind: "admin_job_papers", rootJobId });
-    setMobileSidebarOpen(false);
-    setAccountMenuOpen(false);
-    setProjectMenuProjectId(null);
-  }, [updateTrendingBrowseState]);
+  const openAdminJobPapers = useCallback(
+    (rootJobId: string) => {
+      updateTrendingBrowseState(null);
+      setWorkspaceView({ kind: "admin_job_papers", rootJobId });
+      setMobileSidebarOpen(false);
+      setAccountMenuOpen(false);
+      setProjectMenuProjectId(null);
+    },
+    [updateTrendingBrowseState],
+  );
 
   const createNewThread = useCallback(
     async (title = "", explicitProjectId?: string) => {
@@ -3286,6 +3292,13 @@ export default function App() {
         return;
       }
 
+      const initialTrendingBrowseState = trendingBrowseStateFromUrl();
+      if (initialTrendingBrowseState) {
+        setTrendingBrowseState(initialTrendingBrowseState);
+        setWorkspaceView({ kind: "trending" });
+        return;
+      }
+
       const firstOpen = validRestoredTabs[0];
       if (firstOpen) {
         setActiveTab(firstOpen);
@@ -3455,6 +3468,14 @@ export default function App() {
     },
     [openAuthModal],
   );
+
+  const openTrendingFromLanding = useCallback(() => {
+    updateTrendingBrowseState({
+      date: trendingBrowseState?.date ?? localDateString(),
+      sort: trendingBrowseState?.sort ?? "default",
+      paperId: trendingBrowseState?.paperId ?? null,
+    });
+  }, [trendingBrowseState, updateTrendingBrowseState]);
 
   const handleUpload = useCallback(
     async (file: File) => {
@@ -4702,68 +4723,110 @@ export default function App() {
   return (
     <>
       {!authenticated ? (
-        <main id="landing-page" className="landing-page">
-          <button
-            id="landing-login-button"
-            className="landing-login-button"
-            type="button"
-            onClick={() => openAuthModal("login")}
-          >
-            <span className="landing-login-icon" aria-hidden="true">
-              <AppIcon src={staticAssetPath("login.svg")} className="landing-login-icon-image" />
-            </span>
-            <span className="landing-login-label">Log in</span>
-          </button>
-          <div className="landing-column">
-            <a
-              className="brandline brandline-link"
-              href="https://mv37.org"
-              target="_blank"
-              rel="noreferrer"
+        trendingBrowseState ? (
+          <main id="landing-page" className="landing-page landing-page-trending">
+            <button
+              id="landing-login-button"
+              className="landing-login-button"
+              type="button"
+              onClick={() => openAuthModal("login")}
             >
-              MV37
-            </a>
-            <h1 className="landing-title">Paperbase</h1>
-            <p className="landing-subtitle">
-              Research patterns for building better AI agents and systems.
-            </p>
-            <div className="landing-copy">
-              <p>
-                Paperbase helps AI researchers and agent builders keep up with fast-moving work
-                without losing track of the original sources, so they can ask broad questions,
-                compare ideas across papers, and pull out the design patterns that matter when
-                building agents and AI systems.
-              </p>
+              <span className="landing-login-icon" aria-hidden="true">
+                <AppIcon src={staticAssetPath("login.svg")} className="landing-login-icon-image" />
+              </span>
+              <span className="landing-login-label">Log in</span>
+            </button>
+            <div className="landing-column landing-column-wide">
+              <a
+                className="brandline brandline-link"
+                href="https://mv37.org"
+                target="_blank"
+                rel="noreferrer"
+              >
+                MV37
+              </a>
+              <TrendingPapersPage
+                variant="public"
+                authenticated={false}
+                browseState={trendingBrowseState}
+                onChangeBrowseState={updateTrendingBrowseState}
+                onRequireAuth={() => openAuthModal("login")}
+              />
             </div>
-            <LandingMentionEditor
-              attachButtonId="landing-upload-trigger"
-              onAttach={() => openAuthModal("login")}
-              onChange={setLandingPrompt}
-              onSubmit={() => void handleLandingSubmit()}
-              searchPapers={suggestBrowserPapers}
-              submitButtonId="landing-start-button"
-              submitLabel="Start"
-              value={landingPrompt}
-            />
-
-            <section className="examples">
-              <div className="section-label">Examples</div>
-              <div className="example-list">
-                {EXAMPLES.map((example) => (
-                  <button
-                    key={example.label}
-                    type="button"
-                    className="example-pill"
-                    onClick={() => void handleExample(example.prompt)}
-                  >
-                    <span className="example-title">{example.label}</span>
-                    <span className="example-description">{example.description}</span>
-                  </button>
-                ))}
+          </main>
+        ) : (
+          <main id="landing-page" className="landing-page">
+            <button
+              id="landing-login-button"
+              className="landing-login-button"
+              type="button"
+              onClick={() => openAuthModal("login")}
+            >
+              <span className="landing-login-icon" aria-hidden="true">
+                <AppIcon src={staticAssetPath("login.svg")} className="landing-login-icon-image" />
+              </span>
+              <span className="landing-login-label">Log in</span>
+            </button>
+            <div className="landing-column">
+              <a
+                className="brandline brandline-link"
+                href="https://mv37.org"
+                target="_blank"
+                rel="noreferrer"
+              >
+                MV37
+              </a>
+              <h1 className="landing-title">Paperbase</h1>
+              <p className="landing-subtitle">
+                Research patterns for building better AI agents and systems.
+              </p>
+              <div className="landing-copy">
+                <p>
+                  Paperbase helps AI researchers and agent builders keep up with fast-moving work
+                  without losing track of the original sources, so they can ask broad questions,
+                  compare ideas across papers, and pull out the design patterns that matter when
+                  building agents and AI systems.
+                </p>
               </div>
-            </section>
-          </div>
-        </main>
+              <div className="landing-browse-row">
+                <button
+                  type="button"
+                  className="landing-browse-button"
+                  onClick={openTrendingFromLanding}
+                >
+                  Browse trending papers
+                </button>
+              </div>
+              <LandingMentionEditor
+                attachButtonId="landing-upload-trigger"
+                onAttach={() => openAuthModal("login")}
+                onChange={setLandingPrompt}
+                onSubmit={() => void handleLandingSubmit()}
+                searchPapers={suggestBrowserPapers}
+                submitButtonId="landing-start-button"
+                submitLabel="Start"
+                value={landingPrompt}
+              />
+
+              <section className="examples">
+                <div className="section-label">Examples</div>
+                <div className="example-list">
+                  {EXAMPLES.map((example) => (
+                    <button
+                      key={example.label}
+                      type="button"
+                      className="example-pill"
+                      onClick={() => void handleExample(example.prompt)}
+                    >
+                      <span className="example-title">{example.label}</span>
+                      <span className="example-description">{example.description}</span>
+                    </button>
+                  ))}
+                </div>
+              </section>
+            </div>
+          </main>
+        )
       ) : null}
 
       {authenticated ? (
@@ -5516,14 +5579,20 @@ export default function App() {
               ) : null}
               {workspaceView ? (
                 workspaceView.kind === "trending" ? (
-                  <div className="workspace-page">
-                    <div className="workspace-page-header">
-                      <span>Trending papers</span>
-                      <h1>Trending papers</h1>
-                      <p>
-                        This view is still empty. The sidebar slot is in place for the next pass.
-                      </p>
-                    </div>
+                  <div className="workspace-page workspace-page-wide">
+                    <TrendingPapersPage
+                      variant="workspace"
+                      authenticated={authenticated}
+                      browseState={
+                        trendingBrowseState ?? {
+                          date: localDateString(),
+                          sort: "default",
+                          paperId: null,
+                        }
+                      }
+                      onChangeBrowseState={(nextState) => updateTrendingBrowseState(nextState)}
+                      onRequireAuth={() => openAuthModal("login")}
+                    />
                   </div>
                 ) : sessionSummary?.isAdmin ? (
                   <div className="workspace-page workspace-page-admin">
