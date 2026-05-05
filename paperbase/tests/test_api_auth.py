@@ -310,6 +310,14 @@ class StubApiService:
             return None
         return _job("index_paper", payload={"job_id": job_id, "retried": True})
 
+    def cancel_job(self, job_id: str):
+        self.calls.append(("cancel_job", job_id))
+        if job_id == "job_nonexistent":
+            return None
+        return _job("index_paper", payload={"job_id": job_id, "canceled": True}).model_copy(
+            update={"status": "canceled", "effective_status": "canceled"}
+        )
+
     def record_search_click(self, query_id: str, paper_id: str) -> bool:
         self.calls.append(("record_search_click", (query_id, paper_id)))
         return query_id == "qry_known"
@@ -1417,6 +1425,28 @@ def test_retry_job_endpoint_returns_404_for_unknown_job(api_client):
 
     assert response.status_code == 404
     assert ("retry_dead_job", "job_nonexistent") in service.calls
+
+
+def test_cancel_job_endpoint_delegates_to_service(api_client):
+    client, service, settings = api_client
+    headers = {"Authorization": f"Bearer {settings.api_key}"}
+
+    response = client.post("/v1/jobs/job_running_1/cancel", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["effective_status"] == "canceled"
+    assert response.json()["payload"]["canceled"] is True
+    assert ("cancel_job", "job_running_1") in service.calls
+
+
+def test_cancel_job_endpoint_returns_404_for_unknown_job(api_client):
+    client, service, settings = api_client
+    headers = {"Authorization": f"Bearer {settings.api_key}"}
+
+    response = client.post("/v1/jobs/job_nonexistent/cancel", headers=headers)
+
+    assert response.status_code == 404
+    assert ("cancel_job", "job_nonexistent") in service.calls
 
 
 def test_browser_preview_route_returns_signed_url_and_no_store_cache(api_client):

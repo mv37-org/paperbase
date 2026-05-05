@@ -349,15 +349,53 @@ def default_priority(job_type: str) -> int:
     return _JOB_TYPE_PRIORITY.get(job_type, 0)
 
 
+JOB_LEASE_SECONDS = 600
+
+
+def _lease_expires_at(*, now: Any | None = None, lease_seconds: int = JOB_LEASE_SECONDS) -> Any:
+    return (now or utcnow()) + timedelta(seconds=lease_seconds)
+
+
+def _effective_job_status(
+    *,
+    status: str,
+    lease_expires_at: Any | None = None,
+    cancel_requested_at: Any | None = None,
+    now: Any | None = None,
+) -> str:
+    if status != "running":
+        return status
+    if lease_expires_at is None:
+        return "stalled"
+    if lease_expires_at <= (now or utcnow()):
+        return "stalled"
+    if cancel_requested_at is not None:
+        return "canceling"
+    return "running"
+
+
+def _job_response_with_effective_status(job: JobResponse, *, now: Any | None = None) -> JobResponse:
+    return job.model_copy(
+        update={
+            "effective_status": _effective_job_status(
+                status=job.status,
+                lease_expires_at=job.lease_expires_at,
+                cancel_requested_at=job.cancel_requested_at,
+                now=now or utcnow(),
+            )
+        }
+    )
+
+
 class JobORM(Base):
     __tablename__ = "jobs"
 
     job_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     job_type: Mapped[str] = mapped_column(String(64), index=True)
     dedupe_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    # `pending`, `running`, `completed`, or `dead`. The old `failed` terminal
-    # status still shows up on rows written before #32; admin retry still
-    # accepts those rows for compatibility.
+    # `pending`, `running`, `completed`, `dead`, or `canceled`. The old
+    # `failed` terminal status still shows up on rows written before #32;
+    # admin retry still accepts those rows for compatibility.
     status: Mapped[str] = mapped_column(String(32), index=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -367,6 +405,15 @@ class JobORM(Base):
     # schedule the next attempt after backoff.
     next_run_at: Mapped[Any | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     last_attempted_at: Mapped[Any | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Running jobs are leased by exactly one worker claim. A live heartbeat
+    # extends the lease; if the timestamp expires, the authoritative
+    # UI-facing state becomes `stalled` even though the raw DB status remains
+    # `running` for compatibility.
+    worker_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_token: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    heartbeat_at: Mapped[Any | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_expires_at: Mapped[Any | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    cancel_requested_at: Mapped[Any | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Claim ordering: smaller = higher priority. Default 0 keeps legacy rows
     # behaving like everything else; new bulk-harvest jobs set a higher value
     # so they can't starve interactive on-demand work.
@@ -1420,15 +1467,50 @@ class PaperRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def claim_pending_job(self) -> JobResponse | None:
+    def claim_pending_job(
+        self,
+        *,
+        worker_id: str | None = None,
+        lease_seconds: int = JOB_LEASE_SECONDS,
+    ) -> JobResponse | None:
         raise NotImplementedError
 
     @abstractmethod
-    def mark_job_running(self, job_id: str) -> None:
+    def heartbeat_job(
+        self,
+        job_id: str,
+        *,
+        lease_token: str,
+        worker_id: str | None = None,
+        lease_seconds: int = JOB_LEASE_SECONDS,
+    ) -> JobResponse | None:
         raise NotImplementedError
 
     @abstractmethod
-    def mark_job_completed(self, job_id: str) -> None:
+    def is_job_cancel_requested(self, job_id: str, *, lease_token: str | None = None) -> bool:
+        raise NotImplementedError
+
+    @abstractmethod
+    def cancel_job(self, job_id: str) -> JobResponse | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def mark_job_running(
+        self,
+        job_id: str,
+        *,
+        lease_token: str | None = None,
+        worker_id: str | None = None,
+        lease_seconds: int = JOB_LEASE_SECONDS,
+    ) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def mark_job_completed(self, job_id: str, *, lease_token: str | None = None) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def mark_job_canceled(self, job_id: str, *, lease_token: str | None = None) -> None:
         raise NotImplementedError
 
     @abstractmethod
@@ -1439,6 +1521,7 @@ class PaperRepository(ABC):
         *,
         permanent: bool = False,
         next_run_at: Any | None = None,
+        lease_token: str | None = None,
     ) -> None:
         raise NotImplementedError
 
@@ -1625,6 +1708,21 @@ class SqlAlchemyPaperRepository(PaperRepository):
             connection.execute(
                 text("ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS dedupe_key VARCHAR(512)")
             )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS worker_id VARCHAR(128)")
+            )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS lease_token VARCHAR(128)")
+            )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ")
+            )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ")
+            )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS cancel_requested_at TIMESTAMPTZ")
+            )
             # Indexes on next_run_at (#32) and priority (#33) go in the
             # post-create_all block below — on a fresh CI DB the `jobs` table
             # doesn't exist yet when ALTERs run, and CREATE INDEX (unlike
@@ -1801,6 +1899,9 @@ class SqlAlchemyPaperRepository(PaperRepository):
             )
             connection.execute(
                 text("CREATE INDEX IF NOT EXISTS jobs_priority ON jobs (priority)")
+            )
+            connection.execute(
+                text("CREATE INDEX IF NOT EXISTS jobs_lease_expires_at ON jobs (lease_expires_at)")
             )
             connection.execute(
                 text(
@@ -4633,21 +4734,29 @@ class SqlAlchemyPaperRepository(PaperRepository):
             job_id = session.scalar(select(JobORM.job_id).where(JobORM.dedupe_key == dedupe_key))
         return self.get_job(job_id) if job_id is not None else None
 
-    def get_job(self, job_id: str) -> JobResponse | None:
-        with self._session() as session:
-            row = session.get(JobORM, job_id)
-        if row is None:
-            return None
+    def _job_response_from_row(self, row: JobORM, *, now: Any | None = None) -> JobResponse:
+        current_time = now or utcnow()
         return JobResponse(
             job_id=row.job_id,
             job_type=row.job_type,
             status=row.status,
+            effective_status=_effective_job_status(
+                status=row.status,
+                lease_expires_at=row.lease_expires_at,
+                cancel_requested_at=row.cancel_requested_at,
+                now=current_time,
+            ),
             payload=row.payload,
             error=row.error,
             attempts=row.attempts or 0,
             max_attempts=row.max_attempts or 3,
             next_run_at=row.next_run_at,
             last_attempted_at=row.last_attempted_at,
+            worker_id=row.worker_id,
+            heartbeat_at=row.heartbeat_at,
+            lease_expires_at=row.lease_expires_at,
+            cancel_requested_at=row.cancel_requested_at,
+            lease_token=row.lease_token,
             priority=row.priority or 0,
             created_at=row.created_at,
             updated_at=row.updated_at,
@@ -4655,7 +4764,20 @@ class SqlAlchemyPaperRepository(PaperRepository):
             finished_at=row.finished_at,
         )
 
-    def claim_pending_job(self) -> JobResponse | None:
+    def get_job(self, job_id: str) -> JobResponse | None:
+        now = utcnow()
+        with self._session() as session:
+            row = session.get(JobORM, job_id)
+            if row is None:
+                return None
+            return self._job_response_from_row(row, now=now)
+
+    def claim_pending_job(
+        self,
+        *,
+        worker_id: str | None = None,
+        lease_seconds: int = JOB_LEASE_SECONDS,
+    ) -> JobResponse | None:
         # Atomic lease via ``SELECT ... FOR UPDATE SKIP LOCKED``. Without the
         # row lock, two concurrent workers reading at the same instant could
         # both match the same row, both set status='running', and both believe
@@ -4685,33 +4807,137 @@ class SqlAlchemyPaperRepository(PaperRepository):
             if row is None:
                 return None
             row.status = "running"
-            row.started_at = utcnow()
-            row.updated_at = utcnow()
-            row.last_attempted_at = utcnow()
+            row.started_at = now
+            row.updated_at = now
+            row.last_attempted_at = now
+            row.worker_id = worker_id
+            row.lease_token = new_id("lease")
+            row.heartbeat_at = now
+            row.lease_expires_at = _lease_expires_at(now=now, lease_seconds=lease_seconds)
+            row.cancel_requested_at = None
             row.attempts = (row.attempts or 0) + 1
-            job_id = row.job_id
-        return self.get_job(job_id)
+            return self._job_response_from_row(row, now=now)
 
-    def mark_job_running(self, job_id: str) -> None:
+    def heartbeat_job(
+        self,
+        job_id: str,
+        *,
+        lease_token: str,
+        worker_id: str | None = None,
+        lease_seconds: int = JOB_LEASE_SECONDS,
+    ) -> JobResponse | None:
+        now = utcnow()
         with self._session() as session:
             row = session.get(JobORM, job_id)
-            if row:
+            if row is None or row.status != "running" or row.lease_token != lease_token:
+                return None
+            if worker_id is not None and row.worker_id not in {None, worker_id}:
+                return None
+            row.worker_id = worker_id or row.worker_id
+            row.heartbeat_at = now
+            row.lease_expires_at = _lease_expires_at(now=now, lease_seconds=lease_seconds)
+            row.updated_at = now
+            return self._job_response_from_row(row, now=now)
+
+    def is_job_cancel_requested(self, job_id: str, *, lease_token: str | None = None) -> bool:
+        with self._session() as session:
+            row = session.get(JobORM, job_id)
+            if row is None:
+                return False
+            if lease_token is not None and row.lease_token != lease_token:
+                return False
+            return row.cancel_requested_at is not None or row.status == "canceled"
+
+    def cancel_job(self, job_id: str) -> JobResponse | None:
+        now = utcnow()
+        with self._session() as session:
+            row = session.get(JobORM, job_id)
+            if row is None:
+                return None
+            if row.status == "pending":
+                row.status = "canceled"
+                row.cancel_requested_at = now
+                row.finished_at = now
+                row.updated_at = now
+                row.worker_id = None
+                row.lease_token = None
+                row.heartbeat_at = None
+                row.lease_expires_at = None
+                return self._job_response_from_row(row, now=now)
+            if row.status == "running":
+                if _effective_job_status(
+                    status=row.status,
+                    lease_expires_at=row.lease_expires_at,
+                    cancel_requested_at=row.cancel_requested_at,
+                    now=now,
+                ) == "stalled":
+                    row.status = "canceled"
+                    row.cancel_requested_at = now
+                    row.finished_at = now
+                    row.updated_at = now
+                    row.worker_id = None
+                    row.lease_token = None
+                    row.heartbeat_at = None
+                    row.lease_expires_at = None
+                    return self._job_response_from_row(row, now=now)
+                row.cancel_requested_at = row.cancel_requested_at or now
+                row.updated_at = now
+                return self._job_response_from_row(row, now=now)
+            return None
+
+    def _claim_matches(self, row: JobORM, lease_token: str | None) -> bool:
+        return lease_token is None or row.lease_token == lease_token
+
+    def mark_job_running(
+        self,
+        job_id: str,
+        *,
+        lease_token: str | None = None,
+        worker_id: str | None = None,
+        lease_seconds: int = JOB_LEASE_SECONDS,
+    ) -> None:
+        now = utcnow()
+        with self._session() as session:
+            row = session.get(JobORM, job_id)
+            if row and self._claim_matches(row, lease_token):
                 row.status = "running"
-                row.started_at = row.started_at or utcnow()
-                row.updated_at = utcnow()
+                row.started_at = row.started_at or now
+                row.updated_at = now
+                row.worker_id = worker_id or row.worker_id
+                row.lease_token = lease_token or row.lease_token or new_id("lease")
+                row.heartbeat_at = now
+                row.lease_expires_at = _lease_expires_at(now=now, lease_seconds=lease_seconds)
 
-    def mark_job_completed(self, job_id: str) -> None:
+    def mark_job_completed(self, job_id: str, *, lease_token: str | None = None) -> None:
         with self._session() as session:
             row = session.get(JobORM, job_id)
-            if row:
-                row.status = "completed"
+            if row and self._claim_matches(row, lease_token):
+                row.status = "canceled" if row.cancel_requested_at is not None else "completed"
                 row.finished_at = utcnow()
                 row.updated_at = utcnow()
+                row.worker_id = None
+                row.lease_token = None
+                row.heartbeat_at = None
+                row.lease_expires_at = None
                 # Clear retry metadata from prior failed attempts so the
                 # completed JobResponse doesn't surface a stale transient
                 # error message or a dangling next_run_at. The retry loop
                 # sets these on failure; success must wipe them.
                 row.error = None
+                row.next_run_at = None
+
+    def mark_job_canceled(self, job_id: str, *, lease_token: str | None = None) -> None:
+        with self._session() as session:
+            row = session.get(JobORM, job_id)
+            if row and self._claim_matches(row, lease_token):
+                row.status = "canceled"
+                row.cancel_requested_at = row.cancel_requested_at or utcnow()
+                row.finished_at = utcnow()
+                row.updated_at = utcnow()
+                row.worker_id = None
+                row.lease_token = None
+                row.heartbeat_at = None
+                row.lease_expires_at = None
                 row.next_run_at = None
 
     def mark_job_failed(
@@ -4721,6 +4947,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
         *,
         permanent: bool = False,
         next_run_at: Any | None = None,
+        lease_token: str | None = None,
     ) -> None:
         """Record a failed attempt.
 
@@ -4731,10 +4958,24 @@ class SqlAlchemyPaperRepository(PaperRepository):
         """
         with self._session() as session:
             row = session.get(JobORM, job_id)
-            if row is None:
+            if row is None or not self._claim_matches(row, lease_token):
+                return
+            if row.cancel_requested_at is not None:
+                row.status = "canceled"
+                row.finished_at = utcnow()
+                row.updated_at = utcnow()
+                row.worker_id = None
+                row.lease_token = None
+                row.heartbeat_at = None
+                row.lease_expires_at = None
+                row.next_run_at = None
                 return
             row.error = error
             row.updated_at = utcnow()
+            row.worker_id = None
+            row.lease_token = None
+            row.heartbeat_at = None
+            row.lease_expires_at = None
             attempts = row.attempts or 0
             max_attempts = row.max_attempts or 3
             if permanent or attempts >= max_attempts:
@@ -4757,19 +4998,46 @@ class SqlAlchemyPaperRepository(PaperRepository):
             row.error = None
             row.next_run_at = None
             row.finished_at = None
+            row.worker_id = None
+            row.lease_token = None
+            row.heartbeat_at = None
+            row.lease_expires_at = None
+            row.cancel_requested_at = None
             row.updated_at = utcnow()
             job_id = row.job_id
         return self.get_job(job_id)
 
     def list_jobs_by_status(self, status: str, *, limit: int = 50) -> list[JobResponse]:
+        now = utcnow()
         with self._session() as session:
+            if status == "running":
+                predicate = (
+                    JobORM.status == "running",
+                    JobORM.cancel_requested_at.is_(None),
+                    JobORM.lease_expires_at.is_not(None),
+                    JobORM.lease_expires_at > now,
+                )
+            elif status == "stalled":
+                predicate = (
+                    JobORM.status == "running",
+                    or_(JobORM.lease_expires_at.is_(None), JobORM.lease_expires_at <= now),
+                )
+            elif status == "canceling":
+                predicate = (
+                    JobORM.status == "running",
+                    JobORM.cancel_requested_at.is_not(None),
+                    JobORM.lease_expires_at.is_not(None),
+                    JobORM.lease_expires_at > now,
+                )
+            else:
+                predicate = (JobORM.status == status,)
             rows = session.scalars(
                 select(JobORM)
-                .where(JobORM.status == status)
+                .where(*predicate)
                 .order_by(JobORM.updated_at.desc())
                 .limit(limit)
             ).all()
-        return [self.get_job(row.job_id) for row in rows if row is not None]  # type: ignore[list-item]
+            return [self._job_response_from_row(row, now=now) for row in rows if row is not None]
 
     def cleanup_expired_results(self) -> None:
         with self._session() as session:
@@ -6626,9 +6894,15 @@ class MemoryPaperRepository(PaperRepository):
         return job
 
     def get_job(self, job_id: str) -> JobResponse | None:
-        return self.jobs.get(job_id)
+        job = self.jobs.get(job_id)
+        return _job_response_with_effective_status(job) if job is not None else None
 
-    def claim_pending_job(self) -> JobResponse | None:
+    def claim_pending_job(
+        self,
+        *,
+        worker_id: str | None = None,
+        lease_seconds: int = JOB_LEASE_SECONDS,
+    ) -> JobResponse | None:
         now = utcnow()
         # priority ASC, next_run_at NULLS FIRST, created_at ASC — same
         # ordering as SQL. Priority keeps bulk backfill from starving
@@ -6647,35 +6921,173 @@ class MemoryPaperRepository(PaperRepository):
         claimed = job.model_copy(
             update={
                 "status": "running",
-                "started_at": utcnow(),
-                "updated_at": utcnow(),
-                "last_attempted_at": utcnow(),
+                "effective_status": "running",
+                "started_at": now,
+                "updated_at": now,
+                "last_attempted_at": now,
+                "worker_id": worker_id,
+                "lease_token": new_id("lease"),
+                "heartbeat_at": now,
+                "lease_expires_at": _lease_expires_at(now=now, lease_seconds=lease_seconds),
+                "cancel_requested_at": None,
                 "attempts": (job.attempts or 0) + 1,
             }
         )
         self.jobs[job_id] = claimed
         return claimed
 
-    def mark_job_running(self, job_id: str) -> None:
+    def heartbeat_job(
+        self,
+        job_id: str,
+        *,
+        lease_token: str,
+        worker_id: str | None = None,
+        lease_seconds: int = JOB_LEASE_SECONDS,
+    ) -> JobResponse | None:
         job = self.jobs.get(job_id)
-        if job:
+        if job is None or job.status != "running" or job.lease_token != lease_token:
+            return None
+        if worker_id is not None and job.worker_id not in {None, worker_id}:
+            return None
+        now = utcnow()
+        updated = job.model_copy(
+            update={
+                "worker_id": worker_id or job.worker_id,
+                "heartbeat_at": now,
+                "lease_expires_at": _lease_expires_at(now=now, lease_seconds=lease_seconds),
+                "updated_at": now,
+            }
+        )
+        self.jobs[job_id] = updated
+        return _job_response_with_effective_status(updated, now=now)
+
+    def is_job_cancel_requested(self, job_id: str, *, lease_token: str | None = None) -> bool:
+        job = self.jobs.get(job_id)
+        if job is None:
+            return False
+        if lease_token is not None and job.lease_token != lease_token:
+            return False
+        return job.cancel_requested_at is not None or job.status == "canceled"
+
+    def cancel_job(self, job_id: str) -> JobResponse | None:
+        job = self.jobs.get(job_id)
+        if job is None:
+            return None
+        now = utcnow()
+        if job.status == "pending":
+            updated = job.model_copy(
+                update={
+                    "status": "canceled",
+                    "effective_status": "canceled",
+                    "cancel_requested_at": now,
+                    "finished_at": now,
+                    "updated_at": now,
+                    "worker_id": None,
+                    "lease_token": None,
+                    "heartbeat_at": None,
+                    "lease_expires_at": None,
+                }
+            )
+            self.jobs[job_id] = updated
+            return updated
+        if job.status == "running":
+            if _effective_job_status(
+                status=job.status,
+                lease_expires_at=job.lease_expires_at,
+                cancel_requested_at=job.cancel_requested_at,
+                now=now,
+            ) == "stalled":
+                updated = job.model_copy(
+                    update={
+                        "status": "canceled",
+                        "effective_status": "canceled",
+                        "cancel_requested_at": now,
+                        "finished_at": now,
+                        "updated_at": now,
+                        "worker_id": None,
+                        "lease_token": None,
+                        "heartbeat_at": None,
+                        "lease_expires_at": None,
+                    }
+                )
+                self.jobs[job_id] = updated
+                return updated
+            updated = job.model_copy(
+                update={
+                    "effective_status": "canceling",
+                    "cancel_requested_at": job.cancel_requested_at or now,
+                    "updated_at": now,
+                }
+            )
+            self.jobs[job_id] = updated
+            return updated
+        return None
+
+    def _claim_matches(self, job: JobResponse, lease_token: str | None) -> bool:
+        return lease_token is None or job.lease_token == lease_token
+
+    def mark_job_running(
+        self,
+        job_id: str,
+        *,
+        lease_token: str | None = None,
+        worker_id: str | None = None,
+        lease_seconds: int = JOB_LEASE_SECONDS,
+    ) -> None:
+        job = self.jobs.get(job_id)
+        if job and self._claim_matches(job, lease_token):
+            now = utcnow()
             self.jobs[job_id] = job.model_copy(
-                update={"status": "running", "updated_at": utcnow(), "started_at": job.started_at or utcnow()}
+                update={
+                    "status": "running",
+                    "effective_status": "running",
+                    "updated_at": now,
+                    "started_at": job.started_at or now,
+                    "worker_id": worker_id or job.worker_id,
+                    "lease_token": lease_token or job.lease_token or new_id("lease"),
+                    "heartbeat_at": now,
+                    "lease_expires_at": _lease_expires_at(now=now, lease_seconds=lease_seconds),
+                }
             )
 
-    def mark_job_completed(self, job_id: str) -> None:
+    def mark_job_completed(self, job_id: str, *, lease_token: str | None = None) -> None:
         job = self.jobs.get(job_id)
-        if job:
+        if job and self._claim_matches(job, lease_token):
             # Clear retry metadata from prior failed attempts so the
             # completed JobResponse doesn't surface a stale transient
             # error message or a dangling next_run_at.
+            status = "canceled" if job.cancel_requested_at is not None else "completed"
             self.jobs[job_id] = job.model_copy(
                 update={
-                    "status": "completed",
+                    "status": status,
+                    "effective_status": status,
                     "updated_at": utcnow(),
                     "finished_at": utcnow(),
                     "error": None,
                     "next_run_at": None,
+                    "worker_id": None,
+                    "lease_token": None,
+                    "heartbeat_at": None,
+                    "lease_expires_at": None,
+                }
+            )
+
+    def mark_job_canceled(self, job_id: str, *, lease_token: str | None = None) -> None:
+        job = self.jobs.get(job_id)
+        if job and self._claim_matches(job, lease_token):
+            now = utcnow()
+            self.jobs[job_id] = job.model_copy(
+                update={
+                    "status": "canceled",
+                    "effective_status": "canceled",
+                    "cancel_requested_at": job.cancel_requested_at or now,
+                    "updated_at": now,
+                    "finished_at": now,
+                    "next_run_at": None,
+                    "worker_id": None,
+                    "lease_token": None,
+                    "heartbeat_at": None,
+                    "lease_expires_at": None,
                 }
             )
 
@@ -6686,9 +7098,13 @@ class MemoryPaperRepository(PaperRepository):
         *,
         permanent: bool = False,
         next_run_at: Any | None = None,
+        lease_token: str | None = None,
     ) -> None:
         job = self.jobs.get(job_id)
-        if job is None:
+        if job is None or not self._claim_matches(job, lease_token):
+            return
+        if job.cancel_requested_at is not None:
+            self.mark_job_canceled(job_id, lease_token=lease_token)
             return
         attempts = job.attempts or 0
         max_attempts = job.max_attempts or 3
@@ -6696,19 +7112,29 @@ class MemoryPaperRepository(PaperRepository):
             self.jobs[job_id] = job.model_copy(
                 update={
                     "status": "dead",
+                    "effective_status": "dead",
                     "error": error,
                     "updated_at": utcnow(),
                     "finished_at": utcnow(),
                     "next_run_at": None,
+                    "worker_id": None,
+                    "lease_token": None,
+                    "heartbeat_at": None,
+                    "lease_expires_at": None,
                 }
             )
         else:
             self.jobs[job_id] = job.model_copy(
                 update={
                     "status": "pending",
+                    "effective_status": "pending",
                     "error": error,
                     "updated_at": utcnow(),
                     "next_run_at": next_run_at,
+                    "worker_id": None,
+                    "lease_token": None,
+                    "heartbeat_at": None,
+                    "lease_expires_at": None,
                 }
             )
 
@@ -6719,17 +7145,35 @@ class MemoryPaperRepository(PaperRepository):
         self.jobs[job_id] = job.model_copy(
             update={
                 "status": "pending",
+                "effective_status": "pending",
                 "attempts": 0,
                 "error": None,
                 "next_run_at": None,
                 "finished_at": None,
+                "worker_id": None,
+                "lease_token": None,
+                "heartbeat_at": None,
+                "lease_expires_at": None,
+                "cancel_requested_at": None,
                 "updated_at": utcnow(),
             }
         )
-        return self.jobs[job_id]
+        return self.get_job(job_id)
 
     def list_jobs_by_status(self, status: str, *, limit: int = 50) -> list[JobResponse]:
-        jobs = [job for job in self.jobs.values() if job.status == status]
+        now = utcnow()
+        jobs = [
+            _job_response_with_effective_status(job, now=now)
+            for job in self.jobs.values()
+            if _effective_job_status(
+                status=job.status,
+                lease_expires_at=job.lease_expires_at,
+                cancel_requested_at=job.cancel_requested_at,
+                now=now,
+            )
+            == status
+            or (status not in {"running", "stalled", "canceling"} and job.status == status)
+        ]
         jobs.sort(key=lambda item: item.updated_at, reverse=True)
         return jobs[:limit]
 

@@ -818,7 +818,13 @@ def get_job(job_id: str, service: PaperbaseService = Depends(get_service)) -> Jo
     dependencies=[Depends(require_bearer_token)],
 )
 def list_jobs(
-    status: str = Query(default="dead", description="Job status to filter on (dead|failed|pending|running|completed)."),
+    status: str = Query(
+        default="dead",
+        description=(
+            "Job status to filter on "
+            "(dead|failed|pending|running|stalled|canceling|canceled|completed)."
+        ),
+    ),
     limit: int = Query(default=50, ge=1, le=500),
     service: PaperbaseService = Depends(get_service),
 ) -> list[JobResponse]:
@@ -840,6 +846,23 @@ def retry_job(
     result = service.retry_dead_job(job_id)
     if result is None:
         raise HTTPException(status_code=404, detail=f"Job {job_id} is not in a retryable state")
+    return result
+
+
+@app.post(
+    "/v1/jobs/{job_id}/cancel",
+    response_model=JobResponse,
+    dependencies=[Depends(require_bearer_token)],
+)
+def cancel_job(
+    job_id: str,
+    service: PaperbaseService = Depends(get_service),
+) -> JobResponse:
+    """Cancel a pending job immediately or request cooperative cancellation
+    from the worker that currently owns a running job lease."""
+    result = service.cancel_job(job_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} is not in a cancelable state")
     return result
 
 

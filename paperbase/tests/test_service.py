@@ -1810,6 +1810,9 @@ def test_init_creates_trigram_indexes_for_summary_and_tldr():
     assert "tldr gin_trgm_ops" in combined
     assert "text_chunks_content_tsv_gin" in combined
     assert "to_tsvector('english', coalesce(content, ''))" in combined
+    assert "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS lease_token VARCHAR(128)" in combined
+    assert "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ" in combined
+    assert "jobs_lease_expires_at" in combined
 
 
 def test_search_local_uses_chunk_candidates_without_grouping_before_vector_limit():
@@ -5161,6 +5164,99 @@ def test_claim_skips_jobs_whose_next_run_at_is_in_the_future():
     )
 
     assert service.repository.claim_pending_job() is None
+
+
+def test_claimed_job_gets_live_lease_and_stalled_effective_status_when_expired():
+    from datetime import UTC, datetime, timedelta
+
+    service = _retry_service()
+    job = service.repository.create_job("index_paper", {"arxiv_id": "test/lease"})
+
+    claimed = service.repository.claim_pending_job(worker_id="worker-a", lease_seconds=60)
+
+    assert claimed is not None
+    assert claimed.job_id == job.job_id
+    assert claimed.status == "running"
+    assert claimed.effective_status == "running"
+    assert claimed.worker_id == "worker-a"
+    assert claimed.lease_token
+    assert claimed.heartbeat_at is not None
+    assert claimed.lease_expires_at is not None
+
+    service.repository.jobs[job.job_id] = service.repository.jobs[job.job_id].model_copy(
+        update={"lease_expires_at": datetime.now(UTC) - timedelta(seconds=1)}
+    )
+
+    stalled = service.repository.get_job(job.job_id)
+    assert stalled is not None
+    assert stalled.status == "running"
+    assert stalled.effective_status == "stalled"
+    assert [item.job_id for item in service.list_jobs_by_status("stalled")] == [job.job_id]
+    assert service.list_jobs_by_status("running") == []
+
+    canceled = service.cancel_job(job.job_id)
+    assert canceled is not None
+    assert canceled.status == "canceled"
+    assert canceled.effective_status == "canceled"
+    assert canceled.lease_token is None
+
+
+def test_cancel_pending_job_marks_canceled_immediately():
+    service = _retry_service()
+    job = service.repository.create_job("index_paper", {"arxiv_id": "test/cancel-pending"})
+
+    canceled = service.cancel_job(job.job_id)
+
+    assert canceled is not None
+    assert canceled.status == "canceled"
+    assert canceled.effective_status == "canceled"
+    assert canceled.cancel_requested_at is not None
+    assert canceled.finished_at is not None
+    assert service.repository.claim_pending_job() is None
+
+
+def test_cancel_running_job_requests_cancel_and_worker_marks_canceled(monkeypatch):
+    service = _retry_service()
+    job = service.repository.create_job("index_paper", {"arxiv_id": "test/cancel-running"})
+
+    def cancel_during_index(arxiv_id, force=False):
+        requested = service.cancel_job(job.job_id)
+        assert requested is not None
+        assert requested.effective_status == "canceling"
+        service._raise_if_current_job_canceled()
+
+    monkeypatch.setattr(service, "index_arxiv_paper", cancel_during_index)
+
+    processed = service.process_next_job()
+
+    assert processed is not None
+    assert processed.status == "canceled"
+    assert processed.effective_status == "canceled"
+    assert processed.finished_at is not None
+
+
+def test_canceling_job_becomes_stalled_if_worker_lease_expires():
+    from datetime import UTC, datetime, timedelta
+
+    service = _retry_service()
+    job = service.repository.create_job("index_paper", {"arxiv_id": "test/cancel-expired"})
+    claimed = service.repository.claim_pending_job(worker_id="worker-a", lease_seconds=60)
+    assert claimed is not None
+
+    requested = service.cancel_job(job.job_id)
+    assert requested is not None
+    assert requested.effective_status == "canceling"
+    assert [item.job_id for item in service.list_jobs_by_status("canceling")] == [job.job_id]
+
+    service.repository.jobs[job.job_id] = service.repository.jobs[job.job_id].model_copy(
+        update={"lease_expires_at": datetime.now(UTC) - timedelta(seconds=1)}
+    )
+
+    stalled = service.repository.get_job(job.job_id)
+    assert stalled is not None
+    assert stalled.effective_status == "stalled"
+    assert service.list_jobs_by_status("canceling") == []
+    assert [item.job_id for item in service.list_jobs_by_status("stalled")] == [job.job_id]
 
 
 def test_retry_dead_job_resets_attempts_and_unblocks_claim():

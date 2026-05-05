@@ -121,6 +121,9 @@ class PaperbaseClient:
     def get_job(self, job_id: str) -> dict[str, Any]:
         return self._request("GET", f"/v1/jobs/{job_id}")
 
+    def cancel_job(self, job_id: str) -> dict[str, Any]:
+        return self._request("POST", f"/v1/jobs/{job_id}/cancel")
+
     def expand_query(self, query: str, *, variants: int = 4) -> list[str]:
         """Ask the paperbase server for query variants.
 
