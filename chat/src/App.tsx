@@ -1653,6 +1653,8 @@ export default function App() {
     });
   }, [openTabs, projects, pythonFileMap, streamingThreadId, threadMap]);
   const hasOpenTabs = openTabItems.length > 0;
+  const isAdminWorkspaceView =
+    workspaceView?.kind === "admin_jobs" || workspaceView?.kind === "admin_job_papers";
   const tabStripStyle = useMemo(
     () =>
       ({
@@ -5429,7 +5431,7 @@ export default function App() {
 
             <div
               ref={messageListRef}
-              className={`chat-message-list${isChatEmpty ? " empty" : ""}${activeTab?.kind === "python_file" ? " python-file-view" : ""}`}
+              className={`chat-message-list${isChatEmpty ? " empty" : ""}${activeTab?.kind === "python_file" ? " python-file-view" : ""}${isAdminWorkspaceView ? " workspace-admin-view" : ""}`}
               onScroll={handleMessageListScroll}
             >
               {activeTab?.kind === "thread" && activeThreadDebugBundle && !isChatEmpty ? (
@@ -5467,7 +5469,7 @@ export default function App() {
                     </div>
                   </div>
                 ) : sessionSummary?.isAdmin ? (
-                  <div className="workspace-page workspace-page-wide">
+                  <div className="workspace-page workspace-page-admin">
                     <AdminOpsPanel
                       view={
                         workspaceView.kind === "admin_job_papers"

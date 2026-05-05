@@ -3166,14 +3166,18 @@ describe("App", () => {
       expect(screen.getByText("job_recent")).toBeTruthy();
       expect(screen.getByText("job_old")).toBeTruthy();
 
-      fireEvent.click(screen.getByRole("button", { name: "Last hour" }));
+      fireEvent.change(screen.getByLabelText("Jobs window"), {
+        target: { value: "1h" },
+      });
 
       await waitFor(() => {
         expect(screen.getByText("job_recent")).toBeTruthy();
       });
       expect(screen.queryByText("job_old")).toBeNull();
 
-      fireEvent.click(screen.getByRole("button", { name: "Custom" }));
+      fireEvent.change(screen.getByLabelText("Jobs window"), {
+        target: { value: "custom" },
+      });
       fireEvent.change(screen.getByLabelText("Custom range start"), {
         target: { value: "2026-04-15T00:00" },
       });

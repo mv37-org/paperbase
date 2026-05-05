@@ -1522,6 +1522,13 @@ textarea::placeholder,
   width: min(1280px, calc(100% - 48px));
 }
 
+.workspace-page-admin {
+  width: 100%;
+  margin: 0;
+  max-width: none;
+  gap: 0;
+}
+
 .workspace-page-header {
   display: grid;
   gap: 8px;
@@ -1901,6 +1908,10 @@ textarea::placeholder,
   overflow: auto;
   overflow-x: hidden;
   padding: 24px 24px 240px;
+}
+
+.chat-message-list.workspace-admin-view {
+  padding: 0 0 240px;
 }
 
 .chat-composer-fade {
@@ -5083,7 +5094,7 @@ textarea {
 
 .admin-jobs-shell {
   display: grid;
-  gap: 18px;
+  gap: 0;
 }
 
 .admin-jobs-header {
@@ -5091,6 +5102,7 @@ textarea {
   align-items: flex-end;
   justify-content: space-between;
   gap: 16px;
+  padding: 24px 24px 0;
 }
 
 .admin-jobs-header h1,
@@ -5202,6 +5214,7 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
 
 .admin-jobs-inline-error {
   color: #b42318;
+  padding: 0 24px;
 }
 
 .admin-jobs-surface {
@@ -5211,25 +5224,24 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
 
 .admin-jobs-timeline-panel {
   display: grid;
-  gap: 16px;
+  gap: 12px;
   padding: 0 0 18px;
   border-bottom: 1px solid var(--line);
 }
 
 .admin-jobs-timeline-head {
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
+  align-items: flex-end;
+  justify-content: flex-end;
   gap: 16px;
+  padding: 0 24px;
 }
 
-.admin-jobs-timeline-copy,
 .admin-jobs-timeline-meta {
   display: grid;
   gap: 4px;
 }
 
-.admin-jobs-timeline-kicker,
 .admin-jobs-results-bar,
 .admin-jobs-table th,
 .admin-paper-metadata-row span,
@@ -5238,78 +5250,67 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
   letter-spacing: 0.04em;
 }
 
-.admin-jobs-timeline-kicker {
-  color: var(--muted);
-  font-size: 11px;
-  text-transform: uppercase;
-}
-
-.admin-jobs-timeline-copy strong,
-.admin-jobs-timeline-meta strong {
-  color: var(--text);
-  font-size: 22px;
-  font-weight: 600;
-  letter-spacing: -0.03em;
-}
-
-.admin-jobs-timeline-copy span:last-child,
 .admin-jobs-timeline-meta {
   color: var(--muted);
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .admin-jobs-timeline-meta {
   justify-items: end;
   text-align: right;
+  font-family: "JetBrains Mono", "SFMono-Regular", monospace;
+  letter-spacing: 0.04em;
 }
 
-.admin-jobs-timeline-meta strong {
-  font-size: 13px;
-  letter-spacing: 0;
+.admin-jobs-window-control {
+  position: relative;
 }
 
-.admin-jobs-filter-row {
-  display: grid;
-  gap: 12px;
-}
-
-.admin-jobs-filter-pills {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.admin-jobs-filter-pill {
-  min-height: 28px;
-  padding: 0 10px;
+.admin-jobs-window-select,
+.admin-jobs-custom-close {
+  min-height: 30px;
   border: 1px solid var(--line);
-  border-radius: 999px;
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
+  border-radius: 8px;
+  background: rgba(27, 22, 17, 0.02);
+  color: var(--text);
   font-family: "JetBrains Mono", "SFMono-Regular", monospace;
   font-size: 11px;
-  line-height: 1;
+  letter-spacing: 0.03em;
 }
 
-.admin-jobs-filter-pill.active {
-  border-color: rgba(37, 99, 235, 0.24);
-  background: rgba(37, 99, 235, 0.08);
-  color: var(--blue);
+.admin-jobs-window-select {
+  appearance: none;
+  min-width: 168px;
+  padding: 0 30px 0 10px;
+  cursor: pointer;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position:
+    calc(100% - 16px) calc(50% - 2px),
+    calc(100% - 11px) calc(50% - 2px);
+  background-size: 5px 5px;
+  background-repeat: no-repeat;
 }
 
-.admin-jobs-custom-range {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
+.admin-jobs-custom-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  display: grid;
+  gap: 10px;
+  min-width: min(280px, calc(100vw - 48px));
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 12px 32px rgba(27, 22, 17, 0.08);
+  z-index: 5;
 }
 
 .admin-jobs-custom-field {
   display: grid;
   gap: 6px;
-  min-width: min(220px, 100%);
   color: var(--muted);
   font-family: "JetBrains Mono", "SFMono-Regular", monospace;
   font-size: 11px;
@@ -5319,10 +5320,16 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
   min-height: 36px;
 }
 
+.admin-jobs-custom-close {
+  justify-self: end;
+  padding: 0 10px;
+  cursor: pointer;
+}
+
 .admin-jobs-chart-shell {
   width: 100%;
   min-height: 340px;
-  background: linear-gradient(180deg, rgba(27, 22, 17, 0.03) 0%, rgba(27, 22, 17, 0) 72%);
+  background: linear-gradient(180deg, rgba(159, 178, 232, 0.08) 0%, rgba(159, 178, 232, 0) 72%);
 }
 
 .admin-jobs-chart {
@@ -5343,12 +5350,12 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
   position: relative;
   min-height: 340px;
   overflow: hidden;
-  background: linear-gradient(180deg, rgba(27, 22, 17, 0.03) 0%, rgba(27, 22, 17, 0) 72%);
+  background: linear-gradient(180deg, rgba(159, 178, 232, 0.08) 0%, rgba(159, 178, 232, 0) 72%);
 }
 
 .admin-jobs-skeleton-grid {
   position: absolute;
-  inset: 22px 0 52px;
+  inset: 22px 0 52px 56px;
   display: grid;
   align-content: space-between;
   pointer-events: none;
@@ -5361,17 +5368,17 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
 
 .admin-jobs-skeleton-bars {
   position: absolute;
-  inset: 30px 0 56px;
+  inset: 30px 0 56px 56px;
   display: flex;
   align-items: flex-end;
-  gap: 8px;
+  gap: 10px;
 }
 
 .admin-jobs-skeleton-bar {
   flex: 1 1 0;
   min-width: 0;
   border-radius: 4px 4px 0 0;
-  background: linear-gradient(180deg, rgba(37, 99, 235, 0.36), rgba(37, 99, 235, 0.12));
+  background: linear-gradient(180deg, rgba(159, 178, 232, 0.52), rgba(159, 178, 232, 0.16));
   animation: admin-jobs-skeleton-pulse 1.4s ease-in-out infinite;
 }
 
@@ -5388,6 +5395,28 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
   border-bottom: 1px solid var(--line);
   color: var(--muted);
   font-size: 13px;
+}
+
+.admin-jobs-chart-empty-note {
+  position: absolute;
+  left: 50%;
+  bottom: 72px;
+  display: grid;
+  gap: 4px;
+  justify-items: center;
+  width: min(320px, calc(100% - 48px));
+  transform: translateX(-50%);
+  color: rgba(107, 98, 89, 0.92);
+  font-size: 11px;
+  line-height: 1.45;
+  text-align: center;
+  pointer-events: none;
+}
+
+.admin-jobs-chart-empty-note strong {
+  color: rgba(107, 98, 89, 0.96);
+  font-size: 12px;
+  font-weight: 500;
 }
 
 .admin-jobs-table-shell {
@@ -6295,10 +6324,13 @@ button.admin-compact-action.admin-compact-action-secondary:hover:not(:disabled) 
   border-color: rgba(27, 22, 17, 0.18);
 }
 
-.admin-jobs-filter-pill:hover,
-.admin-jobs-filter-pill:focus-visible {
-  border-color: rgba(37, 99, 235, 0.22);
-  color: var(--text);
+.admin-jobs-window-select:hover,
+.admin-jobs-window-select:focus-visible,
+.admin-jobs-custom-close:hover,
+.admin-jobs-custom-close:focus-visible {
+  border-color: rgba(43, 98, 228, 0.24);
+  background-color: rgba(43, 98, 228, 0.06);
+  outline: none;
 }
 
 .chat-empty-action-tag.python:hover {
@@ -7299,24 +7331,31 @@ body.authenticated-theme-dark .admin-compact-action-secondary:hover:not(:disable
 
 body.authenticated-theme-dark .admin-jobs-chart-shell,
 body.authenticated-theme-dark .admin-jobs-skeleton-chart {
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.04) 0%, rgba(255, 255, 255, 0) 72%);
+  background: linear-gradient(180deg, rgba(142, 166, 221, 0.12) 0%, rgba(142, 166, 221, 0) 72%);
 }
 
-body.authenticated-theme-dark .admin-jobs-filter-pill {
+body.authenticated-theme-dark .admin-jobs-window-select,
+body.authenticated-theme-dark .admin-jobs-custom-close,
+body.authenticated-theme-dark .admin-jobs-custom-popover {
   border-color: rgba(223, 232, 244, 0.14);
-  color: var(--muted);
 }
 
-body.authenticated-theme-dark .admin-jobs-filter-pill.active {
-  border-color: rgba(111, 164, 255, 0.34);
-  background: rgba(79, 140, 255, 0.12);
-  color: #91b9ff;
+body.authenticated-theme-dark .admin-jobs-window-select,
+body.authenticated-theme-dark .admin-jobs-custom-close {
+  background-color: rgba(255, 255, 255, 0.04);
 }
 
-body.authenticated-theme-dark .admin-jobs-filter-pill:hover,
-body.authenticated-theme-dark .admin-jobs-filter-pill:focus-visible {
-  border-color: rgba(223, 232, 244, 0.22);
-  color: var(--text);
+body.authenticated-theme-dark .admin-jobs-custom-popover {
+  background: rgba(19, 24, 31, 0.98);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.3);
+}
+
+body.authenticated-theme-dark .admin-jobs-window-select:hover,
+body.authenticated-theme-dark .admin-jobs-window-select:focus-visible,
+body.authenticated-theme-dark .admin-jobs-custom-close:hover,
+body.authenticated-theme-dark .admin-jobs-custom-close:focus-visible {
+  border-color: rgba(142, 166, 221, 0.32);
+  background-color: rgba(142, 166, 221, 0.12);
 }
 
 body.authenticated-theme-dark .admin-jobs-row:hover {
@@ -7330,6 +7369,11 @@ body.authenticated-theme-dark .admin-jobs-skeleton-cell {
     rgba(255, 255, 255, 0.16),
     rgba(255, 255, 255, 0.08)
   );
+}
+
+body.authenticated-theme-dark .admin-jobs-chart-empty-note,
+body.authenticated-theme-dark .admin-jobs-chart-empty-note strong {
+  color: rgba(223, 232, 244, 0.72);
 }
 
 body.authenticated-theme-dark .admin-create-job-option:hover,

@@ -1,4 +1,11 @@
-import { type ComponentPropsWithoutRef, type ReactNode, useEffect, useMemo, useState } from "react";
+import {
+  type ChangeEvent,
+  type ComponentPropsWithoutRef,
+  type ReactNode,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 import type { EChartsOption } from "echarts";
 import ReactECharts from "echarts-for-react";
 
@@ -577,10 +584,10 @@ function buildJobsTimeline(
 function readAdminJobsTheme(): AdminJobsTheme {
   if (typeof window === "undefined") {
     return {
-      accent: "#2563eb",
-      areaFill: "rgba(37, 99, 235, 0.08)",
+      accent: "#7f99df",
+      areaFill: "rgba(127, 153, 223, 0.12)",
       axisText: "#6b6259",
-      barFill: "#2563eb",
+      barFill: "#9fb2e8",
       line: "rgba(27, 22, 17, 0.12)",
       text: "#1b1611",
       tooltipBackground: "#ffffff",
@@ -590,13 +597,12 @@ function readAdminJobsTheme(): AdminJobsTheme {
   const text = styles.getPropertyValue("--text").trim() || "#1b1611";
   const axisText = styles.getPropertyValue("--muted").trim() || "#6b6259";
   const line = styles.getPropertyValue("--line").trim() || "rgba(27, 22, 17, 0.12)";
-  const accent = styles.getPropertyValue("--blue").trim() || "#2563eb";
   const isDark = document.body.classList.contains("authenticated-theme-dark");
   return {
-    accent,
-    areaFill: isDark ? "rgba(79, 140, 255, 0.08)" : "rgba(37, 99, 235, 0.08)",
+    accent: isDark ? "#8ea6dd" : "#7f99df",
+    areaFill: isDark ? "rgba(142, 166, 221, 0.14)" : "rgba(127, 153, 223, 0.12)",
     axisText,
-    barFill: isDark ? "#6fa4ff" : accent,
+    barFill: isDark ? "#aab9e8" : "#9fb2e8",
     line,
     text,
     tooltipBackground: isDark ? "#0f151d" : "#ffffff",
@@ -818,7 +824,7 @@ function CreateJobCheckboxField({
   );
 }
 
-function TimelineSkeleton() {
+function TimelineSkeleton({ message }: { message?: ReactNode }) {
   return (
     <div className="admin-jobs-skeleton-chart" data-testid="admin-jobs-chart-skeleton">
       <div className="admin-jobs-skeleton-grid">
@@ -837,6 +843,7 @@ function TimelineSkeleton() {
           ),
         )}
       </div>
+      {message ? <div className="admin-jobs-chart-empty-note">{message}</div> : null}
     </div>
   );
 }
@@ -877,24 +884,26 @@ function JobsTimeline({
   selectedRangeId: JobsTimeRangeId;
   timeWindow: JobsTimeWindow;
 }) {
+  const [customPopoverOpen, setCustomPopoverOpen] = useState(
+    selectedRangeId === CUSTOM_TIME_RANGE_ID,
+  );
   const theme = readAdminJobsTheme();
   const timeline = useMemo(() => buildJobsTimeline(jobs, timeWindow), [jobs, timeWindow]);
   const showSkeleton = loading || timeline.trackedJobs === 0;
-  const headline = loading
-    ? "Loading indexed-paper history"
-    : timeline.trackedJobs > 0
-      ? `${formatWholeNumber(timeline.totalIndexed)} indexed papers`
-      : "No indexed papers in this window";
-  const subheadline = loading
-    ? "Fetching tracked jobs"
-    : timeline.trackedJobs > 0
-      ? `${formatWholeNumber(timeline.trackedJobs)} tracked jobs · ${timeline.bucketLabel}`
-      : "Pick another window, widen the range, or run a backfill job.";
+
+  useEffect(() => {
+    setCustomPopoverOpen(selectedRangeId === CUSTOM_TIME_RANGE_ID);
+  }, [selectedRangeId]);
 
   const option = useMemo<EChartsOption>(() => {
     return {
       animation: false,
+      animationDuration: 0,
+      animationDurationUpdate: 0,
       backgroundColor: "transparent",
+      stateAnimation: {
+        duration: 0,
+      },
       textStyle: {
         color: theme.text,
         fontFamily: '"JetBrains Mono", "SFMono-Regular", monospace',
@@ -987,14 +996,14 @@ function JobsTimeline({
           type: "bar",
           data: timeline.buckets.map((bucket) => bucket.count),
           barMinHeight: 2,
-          barMaxWidth: 20,
+          barMaxWidth: 10,
           itemStyle: {
             color: theme.barFill,
             borderRadius: [4, 4, 0, 0],
           },
           emphasis: {
             itemStyle: {
-              color: theme.accent,
+              color: theme.barFill,
             },
           },
         },
@@ -1002,75 +1011,83 @@ function JobsTimeline({
     };
   }, [theme, timeline]);
 
+  const emptyChartMessage = (
+    <>
+      <strong>No indexed papers in this window</strong>
+      <span>Pick another window, widen the range, or run a backfill job.</span>
+    </>
+  );
+
+  function handleWindowChange(event: ChangeEvent<HTMLSelectElement>) {
+    const nextRangeId = event.target.value as JobsTimeRangeId;
+    if (nextRangeId === CUSTOM_TIME_RANGE_ID) {
+      setCustomPopoverOpen(true);
+    }
+    onSelectRangeId(nextRangeId);
+  }
+
   return (
     <section className="admin-jobs-timeline-panel" aria-label="Indexed papers timeline">
       <div className="admin-jobs-timeline-head">
-        <div className="admin-jobs-timeline-copy">
-          <span className="admin-jobs-timeline-kicker">Timeline</span>
-          <strong>{headline}</strong>
-          <span>{subheadline}</span>
-        </div>
         <div className="admin-jobs-timeline-meta">
-          <span>{selectedRangeId === CUSTOM_TIME_RANGE_ID ? "Custom range" : "Window"}</span>
-          <strong>{timeWindow.label}</strong>
-          {timeline.latestUpdatedAt ? (
-            <span>Last update {formatTimestamp(timeline.latestUpdatedAt)}</span>
-          ) : null}
-        </div>
-      </div>
-
-      <div className="admin-jobs-filter-row" aria-label="Jobs timeline range filters">
-        <div className="admin-jobs-filter-pills">
-          {JOBS_TIME_RANGE_PRESETS.map((preset) => (
-            <button
-              key={preset.id}
-              type="button"
-              className={`admin-jobs-filter-pill${selectedRangeId === preset.id ? " active" : ""}`}
-              aria-pressed={selectedRangeId === preset.id}
-              onClick={() => onSelectRangeId(preset.id)}
+          <span>Window</span>
+          <div className="admin-jobs-window-control">
+            <select
+              aria-label="Jobs window"
+              className="admin-jobs-window-select"
+              value={selectedRangeId}
+              onChange={handleWindowChange}
             >
-              {preset.label}
-            </button>
-          ))}
-          <button
-            type="button"
-            className={`admin-jobs-filter-pill${selectedRangeId === CUSTOM_TIME_RANGE_ID ? " active" : ""}`}
-            aria-pressed={selectedRangeId === CUSTOM_TIME_RANGE_ID}
-            onClick={() => onSelectRangeId(CUSTOM_TIME_RANGE_ID)}
-          >
-            Custom
-          </button>
-        </div>
-        {selectedRangeId === CUSTOM_TIME_RANGE_ID ? (
-          <div className="admin-jobs-custom-range">
-            <label className="admin-jobs-custom-field">
-              <span>From</span>
-              <input
-                type="datetime-local"
-                aria-label="Custom range start"
-                value={customRange.start}
-                onChange={(event) =>
-                  onCustomRangeChange({ ...customRange, start: event.target.value })
-                }
-              />
-            </label>
-            <label className="admin-jobs-custom-field">
-              <span>To</span>
-              <input
-                type="datetime-local"
-                aria-label="Custom range end"
-                value={customRange.end}
-                onChange={(event) =>
-                  onCustomRangeChange({ ...customRange, end: event.target.value })
-                }
-              />
-            </label>
+              {JOBS_TIME_RANGE_PRESETS.map((preset) => (
+                <option key={preset.id} value={preset.id}>
+                  {preset.label}
+                </option>
+              ))}
+              <option value={CUSTOM_TIME_RANGE_ID}>Custom range</option>
+            </select>
+            {selectedRangeId === CUSTOM_TIME_RANGE_ID && customPopoverOpen ? (
+              <div
+                className="admin-jobs-custom-popover"
+                role="dialog"
+                aria-label="Custom job window"
+              >
+                <label className="admin-jobs-custom-field">
+                  <span>Start</span>
+                  <input
+                    type="datetime-local"
+                    aria-label="Custom range start"
+                    value={customRange.start}
+                    onChange={(event) =>
+                      onCustomRangeChange({ ...customRange, start: event.target.value })
+                    }
+                  />
+                </label>
+                <label className="admin-jobs-custom-field">
+                  <span>End</span>
+                  <input
+                    type="datetime-local"
+                    aria-label="Custom range end"
+                    value={customRange.end}
+                    onChange={(event) =>
+                      onCustomRangeChange({ ...customRange, end: event.target.value })
+                    }
+                  />
+                </label>
+                <button
+                  type="button"
+                  className="admin-jobs-custom-close"
+                  onClick={() => setCustomPopoverOpen(false)}
+                >
+                  Done
+                </button>
+              </div>
+            ) : null}
           </div>
-        ) : null}
+        </div>
       </div>
 
       {showSkeleton ? (
-        <TimelineSkeleton />
+        <TimelineSkeleton message={!loading ? emptyChartMessage : undefined} />
       ) : (
         <div className="admin-jobs-chart-shell" data-testid="admin-jobs-chart">
           <ReactECharts option={option} className="admin-jobs-chart" notMerge lazyUpdate />
@@ -1388,13 +1405,6 @@ export function AdminOpsPanel({
               selectedRangeId={selectedRangeId}
               timeWindow={timeWindow}
             />
-            <div className="admin-jobs-results-bar">
-              {jobsLoading
-                ? "Loading jobs"
-                : filteredJobs.length > 0
-                  ? `${formatWholeNumber(filteredJobs.length)} jobs in ${timeWindow.label}`
-                  : `No jobs in ${timeWindow.label.toLowerCase()}`}
-            </div>
             <div className="admin-jobs-table-shell">
               <table className="admin-jobs-table">
                 <thead>
