@@ -107,6 +107,8 @@ The intended local experience is:
 3. run `make doctor`
 4. run `make dev`
 
+During `make dev`, the API reload watcher is scoped to authored backend source and excludes generated paper storage and packaged frontend static output.
+
 For validation:
 
 - `make test` is the standard correctness gate

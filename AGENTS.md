@@ -97,6 +97,8 @@ If you change the developer workflow, keep the docs synchronized in the same cha
 
 Logs are written to `.run/`.
 
+The API reload watcher is limited to authored backend source. Generated paper storage and packaged frontend static output must not trigger API reloads.
+
 Generated frontend build output lives in `paperbase/src/paperbase/static/`. Treat that directory as build output, not authored source.
 
 ## Git and Review Expectations

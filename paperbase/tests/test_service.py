@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
+import threading
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlparse
 
@@ -1432,11 +1434,23 @@ def test_api_main_respects_reload_env(monkeypatch):
     )
     monkeypatch.setenv("PAPERBASE_API_RELOAD", "1")
 
-    def fake_uvicorn_run(app, *, host, port, reload, log_config, log_level):
+    def fake_uvicorn_run(
+        app,
+        *,
+        host,
+        port,
+        reload,
+        reload_dirs,
+        reload_excludes,
+        log_config,
+        log_level,
+    ):
         captured["app"] = app
         captured["host"] = host
         captured["port"] = port
         captured["reload"] = reload
+        captured["reload_dirs"] = reload_dirs
+        captured["reload_excludes"] = reload_excludes
         captured["log_config"] = log_config
         captured["log_level"] = log_level
 
@@ -1448,7 +1462,51 @@ def test_api_main_respects_reload_env(monkeypatch):
     assert captured["host"] == "0.0.0.0"
     assert captured["port"] == 8080
     assert captured["reload"] is True
+    assert captured["reload_dirs"] == [str(api_module._PACKAGE_DIR)]
+    assert str(api_module._STATIC_DIR / "*") in captured["reload_excludes"]
     assert captured["log_level"] == "warning"
+
+
+def test_get_service_initializes_once_under_concurrent_requests(monkeypatch):
+    import paperbase.service as service_module
+
+    settings = Settings(
+        storage_backend="memory",
+        database_url="memory://",
+        api_key="test-token",
+    )
+    init_started = threading.Event()
+    release_init = threading.Event()
+    init_lock = threading.Lock()
+    init_count = 0
+
+    class BlockingRepository(MemoryPaperRepository):
+        def init(self) -> None:
+            nonlocal init_count
+            with init_lock:
+                init_count += 1
+            init_started.set()
+            assert release_init.wait(timeout=2)
+
+    repository = BlockingRepository()
+    monkeypatch.setattr(service_module, "_SERVICE", None)
+    monkeypatch.setattr(service_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(service_module, "build_repository", lambda _settings: repository)
+    monkeypatch.setattr(service_module, "build_object_store", lambda _settings: MemoryObjectStore())
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(service_module.get_service)
+        assert init_started.wait(timeout=1)
+        second = executor.submit(service_module.get_service)
+
+        assert init_count == 1
+        release_init.set()
+        first_service = first.result(timeout=2)
+        second_service = second.result(timeout=2)
+
+    assert first_service is second_service
+    assert init_count == 1
+    monkeypatch.setattr(service_module, "_SERVICE", None)
 
 
 def test_probe_integrations_returns_database_and_storage_status(service: PaperbaseService):

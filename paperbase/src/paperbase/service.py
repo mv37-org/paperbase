@@ -9208,11 +9208,21 @@ class PaperbaseService:
         )
 
 
-@lru_cache(maxsize=1)
+_SERVICE_LOCK = threading.Lock()
+_SERVICE: PaperbaseService | None = None
+
+
 def get_service() -> PaperbaseService:
-    settings = get_settings()
-    repository = build_repository(settings)
-    object_store = build_object_store(settings)
-    service = PaperbaseService(settings=settings, repository=repository, object_store=object_store)
-    service.init()
-    return service
+    global _SERVICE
+    if _SERVICE is not None:
+        return _SERVICE
+    with _SERVICE_LOCK:
+        if _SERVICE is None:
+            settings = get_settings()
+            repository = build_repository(settings)
+            object_store = build_object_store(settings)
+            service = PaperbaseService(settings=settings, repository=repository, object_store=object_store)
+            service.init()
+            _SERVICE = service
+    assert _SERVICE is not None
+    return _SERVICE

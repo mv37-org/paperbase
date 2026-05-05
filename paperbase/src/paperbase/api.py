@@ -120,6 +120,16 @@ def _allowed_browser_origins() -> list[str]:
     return origins
 
 
+def _api_reload_dirs() -> list[str]:
+    return [str(_PACKAGE_DIR)]
+
+
+def _api_reload_excludes() -> list[str]:
+    return [
+        str(_STATIC_DIR / "*"),
+    ]
+
+
 app.add_middleware(
     SessionMiddleware,
     secret_key=_app_settings.app_secret,
@@ -1725,6 +1735,8 @@ def main() -> None:
         host=host,
         port=port,
         reload=reload_enabled,
+        reload_dirs=_api_reload_dirs(),
+        reload_excludes=_api_reload_excludes(),
         log_config=build_log_config(component="api", level=settings.log_level, log_format=settings.log_format),
         log_level=settings.log_level.lower(),
     )
