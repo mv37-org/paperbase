@@ -5259,7 +5259,6 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
   gap: 0;
   padding: 0;
   border-top: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
 }
 
 .admin-jobs-timeline-head {
@@ -5500,6 +5499,8 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
 }
 
 .admin-jobs-table th {
+  padding-top: 6px;
+  padding-bottom: 6px;
   background: rgba(249, 246, 240, 0.9);
   color: var(--muted);
   font-size: 11px;
