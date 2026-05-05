@@ -5624,14 +5624,8 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
   color: var(--muted);
 }
 
-.admin-jobs-type-cell {
-  display: grid;
-  gap: 3px;
-}
-
 .admin-jobs-run-reason {
-  display: block;
-  padding-left: 20px;
+  display: inline-flex;
   color: var(--muted);
   font-family: "JetBrains Mono", "SFMono-Regular", monospace;
   font-size: 11px;

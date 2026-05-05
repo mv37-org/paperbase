@@ -1630,6 +1630,7 @@ export function AdminOpsPanel({
                 <thead>
                   <tr>
                     <th>Type</th>
+                    <th>Reason</th>
                     <th>ID</th>
                     <th>Status</th>
                     <th>Indexed papers</th>
@@ -1644,7 +1645,7 @@ export function AdminOpsPanel({
                   }
                 >
                   {jobsLoading || filteredJobs.length === 0 ? (
-                    <TableSkeletonRows columns={5} />
+                    <TableSkeletonRows columns={6} />
                   ) : (
                     filteredJobs.map((job) => {
                       const expanded = Boolean(expandedJobIds[job.job_id]);
@@ -1661,26 +1662,26 @@ export function AdminOpsPanel({
                             }
                           >
                             <td>
-                              <div className="admin-jobs-type-cell">
-                                <button
-                                  type="button"
-                                  className="admin-jobs-expand"
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    setExpandedJobIds((current) => ({
-                                      ...current,
-                                      [job.job_id]: !current[job.job_id],
-                                    }));
-                                  }}
-                                  aria-expanded={expanded}
-                                >
-                                  <span>{expanded ? "−" : "+"}</span>
-                                  <span>{jobTypeLabel(job.job_type)}</span>
-                                </button>
-                                <span className="admin-jobs-run-reason">
-                                  {adminJobRunReason(job)}
-                                </span>
-                              </div>
+                              <button
+                                type="button"
+                                className="admin-jobs-expand"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  setExpandedJobIds((current) => ({
+                                    ...current,
+                                    [job.job_id]: !current[job.job_id],
+                                  }));
+                                }}
+                                aria-expanded={expanded}
+                              >
+                                <span>{expanded ? "−" : "+"}</span>
+                                <span>{jobTypeLabel(job.job_type)}</span>
+                              </button>
+                            </td>
+                            <td>
+                              <span className="admin-jobs-run-reason">
+                                {adminJobRunReason(job)}
+                              </span>
                             </td>
                             <td>
                               <code>{job.job_id}</code>
@@ -1710,7 +1711,7 @@ export function AdminOpsPanel({
                           </tr>
                           {expanded ? (
                             <tr className="admin-jobs-expanded-row">
-                              <td colSpan={5}>
+                              <td colSpan={6}>
                                 <div className="admin-jobs-expanded">
                                   <div>Latest status: {job.latest_status_summary}</div>
                                   {job.error ? <div>Error: {job.error}</div> : null}

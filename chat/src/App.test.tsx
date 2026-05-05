@@ -3112,6 +3112,9 @@ describe("App", () => {
         "paper outcomes,paper outcomes,paper outcomes",
       );
       expect((chart as HTMLElement).style.height).toBe("320px");
+      expect(
+        within(screen.getByRole("table")).getByRole("columnheader", { name: "Reason" }),
+      ).toBeTruthy();
       expect(screen.getByText("User queued · date range backfill")).toBeTruthy();
       expect(screen.queryByRole("button", { name: "Close Control panel" })).toBeNull();
       expect(apiMocks.loadBrowserAdminJobsOverview).toHaveBeenCalledWith(200);
@@ -3232,6 +3235,9 @@ describe("App", () => {
       await waitFor(() => {
         expect(screen.getByText("Env scheduled · latest sync")).toBeTruthy();
       });
+      expect(
+        within(screen.getByRole("table")).getByRole("columnheader", { name: "Reason" }),
+      ).toBeTruthy();
       expect(screen.getByText("User queued · date range backfill")).toBeTruthy();
     } finally {
       dateNowSpy.mockRestore();
