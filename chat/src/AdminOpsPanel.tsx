@@ -1,11 +1,4 @@
-import {
-  type ChangeEvent,
-  type ComponentPropsWithoutRef,
-  type ReactNode,
-  useEffect,
-  useMemo,
-  useState,
-} from "react";
+import { type ComponentPropsWithoutRef, type ReactNode, useEffect, useMemo, useState } from "react";
 import type { EChartsOption } from "echarts";
 import ReactECharts from "echarts-for-react";
 
@@ -871,33 +864,124 @@ function TableSkeletonRows({ columns, rows = 5 }: { columns: number; rows?: numb
   );
 }
 
-function JobsTimeline({
-  jobs,
-  loading,
+function JobsWindowControl({
   customRange,
   onCustomRangeChange,
   onSelectRangeId,
   selectedRangeId,
-  timeWindow,
 }: {
-  jobs: AdminJobOverviewRow[];
-  loading: boolean;
   customRange: CustomTimeRangeState;
   onCustomRangeChange: (range: CustomTimeRangeState) => void;
   onSelectRangeId: (nextRangeId: JobsTimeRangeId) => void;
   selectedRangeId: JobsTimeRangeId;
-  timeWindow: JobsTimeWindow;
 }) {
+  const [menuOpen, setMenuOpen] = useState(false);
   const [customPopoverOpen, setCustomPopoverOpen] = useState(
     selectedRangeId === CUSTOM_TIME_RANGE_ID,
   );
-  const theme = readAdminJobsTheme();
-  const timeline = useMemo(() => buildJobsTimeline(jobs, timeWindow), [jobs, timeWindow]);
-  const showSkeleton = loading || timeline.trackedJobs === 0;
+  const selectedLabel =
+    JOBS_TIME_RANGE_PRESETS.find((preset) => preset.id === selectedRangeId)?.label ??
+    "Custom range";
 
   useEffect(() => {
     setCustomPopoverOpen(selectedRangeId === CUSTOM_TIME_RANGE_ID);
   }, [selectedRangeId]);
+
+  function selectWindow(nextRangeId: JobsTimeRangeId) {
+    setMenuOpen(false);
+    if (nextRangeId === CUSTOM_TIME_RANGE_ID) {
+      setCustomPopoverOpen(true);
+    }
+    onSelectRangeId(nextRangeId);
+  }
+
+  return (
+    <div className="admin-jobs-window-control">
+      <button
+        type="button"
+        className="admin-compact-action admin-compact-action-window admin-jobs-window-button"
+        aria-haspopup="listbox"
+        aria-expanded={menuOpen}
+        aria-label="Jobs window"
+        onClick={() => setMenuOpen((open) => !open)}
+      >
+        <span>{selectedLabel}</span>
+        <span className="admin-jobs-window-chevron" aria-hidden="true">
+          ▾
+        </span>
+      </button>
+      {menuOpen ? (
+        <div className="admin-jobs-window-menu" role="listbox" aria-label="Jobs window">
+          {JOBS_TIME_RANGE_PRESETS.map((preset) => (
+            <button
+              key={preset.id}
+              type="button"
+              className={`admin-jobs-window-option${selectedRangeId === preset.id ? " active" : ""}`}
+              role="option"
+              aria-selected={selectedRangeId === preset.id}
+              onClick={() => selectWindow(preset.id)}
+            >
+              {preset.label}
+            </button>
+          ))}
+          <button
+            type="button"
+            className={`admin-jobs-window-option${selectedRangeId === CUSTOM_TIME_RANGE_ID ? " active" : ""}`}
+            role="option"
+            aria-selected={selectedRangeId === CUSTOM_TIME_RANGE_ID}
+            onClick={() => selectWindow(CUSTOM_TIME_RANGE_ID)}
+          >
+            Custom range
+          </button>
+        </div>
+      ) : null}
+      {selectedRangeId === CUSTOM_TIME_RANGE_ID && customPopoverOpen && !menuOpen ? (
+        <div className="admin-jobs-custom-popover" role="dialog" aria-label="Custom job window">
+          <label className="admin-jobs-custom-field">
+            <span>Start</span>
+            <input
+              type="datetime-local"
+              aria-label="Custom range start"
+              value={customRange.start}
+              onChange={(event) =>
+                onCustomRangeChange({ ...customRange, start: event.target.value })
+              }
+            />
+          </label>
+          <label className="admin-jobs-custom-field">
+            <span>End</span>
+            <input
+              type="datetime-local"
+              aria-label="Custom range end"
+              value={customRange.end}
+              onChange={(event) => onCustomRangeChange({ ...customRange, end: event.target.value })}
+            />
+          </label>
+          <button
+            type="button"
+            className="admin-jobs-custom-close"
+            onClick={() => setCustomPopoverOpen(false)}
+          >
+            Done
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function JobsTimeline({
+  jobs,
+  loading,
+  timeWindow,
+}: {
+  jobs: AdminJobOverviewRow[];
+  loading: boolean;
+  timeWindow: JobsTimeWindow;
+}) {
+  const theme = readAdminJobsTheme();
+  const timeline = useMemo(() => buildJobsTimeline(jobs, timeWindow), [jobs, timeWindow]);
+  const showSkeleton = loading || timeline.trackedJobs === 0;
 
   const option = useMemo<EChartsOption>(() => {
     return {
@@ -1022,74 +1106,8 @@ function JobsTimeline({
     </>
   );
 
-  function handleWindowChange(event: ChangeEvent<HTMLSelectElement>) {
-    const nextRangeId = event.target.value as JobsTimeRangeId;
-    if (nextRangeId === CUSTOM_TIME_RANGE_ID) {
-      setCustomPopoverOpen(true);
-    }
-    onSelectRangeId(nextRangeId);
-  }
-
   return (
     <section className="admin-jobs-timeline-panel" aria-label="Indexed papers timeline">
-      <div className="admin-jobs-timeline-head">
-        <div className="admin-jobs-timeline-meta">
-          <span>Window</span>
-          <div className="admin-jobs-window-control">
-            <select
-              aria-label="Jobs window"
-              className="admin-jobs-window-select"
-              value={selectedRangeId}
-              onChange={handleWindowChange}
-            >
-              {JOBS_TIME_RANGE_PRESETS.map((preset) => (
-                <option key={preset.id} value={preset.id}>
-                  {preset.label}
-                </option>
-              ))}
-              <option value={CUSTOM_TIME_RANGE_ID}>Custom range</option>
-            </select>
-            {selectedRangeId === CUSTOM_TIME_RANGE_ID && customPopoverOpen ? (
-              <div
-                className="admin-jobs-custom-popover"
-                role="dialog"
-                aria-label="Custom job window"
-              >
-                <label className="admin-jobs-custom-field">
-                  <span>Start</span>
-                  <input
-                    type="datetime-local"
-                    aria-label="Custom range start"
-                    value={customRange.start}
-                    onChange={(event) =>
-                      onCustomRangeChange({ ...customRange, start: event.target.value })
-                    }
-                  />
-                </label>
-                <label className="admin-jobs-custom-field">
-                  <span>End</span>
-                  <input
-                    type="datetime-local"
-                    aria-label="Custom range end"
-                    value={customRange.end}
-                    onChange={(event) =>
-                      onCustomRangeChange({ ...customRange, end: event.target.value })
-                    }
-                  />
-                </label>
-                <button
-                  type="button"
-                  className="admin-jobs-custom-close"
-                  onClick={() => setCustomPopoverOpen(false)}
-                >
-                  Done
-                </button>
-              </div>
-            ) : null}
-          </div>
-        </div>
-      </div>
-
       {showSkeleton ? (
         <TimelineSkeleton message={!loading ? emptyChartMessage : undefined} />
       ) : (
@@ -1382,33 +1400,33 @@ export function AdminOpsPanel({
       {view.kind === "jobs" ? (
         <>
           <div className="admin-jobs-header">
-            <h1>Jobs</h1>
-            <button
-              type="button"
-              className="admin-compact-action admin-compact-action-primary admin-compact-action-with-icon admin-jobs-create-button"
-              onClick={() => {
-                setCreateModalOpen(true);
-                setCreateJobKind(null);
-              }}
-            >
-              <span className="admin-compact-action-icon" aria-hidden="true">
-                +
-              </span>
-              <span className="admin-compact-action-label">Create job</span>
-            </button>
+            <h1>Control panel</h1>
+            <div className="admin-jobs-header-actions">
+              <JobsWindowControl
+                customRange={customRange}
+                onCustomRangeChange={setCustomRange}
+                onSelectRangeId={handleSelectRangeId}
+                selectedRangeId={selectedRangeId}
+              />
+              <button
+                type="button"
+                className="admin-compact-action admin-compact-action-primary admin-compact-action-with-icon admin-jobs-create-button"
+                onClick={() => {
+                  setCreateModalOpen(true);
+                  setCreateJobKind(null);
+                }}
+              >
+                <span className="admin-compact-action-icon" aria-hidden="true">
+                  +
+                </span>
+                <span className="admin-compact-action-label">Create job</span>
+              </button>
+            </div>
           </div>
 
           {jobsError ? <div className="admin-jobs-inline-error">{jobsError}</div> : null}
           <div className="admin-jobs-surface">
-            <JobsTimeline
-              jobs={filteredJobs}
-              loading={jobsLoading}
-              customRange={customRange}
-              onCustomRangeChange={setCustomRange}
-              onSelectRangeId={handleSelectRangeId}
-              selectedRangeId={selectedRangeId}
-              timeWindow={timeWindow}
-            />
+            <JobsTimeline jobs={filteredJobs} loading={jobsLoading} timeWindow={timeWindow} />
             <div className="admin-jobs-table-shell">
               <table className="admin-jobs-table">
                 <thead>

@@ -5099,9 +5099,9 @@ textarea {
 
 .admin-jobs-header {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 12px;
   padding: 24px 24px 0;
 }
 
@@ -5113,6 +5113,14 @@ textarea {
 .admin-jobs-header-papers {
   justify-content: flex-start;
   align-items: center;
+}
+
+.admin-jobs-header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-left: auto;
 }
 
 .admin-jobs-create-button {
@@ -5166,6 +5174,12 @@ button.admin-compact-action.admin-compact-action-primary {
 
 button.admin-compact-action.admin-compact-action-secondary {
   background: rgba(27, 22, 17, 0.02);
+}
+
+button.admin-compact-action.admin-compact-action-window {
+  border-color: rgba(136, 82, 24, 0.24);
+  background: rgba(136, 82, 24, 0.08);
+  color: #7a4a17;
 }
 
 button.admin-compact-action:hover:not(:disabled) {
@@ -5224,7 +5238,7 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
 
 .admin-jobs-timeline-panel {
   display: grid;
-  gap: 12px;
+  gap: 0;
   padding: 0 0 18px;
   border-bottom: 1px solid var(--line);
 }
@@ -5266,31 +5280,47 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
   position: relative;
 }
 
-.admin-jobs-window-select,
-.admin-jobs-custom-close {
-  min-height: 30px;
+.admin-jobs-window-button {
+  min-width: 128px;
+}
+
+.admin-jobs-window-chevron {
+  font-size: 10px;
+  line-height: 1;
+  margin-left: 2px;
+}
+
+.admin-jobs-window-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 30;
+  display: grid;
+  width: 168px;
+  padding: 4px;
   border: 1px solid var(--line);
-  border-radius: 8px;
-  background: rgba(27, 22, 17, 0.02);
+  border-radius: 4px;
+  background: var(--paper-strong);
+  box-shadow: 0 16px 36px rgba(16, 24, 40, 0.14);
+}
+
+.admin-jobs-window-option {
+  min-height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
   color: var(--text);
+  cursor: pointer;
   font-family: "JetBrains Mono", "SFMono-Regular", monospace;
   font-size: 11px;
   letter-spacing: 0.03em;
+  text-align: left;
 }
 
-.admin-jobs-window-select {
-  appearance: none;
-  min-width: 168px;
-  padding: 0 30px 0 10px;
-  cursor: pointer;
-  background-image:
-    linear-gradient(45deg, transparent 50%, var(--muted) 50%),
-    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
-  background-position:
-    calc(100% - 16px) calc(50% - 2px),
-    calc(100% - 11px) calc(50% - 2px);
-  background-size: 5px 5px;
-  background-repeat: no-repeat;
+.admin-jobs-window-option.active {
+  background: rgba(136, 82, 24, 0.1);
+  color: #7a4a17;
 }
 
 .admin-jobs-custom-popover {
@@ -5302,7 +5332,7 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
   min-width: min(280px, calc(100vw - 48px));
   padding: 12px;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: 4px;
   background: rgba(255, 255, 255, 0.98);
   box-shadow: 0 12px 32px rgba(27, 22, 17, 0.08);
   z-index: 5;
@@ -5321,9 +5351,17 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
 }
 
 .admin-jobs-custom-close {
+  min-height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: rgba(27, 22, 17, 0.02);
+  color: var(--text);
   justify-self: end;
-  padding: 0 10px;
+  padding: 0 12px;
   cursor: pointer;
+  font-family: "JetBrains Mono", "SFMono-Regular", monospace;
+  font-size: 11px;
+  letter-spacing: 0.03em;
 }
 
 .admin-jobs-chart-shell {
@@ -6308,8 +6346,13 @@ button.admin-compact-action.admin-compact-action-secondary:hover:not(:disabled) 
   border-color: rgba(27, 22, 17, 0.18);
 }
 
-.admin-jobs-window-select:hover,
-.admin-jobs-window-select:focus-visible,
+button.admin-compact-action.admin-compact-action-window:hover:not(:disabled) {
+  background: rgba(136, 82, 24, 0.12);
+  border-color: rgba(136, 82, 24, 0.32);
+}
+
+.admin-jobs-window-option:hover,
+.admin-jobs-window-option:focus-visible,
 .admin-jobs-custom-close:hover,
 .admin-jobs-custom-close:focus-visible {
   border-color: rgba(43, 98, 228, 0.24);
@@ -7308,6 +7351,11 @@ body.authenticated-theme-dark .admin-compact-action-primary:hover:not(:disabled)
   box-shadow: none;
 }
 
+body.authenticated-theme-dark .admin-compact-action-window:hover:not(:disabled) {
+  background: rgba(250, 204, 21, 0.14);
+  border-color: rgba(250, 204, 21, 0.34);
+}
+
 body.authenticated-theme-dark .admin-compact-action-secondary:hover:not(:disabled) {
   background: rgba(255, 255, 255, 0.08);
   border-color: rgba(223, 232, 244, 0.2);
@@ -7321,15 +7369,21 @@ body.authenticated-theme-dark .admin-jobs-skeleton-chart {
   background: linear-gradient(180deg, rgba(223, 232, 244, 0.04) 0%, rgba(223, 232, 244, 0) 72%);
 }
 
-body.authenticated-theme-dark .admin-jobs-window-select,
+body.authenticated-theme-dark .admin-jobs-window-menu,
 body.authenticated-theme-dark .admin-jobs-custom-close,
 body.authenticated-theme-dark .admin-jobs-custom-popover {
   border-color: rgba(223, 232, 244, 0.14);
 }
 
-body.authenticated-theme-dark .admin-jobs-window-select,
+body.authenticated-theme-dark .admin-jobs-window-menu,
 body.authenticated-theme-dark .admin-jobs-custom-close {
   background-color: rgba(255, 255, 255, 0.04);
+}
+
+body.authenticated-theme-dark .admin-compact-action-window {
+  border-color: rgba(250, 204, 21, 0.26);
+  background: rgba(250, 204, 21, 0.1);
+  color: #f9d683;
 }
 
 body.authenticated-theme-dark .admin-jobs-custom-popover {
@@ -7337,8 +7391,13 @@ body.authenticated-theme-dark .admin-jobs-custom-popover {
   box-shadow: 0 16px 36px rgba(0, 0, 0, 0.3);
 }
 
-body.authenticated-theme-dark .admin-jobs-window-select:hover,
-body.authenticated-theme-dark .admin-jobs-window-select:focus-visible,
+body.authenticated-theme-dark .admin-jobs-window-option.active {
+  background: rgba(250, 204, 21, 0.12);
+  color: #f9d683;
+}
+
+body.authenticated-theme-dark .admin-jobs-window-option:hover,
+body.authenticated-theme-dark .admin-jobs-window-option:focus-visible,
 body.authenticated-theme-dark .admin-jobs-custom-close:hover,
 body.authenticated-theme-dark .admin-jobs-custom-close:focus-visible {
   border-color: rgba(142, 166, 221, 0.32);

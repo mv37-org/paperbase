@@ -303,7 +303,7 @@ const buildProjectCategoryCollapseState = (collapsed: boolean) =>
   >;
 const WORKSPACE_SIDEBAR_ITEMS = [
   { id: "trending", label: "Trending papers", asset: "docs.svg" },
-  { id: "admin_jobs", label: "Admin panel", asset: "settings.svg", adminOnly: true },
+  { id: "admin_jobs", label: "Control panel", asset: "settings.svg", adminOnly: true },
 ] satisfies Array<{
   id: "trending" | "admin_jobs";
   label: string;
@@ -5485,7 +5485,7 @@ export default function App() {
                 ) : (
                   <div className="workspace-page">
                     <div className="workspace-page-header">
-                      <span>Admin panel</span>
+                      <span>Control panel</span>
                       <h1>Admin access required</h1>
                       <p>This area is only available to allowlisted admin accounts.</p>
                     </div>

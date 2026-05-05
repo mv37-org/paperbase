@@ -2956,7 +2956,7 @@ describe("App", () => {
       expect(document.querySelector("#account-menu-button")).toBeTruthy();
     });
     expect(screen.getByRole("button", { name: "Trending papers" })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Admin panel" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Control panel" })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Trending papers" }));
     await waitFor(() => {
@@ -3045,23 +3045,23 @@ describe("App", () => {
       render(<App />);
 
       await waitFor(() => {
-        expect(screen.getByRole("button", { name: "Admin panel" })).toBeTruthy();
+        expect(screen.getByRole("button", { name: "Control panel" })).toBeTruthy();
       });
 
-      fireEvent.click(screen.getByRole("button", { name: "Admin panel" }));
+      fireEvent.click(screen.getByRole("button", { name: "Control panel" }));
 
       await waitFor(() => {
-        expect(screen.getByRole("heading", { name: "Jobs" })).toBeTruthy();
+        expect(screen.getByRole("heading", { name: "Control panel" })).toBeTruthy();
       });
       expect(screen.getByTestId("admin-jobs-chart")).toBeTruthy();
-      expect(screen.queryByRole("button", { name: "Close Admin panel" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Close Control panel" })).toBeNull();
       expect(apiMocks.loadBrowserAdminJobsOverview).toHaveBeenCalledWith(200);
 
       fireEvent.click(within(screen.getByRole("table")).getByRole("button", { name: "2" }));
       await waitFor(() => {
         expect(screen.getByRole("heading", { name: "Indexed papers" })).toBeTruthy();
       });
-      expect(screen.queryByRole("button", { name: "Close Admin panel" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Close Control panel" })).toBeNull();
       expect(apiMocks.loadBrowserAdminJobPapers).toHaveBeenCalledWith("job_root_1");
 
       fireEvent.click(document.querySelector("#account-menu-button") as HTMLElement);
@@ -3085,16 +3085,16 @@ describe("App", () => {
     render(<App />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Admin panel" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Control panel" })).toBeTruthy();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Admin panel" }));
+    fireEvent.click(screen.getByRole("button", { name: "Control panel" }));
 
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "Jobs" })).toBeTruthy();
+      expect(screen.getByRole("heading", { name: "Control panel" })).toBeTruthy();
     });
     const table = screen.getByRole("table");
-    expect(screen.getByText("No indexed papers in this window")).toBeTruthy();
+    expect(screen.getAllByText("No indexed papers in this window").length).toBeGreaterThan(0);
     expect(screen.getByTestId("admin-jobs-chart-skeleton")).toBeTruthy();
     expect(screen.getByTestId("admin-jobs-table-skeleton")).toBeTruthy();
     expect(within(table).getByRole("columnheader", { name: "Type" })).toBeTruthy();
@@ -3154,30 +3154,28 @@ describe("App", () => {
       render(<App />);
 
       await waitFor(() => {
-        expect(screen.getByRole("button", { name: "Admin panel" })).toBeTruthy();
+        expect(screen.getByRole("button", { name: "Control panel" })).toBeTruthy();
       });
 
-      fireEvent.click(screen.getByRole("button", { name: "Admin panel" }));
+      fireEvent.click(screen.getByRole("button", { name: "Control panel" }));
 
       await waitFor(() => {
-        expect(screen.getByRole("heading", { name: "Jobs" })).toBeTruthy();
+        expect(screen.getByRole("heading", { name: "Control panel" })).toBeTruthy();
       });
 
       expect(screen.getByText("job_recent")).toBeTruthy();
       expect(screen.getByText("job_old")).toBeTruthy();
 
-      fireEvent.change(screen.getByLabelText("Jobs window"), {
-        target: { value: "1h" },
-      });
+      fireEvent.click(screen.getByRole("button", { name: "Jobs window" }));
+      fireEvent.click(screen.getByRole("option", { name: "Last hour" }));
 
       await waitFor(() => {
         expect(screen.getByText("job_recent")).toBeTruthy();
       });
       expect(screen.queryByText("job_old")).toBeNull();
 
-      fireEvent.change(screen.getByLabelText("Jobs window"), {
-        target: { value: "custom" },
-      });
+      fireEvent.click(screen.getByRole("button", { name: "Jobs window" }));
+      fireEvent.click(screen.getByRole("option", { name: "Custom range" }));
       fireEvent.change(screen.getByLabelText("Custom range start"), {
         target: { value: "2026-04-15T00:00" },
       });
@@ -3200,13 +3198,13 @@ describe("App", () => {
     render(<App />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Admin panel" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Control panel" })).toBeTruthy();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Admin panel" }));
+    fireEvent.click(screen.getByRole("button", { name: "Control panel" }));
 
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "Jobs" })).toBeTruthy();
+      expect(screen.getByRole("heading", { name: "Control panel" })).toBeTruthy();
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Create job" }));
@@ -3249,13 +3247,13 @@ describe("App", () => {
     render(<App />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Admin panel" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Control panel" })).toBeTruthy();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Admin panel" }));
+    fireEvent.click(screen.getByRole("button", { name: "Control panel" }));
 
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "Jobs" })).toBeTruthy();
+      expect(screen.getByRole("heading", { name: "Control panel" })).toBeTruthy();
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Create job" }));
