@@ -3226,18 +3226,27 @@ describe("App", () => {
         },
       ],
     });
+    localStorage.setItem(OPEN_TABS_KEY, JSON.stringify(["thread_1"]));
     try {
       render(<App />);
 
       await waitFor(() => {
         expect(screen.getByRole("button", { name: "Control panel" })).toBeTruthy();
       });
+      await waitFor(() => {
+        expect(screen.getByRole("tablist", { name: "Open tabs" })).toBeTruthy();
+      });
+      expect(screen.getByRole("button", { name: "Send" })).toBeTruthy();
+      expect(screen.getByText("Grounded answer")).toBeTruthy();
 
       fireEvent.click(screen.getByRole("button", { name: "Control panel" }));
 
       await waitFor(() => {
         expect(screen.getByRole("heading", { name: "Control panel" })).toBeTruthy();
       });
+      expect(screen.queryByRole("tablist", { name: "Open tabs" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
+      expect(screen.queryByText("Grounded answer")).toBeNull();
       expect(await screen.findByTestId("admin-jobs-chart")).toBeTruthy();
       const chart = screen.getByTestId("admin-jobs-chart-inner");
       expect(chart.getAttribute("data-grid-bottom")).toBe("26");
