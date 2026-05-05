@@ -710,10 +710,14 @@ export async function loadBrowserAdminJobsOverview(limit = 50) {
   }
 }
 
-export function loadBrowserAdminJobPapers(rootJobId: string) {
-  return api<AdminJobPapersResponse>(`/v1/browser/admin/jobs/${rootJobId}/papers`, {
-    method: "GET",
-  });
+export function loadBrowserAdminJobPapers(rootJobId: string, offset = 0, limit = 100) {
+  const params = new URLSearchParams({ offset: String(offset), limit: String(limit) });
+  return api<AdminJobPapersResponse>(
+    `/v1/browser/admin/jobs/${rootJobId}/papers?${params.toString()}`,
+    {
+      method: "GET",
+    },
+  );
 }
 
 export function retryBrowserAdminJob(jobId: string) {

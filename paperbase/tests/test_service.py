@@ -911,6 +911,10 @@ def test_index_job_tracks_papers_for_admin_overview(monkeypatch, service: Paperb
 
     job_papers = service.get_admin_job_papers(job.job_id)
     assert len(job_papers.papers) == 1
+    assert job_papers.total_count == 1
+    assert job_papers.offset == 0
+    assert job_papers.limit == 100
+    assert job_papers.has_more is False
     assert job_papers.papers[0].paper_id == "arxiv:2401.77777"
     assert job_papers.papers[0].outcome == "indexed"
 
@@ -1011,6 +1015,51 @@ def test_latest_sync_schedule_uses_latest_run_tracking_for_legacy_rootless_jobs(
 
     job_papers = service.get_admin_job_papers(schedule_row.root_job_id)
     assert [paper.paper_id for paper in job_papers.papers] == ["arxiv:2401.88888"]
+
+
+def test_admin_job_papers_response_is_paginated(service: PaperbaseService):
+    job = service.repository.create_job("harvest_range", {"harvest_id": "harvest-page"})
+    service.repository.jobs[job.job_id] = job.model_copy(update={"status": "completed"})
+    service.repository.record_job_paper(
+        job.job_id,
+        "arxiv:2401.00001",
+        outcome="indexed",
+        arxiv_id="2401.00001",
+        title="Paper One",
+    )
+    service.repository.record_job_paper(
+        job.job_id,
+        "arxiv:2401.00002",
+        outcome="indexed",
+        arxiv_id="2401.00002",
+        title="Paper Two",
+    )
+    service.repository.record_job_paper(
+        job.job_id,
+        "arxiv:2401.00003",
+        outcome="indexed",
+        arxiv_id="2401.00003",
+        title="Paper Three",
+    )
+    now = datetime.now(timezone.utc)
+    service.repository.job_papers[(job.job_id, "arxiv:2401.00001")] = service.repository.job_papers[
+        (job.job_id, "arxiv:2401.00001")
+    ].model_copy(update={"updated_at": now.replace(microsecond=1)})
+    service.repository.job_papers[(job.job_id, "arxiv:2401.00002")] = service.repository.job_papers[
+        (job.job_id, "arxiv:2401.00002")
+    ].model_copy(update={"updated_at": now.replace(microsecond=2)})
+    service.repository.job_papers[(job.job_id, "arxiv:2401.00003")] = service.repository.job_papers[
+        (job.job_id, "arxiv:2401.00003")
+    ].model_copy(update={"updated_at": now.replace(microsecond=3)})
+
+    page = service.get_admin_job_papers(job.job_id, offset=1, limit=1)
+
+    assert page.root_job_id == job.job_id
+    assert page.total_count == 3
+    assert page.offset == 1
+    assert page.limit == 1
+    assert page.has_more is True
+    assert [paper.paper_id for paper in page.papers] == ["arxiv:2401.00002"]
 
 
 def test_reindex_replaces_stale_artifacts(monkeypatch, service: PaperbaseService):

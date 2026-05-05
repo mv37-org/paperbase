@@ -125,6 +125,7 @@ const JOB_TYPE_LABELS: Record<string, string> = {
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 const ADMIN_JOBS_OVERVIEW_LIMIT = 200;
+const ADMIN_JOB_PAPERS_PAGE_SIZE = 100;
 const CUSTOM_TIME_RANGE_ID = "custom";
 const TIMELINE_BUCKETS = [
   { maxSpanMs: 2 * DAY_MS, sizeMs: 45 * 60 * 1000, label: "45-minute buckets" },
@@ -1269,6 +1270,9 @@ export function AdminOpsPanel({
   const [jobPapers, setJobPapers] = useState<AdminJobPaperResponse[]>([]);
   const [jobPapersLoading, setJobPapersLoading] = useState(false);
   const [jobPapersError, setJobPapersError] = useState("");
+  const [jobPapersOffset, setJobPapersOffset] = useState(0);
+  const [jobPapersTotalCount, setJobPapersTotalCount] = useState(0);
+  const [jobPapersHasMore, setJobPapersHasMore] = useState(false);
 
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [createJobKind, setCreateJobKind] = useState<CreateJobKind | null>(null);
@@ -1334,12 +1338,19 @@ export function AdminOpsPanel({
     [],
   );
 
-  const refreshJobPapers = useCallback(async (rootJobId: string) => {
+  const refreshJobPapers = useCallback(async (rootJobId: string, offset: number) => {
     setJobPapersLoading(true);
     setJobPapersError("");
     try {
-      const response = await loadBrowserAdminJobPapers(rootJobId);
+      const response = await loadBrowserAdminJobPapers(
+        rootJobId,
+        offset,
+        ADMIN_JOB_PAPERS_PAGE_SIZE,
+      );
       setJobPapers(response.papers);
+      setJobPapersOffset(response.offset);
+      setJobPapersTotalCount(response.total_count);
+      setJobPapersHasMore(response.has_more);
     } catch (error) {
       setJobPapersError(panelErrorMessage(error, "Indexed papers could not be loaded."));
     } finally {
@@ -1367,9 +1378,22 @@ export function AdminOpsPanel({
 
   useEffect(() => {
     if (view.kind === "papers") {
-      void refreshJobPapers(view.rootJobId);
+      void refreshJobPapers(view.rootJobId, jobPapersOffset);
     }
-  }, [refreshJobPapers, view.kind, view.kind === "papers" ? view.rootJobId : null]);
+  }, [
+    jobPapersOffset,
+    refreshJobPapers,
+    view.kind,
+    view.kind === "papers" ? view.rootJobId : null,
+  ]);
+
+  useEffect(() => {
+    if (view.kind !== "papers") {
+      return;
+    }
+    setJobPapersOffset(0);
+    setSelectedJobPaper(null);
+  }, [view.kind, view.kind === "papers" ? view.rootJobId : null]);
 
   useEffect(() => {
     if (!selectedJobPaper) {
@@ -1557,6 +1581,11 @@ export function AdminOpsPanel({
     setSelectedRangeId(nextRangeId);
   }
 
+  const jobPapersPageStart =
+    jobPapersTotalCount === 0 || jobPapers.length === 0 ? 0 : jobPapersOffset + 1;
+  const jobPapersPageEnd = jobPapersOffset + jobPapers.length;
+  const jobPapersHasPrevious = jobPapersOffset > 0;
+
   return (
     <section className="admin-jobs-shell">
       {view.kind === "jobs" ? (
@@ -1722,11 +1751,13 @@ export function AdminOpsPanel({
             </div>
             <div className="admin-jobs-paper-meta">
               <span>
-                {jobPapersLoading
+                {jobPapersLoading && jobPapersTotalCount === 0
                   ? "Loading papers"
-                  : `${formatWholeNumber(jobPapers.length)} ${
-                      jobPapers.length === 1 ? "paper" : "papers"
-                    }`}
+                  : jobPapersTotalCount === 0
+                    ? "0 papers"
+                    : `${formatWholeNumber(jobPapersPageStart)}-${formatWholeNumber(
+                        jobPapersPageEnd,
+                      )} of ${formatWholeNumber(jobPapersTotalCount)}`}
               </span>
               <code>{view.rootJobId}</code>
             </div>
@@ -1734,8 +1765,47 @@ export function AdminOpsPanel({
 
           {jobPapersError ? <div className="admin-jobs-inline-error">{jobPapersError}</div> : null}
           <div className="admin-jobs-surface">
-            {jobPapersLoading ? <div className="admin-jobs-empty">Loading papers...</div> : null}
-            {!jobPapersLoading ? (
+            <div className="admin-jobs-results-bar">
+              <span>
+                {jobPapersLoading && jobPapersTotalCount === 0
+                  ? "Loading papers..."
+                  : jobPapersTotalCount === 0
+                    ? "No tracked papers yet"
+                    : `${formatWholeNumber(jobPapersPageStart)}-${formatWholeNumber(
+                        jobPapersPageEnd,
+                      )} of ${formatWholeNumber(jobPapersTotalCount)}`}
+              </span>
+              <div className="admin-jobs-results-actions">
+                <button
+                  type="button"
+                  className="admin-compact-action admin-compact-action-secondary"
+                  disabled={jobPapersLoading || !jobPapersHasPrevious}
+                  onClick={() => {
+                    setSelectedJobPaper(null);
+                    setJobPapersOffset((current) =>
+                      Math.max(0, current - ADMIN_JOB_PAPERS_PAGE_SIZE),
+                    );
+                  }}
+                >
+                  Prev
+                </button>
+                <button
+                  type="button"
+                  className="admin-compact-action admin-compact-action-secondary"
+                  disabled={jobPapersLoading || !jobPapersHasMore}
+                  onClick={() => {
+                    setSelectedJobPaper(null);
+                    setJobPapersOffset((current) => current + ADMIN_JOB_PAPERS_PAGE_SIZE);
+                  }}
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+            {jobPapersLoading && jobPapersTotalCount === 0 ? (
+              <div className="admin-jobs-empty">Loading papers...</div>
+            ) : null}
+            {!jobPapersLoading || jobPapers.length > 0 || jobPapersTotalCount === 0 ? (
               <div className="admin-jobs-table-shell">
                 <table className="admin-jobs-table admin-papers-table">
                   <thead>

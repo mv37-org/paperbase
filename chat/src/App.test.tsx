@@ -683,6 +683,10 @@ describe("App", () => {
     });
     apiMocks.loadBrowserAdminJobPapers.mockResolvedValue({
       root_job_id: "job_root_1",
+      total_count: 0,
+      offset: 0,
+      limit: 100,
+      has_more: false,
       papers: [],
     });
     apiMocks.loadBrowserAdminJobs.mockResolvedValue([]);
@@ -3067,6 +3071,10 @@ describe("App", () => {
     });
     apiMocks.loadBrowserAdminJobPapers.mockResolvedValue({
       root_job_id: "job_root_1",
+      total_count: 1,
+      offset: 0,
+      limit: 100,
+      has_more: false,
       papers: [
         {
           root_job_id: "job_root_1",
@@ -3093,7 +3101,7 @@ describe("App", () => {
       await waitFor(() => {
         expect(screen.getByRole("heading", { name: "Control panel" })).toBeTruthy();
       });
-      expect(screen.getByTestId("admin-jobs-chart")).toBeTruthy();
+      expect(await screen.findByTestId("admin-jobs-chart")).toBeTruthy();
       const chart = screen.getByTestId("admin-jobs-chart-inner");
       expect(chart.getAttribute("data-grid-bottom")).toBe("0");
       expect(chart.getAttribute("data-grid-left")).toBe("0");
@@ -3121,10 +3129,10 @@ describe("App", () => {
       });
       const backButton = screen.getByRole("button", { name: "Back to jobs" });
       expect(backButton.textContent).toBe("←");
-      expect(screen.getByText("1 paper")).toBeTruthy();
+      expect(screen.getAllByText("1-1 of 1").length).toBeGreaterThan(0);
       expect(screen.getByText("job_root_1")).toBeTruthy();
       expect(screen.queryByRole("button", { name: "Close Control panel" })).toBeNull();
-      expect(apiMocks.loadBrowserAdminJobPapers).toHaveBeenCalledWith("job_root_1");
+      expect(apiMocks.loadBrowserAdminJobPapers).toHaveBeenCalledWith("job_root_1", 0, 100);
 
       fireEvent.click(document.querySelector("#account-menu-button") as HTMLElement);
       fireEvent.click(screen.getByRole("menuitem", { name: "Settings" }));
@@ -3413,6 +3421,122 @@ describe("App", () => {
       expect(apiMocks.loadBrowserAdminJobsOverview).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it("paginates indexed papers in the admin drilldown", async () => {
+    const dateNowSpy = vi
+      .spyOn(Date, "now")
+      .mockReturnValue(new Date("2026-05-04T12:00:00Z").getTime());
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession({ is_admin: true }));
+    apiMocks.loadBrowserAdminJobsOverview.mockResolvedValue({
+      jobs: [
+        {
+          job_id: "job_root_1",
+          root_job_id: "job_root_1",
+          job_type: "harvest_range",
+          status: "completed",
+          display_status: "completed",
+          payload: {},
+          attempts: 1,
+          max_attempts: 3,
+          priority: 10,
+          created_at: "2026-05-04T00:00:00Z",
+          updated_at: "2026-05-04T01:00:00Z",
+          is_synthetic: false,
+          tracking_available: true,
+          indexed_paper_count: 140,
+          paper_outcome_counts: { indexed: 140 },
+          latest_status_summary: "completed",
+          child_job_count: 0,
+          details: {},
+        },
+      ],
+      worker: null,
+    });
+    apiMocks.loadBrowserAdminJobPapers
+      .mockResolvedValueOnce({
+        root_job_id: "job_root_1",
+        total_count: 140,
+        offset: 0,
+        limit: 100,
+        has_more: true,
+        papers: [
+          {
+            root_job_id: "job_root_1",
+            job_id: "job_chunk_1",
+            paper_id: "arxiv:2401.00001",
+            arxiv_id: "2401.00001",
+            title: "Page One Paper",
+            outcome: "indexed",
+            created_at: "2026-04-21T00:00:00Z",
+            updated_at: "2026-04-21T01:10:00Z",
+            paper: null,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        root_job_id: "job_root_1",
+        total_count: 140,
+        offset: 100,
+        limit: 100,
+        has_more: false,
+        papers: [
+          {
+            root_job_id: "job_root_1",
+            job_id: "job_chunk_2",
+            paper_id: "arxiv:2401.00002",
+            arxiv_id: "2401.00002",
+            title: "Page Two Paper",
+            outcome: "indexed",
+            created_at: "2026-04-21T00:00:00Z",
+            updated_at: "2026-04-21T02:10:00Z",
+            paper: null,
+          },
+        ],
+      });
+
+    try {
+      render(<App />);
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Control panel" })).toBeTruthy();
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Control panel" }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("heading", { name: "Control panel" })).toBeTruthy();
+      });
+
+      const indexedPapersButton = await within(screen.getByRole("table")).findByRole("button", {
+        name: "140",
+      });
+      fireEvent.click(indexedPapersButton);
+
+      await waitFor(() => {
+        expect(screen.getByRole("heading", { name: "Indexed papers" })).toBeTruthy();
+      });
+      expect(apiMocks.loadBrowserAdminJobPapers).toHaveBeenNthCalledWith(1, "job_root_1", 0, 100);
+      expect(screen.getByText("Page One Paper")).toBeTruthy();
+      expect(screen.getAllByText("1-1 of 140").length).toBeGreaterThan(0);
+
+      fireEvent.click(screen.getByRole("button", { name: "Next" }));
+
+      await waitFor(() => {
+        expect(apiMocks.loadBrowserAdminJobPapers).toHaveBeenNthCalledWith(
+          2,
+          "job_root_1",
+          100,
+          100,
+        );
+      });
+      await waitFor(() => {
+        expect(screen.getByText("Page Two Paper")).toBeTruthy();
+      });
+      expect(screen.getAllByText("101-101 of 140").length).toBeGreaterThan(0);
+    } finally {
+      dateNowSpy.mockRestore();
     }
   });
 

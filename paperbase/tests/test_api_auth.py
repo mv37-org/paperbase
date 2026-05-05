@@ -348,10 +348,14 @@ class StubApiService:
             worker=None,
         )
 
-    def get_admin_job_papers(self, root_job_id: str) -> AdminJobPapersResponse:
-        self.calls.append(("get_admin_job_papers", root_job_id))
+    def get_admin_job_papers(self, root_job_id: str, *, offset: int = 0, limit: int = 100) -> AdminJobPapersResponse:
+        self.calls.append(("get_admin_job_papers", (root_job_id, offset, limit)))
         return AdminJobPapersResponse(
             root_job_id=root_job_id,
+            total_count=1,
+            offset=offset,
+            limit=limit,
+            has_more=False,
             papers=[
                 AdminJobPaperResponse(
                     root_job_id=root_job_id,
@@ -1136,7 +1140,7 @@ def test_browser_admin_routes_delegate_for_admin_users(api_client):
 
     jobs = client.get("/v1/browser/admin/jobs?status=all&limit=5")
     overview = client.get("/v1/browser/admin/jobs/overview?limit=7")
-    job_papers = client.get("/v1/browser/admin/jobs/job_root_1/papers")
+    job_papers = client.get("/v1/browser/admin/jobs/job_root_1/papers?offset=20&limit=10")
     papers = client.get("/v1/browser/admin/papers?q=benchmark&index_status=indexed&limit=3")
     files = client.get("/v1/browser/admin/papers/arxiv:2401.54321/files")
     file_contents = client.get("/v1/browser/admin/papers/arxiv:2401.54321/files/text/full.md")
@@ -1194,7 +1198,7 @@ def test_browser_admin_routes_delegate_for_admin_users(api_client):
     assert enriched.status_code == 200
     assert ("list_jobs_by_status", ("all", 5)) in service.calls
     assert ("get_admin_jobs_overview", 7) in service.calls
-    assert ("get_admin_job_papers", "job_root_1") in service.calls
+    assert ("get_admin_job_papers", ("job_root_1", 20, 10)) in service.calls
     assert ("list_papers", ("benchmark", "indexed", 3)) in service.calls
     assert ("list_files", "arxiv:2401.54321") in service.calls
     assert ("read_file", ("arxiv:2401.54321", "text/full.md")) in service.calls

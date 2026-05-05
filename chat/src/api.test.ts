@@ -353,7 +353,16 @@ describe("chat api", () => {
       )
       .mockResolvedValueOnce(jsonResponse([]))
       .mockResolvedValueOnce(jsonResponse({ jobs: [], worker: null }))
-      .mockResolvedValueOnce(jsonResponse({ root_job_id: "job_admin_1", papers: [] }));
+      .mockResolvedValueOnce(
+        jsonResponse({
+          root_job_id: "job_admin_1",
+          total_count: 0,
+          offset: 0,
+          limit: 100,
+          has_more: false,
+          papers: [],
+        }),
+      );
     vi.stubGlobal("fetch", fetchMock);
     const api = await loadApiModule();
 
@@ -387,7 +396,9 @@ describe("chat api", () => {
 
     const [papersPath, papersInit] = fetchMock.mock.calls[4] as FetchCall;
     const papersUrl = new URL(String(papersPath), "http://localhost");
-    expect(papersUrl.pathname).toBe("/v1/browser/admin/jobs/job_admin_1/papers");
+    expect(`${papersUrl.pathname}${papersUrl.search}`).toBe(
+      "/v1/browser/admin/jobs/job_admin_1/papers?offset=0&limit=100",
+    );
     expect(papersInit?.method).toBe("GET");
   });
 

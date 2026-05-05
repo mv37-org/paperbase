@@ -128,6 +128,10 @@ export interface AdminJobPaperResponse {
 
 export interface AdminJobPapersResponse {
   root_job_id: string;
+  total_count: number;
+  offset: number;
+  limit: number;
+  has_more: boolean;
   papers: AdminJobPaperResponse[];
 }
 

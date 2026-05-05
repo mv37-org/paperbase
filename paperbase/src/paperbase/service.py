@@ -7526,10 +7526,12 @@ class PaperbaseService:
         rows.sort(key=lambda row: (row.updated_at, -_admin_status_sort_key(row.display_status)), reverse=True)
         return AdminJobsOverviewResponse(jobs=rows[:limit], worker=worker_summary)
 
-    def get_admin_job_papers(self, root_job_id: str) -> AdminJobPapersResponse:
+    def get_admin_job_papers(self, root_job_id: str, *, offset: int = 0, limit: int = 100) -> AdminJobPapersResponse:
         jobs = self.repository.list_jobs_for_root(root_job_id)
         if not jobs:
             raise HTTPException(status_code=404, detail=f"Job run {root_job_id} not found")
+        normalized_offset = max(0, int(offset))
+        normalized_limit = max(1, int(limit))
 
         grouped: dict[str, JobPaperRecord] = {}
         for record in self.repository.list_job_papers_for_root(root_job_id):
@@ -7543,8 +7545,12 @@ class PaperbaseService:
             ):
                 grouped[record.paper_id] = record
 
+        ordered_records = sorted(grouped.values(), key=lambda item: item.updated_at, reverse=True)
+        total_count = len(ordered_records)
+        page_records = ordered_records[normalized_offset : normalized_offset + normalized_limit]
+
         papers = []
-        for record in sorted(grouped.values(), key=lambda item: item.updated_at, reverse=True):
+        for record in page_records:
             paper = self.repository.get_paper(record.paper_id)
             papers.append(
                 AdminJobPaperResponse(
@@ -7559,7 +7565,14 @@ class PaperbaseService:
                     paper=paper,
                 )
             )
-        return AdminJobPapersResponse(root_job_id=root_job_id, papers=papers)
+        return AdminJobPapersResponse(
+            root_job_id=root_job_id,
+            total_count=total_count,
+            offset=normalized_offset,
+            limit=normalized_limit,
+            has_more=normalized_offset + len(page_records) < total_count,
+            papers=papers,
+        )
 
     def list_papers(
         self,

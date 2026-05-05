@@ -769,10 +769,12 @@ def browser_admin_list_jobs(
 @app.get("/v1/browser/admin/jobs/{root_job_id}/papers", response_model=AdminJobPapersResponse)
 def browser_admin_job_papers(
     root_job_id: str,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=200),
     user=Depends(require_browser_admin_user),
     service: PaperbaseService = Depends(get_service),
 ) -> AdminJobPapersResponse:
-    return service.get_admin_job_papers(root_job_id)
+    return service.get_admin_job_papers(root_job_id, offset=offset, limit=limit)
 
 
 @app.post("/v1/browser/admin/jobs/{job_id}/retry", response_model=JobResponse)

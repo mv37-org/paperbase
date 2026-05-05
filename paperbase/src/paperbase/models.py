@@ -223,6 +223,10 @@ class AdminJobPaperResponse(BaseModel):
 
 class AdminJobPapersResponse(BaseModel):
     root_job_id: str
+    total_count: int = 0
+    offset: int = 0
+    limit: int = 100
+    has_more: bool = False
     papers: list[AdminJobPaperResponse]
 
 
