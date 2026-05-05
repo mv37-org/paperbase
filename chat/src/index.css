@@ -5350,12 +5350,12 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
   position: relative;
   min-height: 340px;
   overflow: hidden;
-  background: linear-gradient(180deg, rgba(159, 178, 232, 0.08) 0%, rgba(159, 178, 232, 0) 72%);
+  background: linear-gradient(180deg, rgba(27, 22, 17, 0.03) 0%, rgba(27, 22, 17, 0) 72%);
 }
 
 .admin-jobs-skeleton-grid {
   position: absolute;
-  inset: 22px 0 52px 56px;
+  inset: 22px 0 52px;
   display: grid;
   align-content: space-between;
   pointer-events: none;
@@ -5363,31 +5363,25 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
 
 .admin-jobs-skeleton-grid-line {
   display: block;
-  border-top: 1px solid var(--line);
+  border-top: 1px solid rgba(27, 22, 17, 0.08);
 }
 
 .admin-jobs-skeleton-bars {
   position: absolute;
-  inset: 30px 0 56px 56px;
+  inset: 30px 0 56px;
   display: flex;
   align-items: flex-end;
-  gap: 10px;
+  justify-content: space-between;
+  gap: 0;
 }
 
 .admin-jobs-skeleton-bar {
   flex: 1 1 0;
+  width: 100%;
+  max-width: 10px;
   min-width: 0;
   border-radius: 4px 4px 0 0;
-  background: linear-gradient(180deg, rgba(159, 178, 232, 0.52), rgba(159, 178, 232, 0.16));
-  animation: admin-jobs-skeleton-pulse 1.4s ease-in-out infinite;
-}
-
-.admin-jobs-skeleton-bar:nth-child(3n) {
-  animation-delay: 0.12s;
-}
-
-.admin-jobs-skeleton-bar:nth-child(4n) {
-  animation-delay: 0.24s;
+  background: linear-gradient(180deg, rgba(27, 22, 17, 0.1), rgba(27, 22, 17, 0.03));
 }
 
 .admin-jobs-results-bar {
@@ -5562,16 +5556,6 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
 
 .admin-paper-primary {
   font-weight: 600;
-}
-
-@keyframes admin-jobs-skeleton-pulse {
-  0%,
-  100% {
-    opacity: 0.5;
-  }
-  50% {
-    opacity: 1;
-  }
 }
 
 @keyframes admin-jobs-skeleton-shimmer {
@@ -7329,9 +7313,12 @@ body.authenticated-theme-dark .admin-compact-action-secondary:hover:not(:disable
   border-color: rgba(223, 232, 244, 0.2);
 }
 
-body.authenticated-theme-dark .admin-jobs-chart-shell,
-body.authenticated-theme-dark .admin-jobs-skeleton-chart {
+body.authenticated-theme-dark .admin-jobs-chart-shell {
   background: linear-gradient(180deg, rgba(142, 166, 221, 0.12) 0%, rgba(142, 166, 221, 0) 72%);
+}
+
+body.authenticated-theme-dark .admin-jobs-skeleton-chart {
+  background: linear-gradient(180deg, rgba(223, 232, 244, 0.04) 0%, rgba(223, 232, 244, 0) 72%);
 }
 
 body.authenticated-theme-dark .admin-jobs-window-select,
@@ -7360,6 +7347,14 @@ body.authenticated-theme-dark .admin-jobs-custom-close:focus-visible {
 
 body.authenticated-theme-dark .admin-jobs-row:hover {
   background: rgba(255, 255, 255, 0.04);
+}
+
+body.authenticated-theme-dark .admin-jobs-skeleton-grid-line {
+  border-top-color: rgba(223, 232, 244, 0.12);
+}
+
+body.authenticated-theme-dark .admin-jobs-skeleton-bar {
+  background: linear-gradient(180deg, rgba(223, 232, 244, 0.14), rgba(223, 232, 244, 0.05));
 }
 
 body.authenticated-theme-dark .admin-jobs-skeleton-cell {

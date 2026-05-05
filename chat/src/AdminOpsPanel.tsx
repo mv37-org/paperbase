@@ -175,6 +175,12 @@ const JOBS_TIME_RANGE_PRESETS: JobsTimeRangePreset[] = [
   { id: "14d", label: "Last 2 weeks", durationMs: 14 * DAY_MS },
 ];
 
+const TIMELINE_SKELETON_BAR_HEIGHTS = Array.from({ length: 48 }, (_, index) => {
+  const pattern = [0.1, 0.28, 0.18, 0.42, 0.24, 0.52, 0.3, 0.46];
+  const step = Math.floor(index / pattern.length) % 3;
+  return Math.min(pattern[index % pattern.length] + step * 0.05, 0.7);
+});
+
 type TimelineBucketPoint = {
   axisLabel: string;
   bucketLabel: string;
@@ -833,15 +839,13 @@ function TimelineSkeleton({ message }: { message?: ReactNode }) {
         ))}
       </div>
       <div className="admin-jobs-skeleton-bars" aria-hidden="true">
-        {[0.34, 0.58, 0.41, 0.69, 0.47, 0.76, 0.52, 0.61, 0.43, 0.72, 0.56, 0.67].map(
-          (height, index) => (
-            <span
-              key={`bar-${index}`}
-              className="admin-jobs-skeleton-bar"
-              style={{ height: `${height * 100}%` }}
-            />
-          ),
-        )}
+        {TIMELINE_SKELETON_BAR_HEIGHTS.map((height, index) => (
+          <span
+            key={`bar-${index}`}
+            className="admin-jobs-skeleton-bar"
+            style={{ height: `${height * 100}%` }}
+          />
+        ))}
       </div>
       {message ? <div className="admin-jobs-chart-empty-note">{message}</div> : null}
     </div>
