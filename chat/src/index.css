@@ -5119,7 +5119,7 @@ button.admin-compact-action {
   height: 24px;
   max-height: 24px;
   display: inline-flex;
-  align-items: stretch;
+  align-items: center;
   justify-content: center;
   gap: 8px;
   padding: 0 8px;
@@ -5161,6 +5161,7 @@ button.admin-compact-action:hover:not(:disabled) {
 }
 
 button.admin-compact-action.admin-compact-action-with-icon {
+  align-items: stretch;
   gap: 0;
   padding: 0;
   overflow: hidden;
@@ -5555,24 +5556,27 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
 
 .admin-create-job-modal {
   width: min(680px, calc(100vw - 32px));
-  max-height: min(88vh, 840px);
-  overflow-x: hidden;
-  overflow-y: auto;
+  max-height: none;
+  padding: 0;
+  overflow: visible;
 }
 
 .admin-create-job-modal h2 {
-  margin: 0 0 16px;
+  margin: 0;
+  padding: 32px 32px 24px;
+  padding-right: 64px;
 }
 
 .admin-create-job-chooser {
   display: grid;
   gap: 0;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .admin-create-job-form {
   display: grid;
   gap: 12px;
+  padding: 0 32px 32px;
 }
 
 .admin-create-job-option {
@@ -5582,7 +5586,7 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
   gap: 16px;
   width: 100%;
   margin: 0;
-  padding: 12px 8px;
+  padding: 16px 32px;
   border: 0;
   border-top: 1px solid rgba(27, 22, 17, 0.08);
   border-radius: 0;
@@ -5594,7 +5598,6 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
 
 .admin-create-job-option:first-child {
   border-top: 0;
-  padding-top: 8px;
 }
 
 .admin-create-job-option-copy {
@@ -5737,6 +5740,16 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
     opacity 120ms ease,
     transform 120ms ease;
   z-index: 20;
+}
+
+.admin-create-job-grid > :nth-child(even) .admin-create-job-help-tooltip {
+  right: 0;
+  left: auto;
+}
+
+.admin-create-job-grid > :nth-child(even) .admin-create-job-help-tooltip::before {
+  right: 12px;
+  left: auto;
 }
 
 .admin-create-job-help-tooltip::before {
