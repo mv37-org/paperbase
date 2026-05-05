@@ -1366,6 +1366,9 @@ export default function App() {
   const [toolActivities, setToolActivities] = useState<Record<string, ToolActivityEntry[]>>({});
   const [contextUsagePopoverOpen, setContextUsagePopoverOpen] = useState(false);
   const [paperDrawer, setPaperDrawer] = useState<PaperDrawerState>(() => drawerStateFromUrl());
+  const [trendingBrowseState, setTrendingBrowseState] = useState<TrendingBrowseState | null>(() =>
+    trendingBrowseStateFromUrl(),
+  );
   const [paperDrawerPaper, setPaperDrawerPaper] = useState<PaperResponse | null>(null);
   const [paperDrawerContent, setPaperDrawerContent] = useState<PaperDrawerContent | null>(null);
   const [paperDrawerStatus, setPaperDrawerStatus] = useState<
@@ -1448,8 +1451,12 @@ export default function App() {
   useEffect(() => {
     if (activeTab !== null) {
       setWorkspaceView(null);
+      if (trendingBrowseState) {
+        setTrendingBrowseState(null);
+        updateTrendingBrowseUrl(null);
+      }
     }
-  }, [activeTab]);
+  }, [activeTab, trendingBrowseState]);
 
   useEffect(() => {
     setSidebarCollapsed(restoreSidebarCollapsed());
@@ -1563,7 +1570,7 @@ export default function App() {
   const activeWorkspacePageId =
     workspaceView?.kind === "admin_jobs" || workspaceView?.kind === "admin_job_papers"
       ? "admin_jobs"
-      : workspaceView?.kind === "trending"
+      : workspaceView?.kind === "trending" || trendingBrowseState
         ? "trending"
         : null;
   const activeThread = activeThreadId ? (threadMap[activeThreadId] ?? null) : null;
@@ -1772,6 +1779,14 @@ export default function App() {
   useEffect(() => {
     const handlePopState = () => {
       setPaperDrawer(drawerStateFromUrl());
+      const nextTrendingBrowseState = trendingBrowseStateFromUrl();
+      setTrendingBrowseState(nextTrendingBrowseState);
+      setWorkspaceView((current) => {
+        if (nextTrendingBrowseState) {
+          return { kind: "trending" };
+        }
+        return current?.kind === "trending" ? null : current;
+      });
     };
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
@@ -1979,6 +1994,11 @@ export default function App() {
   const closePaperDrawer = useCallback(() => {
     setPaperDrawer(null);
     updateDrawerUrl(null);
+  }, []);
+
+  const updateTrendingBrowseState = useCallback((nextState: TrendingBrowseState | null) => {
+    setTrendingBrowseState(nextState);
+    updateTrendingBrowseUrl(nextState);
   }, []);
 
   const openPaperDrawer = useCallback((paperId: string, path: string) => {
@@ -2667,18 +2687,29 @@ export default function App() {
   }, []);
 
   const openWorkspacePage = useCallback((pageId: "trending" | "admin_jobs") => {
-    setWorkspaceView(pageId === "trending" ? { kind: "trending" } : { kind: "admin_jobs" });
+    if (pageId === "trending") {
+      updateTrendingBrowseState({
+        date: trendingBrowseState?.date ?? localDateString(),
+        sort: trendingBrowseState?.sort ?? "default",
+        paperId: trendingBrowseState?.paperId ?? null,
+      });
+      setWorkspaceView({ kind: "trending" });
+    } else {
+      updateTrendingBrowseState(null);
+      setWorkspaceView({ kind: "admin_jobs" });
+    }
     setMobileSidebarOpen(false);
     setAccountMenuOpen(false);
     setProjectMenuProjectId(null);
-  }, []);
+  }, [trendingBrowseState, updateTrendingBrowseState]);
 
   const openAdminJobPapers = useCallback((rootJobId: string) => {
+    updateTrendingBrowseState(null);
     setWorkspaceView({ kind: "admin_job_papers", rootJobId });
     setMobileSidebarOpen(false);
     setAccountMenuOpen(false);
     setProjectMenuProjectId(null);
-  }, []);
+  }, [updateTrendingBrowseState]);
 
   const createNewThread = useCallback(
     async (title = "", explicitProjectId?: string) => {
