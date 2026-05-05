@@ -5509,12 +5509,141 @@ textarea {
   gap: 12px;
 }
 
-.admin-create-job-checkbox {
+.admin-create-job-field-header {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 12px;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.admin-create-job-field-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 1.3;
+  text-transform: none;
+}
+
+.admin-create-job-field-badge.required {
+  background: rgba(180, 35, 24, 0.08);
+  color: #9f2318;
+}
+
+.admin-create-job-field-badge.optional {
+  background: rgba(27, 22, 17, 0.06);
   color: var(--muted);
+}
+
+.admin-create-job-help {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.admin-create-job-help-trigger {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 1px solid rgba(27, 22, 17, 0.16);
+  border-radius: 999px;
+  background: #ffffff;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: help;
+}
+
+.admin-create-job-help-trigger:focus-visible {
+  outline: none;
+  border-color: rgba(43, 98, 228, 0.42);
+  box-shadow: 0 0 0 3px rgba(43, 98, 228, 0.12);
+}
+
+.admin-create-job-help-tooltip {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  min-width: 220px;
+  max-width: min(280px, calc(100vw - 96px));
+  padding: 8px 10px;
+  border: 1px solid rgba(27, 22, 17, 0.16);
+  border-radius: 8px;
+  background: #1b1611;
+  color: #fffdfa;
+  font-size: 11px;
+  line-height: 1.45;
+  letter-spacing: normal;
+  text-transform: none;
+  white-space: normal;
+  box-shadow: 0 16px 32px rgba(16, 24, 40, 0.18);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-4px);
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease;
+  z-index: 20;
+}
+
+.admin-create-job-help-tooltip::before {
+  content: "";
+  position: absolute;
+  left: 12px;
+  bottom: 100%;
+  width: 8px;
+  height: 8px;
+  border-top: 1px solid rgba(27, 22, 17, 0.16);
+  border-left: 1px solid rgba(27, 22, 17, 0.16);
+  background: #1b1611;
+  transform: rotate(45deg) translateY(4px);
+}
+
+.admin-create-job-help:hover .admin-create-job-help-tooltip,
+.admin-create-job-help:focus-within .admin-create-job-help-tooltip {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.admin-create-job-checkbox-field {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(27, 22, 17, 0.08);
+  border-radius: var(--radius);
+  background: rgba(27, 22, 17, 0.02);
+}
+
+.admin-create-job-checkbox-field input {
+  margin: 3px 0 0;
+}
+
+.admin-create-job-checkbox-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.admin-create-job-checkbox-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.admin-create-job-checkbox-note {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .admin-paper-modal {
@@ -6658,13 +6787,17 @@ body.authenticated-theme-dark .settings-appearance-preview {
   border-color: rgba(223, 232, 244, 0.16);
 }
 
-body.authenticated-theme-dark .settings-field input {
+body.authenticated-theme-dark .settings-field input,
+body.authenticated-theme-dark .settings-field select,
+body.authenticated-theme-dark .settings-field textarea {
   border-color: rgba(223, 232, 244, 0.14);
   background: #0d141c;
   color: var(--text);
 }
 
-body.authenticated-theme-dark .settings-field input:focus {
+body.authenticated-theme-dark .settings-field input:focus,
+body.authenticated-theme-dark .settings-field select:focus,
+body.authenticated-theme-dark .settings-field textarea:focus {
   border-color: rgba(111, 164, 255, 0.44);
   box-shadow: 0 0 0 3px rgba(79, 140, 255, 0.12);
 }
@@ -6679,6 +6812,33 @@ body.authenticated-theme-dark .admin-compact-action-secondary {
   border-color: rgba(223, 232, 244, 0.14);
   background: rgba(255, 255, 255, 0.04);
   color: var(--text);
+}
+
+body.authenticated-theme-dark .admin-create-job-field-badge.required {
+  background: rgba(248, 113, 113, 0.12);
+  color: #fda4af;
+}
+
+body.authenticated-theme-dark .admin-create-job-field-badge.optional {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--muted);
+}
+
+body.authenticated-theme-dark .admin-create-job-help-trigger {
+  border-color: rgba(223, 232, 244, 0.16);
+  background: #0d141c;
+  color: var(--muted);
+}
+
+body.authenticated-theme-dark .admin-create-job-help-tooltip,
+body.authenticated-theme-dark .admin-create-job-help-tooltip::before {
+  border-color: rgba(223, 232, 244, 0.16);
+  background: #0d141c;
+}
+
+body.authenticated-theme-dark .admin-create-job-checkbox-field {
+  border-color: rgba(223, 232, 244, 0.12);
+  background: rgba(255, 255, 255, 0.04);
 }
 
 body.authenticated-theme-dark .modal-close,

@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { type ComponentPropsWithoutRef, type ReactNode, useEffect, useMemo, useState } from "react";
 import type { EChartsOption } from "echarts";
 import ReactECharts from "echarts-for-react";
 
@@ -143,6 +143,122 @@ type TimelineSummary = {
   trackedJobs: number;
 };
 
+type CreateJobFieldDefinition = {
+  label: string;
+  help: string;
+  required: boolean;
+  defaultDescription?: string;
+};
+
+const CREATE_JOB_FIELD_DEFINITIONS: Record<
+  CreateJobKind,
+  Record<string, CreateJobFieldDefinition>
+> = {
+  index_paper: {
+    arxiv_id: {
+      label: "arXiv ID",
+      help: "The identifier for the single paper you want the worker to fetch and index.",
+      required: true,
+    },
+    force: {
+      label: "Force reindex",
+      help: "Re-run the indexing pipeline even if this paper already exists in storage.",
+      required: false,
+      defaultDescription: "Off, so existing papers are left alone",
+    },
+  },
+  harvest_range: {
+    categories: {
+      label: "Categories",
+      help: "The arXiv subjects to scan, like cs.LG or cs.CL, so the backfill stays in the area you care about.",
+      required: false,
+      defaultDescription: "The server's configured AI/ML arXiv categories",
+    },
+    start_date: {
+      label: "Start date",
+      help: "The first calendar day the harvest is allowed to include.",
+      required: true,
+    },
+    end_date: {
+      label: "End date",
+      help: "The last calendar day the harvest is allowed to include.",
+      required: true,
+    },
+    limit_per_window: {
+      label: "Per-window limit",
+      help: "A safety cap for each category inside each time chunk, so one busy window does not flood the queue.",
+      required: false,
+      defaultDescription: "No per-window cap",
+    },
+    chunk_months: {
+      label: "Chunk months",
+      help: "How many months of time to bundle together before the planner splits the work into sub-jobs.",
+      required: false,
+      defaultDescription: "3 months",
+    },
+  },
+  harvest_top_cited: {
+    min_citations: {
+      label: "Minimum citations",
+      help: "The citation floor a paper must clear on Semantic Scholar before we bother trying to index it.",
+      required: false,
+      defaultDescription: "100 citations",
+    },
+    max_papers: {
+      label: "Max papers",
+      help: "A hard stop for how many candidate papers the planner can emit before it quits.",
+      required: false,
+      defaultDescription: "No cap",
+    },
+    chunk_size: {
+      label: "Chunk size",
+      help: "How many arXiv ids to bundle into each worker batch once the planner finds candidates.",
+      required: false,
+      defaultDescription: "50 papers per batch",
+    },
+  },
+  harvest_venue: {
+    venue: {
+      label: "Venue",
+      help: "The conference or journal name Semantic Scholar should search inside.",
+      required: true,
+    },
+    year: {
+      label: "Year",
+      help: "The single publication year to search within that venue.",
+      required: true,
+    },
+    max_papers: {
+      label: "Max papers",
+      help: "A hard stop for how many venue matches the planner can emit before it quits.",
+      required: false,
+      defaultDescription: "No cap",
+    },
+    chunk_size: {
+      label: "Chunk size",
+      help: "How many arXiv ids to bundle into each worker batch after the planner finds venue matches.",
+      required: false,
+      defaultDescription: "50 papers per batch",
+    },
+  },
+  enrich_missing_metadata: {
+    limit: {
+      label: "Limit",
+      help: "How many already-stored papers this backfill pass is allowed to inspect.",
+      required: false,
+      defaultDescription: "50,000 papers",
+    },
+    min_age_seconds: {
+      label: "Min age (seconds)",
+      help: "How old a stored paper must be before we retry enrichment, so we do not immediately recheck fresh ingests.",
+      required: false,
+      defaultDescription: "3600 seconds (1 hour)",
+    },
+  },
+};
+
+const DATE_PATTERN = "\\d{4}-\\d{2}-\\d{2}";
+
 function parseCsvList(value: string) {
   return value
     .split(/[\n,]/)
@@ -156,6 +272,15 @@ function parseOptionalInteger(value: FormDataEntryValue | null) {
     return null;
   }
   return Number.parseInt(text, 10);
+}
+
+function parseIntegerWithDefault(value: FormDataEntryValue | null, defaultValue: number) {
+  const text = String(value ?? "").trim();
+  if (!text) {
+    return defaultValue;
+  }
+  const parsed = Number.parseInt(text, 10);
+  return Number.isNaN(parsed) ? defaultValue : parsed;
 }
 
 function formatTimestamp(value?: string | null) {
@@ -195,6 +320,25 @@ function jobTypeLabel(jobType: string) {
 
 function panelErrorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
+}
+
+function createJobFieldDefinition(jobKind: CreateJobKind, fieldName: string) {
+  const definition = CREATE_JOB_FIELD_DEFINITIONS[jobKind][fieldName];
+  if (!definition) {
+    throw new Error(`Missing create-job field definition for ${jobKind}.${fieldName}`);
+  }
+  return definition;
+}
+
+function createJobFieldId(jobKind: CreateJobKind, fieldName: string) {
+  return `create-job-${jobKind}-${fieldName}`;
+}
+
+function createJobFieldHelpText(definition: CreateJobFieldDefinition) {
+  if (definition.required) {
+    return `${definition.help} Required.`;
+  }
+  return `${definition.help} Optional. Default: ${definition.defaultDescription ?? "none"}.`;
 }
 
 function isProbablyTextFile(file: FileObject) {
@@ -385,6 +529,146 @@ function metadataRows(paper: PaperResponse | null, entry: AdminJobPaperResponse 
     ["Citations", paper ? String(paper.citation_count) : "—"],
     ["Source type", paper?.source_type ?? "—"],
   ];
+}
+
+function CreateJobFieldHeader({
+  jobKind,
+  fieldName,
+}: {
+  jobKind: CreateJobKind;
+  fieldName: string;
+}) {
+  const definition = createJobFieldDefinition(jobKind, fieldName);
+  const fieldId = createJobFieldId(jobKind, fieldName);
+  const tooltipId = `${fieldId}-tooltip`;
+  return (
+    <div className="admin-create-job-field-header">
+      <label htmlFor={fieldId} className="settings-field-label">
+        {definition.label}
+      </label>
+      <span
+        className={`admin-create-job-field-badge ${definition.required ? "required" : "optional"}`}
+        aria-hidden="true"
+      >
+        {definition.required ? "Required" : "Optional"}
+      </span>
+      <div className="admin-create-job-help">
+        <button
+          type="button"
+          className="admin-create-job-help-trigger"
+          aria-label={`Explain ${definition.label}`}
+          aria-describedby={tooltipId}
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+          }}
+        >
+          i
+        </button>
+        <span id={tooltipId} role="tooltip" className="admin-create-job-help-tooltip">
+          {createJobFieldHelpText(definition)}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function CreateJobInputField({
+  jobKind,
+  fieldName,
+  ...inputProps
+}: {
+  jobKind: CreateJobKind;
+  fieldName: string;
+} & ComponentPropsWithoutRef<"input">) {
+  const definition = createJobFieldDefinition(jobKind, fieldName);
+  return (
+    <div className="settings-field">
+      <CreateJobFieldHeader jobKind={jobKind} fieldName={fieldName} />
+      <input
+        id={createJobFieldId(jobKind, fieldName)}
+        name={fieldName}
+        required={definition.required}
+        {...inputProps}
+      />
+    </div>
+  );
+}
+
+function CreateJobTextareaField({
+  jobKind,
+  fieldName,
+  ...textareaProps
+}: {
+  jobKind: CreateJobKind;
+  fieldName: string;
+} & ComponentPropsWithoutRef<"textarea">) {
+  const definition = createJobFieldDefinition(jobKind, fieldName);
+  return (
+    <div className="settings-field">
+      <CreateJobFieldHeader jobKind={jobKind} fieldName={fieldName} />
+      <textarea
+        id={createJobFieldId(jobKind, fieldName)}
+        name={fieldName}
+        required={definition.required}
+        {...textareaProps}
+      />
+    </div>
+  );
+}
+
+function CreateJobCheckboxField({
+  jobKind,
+  fieldName,
+}: {
+  jobKind: CreateJobKind;
+  fieldName: string;
+}) {
+  const definition = createJobFieldDefinition(jobKind, fieldName);
+  const fieldId = createJobFieldId(jobKind, fieldName);
+  const labelId = `${fieldId}-label`;
+  const tooltipId = `${fieldId}-tooltip`;
+  return (
+    <div className="admin-create-job-checkbox-field">
+      <input
+        id={fieldId}
+        name={fieldName}
+        type="checkbox"
+        aria-labelledby={labelId}
+        aria-describedby={tooltipId}
+      />
+      <span className="admin-create-job-checkbox-copy">
+        <span className="admin-create-job-checkbox-header">
+          <label htmlFor={fieldId} className="settings-field-label" id={labelId}>
+            {definition.label}
+          </label>
+          <span className="admin-create-job-field-badge optional" aria-hidden="true">
+            Optional
+          </span>
+          <span className="admin-create-job-help">
+            <button
+              type="button"
+              className="admin-create-job-help-trigger"
+              aria-label={`Explain ${definition.label}`}
+              aria-describedby={tooltipId}
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+              }}
+            >
+              i
+            </button>
+            <span id={tooltipId} role="tooltip" className="admin-create-job-help-tooltip">
+              {createJobFieldHelpText(definition)}
+            </span>
+          </span>
+        </span>
+        <span className="admin-create-job-checkbox-note">
+          Run a fresh indexing pass even if the paper is already stored.
+        </span>
+      </span>
+    </div>
+  );
 }
 
 function JobsTimeline({ jobs, loading }: { jobs: AdminJobOverviewRow[]; loading: boolean }) {
@@ -753,26 +1037,26 @@ export function AdminOpsPanel({
           start_date: String(formData.get("start_date") ?? "").trim(),
           end_date: String(formData.get("end_date") ?? "").trim(),
           limit_per_window: parseOptionalInteger(formData.get("limit_per_window")),
-          chunk_months: Number.parseInt(String(formData.get("chunk_months") ?? "3"), 10),
+          chunk_months: parseIntegerWithDefault(formData.get("chunk_months"), 3),
           source: "arxiv",
         });
       } else if (createJobKind === "harvest_top_cited") {
         await queueBrowserAdminHarvestTopCited({
-          min_citations: Number.parseInt(String(formData.get("min_citations") ?? "100"), 10),
+          min_citations: parseIntegerWithDefault(formData.get("min_citations"), 100),
           max_papers: parseOptionalInteger(formData.get("max_papers")),
-          chunk_size: Number.parseInt(String(formData.get("chunk_size") ?? "50"), 10),
+          chunk_size: parseIntegerWithDefault(formData.get("chunk_size"), 50),
         });
       } else if (createJobKind === "harvest_venue") {
         await queueBrowserAdminHarvestVenue({
           venue: String(formData.get("venue") ?? "").trim(),
-          year: Number.parseInt(String(formData.get("year") ?? "2024"), 10),
+          year: parseIntegerWithDefault(formData.get("year"), 2024),
           max_papers: parseOptionalInteger(formData.get("max_papers")),
-          chunk_size: Number.parseInt(String(formData.get("chunk_size") ?? "50"), 10),
+          chunk_size: parseIntegerWithDefault(formData.get("chunk_size"), 50),
         });
       } else {
         await queueBrowserAdminEnrichMissingMetadata(
-          Number.parseInt(String(formData.get("limit") ?? "50000"), 10),
-          Number.parseInt(String(formData.get("min_age_seconds") ?? "3600"), 10),
+          parseIntegerWithDefault(formData.get("limit"), 50000),
+          parseIntegerWithDefault(formData.get("min_age_seconds"), 3600),
         );
       }
       onNote(`Queued ${activeCreateJob?.label ?? "job"}.`);
@@ -1044,42 +1328,60 @@ export function AdminOpsPanel({
 
                 {createJobKind === "index_paper" ? (
                   <>
-                    <label className="settings-field">
-                      <span className="settings-field-label">arXiv ID</span>
-                      <input name="arxiv_id" placeholder="2401.01234" />
-                    </label>
-                    <label className="admin-create-job-checkbox">
-                      <input name="force" type="checkbox" />
-                      <span>Force reindex</span>
-                    </label>
+                    <CreateJobInputField
+                      jobKind="index_paper"
+                      fieldName="arxiv_id"
+                      placeholder="2401.01234"
+                    />
+                    <CreateJobCheckboxField jobKind="index_paper" fieldName="force" />
                   </>
                 ) : null}
 
                 {createJobKind === "harvest_range" ? (
                   <>
-                    <label className="settings-field">
-                      <span className="settings-field-label">Categories</span>
-                      <textarea name="categories" rows={3} placeholder="cs.LG, cs.CL" />
-                    </label>
+                    <CreateJobTextareaField
+                      jobKind="harvest_range"
+                      fieldName="categories"
+                      rows={3}
+                      placeholder="cs.LG, cs.CL"
+                    />
                     <div className="admin-create-job-grid">
-                      <label className="settings-field">
-                        <span className="settings-field-label">Start date</span>
-                        <input name="start_date" placeholder="2024-01-01" />
-                      </label>
-                      <label className="settings-field">
-                        <span className="settings-field-label">End date</span>
-                        <input name="end_date" placeholder="2024-03-31" />
-                      </label>
+                      <CreateJobInputField
+                        jobKind="harvest_range"
+                        fieldName="start_date"
+                        placeholder="2024-01-01"
+                        inputMode="numeric"
+                        pattern={DATE_PATTERN}
+                      />
+                      <CreateJobInputField
+                        jobKind="harvest_range"
+                        fieldName="end_date"
+                        placeholder="2024-03-31"
+                        inputMode="numeric"
+                        pattern={DATE_PATTERN}
+                      />
                     </div>
                     <div className="admin-create-job-grid">
-                      <label className="settings-field">
-                        <span className="settings-field-label">Per-window limit</span>
-                        <input name="limit_per_window" placeholder="1000" />
-                      </label>
-                      <label className="settings-field">
-                        <span className="settings-field-label">Chunk months</span>
-                        <input name="chunk_months" defaultValue="3" />
-                      </label>
+                      <CreateJobInputField
+                        jobKind="harvest_range"
+                        fieldName="limit_per_window"
+                        type="number"
+                        inputMode="numeric"
+                        min={1}
+                        max={10000000}
+                        step={1}
+                        placeholder="1000"
+                      />
+                      <CreateJobInputField
+                        jobKind="harvest_range"
+                        fieldName="chunk_months"
+                        type="number"
+                        inputMode="numeric"
+                        min={1}
+                        max={24}
+                        step={1}
+                        defaultValue="3"
+                      />
                     </div>
                   </>
                 ) : null}
@@ -1087,43 +1389,80 @@ export function AdminOpsPanel({
                 {createJobKind === "harvest_top_cited" ? (
                   <>
                     <div className="admin-create-job-grid">
-                      <label className="settings-field">
-                        <span className="settings-field-label">Minimum citations</span>
-                        <input name="min_citations" defaultValue="100" />
-                      </label>
-                      <label className="settings-field">
-                        <span className="settings-field-label">Chunk size</span>
-                        <input name="chunk_size" defaultValue="50" />
-                      </label>
+                      <CreateJobInputField
+                        jobKind="harvest_top_cited"
+                        fieldName="min_citations"
+                        type="number"
+                        inputMode="numeric"
+                        min={0}
+                        max={1000000}
+                        step={1}
+                        defaultValue="100"
+                      />
+                      <CreateJobInputField
+                        jobKind="harvest_top_cited"
+                        fieldName="chunk_size"
+                        type="number"
+                        inputMode="numeric"
+                        min={1}
+                        max={500}
+                        step={1}
+                        defaultValue="50"
+                      />
                     </div>
-                    <label className="settings-field">
-                      <span className="settings-field-label">Max papers</span>
-                      <input name="max_papers" placeholder="Optional" />
-                    </label>
+                    <CreateJobInputField
+                      jobKind="harvest_top_cited"
+                      fieldName="max_papers"
+                      type="number"
+                      inputMode="numeric"
+                      min={1}
+                      max={10000000}
+                      step={1}
+                      placeholder="Optional"
+                    />
                   </>
                 ) : null}
 
                 {createJobKind === "harvest_venue" ? (
                   <>
                     <div className="admin-create-job-grid">
-                      <label className="settings-field">
-                        <span className="settings-field-label">Venue</span>
-                        <input name="venue" placeholder="ICLR" />
-                      </label>
-                      <label className="settings-field">
-                        <span className="settings-field-label">Year</span>
-                        <input name="year" defaultValue="2024" />
-                      </label>
+                      <CreateJobInputField
+                        jobKind="harvest_venue"
+                        fieldName="venue"
+                        placeholder="ICLR"
+                      />
+                      <CreateJobInputField
+                        jobKind="harvest_venue"
+                        fieldName="year"
+                        type="number"
+                        inputMode="numeric"
+                        min={1900}
+                        max={2100}
+                        step={1}
+                        defaultValue="2024"
+                      />
                     </div>
                     <div className="admin-create-job-grid">
-                      <label className="settings-field">
-                        <span className="settings-field-label">Max papers</span>
-                        <input name="max_papers" placeholder="Optional" />
-                      </label>
-                      <label className="settings-field">
-                        <span className="settings-field-label">Chunk size</span>
-                        <input name="chunk_size" defaultValue="50" />
-                      </label>
+                      <CreateJobInputField
+                        jobKind="harvest_venue"
+                        fieldName="max_papers"
+                        type="number"
+                        inputMode="numeric"
+                        min={1}
+                        max={10000000}
+                        step={1}
+                        placeholder="Optional"
+                      />
+                      <CreateJobInputField
+                        jobKind="harvest_venue"
+                        fieldName="chunk_size"
+                        type="number"
+                        inputMode="numeric"
+                        min={1}
+                        max={500}
+                        step={1}
+                        defaultValue="50"
+                      />
                     </div>
                   </>
                 ) : null}
@@ -1131,14 +1470,26 @@ export function AdminOpsPanel({
                 {createJobKind === "enrich_missing_metadata" ? (
                   <>
                     <div className="admin-create-job-grid">
-                      <label className="settings-field">
-                        <span className="settings-field-label">Limit</span>
-                        <input name="limit" defaultValue="50000" />
-                      </label>
-                      <label className="settings-field">
-                        <span className="settings-field-label">Min age (seconds)</span>
-                        <input name="min_age_seconds" defaultValue="3600" />
-                      </label>
+                      <CreateJobInputField
+                        jobKind="enrich_missing_metadata"
+                        fieldName="limit"
+                        type="number"
+                        inputMode="numeric"
+                        min={1}
+                        max={5000000}
+                        step={1}
+                        defaultValue="50000"
+                      />
+                      <CreateJobInputField
+                        jobKind="enrich_missing_metadata"
+                        fieldName="min_age_seconds"
+                        type="number"
+                        inputMode="numeric"
+                        min={0}
+                        max={2592000}
+                        step={1}
+                        defaultValue="3600"
+                      />
                     </div>
                   </>
                 ) : null}

@@ -3142,6 +3142,76 @@ describe("App", () => {
     });
   });
 
+  it("shows field help for create-job forms and falls back to optional defaults", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession({ is_admin: true }));
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Admin panel" })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Admin panel" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Jobs" })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Create job" }));
+    fireEvent.click(screen.getByRole("button", { name: /Single paper/i }));
+
+    const arxivIdInput = screen.getByLabelText("arXiv ID") as HTMLInputElement;
+    expect(arxivIdInput.required).toBe(true);
+    expect(screen.getByLabelText("Explain arXiv ID")).toBeTruthy();
+    expect(
+      screen.getByText(
+        "The identifier for the single paper you want the worker to fetch and index. Required.",
+      ),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(
+        "Re-run the indexing pipeline even if this paper already exists in storage. Optional. Default: Off, so existing papers are left alone.",
+      ),
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Change type" }));
+    fireEvent.click(screen.getByRole("button", { name: /Date range/i }));
+
+    expect((screen.getByLabelText("Categories") as HTMLTextAreaElement).required).toBe(false);
+    expect((screen.getByLabelText("Start date") as HTMLInputElement).required).toBe(true);
+    expect((screen.getByLabelText("End date") as HTMLInputElement).required).toBe(true);
+    expect(
+      screen.getByText(
+        "The arXiv subjects to scan, like cs.LG or cs.CL, so the backfill stays in the area you care about. Optional. Default: The server's configured AI/ML arXiv categories.",
+      ),
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Change type" }));
+    fireEvent.click(screen.getByRole("button", { name: /Venue year/i }));
+
+    expect((screen.getByLabelText("Venue") as HTMLInputElement).required).toBe(true);
+    expect((screen.getByLabelText("Year") as HTMLInputElement).required).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Change type" }));
+    fireEvent.click(screen.getByRole("button", { name: /Top cited/i }));
+
+    fireEvent.change(screen.getByLabelText("Minimum citations"), {
+      target: { value: "" },
+    });
+    fireEvent.change(screen.getByLabelText("Chunk size"), {
+      target: { value: "" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Queue job" }));
+
+    await waitFor(() => {
+      expect(apiMocks.queueBrowserAdminHarvestTopCited).toHaveBeenCalledWith({
+        min_citations: 100,
+        max_papers: null,
+        chunk_size: 50,
+      });
+    });
+  });
+
   it("applies dark mode only after saving the appearance setting", async () => {
     apiMocks.loadSession.mockResolvedValue(
       authenticatedSession({
