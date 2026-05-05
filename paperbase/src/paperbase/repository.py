@@ -517,6 +517,10 @@ class BrowserUserORM(Base):
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
     display_name: Mapped[str] = mapped_column(Text, default="")
     password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Legacy browser account quota column from an older branch. Keep writing
+    # it so local DBs that still have the NOT NULL column continue to accept
+    # signup/login flows instead of failing with an IntegrityError.
+    free_responses_used: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
@@ -1525,6 +1529,18 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 text(
                     "ALTER TABLE IF EXISTS browser_user_settings "
                     "ADD COLUMN IF NOT EXISTS appearance_theme VARCHAR(16) DEFAULT 'light'"
+                )
+            )
+            connection.execute(
+                text(
+                    "ALTER TABLE IF EXISTS browser_users "
+                    "ADD COLUMN IF NOT EXISTS free_responses_used INTEGER NOT NULL DEFAULT 0"
+                )
+            )
+            connection.execute(
+                text(
+                    "ALTER TABLE IF EXISTS browser_users "
+                    "ALTER COLUMN free_responses_used SET DEFAULT 0"
                 )
             )
         Base.metadata.create_all(self._engine)
