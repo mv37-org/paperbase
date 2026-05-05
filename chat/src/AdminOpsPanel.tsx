@@ -1,4 +1,6 @@
 import { type ReactNode, useEffect, useMemo, useState } from "react";
+import type { EChartsOption } from "echarts";
+import ReactECharts from "echarts-for-react";
 
 import {
   getBrowserAdminPaperAsset,
@@ -112,6 +114,35 @@ const JOB_TYPE_LABELS: Record<string, string> = {
   sync_latest: "Latest sync",
 };
 
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
+const TIMELINE_BUCKETS = [
+  { maxSpanMs: 2 * DAY_MS, sizeMs: HOUR_MS, label: "Hourly buckets" },
+  { maxSpanMs: 14 * DAY_MS, sizeMs: 6 * HOUR_MS, label: "6-hour buckets" },
+  { maxSpanMs: 90 * DAY_MS, sizeMs: DAY_MS, label: "Daily buckets" },
+  { maxSpanMs: 365 * DAY_MS, sizeMs: 7 * DAY_MS, label: "Weekly buckets" },
+];
+const LOG_SURFACE_TEXT = "#edf3fb";
+const LOG_SURFACE_MUTED = "#90a0b5";
+const LOG_SURFACE_LINE = "rgba(144, 160, 181, 0.2)";
+const TIMELINE_BAR = "#5f87ff";
+const INTEGER_FORMATTER = new Intl.NumberFormat("en-US");
+
+type TimelineBucketPoint = {
+  axisLabel: string;
+  bucketLabel: string;
+  count: number;
+  jobCount: number;
+};
+
+type TimelineSummary = {
+  bucketLabel: string;
+  buckets: TimelineBucketPoint[];
+  latestUpdatedAt: string | null;
+  totalIndexed: number;
+  trackedJobs: number;
+};
+
 function parseCsvList(value: string) {
   return value
     .split(/[\n,]/)
@@ -136,6 +167,10 @@ function formatTimestamp(value?: string | null) {
     return value;
   }
   return date.toLocaleString();
+}
+
+function formatWholeNumber(value: number) {
+  return INTEGER_FORMATTER.format(value);
 }
 
 function statusLabel(value: string) {
@@ -185,6 +220,96 @@ function assetKind(asset: PaperAssetResponse | null) {
     return "pdf";
   }
   return "file";
+}
+
+function selectTimelineBucket(spanMs: number) {
+  return TIMELINE_BUCKETS.find((bucket) => spanMs <= bucket.maxSpanMs) ?? TIMELINE_BUCKETS.at(-1)!;
+}
+
+function formatTimelineAxisLabel(timestamp: number, bucketMs: number) {
+  const date = new Date(timestamp);
+  const options: Intl.DateTimeFormatOptions =
+    bucketMs < DAY_MS
+      ? { month: "short", day: "numeric", hour: "2-digit" }
+      : { month: "short", day: "numeric" };
+  return date.toLocaleString([], options);
+}
+
+function formatTimelineTooltipLabel(timestamp: number, bucketMs: number) {
+  const start = new Date(timestamp);
+  const end = new Date(timestamp + bucketMs);
+  if (bucketMs >= DAY_MS) {
+    return `${start.toLocaleDateString()} to ${new Date(end.getTime() - 1).toLocaleDateString()}`;
+  }
+  return `${start.toLocaleString()} to ${end.toLocaleString()}`;
+}
+
+function buildJobsTimeline(jobs: AdminJobOverviewRow[]): TimelineSummary {
+  const trackedJobs = jobs
+    .filter(
+      (job) =>
+        job.tracking_available &&
+        typeof job.indexed_paper_count === "number" &&
+        Number.isFinite(job.indexed_paper_count) &&
+        job.updated_at,
+    )
+    .map((job) => {
+      const timestamp = new Date(job.updated_at).getTime();
+      return Number.isNaN(timestamp) ? null : { ...job, timestamp };
+    })
+    .filter((job): job is AdminJobOverviewRow & { timestamp: number } => Boolean(job));
+
+  if (trackedJobs.length === 0) {
+    return {
+      bucketLabel: "Daily buckets",
+      buckets: [],
+      latestUpdatedAt: null,
+      totalIndexed: 0,
+      trackedJobs: 0,
+    };
+  }
+
+  const minTimestamp = Math.min(...trackedJobs.map((job) => job.timestamp));
+  const maxTimestamp = Math.max(...trackedJobs.map((job) => job.timestamp));
+  const selectedBucket = selectTimelineBucket(Math.max(maxTimestamp - minTimestamp, 1));
+  const startTimestamp = Math.floor(minTimestamp / selectedBucket.sizeMs) * selectedBucket.sizeMs;
+  const endTimestamp = Math.floor(maxTimestamp / selectedBucket.sizeMs) * selectedBucket.sizeMs;
+  const byBucket = new Map<number, { count: number; jobCount: number }>();
+
+  for (const job of trackedJobs) {
+    const bucketTimestamp =
+      Math.floor(job.timestamp / selectedBucket.sizeMs) * selectedBucket.sizeMs;
+    const current = byBucket.get(bucketTimestamp) ?? { count: 0, jobCount: 0 };
+    current.count += Math.max(job.indexed_paper_count ?? 0, 0);
+    current.jobCount += 1;
+    byBucket.set(bucketTimestamp, current);
+  }
+
+  const buckets: TimelineBucketPoint[] = [];
+  for (let cursor = startTimestamp; cursor <= endTimestamp; cursor += selectedBucket.sizeMs) {
+    const entry = byBucket.get(cursor) ?? { count: 0, jobCount: 0 };
+    buckets.push({
+      axisLabel: formatTimelineAxisLabel(cursor, selectedBucket.sizeMs),
+      bucketLabel: formatTimelineTooltipLabel(cursor, selectedBucket.sizeMs),
+      count: entry.count,
+      jobCount: entry.jobCount,
+    });
+  }
+
+  const latestJob = trackedJobs.reduce((current, candidate) =>
+    candidate.timestamp > current.timestamp ? candidate : current,
+  );
+
+  return {
+    bucketLabel: selectedBucket.label,
+    buckets,
+    latestUpdatedAt: latestJob.updated_at,
+    totalIndexed: trackedJobs.reduce(
+      (sum, job) => sum + Math.max(job.indexed_paper_count ?? 0, 0),
+      0,
+    ),
+    trackedJobs: trackedJobs.length,
+  };
 }
 
 function detailRows(job: AdminJobOverviewRow) {
@@ -260,6 +385,156 @@ function metadataRows(paper: PaperResponse | null, entry: AdminJobPaperResponse 
     ["Citations", paper ? String(paper.citation_count) : "—"],
     ["Source type", paper?.source_type ?? "—"],
   ];
+}
+
+function JobsTimeline({ jobs, loading }: { jobs: AdminJobOverviewRow[]; loading: boolean }) {
+  const timeline = useMemo(() => buildJobsTimeline(jobs), [jobs]);
+  const option = useMemo<EChartsOption>(() => {
+    return {
+      animation: false,
+      backgroundColor: "transparent",
+      textStyle: {
+        color: LOG_SURFACE_TEXT,
+        fontFamily: '"JetBrains Mono", "SFMono-Regular", monospace',
+      },
+      grid: { top: 18, right: 18, bottom: 56, left: 56 },
+      tooltip: {
+        trigger: "axis",
+        axisPointer: {
+          type: "shadow",
+          shadowStyle: { color: "rgba(95, 135, 255, 0.12)" },
+        },
+        backgroundColor: "#0a0f15",
+        borderColor: LOG_SURFACE_LINE,
+        textStyle: {
+          color: LOG_SURFACE_TEXT,
+          fontFamily: '"JetBrains Mono", "SFMono-Regular", monospace',
+        },
+        formatter: (params: unknown) => {
+          const point = Array.isArray(params) ? params[0] : params;
+          const dataIndex =
+            point && typeof point === "object" && "dataIndex" in point
+              ? Number((point as { dataIndex?: number }).dataIndex ?? 0)
+              : 0;
+          const bucket = timeline.buckets[dataIndex];
+          if (!bucket) {
+            return "";
+          }
+          return [
+            bucket.bucketLabel,
+            `${formatWholeNumber(bucket.count)} indexed papers`,
+            `${formatWholeNumber(bucket.jobCount)} tracked jobs`,
+          ].join("<br/>");
+        },
+      },
+      xAxis: {
+        type: "category",
+        data: timeline.buckets.map((bucket) => bucket.axisLabel),
+        boundaryGap: true,
+        axisLine: { lineStyle: { color: LOG_SURFACE_LINE } },
+        axisTick: { show: false },
+        axisLabel: {
+          color: LOG_SURFACE_MUTED,
+          hideOverlap: true,
+          margin: 12,
+        },
+      },
+      yAxis: {
+        type: "value",
+        minInterval: 1,
+        splitNumber: 4,
+        axisLine: { show: false },
+        axisTick: { show: false },
+        axisLabel: {
+          color: LOG_SURFACE_MUTED,
+          formatter: (value: number) =>
+            value >= 1000 ? `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}k` : `${value}`,
+        },
+        splitLine: {
+          lineStyle: { color: LOG_SURFACE_LINE },
+        },
+      },
+      dataZoom: [
+        {
+          type: "inside",
+          filterMode: "none",
+          zoomLock: false,
+        },
+        {
+          type: "slider",
+          height: 20,
+          bottom: 16,
+          brushSelect: false,
+          borderColor: LOG_SURFACE_LINE,
+          fillerColor: "rgba(95, 135, 255, 0.16)",
+          backgroundColor: "rgba(255, 255, 255, 0.03)",
+          handleStyle: {
+            color: "#9db6ff",
+            borderColor: "#9db6ff",
+          },
+          moveHandleStyle: { color: "transparent", opacity: 0 },
+          textStyle: {
+            color: LOG_SURFACE_MUTED,
+            fontFamily: '"JetBrains Mono", "SFMono-Regular", monospace',
+          },
+        },
+      ],
+      series: [
+        {
+          name: "Indexed papers",
+          type: "bar",
+          data: timeline.buckets.map((bucket) => bucket.count),
+          barMinHeight: 2,
+          barMaxWidth: 20,
+          itemStyle: {
+            color: TIMELINE_BAR,
+            borderRadius: [4, 4, 0, 0],
+          },
+          emphasis: {
+            itemStyle: {
+              color: "#7ea0ff",
+            },
+          },
+        },
+      ],
+    };
+  }, [timeline]);
+
+  return (
+    <section className="admin-jobs-timeline-panel" aria-label="Indexed papers timeline">
+      <div className="admin-jobs-timeline-head">
+        <div className="admin-jobs-timeline-copy">
+          <span className="admin-jobs-timeline-kicker">Timeline</span>
+          <strong>
+            {loading
+              ? "Loading indexed-paper history"
+              : `${formatWholeNumber(timeline.totalIndexed)} indexed papers`}
+          </strong>
+          <span>
+            {loading
+              ? "Fetching tracked jobs"
+              : `${formatWholeNumber(timeline.trackedJobs)} tracked jobs${timeline.trackedJobs > 0 ? ` · ${timeline.bucketLabel}` : ""}`}
+          </span>
+        </div>
+        {timeline.latestUpdatedAt ? (
+          <div className="admin-jobs-timeline-meta">
+            Last update
+            <strong>{formatTimestamp(timeline.latestUpdatedAt)}</strong>
+          </div>
+        ) : null}
+      </div>
+
+      {loading ? (
+        <div className="admin-jobs-timeline-empty">Loading timeline...</div>
+      ) : timeline.buckets.length > 0 ? (
+        <div className="admin-jobs-chart-shell" data-testid="admin-jobs-chart">
+          <ReactECharts option={option} className="admin-jobs-chart" notMerge lazyUpdate />
+        </div>
+      ) : (
+        <div className="admin-jobs-timeline-empty">No indexed-paper history yet.</div>
+      )}
+    </section>
+  );
 }
 
 export function AdminOpsPanel({
@@ -519,109 +794,118 @@ export function AdminOpsPanel({
             <h1>Jobs</h1>
             <button
               type="button"
-              className="primary-button admin-jobs-create-button"
+              className="admin-compact-action admin-compact-action-primary admin-compact-action-with-icon admin-jobs-create-button"
               onClick={() => {
                 setCreateModalOpen(true);
                 setCreateJobKind(null);
               }}
             >
-              Create job
+              <span className="admin-compact-action-icon" aria-hidden="true">
+                +
+              </span>
+              <span className="admin-compact-action-label">Create job</span>
             </button>
           </div>
 
           {jobsError ? <div className="admin-jobs-inline-error">{jobsError}</div> : null}
-          {jobsLoading ? <div className="admin-jobs-empty">Loading jobs...</div> : null}
-          {!jobsLoading ? (
-            <div className="admin-jobs-table-shell">
-              <table className="admin-jobs-table">
-                <thead>
-                  <tr>
-                    <th>Type</th>
-                    <th>ID</th>
-                    <th>Status</th>
-                    <th>Indexed papers</th>
-                    <th>Updated</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {jobs.length === 0 ? (
-                    <tr className="admin-jobs-empty-row">
-                      <td colSpan={5}>
-                        <div className="admin-jobs-empty">No jobs yet.</div>
-                      </td>
+          <div className="admin-jobs-surface">
+            <JobsTimeline jobs={jobs} loading={jobsLoading} />
+            <div className="admin-jobs-results-bar">
+              {jobsLoading ? "Loading jobs" : `${formatWholeNumber(jobs.length)} jobs`}
+            </div>
+            {jobsLoading ? <div className="admin-jobs-empty">Loading jobs...</div> : null}
+            {!jobsLoading ? (
+              <div className="admin-jobs-table-shell">
+                <table className="admin-jobs-table">
+                  <thead>
+                    <tr>
+                      <th>Type</th>
+                      <th>ID</th>
+                      <th>Status</th>
+                      <th>Indexed papers</th>
+                      <th>Updated</th>
                     </tr>
-                  ) : (
-                    jobs.map((job) => {
-                      const expanded = Boolean(expandedJobIds[job.job_id]);
-                      const detailPairs = detailRows(job);
-                      return (
-                        <FragmentRow key={job.job_id}>
-                          <tr className="admin-jobs-row">
-                            <td>
-                              <button
-                                type="button"
-                                className="admin-jobs-expand"
-                                onClick={() =>
-                                  setExpandedJobIds((current) => ({
-                                    ...current,
-                                    [job.job_id]: !current[job.job_id],
-                                  }))
-                                }
-                                aria-expanded={expanded}
-                              >
-                                <span>{expanded ? "−" : "+"}</span>
-                                <span>{jobTypeLabel(job.job_type)}</span>
-                              </button>
-                            </td>
-                            <td>
-                              <code>{job.job_id}</code>
-                            </td>
-                            <td>
-                              <span className={`admin-jobs-status status-${job.display_status}`}>
-                                {statusLabel(job.display_status)}
-                              </span>
-                            </td>
-                            <td>
-                              {job.tracking_available ? (
+                  </thead>
+                  <tbody>
+                    {jobs.length === 0 ? (
+                      <tr className="admin-jobs-empty-row">
+                        <td colSpan={5}>
+                          <div className="admin-jobs-empty">No jobs yet.</div>
+                        </td>
+                      </tr>
+                    ) : (
+                      jobs.map((job) => {
+                        const expanded = Boolean(expandedJobIds[job.job_id]);
+                        const detailPairs = detailRows(job);
+                        return (
+                          <FragmentRow key={job.job_id}>
+                            <tr className="admin-jobs-row">
+                              <td>
                                 <button
                                   type="button"
-                                  className="admin-jobs-link-button"
-                                  onClick={() => onOpenJobPapers(job.root_job_id)}
+                                  className="admin-jobs-expand"
+                                  onClick={() =>
+                                    setExpandedJobIds((current) => ({
+                                      ...current,
+                                      [job.job_id]: !current[job.job_id],
+                                    }))
+                                  }
+                                  aria-expanded={expanded}
                                 >
-                                  {job.indexed_paper_count ?? 0}
+                                  <span>{expanded ? "−" : "+"}</span>
+                                  <span>{jobTypeLabel(job.job_type)}</span>
                                 </button>
-                              ) : (
-                                <span>—</span>
-                              )}
-                            </td>
-                            <td>{formatTimestamp(job.updated_at)}</td>
-                          </tr>
-                          {expanded ? (
-                            <tr className="admin-jobs-expanded-row">
-                              <td colSpan={5}>
-                                <div className="admin-jobs-expanded">
-                                  <div>Latest status: {job.latest_status_summary}</div>
-                                  {job.error ? <div>Error: {job.error}</div> : null}
-                                  {detailPairs.map(([label, value]) => (
-                                    <div key={label}>
-                                      {label}: {value}
-                                    </div>
-                                  ))}
-                                  {job.child_job_count > 0 ? (
-                                    <div>Sub-jobs: {job.child_job_count}</div>
-                                  ) : null}
-                                </div>
                               </td>
+                              <td>
+                                <code>{job.job_id}</code>
+                              </td>
+                              <td>
+                                <span className={`admin-jobs-status status-${job.display_status}`}>
+                                  {statusLabel(job.display_status)}
+                                </span>
+                              </td>
+                              <td>
+                                {job.tracking_available ? (
+                                  <button
+                                    type="button"
+                                    className="admin-jobs-link-button"
+                                    onClick={() => onOpenJobPapers(job.root_job_id)}
+                                  >
+                                    {job.indexed_paper_count ?? 0}
+                                  </button>
+                                ) : (
+                                  <span>—</span>
+                                )}
+                              </td>
+                              <td>{formatTimestamp(job.updated_at)}</td>
                             </tr>
-                          ) : null}
-                        </FragmentRow>
-                      );
-                    })
-                  )}
-                </tbody>
-              </table>
-            </div>
-          ) : null}
+                            {expanded ? (
+                              <tr className="admin-jobs-expanded-row">
+                                <td colSpan={5}>
+                                  <div className="admin-jobs-expanded">
+                                    <div>Latest status: {job.latest_status_summary}</div>
+                                    {job.error ? <div>Error: {job.error}</div> : null}
+                                    {detailPairs.map(([label, value]) => (
+                                      <div key={label}>
+                                        {label}: {value}
+                                      </div>
+                                    ))}
+                                    {job.child_job_count > 0 ? (
+                                      <div>Sub-jobs: {job.child_job_count}</div>
+                                    ) : null}
+                                  </div>
+                                </td>
+                              </tr>
+                            ) : null}
+                          </FragmentRow>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
+          </div>
         </>
       ) : (
         <>
@@ -633,46 +917,61 @@ export function AdminOpsPanel({
           </div>
 
           {jobPapersError ? <div className="admin-jobs-inline-error">{jobPapersError}</div> : null}
-          {jobPapersLoading ? <div className="admin-jobs-empty">Loading papers...</div> : null}
-          {!jobPapersLoading && jobPapers.length === 0 ? (
-            <div className="admin-jobs-empty">No tracked papers for this job yet.</div>
-          ) : null}
-
-          {!jobPapersLoading && jobPapers.length > 0 ? (
-            <div className="admin-jobs-table-shell">
-              <table className="admin-jobs-table admin-papers-table">
-                <thead>
-                  <tr>
-                    <th>Paper</th>
-                    <th>Outcome</th>
-                    <th>Updated</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {jobPapers.map((paper) => (
-                    <tr
-                      key={`${paper.job_id}:${paper.paper_id}`}
-                      className="admin-jobs-row admin-paper-row"
-                      onClick={() => setSelectedJobPaper(paper)}
-                    >
-                      <td>
-                        <div className="admin-paper-primary">{paper.title ?? paper.paper_id}</div>
-                        <div className="admin-paper-secondary">
-                          {paper.arxiv_id ?? paper.paper_id}
-                        </div>
-                      </td>
-                      <td>
-                        <span className={`admin-jobs-status status-${paper.outcome}`}>
-                          {statusLabel(paper.outcome)}
-                        </span>
-                      </td>
-                      <td>{formatTimestamp(paper.updated_at)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+          <div className="admin-jobs-surface">
+            <div className="admin-jobs-results-bar">
+              {jobPapersLoading
+                ? "Loading papers"
+                : `${formatWholeNumber(jobPapers.length)} papers`}
             </div>
-          ) : null}
+            {jobPapersLoading ? <div className="admin-jobs-empty">Loading papers...</div> : null}
+            {!jobPapersLoading ? (
+              <div className="admin-jobs-table-shell">
+                <table className="admin-jobs-table admin-papers-table">
+                  <thead>
+                    <tr>
+                      <th>Paper</th>
+                      <th>Outcome</th>
+                      <th>Updated</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {jobPapers.length === 0 ? (
+                      <tr className="admin-jobs-empty-row">
+                        <td colSpan={3}>
+                          <div className="admin-jobs-empty">
+                            No tracked papers for this job yet.
+                          </div>
+                        </td>
+                      </tr>
+                    ) : (
+                      jobPapers.map((paper) => (
+                        <tr
+                          key={`${paper.job_id}:${paper.paper_id}`}
+                          className="admin-jobs-row admin-paper-row"
+                          onClick={() => setSelectedJobPaper(paper)}
+                        >
+                          <td>
+                            <div className="admin-paper-primary">
+                              {paper.title ?? paper.paper_id}
+                            </div>
+                            <div className="admin-paper-secondary">
+                              {paper.arxiv_id ?? paper.paper_id}
+                            </div>
+                          </td>
+                          <td>
+                            <span className={`admin-jobs-status status-${paper.outcome}`}>
+                              {statusLabel(paper.outcome)}
+                            </span>
+                          </td>
+                          <td>{formatTimestamp(paper.updated_at)}</td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
+          </div>
         </>
       )}
 
@@ -718,9 +1017,14 @@ export function AdminOpsPanel({
                     className="admin-create-job-option"
                     onClick={() => setCreateJobKind(option.kind)}
                   >
-                    <strong>{option.label}</strong>
-                    <span>{option.description}</span>
-                    <em>{option.estimate}</em>
+                    <span className="admin-create-job-option-copy">
+                      <strong>{option.label}</strong>
+                      <span>{option.description}</span>
+                      <em>{option.estimate}</em>
+                    </span>
+                    <span className="admin-create-job-option-arrow" aria-hidden="true">
+                      →
+                    </span>
                   </button>
                 ))}
               </div>
@@ -733,13 +1037,6 @@ export function AdminOpsPanel({
                 }}
               >
                 <div className="admin-create-job-summary">
-                  <button
-                    type="button"
-                    className="admin-jobs-link-button"
-                    onClick={() => setCreateJobKind(null)}
-                  >
-                    Change type
-                  </button>
                   <strong>{activeCreateJob.label}</strong>
                   <span>{activeCreateJob.description}</span>
                   <em>{activeCreateJob.estimate}</em>
@@ -846,9 +1143,23 @@ export function AdminOpsPanel({
                   </>
                 ) : null}
 
-                <button type="submit" className="primary-button" disabled={createSubmitting}>
-                  {createSubmitting ? "Queuing..." : "Queue job"}
-                </button>
+                <div className="admin-create-job-actions">
+                  <button
+                    type="button"
+                    className="admin-compact-action admin-compact-action-secondary"
+                    onClick={() => setCreateJobKind(null)}
+                    disabled={createSubmitting}
+                  >
+                    Change type
+                  </button>
+                  <button
+                    type="submit"
+                    className="admin-compact-action admin-compact-action-primary"
+                    disabled={createSubmitting}
+                  >
+                    {createSubmitting ? "Queuing..." : "Queue job"}
+                  </button>
+                </div>
               </form>
             )}
           </div>

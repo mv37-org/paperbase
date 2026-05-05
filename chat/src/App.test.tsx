@@ -204,6 +204,12 @@ vi.mock("@monaco-editor/react", () => ({
   ),
 }));
 
+vi.mock("echarts-for-react", () => ({
+  default: ({ className }: { className?: string }) => (
+    <div data-testid="admin-jobs-chart-inner" className={className} />
+  ),
+}));
+
 import App from "./App";
 
 const OPEN_TABS_KEY = "paperbase-open-tabs";
@@ -3044,6 +3050,7 @@ describe("App", () => {
     await waitFor(() => {
       expect(screen.getByRole("heading", { name: "Jobs" })).toBeTruthy();
     });
+    expect(screen.getByTestId("admin-jobs-chart")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Close Admin panel" })).toBeNull();
     expect(apiMocks.loadBrowserAdminJobsOverview).toHaveBeenCalledWith(75);
 
@@ -3081,8 +3088,58 @@ describe("App", () => {
       expect(screen.getByRole("heading", { name: "Jobs" })).toBeTruthy();
     });
     const table = screen.getByRole("table");
+    expect(screen.getByText("No indexed-paper history yet.")).toBeTruthy();
     expect(within(table).getByRole("columnheader", { name: "Type" })).toBeTruthy();
     expect(within(table).getByText("No jobs yet.")).toBeTruthy();
+  });
+
+  it("lets admins switch job types from the create-job modal before queueing", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession({ is_admin: true }));
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Admin panel" })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Admin panel" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Jobs" })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Create job" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Create job" })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Single paper/i }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Change type" })).toBeTruthy();
+    });
+
+    const actionButtons = Array.from(
+      document.querySelectorAll(".admin-create-job-actions button"),
+    ).map((button) => button.textContent);
+    expect(actionButtons).toEqual(["Change type", "Queue job"]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Change type" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Single paper/i })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Single paper/i }));
+    fireEvent.change(screen.getByLabelText("arXiv ID"), {
+      target: { value: "2401.12345" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Queue job" }));
+
+    await waitFor(() => {
+      expect(apiMocks.queueBrowserAdminPaperIndex).toHaveBeenCalledWith("2401.12345", false);
+    });
   });
 
   it("applies dark mode only after saving the appearance setting", async () => {
