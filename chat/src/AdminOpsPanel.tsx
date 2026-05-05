@@ -1453,7 +1453,7 @@ export function AdminOpsPanel({
                       const detailPairs = detailRows(job);
                       return (
                         <FragmentRow key={job.job_id}>
-                          <tr className="admin-jobs-row">
+                          <tr className={`admin-jobs-row${expanded ? " expanded" : ""}`}>
                             <td>
                               <button
                                 type="button"
