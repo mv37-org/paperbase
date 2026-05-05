@@ -1,4 +1,5 @@
 import {
+  useCallback,
   type ComponentPropsWithoutRef,
   type ReactNode,
   useEffect,
@@ -149,6 +150,14 @@ type JobsTimeRangePreset = {
   label: string;
 };
 
+type JobsRefreshIntervalId = "5s" | "30s" | "1m";
+
+type JobsRefreshIntervalOption = {
+  id: JobsRefreshIntervalId;
+  intervalMs: number;
+  label: string;
+};
+
 type JobsTimeWindow = {
   endMs: number;
   label: string;
@@ -173,6 +182,12 @@ const JOBS_TIME_RANGE_PRESETS: JobsTimeRangePreset[] = [
   { id: "3d", label: "Last 3 days", durationMs: 3 * DAY_MS },
   { id: "7d", label: "Last 7 days", durationMs: 7 * DAY_MS },
   { id: "14d", label: "Last 2 weeks", durationMs: 14 * DAY_MS },
+];
+
+const JOBS_REFRESH_INTERVAL_OPTIONS: JobsRefreshIntervalOption[] = [
+  { id: "5s", label: "5 seconds", intervalMs: 5_000 },
+  { id: "30s", label: "30 seconds", intervalMs: 30_000 },
+  { id: "1m", label: "1 min", intervalMs: 60_000 },
 ];
 
 const TIMELINE_SKELETON_BAR_HEIGHTS = Array.from({ length: 106 }, (_, index) => {
@@ -974,6 +989,55 @@ function JobsWindowControl({
   );
 }
 
+function JobsRefreshControl({
+  onSelectRefreshId,
+  selectedRefreshId,
+}: {
+  onSelectRefreshId: (nextRefreshId: JobsRefreshIntervalId) => void;
+  selectedRefreshId: JobsRefreshIntervalId;
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const selectedLabel =
+    JOBS_REFRESH_INTERVAL_OPTIONS.find((option) => option.id === selectedRefreshId)?.label ??
+    "30 seconds";
+
+  function selectRefresh(nextRefreshId: JobsRefreshIntervalId) {
+    setMenuOpen(false);
+    onSelectRefreshId(nextRefreshId);
+  }
+
+  return (
+    <div className="admin-jobs-refresh-control">
+      <button
+        type="button"
+        className="admin-compact-action admin-compact-action-window admin-jobs-refresh-button"
+        aria-haspopup="listbox"
+        aria-expanded={menuOpen}
+        aria-label="Jobs refresh interval"
+        onClick={() => setMenuOpen((open) => !open)}
+      >
+        <span>{selectedLabel}</span>
+      </button>
+      {menuOpen ? (
+        <div className="admin-jobs-refresh-menu" role="listbox" aria-label="Jobs refresh interval">
+          {JOBS_REFRESH_INTERVAL_OPTIONS.map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              className={`admin-jobs-refresh-option${selectedRefreshId === option.id ? " active" : ""}`}
+              role="option"
+              aria-selected={selectedRefreshId === option.id}
+              onClick={() => selectRefresh(option.id)}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function JobsTimeline({
   jobs,
   loading,
@@ -1111,9 +1175,11 @@ export function AdminOpsPanel({
   const [jobsError, setJobsError] = useState("");
   const [expandedJobIds, setExpandedJobIds] = useState<Record<string, boolean>>({});
   const [selectedRangeId, setSelectedRangeId] = useState<JobsTimeRangeId>("7d");
+  const [selectedRefreshId, setSelectedRefreshId] = useState<JobsRefreshIntervalId>("30s");
   const [customRange, setCustomRange] = useState<CustomTimeRangeState>(() =>
     defaultCustomTimeRange(),
   );
+  const jobsRefreshInFlightRef = useRef(false);
 
   const [jobPapers, setJobPapers] = useState<AdminJobPaperResponse[]>([]);
   const [jobPapersLoading, setJobPapersLoading] = useState(false);
@@ -1153,21 +1219,37 @@ export function AdminOpsPanel({
     [customRange, selectedRangeId],
   );
   const filteredJobs = useMemo(() => jobsInTimeWindow(jobs, timeWindow), [jobs, timeWindow]);
+  const selectedRefreshInterval = useMemo(
+    () =>
+      JOBS_REFRESH_INTERVAL_OPTIONS.find((option) => option.id === selectedRefreshId) ??
+      JOBS_REFRESH_INTERVAL_OPTIONS[1],
+    [selectedRefreshId],
+  );
 
-  async function refreshJobs() {
-    setJobsLoading(true);
-    setJobsError("");
-    try {
-      const response = await loadBrowserAdminJobsOverview(ADMIN_JOBS_OVERVIEW_LIMIT);
-      setJobs(response.jobs);
-    } catch (error) {
-      setJobsError(panelErrorMessage(error, "Jobs could not be loaded."));
-    } finally {
-      setJobsLoading(false);
-    }
-  }
+  const refreshJobs = useCallback(
+    async ({ showLoading = true }: { showLoading?: boolean } = {}) => {
+      if (jobsRefreshInFlightRef.current) {
+        return;
+      }
+      jobsRefreshInFlightRef.current = true;
+      if (showLoading) {
+        setJobsLoading(true);
+      }
+      setJobsError("");
+      try {
+        const response = await loadBrowserAdminJobsOverview(ADMIN_JOBS_OVERVIEW_LIMIT);
+        setJobs(response.jobs);
+      } catch (error) {
+        setJobsError(panelErrorMessage(error, "Jobs could not be loaded."));
+      } finally {
+        jobsRefreshInFlightRef.current = false;
+        setJobsLoading(false);
+      }
+    },
+    [],
+  );
 
-  async function refreshJobPapers(rootJobId: string) {
+  const refreshJobPapers = useCallback(async (rootJobId: string) => {
     setJobPapersLoading(true);
     setJobPapersError("");
     try {
@@ -1178,19 +1260,31 @@ export function AdminOpsPanel({
     } finally {
       setJobPapersLoading(false);
     }
-  }
+  }, []);
 
   useEffect(() => {
     if (view.kind === "jobs") {
-      void refreshJobs();
+      void refreshJobs({ showLoading: true });
     }
-  }, [view.kind]);
+  }, [refreshJobs, view.kind]);
+
+  useEffect(() => {
+    if (view.kind !== "jobs") {
+      return;
+    }
+    const intervalId = window.setInterval(() => {
+      void refreshJobs({ showLoading: false });
+    }, selectedRefreshInterval.intervalMs);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [refreshJobs, selectedRefreshInterval.intervalMs, view.kind]);
 
   useEffect(() => {
     if (view.kind === "papers") {
       void refreshJobPapers(view.rootJobId);
     }
-  }, [view.kind, view.kind === "papers" ? view.rootJobId : null]);
+  }, [refreshJobPapers, view.kind, view.kind === "papers" ? view.rootJobId : null]);
 
   useEffect(() => {
     if (!selectedJobPaper) {
@@ -1355,7 +1449,7 @@ export function AdminOpsPanel({
       onNote(`Queued ${activeCreateJob?.label ?? "job"}.`);
       setCreateModalOpen(false);
       setCreateJobKind(null);
-      await refreshJobs();
+      await refreshJobs({ showLoading: false });
     } catch (error) {
       onError(panelErrorMessage(error, "Job could not be queued."));
     } finally {
@@ -1393,6 +1487,10 @@ export function AdminOpsPanel({
                 onCustomRangeChange={setCustomRange}
                 onSelectRangeId={handleSelectRangeId}
                 selectedRangeId={selectedRangeId}
+              />
+              <JobsRefreshControl
+                onSelectRefreshId={setSelectedRefreshId}
+                selectedRefreshId={selectedRefreshId}
               />
               <button
                 type="button"

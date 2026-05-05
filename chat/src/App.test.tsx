@@ -3218,6 +3218,49 @@ describe("App", () => {
     }
   });
 
+  it("auto-refreshes admin jobs using the selected refresh interval", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession({ is_admin: true }));
+    apiMocks.loadBrowserAdminJobsOverview.mockResolvedValue({
+      jobs: [],
+      worker: null,
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Control panel" })).toBeTruthy();
+    });
+
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "Control panel" }));
+
+      expect(screen.getByRole("heading", { name: "Control panel" })).toBeTruthy();
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(apiMocks.loadBrowserAdminJobsOverview).toHaveBeenCalledTimes(1);
+
+      fireEvent.click(screen.getByRole("button", { name: "Jobs refresh interval" }));
+      expect(screen.getByRole("option", { name: "5 seconds" })).toBeTruthy();
+      expect(screen.getByRole("option", { name: "30 seconds" })).toBeTruthy();
+      expect(screen.getByRole("option", { name: "1 min" })).toBeTruthy();
+      fireEvent.click(screen.getByRole("option", { name: "5 seconds" }));
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4999);
+      });
+      expect(apiMocks.loadBrowserAdminJobsOverview).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1);
+      });
+      expect(apiMocks.loadBrowserAdminJobsOverview).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("lets admins switch job types from the create-job modal before queueing", async () => {
     apiMocks.loadSession.mockResolvedValue(authenticatedSession({ is_admin: true }));
 
