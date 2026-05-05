@@ -70,6 +70,16 @@ type FileTreeNode =
       children: FileTreeNode[];
     };
 
+const PAPER_MODAL_TABS: Array<{
+  asset: string;
+  id: PaperModalTab;
+  label: string;
+}> = [
+  { id: "screenshot", label: "Screenshot", asset: "notes.svg" },
+  { id: "metadata", label: "Metadata", asset: "data.svg" },
+  { id: "files", label: "File structure", asset: "code.svg" },
+];
+
 const TEXT_FILE_EXTENSIONS = new Set([
   ".csv",
   ".html",
@@ -168,6 +178,21 @@ const TIMELINE_BUCKETS = [
   { sizeMs: 6 * DAY_MS, label: "6-day buckets" },
 ];
 const INTEGER_FORMATTER = new Intl.NumberFormat("en-US");
+
+function adminStaticAssetPath(name: string) {
+  return `${import.meta.env.BASE_URL}${name.replace(/^\/+/, "")}`;
+}
+
+function AdminPaperIcon({ asset, className = "" }: { asset: string; className?: string }) {
+  return (
+    <img
+      src={adminStaticAssetPath(asset)}
+      alt=""
+      aria-hidden="true"
+      className={className ? `icon-image ${className}` : "icon-image"}
+    />
+  );
+}
 
 type JobsTimeRangeId =
   | "1h"
@@ -1035,8 +1060,22 @@ function PaperFileTreeList({
   selectedFilePath: string | null;
   tree: FileTreeNode[];
 }) {
+  function fileTreeAsset(file: FileObject) {
+    const contentType = (file.content_type ?? "").toLowerCase();
+    if (isProbablyTextFile(file)) {
+      return "code.svg";
+    }
+    if (contentType === "application/pdf") {
+      return "docs.svg";
+    }
+    if (contentType.startsWith("image/")) {
+      return "notes.svg";
+    }
+    return "docs.svg";
+  }
+
   function renderNode(node: FileTreeNode, depth: number): ReactNode {
-    const paddingLeft = 12 + depth * 14;
+    const paddingLeft = 8 + depth * 12;
     if (node.kind === "folder") {
       const expanded = expandedFolders[node.path] ?? true;
       return (
@@ -1048,8 +1087,13 @@ function PaperFileTreeList({
             onClick={() => onToggleFolder(node.path)}
             aria-expanded={expanded}
           >
-            <span className="admin-paper-tree-glyph">{expanded ? "v" : ">"}</span>
-            <span>{node.name}</span>
+            <span className="admin-paper-tree-label">
+              <AdminPaperIcon
+                asset={expanded ? "project-opened.svg" : "project-closed.svg"}
+                className="admin-paper-tree-icon"
+              />
+              <span>{node.name}</span>
+            </span>
           </button>
           {expanded ? node.children.map((child) => renderNode(child, depth + 1)) : null}
         </div>
@@ -1063,8 +1107,13 @@ function PaperFileTreeList({
         style={{ paddingLeft }}
         onClick={() => onOpenFile(node.file)}
       >
-        <span>{node.name}</span>
-        <span>{node.file.content_type ?? "file"}</span>
+        <span className="admin-paper-tree-label">
+          <AdminPaperIcon asset={fileTreeAsset(node.file)} className="admin-paper-tree-icon" />
+          <span>{node.name}</span>
+        </span>
+        <span className="admin-paper-tree-meta" aria-hidden="true">
+          {node.file.content_type ?? "file"}
+        </span>
       </button>
     );
   }
@@ -2535,20 +2584,17 @@ export function AdminOpsPanel({
                   aria-label="Paper detail views"
                   aria-orientation="vertical"
                 >
-                  {(["screenshot", "metadata", "files"] as PaperModalTab[]).map((tab) => (
+                  {PAPER_MODAL_TABS.map((tab) => (
                     <button
-                      key={tab}
+                      key={tab.id}
                       type="button"
                       role="tab"
-                      aria-selected={paperModalTab === tab}
-                      className={`admin-paper-tab${paperModalTab === tab ? " active" : ""}`}
-                      onClick={() => setPaperModalTab(tab)}
+                      aria-selected={paperModalTab === tab.id}
+                      className={`admin-paper-tab${paperModalTab === tab.id ? " active" : ""}`}
+                      onClick={() => setPaperModalTab(tab.id)}
                     >
-                      {tab === "screenshot"
-                        ? "Screenshot"
-                        : tab === "metadata"
-                          ? "Metadata"
-                          : "File structure"}
+                      <AdminPaperIcon asset={tab.asset} className="admin-paper-tab-icon" />
+                      <span>{tab.label}</span>
                     </button>
                   ))}
                 </div>
@@ -2707,54 +2753,58 @@ export function AdminOpsPanel({
                             </a>
                           ) : null}
                         </div>
-                        {selectedFileError ? (
-                          <div className="admin-jobs-inline-error">{selectedFileError}</div>
-                        ) : null}
-                        {selectedFileLoading ? (
-                          <div className="admin-jobs-empty">Opening file...</div>
-                        ) : null}
-                        {!selectedFileLoading && selectedFileContent ? (
-                          <pre className="admin-paper-file-text">{selectedFileContent.content}</pre>
-                        ) : null}
-                        {!selectedFileLoading &&
-                        selectedAsset &&
-                        assetKind(selectedAsset) === "image" ? (
-                          <div className="admin-paper-preview-stage">
-                            <img
-                              className="admin-paper-preview"
+                        <div className="admin-paper-file-preview-body">
+                          {selectedFileError ? (
+                            <div className="admin-jobs-inline-error">{selectedFileError}</div>
+                          ) : null}
+                          {selectedFileLoading ? (
+                            <div className="admin-jobs-empty">Opening file...</div>
+                          ) : null}
+                          {!selectedFileLoading && selectedFileContent ? (
+                            <pre className="admin-paper-file-text">
+                              {selectedFileContent.content}
+                            </pre>
+                          ) : null}
+                          {!selectedFileLoading &&
+                          selectedAsset &&
+                          assetKind(selectedAsset) === "image" ? (
+                            <div className="admin-paper-preview-stage">
+                              <img
+                                className="admin-paper-preview"
+                                src={selectedAssetPreviewUrl}
+                                alt={selectedAsset.path}
+                              />
+                            </div>
+                          ) : null}
+                          {!selectedFileLoading &&
+                          selectedAsset &&
+                          assetKind(selectedAsset) === "pdf" ? (
+                            <iframe
+                              className="admin-paper-pdf-frame"
                               src={selectedAssetPreviewUrl}
-                              alt={selectedAsset.path}
+                              title={selectedAsset.path}
                             />
-                          </div>
-                        ) : null}
-                        {!selectedFileLoading &&
-                        selectedAsset &&
-                        assetKind(selectedAsset) === "pdf" ? (
-                          <iframe
-                            className="admin-paper-pdf-frame"
-                            src={selectedAssetPreviewUrl}
-                            title={selectedAsset.path}
-                          />
-                        ) : null}
-                        {!selectedFileLoading &&
-                        selectedAsset &&
-                        assetKind(selectedAsset) === "file" ? (
-                          <a
-                            href={selectedAssetPreviewUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="admin-paper-file-link"
-                          >
-                            Open file
-                          </a>
-                        ) : null}
-                        {!selectedFileLoading &&
-                        !selectedFileContent &&
-                        !selectedAsset &&
-                        !selectedFileError &&
-                        selectedJobPaper ? (
-                          <div className="admin-jobs-empty">Pick a file to inspect.</div>
-                        ) : null}
+                          ) : null}
+                          {!selectedFileLoading &&
+                          selectedAsset &&
+                          assetKind(selectedAsset) === "file" ? (
+                            <a
+                              href={selectedAssetPreviewUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="admin-paper-file-link"
+                            >
+                              Open file
+                            </a>
+                          ) : null}
+                          {!selectedFileLoading &&
+                          !selectedFileContent &&
+                          !selectedAsset &&
+                          !selectedFileError &&
+                          selectedJobPaper ? (
+                            <div className="admin-jobs-empty">Pick a file to inspect.</div>
+                          ) : null}
+                        </div>
                       </div>
                     </div>
                   </div>

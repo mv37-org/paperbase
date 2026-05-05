@@ -3758,6 +3758,13 @@ describe("App", () => {
       expect(apiMocks.loadBrowserAdminPaperFiles).toHaveBeenCalledWith("arxiv:2401.00001");
     });
 
+    const previewFolderButton = screen.getByRole("button", { name: "preview" });
+    expect(previewFolderButton).toBeTruthy();
+
+    fireEvent.click(previewFolderButton);
+    expect(screen.queryByRole("button", { name: /first-page-top\.webp/i })).toBeNull();
+
+    fireEvent.click(previewFolderButton);
     fireEvent.click(screen.getByRole("button", { name: /first-page-top\.webp/i }));
 
     await waitFor(() => {
