@@ -3104,6 +3104,7 @@ describe("App", () => {
         "paper outcomes,paper outcomes,paper outcomes",
       );
       expect((chart as HTMLElement).style.height).toBe("320px");
+      expect(screen.getByText("User queued · date range backfill")).toBeTruthy();
       expect(screen.queryByRole("button", { name: "Close Control panel" })).toBeNull();
       expect(apiMocks.loadBrowserAdminJobsOverview).toHaveBeenCalledWith(200);
 
@@ -3118,6 +3119,10 @@ describe("App", () => {
       await waitFor(() => {
         expect(screen.getByRole("heading", { name: "Indexed papers" })).toBeTruthy();
       });
+      const backButton = screen.getByRole("button", { name: "Back to jobs" });
+      expect(backButton.textContent).toBe("←");
+      expect(screen.getByText("1 paper")).toBeTruthy();
+      expect(screen.getByText("job_root_1")).toBeTruthy();
       expect(screen.queryByRole("button", { name: "Close Control panel" })).toBeNull();
       expect(apiMocks.loadBrowserAdminJobPapers).toHaveBeenCalledWith("job_root_1");
 
@@ -3156,6 +3161,73 @@ describe("App", () => {
     expect(screen.getByTestId("admin-jobs-table-skeleton")).toBeTruthy();
     expect(within(table).getByRole("columnheader", { name: "Type" })).toBeTruthy();
     expect(within(table).queryByText("No jobs yet.")).toBeNull();
+  });
+
+  it("shows why each admin job ran", async () => {
+    const dateNowSpy = vi
+      .spyOn(Date, "now")
+      .mockReturnValue(new Date("2026-04-21T12:00:00Z").getTime());
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession({ is_admin: true }));
+    apiMocks.loadBrowserAdminJobsOverview.mockResolvedValue({
+      jobs: [
+        {
+          job_id: "env:latest_sync",
+          root_job_id: "job_sync_1",
+          job_type: "latest_sync_schedule",
+          status: "scheduled",
+          display_status: "scheduled",
+          payload: {},
+          attempts: 0,
+          max_attempts: 0,
+          priority: 0,
+          created_at: "2026-04-21T00:00:00Z",
+          updated_at: "2026-04-21T01:00:00Z",
+          is_synthetic: true,
+          tracking_available: false,
+          indexed_paper_count: null,
+          latest_status_summary: "Runs on the worker schedule.",
+          child_job_count: 0,
+          details: {},
+        },
+        {
+          job_id: "job_range_1",
+          root_job_id: "job_range_1",
+          job_type: "harvest_range",
+          status: "completed",
+          display_status: "completed",
+          payload: {},
+          attempts: 1,
+          max_attempts: 3,
+          priority: 10,
+          created_at: "2026-04-21T00:00:00Z",
+          updated_at: "2026-04-21T01:00:00Z",
+          is_synthetic: false,
+          tracking_available: false,
+          indexed_paper_count: null,
+          latest_status_summary: "1 completed · 1 total",
+          child_job_count: 0,
+          details: {},
+        },
+      ],
+      worker: null,
+    });
+
+    try {
+      render(<App />);
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Control panel" })).toBeTruthy();
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Control panel" }));
+
+      await waitFor(() => {
+        expect(screen.getByText("Env scheduled · latest sync")).toBeTruthy();
+      });
+      expect(screen.getByText("User queued · date range backfill")).toBeTruthy();
+    } finally {
+      dateNowSpy.mockRestore();
+    }
   });
 
   it("keeps zero-valued admin job timelines fixed with denser grid lines", async () => {

@@ -465,6 +465,32 @@ function jobTypeLabel(jobType: string) {
   return JOB_TYPE_LABELS[jobType] ?? jobType.replaceAll("_", " ");
 }
 
+function adminJobRunReason(job: AdminJobOverviewRow) {
+  if (
+    job.is_synthetic ||
+    job.job_type === "latest_sync_schedule" ||
+    job.job_type === "sync_latest"
+  ) {
+    return "Env scheduled · latest sync";
+  }
+  if (job.job_type === "index_paper") {
+    return "User queued · single paper";
+  }
+  if (job.job_type === "harvest_range") {
+    return "User queued · date range backfill";
+  }
+  if (job.job_type === "harvest_top_cited") {
+    return "User queued · top cited backfill";
+  }
+  if (job.job_type === "harvest_venue") {
+    return "User queued · venue backfill";
+  }
+  if (job.job_type === "enrich_missing_metadata") {
+    return "User queued · metadata enrichment";
+  }
+  return "User queued · manual job";
+}
+
 function panelErrorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
 }
@@ -1606,21 +1632,26 @@ export function AdminOpsPanel({
                             }
                           >
                             <td>
-                              <button
-                                type="button"
-                                className="admin-jobs-expand"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  setExpandedJobIds((current) => ({
-                                    ...current,
-                                    [job.job_id]: !current[job.job_id],
-                                  }));
-                                }}
-                                aria-expanded={expanded}
-                              >
-                                <span>{expanded ? "−" : "+"}</span>
-                                <span>{jobTypeLabel(job.job_type)}</span>
-                              </button>
+                              <div className="admin-jobs-type-cell">
+                                <button
+                                  type="button"
+                                  className="admin-jobs-expand"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    setExpandedJobIds((current) => ({
+                                      ...current,
+                                      [job.job_id]: !current[job.job_id],
+                                    }));
+                                  }}
+                                  aria-expanded={expanded}
+                                >
+                                  <span>{expanded ? "−" : "+"}</span>
+                                  <span>{jobTypeLabel(job.job_type)}</span>
+                                </button>
+                                <span className="admin-jobs-run-reason">
+                                  {adminJobRunReason(job)}
+                                </span>
+                              </div>
                             </td>
                             <td>
                               <code>{job.job_id}</code>
@@ -1678,19 +1709,31 @@ export function AdminOpsPanel({
       ) : (
         <>
           <div className="admin-jobs-header admin-jobs-header-papers">
-            <button type="button" className="secondary-button" onClick={onBackToJobs}>
-              Back to jobs
-            </button>
-            <h1>Indexed papers</h1>
+            <div className="admin-jobs-header-main">
+              <button
+                type="button"
+                className="admin-jobs-back-icon"
+                aria-label="Back to jobs"
+                onClick={onBackToJobs}
+              >
+                ←
+              </button>
+              <h1>Indexed papers</h1>
+            </div>
+            <div className="admin-jobs-paper-meta">
+              <span>
+                {jobPapersLoading
+                  ? "Loading papers"
+                  : `${formatWholeNumber(jobPapers.length)} ${
+                      jobPapers.length === 1 ? "paper" : "papers"
+                    }`}
+              </span>
+              <code>{view.rootJobId}</code>
+            </div>
           </div>
 
           {jobPapersError ? <div className="admin-jobs-inline-error">{jobPapersError}</div> : null}
           <div className="admin-jobs-surface">
-            <div className="admin-jobs-results-bar">
-              {jobPapersLoading
-                ? "Loading papers"
-                : `${formatWholeNumber(jobPapers.length)} papers`}
-            </div>
             {jobPapersLoading ? <div className="admin-jobs-empty">Loading papers...</div> : null}
             {!jobPapersLoading ? (
               <div className="admin-jobs-table-shell">
