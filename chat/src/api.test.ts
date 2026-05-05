@@ -327,7 +327,9 @@ describe("chat api", () => {
     expect(new Headers(voteInit?.headers).get("X-Paperbase-CSRF")).toBe("csrf-123");
     expect(voteInit?.method).toBe("PUT");
     const [commentPath, commentInit] = fetchMock.mock.calls[2] as FetchCall;
-    expect(requestPath(commentPath)).toBe("/v1/browser/trending/papers/arxiv%3A2401.12345/comments");
+    expect(requestPath(commentPath)).toBe(
+      "/v1/browser/trending/papers/arxiv%3A2401.12345/comments",
+    );
     expect(new Headers(commentInit?.headers).get("X-Paperbase-CSRF")).toBe("csrf-123");
     expect(commentInit?.method).toBe("POST");
   });
