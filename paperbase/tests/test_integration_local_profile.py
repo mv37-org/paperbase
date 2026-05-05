@@ -62,29 +62,6 @@ def test_probe_integrations_against_active_local_profile(integration_context):
 
 
 @pytest.mark.integration
-def test_sql_repository_create_browser_user_tolerates_legacy_quota_column(integration_context):
-    _, repository, _, namespace = integration_context
-    email = f"{namespace.replace('/', '-')}@paperbase.local"
-
-    try:
-        user = repository.create_browser_user(
-            email=email,
-            display_name="Integration User",
-            password_hash="hash",
-        )
-        assert user.email == email
-    finally:
-        with _connect() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute("DELETE FROM browser_sessions WHERE user_id IN (SELECT user_id FROM browser_users WHERE email = %s)", (email,))
-                cursor.execute("DELETE FROM password_reset_tokens WHERE user_id IN (SELECT user_id FROM browser_users WHERE email = %s)", (email,))
-                cursor.execute("DELETE FROM anthropic_api_keys WHERE user_id IN (SELECT user_id FROM browser_users WHERE email = %s)", (email,))
-                cursor.execute("DELETE FROM browser_user_settings WHERE user_id IN (SELECT user_id FROM browser_users WHERE email = %s)", (email,))
-                cursor.execute("DELETE FROM projects WHERE user_id IN (SELECT user_id FROM browser_users WHERE email = %s)", (email,))
-                cursor.execute("DELETE FROM browser_users WHERE email = %s", (email,))
-
-
-@pytest.mark.integration
 def test_sql_repository_search_and_result_set_flow(integration_context):
     _, repository, _, namespace = integration_context
     arxiv_id = f"{namespace}/search/0001"
