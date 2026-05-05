@@ -664,12 +664,18 @@ describe("App", () => {
     );
     expect(restoredTab?.querySelector(".chat-tab-thread-indicator")).toBeNull();
     expect(document.querySelectorAll(".chat-tab-thread-indicator")).toHaveLength(0);
-    const debugStrip = screen.getByTestId("thread-debug-strip");
-    expect(debugStrip.textContent).toContain("user user_1");
-    expect(debugStrip.textContent).toContain("project proj_1");
-    expect(debugStrip.textContent).toContain("thread thread_1");
-    expect(debugStrip.textContent).toContain("assistant msg_1");
-    expect(screen.getByRole("button", { name: "Copy chat debug bundle" })).toBeTruthy();
+    expect(screen.queryByTestId("thread-debug-strip")).toBeNull();
+    const debugButton = screen.getByRole("button", { name: "Open chat debug info" });
+    expect(debugButton).toBeTruthy();
+
+    fireEvent.click(debugButton);
+
+    const debugModal = screen.getByRole("dialog", { name: "Chat debug" });
+    expect(within(debugModal).getByText("user_1")).toBeTruthy();
+    expect(within(debugModal).getByText("proj_1")).toBeTruthy();
+    expect(within(debugModal).getByText("thread_1")).toBeTruthy();
+    expect(within(debugModal).getAllByText("msg_1").length).toBeGreaterThan(0);
+    expect(within(debugModal).getByRole("button", { name: "Copy debug bundle" })).toBeTruthy();
   });
 
   it("restores the previously selected project and keeps only that tree expanded", async () => {
