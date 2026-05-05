@@ -917,6 +917,27 @@ def test_index_job_tracks_papers_for_admin_overview(monkeypatch, service: Paperb
     assert job_papers.has_more is False
     assert job_papers.papers[0].paper_id == "arxiv:2401.77777"
     assert job_papers.papers[0].outcome == "indexed"
+    assert job_papers.outcome_counts == {"indexed": 1}
+
+
+def test_index_job_records_skip_reason_for_already_indexed_paper(monkeypatch, service: PaperbaseService):
+    paper = _sample_paper("2401.77778", title="Already Indexed Paper", abstract="Tracked abstract.")
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda current_paper: _rich_extraction(text="Tracked text"),
+    )
+    service.index_arxiv_paper(paper.arxiv_id, paper=paper)
+
+    job = service.enqueue_index_job(paper.arxiv_id)
+    completed = service.process_next_job()
+
+    assert completed is not None
+    job_papers = service.get_admin_job_papers(job.job_id)
+    assert job_papers.outcome_counts == {"skipped": 1}
+    assert job_papers.skipped_reason_counts == {"already_indexed": 1}
+    assert job_papers.papers[0].outcome == "skipped"
+    assert job_papers.papers[0].skip_reason == "already_indexed"
 
 
 def test_admin_jobs_overview_counts_tracked_paper_outcomes(service: PaperbaseService):
@@ -943,6 +964,7 @@ def test_admin_jobs_overview_counts_tracked_paper_outcomes(service: PaperbaseSer
         outcome="skipped",
         arxiv_id="2401.00002",
         title="Skipped Paper",
+        skip_reason="already_indexed",
     )
     service.repository.record_job_paper(
         job.job_id,
@@ -958,6 +980,12 @@ def test_admin_jobs_overview_counts_tracked_paper_outcomes(service: PaperbaseSer
     assert row.tracking_available is True
     assert row.indexed_paper_count == 1
     assert row.paper_outcome_counts == {"failed": 1, "indexed": 1, "skipped": 1}
+
+    job_papers = service.get_admin_job_papers(job.job_id)
+    skipped = next(paper for paper in job_papers.papers if paper.outcome == "skipped")
+    assert skipped.skip_reason == "already_indexed"
+    assert job_papers.outcome_counts == {"failed": 1, "indexed": 1, "skipped": 1}
+    assert job_papers.skipped_reason_counts == {"already_indexed": 1}
 
 
 def test_summarize_top_cited_admin_row_does_not_claim_index_tracking(service: PaperbaseService):

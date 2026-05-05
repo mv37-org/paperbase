@@ -344,6 +344,7 @@ class JobPaperORM(Base):
     arxiv_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
     outcome: Mapped[str] = mapped_column(String(32), default="indexed", index=True)
+    skip_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
@@ -1342,6 +1343,7 @@ class PaperRepository(ABC):
         outcome: str,
         arxiv_id: str | None = None,
         title: str | None = None,
+        skip_reason: str | None = None,
     ) -> None:
         raise NotImplementedError
 
@@ -1713,6 +1715,9 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     "CREATE INDEX IF NOT EXISTS job_papers_outcome_idx "
                     "ON job_papers (outcome)"
                 )
+            )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS job_papers ADD COLUMN IF NOT EXISTS skip_reason TEXT")
             )
             connection.execute(
                 text(
@@ -4567,6 +4572,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
         outcome: str,
         arxiv_id: str | None = None,
         title: str | None = None,
+        skip_reason: str | None = None,
     ) -> None:
         statement = insert(JobPaperORM).values(
             job_id=job_id,
@@ -4574,6 +4580,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
             arxiv_id=arxiv_id,
             title=title,
             outcome=outcome,
+            skip_reason=skip_reason,
             created_at=utcnow(),
             updated_at=utcnow(),
         )
@@ -4583,6 +4590,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 "arxiv_id": arxiv_id,
                 "title": title,
                 "outcome": outcome,
+                "skip_reason": skip_reason,
                 "updated_at": utcnow(),
             },
         )
@@ -4604,6 +4612,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 arxiv_id=row.arxiv_id,
                 title=row.title,
                 outcome=row.outcome,
+                skip_reason=row.skip_reason,
                 created_at=row.created_at,
                 updated_at=row.updated_at,
             )
@@ -6501,6 +6510,7 @@ class MemoryPaperRepository(PaperRepository):
         outcome: str,
         arxiv_id: str | None = None,
         title: str | None = None,
+        skip_reason: str | None = None,
     ) -> None:
         key = (job_id, paper_id)
         existing = self.job_papers.get(key)
@@ -6511,6 +6521,7 @@ class MemoryPaperRepository(PaperRepository):
             arxiv_id=arxiv_id,
             title=title,
             outcome=outcome,
+            skip_reason=skip_reason,
             created_at=created_at,
             updated_at=utcnow(),
         )

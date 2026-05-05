@@ -336,7 +336,7 @@ def _job_paper_outcome_rank(value: str) -> int:
     return {"indexed": 0, "failed": 1, "skipped": 2}.get(value, 9)
 
 
-def _job_paper_outcome_counts(records: list[JobPaperRecord]) -> dict[str, int]:
+def _group_job_paper_records(records: list[JobPaperRecord]) -> dict[str, JobPaperRecord]:
     grouped: dict[str, JobPaperRecord] = {}
     for record in records:
         existing = grouped.get(record.paper_id)
@@ -349,9 +349,25 @@ def _job_paper_outcome_counts(records: list[JobPaperRecord]) -> dict[str, int]:
         ):
             grouped[record.paper_id] = record
 
+    return grouped
+
+
+def _job_paper_outcome_counts(records: list[JobPaperRecord]) -> dict[str, int]:
+    grouped = _group_job_paper_records(records)
     counts: dict[str, int] = {}
     for record in grouped.values():
         counts[record.outcome] = counts.get(record.outcome, 0) + 1
+    return counts
+
+
+def _job_paper_skipped_reason_counts(records: list[JobPaperRecord]) -> dict[str, int]:
+    grouped = _group_job_paper_records(records)
+    counts: dict[str, int] = {}
+    for record in grouped.values():
+        if record.outcome != "skipped":
+            continue
+        reason = (record.skip_reason or "unknown").strip() or "unknown"
+        counts[reason] = counts.get(reason, 0) + 1
     return counts
 
 
@@ -7533,17 +7549,8 @@ class PaperbaseService:
         normalized_offset = max(0, int(offset))
         normalized_limit = max(1, int(limit))
 
-        grouped: dict[str, JobPaperRecord] = {}
-        for record in self.repository.list_job_papers_for_root(root_job_id):
-            existing = grouped.get(record.paper_id)
-            if existing is None:
-                grouped[record.paper_id] = record
-                continue
-            if _job_paper_outcome_rank(record.outcome) < _job_paper_outcome_rank(existing.outcome) or (
-                _job_paper_outcome_rank(record.outcome) == _job_paper_outcome_rank(existing.outcome)
-                and record.updated_at > existing.updated_at
-            ):
-                grouped[record.paper_id] = record
+        records = self.repository.list_job_papers_for_root(root_job_id)
+        grouped = _group_job_paper_records(records)
 
         ordered_records = sorted(grouped.values(), key=lambda item: item.updated_at, reverse=True)
         total_count = len(ordered_records)
@@ -7560,6 +7567,7 @@ class PaperbaseService:
                     arxiv_id=record.arxiv_id or (paper.arxiv_id if paper is not None else None),
                     title=record.title or (paper.title if paper is not None else None),
                     outcome=record.outcome,
+                    skip_reason=record.skip_reason,
                     created_at=record.created_at,
                     updated_at=record.updated_at,
                     paper=paper,
@@ -7571,6 +7579,8 @@ class PaperbaseService:
             offset=normalized_offset,
             limit=normalized_limit,
             has_more=normalized_offset + len(page_records) < total_count,
+            outcome_counts=_job_paper_outcome_counts(records),
+            skipped_reason_counts=_job_paper_skipped_reason_counts(records),
             papers=papers,
         )
 
@@ -7644,6 +7654,7 @@ class PaperbaseService:
                     outcome="skipped",
                     arxiv_id=existing.arxiv_id,
                     title=existing.title,
+                    skip_reason="already_indexed",
                 )
             logger.info(
                 "Skipped already indexed paper",

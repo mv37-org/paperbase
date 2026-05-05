@@ -3070,6 +3070,9 @@ describe("App", () => {
     const dateNowSpy = vi
       .spyOn(Date, "now")
       .mockReturnValue(new Date("2026-04-21T12:00:00Z").getTime());
+    const longSkippedTitle =
+      "This Paper Title Is Deliberately Long Enough To Need Truncation In The Admin Paper Table";
+    const truncatedSkippedTitle = `${longSkippedTitle.slice(0, 60).trimEnd()}...`;
     apiMocks.loadSession.mockResolvedValue(authenticatedSession({ is_admin: true }));
     apiMocks.loadBrowserAdminJobsOverview.mockResolvedValue({
       jobs: [
@@ -3098,10 +3101,12 @@ describe("App", () => {
     });
     apiMocks.loadBrowserAdminJobPapers.mockResolvedValue({
       root_job_id: "job_root_1",
-      total_count: 1,
+      total_count: 3,
       offset: 0,
       limit: 100,
       has_more: false,
+      outcome_counts: { indexed: 2, skipped: 1 },
+      skipped_reason_counts: { already_indexed: 1 },
       papers: [
         {
           root_job_id: "job_root_1",
@@ -3112,6 +3117,18 @@ describe("App", () => {
           outcome: "indexed",
           created_at: "2026-04-21T00:00:00Z",
           updated_at: "2026-04-21T01:10:00Z",
+          paper: null,
+        },
+        {
+          root_job_id: "job_root_1",
+          job_id: "job_chunk_1",
+          paper_id: "arxiv:2401.12346",
+          arxiv_id: "2401.12346",
+          title: longSkippedTitle,
+          outcome: "skipped",
+          skip_reason: "already_indexed",
+          created_at: "2026-04-21T00:00:00Z",
+          updated_at: "2026-04-21T01:11:00Z",
           paper: null,
         },
       ],
@@ -3164,8 +3181,15 @@ describe("App", () => {
       });
       const backButton = screen.getByRole("button", { name: "Back to jobs" });
       expect(backButton.textContent).toBe("←");
-      expect(screen.getAllByText("1-1 of 1").length).toBeGreaterThan(0);
+      expect(screen.getAllByText("1-2 of 3").length).toBeGreaterThan(0);
       expect(screen.getByText("job_root_1")).toBeTruthy();
+      const statusSummary = screen.getByRole("group", { name: "Indexed paper outcomes" });
+      expect(within(statusSummary).getByText("Indexed")).toBeTruthy();
+      expect(within(statusSummary).getByText("Skipped: Already indexed")).toBeTruthy();
+      expect(screen.getByText(truncatedSkippedTitle)).toBeTruthy();
+      expect(screen.queryByText(longSkippedTitle)).toBeNull();
+      expect(screen.getByText("Skipped").getAttribute("title")).toBe("Skipped: Already indexed");
+      expect(screen.getAllByText(/\d{1,2} \w{3} at \d{1,2}:\d{2} [AP]M/).length).toBeGreaterThan(0);
       expect(screen.queryByRole("button", { name: "Close Control panel" })).toBeNull();
       expect(apiMocks.loadBrowserAdminJobPapers).toHaveBeenCalledWith("job_root_1", 0, 100);
 

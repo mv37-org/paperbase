@@ -47,6 +47,7 @@ import { CredentialFormUsernameField } from "./CredentialFormUsernameField";
 import { CodeSnippet, extractStreamingPythonPreview } from "./CodeSnippet";
 import { LandingMentionEditor } from "./LandingMentionEditor";
 import { MarkdownRenderer } from "./MarkdownRenderer";
+import { formatLocalTimestamp } from "./time";
 import type {
   AuthView,
   BrowserSessionResponse,
@@ -654,25 +655,6 @@ function truncateTabTitle(title: string) {
     return words.join(" ");
   }
   return `${words.slice(0, 4).join(" ")}…`;
-}
-
-function formatTodayTimeLabel(value: string) {
-  const timestamp = new Date(value);
-  if (Number.isNaN(timestamp.getTime())) {
-    return null;
-  }
-  const now = new Date();
-  const isToday =
-    timestamp.getFullYear() === now.getFullYear() &&
-    timestamp.getMonth() === now.getMonth() &&
-    timestamp.getDate() === now.getDate();
-  if (!isToday) {
-    return null;
-  }
-  return new Intl.DateTimeFormat(undefined, {
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(timestamp);
 }
 
 function pickThinkingWord(previous?: string | null) {
@@ -5905,7 +5887,7 @@ export default function App() {
                         activeThreadStreamState?.turnIndex === userTurnIndex &&
                         !activeThreadStreamState.assistantStarted &&
                         turnActivities.length === 0;
-                      const hoverTime = formatTodayTimeLabel(message.created_at);
+                      const hoverTime = formatLocalTimestamp(message.created_at, "");
                       return (
                         <Fragment key={message.message_id}>
                           <article

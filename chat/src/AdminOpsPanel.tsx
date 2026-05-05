@@ -33,6 +33,7 @@ import type {
   PaperPreviewResponse,
   PaperResponse,
 } from "./types";
+import { formatLocalTimestamp } from "./time";
 
 type AdminWorkspaceView = { kind: "jobs" } | { kind: "papers"; rootJobId: string };
 
@@ -223,6 +224,7 @@ const TIMELINE_OUTCOMES: Array<{ key: TimelineOutcomeKey; label: string; color: 
   { key: "skipped", label: "Skipped", color: "#99582a" },
   { key: "failed", label: "Failed", color: "#b42318" },
 ];
+const SKIPPED_REASON_COLORS = ["#99582a", "#b7774d", "#c89a72", "#7f4a24"];
 
 type TimelineBucketPoint = {
   axisLabel: string;
@@ -239,6 +241,12 @@ type TimelineSummary = {
   maxTotal: number;
   totalIndexed: number;
   trackedJobs: number;
+};
+
+type JobPaperStatusSegment = {
+  color: string;
+  count: number;
+  label: string;
 };
 
 type CustomTimeRangeState = {
@@ -386,16 +394,7 @@ function parseDateTimeLocalValue(value: string) {
 }
 
 function formatTimeWindowLabel(startMs: number, endMs: number) {
-  const start = new Date(startMs);
-  const end = new Date(endMs);
-  const sameDay = start.toDateString() === end.toDateString();
-  const startOptions: Intl.DateTimeFormatOptions = sameDay
-    ? { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }
-    : { month: "short", day: "numeric", hour: "numeric" };
-  const endOptions: Intl.DateTimeFormatOptions = sameDay
-    ? { hour: "numeric", minute: "2-digit" }
-    : { month: "short", day: "numeric", hour: "numeric" };
-  return `${start.toLocaleString([], startOptions)} to ${end.toLocaleString([], endOptions)}`;
+  return `${formatLocalTimestamp(startMs)} to ${formatLocalTimestamp(endMs)}`;
 }
 
 function presetTimeWindow(
@@ -449,14 +448,7 @@ function parseIntegerWithDefault(value: FormDataEntryValue | null, defaultValue:
 }
 
 function formatTimestamp(value?: string | null) {
-  if (!value) {
-    return "Not yet";
-  }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-  return date.toLocaleString();
+  return formatLocalTimestamp(value);
 }
 
 function formatWholeNumber(value: number) {
@@ -477,6 +469,33 @@ function statusLabel(value: string) {
     return "Scheduled";
   }
   return `${value[0]?.toUpperCase() ?? ""}${value.slice(1)}`;
+}
+
+function truncateText(value: string, maxLength: number) {
+  if (value.length <= maxLength) {
+    return value;
+  }
+  return `${value.slice(0, maxLength).trimEnd()}...`;
+}
+
+function humanizeReason(value?: string | null) {
+  const text = (value ?? "").trim();
+  if (!text) {
+    return "No reason recorded";
+  }
+  const labels: Record<string, string> = {
+    already_indexed: "Already indexed",
+    unknown: "No reason recorded",
+  };
+  return (
+    labels[text] ??
+    text
+      .replaceAll("_", " ")
+      .replaceAll(":", ": ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .replace(/^\w/, (match) => match.toUpperCase())
+  );
 }
 
 function jobTypeLabel(jobType: string) {
@@ -578,21 +597,22 @@ function formatTimelineAxisLabel(timestamp: number, bucketMs: number) {
   const date = new Date(timestamp);
   if (bucketMs < DAY_MS) {
     return date.toLocaleString([], {
-      month: "numeric",
       day: "numeric",
-      hour: "2-digit",
+      hour: "numeric",
+      hour12: true,
+      month: "short",
     });
   }
-  return date.toLocaleDateString([], { month: "numeric", day: "numeric" });
+  return date.toLocaleDateString([], { day: "numeric", month: "short" });
 }
 
 function formatTimelineTooltipLabel(timestamp: number, bucketMs: number) {
   const start = new Date(timestamp);
   const end = new Date(timestamp + bucketMs);
   if (bucketMs >= DAY_MS) {
-    return `${start.toLocaleDateString()} to ${new Date(end.getTime() - 1).toLocaleDateString()}`;
+    return `${formatLocalTimestamp(start)} to ${formatLocalTimestamp(end.getTime() - 1)}`;
   }
-  return `${start.toLocaleString()} to ${end.toLocaleString()}`;
+  return `${formatLocalTimestamp(start)} to ${formatLocalTimestamp(end)}`;
 }
 
 function emptyTimelineOutcomeCounts(): TimelineOutcomeCounts {
@@ -622,6 +642,72 @@ function timelineOutcomeCountsForJob(job: AdminJobOverviewRow): TimelineOutcomeC
 
 function sumTimelineOutcomeCounts(counts: TimelineOutcomeCounts) {
   return TIMELINE_OUTCOMES.reduce((sum, outcome) => sum + counts[outcome.key], 0);
+}
+
+function countJobPapersByOutcome(papers: AdminJobPaperResponse[]) {
+  return papers.reduce<Record<string, number>>((counts, paper) => {
+    counts[paper.outcome] = (counts[paper.outcome] ?? 0) + 1;
+    return counts;
+  }, {});
+}
+
+function countSkippedJobPapersByReason(papers: AdminJobPaperResponse[]) {
+  return papers.reduce<Record<string, number>>((counts, paper) => {
+    if (paper.outcome !== "skipped") {
+      return counts;
+    }
+    const reason = (paper.skip_reason ?? "unknown").trim() || "unknown";
+    counts[reason] = (counts[reason] ?? 0) + 1;
+    return counts;
+  }, {});
+}
+
+function buildJobPaperStatusSegments(
+  outcomeCounts: Record<string, number>,
+  skippedReasonCounts: Record<string, number>,
+): JobPaperStatusSegment[] {
+  const segments: JobPaperStatusSegment[] = [];
+  const indexed = Math.max(0, outcomeCounts.indexed ?? 0);
+  const skipped = Math.max(0, outcomeCounts.skipped ?? 0);
+  const failed = Math.max(0, outcomeCounts.failed ?? 0);
+  if (indexed > 0) {
+    segments.push({ label: "Indexed", count: indexed, color: "#432818" });
+  }
+
+  const skippedReasonEntries = Object.entries(skippedReasonCounts)
+    .map(([reason, count]) => [reason, Math.max(0, count)] as const)
+    .filter(([, count]) => count > 0);
+  const countedSkipped = skippedReasonEntries.reduce((sum, [, count]) => sum + count, 0);
+  const normalizedSkippedReasonEntries =
+    skipped > countedSkipped
+      ? [...skippedReasonEntries, ["unknown", skipped - countedSkipped] as const]
+      : skippedReasonEntries;
+  normalizedSkippedReasonEntries.forEach(([reason, count], index) => {
+    segments.push({
+      label: `Skipped: ${humanizeReason(reason)}`,
+      count,
+      color: SKIPPED_REASON_COLORS[index % SKIPPED_REASON_COLORS.length] ?? "#99582a",
+    });
+  });
+
+  if (failed > 0) {
+    segments.push({ label: "Failed", count: failed, color: "#b42318" });
+  }
+  return segments;
+}
+
+function buildConicGradient(segments: JobPaperStatusSegment[]) {
+  const total = segments.reduce((sum, segment) => sum + segment.count, 0);
+  if (total <= 0) {
+    return "conic-gradient(rgba(27, 22, 17, 0.08) 0deg 360deg)";
+  }
+  let cursor = 0;
+  const stops = segments.map((segment) => {
+    const start = cursor;
+    cursor += (segment.count / total) * 360;
+    return `${segment.color} ${start.toFixed(2)}deg ${cursor.toFixed(2)}deg`;
+  });
+  return `conic-gradient(${stops.join(", ")})`;
 }
 
 function buildJobsTimeline(
@@ -1309,6 +1395,10 @@ export function AdminOpsPanel({
   const [jobPapersOffset, setJobPapersOffset] = useState(0);
   const [jobPapersTotalCount, setJobPapersTotalCount] = useState(0);
   const [jobPapersHasMore, setJobPapersHasMore] = useState(false);
+  const [jobPapersOutcomeCounts, setJobPapersOutcomeCounts] = useState<Record<string, number>>({});
+  const [jobPapersSkippedReasonCounts, setJobPapersSkippedReasonCounts] = useState<
+    Record<string, number>
+  >({});
 
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [createJobKind, setCreateJobKind] = useState<CreateJobKind | null>(null);
@@ -1387,6 +1477,8 @@ export function AdminOpsPanel({
       setJobPapersOffset(response.offset);
       setJobPapersTotalCount(response.total_count);
       setJobPapersHasMore(response.has_more);
+      setJobPapersOutcomeCounts(response.outcome_counts ?? {});
+      setJobPapersSkippedReasonCounts(response.skipped_reason_counts ?? {});
     } catch (error) {
       setJobPapersError(panelErrorMessage(error, "Indexed papers could not be loaded."));
     } finally {
@@ -1428,6 +1520,11 @@ export function AdminOpsPanel({
       return;
     }
     setJobPapersOffset(0);
+    setJobPapers([]);
+    setJobPapersTotalCount(0);
+    setJobPapersHasMore(false);
+    setJobPapersOutcomeCounts({});
+    setJobPapersSkippedReasonCounts({});
     setSelectedJobPaper(null);
   }, [view.kind, view.kind === "papers" ? view.rootJobId : null]);
 
@@ -1621,6 +1718,23 @@ export function AdminOpsPanel({
     jobPapersTotalCount === 0 || jobPapers.length === 0 ? 0 : jobPapersOffset + 1;
   const jobPapersPageEnd = jobPapersOffset + jobPapers.length;
   const jobPapersHasPrevious = jobPapersOffset > 0;
+  const effectiveJobPapersOutcomeCounts =
+    Object.keys(jobPapersOutcomeCounts).length > 0
+      ? jobPapersOutcomeCounts
+      : countJobPapersByOutcome(jobPapers);
+  const effectiveJobPapersSkippedReasonCounts =
+    Object.keys(jobPapersSkippedReasonCounts).length > 0
+      ? jobPapersSkippedReasonCounts
+      : countSkippedJobPapersByReason(jobPapers);
+  const jobPaperStatusSegments = buildJobPaperStatusSegments(
+    effectiveJobPapersOutcomeCounts,
+    effectiveJobPapersSkippedReasonCounts,
+  );
+  const jobPaperStatusTotal = jobPaperStatusSegments.reduce(
+    (sum, segment) => sum + segment.count,
+    0,
+  );
+  const jobPaperStatusGradient = buildConicGradient(jobPaperStatusSegments);
 
   return (
     <section className="admin-jobs-shell">
@@ -1805,6 +1919,32 @@ export function AdminOpsPanel({
             {jobPapersLoading && jobPapersTotalCount === 0 ? (
               <div className="admin-jobs-empty">Loading papers...</div>
             ) : null}
+            {jobPaperStatusTotal > 0 ? (
+              <div
+                className="admin-paper-status-summary"
+                role="group"
+                aria-label="Indexed paper outcomes"
+              >
+                <div
+                  className="admin-paper-status-donut"
+                  style={{ background: jobPaperStatusGradient }}
+                  aria-hidden="true"
+                />
+                <div className="admin-paper-status-legend">
+                  {jobPaperStatusSegments.map((segment) => (
+                    <span key={segment.label} className="admin-paper-status-legend-item">
+                      <span
+                        className="admin-paper-status-swatch"
+                        style={{ backgroundColor: segment.color }}
+                        aria-hidden="true"
+                      />
+                      <span>{segment.label}</span>
+                      <strong>{formatWholeNumber(segment.count)}</strong>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ) : null}
             {!jobPapersLoading || jobPapers.length > 0 || jobPapersTotalCount === 0 ? (
               <div className="admin-jobs-table-shell">
                 <table className="admin-jobs-table admin-papers-table">
@@ -1832,15 +1972,25 @@ export function AdminOpsPanel({
                           onClick={() => setSelectedJobPaper(paper)}
                         >
                           <td>
-                            <div className="admin-paper-primary">
-                              {paper.title ?? paper.paper_id}
+                            <div
+                              className="admin-paper-primary"
+                              title={paper.title ?? paper.paper_id}
+                            >
+                              {truncateText(paper.title ?? paper.paper_id, 60)}
                             </div>
                             <div className="admin-paper-secondary">
                               {paper.arxiv_id ?? paper.paper_id}
                             </div>
                           </td>
                           <td>
-                            <span className={`admin-jobs-status status-${paper.outcome}`}>
+                            <span
+                              className={`admin-jobs-status status-${paper.outcome}`}
+                              title={
+                                paper.outcome === "skipped"
+                                  ? `Skipped: ${humanizeReason(paper.skip_reason)}`
+                                  : undefined
+                              }
+                            >
                               {statusLabel(paper.outcome)}
                             </span>
                           </td>

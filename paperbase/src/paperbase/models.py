@@ -164,6 +164,7 @@ class JobPaperRecord(BaseModel):
     arxiv_id: str | None = None
     title: str | None = None
     outcome: str
+    skip_reason: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -216,6 +217,7 @@ class AdminJobPaperResponse(BaseModel):
     arxiv_id: str | None = None
     title: str | None = None
     outcome: str
+    skip_reason: str | None = None
     created_at: datetime
     updated_at: datetime
     paper: PaperResponse | None = None
@@ -227,6 +229,8 @@ class AdminJobPapersResponse(BaseModel):
     offset: int = 0
     limit: int = 100
     has_more: bool = False
+    outcome_counts: dict[str, int] = Field(default_factory=dict)
+    skipped_reason_counts: dict[str, int] = Field(default_factory=dict)
     papers: list[AdminJobPaperResponse]
 
 

@@ -121,6 +121,7 @@ export interface AdminJobPaperResponse {
   arxiv_id?: string | null;
   title?: string | null;
   outcome: string;
+  skip_reason?: string | null;
   created_at: string;
   updated_at: string;
   paper?: PaperResponse | null;
@@ -132,6 +133,8 @@ export interface AdminJobPapersResponse {
   offset: number;
   limit: number;
   has_more: boolean;
+  outcome_counts?: Record<string, number>;
+  skipped_reason_counts?: Record<string, number>;
   papers: AdminJobPaperResponse[];
 }
 
