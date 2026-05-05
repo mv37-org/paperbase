@@ -305,7 +305,7 @@ const buildProjectCategoryCollapseState = (collapsed: boolean) =>
     Record<ProjectSidebarCategoryKey, boolean>
   >;
 const WORKSPACE_SIDEBAR_ITEMS = [
-  { id: "trending", label: "Latest and Hottest", asset: "docs.svg" },
+  { id: "trending", label: "Trending papers", asset: "docs.svg" },
   { id: "admin_jobs", label: "Control panel", asset: "settings.svg", adminOnly: true },
 ] satisfies Array<{
   id: "trending" | "admin_jobs";
@@ -4797,7 +4797,7 @@ export default function App() {
                   className="landing-browse-button"
                   onClick={openTrendingFromLanding}
                 >
-                  Browse Latest and Hottest
+                  Browse trending papers
                 </button>
               </div>
               <LandingMentionEditor

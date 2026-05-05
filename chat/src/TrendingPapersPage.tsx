@@ -44,7 +44,7 @@ function formatTrendingDate(value: string) {
 }
 
 function sortLabel(sort: TrendingSort) {
-  return sort === "upvotes" ? "Upvotes" : "Today";
+  return sort === "upvotes" ? "Hottest" : "Latest";
 }
 
 function applyVoteToFeed(
@@ -262,7 +262,7 @@ export function TrendingPapersPage({
   const pageTitle = useMemo(() => formatTrendingDate(browseState.date), [browseState.date]);
   const pageDescription = browseState.paperId
     ? `Published ${detail?.published ?? browseState.date}. Read the paper, skim the ELI5, and join the discussion.`
-    : `Fresh papers people are opening today. Start with the newest releases, or switch to Upvotes to see what is catching on.`;
+    : `Fresh papers people are opening today. Start with the newest releases, or switch to Hottest to see what is catching on.`;
 
   const handleSortChange = (sort: TrendingSort) => {
     onChangeBrowseState({ ...browseState, sort });
@@ -345,7 +345,7 @@ export function TrendingPapersPage({
     >
       <header className="workspace-page-header trending-page-header">
         <div className="trending-page-header-copy">
-          <h1>{browseState.paperId ? (detail?.title ?? "Loading paper") : "Latest and Hottest"}</h1>
+          <h1>{browseState.paperId ? (detail?.title ?? "Loading paper") : "Trending papers"}</h1>
           <p>
             {browseState.paperId ? pageDescription : `${pageDescription} Published ${pageTitle}.`}
           </p>

@@ -131,7 +131,7 @@ describe("TrendingPapersPage", () => {
     });
     expect(apiMocks.loadBrowserTrendingPapers).toHaveBeenCalledWith("2026-04-21", "default");
 
-    fireEvent.click(screen.getByRole("tab", { name: "Upvotes" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Hottest" }));
 
     await waitFor(() => {
       expect(apiMocks.loadBrowserTrendingPapers).toHaveBeenLastCalledWith("2026-04-21", "upvotes");
