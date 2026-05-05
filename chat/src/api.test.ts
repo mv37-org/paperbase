@@ -14,9 +14,12 @@ function requestPath(input: RequestInfo | URL) {
   return new URL(String(input), "http://localhost").pathname;
 }
 
-async function loadApiModule() {
+async function loadApiModule(options: { bootstrapSession?: unknown } = {}) {
   vi.resetModules();
   (window as typeof window & { PAPERBASE_BASE_URL?: string }).PAPERBASE_BASE_URL = "";
+  (
+    window as typeof window & { PAPERBASE_BOOTSTRAP_SESSION?: unknown }
+  ).PAPERBASE_BOOTSTRAP_SESSION = options.bootstrapSession;
   return import("./api");
 }
 
@@ -66,6 +69,44 @@ describe("chat api", () => {
 
     const [, init] = fetchMock.mock.calls[1] as FetchCall;
     expect(new Headers(init?.headers).get("X-Paperbase-CSRF")).toBe("csrf-123");
+  });
+
+  it("hydrates CSRF headers from the bootstrapped browser session", async () => {
+    const api = await loadApiModule({
+      bootstrapSession: {
+        authenticated: true,
+        user: {
+          user_id: "user_1",
+          email: "user@example.com",
+          display_name: "User",
+        },
+        has_openai_api_key: true,
+        csrf_token: "csrf-bootstrap",
+      },
+    });
+
+    const fetchMock = vi
+      .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          thread_id: "thread_1",
+          project_id: "proj_1",
+          project_name: "General",
+          project_instructions: "",
+          title: "New chat",
+          created_at: "2026-04-21T00:00:00Z",
+          updated_at: "2026-04-21T00:00:00Z",
+          messages: [],
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    expect(api.getBootstrapSession()?.authenticated).toBe(true);
+
+    await api.createThread("New chat");
+
+    const [, init] = fetchMock.mock.calls[0] as FetchCall;
+    expect(new Headers(init?.headers).get("X-Paperbase-CSRF")).toBe("csrf-bootstrap");
   });
 
   it("dispatches auth-expired on 401 and clears the cached CSRF token", async () => {

@@ -155,6 +155,7 @@ type Props = {
   value: string;
   onChange: (value: string) => void;
   searchPapers?: (query: string, limit?: number) => Promise<MentionSuggestionResult>;
+  onTagsChange?: (tags: MentionTag[]) => void;
   onSubmit: () => void;
   placeholder?: string;
   submitOnEnter?: boolean;
@@ -177,6 +178,7 @@ export function LandingMentionEditor({
   value: plainText,
   onChange,
   searchPapers,
+  onTagsChange,
   onSubmit,
   placeholder = "Ask about agents, evals, or inference. Type @ to tag a paper.",
   submitOnEnter = false,
@@ -198,6 +200,16 @@ export function LandingMentionEditor({
   const shellRef = useRef<HTMLFormElement | null>(null);
 
   const tags = useMemo(() => extractMentionTags(value), [value]);
+  const tagsKey = useMemo(() => tags.map((tag) => tag.id).join("\0"), [tags]);
+  const lastTagsKeyRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (lastTagsKeyRef.current === tagsKey) {
+      return;
+    }
+    lastTagsKeyRef.current = tagsKey;
+    onTagsChange?.(tags);
+  }, [onTagsChange, tags, tagsKey]);
   const showSuggestions = Boolean(target && suggestions.length > 0);
   const composerClassName = variant === "chat" ? "chat-composer" : "landing-composer";
   const shellClassName =

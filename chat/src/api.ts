@@ -65,6 +65,7 @@ export type SendThreadMessagePayload = {
   content: string;
   include_uploads: boolean;
   include_papers: boolean;
+  paper_ids?: string[];
 };
 
 type StreamEventHandler = <T extends keyof ChatStreamEventMap>(
@@ -149,6 +150,35 @@ function syncBrowserSession(payload: unknown) {
     session.settings.anthropic_api_key_hint = session.settings.openai_api_key_hint;
   }
   browserCsrfToken = session.authenticated ? (session.csrf_token ?? null) : null;
+}
+
+function readBootstrapSession() {
+  const payload = (window as typeof window & { PAPERBASE_BOOTSTRAP_SESSION?: unknown })
+    .PAPERBASE_BOOTSTRAP_SESSION;
+  if (!payload || typeof payload !== "object" || !("authenticated" in payload)) {
+    return null;
+  }
+  return payload as BrowserSessionResponse;
+}
+
+function cloneBrowserSession(
+  session: BrowserSessionResponse | null,
+): BrowserSessionResponse | null {
+  if (!session) {
+    return null;
+  }
+  return {
+    ...session,
+    user: session.user ? { ...session.user } : null,
+    settings: session.settings ? { ...session.settings } : session.settings,
+  };
+}
+
+const bootstrapSession = readBootstrapSession();
+syncBrowserSession(bootstrapSession);
+
+export function getBootstrapSession() {
+  return cloneBrowserSession(bootstrapSession);
 }
 
 function messageFromItem(item: ChatThreadItemResponse): ChatMessageResponse | null {
@@ -242,6 +272,7 @@ function chatRequestBody(payload: SendThreadMessagePayload) {
     tag_filters: [],
     include_uploads: payload.include_uploads,
     include_papers: payload.include_papers,
+    paper_ids: payload.paper_ids ?? [],
   });
 }
 

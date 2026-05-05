@@ -48,6 +48,7 @@ class WorkerState:
     completed_count: int = 0
     retry_scheduled_count: int = 0
     dead_count: int = 0
+    canceled_count: int = 0
     idle_count: int = 0
     last_job_id: str | None = None
     last_job_type: str | None = None
@@ -63,6 +64,7 @@ class WorkerState:
             "completed_count": self.completed_count,
             "retry_scheduled_count": self.retry_scheduled_count,
             "dead_count": self.dead_count,
+            "canceled_count": self.canceled_count,
             "idle_count": self.idle_count,
             "last_job_id": self.last_job_id,
             "last_job_type": self.last_job_type,
@@ -130,6 +132,7 @@ def run_one_iteration(
         #   completed → job succeeded
         #   pending   → transient failure, requeued with backoff (next_run_at set)
         #   dead      → permanent failure or exhausted attempts (terminal)
+        #   canceled  → operator-requested cooperative cancellation
         if processed.status == "completed":
             state.completed_count += 1
         elif processed.status == "pending":
@@ -137,6 +140,8 @@ def run_one_iteration(
         elif processed.status == "dead":
             state.dead_count += 1
             state.last_terminal_error = processed.error
+        elif processed.status == "canceled":
+            state.canceled_count += 1
 
     logger.info(
         "Processed job",

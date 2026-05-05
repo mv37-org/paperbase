@@ -10,7 +10,10 @@ The admin CLI includes:
 - `paperbase-dev reindex-embeddings` for queuing a full paper/chunk embedding rewrite after an embedding-model change
 - `paperbase-dev jobs list-dead` for dead-letter triage
 - `paperbase-dev jobs retry <job_id>` for promoting a dead job back to pending
+- `paperbase-dev jobs cancel <job_id>` for canceling pending jobs or requesting cooperative cancellation for running jobs
 - `paperbase-dev harvest --categories cs.LG,cs.CL --start YYYY-MM-DD --end YYYY-MM-DD` for historical arXiv backfills
+
+Job API responses expose `effective_status` in addition to raw `status`: `running` requires an unexpired worker lease, `stalled` means that lease expired, and `canceling` means a running worker has been asked to stop.
 
 For harvests, `--limit-per-window` is a per category-window cap, not a whole-category cap across the full date range. Harvest chunks run at backfill priority below interactive indexing.
 

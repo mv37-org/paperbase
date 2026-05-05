@@ -29,3 +29,8 @@ class PermanentError(JobError):
     """Structural failure. Worker skips retry and promotes to ``dead``
     immediately. Raise this when re-running would never succeed —
     e.g. arxiv 404, invalid payload, disabled feature."""
+
+
+class JobCanceled(JobError):
+    """Operator-requested cancellation. Worker marks the job ``canceled``
+    instead of treating it as a retryable or dead-letter failure."""

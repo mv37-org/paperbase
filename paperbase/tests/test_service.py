@@ -1100,6 +1100,60 @@ def test_admin_job_papers_response_is_paginated(service: PaperbaseService):
     assert page.limit == 1
     assert page.has_more is True
     assert [paper.paper_id for paper in page.papers] == ["arxiv:2401.00002"]
+def test_get_figure_serves_eps_and_pdf_raw_fallbacks(service: PaperbaseService):
+    """LaTeX-path figures fall back to raw eps/pdf bytes when Ghostscript /
+    pypdfium2 fail to rasterize. The figure-serving probe must recognize
+    those extensions and return their proper MIME so the UI renders
+    something instead of ``image_url=None``."""
+    paper_id = "arxiv:2401.42420"
+    eps_caption = f"papers/{paper_id}/figures/figure-eps/caption.md"
+    pdf_caption = f"papers/{paper_id}/figures/figure-pdf/caption.md"
+    service.object_store.put_text(eps_caption, "EPS figure caption", content_type="text/markdown")
+    service.object_store.put_text(pdf_caption, "PDF figure caption", content_type="text/markdown")
+    service.object_store.put_bytes(
+        f"papers/{paper_id}/figures/figure-eps/image.eps",
+        b"%!PS-Adobe-3.0 EPSF-3.0\n%%fake eps\n",
+        content_type="application/postscript",
+    )
+    service.object_store.put_bytes(
+        f"papers/{paper_id}/figures/figure-pdf/image.pdf",
+        b"%PDF-1.4\nfake\n",
+        content_type="application/pdf",
+    )
+
+    eps_response = service.get_figure(paper_id, "figure-eps")
+    pdf_response = service.get_figure(paper_id, "figure-pdf")
+
+    assert eps_response.image_url is not None
+    assert eps_response.content_type == "application/postscript"
+    assert pdf_response.image_url is not None
+    assert pdf_response.content_type == "application/pdf"
+
+
+def test_get_figure_prefers_rasterized_png_over_raw_pdf(service: PaperbaseService):
+    """When both a browser-renderable raster and a raw vector copy exist
+    (e.g. a re-index produced both representations), the probe must pick
+    the raster so the UI doesn't fall through to a non-renderable MIME."""
+    paper_id = "arxiv:2401.42421"
+    service.object_store.put_text(
+        f"papers/{paper_id}/figures/figure-1/caption.md",
+        "caption",
+        content_type="text/markdown",
+    )
+    service.object_store.put_bytes(
+        f"papers/{paper_id}/figures/figure-1/image.png",
+        b"\x89PNG\r\n\x1a\n",
+        content_type="image/png",
+    )
+    service.object_store.put_bytes(
+        f"papers/{paper_id}/figures/figure-1/image.pdf",
+        b"%PDF-1.4\n",
+        content_type="application/pdf",
+    )
+
+    response = service.get_figure(paper_id, "figure-1")
+
+    assert response.content_type == "image/png"
 
 
 def test_reindex_replaces_stale_artifacts(monkeypatch, service: PaperbaseService):
@@ -1286,6 +1340,9 @@ def test_root_serves_built_chat_shell():
     assert "/static/app.js" in response.text
     assert "/static/app.css" in response.text
     assert "__PAPERBASE_BASE_URL__" not in response.text
+    assert "__PAPERBASE_BOOTSTRAP_SESSION__" not in response.text
+    assert response.headers["Cache-Control"] == "no-store"
+    assert response.headers["Pragma"] == "no-cache"
 
 
 def test_root_uses_forwarded_https_base_url():
@@ -1301,6 +1358,28 @@ def test_root_uses_forwarded_https_base_url():
 
     assert response.status_code == 200
     assert 'window.PAPERBASE_BASE_URL = "https://paperbase-api.example.test";' in response.text
+
+
+def test_root_inlines_bootstrap_browser_session(browser_service):
+    service, _, _ = browser_service
+    app.dependency_overrides[get_service] = lambda: service
+    try:
+        client = TestClient(app)
+
+        signup = client.post(
+            "/v1/browser/auth/signup",
+            json={"email": "inline@example.com", "password": "topsecret123", "display_name": "Inline User"},
+        )
+        csrf_token = signup.json()["csrf_token"]
+
+        response = client.get("/")
+
+        assert response.status_code == 200
+        assert '"authenticated":true' in response.text
+        assert f'"csrf_token":"{csrf_token}"' in response.text
+        assert '"appearance_theme":"light"' in response.text
+    finally:
+        app.dependency_overrides.clear()
 
 
 def test_static_chat_assets_are_served():
@@ -1981,6 +2060,9 @@ def test_init_creates_trigram_indexes_for_summary_and_tldr():
     assert "tldr gin_trgm_ops" in combined
     assert "text_chunks_content_tsv_gin" in combined
     assert "to_tsvector('english', coalesce(content, ''))" in combined
+    assert "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS lease_token VARCHAR(128)" in combined
+    assert "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ" in combined
+    assert "jobs_lease_expires_at" in combined
 
 
 def test_search_local_uses_chunk_candidates_without_grouping_before_vector_limit():
@@ -2392,6 +2474,152 @@ def test_invalid_saved_anthropic_key_is_cleared_and_gates_chat(browser_service):
     assert streamed[0][1]["thread"]["messages"] == []
 
 
+def test_send_chat_message_indexes_mentioned_paper_on_demand(monkeypatch, browser_service):
+    """A paper mentioned via @-tag that is in the catalog at index_status='discovered'
+    must be fetched and indexed before the chat turn runs, so the model sees a fully
+    indexed paper instead of a metadata stub."""
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="mention@example.com", password="topsecret123", display_name="Mention User")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
+
+    discovered = service.repository.upsert_paper_shallow(  # type: ignore[attr-defined]
+        _sample_paper("2401.99999", title="Mentioned Paper", abstract="Body of work."),
+    )
+    assert discovered.index_status == "discovered"
+
+    fetched: list[tuple[str, bool]] = []
+
+    def fake_index_arxiv_paper(arxiv_id: str, *, paper=None, force: bool = False):
+        fetched.append((arxiv_id, force))
+        indexed = discovered.model_copy(update={"index_status": "indexed"})
+        service.repository.papers[discovered.paper_id] = indexed  # type: ignore[attr-defined]
+        return indexed
+
+    monkeypatch.setattr(service, "index_arxiv_paper", fake_index_arxiv_paper)
+
+    response = service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="Summarize @Mentioned Paper", paper_ids=[discovered.paper_id]),
+    )
+
+    assert fetched == [(discovered.arxiv_id, False)]
+    assert response.assistant_message is not None
+
+
+def test_send_chat_message_skips_indexing_when_paper_is_already_indexed(monkeypatch, browser_service):
+    """A mentioned paper that is already at index_status='indexed' must not trigger
+    a redundant fetch — the resolve helper short-circuits."""
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="indexed-mention@example.com", password="topsecret123", display_name="Indexed Mention")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
+
+    discovered = service.repository.upsert_paper_shallow(  # type: ignore[attr-defined]
+        _sample_paper("2401.88888", title="Already Indexed", abstract="Body."),
+    )
+    indexed = discovered.model_copy(update={"index_status": "indexed"})
+    service.repository.papers[discovered.paper_id] = indexed  # type: ignore[attr-defined]
+
+    fetched: list[str] = []
+
+    def fake_index_arxiv_paper(arxiv_id: str, *, paper=None, force: bool = False):
+        fetched.append(arxiv_id)
+        return indexed
+
+    monkeypatch.setattr(service, "index_arxiv_paper", fake_index_arxiv_paper)
+
+    service.send_chat_message(
+        session.user,
+        thread.thread_id,
+        SendChatMessageRequest(content="Hello @Already Indexed", paper_ids=[indexed.paper_id]),
+    )
+
+    assert fetched == []
+
+
+def test_stream_chat_message_emits_mention_indexing_events(monkeypatch, browser_service):
+    """Streaming chat must yield mention_indexing_started/completed events so the UI
+    can show a 'fetching paper' state for any unindexed @-mention."""
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="mention-stream@example.com", password="topsecret123", display_name="Mention Stream")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
+
+    discovered = service.repository.upsert_paper_shallow(  # type: ignore[attr-defined]
+        _sample_paper("2401.77777", title="Streamed Paper", abstract="Body."),
+    )
+
+    def fake_index_arxiv_paper(arxiv_id: str, *, paper=None, force: bool = False):
+        indexed = discovered.model_copy(update={"index_status": "indexed"})
+        service.repository.papers[discovered.paper_id] = indexed  # type: ignore[attr-defined]
+        return indexed
+
+    monkeypatch.setattr(service, "index_arxiv_paper", fake_index_arxiv_paper)
+
+    events = list(
+        service.stream_chat_message(
+            session.user,
+            thread.thread_id,
+            SendChatMessageRequest(content="@Streamed Paper please", paper_ids=[discovered.paper_id]),
+        )
+    )
+
+    event_names = [name for name, _ in events]
+    assert "mention_indexing_started" in event_names
+    assert "mention_indexing_completed" in event_names
+    started_payload = next(payload for name, payload in events if name == "mention_indexing_started")
+    assert started_payload["paper_id"] == discovered.paper_id
+    assert started_payload["arxiv_id"] == discovered.arxiv_id
+
+
+def test_send_chat_message_reports_mention_failure_without_aborting_turn(monkeypatch, browser_service):
+    """If on-demand indexing raises (e.g. arXiv 404 → PermanentError), the chat turn
+    must still complete — the failure is surfaced as an SSE event but does not abort
+    the assistant response."""
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="mention-fail@example.com", password="topsecret123", display_name="Mention Fail")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
+
+    discovered = service.repository.upsert_paper_shallow(  # type: ignore[attr-defined]
+        _sample_paper("2401.66666", title="Doomed Paper", abstract="Body."),
+    )
+
+    def fake_index_arxiv_paper(arxiv_id: str, *, paper=None, force: bool = False):
+        from paperbase.errors import PermanentError
+
+        raise PermanentError(f"Paper {arxiv_id} not found on arXiv")
+
+    monkeypatch.setattr(service, "index_arxiv_paper", fake_index_arxiv_paper)
+
+    events = list(
+        service.stream_chat_message(
+            session.user,
+            thread.thread_id,
+            SendChatMessageRequest(content="@Doomed Paper", paper_ids=[discovered.paper_id]),
+        )
+    )
+
+    failure_events = [payload for name, payload in events if name == "mention_indexing_failed"]
+    assert len(failure_events) == 1
+    assert "not found" in failure_events[0]["detail"]
+    assert any(name == "turn_completed" for name, _ in events)
+
+
 def test_sanitize_inline_citations_preserves_markdown_structure():
     answer = """# Findings
 
@@ -2689,7 +2917,9 @@ def test_project_chat_tools_are_advertised_for_coding_turns(browser_service):
         include_project_code_tools=True,
     )
     assert "Once the tool results are sufficient, stop calling tools and answer directly in the same turn." in prompt
-    assert "Use them only when paper evidence" in prompt
+    assert "First judge whether the user's request is within Paperbase scope" in prompt
+    assert "For AI, ML, agent, evaluation, architecture, algorithm, or implementation-code requests" in prompt
+    assert "search for relevant papers or uploaded evidence before settling the implementation approach" in prompt
     assert "Operate like a coding agent." in prompt
     assert "Project workspace tools operate on the current project's repo-relative text files." in prompt
     assert "Generated runnable code should support smoke-scale validation when practical." in prompt
@@ -4049,7 +4279,7 @@ def test_browser_uploads_and_chat_require_api_key_before_first_turn(monkeypatch,
     app.dependency_overrides.clear()
 
 
-def test_non_grounded_chat_can_use_tools_without_forcing_research_posture(browser_service):
+def test_off_topic_chat_prompt_redirects_without_forcing_research_posture(browser_service):
     service, _, chat_model = browser_service
     session, _ = service.register_browser_user(
         SignupRequest(email="casual@example.com", password="topsecret123", display_name="Casual User")
@@ -4076,9 +4306,8 @@ def test_non_grounded_chat_can_use_tools_without_forcing_research_posture(browse
     }
     assert "paperbase_search_sections" in first_tool_names
     assert "paperbase_search_uploaded_sections" in first_tool_names
-    assert "For casual or non-evidence turns, answer directly when tools are unnecessary." in str(
-        first_call["system_prompt"]
-    )
+    assert "If the request is outside Paperbase scope, politely redirect the user back" in str(first_call["system_prompt"])
+    assert "do not call tools just to answer an off-topic request" in str(first_call["system_prompt"])
     assert "Every tool-enabled turn must begin by leveraging these research tools" not in str(
         first_call["system_prompt"]
     )
@@ -5408,6 +5637,99 @@ def test_claim_skips_jobs_whose_next_run_at_is_in_the_future():
     assert service.repository.claim_pending_job() is None
 
 
+def test_claimed_job_gets_live_lease_and_stalled_effective_status_when_expired():
+    from datetime import UTC, datetime, timedelta
+
+    service = _retry_service()
+    job = service.repository.create_job("index_paper", {"arxiv_id": "test/lease"})
+
+    claimed = service.repository.claim_pending_job(worker_id="worker-a", lease_seconds=60)
+
+    assert claimed is not None
+    assert claimed.job_id == job.job_id
+    assert claimed.status == "running"
+    assert claimed.effective_status == "running"
+    assert claimed.worker_id == "worker-a"
+    assert claimed.lease_token
+    assert claimed.heartbeat_at is not None
+    assert claimed.lease_expires_at is not None
+
+    service.repository.jobs[job.job_id] = service.repository.jobs[job.job_id].model_copy(
+        update={"lease_expires_at": datetime.now(UTC) - timedelta(seconds=1)}
+    )
+
+    stalled = service.repository.get_job(job.job_id)
+    assert stalled is not None
+    assert stalled.status == "running"
+    assert stalled.effective_status == "stalled"
+    assert [item.job_id for item in service.list_jobs_by_status("stalled")] == [job.job_id]
+    assert service.list_jobs_by_status("running") == []
+
+    canceled = service.cancel_job(job.job_id)
+    assert canceled is not None
+    assert canceled.status == "canceled"
+    assert canceled.effective_status == "canceled"
+    assert canceled.lease_token is None
+
+
+def test_cancel_pending_job_marks_canceled_immediately():
+    service = _retry_service()
+    job = service.repository.create_job("index_paper", {"arxiv_id": "test/cancel-pending"})
+
+    canceled = service.cancel_job(job.job_id)
+
+    assert canceled is not None
+    assert canceled.status == "canceled"
+    assert canceled.effective_status == "canceled"
+    assert canceled.cancel_requested_at is not None
+    assert canceled.finished_at is not None
+    assert service.repository.claim_pending_job() is None
+
+
+def test_cancel_running_job_requests_cancel_and_worker_marks_canceled(monkeypatch):
+    service = _retry_service()
+    job = service.repository.create_job("index_paper", {"arxiv_id": "test/cancel-running"})
+
+    def cancel_during_index(arxiv_id, force=False):
+        requested = service.cancel_job(job.job_id)
+        assert requested is not None
+        assert requested.effective_status == "canceling"
+        service._raise_if_current_job_canceled()
+
+    monkeypatch.setattr(service, "index_arxiv_paper", cancel_during_index)
+
+    processed = service.process_next_job()
+
+    assert processed is not None
+    assert processed.status == "canceled"
+    assert processed.effective_status == "canceled"
+    assert processed.finished_at is not None
+
+
+def test_canceling_job_becomes_stalled_if_worker_lease_expires():
+    from datetime import UTC, datetime, timedelta
+
+    service = _retry_service()
+    job = service.repository.create_job("index_paper", {"arxiv_id": "test/cancel-expired"})
+    claimed = service.repository.claim_pending_job(worker_id="worker-a", lease_seconds=60)
+    assert claimed is not None
+
+    requested = service.cancel_job(job.job_id)
+    assert requested is not None
+    assert requested.effective_status == "canceling"
+    assert [item.job_id for item in service.list_jobs_by_status("canceling")] == [job.job_id]
+
+    service.repository.jobs[job.job_id] = service.repository.jobs[job.job_id].model_copy(
+        update={"lease_expires_at": datetime.now(UTC) - timedelta(seconds=1)}
+    )
+
+    stalled = service.repository.get_job(job.job_id)
+    assert stalled is not None
+    assert stalled.effective_status == "stalled"
+    assert service.list_jobs_by_status("canceling") == []
+    assert [item.job_id for item in service.list_jobs_by_status("stalled")] == [job.job_id]
+
+
 def test_retry_dead_job_resets_attempts_and_unblocks_claim():
     """The admin retry path must reset attempts to 0, clear the error, and
     re-make the job claimable. Confirms the round-trip from dead → pending →
@@ -6542,3 +6864,501 @@ def test_list_and_read_return_none_for_missing_paper(service: PaperbaseService) 
     assert service.read_paper_code_file("paper_does_not_exist", "README.md") is None
     assert service.search_paper_code("paper_does_not_exist", "x") is None
     assert service.get_paper_code_context("paper_does_not_exist", "x") is None
+
+
+# --------------------------------------------------------------------------- #
+# code_url 3-layer decision (#46): admin > HF paper page > ranker
+# --------------------------------------------------------------------------- #
+
+
+def _seed_code_url_paper(
+    service: PaperbaseService,
+    *,
+    arxiv_id: str = "2401.99999",
+    code_url: str | None = None,
+    code_url_source: str | None = None,
+) -> str:
+    from datetime import UTC, datetime as _datetime
+
+    paper = PaperMetadata(
+        arxiv_id=arxiv_id,
+        title="Test Paper",
+        authors="Alice, Bob",
+        abstract="x",
+        categories="cs.AI",
+        primary_category="cs.AI",
+        published="2024-01-01",
+        updated="2024-01-01",
+        code_url=code_url,
+        code_url_source=code_url_source,
+        index_status="indexed",
+        indexed_at=_datetime(2024, 1, 1, tzinfo=UTC),
+    )
+    stored = service.repository.upsert_paper(paper, search_document="x", embedding=None)
+    return stored.paper_id
+
+
+def test_set_admin_code_url_pins_and_rejects_unsupported(service: PaperbaseService) -> None:
+    paper_id = _seed_code_url_paper(service)
+    pinned = service.set_admin_code_url(paper_id, code_url="https://github.com/owner/official")
+    assert pinned is not None
+    assert pinned.code_url == "https://github.com/owner/official"
+    assert pinned.code_url_source == "admin"
+
+    cleared = service.set_admin_code_url(paper_id, code_url=None)
+    assert cleared is not None
+    assert cleared.code_url is None
+    assert cleared.code_url_source is None
+
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as excinfo:
+        service.set_admin_code_url(paper_id, code_url="https://gitlab.com/x/y")
+    assert excinfo.value.status_code == 400
+
+    assert service.set_admin_code_url("paper_unknown", code_url="https://github.com/a/b") is None
+
+
+def test_update_code_url_resets_code_ingest_state_on_url_change(
+    service: PaperbaseService,
+) -> None:
+    """When ``update_code_url`` swaps or clears the URL, the underlying
+    code-ingest state must reset alongside it (#45 review). Otherwise
+    clearing a URL leaves ``code_index_status='indexed'`` plus the old
+    manifest/code chunks served, and swapping repos serves stale
+    metadata until an unrelated reindex catches up."""
+    paper_id = _seed_code_url_paper(
+        service, code_url="https://github.com/a/old", code_url_source="extracted"
+    )
+    # Hand-set the post-ingest state the way a successful ingest_repo
+    # would leave it. The repository's update_code_url must wipe these
+    # on a URL transition.
+    paper = service.repository.papers[paper_id]
+    service.repository.papers[paper_id] = paper.model_copy(
+        update={
+            "code_index_status": "indexed",
+            "code_is_python": True,
+            "code_python_reason": "py-files-found",
+            "code_manifest": {"resolved_sha": "abc123", "code_url": "https://github.com/a/old"},
+        }
+    )
+    service.repository.text_chunks[paper_id] = [
+        {
+            "chunk_id": "chunk_a",
+            "paper_id": paper_id,
+            "path": "README.md",
+            "chunk_kind": "code_readme",
+            "content": "old readme",
+            "chunk_index": 0,
+            "section_depth": 1,
+            "section_order": 0,
+        },
+        {
+            "chunk_id": "chunk_b",
+            "paper_id": paper_id,
+            "path": "sections/intro.md",
+            "chunk_kind": "section",
+            "content": "paper section",
+            "chunk_index": 0,
+            "section_depth": 1,
+            "section_order": 0,
+        },
+    ]
+
+    swapped = service.repository.update_code_url(
+        paper_id, code_url="https://github.com/a/new", code_url_source="admin"
+    )
+    assert swapped is not None
+    assert swapped.code_url == "https://github.com/a/new"
+    assert swapped.code_index_status == "none"
+    assert swapped.code_is_python is None
+    assert swapped.code_python_reason is None
+    assert swapped.code_manifest is None
+    remaining_kinds = {c["chunk_kind"] for c in service.repository.text_chunks[paper_id]}
+    assert remaining_kinds == {"section"}, "section chunks must survive a code-url swap"
+
+    cleared = service.repository.update_code_url(
+        paper_id, code_url=None, code_url_source=None
+    )
+    assert cleared is not None
+    assert cleared.code_url is None
+    assert cleared.code_index_status == "none"
+
+
+def test_set_admin_code_url_enqueues_ingest_repo_on_change(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An admin pinning or swapping a paper's code_url must trigger a
+    fresh ``ingest_repo`` job so the chat surface picks up the new
+    repo's code without waiting on a separate reindex."""
+    paper_id = _seed_code_url_paper(service)
+
+    enqueued: list[tuple[str, bool]] = []
+
+    def fake_enqueue(_paper_id: str, *, force: bool = False):
+        enqueued.append((_paper_id, force))
+
+        class _StubJob:
+            job_id = "job_enq_test"
+
+        return _StubJob()
+
+    monkeypatch.setattr(service, "enqueue_ingest_repo_job", fake_enqueue)
+
+    service.set_admin_code_url(paper_id, code_url="https://github.com/owner/first")
+    assert enqueued == [(paper_id, True)]
+
+    # Same URL: no re-enqueue.
+    service.set_admin_code_url(paper_id, code_url="https://github.com/owner/first")
+    assert len(enqueued) == 1
+
+    # Swap to a new URL: re-enqueue.
+    service.set_admin_code_url(paper_id, code_url="https://github.com/owner/second")
+    assert enqueued[-1] == (paper_id, True)
+    assert len(enqueued) == 2
+
+    # Clear: no enqueue (no new repo to fetch).
+    service.set_admin_code_url(paper_id, code_url=None)
+    assert len(enqueued) == 2
+
+
+def test_admin_pin_survives_reindex_in_index_arxiv_paper(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 3-layer decision in ``index_arxiv_paper`` must leave a paper's
+    admin-pinned ``code_url`` untouched, even when the paper text
+    contains a different high-confidence candidate (#46 sticky rule)."""
+    paper_id = _seed_code_url_paper(service)
+    service.set_admin_code_url(paper_id, code_url="https://github.com/admin/pinned")
+
+    from paperbase import sources
+    from paperbase.extractors import ExtractionOutput
+
+    def fake_get_paper_details(arxiv_id: str):
+        return PaperMetadata(
+            arxiv_id=arxiv_id,
+            title="Test Paper Refresh",
+            authors="Alice, Bob",
+            abstract="We release code at https://github.com/text/advertised.",
+            categories="cs.AI",
+            primary_category="cs.AI",
+            published="2024-01-01",
+            updated="2024-01-01",
+        )
+
+    monkeypatch.setattr(sources, "get_paper_details", fake_get_paper_details)
+    monkeypatch.setattr(sources, "enrich_with_semantic_scholar", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda metadata: ExtractionOutput(
+            source_type="abstract-only",
+            text_markdown="# Test\n\nSee https://github.com/text/advertised for details.\n",
+        ),
+    )
+
+    refreshed = service.index_arxiv_paper("2401.99999", force=True)
+    assert refreshed.code_url == "https://github.com/admin/pinned"
+    assert refreshed.code_url_source == "admin"
+
+
+def test_index_arxiv_paper_prefers_hf_papers_over_ranker(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the Hugging Face paper-page crosslink is enabled and returns
+    a repo, the ranker's choice is overridden — the curated
+    ``githubRepo`` field is the authoritative layer-1 signal (#46)."""
+    _seed_code_url_paper(service)
+
+    from paperbase import sources
+    from paperbase.extractors import ExtractionOutput
+
+    service.settings.fetch_code_crosslinks_at_index = True
+
+    monkeypatch.setattr(
+        sources,
+        "get_paper_details",
+        lambda aid: PaperMetadata(
+            arxiv_id=aid,
+            title="T",
+            authors="A",
+            abstract="",
+            categories="cs.AI",
+            primary_category="cs.AI",
+            published="2024-01-01",
+            updated="2024-01-01",
+        ),
+    )
+    monkeypatch.setattr(sources, "enrich_with_semantic_scholar", lambda *a, **k: None)
+    monkeypatch.setattr(
+        sources, "fetch_hf_paper_repo", lambda _aid: "https://github.com/hf/official"
+    )
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda metadata: ExtractionOutput(
+            source_type="abstract-only",
+            text_markdown="See https://github.com/text/ranker for code.\n",
+        ),
+    )
+
+    refreshed = service.index_arxiv_paper("2401.99999", force=True)
+    assert refreshed.code_url == "https://github.com/hf/official"
+    assert refreshed.code_url_source == "hf_papers"
+    assert refreshed.code_url_candidates is not None
+    assert any("text/ranker" in c for c in refreshed.code_url_candidates)
+
+
+def test_index_arxiv_paper_falls_back_to_ranker_when_hf_page_empty(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the Hugging Face paper-page crosslink enabled but returning
+    no repo, the ranker
+    picks the in-text winner (#46 layer 2)."""
+    _seed_code_url_paper(service)
+
+    from paperbase import sources
+    from paperbase.extractors import ExtractionOutput
+
+    service.settings.fetch_code_crosslinks_at_index = True
+
+    monkeypatch.setattr(
+        sources,
+        "get_paper_details",
+        lambda aid: PaperMetadata(
+            arxiv_id=aid,
+            title="T",
+            authors="A",
+            abstract="",
+            categories="cs.AI",
+            primary_category="cs.AI",
+            published="2024-01-01",
+            updated="2024-01-01",
+        ),
+    )
+    monkeypatch.setattr(sources, "enrich_with_semantic_scholar", lambda *a, **k: None)
+    monkeypatch.setattr(sources, "fetch_hf_paper_repo", lambda _aid: None)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda metadata: ExtractionOutput(
+            source_type="abstract-only",
+            text_markdown="Code at https://github.com/text/winner.\n",
+        ),
+    )
+
+    refreshed = service.index_arxiv_paper("2401.99999", force=True)
+    assert refreshed.code_url == "https://github.com/text/winner"
+    assert refreshed.code_url_source == "extracted"
+
+
+def test_index_arxiv_paper_verifier_demotes_unverified_pick(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for the #46 follow-up GitHub README verifier:
+    when ``verify_code_url_via_github_readme`` is on and the verifier
+    rejects the ranker's pick (README does not reference the arxiv id
+    or title), ``code_url`` must demote to ``None`` rather than stick
+    with an unverified guess. This is the precision-filter behavior
+    measured at 0/30 wrong on the landmark benchmark."""
+    _seed_code_url_paper(service)
+
+    from paperbase import sources
+    from paperbase.extractors import ExtractionOutput
+
+    service.settings.fetch_code_crosslinks_at_index = False
+    service.settings.verify_code_url_via_github_readme = True
+
+    monkeypatch.setattr(
+        sources,
+        "get_paper_details",
+        lambda aid: PaperMetadata(
+            arxiv_id=aid,
+            title="T",
+            authors="A",
+            abstract="",
+            categories="cs.AI",
+            primary_category="cs.AI",
+            published="2024-01-01",
+            updated="2024-01-01",
+        ),
+    )
+    monkeypatch.setattr(sources, "enrich_with_semantic_scholar", lambda *a, **k: None)
+    # Stub the verifier to always reject — simulates the GPT-3
+    # ``gpt-3supplemental`` 404 case or the ``tensorflow/models`` /
+    # GraphSAGE case where the README does not mention the paper.
+    monkeypatch.setattr(sources, "verify_repo_owns_paper", lambda *a, **k: False)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda metadata: ExtractionOutput(
+            source_type="abstract-only",
+            text_markdown="Code at https://github.com/text/winner.\n",
+        ),
+    )
+
+    refreshed = service.index_arxiv_paper("2401.99999", force=True)
+    assert refreshed.code_url is None
+    assert refreshed.code_url_source is None
+    # Candidate set is still preserved for admin / future agent use.
+    assert refreshed.code_url_candidates == ["https://github.com/text/winner"]
+
+
+def test_index_arxiv_paper_verifier_keeps_verified_pick(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifier accepting the ranker's pick must leave it intact —
+    the precision filter only kicks out unverified picks."""
+    _seed_code_url_paper(service)
+
+    from paperbase import sources
+    from paperbase.extractors import ExtractionOutput
+
+    service.settings.fetch_code_crosslinks_at_index = False
+    service.settings.verify_code_url_via_github_readme = True
+
+    monkeypatch.setattr(
+        sources,
+        "get_paper_details",
+        lambda aid: PaperMetadata(
+            arxiv_id=aid,
+            title="T",
+            authors="A",
+            abstract="",
+            categories="cs.AI",
+            primary_category="cs.AI",
+            published="2024-01-01",
+            updated="2024-01-01",
+        ),
+    )
+    monkeypatch.setattr(sources, "enrich_with_semantic_scholar", lambda *a, **k: None)
+    monkeypatch.setattr(sources, "verify_repo_owns_paper", lambda *a, **k: True)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda metadata: ExtractionOutput(
+            source_type="abstract-only",
+            text_markdown="Code at https://github.com/text/winner.\n",
+        ),
+    )
+
+    refreshed = service.index_arxiv_paper("2401.99999", force=True)
+    assert refreshed.code_url == "https://github.com/text/winner"
+    assert refreshed.code_url_source == "extracted"
+
+
+def test_index_arxiv_paper_returns_none_on_three_way_ambiguity(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Three+ candidates clustered at the top: ``code_url`` must
+    resolve to ``None`` so ``ingest_repo`` is not auto-enqueued
+    against an uncertain repo. This is arslnb's "ambiguity → None"
+    rule from the PR #45 review, post-tuning: 2-way ties get a
+    first-mention tiebreaker (CoT-style false positives), 3+-way
+    ties stay None (the case the rule actually targets)."""
+    _seed_code_url_paper(service)
+
+    from paperbase import sources
+    from paperbase.extractors import ExtractionOutput
+
+    service.settings.fetch_code_crosslinks_at_index = False
+
+    monkeypatch.setattr(
+        sources,
+        "get_paper_details",
+        lambda aid: PaperMetadata(
+            arxiv_id=aid,
+            title="T",
+            authors="A",
+            abstract="",
+            categories="cs.AI",
+            primary_category="cs.AI",
+            published="2024-01-01",
+            updated="2024-01-01",
+        ),
+    )
+    monkeypatch.setattr(sources, "enrich_with_semantic_scholar", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda metadata: ExtractionOutput(
+            source_type="abstract-only",
+            text_markdown=(
+                "See https://github.com/owner/datasetA, "
+                "https://github.com/owner/datasetB, and "
+                "https://github.com/owner/method in the code.\n"
+            ),
+        ),
+    )
+
+    refreshed = service.index_arxiv_paper("2401.99999", force=True)
+    assert refreshed.code_url is None
+    assert refreshed.code_url_source is None
+    assert refreshed.code_url_candidates is not None
+    assert len(refreshed.code_url_candidates) == 3
+
+
+def test_backfill_code_urls_from_hf_papers_respects_admin_pin(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Core regression: the backfill CLI must never overwrite an
+    operator-pinned ``code_url``, even if Hugging Face has a different repo on
+    file for that paper. Protects admin labor from automated cleanup."""
+    pinned_id = _seed_code_url_paper(
+        service,
+        arxiv_id="2401.00001",
+        code_url="https://github.com/admin/pinned",
+        code_url_source="admin",
+    )
+    extracted_id = _seed_code_url_paper(
+        service,
+        arxiv_id="2401.00002",
+        code_url="https://github.com/regex/guess",
+        code_url_source="extracted",
+    )
+
+    from paperbase import sources
+
+    monkeypatch.setattr(
+        sources,
+        "fetch_hf_paper_repo",
+        lambda arxiv_id: f"https://github.com/hf/{arxiv_id.replace('.', '-')}",
+    )
+
+    result = service.backfill_code_urls_from_hf_papers(limit=10, page_size=10, dry_run=False)
+    # Repo-level filter drops admin rows up front; only the extracted
+    # paper reaches the backfill loop.
+    assert result["scanned"] == 1
+    assert result["updated"] == 1
+    assert result["crosslink_hits"] == 1
+
+    pinned = service.repository.get_paper(pinned_id)
+    assert pinned is not None
+    assert pinned.code_url == "https://github.com/admin/pinned"
+    assert pinned.code_url_source == "admin"
+
+    updated = service.repository.get_paper(extracted_id)
+    assert updated is not None
+    assert updated.code_url == "https://github.com/hf/2401-00002"
+    assert updated.code_url_source == "hf_papers"
+
+
+def test_backfill_code_urls_dry_run_does_not_write(
+    service: PaperbaseService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--dry-run`` must report the would-be diff count without
+    mutating the paper row — the operator needs to eyeball changes
+    before a real run touches thousands of rows."""
+    paper_id = _seed_code_url_paper(
+        service,
+        code_url="https://github.com/stale/guess",
+        code_url_source="extracted",
+    )
+    from paperbase import sources
+
+    monkeypatch.setattr(
+        sources, "fetch_hf_paper_repo", lambda _aid: "https://github.com/hf/new"
+    )
+
+    result = service.backfill_code_urls_from_hf_papers(limit=10, page_size=10, dry_run=True)
+    assert result["updated"] == 1
+    assert result["dry_run"] is True
+
+    paper = service.repository.get_paper(paper_id)
+    assert paper is not None
+    assert paper.code_url == "https://github.com/stale/guess"
+    assert paper.code_url_source == "extracted"

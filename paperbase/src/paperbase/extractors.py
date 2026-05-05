@@ -11,15 +11,323 @@ import tarfile
 import tempfile
 from dataclasses import dataclass, field
 from textwrap import shorten
+from typing import NamedTuple
 
 import requests
 from bs4 import BeautifulSoup
 
+from . import code_ingest
 from .models import PaperMetadata
 from .preview import generate_first_page_preview
 from .utils import csv_bytes, make_slug, slugify
 
 PREVIEW_ARTIFACT_PATH = "preview/first-page-top.webp"
+
+# GitHub URL detection for populating ``papers.code_url`` from paper text
+# (abstract / body). Covers the common in-text form where authors write
+# "code is available at https://github.com/owner/repo" or trailing the
+# url with a period / paren / quote. ``code_ingest.parse_github_url``
+# does the canonical normalization downstream so we can be lenient here.
+_GITHUB_URL_RE = re.compile(
+    r"https?://github\.com/[\w\.\-]+/[\w\.\-]+(?:/[\w\.\-/#?=&]+)?",
+    re.IGNORECASE,
+)
+# Punctuation that prose commonly pastes onto the end of a URL.
+_GITHUB_URL_TRAILING_JUNK = ".,;:)\"'"
+
+# Body-text mash-up suffixes we strip from the captured repo slug.
+# Arxiv HTML→markdown extraction occasionally drops the whitespace
+# between a URL and the prose that follows, so ``...openai/gpt-3``
+# ``Supplemental Material`` renders as ``openai/gpt-3supplemental``
+# and the regex captures the whole mash-up. The regex itself can't
+# tell where the URL ends, so we post-process by stripping known
+# noise tokens from the trailing edge of the repo slug.
+#
+# Two tiers, because the unconditional version of this rule was too
+# aggressive and rewrote legitimate slugs like ``interpretable`` /
+# ``roundtable`` / ``release-notes`` (PR #45 review). The boundary
+# tier requires the suffix to be preceded by a non-letter character
+# (digit, ``-``, ``_``, ``.``) — a strong signal of prose-mash because
+# real repo names that end in these words almost always do so as a
+# continuous lowercase token (``interpretable``, ``roundtable``).
+# The always tier covers ``http``/``https`` only, where any trailing
+# instance is essentially never a repo name and is overwhelmingly a
+# prose-paste artifact (``simclr`` + ``http://...`` mash).
+# Order matters — longer suffixes first so ``supplementary`` doesn't
+# get stripped to ``supplement`` before the longer match runs.
+_REPO_SLUG_NOISE_SUFFIXES_ALWAYS: tuple[str, ...] = (
+    "https",
+    "http",
+)
+_REPO_SLUG_NOISE_SUFFIXES_REQUIRE_BOUNDARY: tuple[str, ...] = (
+    "supplementary",
+    "supplemental",
+    "appendix",
+    "material",
+    "license",
+    "readme",
+    "section",
+    "notes",
+    "note",
+    "figure",
+    "fig",
+    "table",
+)
+
+
+def _strip_noise_suffix(slug: str) -> str:
+    """Strip body-text mash-up suffixes from a captured repo name.
+
+    Catches the ``gpt-3supplemental`` / ``simclrhttp`` family of regex
+    captures where extraction lost a whitespace boundary between the
+    URL and the surrounding prose. Conservative by default — for
+    suffixes that overlap with real English words (``table``, ``notes``,
+    ``readme``, ...) only fires when the character before the suffix
+    is a digit, which is the strongest signal of prose-paste because
+    paper / model IDs (``gpt-3``, ``llama-2``, ``yolo-9``) overwhelmingly
+    end in digits and prose words start with letters. Other separators
+    (``-``, ``_``, ``.``) deliberately appear in real repo names like
+    ``release-notes`` / ``repo_appendix`` so they don't qualify as
+    mash-up evidence on their own. ``http`` / ``https`` are the only
+    suffixes we strip unconditionally because they are essentially
+    never legitimate trailing tokens in a repo name.
+    """
+    if not slug:
+        return slug
+    lower = slug.lower()
+    for suffix in _REPO_SLUG_NOISE_SUFFIXES_ALWAYS:
+        if lower.endswith(suffix) and len(slug) - len(suffix) >= 4:
+            stripped = _trim_repo_slug(slug, suffix)
+            if stripped is not None:
+                return stripped
+    for suffix in _REPO_SLUG_NOISE_SUFFIXES_REQUIRE_BOUNDARY:
+        if not lower.endswith(suffix) or len(slug) - len(suffix) < 4:
+            continue
+        boundary_char = slug[-(len(suffix) + 1)]
+        if not boundary_char.isdigit():
+            # Letter or separator: assume legitimate slug (``interpretable``,
+            # ``roundtable``, ``release-notes``, ``repo_appendix``).
+            continue
+        stripped = _trim_repo_slug(slug, suffix)
+        if stripped is not None:
+            return stripped
+    return slug
+
+
+def _trim_repo_slug(slug: str, suffix: str) -> str | None:
+    """Drop ``suffix`` from the tail of ``slug`` and trim trailing
+    separators (so ``gpt-3-`` / ``simclr_`` don't leak through). Returns
+    ``None`` when the resulting prefix is shorter than 3 chars — that
+    suggests the suffix was the dominant content and the original slug
+    was probably legitimate after all."""
+    stripped = slug[: -len(suffix)].rstrip("-_.")
+    return stripped if len(stripped) >= 3 else None
+
+
+@dataclass(frozen=True)
+class GitHubUrlCandidate:
+    """One normalized GitHub repo reference found in paper text (#46).
+
+    ``url`` is the canonical ``https://github.com/{owner}/{repo}`` form,
+    stripped of sub-paths (``/tree``, ``/blob``, ``/commit``) and query
+    parameters — those are preserved as the ``has_subpath`` bit for the
+    ranker to penalize as "less likely to be the paper's primary repo".
+    """
+
+    url: str
+    owner: str
+    repo: str
+    has_subpath: bool = False
+
+
+def extract_github_candidates(abstract: str, body: str) -> list[GitHubUrlCandidate]:
+    """Return all valid, deduped GitHub repo candidates mentioned in the
+    paper (#46 layer-2 input).
+
+    Replaces the previous ``extract_github_url`` first-match-wins behavior,
+    which misfired when a paper cited a dataset / baseline repo before
+    mentioning its own (e.g. CoT's ``chaochun/nlu-asdiv-dataset``). The
+    ranker downstream consumes this list plus the raw texts to pick the
+    paper's primary repo or decline when ambiguous.
+
+    Normalization goes through ``code_ingest.parse_github_url`` so the
+    returned ``url`` field is always the canonical form — callers can
+    persist it to ``papers.code_url`` directly without re-parsing.
+    """
+    seen: dict[str, GitHubUrlCandidate] = {}
+    combined = f"{abstract or ''}\n{body or ''}"
+    for match in _GITHUB_URL_RE.finditer(combined):
+        raw = match.group(0)
+        while raw and raw[-1] in _GITHUB_URL_TRAILING_JUNK:
+            raw = raw[:-1]
+        if raw.endswith(".git"):
+            raw = raw[:-4]
+        ref = code_ingest.parse_github_url(raw)
+        if ref is None:
+            continue
+        # Repair body-text mash-ups like ``openai/gpt-3supplemental`` or
+        # ``google-research/simclrhttp`` (regex grabbed the prose tail
+        # because PDF→markdown lost a whitespace boundary). Only the
+        # repo segment is repaired; owner names rarely mash with prose.
+        repaired_repo = _strip_noise_suffix(ref.repo)
+        if repaired_repo != ref.repo:
+            from . import code_ingest as _ci
+
+            ref = _ci.GitHubRepoRef(owner=ref.owner, repo=repaired_repo, ref=ref.ref)
+        # GitHub repo paths are case-insensitive on the server, so ``Owner/Repo``
+        # and ``owner/repo`` are the same resource. Dedupe on the lowercased
+        # form but keep the canonical-cased string that the author used.
+        key = f"{ref.owner.lower()}/{ref.repo.lower()}"
+        canonical = f"https://github.com/{ref.owner}/{ref.repo}"
+        had_subpath = bool(
+            re.search(r"/(?:tree|blob|commit)/", raw) or "?" in raw or "#" in raw
+        )
+        previous = seen.get(key)
+        if previous is None:
+            seen[key] = GitHubUrlCandidate(
+                url=canonical, owner=ref.owner, repo=ref.repo, has_subpath=had_subpath
+            )
+        elif previous.has_subpath and not had_subpath:
+            # Upgrade the record when a later mention is the canonical form.
+            seen[key] = GitHubUrlCandidate(
+                url=canonical, owner=ref.owner, repo=ref.repo, has_subpath=False
+            )
+    return list(seen.values())
+
+
+def rank_github_candidates(
+    candidates: list[GitHubUrlCandidate],
+    *,
+    abstract: str,
+    body: str,
+    authors: str = "",
+    min_margin: float = 0.2,
+    tie_window: float = 0.05,
+) -> GitHubUrlCandidate | None:
+    """Pick the paper's primary repo from a candidate set, or ``None``
+    when the signal is ambiguous (#46 layer 2).
+
+    Precision-first, but with two carve-outs the original implementation
+    didn't have:
+
+    - **2-candidate tie tiebreaker.** Real ML papers cite many repos
+      (BERT has 2, ViT 2, LLaMA 3) and the symmetric scoring often
+      ties two candidates exactly. When exactly two candidates score
+      within ``tie_window`` of the top, the one that appears earliest
+      in the body wins — empirically the paper's own repo is mentioned
+      first (in a page-1 footnote), with citations following later.
+    - **3+ candidate tie still resolves to None.** When three or more
+      candidates cluster at the top (e.g. CoT references 7 dataset
+      repos at similar mention frequency), there is no honest
+      tiebreaker and the precision-first rule wins.
+
+    Scoring (cumulative):
+    - ``+1.0`` canonical form (no ``/tree``, ``/blob``, ``?``, ``#``)
+    - ``+1.5`` owner slug matches an author-affiliation token
+      (``google-research``, ``facebookresearch``, ``microsoft``, …)
+    - ``+1.0`` URL appears in abstract; ``+0.3`` body-only
+    - ``+0.3`` per extra body mention beyond the first (cap ``+0.9``)
+
+    ``min_margin=0.2`` is the post-tuning default — the original ``0.5``
+    was calibrated against synthetic test fixtures and rejected real-
+    paper cases like BERT (margin 0.30) where one candidate clearly
+    leads but not by half a point. The 10-paper landmark benchmark
+    demonstrates this margin.
+    """
+    if not candidates:
+        return None
+    author_tokens = _author_affinity_tokens(authors)
+    abstract_lower = (abstract or "").lower()
+    body_lower = (body or "").lower()
+    scored: list[tuple[float, GitHubUrlCandidate]] = []
+    for candidate in candidates:
+        score = 0.0
+        if not candidate.has_subpath:
+            score += 1.0
+        if _owner_matches_authors(candidate.owner, author_tokens):
+            score += 1.5
+        pattern = f"github.com/{candidate.owner.lower()}/{candidate.repo.lower()}"
+        if pattern in abstract_lower:
+            score += 1.0
+        elif pattern in body_lower:
+            score += 0.3
+        body_mentions = body_lower.count(pattern)
+        if body_mentions > 1:
+            score += min(0.3 * (body_mentions - 1), 0.9)
+        scored.append((score, candidate))
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    top_score, top_candidate = scored[0]
+
+    # Carve out the cluster of candidates that are effectively tied
+    # with the top by ``tie_window``. A single-element cluster means
+    # the top candidate is a clear leader; two means a 2-way tie that
+    # we can break by first-mention; three+ means real ambiguity.
+    tied_top = [
+        candidate for score, candidate in scored if top_score - score <= tie_window
+    ]
+    if len(tied_top) == 1:
+        if len(scored) >= 2:
+            runner_up_score, _ = scored[1]
+            if top_score - runner_up_score < min_margin:
+                return None
+        return top_candidate
+    if len(tied_top) == 2:
+        # Tiebreak by first appearance in the body. The paper's own
+        # repo is empirically mentioned first (page-1 footnote);
+        # cited / baseline repos come later in the references.
+        positions: dict[str, int] = {}
+        for candidate in tied_top:
+            pattern = f"github.com/{candidate.owner.lower()}/{candidate.repo.lower()}"
+            position = body_lower.find(pattern)
+            # ``not found`` ⇒ push to the end of the ordering.
+            positions[candidate.url] = position if position >= 0 else len(body_lower) + 1
+        return min(tied_top, key=lambda candidate: positions[candidate.url])
+    # 3+ candidates clustered at the top — genuinely ambiguous; the
+    # admin override is the right escape hatch for these.
+    return None
+
+
+_AFFINITY_TOKEN_RE = re.compile(r"[a-z][a-z0-9\-]{2,}")
+
+
+def _author_affinity_tokens(authors: str) -> set[str]:
+    if not authors:
+        return set()
+    tokens: set[str] = set()
+    for part in _AFFINITY_TOKEN_RE.findall(authors.lower()):
+        if len(part) >= 4:
+            tokens.add(part)
+    return tokens
+
+
+def _owner_matches_authors(owner: str, author_tokens: set[str]) -> bool:
+    if not owner or not author_tokens:
+        return False
+    owner_parts = re.findall(r"[a-z]+", owner.lower())
+    for part in owner_parts:
+        if len(part) >= 4 and part in author_tokens:
+            return True
+    return False
+
+
+def extract_github_url(*texts: str) -> str | None:
+    """DEPRECATED shim for callers that predate #46's candidate ranker.
+
+    Still used by service code that does not yet thread ``authors`` /
+    separate abstract+body. Returns the winner of
+    :func:`rank_github_candidates` on all accumulated text, or ``None``
+    when ambiguous / empty.
+
+    Prefer ``extract_github_candidates`` + ``rank_github_candidates`` in
+    new code — the ranker's precision guarantees depend on separating
+    abstract from body so the position bonus can fire.
+    """
+    joined_abstract = ""
+    joined_body = "\n".join(text or "" for text in texts)
+    candidates = extract_github_candidates(joined_abstract, joined_body)
+    winner = rank_github_candidates(candidates, abstract=joined_abstract, body=joined_body)
+    return winner.url if winner else None
+
 
 logger = logging.getLogger(__name__)
 
@@ -377,18 +685,44 @@ def _download_image(url: str) -> tuple[bytes | None, str | None, str]:
     return response.content, content_type, extension
 
 
-def _extract_figures_from_html(html: str) -> list[FigureArtifact]:
+def _extract_figures_from_html(html: str, *, arxiv_id: str | None = None) -> list[FigureArtifact]:
+    from urllib.parse import urljoin
+
     soup = BeautifulSoup(html, "html.parser")
+    # arXiv's HTML comes in two shapes and the image URL pattern differs:
+    #
+    # 1. Pre-pathed (e.g. 1706.03762 Attention): NO ``<base>`` tag, and
+    #    ``<img>`` srcs include the arxiv id + version —
+    #    ``1706.03762v7/Figures/ModalNet-21.png``. Base must be
+    #    ``https://arxiv.org/html/`` so urljoin produces the full URL.
+    #
+    # 2. Per-paper-base (e.g. 2106.09685 LoRA): a root-relative
+    #    ``<base href="/html/<id>v<N>/">`` tag and bare ``<img>`` srcs
+    #    like ``x1.png``. Qualifying the root-relative base against
+    #    ``https://arxiv.org`` gives a full URL that correctly resolves
+    #    bare srcs.
+    #
+    # Prior to this, a bare fallback of ``https://arxiv.org/html/`` was
+    # used unconditionally which produced 404s on shape (2). An
+    # arxiv-id-scoped fallback produced duplicated paths on shape (1).
+    # Deriving the base from the ``<base>`` tag when present and using
+    # ``/html/`` otherwise handles both.
+    base_tag = soup.find("base", href=True)
+    if base_tag and base_tag.get("href"):
+        base_url = urljoin("https://arxiv.org/", base_tag["href"])
+    else:
+        base_url = "https://arxiv.org/html/"
     figures: list[FigureArtifact] = []
     for index, figure in enumerate(soup.find_all("figure"), start=1):
         image = figure.find("img")
         if image is None or not image.get("src"):
             continue
-        source_url = image["src"]
-        if source_url.startswith("/"):
-            source_url = f"https://arxiv.org{source_url}"
-        elif not source_url.startswith("http"):
-            source_url = f"https://arxiv.org/html/{source_url}"
+        raw_src = image["src"]
+        # ``urljoin`` with an absolute base correctly handles:
+        #   - full URLs (``http://...``) → passed through
+        #   - root-relative (``/html/abs.png``) → joined against host
+        #   - bare relative (``x1.png``) → joined against per-paper base
+        source_url = urljoin(base_url, raw_src)
         caption_tag = figure.find("figcaption")
         caption = caption_tag.get_text(" ", strip=True) if caption_tag else ""
         image_bytes, content_type, extension = _download_image(source_url)
@@ -512,21 +846,165 @@ def _extract_latex_tables(latex: str) -> list[TableArtifact]:
     return tables
 
 
-def _extract_latex_figures(latex: str) -> list[FigureArtifact]:
+def _rasterize_pdf_to_png(pdf_bytes: bytes) -> bytes | None:
+    """Render the first page of a single-figure PDF to PNG.
+
+    arxiv LaTeX sources commonly ship figures as PDF (esp. tikz output).
+    Browsers can't render PDF inline, so we rasterize at ingest using
+    pypdfium2 (already in deps for the paper-preview path). Failures
+    return ``None`` so the caller can fall back to storing raw PDF bytes.
+    """
+    try:
+        import pypdfium2 as pdfium
+        from PIL import Image  # noqa: F401  (registers PNG codec)
+    except Exception:
+        return None
+    try:
+        document = pdfium.PdfDocument(pdf_bytes)
+        if len(document) == 0:
+            return None
+        # scale=2.0 doubles the rendered DPI relative to the PDF's
+        # native resolution. arxiv figures shipped as single-page PDFs
+        # are usually authored at print quality (~300 DPI); 2x keeps
+        # text in figure annotations legible after the PNG conversion.
+        # Matches the scale chosen for EPS rasterization below.
+        pil_image = document[0].render(scale=2.0).to_pil()
+        buffer = io.BytesIO()
+        pil_image.save(buffer, format="PNG", optimize=True)
+        return buffer.getvalue()
+    except Exception:
+        return None
+
+
+def _rasterize_eps_to_png(eps_bytes: bytes) -> bytes | None:
+    """Best-effort EPS → PNG via Pillow.
+
+    Pillow's EPS plugin shells out to Ghostscript at runtime; if Ghostscript
+    is not installed (the default in our slim Docker image), the rasterize
+    fails and the caller stores raw EPS bytes instead. Tracking adding
+    Ghostscript to the image is out of scope for this PR — see #48.
+    """
+    try:
+        from PIL import Image
+    except Exception:
+        return None
+    try:
+        with Image.open(io.BytesIO(eps_bytes)) as eps_image:
+            # scale=2 doubles Ghostscript's render DPI vs Pillow's
+            # default. EPS figures are vector-only so doubling has
+            # no quality cost at the source; 2x preserves detail in
+            # axis labels and small annotations after the PNG
+            # conversion. Matches the PDF rasterizer's scale choice.
+            eps_image.load(scale=2)
+            converted = eps_image.convert("RGBA") if eps_image.mode != "RGBA" else eps_image
+            buffer = io.BytesIO()
+            converted.save(buffer, format="PNG", optimize=True)
+            return buffer.getvalue()
+    except Exception:
+        return None
+
+
+class ResolvedLatexImage(NamedTuple):
+    """Output of ``_resolve_latex_image``. Named so the call site doesn't
+    have to unpack a positional 3-tuple — the (bytes, type, ext) shape
+    is non-obvious from the type alone."""
+
+    image_bytes: bytes
+    content_type: str | None
+    file_extension: str
+
+
+def _resolve_latex_image(
+    asset_bytes: dict[str, bytes],
+    source_path: str,
+) -> ResolvedLatexImage | None:
+    """Resolve a ``\\includegraphics{source_path}`` reference to image bytes
+    from the LaTeX tarball.
+
+    Returns a :class:`ResolvedLatexImage` or ``None`` when the path can't
+    be resolved. Tries the bare path first, then each candidate
+    extension; raster-friendly formats (PNG/JPG/GIF) pass through
+    unchanged; PDF figures are rasterized to PNG; EPS attempts
+    rasterize and falls back to raw bytes when Ghostscript is missing.
+    """
+    if not asset_bytes or not source_path:
+        return None
+
+    # Authors sometimes write ``./figs/foo`` or ``figs/foo`` interchangeably;
+    # treat the leading ``./`` as a no-op so both forms hit the same lookup.
+    cleaned = source_path[2:] if source_path.startswith("./") else source_path
+    candidates: list[str] = [cleaned]
+    if "." not in cleaned.rsplit("/", 1)[-1]:
+        candidates.extend(f"{cleaned}{ext}" for ext in _LATEX_IMAGE_EXTENSIONS)
+
+    matched_name: str | None = None
+    matched_bytes: bytes | None = None
+    for candidate in candidates:
+        if candidate in asset_bytes:
+            matched_name = candidate
+            matched_bytes = asset_bytes[candidate]
+            break
+        # Fall back to suffix-match for tarballs whose member names carry a
+        # leading directory the author didn't write (``main/figs/foo.eps``
+        # vs ``\includegraphics{figs/foo.eps}``).
+        for member_name in asset_bytes:
+            if member_name == candidate or member_name.endswith("/" + candidate):
+                matched_name = member_name
+                matched_bytes = asset_bytes[member_name]
+                break
+        if matched_bytes is not None:
+            break
+
+    if matched_bytes is None or matched_name is None:
+        return None
+
+    extension = matched_name.rsplit(".", 1)[-1].lower() if "." in matched_name else ""
+    if extension == "pdf":
+        rasterized = _rasterize_pdf_to_png(matched_bytes)
+        if rasterized is not None:
+            return ResolvedLatexImage(rasterized, "image/png", "png")
+        return ResolvedLatexImage(matched_bytes, "application/pdf", "pdf")
+    if extension == "eps":
+        rasterized = _rasterize_eps_to_png(matched_bytes)
+        if rasterized is not None:
+            return ResolvedLatexImage(rasterized, "image/png", "png")
+        return ResolvedLatexImage(matched_bytes, "application/postscript", "eps")
+    if extension in {"png", "jpg", "jpeg", "gif"}:
+        content_type = "image/jpeg" if extension == "jpg" else f"image/{extension}"
+        return ResolvedLatexImage(matched_bytes, content_type, extension)
+    return ResolvedLatexImage(matched_bytes, "application/octet-stream", extension or "bin")
+
+
+def _extract_latex_figures(
+    latex: str,
+    asset_bytes: dict[str, bytes] | None = None,
+) -> list[FigureArtifact]:
     figures: list[FigureArtifact] = []
+    asset_map = asset_bytes or {}
     for index, match in enumerate(_LATEX_FIGURE_ENV_RE.finditer(latex), start=1):
         body = match.group(2)
         caption_match = _LATEX_CAPTION_RE.search(body)
         caption = _strip_latex_inline(caption_match.group(1)) if caption_match else ""
         graphics_match = _LATEX_INCLUDEGRAPHICS_RE.search(body)
         source_path = graphics_match.group(1) if graphics_match else None
+
+        image_bytes: bytes | None = None
+        content_type: str | None = None
+        file_extension = "bin"
+        if source_path:
+            resolved = _resolve_latex_image(asset_map, source_path)
+            if resolved is not None:
+                image_bytes = resolved.image_bytes
+                content_type = resolved.content_type
+                file_extension = resolved.file_extension
+
         figures.append(
             FigureArtifact(
                 figure_id=f"figure-{index}",
                 caption=caption[:1000],
-                file_extension="bin",
-                content_type=None,
-                image_bytes=None,
+                file_extension=file_extension,
+                content_type=content_type,
+                image_bytes=image_bytes,
                 source_url=source_path,
             )
         )
@@ -584,6 +1062,42 @@ def _resolve_latex_inputs(
 
 
 def _extract_latex_text(source_bytes: bytes) -> str | None:
+    """Backwards-compatible single-value extractor — returns just the
+    resolved LaTeX text. Use ``_load_latex_archive`` when the caller
+    also needs the binary file map for figure resolution (#48)."""
+    text, _ = _load_latex_archive(source_bytes)
+    return text
+
+
+# Image extensions we recognize when resolving ``\includegraphics{path}``.
+# Ordered by what we can render cheaply, NOT by arxiv prevalence: when
+# an author ships both ``foo.png`` and ``foo.eps`` (a common dual-output
+# pattern from LaTeX build pipelines) we'd rather pick the PNG that
+# passes through unchanged than the EPS that needs Ghostscript at
+# runtime to rasterize. PDF goes through pypdfium2 (already a dep) so
+# it lands ahead of EPS, which falls back to raw bytes whenever the
+# slim Docker image isn't carrying Ghostscript. ``.pdf_tex`` is rare
+# and intentionally excluded — it's a TeX directive container, not a
+# real image file.
+_LATEX_IMAGE_EXTENSIONS: tuple[str, ...] = (".png", ".jpg", ".jpeg", ".gif", ".pdf", ".eps")
+
+
+def _load_latex_archive(source_bytes: bytes) -> tuple[str | None, dict[str, bytes]]:
+    """Return ``(resolved_latex_text, asset_bytes_by_name)`` for a tarball
+    or plain-text LaTeX source.
+
+    Contract: when ``resolved_latex_text`` is ``None`` (any failure
+    path — tarball corrupt, no .tex files, includepdf-only stub,
+    plain text without LaTeX markers), ``asset_bytes_by_name`` is
+    always ``{}``. A partial asset dict from a failed parse would
+    invite a caller to use it without realizing the .tex extraction
+    didn't succeed; returning ``{}`` makes the contract explicit.
+    On success, ``asset_bytes_by_name`` carries every recognized
+    image member (see ``_LATEX_IMAGE_EXTENSIONS``) under its tarball
+    member name. Plain-text sources have no assets, so the dict is
+    ``{}`` there too.
+    """
+    asset_bytes: dict[str, bytes] = {}
     try:
         if source_bytes[:2] == b"\x1f\x8b" or source_bytes[:4] == b"PK\x03\x04":
             file_obj = io.BytesIO(source_bytes)
@@ -591,14 +1105,24 @@ def _extract_latex_text(source_bytes: bytes) -> str | None:
                 with tarfile.open(fileobj=file_obj, mode="r:gz") as archive:
                     tex_by_name: dict[str, str] = {}
                     for member in archive.getmembers():
-                        if not member.name.endswith(".tex"):
+                        if not member.isfile():
                             continue
                         handle = archive.extractfile(member)
                         if handle is None:
                             continue
-                        tex_by_name[member.name] = handle.read().decode("utf-8", errors="replace")
+                        if member.name.endswith(".tex"):
+                            tex_by_name[member.name] = handle.read().decode("utf-8", errors="replace")
+                            continue
+                        # Cap per-asset size to avoid pathologically large
+                        # images filling memory; 25MB covers all real-world
+                        # arxiv figures with headroom.
+                        if member.size and member.size > 25 * 1024 * 1024:
+                            continue
+                        lowered = member.name.lower()
+                        if any(lowered.endswith(ext) for ext in _LATEX_IMAGE_EXTENSIONS):
+                            asset_bytes[member.name] = handle.read()
                     if not tex_by_name:
-                        return None
+                        return None, {}
                     entrypoint_name = next(
                         (name for name, body in tex_by_name.items() if "\\begin{document}" in body),
                         None,
@@ -608,16 +1132,16 @@ def _extract_latex_text(source_bytes: bytes) -> str | None:
                     entrypoint = tex_by_name[entrypoint_name]
                     resolved = _resolve_latex_inputs(entrypoint, tex_by_name, entrypoint_name)
                     if "\\includepdf" in resolved and not re.search(r"\\section\b", resolved):
-                        return None
-                    return resolved
+                        return None, {}
+                    return resolved, asset_bytes
             except tarfile.TarError:
-                return None
+                return None, {}
         text = source_bytes.decode("utf-8", errors="replace")
         if "\\begin{document}" in text or "\\section" in text:
-            return text
+            return text, asset_bytes
     except Exception:
-        return None
-    return None
+        return None, {}
+    return None, {}
 
 
 def _latex_to_markdown(latex: str) -> str:
@@ -792,7 +1316,7 @@ def index_paper_artifacts(paper: PaperMetadata) -> ExtractionOutput:
             source_type="html",
             text_markdown=markdown,
             sections=sections or _extract_sections(markdown),
-            figures=_extract_figures_from_html(html),
+            figures=_extract_figures_from_html(html, arxiv_id=paper.arxiv_id),
             tables=_extract_tables_from_html(html),
             raw_artifacts=raw_artifacts,
         )
@@ -801,14 +1325,14 @@ def index_paper_artifacts(paper: PaperMetadata) -> ExtractionOutput:
 
     source_bytes = fetch_source(paper.arxiv_id)
     if source_bytes:
-        latex = _extract_latex_text(source_bytes)
+        latex, asset_bytes = _load_latex_archive(source_bytes)
         if latex:
             markdown = _latex_to_markdown(latex)
             extraction = ExtractionOutput(
                 source_type="latex",
                 text_markdown=markdown,
                 sections=_extract_sections(markdown),
-                figures=_extract_latex_figures(latex),
+                figures=_extract_latex_figures(latex, asset_bytes),
                 tables=_extract_latex_tables(latex),
                 raw_artifacts=[
                     RawArtifact(path="raw/source.tar.gz", data=source_bytes, content_type="application/gzip"),

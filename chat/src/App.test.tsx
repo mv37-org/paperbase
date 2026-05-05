@@ -56,6 +56,7 @@ const apiMocks = vi.hoisted(() => {
     getBrowserPaperFigure: vi.fn(),
     getBrowserPaperFile: vi.fn(),
     getBrowserPaperTable: vi.fn(),
+    getBootstrapSession: vi.fn(),
     getProjectRepoSync: vi.fn(),
     getPythonFile: vi.fn(),
     getThread: vi.fn(),
@@ -150,6 +151,7 @@ vi.mock("./api", () => ({
   getBrowserPaperFile: apiMocks.getBrowserPaperFile,
   getBrowserPaperTable: apiMocks.getBrowserPaperTable,
   getBrowserTrendingPaper: apiMocks.getBrowserTrendingPaper,
+  getBootstrapSession: apiMocks.getBootstrapSession,
   getProjectRepoSync: apiMocks.getProjectRepoSync,
   getPythonFile: apiMocks.getPythonFile,
   getThread: apiMocks.getThread,
@@ -621,6 +623,7 @@ describe("App", () => {
       configurable: true,
       value: vi.fn(),
     });
+    apiMocks.getBootstrapSession.mockReturnValue(null);
     apiMocks.loadUploads.mockResolvedValue({ documents: [], available_tags: [] });
     apiMocks.loadProjects.mockResolvedValue({
       projects: [projectSummary("proj_1", "General")],
@@ -930,6 +933,30 @@ describe("App", () => {
     });
   });
 
+  it("boots from the server session payload without refetching the browser session", async () => {
+    apiMocks.getBootstrapSession.mockReturnValue(authenticatedSession());
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(document.querySelector("#account-menu-button")).toBeTruthy();
+    });
+
+    expect(apiMocks.loadSession).not.toHaveBeenCalled();
+  });
+
+  it("boots from the server session payload without refetching the browser session", async () => {
+    apiMocks.getBootstrapSession.mockReturnValue(authenticatedSession());
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(document.querySelector("#account-menu-button")).toBeTruthy();
+    });
+
+    expect(apiMocks.loadSession).not.toHaveBeenCalled();
+  });
+
   it("restores previously open tabs for an authenticated session", async () => {
     localStorage.setItem(OPEN_TABS_KEY, JSON.stringify(["thread_1"]));
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());
@@ -948,12 +975,18 @@ describe("App", () => {
     );
     expect(restoredTab?.querySelector(".chat-tab-thread-indicator")).toBeNull();
     expect(document.querySelectorAll(".chat-tab-thread-indicator")).toHaveLength(0);
-    const debugStrip = screen.getByTestId("thread-debug-strip");
-    expect(debugStrip.textContent).toContain("user user_1");
-    expect(debugStrip.textContent).toContain("project proj_1");
-    expect(debugStrip.textContent).toContain("thread thread_1");
-    expect(debugStrip.textContent).toContain("assistant msg_1");
-    expect(screen.getByRole("button", { name: "Copy chat debug bundle" })).toBeTruthy();
+    expect(screen.queryByTestId("thread-debug-strip")).toBeNull();
+    const debugButton = screen.getByRole("button", { name: "Open chat debug info" });
+    expect(debugButton).toBeTruthy();
+
+    fireEvent.click(debugButton);
+
+    const debugModal = screen.getByRole("dialog", { name: "Chat debug" });
+    expect(within(debugModal).getByText("user_1")).toBeTruthy();
+    expect(within(debugModal).getByText("proj_1")).toBeTruthy();
+    expect(within(debugModal).getByText("thread_1")).toBeTruthy();
+    expect(within(debugModal).getAllByText("msg_1").length).toBeGreaterThan(0);
+    expect(within(debugModal).getByRole("button", { name: "Copy debug bundle" })).toBeTruthy();
   });
 
   it("restores the previously selected project and keeps only that tree expanded", async () => {
@@ -2317,6 +2350,64 @@ describe("App", () => {
     await waitFor(() => {
       expect(screen.getByText("Fallback grounded answer")).toBeTruthy();
     });
+  });
+
+  it("preserves pending landing mentions when an API key gate restores the prompt into the chat composer", async () => {
+    sessionStorage.setItem(
+      PENDING_PROMPT_KEY,
+      JSON.stringify({
+        prompt: "Summarize @Mentioned Paper",
+        paperIds: ["arxiv:2401.12345"],
+        mentions: [{ id: "arxiv:2401.12345", title: "Mentioned Paper" }],
+      }),
+    );
+    apiMocks.loadSession.mockResolvedValue(
+      authenticatedSession({ has_openai_api_key: false, has_anthropic_api_key: false }),
+    );
+    apiMocks.api.mockResolvedValue(authenticatedSession());
+    apiMocks.createThread.mockResolvedValue(emptyThreadResponse("thread_2"));
+    apiMocks.sendThreadMessageStream.mockResolvedValue(undefined);
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect((screen.getByLabelText("mention-input-chat") as HTMLInputElement).value).toBe(
+        "Summarize @Mentioned Paper",
+      );
+    });
+    await waitFor(() => {
+      expect(document.querySelector("#settings-anthropic-form")).toBeTruthy();
+    });
+
+    fireEvent.change(screen.getByLabelText("OpenAI API key"), {
+      target: { value: "sk-test-pending-mention" },
+    });
+    fireEvent.submit(document.querySelector("#settings-anthropic-form") as HTMLFormElement);
+
+    await waitFor(() => {
+      expect(apiMocks.api).toHaveBeenCalledWith("/v1/browser/settings/openai-key", {
+        method: "PUT",
+        body: JSON.stringify({
+          username: "user@example.com",
+          api_key: "sk-test-pending-mention",
+        }),
+      });
+    });
+    await waitFor(() => {
+      expect(document.querySelector("#settings-anthropic-form")).toBeNull();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
+      expect(apiMocks.sendThreadMessageStream).toHaveBeenCalledTimes(1);
+    });
+    expect(apiMocks.sendThreadMessageStream.mock.calls[0]?.[1]).toEqual(
+      expect.objectContaining({
+        content: "Summarize @Mentioned Paper",
+        paper_ids: ["arxiv:2401.12345"],
+      }),
+    );
   });
 
   it("shows a re-enter-key message when the saved OpenAI key is invalid", async () => {

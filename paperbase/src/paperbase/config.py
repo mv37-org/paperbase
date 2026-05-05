@@ -172,6 +172,23 @@ class Settings(BaseSettings):
     # extra S2 call per indexed paper, so turn off for mass harvests and leave
     # on for featured-tier / on-demand indexing.
     fetch_references_at_index: bool = Field(default=False)
+    # Hugging Face paper-page crosslink (#46 layer 1): query the live
+    # ``/api/papers/search?q=<arxiv_id>`` endpoint and prefer the exact-match
+    # paper's ``githubRepo`` over in-text regex extraction when present.
+    # One extra HTTP call per paper at index time. Default on because the
+    # endpoint is live and low-latency; operators can still disable it for
+    # mass harvests if they want the pure text-only path.
+    fetch_code_crosslinks_at_index: bool = Field(default=True)
+    # GitHub README verifier (#46 follow-up). When the ranker's pick lands,
+    # fetch the repo's README and confirm it references the arxiv id, the
+    # arxiv URL, or the paper title. Demotes unverified picks to None.
+    # Trade-off measured on the 30-paper landmark benchmark: wrong rate
+    # 5/30 → 0/30, strict precision 14/30 → 11/30 (LLaMA / Llama 2 READMEs
+    # don't carry the arxiv id, so they fail verification despite being
+    # correct). Default off so on-demand indexing isn't gated on a
+    # second GitHub round-trip; turn on for backfill / featured-tier work
+    # where precision dominates and the GitHub token has enough budget.
+    verify_code_url_via_github_readme: bool = Field(default=False)
     # Paper-code ingestion (#5). github_token is service-level (NOT the user
     # OAuth connection used for project repo sync) and is only used to bump
     # the anonymous 60 req/hr archive-fetch limit to 5000. The caps below

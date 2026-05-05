@@ -167,3 +167,308 @@ def test_get_related_papers_bounds_retry_budget_on_interactive_rate_limit(monkey
 
     assert related == []
     assert post_calls["n"] == 2
+
+
+# --------------------------------------------------------------------------- #
+# Hugging Face paper-page crosslink (#46 layer 1)
+# --------------------------------------------------------------------------- #
+
+
+class _StubSession:
+    """Minimal requests.Session stub that replays a per-URL response table.
+
+    Each entry is ``url_prefix -> _FakeResponse``. Matches on startswith
+    so a single test can stub multiple Hugging Face / GitHub routes."""
+
+    def __init__(self, routes: dict[str, _FakeResponse]) -> None:
+        self.routes = routes
+        self.calls: list[str] = []
+
+    def get(self, url: str, *, params=None, timeout=None, **_kwargs):
+        full = url
+        if params:
+            from urllib.parse import urlencode
+
+            sep = "&" if "?" in full else "?"
+            full = f"{full}{sep}{urlencode(params)}"
+        self.calls.append(full)
+        for prefix in sorted(self.routes.keys(), key=len, reverse=True):
+            if url.startswith(prefix):
+                return self.routes[prefix]
+        return _FakeResponse(status_code=404)
+
+
+def test_fetch_hf_paper_repo_returns_exact_match_github_repo():
+    """The Hugging Face paper search result is only trusted when the
+    exact ``paper.id`` matches the queried arXiv id. When it does and a
+    ``githubRepo`` is present, canonicalize it to repo root."""
+    session = _StubSession(
+        {
+            "https://huggingface.co/api/papers/search": _FakeResponse(
+                json_data=[
+                    {
+                        "paper": {
+                            "id": "2401.12345",
+                            "githubRepo": "https://github.com/author/official/tree/main",
+                        }
+                    }
+                ]
+            )
+        }
+    )
+    url = sources.fetch_hf_paper_repo("2401.12345", session=session)
+    assert url == "https://github.com/author/official"
+    assert session.calls == ["https://huggingface.co/api/papers/search?q=2401.12345"]
+
+
+def test_fetch_hf_paper_repo_skips_fuzzy_match_without_exact_id():
+    """Search can return near-matches for short queries. Do not trust a
+    repo link unless the search result's ``paper.id`` exactly equals the
+    requested arXiv id."""
+    session = _StubSession(
+        {
+            "https://huggingface.co/api/papers/search": _FakeResponse(
+                json_data=[
+                    {
+                        "paper": {
+                            "id": "2401.12346",
+                            "githubRepo": "https://github.com/wrong/repo",
+                        }
+                    }
+                ]
+            )
+        }
+    )
+    assert sources.fetch_hf_paper_repo("2401.12345", session=session) is None
+
+
+def test_fetch_hf_paper_repo_returns_none_when_exact_match_has_no_repo():
+    """Hugging Face paper search may know about the paper but not have a
+    linked repo yet. In that case, decline and let the ranker/admin
+    layers decide."""
+    session = _StubSession(
+        {
+            "https://huggingface.co/api/papers/search": _FakeResponse(
+                json_data=[{"paper": {"id": "2401.12345", "githubRepo": None}}]
+            )
+        }
+    )
+    assert sources.fetch_hf_paper_repo("2401.12345", session=session) is None
+
+
+def test_fetch_hf_paper_repo_handles_non_200_and_non_list_payloads():
+    """Non-200 responses and unexpected payload shapes both degrade to
+    None so index-time callers can proceed with the ranker fallback."""
+    session = _StubSession({"https://huggingface.co/api/papers/search": _FakeResponse(status_code=404)})
+    assert sources.fetch_hf_paper_repo("nonexistent", session=session) is None
+
+    session = _StubSession(
+        {"https://huggingface.co/api/papers/search": _FakeResponse(json_data={"paper": {"id": "x"}})}
+    )
+    assert sources.fetch_hf_paper_repo("unknown", session=session) is None
+
+
+def test_fetch_hf_paper_repo_degrades_gracefully_on_network_error():
+    """Network failures (timeouts, DNS issues, connection refused) must
+    not propagate — the whole point of having a ranker fallback is that
+    index-time indexing can't be blocked on Hugging Face uptime."""
+    import requests
+
+    class FailingSession:
+        def get(self, *args, **kwargs):
+            raise requests.ConnectionError("simulated network failure")
+
+    assert sources.fetch_hf_paper_repo("2401.12345", session=FailingSession()) is None
+
+
+# --------------------------------------------------------------------------- #
+# GitHub README verifier (#46 follow-up)
+# --------------------------------------------------------------------------- #
+
+
+def _readme_response(content: str) -> _FakeResponse:
+    """Build a GitHub-shaped README response. Real GitHub returns the
+    README content base64-encoded under the ``content`` key."""
+    import base64
+
+    return _FakeResponse(
+        json_data={"content": base64.b64encode(content.encode("utf-8")).decode("ascii")}
+    )
+
+
+def test_verify_repo_owns_paper_accepts_arxiv_id_match():
+    """Primary signal: README mentions the arxiv id verbatim. That's
+    what BERT's ``google-research/bert`` README does, and what
+    arslnb's PR #45 review proposed as the deterministic check."""
+    session = _StubSession(
+        {
+            "https://api.github.com/repos/google-research/bert/readme": _readme_response(
+                "# BERT\n\nPaper: https://arxiv.org/abs/1810.04805"
+            )
+        }
+    )
+    assert sources.verify_repo_owns_paper(
+        "google-research", "bert", "1810.04805", session=session
+    )
+
+
+def test_verify_repo_owns_paper_accepts_title_match_with_repo_corroboration():
+    """Title-in-README only counts when corroborated by repo-name
+    overlap with a title primary keyword or abstract acronym.
+    Without corroboration, famous papers' titles cited as baselines in
+    unrelated repos would falsely accept (the ResNet → ``microsoft/
+    intrinsic-priva`` failure mode from the 30-paper benchmark).
+    """
+    session = _StubSession(
+        {
+            "https://api.github.com/repos/owner/distinctive/readme": _readme_response(
+                "Implementation of Some Long Distinctive Paper Title here."
+            )
+        }
+    )
+    # Repo name "distinctive" matches the title's primary keyword
+    # "distinctive" — so the corroboration rule fires (+2 repo-overlap
+    # primary, +2 title-corroboration) and the score clears threshold.
+    assert sources.verify_repo_owns_paper(
+        "owner",
+        "distinctive",
+        "2401.99999",
+        title="Distinctive Paper Title For Testing",
+        session=session,
+    )
+
+
+def test_verify_repo_owns_paper_rejects_bare_title_match_without_corroboration():
+    """Regression test for the corroboration rule: a README that
+    cites a famous paper's title (e.g. as a baseline reference) but
+    whose repo name has no overlap with the title must NOT accept.
+    This is what kills the ResNet → ``microsoft/intrinsic-priva``
+    false positive — `intrinsic-priva` README mentions ResNet's
+    "Deep Residual Learning for Image Recognition" as a baseline,
+    but the repo isn't ResNet."""
+    session = _StubSession(
+        {
+            "https://api.github.com/repos/random/unrelated/readme": _readme_response(
+                "This work compares against Some Long Distinctive Paper Title as a baseline."
+            )
+        }
+    )
+    # Repo name "unrelated" has no overlap with title primary keyword.
+    # Title-in-README alone is no longer enough → reject.
+    assert not sources.verify_repo_owns_paper(
+        "random",
+        "unrelated",
+        "2401.99999",
+        title="Some Long Distinctive Paper Title",
+        session=session,
+    )
+
+
+def test_verify_repo_owns_paper_accepts_title_in_first_heading():
+    """The README's first H1 heading IS the paper title — strongest
+    standalone evidence the repo is the paper's implementation, since
+    the heading reflects the project's identity. Closes the SENet
+    (``hujie-frank/senet``) recall gap: the repo name "senet" doesn't
+    match any title token ("Squeeze", "Excitation", "Networks"), but
+    the README heading is the title verbatim."""
+    session = _StubSession(
+        {
+            "https://api.github.com/repos/owner/acronym/readme": _readme_response(
+                "# Some Very Long Distinctive Paper Title\n\nProject body here."
+            )
+        }
+    )
+    assert sources.verify_repo_owns_paper(
+        "owner",
+        "acronym",
+        "2401.99999",
+        title="Some Very Long Distinctive Paper Title",
+        session=session,
+    )
+
+
+def test_verify_repo_owns_paper_rejects_unofficial_heading_match():
+    """Heading match must NOT fire when the heading is marked as a
+    third-party reimplementation. ``# Unofficial PyTorch implementation
+    of <title>`` should not earn the same score as the official repo's
+    plain title heading."""
+    session = _StubSession(
+        {
+            "https://api.github.com/repos/random/unofficial-impl/readme": _readme_response(
+                "# Unofficial PyTorch implementation of Some Very Long Distinctive Paper Title\n\nBody."
+            )
+        }
+    )
+    assert not sources.verify_repo_owns_paper(
+        "random",
+        "unofficial-impl",
+        "2401.99999",
+        title="Some Very Long Distinctive Paper Title",
+        session=session,
+    )
+
+
+def test_verify_repo_owns_paper_rejects_unrelated_readme():
+    """README mentions neither the arxiv id nor the title — this is
+    the case that catches CoT's ``chaochun/nlu-asdiv-dataset`` (README
+    about the dataset, not the paper) and the ``tensorflow/models`` /
+    GraphSAGE mismatch from the 30-paper benchmark."""
+    session = _StubSession(
+        {
+            "https://api.github.com/repos/owner/dataset/readme": _readme_response(
+                "Generic dataset README with no paper references."
+            )
+        }
+    )
+    assert not sources.verify_repo_owns_paper(
+        "owner", "dataset", "1810.04805", session=session
+    )
+
+
+def test_verify_repo_owns_paper_rejects_404_repo():
+    """A 404 means the repo doesn't exist — happens when the regex
+    captured a malformed URL like ``openai/gpt-3supplemental`` from
+    a text-layout corruption. Verifier must return False so the
+    candidate gets demoted to None rather than hitting auto-enqueue."""
+    session = _StubSession(
+        {
+            "https://api.github.com/repos/openai/gpt-3supplemental/readme": _FakeResponse(
+                status_code=404
+            )
+        }
+    )
+    assert not sources.verify_repo_owns_paper(
+        "openai", "gpt-3supplemental", "2005.14165", session=session
+    )
+
+
+def test_verify_repo_owns_paper_short_title_does_not_fire():
+    """Short title (<20 chars) must NOT be used as a verification
+    signal — common-name overlaps would yield false positives.
+    ``BERT`` is the canonical example: many unrelated repos mention
+    BERT in their README without being the paper's repo."""
+    session = _StubSession(
+        {
+            "https://api.github.com/repos/random/repo/readme": _readme_response(
+                "We use BERT embeddings extensively in this codebase."
+            )
+        }
+    )
+    assert not sources.verify_repo_owns_paper(
+        "random", "repo", "1810.04805", title="BERT", session=session
+    )
+
+
+def test_verify_repo_owns_paper_degrades_gracefully_on_network_error():
+    """Same robustness contract as the HF paper-page adapter — index-time
+    indexing must not be blocked on GitHub uptime. Network
+    exceptions return False so the caller can fall through."""
+    import requests
+
+    class FailingSession:
+        def get(self, *args, **kwargs):
+            raise requests.ConnectionError("simulated")
+
+    assert not sources.verify_repo_owns_paper(
+        "owner", "repo", "1810.04805", session=FailingSession()
+    )

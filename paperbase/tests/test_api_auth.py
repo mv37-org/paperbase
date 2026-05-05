@@ -488,6 +488,10 @@ class StubApiService:
         self.calls.append(("enqueue_harvest_venue_job", kwargs))
         return _job("harvest_venue", payload=kwargs)
 
+    def enqueue_harvest_author_job(self, **kwargs):
+        self.calls.append(("enqueue_harvest_author_job", kwargs))
+        return _job("harvest_author", payload=kwargs)
+
     def retry_dead_job(self, job_id: str):
         self.calls.append(("retry_dead_job", job_id))
         if job_id == "job_nonexistent":
@@ -497,6 +501,13 @@ class StubApiService:
     def enqueue_index_job(self, arxiv_id: str, *, force: bool = False):
         self.calls.append(("enqueue_index_job", (arxiv_id, force)))
         return _job("index_paper", payload={"arxiv_id": arxiv_id, "force": force})
+    def cancel_job(self, job_id: str):
+        self.calls.append(("cancel_job", job_id))
+        if job_id == "job_nonexistent":
+            return None
+        return _job("index_paper", payload={"job_id": job_id, "canceled": True}).model_copy(
+            update={"status": "canceled", "effective_status": "canceled"}
+        )
 
     def record_search_click(self, query_id: str, paper_id: str) -> bool:
         self.calls.append(("record_search_click", (query_id, paper_id)))
@@ -561,11 +572,37 @@ class StubApiService:
             context="### README.md (code_readme)\ndemo",
         )
 
+    def set_admin_code_url(self, paper_id: str, *, code_url):
+        self.calls.append(("set_admin_code_url", (paper_id, code_url)))
+        if paper_id == "paper_unknown":
+            return None
+        if code_url == "https://gitlab.com/x/y":
+            from fastapi import HTTPException
+
+            raise HTTPException(status_code=400, detail="Unsupported code_url")
+        refreshed = _paper("2401.54321")
+        return refreshed.model_copy(
+            update={
+                "code_url": code_url,
+                "code_url_source": "admin" if code_url else None,
+            }
+        )
+
     def get_current_browser_user(self, raw_token: str | None):
         self.calls.append(("get_current_browser_user", raw_token))
         if raw_token == "browser-session-token":
             return self.browser_user
         return None
+
+    def get_browser_session(self, raw_token: str | None) -> BrowserSessionResponse:
+        self.calls.append(("get_browser_session", raw_token))
+        user = self.browser_user if raw_token == "browser-session-token" else None
+        return BrowserSessionResponse(
+            authenticated=user is not None,
+            user=user,
+            has_anthropic_api_key=False,
+            csrf_token=None,
+        )
 
     def delete_user_anthropic_key(self, user: BrowserUser) -> BrowserSessionResponse:
         self.calls.append(("delete_user_anthropic_key", user.user_id))
@@ -1809,6 +1846,26 @@ def test_browser_trending_upvote_and_comment_write_routes_use_authenticated_brow
         "create_browser_trending_paper_comment",
         ("arxiv:2401.54321", "user_1", "Useful paper", None),
     ) in service.calls
+def test_cancel_job_endpoint_delegates_to_service(api_client):
+    client, service, settings = api_client
+    headers = {"Authorization": f"Bearer {settings.api_key}"}
+
+    response = client.post("/v1/jobs/job_running_1/cancel", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["effective_status"] == "canceled"
+    assert response.json()["payload"]["canceled"] is True
+    assert ("cancel_job", "job_running_1") in service.calls
+
+
+def test_cancel_job_endpoint_returns_404_for_unknown_job(api_client):
+    client, service, settings = api_client
+    headers = {"Authorization": f"Bearer {settings.api_key}"}
+
+    response = client.post("/v1/jobs/job_nonexistent/cancel", headers=headers)
+
+    assert response.status_code == 404
+    assert ("cancel_job", "job_nonexistent") in service.calls
 
 
 def test_browser_preview_route_returns_signed_url_and_no_store_cache(api_client):
@@ -2098,6 +2155,66 @@ def test_harvest_venue_endpoint_requires_bearer_token(api_client):
     assert invalid.status_code == 403
 
 
+def test_harvest_author_endpoint_delegates_to_service(api_client):
+    """``POST /v1/index/harvest-author`` forwards request fields to
+    ``service.enqueue_harvest_author_job`` and returns the planner job."""
+    client, service, settings = api_client
+    headers = {"Authorization": f"Bearer {settings.api_key}"}
+
+    response = client.post(
+        "/v1/index/harvest-author",
+        headers=headers,
+        json={
+            "min_paper_count": 2,
+            "min_cite_mass": 10_000,
+            "max_authors": 50,
+            "max_papers_per_author": 100,
+            "chunk_size": 25,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["job_type"] == "harvest_author"
+    enqueue_calls = [c for c in service.calls if c[0] == "enqueue_harvest_author_job"]
+    assert len(enqueue_calls) == 1
+    kw = enqueue_calls[0][1]
+    assert kw["min_paper_count"] == 2
+    assert kw["min_cite_mass"] == 10_000
+    assert kw["max_authors"] == 50
+    assert kw["max_papers_per_author"] == 100
+    assert kw["chunk_size"] == 25
+
+
+def test_harvest_author_endpoint_uses_defaults_when_omitted(api_client):
+    """Defaults match the #39 spec — min_cite_mass=5000."""
+    client, service, settings = api_client
+    headers = {"Authorization": f"Bearer {settings.api_key}"}
+
+    response = client.post("/v1/index/harvest-author", headers=headers, json={})
+    assert response.status_code == 200
+    enqueue_calls = [c for c in service.calls if c[0] == "enqueue_harvest_author_job"]
+    assert len(enqueue_calls) == 1
+    kw = enqueue_calls[0][1]
+    assert kw["min_cite_mass"] == 5_000
+    assert kw["max_authors"] == 100
+    assert kw["chunk_size"] == 50
+
+
+def test_harvest_author_endpoint_requires_bearer_token(api_client):
+    """Bulk harvest is admin-only. No auth → 401 / invalid auth → 403."""
+    client, _, _ = api_client
+
+    missing = client.post("/v1/index/harvest-author", json={})
+    invalid = client.post(
+        "/v1/index/harvest-author",
+        headers={"Authorization": "Bearer wrong"},
+        json={},
+    )
+    assert missing.status_code == 401
+    assert invalid.status_code == 403
+
+
 # --------------------------------------------------------------------------- #
 # Paper-code retrieval endpoints (#5 PR 2)
 # --------------------------------------------------------------------------- #
@@ -2166,3 +2283,78 @@ def test_paper_code_endpoints_require_bearer_auth(api_client):
     ]:
         response = client.get(path)
         assert response.status_code == 401, f"{path} must require bearer token"
+
+
+# --------------------------------------------------------------------------- #
+# Admin code_url override (#46 layer 3)
+# --------------------------------------------------------------------------- #
+
+
+def test_patch_code_url_delegates_to_service(api_client):
+    client, service, settings = api_client
+    headers = {"Authorization": f"Bearer {settings.api_key}"}
+
+    response = client.patch(
+        "/v1/papers/paper_xyz/code-url",
+        headers=headers,
+        json={"code_url": "https://github.com/owner/pinned"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["code_url"] == "https://github.com/owner/pinned"
+    assert payload["code_url_source"] == "admin"
+    assert (
+        "set_admin_code_url",
+        ("paper_xyz", "https://github.com/owner/pinned"),
+    ) in service.calls
+
+
+def test_patch_code_url_accepts_null_to_clear_pin(api_client):
+    client, service, settings = api_client
+    headers = {"Authorization": f"Bearer {settings.api_key}"}
+
+    response = client.patch(
+        "/v1/papers/paper_xyz/code-url",
+        headers=headers,
+        json={"code_url": None},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["code_url"] is None
+    assert payload["code_url_source"] is None
+
+
+def test_patch_code_url_404s_on_unknown_paper(api_client):
+    client, _, settings = api_client
+    headers = {"Authorization": f"Bearer {settings.api_key}"}
+
+    response = client.patch(
+        "/v1/papers/paper_unknown/code-url",
+        headers=headers,
+        json={"code_url": "https://github.com/a/b"},
+    )
+    assert response.status_code == 404
+
+
+def test_patch_code_url_400s_on_unsupported_host(api_client):
+    """Admin pin of a non-GitHub URL must surface as 400 at the API,
+    not silently accept and corrupt the paper row."""
+    client, _, settings = api_client
+    headers = {"Authorization": f"Bearer {settings.api_key}"}
+
+    response = client.patch(
+        "/v1/papers/paper_xyz/code-url",
+        headers=headers,
+        json={"code_url": "https://gitlab.com/x/y"},
+    )
+    assert response.status_code == 400
+
+
+def test_patch_code_url_requires_bearer_auth(api_client):
+    client, _, _ = api_client
+
+    response = client.patch(
+        "/v1/papers/paper_xyz/code-url",
+        json={"code_url": "https://github.com/a/b"},
+    )
+    assert response.status_code == 401

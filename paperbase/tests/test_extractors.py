@@ -8,11 +8,16 @@ from PIL import Image
 
 from paperbase.extractors import (
     PREVIEW_ARTIFACT_PATH,
+    _extract_latex_figures,
     _extract_latex_text,
     _extract_sections,
     _latex_to_markdown,
+    _load_latex_archive,
     _sanitize_extracted_text,
     build_manifest,
+    extract_github_candidates,
+    extract_github_url,
+    rank_github_candidates,
     index_paper_artifacts,
 )
 from paperbase.models import PaperMetadata
@@ -86,7 +91,7 @@ def test_index_paper_artifacts_splits_html_into_real_sections(monkeypatch):
     monkeypatch.setattr("paperbase.extractors.fetch_html", lambda arxiv_id: html)
     monkeypatch.setattr("paperbase.extractors.fetch_source", lambda arxiv_id: None)
     monkeypatch.setattr("paperbase.extractors.fetch_pdf", lambda arxiv_id, pdf_url=None: None)
-    monkeypatch.setattr("paperbase.extractors._extract_figures_from_html", lambda html: [])
+    monkeypatch.setattr("paperbase.extractors._extract_figures_from_html", lambda html, *, arxiv_id=None: [])
     monkeypatch.setattr("paperbase.extractors._extract_tables_from_html", lambda html: [])
 
     extraction = index_paper_artifacts(_sample_paper())
@@ -208,6 +213,31 @@ def _build_tex_tarball(files: dict[str, str]) -> bytes:
             info.size = len(data)
             tar.addfile(info, io.BytesIO(data))
     return buf.getvalue()
+
+
+def _build_mixed_tarball(files: dict[str, bytes | str]) -> bytes:
+    """Like ``_build_tex_tarball`` but accepts binary entries too — used
+    for #48's figure-resolution tests."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for name, body in files.items():
+            data = body.encode("utf-8") if isinstance(body, str) else body
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+def _tiny_png_bytes() -> bytes:
+    buffer = io.BytesIO()
+    Image.new("RGB", (8, 8), color="red").save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _tiny_jpg_bytes() -> bytes:
+    buffer = io.BytesIO()
+    Image.new("RGB", (8, 8), color="blue").save(buffer, format="JPEG")
+    return buffer.getvalue()
 
 
 def test_extract_latex_text_resolves_input_and_include_directives():
@@ -417,7 +447,7 @@ def _install_preview_monkeypatches(
     monkeypatch.setattr("paperbase.extractors.fetch_html", _fetch_html)
     monkeypatch.setattr("paperbase.extractors.fetch_source", _fetch_source)
     monkeypatch.setattr("paperbase.extractors.fetch_pdf", _fetch_pdf)
-    monkeypatch.setattr("paperbase.extractors._extract_figures_from_html", lambda _html: [])
+    monkeypatch.setattr("paperbase.extractors._extract_figures_from_html", lambda _html, *, arxiv_id=None: [])
     monkeypatch.setattr("paperbase.extractors._extract_tables_from_html", lambda _html: [])
     if with_docling:
         # Leave docling's real behavior alone.
@@ -555,3 +585,515 @@ def test_manifest_always_carries_preview_key(monkeypatch):
 
     assert "preview" in manifest["available_artifacts"]
     assert manifest["available_artifacts"]["preview"] == PREVIEW_ARTIFACT_PATH
+
+
+def test_extract_figures_from_html_handles_pre_pathed_srcs_without_base_tag(monkeypatch):
+    """Real-world shape from arxiv HTML on papers like 1706.03762
+    (Attention Is All You Need): NO ``<base>`` tag, and ``<img>`` srcs
+    come pre-pathed with ``<arxiv_id>v<N>/Figures/...``. The extractor
+    must use ``https://arxiv.org/html/`` as the base so urljoin
+    produces the correct absolute URL — NOT
+    ``https://arxiv.org/html/<arxiv_id>/`` which would duplicate the
+    id and 404.
+    """
+    from paperbase.extractors import _extract_figures_from_html, SESSION
+
+    html = """
+    <html><body>
+      <figure>
+        <img src="1706.03762v7/Figures/ModalNet-21.png"/>
+        <figcaption>Fig 1.</figcaption>
+      </figure>
+      <figure>
+        <img src="1706.03762v7/x1.png"/>
+        <figcaption>Fig 2.</figcaption>
+      </figure>
+    </body></html>
+    """.strip()
+
+    fetched_urls: list[str] = []
+
+    class _Resp:
+        status_code = 200
+        headers = {"content-type": "image/png"}
+        content = b"PNG"
+
+    monkeypatch.setattr(SESSION, "get", lambda url, *a, **k: fetched_urls.append(url) or _Resp())
+
+    figures = _extract_figures_from_html(html, arxiv_id="1706.03762")
+
+    assert len(figures) == 2
+    assert figures[0].source_url == "https://arxiv.org/html/1706.03762v7/Figures/ModalNet-21.png"
+    assert figures[1].source_url == "https://arxiv.org/html/1706.03762v7/x1.png"
+    assert all(f.image_bytes == b"PNG" for f in figures)
+
+
+def test_extract_figures_from_html_resolves_bare_srcs_via_root_relative_base_tag(monkeypatch):
+    """Real-world shape from arxiv HTML on papers like 2106.09685 (LoRA)
+    and 2305.10601 (Tree of Thoughts): a ROOT-RELATIVE
+    ``<base href="/html/<id>v<N>/">`` tag plus bare ``<img src="x1.png">``.
+
+    The extractor must:
+      1. Pick up the ``<base>`` tag so bare srcs resolve correctly,
+      2. Qualify its root-relative href against ``https://arxiv.org``
+         so the result is absolute (otherwise the HTTP GET raises
+         ``MissingSchema`` on ``/html/<id>v<N>/x1.png``).
+
+    Also covers a full external ``https://`` src passing through.
+    """
+    from paperbase.extractors import _extract_figures_from_html, SESSION
+
+    html = """
+    <html><head><base href="/html/2106.09685v2/"/></head>
+    <body>
+      <figure>
+        <img src="x1.png"/>
+        <figcaption>Fig 1.</figcaption>
+      </figure>
+      <figure>
+        <img src="Figures/arch.png"/>
+        <figcaption>Fig 2.</figcaption>
+      </figure>
+      <figure>
+        <img src="https://cdn.example/external.png"/>
+        <figcaption>External.</figcaption>
+      </figure>
+    </body></html>
+    """.strip()
+
+    fetched_urls: list[str] = []
+
+    class _Resp:
+        status_code = 200
+        headers = {"content-type": "image/png"}
+        content = b"PNG"
+
+    monkeypatch.setattr(SESSION, "get", lambda url, *a, **k: fetched_urls.append(url) or _Resp())
+
+    figures = _extract_figures_from_html(html, arxiv_id="2106.09685")
+
+    assert len(figures) == 3
+    # Bare relative → resolved against the per-paper base derived from <base>.
+    assert figures[0].source_url == "https://arxiv.org/html/2106.09685v2/x1.png"
+    assert figures[1].source_url == "https://arxiv.org/html/2106.09685v2/Figures/arch.png"
+    # Full external URL is left alone.
+    assert figures[2].source_url == "https://cdn.example/external.png"
+    assert all(f.image_bytes == b"PNG" for f in figures)
+    assert fetched_urls == [f.source_url for f in figures]
+
+
+# --- code_url extraction for #41 auto-enqueue ------------------------------
+
+
+def test_extract_github_url_picks_up_in_abstract_with_trailing_period():
+    """Common arxiv-abstract shape: ``code is available at https://github.com/foo/bar.``
+    Trailing period from sentence context must be stripped so the stored
+    code_url is canonical."""
+    abstract = (
+        "We propose LoRA, a low-rank adaptation method. We release "
+        "our code at https://github.com/microsoft/LoRA."
+    )
+    assert extract_github_url(abstract) == "https://github.com/microsoft/LoRA"
+
+
+def test_extract_github_url_searches_body_when_abstract_is_bare():
+    """If the abstract doesn't mention code, the helper falls through to
+    the full body text (first-found wins) so papers that only advertise
+    their repo in an 'Implementation' section still get picked up."""
+    abstract = "We present a model."
+    body = "Our code is released at https://github.com/facebookresearch/llama and pre-trained weights..."
+    assert extract_github_url(abstract, body) == "https://github.com/facebookresearch/llama"
+
+
+def test_extract_github_url_strips_git_suffix():
+    """Git clone URLs sometimes leak into paper text; the canonical
+    stored form uses the web URL without ``.git``."""
+    body = "git clone https://github.com/owner/repo.git"
+    assert extract_github_url(body) == "https://github.com/owner/repo"
+
+
+def test_extract_github_url_returns_none_when_no_github_mention():
+    """Papers without any GitHub reference (ResNet, GPT-3, etc.) must
+    get ``None`` so the downstream code-ingest auto-enqueue is
+    correctly skipped."""
+    assert extract_github_url("No code released; weights are available on request.") is None
+    assert extract_github_url("") is None
+    assert extract_github_url() is None
+
+
+# --------------------------------------------------------------------------- #
+# Candidate ranker (#46 layer 2)
+# --------------------------------------------------------------------------- #
+
+
+def test_extract_github_candidates_dedupes_and_normalizes():
+    body = (
+        "See https://github.com/Owner/Repo/tree/main for the code. "
+        "We forked from https://github.com/owner/repo.git initially. "
+        "And also mention https://github.com/owner/repo again."
+    )
+    candidates = extract_github_candidates("", body)
+    # Case-insensitive dedup — GitHub repo paths are case-insensitive on the
+    # server, so ``Owner/Repo`` and ``owner/repo`` collapse to one entry.
+    assert len(candidates) == 1
+    # Subpath-to-canonical upgrade brings in the later mention's casing, so
+    # the stored URL ends up lowercased (whichever canonical form appears
+    # last after a subpath-only mention).
+    assert candidates[0].url.lower() == "https://github.com/owner/repo"
+    # The record should upgrade to has_subpath=False because a later
+    # canonical mention was seen.
+    assert candidates[0].has_subpath is False
+
+
+def test_rank_github_candidates_returns_none_when_empty():
+    assert rank_github_candidates([], abstract="", body="") is None
+
+
+def test_rank_github_candidates_picks_abstract_mention_over_body():
+    """Position bonus: a URL advertised in the abstract beats one buried
+    deep in the body by a wider margin than the runner-up's canonical
+    bonus, so the ranker is confident enough to pick it."""
+    abstract = "Code at https://github.com/paper/official."
+    body = (
+        "We compare to https://github.com/baseline/impl (previous work). "
+        "Code at https://github.com/paper/official."
+    )
+    candidates = extract_github_candidates(abstract, body)
+    winner = rank_github_candidates(candidates, abstract=abstract, body=body)
+    assert winner is not None
+    assert winner.url == "https://github.com/paper/official"
+
+
+def test_rank_github_candidates_rejects_three_way_tie():
+    """Precision-first: when 3+ candidates cluster at the top score,
+    there is no honest tiebreaker and the ranker resolves to ``None``.
+    This is arslnb's "ambiguity → None" rule from PR #45 — a wrong
+    code_url triggers auto-enqueue of ingest_repo against unrelated
+    code, which is worse than no attachment. Locks the post-tuning
+    behavior: 2-way ties get a first-mention tiebreaker (see
+    ``test_rank_github_candidates_breaks_two_way_tie_by_first_mention``)
+    but 3+ ways stay None.
+    """
+    body = (
+        "See https://github.com/owner/datasetA, "
+        "https://github.com/owner/datasetB, and "
+        "https://github.com/owner/method referenced in Section 3."
+    )
+    candidates = extract_github_candidates("", body)
+    winner = rank_github_candidates(candidates, abstract="", body=body)
+    assert winner is None
+
+
+def test_rank_github_candidates_breaks_two_way_tie_by_first_mention():
+    """Post-tuning behavior (#46 follow-up): a 2-candidate tie at the
+    top score is broken by which candidate appears earliest in the
+    body. Empirically the paper's own repo is mentioned first in a
+    page-1 footnote, with citations to other repos coming later, so
+    "earliest mention wins" recovers BERT / ViT / LLaMA-style cases
+    without resurrecting the CoT first-match-wins regression
+    (which is a 3-way tie and stays None).
+    """
+    body = (
+        "Our implementation at https://github.com/author/own appears here. "
+        "We compare to https://github.com/baseline/impl in Section 4."
+    )
+    candidates = extract_github_candidates("", body)
+    winner = rank_github_candidates(candidates, abstract="", body=body)
+    assert winner is not None
+    assert winner.url == "https://github.com/author/own"
+
+
+def test_rank_github_candidates_author_affinity_tips_the_scale():
+    """If two candidates score identically on canonical/position, the
+    one whose owner slug matches an author-affiliation token wins."""
+    body = (
+        "Baselines from https://github.com/random/user. "
+        "Our implementation at https://github.com/google-research/paper."
+    )
+    authors = "Alice Doe, Bob Researcher (Google Research)"
+    candidates = extract_github_candidates("", body)
+    winner = rank_github_candidates(
+        candidates, abstract="", body=body, authors=authors
+    )
+    assert winner is not None
+    assert winner.url == "https://github.com/google-research/paper"
+
+
+def test_rank_github_candidates_frequency_boost():
+    """Same repo mentioned multiple times in the body outranks a
+    one-off reference elsewhere."""
+    body = (
+        "Our code https://github.com/paper/official handles it. "
+        "See src in https://github.com/paper/official. Also tests in "
+        "https://github.com/paper/official. Contrast with older work at "
+        "https://github.com/other/misc."
+    )
+    candidates = extract_github_candidates("", body)
+    winner = rank_github_candidates(candidates, abstract="", body=body)
+    assert winner is not None
+    assert winner.url == "https://github.com/paper/official"
+
+
+def test_rank_github_candidates_subpath_candidate_still_allowed():
+    """A single in-text candidate that happens to be a /tree/ subpath
+    still wins. Canonical-form bonus is about preferring one candidate
+    over another, not rejecting subpath-only cases."""
+    body = "See https://github.com/owner/repo/tree/main/examples for usage."
+    candidates = extract_github_candidates("", body)
+    assert len(candidates) == 1
+    winner = rank_github_candidates(candidates, abstract="", body=body)
+    assert winner is not None
+    assert winner.url == "https://github.com/owner/repo"
+
+
+def test_extract_github_url_shim_delegates_to_ranker():
+    """The legacy ``extract_github_url`` shim must route through the new
+    ranker so any unverified callsite still benefits from
+    ambiguity-aware behavior. Single-candidate case stays populated."""
+    body = "Code at https://github.com/microsoft/LoRA."
+    assert extract_github_url(body) == "https://github.com/microsoft/LoRA"
+
+
+def test_extract_github_url_shim_returns_none_on_three_way_tie():
+    """3+ candidate clusters under the ranker stay None even through
+    the shim — that's the case PR #45's first-match-wins blew on
+    (CoT-shaped papers with many cited dataset/baseline repos).
+    2-candidate ties now resolve via the first-mention tiebreaker;
+    see ``test_rank_github_candidates_breaks_two_way_tie_by_first_mention``.
+    """
+    body = (
+        "See https://github.com/owner/datasetA, "
+        "https://github.com/owner/datasetB, and "
+        "https://github.com/owner/method in the code."
+    )
+    assert extract_github_url(body) is None
+
+
+def test_extract_github_url_ignores_gitlab_bitbucket():
+    """v1 only supports github.com (per ``code_ingest.parse_github_url``).
+    Other hosts must return None so we don't store an un-ingestable URL."""
+    assert extract_github_url("code at https://gitlab.com/foo/bar") is None
+    assert extract_github_url("https://bitbucket.org/foo/bar for artifacts") is None
+
+
+def test_extract_github_url_keeps_subpath_for_code_ingest_to_normalize():
+    """If the URL includes a ``/tree/<ref>`` subpath, keep it — ``code_ingest.parse_github_url``
+    handles normalization downstream and may use the ref hint.
+    """
+    body = "See https://github.com/owner/repo/tree/v1.2 for the pinned release."
+    url = extract_github_url(body)
+    assert url is not None
+    assert url.startswith("https://github.com/owner/repo")
+
+
+# --------------------------------------------------------------------------- #
+# Prose-mash suffix repair (#45 review)
+# --------------------------------------------------------------------------- #
+
+
+def test_strip_noise_suffix_repairs_digit_boundary_mashups():
+    """Cases where the previous URL ends in a digit and the prose tail
+    got glued on (PDF→markdown lost the whitespace boundary). The
+    digit-to-letter transition is a strong signal of prose-paste, so
+    these stay repaired."""
+    from paperbase.extractors import _strip_noise_suffix
+
+    assert _strip_noise_suffix("gpt-3supplemental") == "gpt-3"
+    assert _strip_noise_suffix("model-2material") == "model-2"
+
+
+def test_strip_noise_suffix_repairs_http_mashups_unconditionally():
+    """``http`` / ``https`` are essentially never trailing tokens of a
+    real repo name and overwhelmingly indicate prose-paste, so they
+    strip even without a digit boundary (``simclrhttp`` shape)."""
+    from paperbase.extractors import _strip_noise_suffix
+
+    assert _strip_noise_suffix("simclrhttp") == "simclr"
+    assert _strip_noise_suffix("repohttps") == "repo"
+
+
+def test_strip_noise_suffix_preserves_legitimate_word_endings():
+    """Regression for the over-strip arslnb caught on PR #45: real
+    repos like ``interpretable``, ``roundtable``, ``release-notes``
+    were getting rewritten to ``interpre`` / ``round`` / ``release``
+    because the strip was unconditional. The boundary requirement on
+    the word-overlap suffixes (``table``, ``notes``, ``readme``, ...)
+    refuses to strip when the preceding char is a letter — i.e. the
+    suffix is part of a single continuous word, not a prose-paste."""
+    from paperbase.extractors import _strip_noise_suffix
+
+    assert _strip_noise_suffix("interpretable") == "interpretable"
+    assert _strip_noise_suffix("roundtable") == "roundtable"
+    assert _strip_noise_suffix("release-notes") == "release-notes"
+    assert _strip_noise_suffix("readme") == "readme"
+
+
+def test_strip_noise_suffix_does_not_strip_separator_only_boundaries():
+    """Hyphen / underscore / dot before the noise suffix is *not* enough
+    to strip — those are common in real repo names (``release-notes``,
+    ``repo_appendix``, ``v1.notes``). Stripping at separator boundaries
+    is what caused the over-correct cases arslnb caught on PR #45.
+    Digit boundaries remain the only mash-up signal we trust."""
+    from paperbase.extractors import _strip_noise_suffix
+
+    assert _strip_noise_suffix("paper-supplemental") == "paper-supplemental"
+    assert _strip_noise_suffix("repo_appendix") == "repo_appendix"
+    assert _strip_noise_suffix("v1-readme") == "v1-readme"
+
+# --- LaTeX figure image-bytes resolution (#48) ------------------------------
+
+
+def test_load_latex_archive_returns_text_and_assets():
+    """``_load_latex_archive`` is the new combined extractor used by the
+    LaTeX path: it parses the tarball once and returns both the resolved
+    .tex content AND a binary asset map keyed by member name (#48)."""
+    png = _tiny_png_bytes()
+    tarball = _build_mixed_tarball({
+        "main.tex": (
+            "\\documentclass{article}\n\\begin{document}\n"
+            "\\begin{figure}\\includegraphics{figs/diagram}\\caption{Diagram}\\end{figure}\n"
+            "\\end{document}\n"
+        ),
+        "figs/diagram.png": png,
+    })
+
+    text, assets = _load_latex_archive(tarball)
+
+    assert text is not None
+    assert "\\begin{document}" in text
+    assert "figs/diagram.png" in assets
+    assert assets["figs/diagram.png"] == png
+
+
+def test_extract_latex_figures_passes_through_png_bytes_with_extension_fallback():
+    """`\\includegraphics{figs/diagram}` (no extension) resolves to
+    ``figs/diagram.png`` via the candidate-extension search; the PNG
+    bytes pass through unchanged with content_type=image/png. Closes
+    the literal #48 bug: ``image_bytes=None`` for LaTeX figures."""
+    png = _tiny_png_bytes()
+    latex = (
+        "\\begin{figure}\n\\includegraphics{figs/diagram}\n"
+        "\\caption{A diagram.}\n\\end{figure}\n"
+    )
+
+    figures = _extract_latex_figures(latex, {"figs/diagram.png": png})
+
+    assert len(figures) == 1
+    assert figures[0].image_bytes == png
+    assert figures[0].content_type == "image/png"
+    assert figures[0].file_extension == "png"
+    # source_url retains the author-written reference for traceability.
+    assert figures[0].source_url == "figs/diagram"
+
+
+def test_extract_latex_figures_resolves_jpeg_with_explicit_extension():
+    """Author wrote the extension explicitly — direct lookup wins over
+    extension fallback. JPEG content_type uses ``image/jpeg`` for both
+    .jpg and .jpeg suffixes."""
+    jpg = _tiny_jpg_bytes()
+    latex = "\\begin{figure}\\includegraphics{figs/photo.jpg}\\caption{Photo}\\end{figure}"
+
+    figures = _extract_latex_figures(latex, {"figs/photo.jpg": jpg})
+
+    assert figures[0].image_bytes == jpg
+    assert figures[0].content_type == "image/jpeg"
+    assert figures[0].file_extension == "jpg"
+
+
+def test_extract_latex_figures_rasterizes_pdf_to_png():
+    """PDF-format figures are rasterized to PNG via pypdfium2 at extract
+    time so browsers / VLM pipelines can render them inline. We don't
+    assert the exact bytes (the rasterizer is non-deterministic across
+    versions); we only assert that bytes are present and content_type
+    flipped to image/png."""
+    pdf_bytes = _valid_single_page_pdf()
+    latex = "\\begin{figure}\\includegraphics{figs/arch.pdf}\\caption{Arch}\\end{figure}"
+
+    figures = _extract_latex_figures(latex, {"figs/arch.pdf": pdf_bytes})
+
+    assert figures[0].image_bytes is not None
+    assert figures[0].image_bytes[:8] == b"\x89PNG\r\n\x1a\n"  # PNG magic
+    assert figures[0].content_type == "image/png"
+    assert figures[0].file_extension == "png"
+
+
+def test_extract_latex_figures_keeps_eps_raw_when_ghostscript_unavailable(monkeypatch):
+    """EPS rasterize requires Ghostscript at runtime. When it's not
+    installed (the default in our slim Docker image), we fall back to
+    storing the raw EPS bytes with ``content_type='application/postscript'``
+    rather than dropping the figure. Strictly better than the prior
+    state of ``image_bytes=None``; full inline rendering is a follow-up."""
+    eps_bytes = b"%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 100 100\n%%EOF\n"
+    latex = "\\begin{figure}\\includegraphics{eps/block}\\caption{Block}\\end{figure}"
+
+    # Force the rasterize path to fail so we exercise the raw-bytes
+    # fallback regardless of whether Ghostscript happens to be installed
+    # on the test machine.
+    monkeypatch.setattr("paperbase.extractors._rasterize_eps_to_png", lambda _b: None)
+
+    figures = _extract_latex_figures(latex, {"eps/block.eps": eps_bytes})
+
+    assert figures[0].image_bytes == eps_bytes
+    assert figures[0].content_type == "application/postscript"
+    assert figures[0].file_extension == "eps"
+
+
+def test_extract_latex_figures_resolves_member_with_directory_prefix():
+    """Tarballs from arxiv often nest contents under a top-level
+    directory (``main/figs/foo.eps``) while authors write the
+    ``\\includegraphics{figs/foo}`` reference relative to the .tex
+    entrypoint. Suffix-match lets the resolver find the file anyway."""
+    png = _tiny_png_bytes()
+    latex = "\\begin{figure}\\includegraphics{figs/diagram}\\caption{D}\\end{figure}"
+
+    figures = _extract_latex_figures(latex, {"main/figs/diagram.png": png})
+
+    assert figures[0].image_bytes == png
+    assert figures[0].content_type == "image/png"
+
+
+def test_extract_latex_figures_returns_none_bytes_for_unresolvable_path():
+    """If the asset map doesn't contain a matching file under any
+    candidate extension, the figure record still gets created (the
+    caption is real signal) but image_bytes stays None. Pre-#48
+    behavior preserved as the failure mode."""
+    latex = "\\begin{figure}\\includegraphics{figs/missing}\\caption{M}\\end{figure}"
+
+    figures = _extract_latex_figures(latex, {"figs/something_else.png": _tiny_png_bytes()})
+
+    assert len(figures) == 1
+    assert figures[0].image_bytes is None
+    assert figures[0].content_type is None
+    assert figures[0].source_url == "figs/missing"
+
+
+def test_extract_latex_figures_without_asset_map_preserves_legacy_behavior():
+    """Calling without ``asset_bytes`` (legacy single-arg call) still
+    works — image_bytes is None, no exceptions. Lock the backwards-
+    compat signature so an older caller doesn't break post-#48."""
+    latex = "\\begin{figure}\\includegraphics{figs/diagram}\\caption{X}\\end{figure}"
+
+    figures = _extract_latex_figures(latex)
+
+    assert len(figures) == 1
+    assert figures[0].image_bytes is None
+    assert figures[0].source_url == "figs/diagram"
+
+
+def test_load_latex_archive_skips_oversize_image_assets():
+    """The asset map caps per-file size to avoid pathologically large
+    images blowing up memory. 25MB is the threshold — anything bigger
+    is silently dropped; the figure resolver then falls back to None."""
+    big_png = b"\x89PNG\r\n\x1a\n" + b"\x00" * (26 * 1024 * 1024)
+    tarball = _build_mixed_tarball({
+        "main.tex": (
+            "\\documentclass{article}\n\\begin{document}\n"
+            "\\begin{figure}\\includegraphics{figs/huge.png}\\end{figure}\n"
+            "\\end{document}\n"
+        ),
+        "figs/huge.png": big_png,
+    })
+
+    _, assets = _load_latex_archive(tarball)
+
+    assert "figs/huge.png" not in assets

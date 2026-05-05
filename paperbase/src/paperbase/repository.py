@@ -31,6 +31,7 @@ from sqlalchemy import (
     select,
     text,
     true,
+    update,
 )
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError, OperationalError
@@ -196,6 +197,19 @@ class PaperORM(Base):
     code_is_python: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     code_python_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     code_manifest: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    # Provenance of ``code_url`` (#46). One of:
+    # - ``None``: legacy-extracted (pre-#46) or never set.
+    # - ``"extracted"``: ranker picked from in-text GitHub URL candidates.
+    # - ``"hf_papers"``: Hugging Face paper search returned a ``githubRepo``
+    #   for the exact arXiv-id match.
+    # - ``"admin"``: operator pinned via PATCH /v1/papers/{id}/code-url;
+    #   never overwritten by automatic re-index.
+    code_url_source: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # Full candidate set surfaced by the in-text ranker (#46). Preserved
+    # alongside the chosen ``code_url`` so admins can pick an alternate
+    # via the override endpoint and so future agent-side logic can
+    # consult the rejected candidates without re-scanning paper text.
+    code_url_candidates: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     # Peer-review venue signal (#39 PR B). venue is the S2 canonical venue
     # string (e.g. "International Conference on Learning Representations").
     # venue_year is the conference year. venue_source records provenance
@@ -204,6 +218,12 @@ class PaperORM(Base):
     venue: Mapped[str | None] = mapped_column(Text, nullable=True)
     venue_year: Mapped[int | None] = mapped_column(Integer, nullable=True)
     venue_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Author-signal harvest provenance (#39 PR C). When non-null, this
+    # paper was pulled in (or re-stamped) by the harvest_author planner
+    # because it shares an author with a top-cited corpus author. The
+    # value is the Semantic Scholar author id of the discovering author;
+    # the full per-author table lives in ``paper_authors``.
+    top_author_s2_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     source_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     index_status: Mapped[str] = mapped_column(String(32), default="discovered")
     search_document: Mapped[str] = mapped_column(Text, default="")
@@ -247,6 +267,27 @@ class PaperRefORM(Base):
     created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class PaperAuthorORM(Base):
+    """Per-author rows for a paper, keyed by Semantic Scholar author id (#39 PR C).
+
+    Populated by ``enrich_with_semantic_scholar`` and the
+    ``backfill-paper-authors`` CLI. The ``author_s2_id`` index supports
+    the ``list_top_authors`` aggregation query that drives the author
+    harvest planner.
+    """
+
+    __tablename__ = "paper_authors"
+
+    paper_id: Mapped[str] = mapped_column(
+        ForeignKey("papers.paper_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    author_s2_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    author_name: Mapped[str] = mapped_column(Text, default="")
+    author_position: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class ResultSetORM(Base):
     __tablename__ = "result_sets"
 
@@ -284,6 +325,7 @@ _JOB_TYPE_MAX_ATTEMPTS: dict[str, int] = {
     "harvest_chunk": 5,
     "harvest_top_cited": 3,  # planner — paginates S2, enqueues harvest_chunk per batch
     "harvest_venue": 3,  # planner — paginates S2 by venue+year, enqueues harvest_chunk per batch
+    "harvest_author": 3,  # planner — derives top authors from corpus, paginates S2 per author
 }
 
 
@@ -305,11 +347,50 @@ _JOB_TYPE_PRIORITY: dict[str, int] = {
     "harvest_chunk": 10,
     "harvest_top_cited": 5,  # planner; same priority tier as harvest_range
     "harvest_venue": 5,  # planner; same priority tier as harvest_range
+    "harvest_author": 5,  # planner; same priority tier as harvest_range
 }
 
 
 def default_priority(job_type: str) -> int:
     return _JOB_TYPE_PRIORITY.get(job_type, 0)
+
+
+JOB_LEASE_SECONDS = 600
+
+
+def _lease_expires_at(*, now: Any | None = None, lease_seconds: int = JOB_LEASE_SECONDS) -> Any:
+    return (now or utcnow()) + timedelta(seconds=lease_seconds)
+
+
+def _effective_job_status(
+    *,
+    status: str,
+    lease_expires_at: Any | None = None,
+    cancel_requested_at: Any | None = None,
+    now: Any | None = None,
+) -> str:
+    if status != "running":
+        return status
+    if lease_expires_at is None:
+        return "stalled"
+    if lease_expires_at <= (now or utcnow()):
+        return "stalled"
+    if cancel_requested_at is not None:
+        return "canceling"
+    return "running"
+
+
+def _job_response_with_effective_status(job: JobResponse, *, now: Any | None = None) -> JobResponse:
+    return job.model_copy(
+        update={
+            "effective_status": _effective_job_status(
+                status=job.status,
+                lease_expires_at=job.lease_expires_at,
+                cancel_requested_at=job.cancel_requested_at,
+                now=now or utcnow(),
+            )
+        }
+    )
 
 
 class JobORM(Base):
@@ -319,9 +400,9 @@ class JobORM(Base):
     root_job_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     job_type: Mapped[str] = mapped_column(String(64), index=True)
     dedupe_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    # `pending`, `running`, `completed`, or `dead`. The old `failed` terminal
-    # status still shows up on rows written before #32; admin retry still
-    # accepts those rows for compatibility.
+    # `pending`, `running`, `completed`, `dead`, or `canceled`. The old
+    # `failed` terminal status still shows up on rows written before #32;
+    # admin retry still accepts those rows for compatibility.
     status: Mapped[str] = mapped_column(String(32), index=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -331,6 +412,15 @@ class JobORM(Base):
     # schedule the next attempt after backoff.
     next_run_at: Mapped[Any | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     last_attempted_at: Mapped[Any | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Running jobs are leased by exactly one worker claim. A live heartbeat
+    # extends the lease; if the timestamp expires, the authoritative
+    # UI-facing state becomes `stalled` even though the raw DB status remains
+    # `running` for compatibility.
+    worker_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_token: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    heartbeat_at: Mapped[Any | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_expires_at: Mapped[Any | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    cancel_requested_at: Mapped[Any | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Claim ordering: smaller = higher priority. Default 0 keeps legacy rows
     # behaving like everything else; new bulk-harvest jobs set a higher value
     # so they can't starve interactive on-demand work.
@@ -819,6 +909,8 @@ def _paper_from_orm(row: PaperORM) -> PaperResponse:
         influential_citation_count=row.influential_citation_count,
         semantic_scholar_id=row.semantic_scholar_id,
         code_url=row.code_url,
+        code_url_source=row.code_url_source,
+        code_url_candidates=list(row.code_url_candidates or []) or None,
         code_index_status=row.code_index_status or "none",
         code_is_python=row.code_is_python,
         code_python_reason=row.code_python_reason,
@@ -826,6 +918,7 @@ def _paper_from_orm(row: PaperORM) -> PaperResponse:
         venue=row.venue,
         venue_year=row.venue_year,
         venue_source=row.venue_source,
+        top_author_s2_id=row.top_author_s2_id,
         source_type=row.source_type,
         index_status=row.index_status,
         indexed_at=row.indexed_at,
@@ -1191,6 +1284,68 @@ class PaperRepository(ABC):
         """
         raise NotImplementedError
 
+    def set_paper_top_author(
+        self,
+        paper_id: str,
+        *,
+        top_author_s2_id: str | None,
+    ) -> PaperResponse | None:
+        """Stamp the author-harvest provenance on an existing paper
+        (#39 PR C). Same separation rationale as :meth:`set_paper_venue`
+        — kept out of the upsert path so a regular re-index does not
+        clear it.
+
+        First-write-wins when ``top_author_s2_id`` is non-None: if the
+        row already has a non-null stamp, the existing value is kept
+        and the row is returned unchanged. Multiple top authors can
+        surface the same paper through concurrent ``harvest_chunk``
+        jobs, and an undefined "last writer wins" would make the
+        provenance non-deterministic. Pass ``top_author_s2_id=None``
+        to clear an existing stamp explicitly.
+
+        Returns the post-call row (so the caller can check
+        ``row.top_author_s2_id == requested`` to know whether their
+        stamp landed), or ``None`` if the paper does not exist."""
+        raise NotImplementedError
+
+    def replace_paper_authors(
+        self,
+        paper_id: str,
+        *,
+        authors: list[dict[str, Any]],
+    ) -> None:
+        """Replace the per-author rows for a paper (#39 PR C).
+
+        ``authors`` is a list of ``{"s2_id": str, "name": str,
+        "position": int}`` dicts. Empty list clears all rows for the
+        paper. Used by the enrich path (during ``index_arxiv_paper``)
+        and by the ``backfill-paper-authors`` CLI to populate the
+        ``paper_authors`` table that drives top-author discovery.
+        """
+        raise NotImplementedError
+
+    def list_top_authors(
+        self,
+        *,
+        min_paper_count: int = 1,
+        min_cite_mass: int = 0,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Return top authors aggregated over the indexed corpus
+        (#39 PR C planner support).
+
+        Aggregation: for each ``author_s2_id`` in ``paper_authors``, sum
+        ``papers.citation_count`` and count papers. Filter by
+        ``min_paper_count`` and ``min_cite_mass`` thresholds, sort by
+        cite mass desc, return top ``limit``.
+
+        Each result row carries ``author_s2_id``, ``paper_count``,
+        ``cite_mass``, and ``sample_name`` (one author_name string for
+        debugging). Returns an empty list when ``paper_authors`` has
+        not yet been populated.
+        """
+        raise NotImplementedError
+
     @abstractmethod
     def replace_code_chunks(self, paper_id: str, chunks: list[dict[str, Any]]) -> None:
         """Replace only the code-kind chunks for a paper (#5 PR 2).
@@ -1218,6 +1373,32 @@ class PaperRepository(ABC):
         whose ``chunk_kind`` is in :data:`CODE_CHUNK_KINDS`. Callers must
         gate on ``paper.code_is_python is True`` — this method does not
         re-check eligibility.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def update_code_url(
+        self,
+        paper_id: str,
+        *,
+        code_url: str | None,
+        code_url_source: str | None,
+    ) -> PaperResponse | None:
+        """Persist a ``code_url`` / ``code_url_source`` transition (#46).
+
+        Single atomic write used by the admin override and the backfill
+        CLI. Does not touch ``code_url_candidates``; those are owned by
+        :meth:`upsert_paper` and represent what the ranker saw, not what
+        was chosen.
+
+        When the new ``code_url`` differs from the existing one (cleared,
+        swapped, or freshly attached), the prior code-ingest state is
+        reset alongside the URL: ``code_index_status`` returns to
+        ``'none'``, ``code_is_python`` / ``code_python_reason`` /
+        ``code_manifest`` are cleared, and existing code chunks (kinds
+        in :data:`CODE_CHUNK_KINDS`) are deleted. This stops a stale
+        manifest from outliving the repo that produced it. Service
+        callers re-enqueue ``ingest_repo`` for non-null new URLs.
         """
         raise NotImplementedError
 
@@ -1267,6 +1448,22 @@ class PaperRepository(ABC):
         has no S2 id, AND has zero citations. The age floor keeps the
         backfill job from racing with inline enrichment on freshly-ingested
         papers.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_papers_for_code_url_backfill(
+        self,
+        *,
+        limit: int,
+        after_paper_id: str | None = None,
+    ) -> list[PaperResponse]:
+        """Page indexed papers for the ``backfill-code-urls`` CLI (#46).
+
+        Skips rows whose ``code_url_source='admin'`` so operator pins are
+        never touched by the backfill job. Keyset-paginated by
+        ``paper_id`` ascending so a long-running backfill that gets
+        interrupted can resume without re-processing earlier rows.
         """
         raise NotImplementedError
 
@@ -1395,15 +1592,50 @@ class PaperRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def claim_pending_job(self) -> JobResponse | None:
+    def claim_pending_job(
+        self,
+        *,
+        worker_id: str | None = None,
+        lease_seconds: int = JOB_LEASE_SECONDS,
+    ) -> JobResponse | None:
         raise NotImplementedError
 
     @abstractmethod
-    def mark_job_running(self, job_id: str) -> None:
+    def heartbeat_job(
+        self,
+        job_id: str,
+        *,
+        lease_token: str,
+        worker_id: str | None = None,
+        lease_seconds: int = JOB_LEASE_SECONDS,
+    ) -> JobResponse | None:
         raise NotImplementedError
 
     @abstractmethod
-    def mark_job_completed(self, job_id: str) -> None:
+    def is_job_cancel_requested(self, job_id: str, *, lease_token: str | None = None) -> bool:
+        raise NotImplementedError
+
+    @abstractmethod
+    def cancel_job(self, job_id: str) -> JobResponse | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def mark_job_running(
+        self,
+        job_id: str,
+        *,
+        lease_token: str | None = None,
+        worker_id: str | None = None,
+        lease_seconds: int = JOB_LEASE_SECONDS,
+    ) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def mark_job_completed(self, job_id: str, *, lease_token: str | None = None) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def mark_job_canceled(self, job_id: str, *, lease_token: str | None = None) -> None:
         raise NotImplementedError
 
     @abstractmethod
@@ -1414,6 +1646,7 @@ class PaperRepository(ABC):
         *,
         permanent: bool = False,
         next_run_at: Any | None = None,
+        lease_token: str | None = None,
     ) -> None:
         raise NotImplementedError
 
@@ -1587,6 +1820,16 @@ class SqlAlchemyPaperRepository(PaperRepository):
             connection.execute(
                 text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS venue_source VARCHAR(32)")
             )
+            # #39 PR C: author-signal harvest provenance + per-author rows
+            connection.execute(
+                text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS top_author_s2_id VARCHAR(64)")
+            )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS code_url_source VARCHAR(16)")
+            )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS code_url_candidates JSONB")
+            )
             connection.execute(
                 text(f"ALTER TABLE IF EXISTS text_chunks ADD COLUMN IF NOT EXISTS embedding {vector_type}")
             )
@@ -1614,6 +1857,21 @@ class SqlAlchemyPaperRepository(PaperRepository):
             )
             connection.execute(
                 text("ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS dedupe_key VARCHAR(512)")
+            )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS worker_id VARCHAR(128)")
+            )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS lease_token VARCHAR(128)")
+            )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ")
+            )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ")
+            )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS cancel_requested_at TIMESTAMPTZ")
             )
             # Indexes on next_run_at (#32) and priority (#33) go in the
             # post-create_all block below — on a fresh CI DB the `jobs` table
@@ -1709,6 +1967,14 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     "CREATE UNIQUE INDEX IF NOT EXISTS projects_default_per_user ON projects (user_id) WHERE is_default"
                 )
             )
+            # #39 PR C: index for the list_top_authors aggregation query
+            # (GROUP BY author_s2_id over paper_authors JOIN papers).
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS paper_authors_author_s2_id_idx "
+                    "ON paper_authors (author_s2_id)"
+                )
+            )
             connection.execute(
                 text("ALTER TABLE IF EXISTS python_files ADD COLUMN IF NOT EXISTS file_kind VARCHAR(32) DEFAULT 'python'")
             )
@@ -1802,6 +2068,9 @@ class SqlAlchemyPaperRepository(PaperRepository):
             )
             connection.execute(
                 text("CREATE INDEX IF NOT EXISTS jobs_root_job_id ON jobs (root_job_id)")
+            )
+            connection.execute(
+                text("CREATE INDEX IF NOT EXISTS jobs_lease_expires_at ON jobs (lease_expires_at)")
             )
             connection.execute(
                 text(
@@ -1920,6 +2189,8 @@ class SqlAlchemyPaperRepository(PaperRepository):
             influential_citation_count=paper.influential_citation_count,
             semantic_scholar_id=paper.semantic_scholar_id,
             code_url=paper.code_url,
+            code_url_source=paper.code_url_source,
+            code_url_candidates=list(paper.code_url_candidates or []) or None,
             source_type=paper.source_type,
             index_status=paper.index_status,
             search_document=search_document,
@@ -1946,6 +2217,8 @@ class SqlAlchemyPaperRepository(PaperRepository):
             "influential_citation_count": paper.influential_citation_count,
             "semantic_scholar_id": paper.semantic_scholar_id,
             "code_url": paper.code_url,
+            "code_url_source": paper.code_url_source,
+            "code_url_candidates": list(paper.code_url_candidates or []) or None,
             "source_type": paper.source_type,
             "index_status": paper.index_status,
             "search_document": search_document,
@@ -2396,6 +2669,111 @@ class SqlAlchemyPaperRepository(PaperRepository):
             session.flush()
             return _paper_from_orm(row)
 
+    def set_paper_top_author(
+        self,
+        paper_id: str,
+        *,
+        top_author_s2_id: str | None,
+    ) -> PaperResponse | None:
+        # First-write-wins implemented as a single atomic UPDATE rather than
+        # read-then-write so concurrent harvest_chunk workers can't both
+        # observe ``top_author_s2_id IS NULL`` and clobber each other —
+        # only one of the racing UPDATEs matches the WHERE predicate, the
+        # other is a no-op. Clearing (top_author_s2_id=None) is always
+        # honored so operators can explicitly reset; that bypasses the
+        # IS NULL guard via a second UPDATE without it.
+        with self._session() as session:
+            if top_author_s2_id is None:
+                session.execute(
+                    update(PaperORM)
+                    .where(PaperORM.paper_id == paper_id)
+                    .values(top_author_s2_id=None, updated_at=utcnow())
+                )
+            else:
+                session.execute(
+                    update(PaperORM)
+                    .where(
+                        PaperORM.paper_id == paper_id,
+                        PaperORM.top_author_s2_id.is_(None),
+                    )
+                    .values(top_author_s2_id=top_author_s2_id, updated_at=utcnow())
+                )
+            session.flush()
+            row = session.get(PaperORM, paper_id)
+            if row is None:
+                return None
+            return _paper_from_orm(row)
+
+    def replace_paper_authors(
+        self,
+        paper_id: str,
+        *,
+        authors: list[dict[str, Any]],
+    ) -> None:
+        with self._session() as session:
+            session.execute(
+                delete(PaperAuthorORM).where(PaperAuthorORM.paper_id == paper_id)
+            )
+            seen: set[str] = set()
+            for author in authors:
+                s2_id = (author.get("s2_id") or "").strip()
+                if not s2_id or s2_id in seen:
+                    continue
+                seen.add(s2_id)
+                session.add(
+                    PaperAuthorORM(
+                        paper_id=paper_id,
+                        author_s2_id=s2_id,
+                        author_name=author.get("name") or "",
+                        author_position=int(author.get("position") or 0),
+                    )
+                )
+
+    def list_top_authors(
+        self,
+        *,
+        min_paper_count: int = 1,
+        min_cite_mass: int = 0,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        if limit < 1:
+            return []
+        statement = text(
+            """
+            SELECT
+                pa.author_s2_id AS author_s2_id,
+                COUNT(DISTINCT pa.paper_id) AS paper_count,
+                COALESCE(SUM(p.citation_count), 0) AS cite_mass,
+                MAX(pa.author_name) AS sample_name
+            FROM paper_authors pa
+            JOIN papers p ON pa.paper_id = p.paper_id
+            GROUP BY pa.author_s2_id
+            HAVING
+                COUNT(DISTINCT pa.paper_id) >= :min_paper_count
+                AND COALESCE(SUM(p.citation_count), 0) >= :min_cite_mass
+            ORDER BY cite_mass DESC, paper_count DESC, pa.author_s2_id ASC
+            LIMIT :limit
+            """
+        )
+        with self._session() as session:
+            rows = session.execute(
+                statement,
+                {
+                    "min_paper_count": int(min_paper_count),
+                    "min_cite_mass": int(min_cite_mass),
+                    "limit": int(limit),
+                },
+            ).mappings().all()
+        return [
+            {
+                "author_s2_id": row["author_s2_id"],
+                "paper_count": int(row["paper_count"]),
+                "cite_mass": int(row["cite_mass"]),
+                "sample_name": row["sample_name"] or "",
+            }
+            for row in rows
+        ]
+
     def replace_code_chunks(self, paper_id: str, chunks: list[dict[str, Any]]) -> None:
         with self._session() as session:
             session.execute(
@@ -2523,6 +2901,43 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 )
             )
         return results
+
+    def update_code_url(
+        self,
+        paper_id: str,
+        *,
+        code_url: str | None,
+        code_url_source: str | None,
+    ) -> PaperResponse | None:
+        with self._session() as session:
+            row = session.get(PaperORM, paper_id)
+            if row is None:
+                return None
+            previous_url = row.code_url
+            row.code_url = code_url
+            row.code_url_source = code_url_source
+            row.updated_at = utcnow()
+            # Reset code-ingest state when the URL changes (cleared,
+            # swapped, or freshly attached). Without this, clearing
+            # ``code_url`` left the row at ``code_index_status='indexed'``
+            # with the previous repo's manifest and code chunks still
+            # served — admins could clear a paper's repo and the chat
+            # still cited the old code. Service-layer callers
+            # (set_admin_code_url / backfill_code_urls) re-enqueue an
+            # ``ingest_repo`` job for non-null new URLs.
+            if previous_url != code_url:
+                row.code_index_status = "none"
+                row.code_is_python = None
+                row.code_python_reason = None
+                row.code_manifest = None
+                session.execute(
+                    delete(TextChunkORM).where(
+                        TextChunkORM.paper_id == paper_id,
+                        TextChunkORM.chunk_kind.in_(CODE_CHUNK_KINDS),
+                    )
+                )
+            session.flush()
+            return _paper_from_orm(row)
 
     def list_papers_needing_summary(
         self,
@@ -2686,6 +3101,27 @@ class SqlAlchemyPaperRepository(PaperRepository):
         sql = text(base_sql.format(after_predicate=after_predicate))
         with self._session() as session:
             rows = session.scalars(select(PaperORM).from_statement(sql).params(**params)).all()
+        return [_paper_from_orm(row) for row in rows]
+
+    def list_papers_for_code_url_backfill(
+        self,
+        *,
+        limit: int,
+        after_paper_id: str | None = None,
+    ) -> list[PaperResponse]:
+        query = (
+            select(PaperORM)
+            .where(PaperORM.index_status == "indexed")
+            .where(
+                (PaperORM.code_url_source.is_(None))
+                | (PaperORM.code_url_source != "admin")
+            )
+        )
+        if after_paper_id:
+            query = query.where(PaperORM.paper_id > after_paper_id)
+        query = query.order_by(PaperORM.paper_id.asc()).limit(limit)
+        with self._session() as session:
+            rows = session.scalars(query).all()
         return [_paper_from_orm(row) for row in rows]
 
     def enrichment_stats(self) -> dict[str, int]:
@@ -3026,6 +3462,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
         venue,
         venue_year,
         venue_source,
+        top_author_s2_id,
         source_type,
         index_status,
         indexed_at
@@ -3058,6 +3495,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
             venue=row["venue"],
             venue_year=row["venue_year"],
             venue_source=row["venue_source"],
+            top_author_s2_id=row["top_author_s2_id"],
             source_type=row["source_type"],
             index_status=row["index_status"],
             indexed_at=row["indexed_at"],
@@ -4785,22 +5223,30 @@ class SqlAlchemyPaperRepository(PaperRepository):
             job_id = session.scalar(select(JobORM.job_id).where(JobORM.dedupe_key == dedupe_key))
         return self.get_job(job_id) if job_id is not None else None
 
-    def get_job(self, job_id: str) -> JobResponse | None:
-        with self._session() as session:
-            row = session.get(JobORM, job_id)
-        if row is None:
-            return None
+    def _job_response_from_row(self, row: JobORM, *, now: Any | None = None) -> JobResponse:
+        current_time = now or utcnow()
         return JobResponse(
             job_id=row.job_id,
             root_job_id=row.root_job_id,
             job_type=row.job_type,
             status=row.status,
+            effective_status=_effective_job_status(
+                status=row.status,
+                lease_expires_at=row.lease_expires_at,
+                cancel_requested_at=row.cancel_requested_at,
+                now=current_time,
+            ),
             payload=row.payload,
             error=row.error,
             attempts=row.attempts or 0,
             max_attempts=row.max_attempts or 3,
             next_run_at=row.next_run_at,
             last_attempted_at=row.last_attempted_at,
+            worker_id=row.worker_id,
+            heartbeat_at=row.heartbeat_at,
+            lease_expires_at=row.lease_expires_at,
+            cancel_requested_at=row.cancel_requested_at,
+            lease_token=row.lease_token,
             priority=row.priority or 0,
             created_at=row.created_at,
             updated_at=row.updated_at,
@@ -4808,7 +5254,20 @@ class SqlAlchemyPaperRepository(PaperRepository):
             finished_at=row.finished_at,
         )
 
-    def claim_pending_job(self) -> JobResponse | None:
+    def get_job(self, job_id: str) -> JobResponse | None:
+        now = utcnow()
+        with self._session() as session:
+            row = session.get(JobORM, job_id)
+            if row is None:
+                return None
+            return self._job_response_from_row(row, now=now)
+
+    def claim_pending_job(
+        self,
+        *,
+        worker_id: str | None = None,
+        lease_seconds: int = JOB_LEASE_SECONDS,
+    ) -> JobResponse | None:
         # Atomic lease via ``SELECT ... FOR UPDATE SKIP LOCKED``. Without the
         # row lock, two concurrent workers reading at the same instant could
         # both match the same row, both set status='running', and both believe
@@ -4838,33 +5297,137 @@ class SqlAlchemyPaperRepository(PaperRepository):
             if row is None:
                 return None
             row.status = "running"
-            row.started_at = utcnow()
-            row.updated_at = utcnow()
-            row.last_attempted_at = utcnow()
+            row.started_at = now
+            row.updated_at = now
+            row.last_attempted_at = now
+            row.worker_id = worker_id
+            row.lease_token = new_id("lease")
+            row.heartbeat_at = now
+            row.lease_expires_at = _lease_expires_at(now=now, lease_seconds=lease_seconds)
+            row.cancel_requested_at = None
             row.attempts = (row.attempts or 0) + 1
-            job_id = row.job_id
-        return self.get_job(job_id)
+            return self._job_response_from_row(row, now=now)
 
-    def mark_job_running(self, job_id: str) -> None:
+    def heartbeat_job(
+        self,
+        job_id: str,
+        *,
+        lease_token: str,
+        worker_id: str | None = None,
+        lease_seconds: int = JOB_LEASE_SECONDS,
+    ) -> JobResponse | None:
+        now = utcnow()
         with self._session() as session:
             row = session.get(JobORM, job_id)
-            if row:
+            if row is None or row.status != "running" or row.lease_token != lease_token:
+                return None
+            if worker_id is not None and row.worker_id not in {None, worker_id}:
+                return None
+            row.worker_id = worker_id or row.worker_id
+            row.heartbeat_at = now
+            row.lease_expires_at = _lease_expires_at(now=now, lease_seconds=lease_seconds)
+            row.updated_at = now
+            return self._job_response_from_row(row, now=now)
+
+    def is_job_cancel_requested(self, job_id: str, *, lease_token: str | None = None) -> bool:
+        with self._session() as session:
+            row = session.get(JobORM, job_id)
+            if row is None:
+                return False
+            if lease_token is not None and row.lease_token != lease_token:
+                return False
+            return row.cancel_requested_at is not None or row.status == "canceled"
+
+    def cancel_job(self, job_id: str) -> JobResponse | None:
+        now = utcnow()
+        with self._session() as session:
+            row = session.get(JobORM, job_id)
+            if row is None:
+                return None
+            if row.status == "pending":
+                row.status = "canceled"
+                row.cancel_requested_at = now
+                row.finished_at = now
+                row.updated_at = now
+                row.worker_id = None
+                row.lease_token = None
+                row.heartbeat_at = None
+                row.lease_expires_at = None
+                return self._job_response_from_row(row, now=now)
+            if row.status == "running":
+                if _effective_job_status(
+                    status=row.status,
+                    lease_expires_at=row.lease_expires_at,
+                    cancel_requested_at=row.cancel_requested_at,
+                    now=now,
+                ) == "stalled":
+                    row.status = "canceled"
+                    row.cancel_requested_at = now
+                    row.finished_at = now
+                    row.updated_at = now
+                    row.worker_id = None
+                    row.lease_token = None
+                    row.heartbeat_at = None
+                    row.lease_expires_at = None
+                    return self._job_response_from_row(row, now=now)
+                row.cancel_requested_at = row.cancel_requested_at or now
+                row.updated_at = now
+                return self._job_response_from_row(row, now=now)
+            return None
+
+    def _claim_matches(self, row: JobORM, lease_token: str | None) -> bool:
+        return lease_token is None or row.lease_token == lease_token
+
+    def mark_job_running(
+        self,
+        job_id: str,
+        *,
+        lease_token: str | None = None,
+        worker_id: str | None = None,
+        lease_seconds: int = JOB_LEASE_SECONDS,
+    ) -> None:
+        now = utcnow()
+        with self._session() as session:
+            row = session.get(JobORM, job_id)
+            if row and self._claim_matches(row, lease_token):
                 row.status = "running"
-                row.started_at = row.started_at or utcnow()
-                row.updated_at = utcnow()
+                row.started_at = row.started_at or now
+                row.updated_at = now
+                row.worker_id = worker_id or row.worker_id
+                row.lease_token = lease_token or row.lease_token or new_id("lease")
+                row.heartbeat_at = now
+                row.lease_expires_at = _lease_expires_at(now=now, lease_seconds=lease_seconds)
 
-    def mark_job_completed(self, job_id: str) -> None:
+    def mark_job_completed(self, job_id: str, *, lease_token: str | None = None) -> None:
         with self._session() as session:
             row = session.get(JobORM, job_id)
-            if row:
-                row.status = "completed"
+            if row and self._claim_matches(row, lease_token):
+                row.status = "canceled" if row.cancel_requested_at is not None else "completed"
                 row.finished_at = utcnow()
                 row.updated_at = utcnow()
+                row.worker_id = None
+                row.lease_token = None
+                row.heartbeat_at = None
+                row.lease_expires_at = None
                 # Clear retry metadata from prior failed attempts so the
                 # completed JobResponse doesn't surface a stale transient
                 # error message or a dangling next_run_at. The retry loop
                 # sets these on failure; success must wipe them.
                 row.error = None
+                row.next_run_at = None
+
+    def mark_job_canceled(self, job_id: str, *, lease_token: str | None = None) -> None:
+        with self._session() as session:
+            row = session.get(JobORM, job_id)
+            if row and self._claim_matches(row, lease_token):
+                row.status = "canceled"
+                row.cancel_requested_at = row.cancel_requested_at or utcnow()
+                row.finished_at = utcnow()
+                row.updated_at = utcnow()
+                row.worker_id = None
+                row.lease_token = None
+                row.heartbeat_at = None
+                row.lease_expires_at = None
                 row.next_run_at = None
 
     def mark_job_failed(
@@ -4874,6 +5437,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
         *,
         permanent: bool = False,
         next_run_at: Any | None = None,
+        lease_token: str | None = None,
     ) -> None:
         """Record a failed attempt.
 
@@ -4884,10 +5448,24 @@ class SqlAlchemyPaperRepository(PaperRepository):
         """
         with self._session() as session:
             row = session.get(JobORM, job_id)
-            if row is None:
+            if row is None or not self._claim_matches(row, lease_token):
+                return
+            if row.cancel_requested_at is not None:
+                row.status = "canceled"
+                row.finished_at = utcnow()
+                row.updated_at = utcnow()
+                row.worker_id = None
+                row.lease_token = None
+                row.heartbeat_at = None
+                row.lease_expires_at = None
+                row.next_run_at = None
                 return
             row.error = error
             row.updated_at = utcnow()
+            row.worker_id = None
+            row.lease_token = None
+            row.heartbeat_at = None
+            row.lease_expires_at = None
             attempts = row.attempts or 0
             max_attempts = row.max_attempts or 3
             if permanent or attempts >= max_attempts:
@@ -4910,19 +5488,46 @@ class SqlAlchemyPaperRepository(PaperRepository):
             row.error = None
             row.next_run_at = None
             row.finished_at = None
+            row.worker_id = None
+            row.lease_token = None
+            row.heartbeat_at = None
+            row.lease_expires_at = None
+            row.cancel_requested_at = None
             row.updated_at = utcnow()
             job_id = row.job_id
         return self.get_job(job_id)
 
     def list_jobs_by_status(self, status: str, *, limit: int = 50) -> list[JobResponse]:
+        now = utcnow()
         with self._session() as session:
+            if status == "running":
+                predicate = (
+                    JobORM.status == "running",
+                    JobORM.cancel_requested_at.is_(None),
+                    JobORM.lease_expires_at.is_not(None),
+                    JobORM.lease_expires_at > now,
+                )
+            elif status == "stalled":
+                predicate = (
+                    JobORM.status == "running",
+                    or_(JobORM.lease_expires_at.is_(None), JobORM.lease_expires_at <= now),
+                )
+            elif status == "canceling":
+                predicate = (
+                    JobORM.status == "running",
+                    JobORM.cancel_requested_at.is_not(None),
+                    JobORM.lease_expires_at.is_not(None),
+                    JobORM.lease_expires_at > now,
+                )
+            else:
+                predicate = (JobORM.status == status,)
             rows = session.scalars(
                 select(JobORM)
-                .where(JobORM.status == status)
+                .where(*predicate)
                 .order_by(JobORM.updated_at.desc())
                 .limit(limit)
             ).all()
-        return [self.get_job(row.job_id) for row in rows if row is not None]  # type: ignore[list-item]
+            return [self._job_response_from_row(row, now=now) for row in rows if row is not None]
 
     def list_recent_jobs(self, *, limit: int = 200) -> list[JobResponse]:
         with self._session() as session:
@@ -5048,6 +5653,8 @@ class MemoryPaperRepository(PaperRepository):
         self.result_sets: dict[str, ResultSetResponse] = {}
         self.jobs: dict[str, JobResponse] = {}
         self.paper_refs: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        # paper_authors mirror for #39 PR C — list of {s2_id, name, position} per paper.
+        self.paper_authors: dict[str, list[dict[str, Any]]] = defaultdict(list)
         # Paper-level embeddings, tracked out-of-band because PaperResponse
         # doesn't carry them on the wire.
         self.paper_embeddings: dict[str, list[float] | None] = {}
@@ -5382,6 +5989,74 @@ class MemoryPaperRepository(PaperRepository):
         self.papers[paper_id] = updated
         return updated
 
+    def set_paper_top_author(
+        self,
+        paper_id: str,
+        *,
+        top_author_s2_id: str | None,
+    ) -> PaperResponse | None:
+        existing = self.papers.get(paper_id)
+        if existing is None:
+            return None
+        # First-write-wins for non-None writes (see ABC docstring).
+        if top_author_s2_id is not None and existing.top_author_s2_id is not None:
+            return existing
+        updated = existing.model_copy(update={"top_author_s2_id": top_author_s2_id})
+        self.papers[paper_id] = updated
+        return updated
+
+    def replace_paper_authors(
+        self,
+        paper_id: str,
+        *,
+        authors: list[dict[str, Any]],
+    ) -> None:
+        seen: set[str] = set()
+        rows: list[dict[str, Any]] = []
+        for author in authors:
+            s2_id = (author.get("s2_id") or "").strip()
+            if not s2_id or s2_id in seen:
+                continue
+            seen.add(s2_id)
+            rows.append({
+                "s2_id": s2_id,
+                "name": author.get("name") or "",
+                "position": int(author.get("position") or 0),
+            })
+        self.paper_authors[paper_id] = rows
+
+    def list_top_authors(
+        self,
+        *,
+        min_paper_count: int = 1,
+        min_cite_mass: int = 0,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        if limit < 1:
+            return []
+        agg: dict[str, dict[str, Any]] = {}
+        for paper_id, author_rows in self.paper_authors.items():
+            paper = self.papers.get(paper_id)
+            if paper is None:
+                continue
+            cite_count = paper.citation_count or 0
+            for row in author_rows:
+                s2_id = row["s2_id"]
+                bucket = agg.setdefault(
+                    s2_id,
+                    {"author_s2_id": s2_id, "paper_count": 0, "cite_mass": 0, "sample_name": ""},
+                )
+                bucket["paper_count"] += 1
+                bucket["cite_mass"] += cite_count
+                if not bucket["sample_name"]:
+                    bucket["sample_name"] = row.get("name") or ""
+        filtered = [
+            b for b in agg.values()
+            if b["paper_count"] >= min_paper_count and b["cite_mass"] >= min_cite_mass
+        ]
+        filtered.sort(key=lambda r: (-r["cite_mass"], -r["paper_count"], r["author_s2_id"]))
+        return filtered[:limit]
+
     def replace_code_chunks(self, paper_id: str, chunks: list[dict[str, Any]]) -> None:
         existing = self.text_chunks.get(paper_id, [])
         # Keep paper-section chunks untouched so a repo re-ingest doesn't
@@ -5427,6 +6102,42 @@ class MemoryPaperRepository(PaperRepository):
             )
         results.sort(key=lambda item: item.score or 0, reverse=True)
         return results[:limit]
+
+    def update_code_url(
+        self,
+        paper_id: str,
+        *,
+        code_url: str | None,
+        code_url_source: str | None,
+    ) -> PaperResponse | None:
+        existing = self.papers.get(paper_id)
+        if existing is None:
+            return None
+        updates: dict[str, Any] = {
+            "code_url": code_url,
+            "code_url_source": code_url_source,
+        }
+        # Mirror the SQL backend: any URL transition wipes the prior
+        # code-ingest state so a stale manifest / classification doesn't
+        # outlive the repo it described.
+        if existing.code_url != code_url:
+            updates.update(
+                {
+                    "code_index_status": "none",
+                    "code_is_python": None,
+                    "code_python_reason": None,
+                    "code_manifest": None,
+                }
+            )
+            preserved = [
+                c
+                for c in self.text_chunks.get(paper_id, [])
+                if c["chunk_kind"] not in CODE_CHUNK_KINDS
+            ]
+            self.text_chunks[paper_id] = preserved
+        updated = existing.model_copy(update=updates)
+        self.papers[paper_id] = updated
+        return updated
 
     def list_papers_needing_summary(
         self,
@@ -5526,6 +6237,22 @@ class MemoryPaperRepository(PaperRepository):
                 return paper.paper_id > after.paper_id
 
             candidates = [paper for paper in candidates if _after(paper)]
+        return candidates[:limit]
+
+    def list_papers_for_code_url_backfill(
+        self,
+        *,
+        limit: int,
+        after_paper_id: str | None = None,
+    ) -> list[PaperResponse]:
+        candidates = [
+            paper
+            for paper in self.papers.values()
+            if paper.index_status == "indexed" and paper.code_url_source != "admin"
+        ]
+        candidates.sort(key=lambda p: p.paper_id)
+        if after_paper_id:
+            candidates = [p for p in candidates if p.paper_id > after_paper_id]
         return candidates[:limit]
 
     def enrichment_stats(self) -> dict[str, int]:
@@ -6886,9 +7613,15 @@ class MemoryPaperRepository(PaperRepository):
         return job
 
     def get_job(self, job_id: str) -> JobResponse | None:
-        return self.jobs.get(job_id)
+        job = self.jobs.get(job_id)
+        return _job_response_with_effective_status(job) if job is not None else None
 
-    def claim_pending_job(self) -> JobResponse | None:
+    def claim_pending_job(
+        self,
+        *,
+        worker_id: str | None = None,
+        lease_seconds: int = JOB_LEASE_SECONDS,
+    ) -> JobResponse | None:
         now = utcnow()
         # priority ASC, next_run_at NULLS FIRST, created_at ASC — same
         # ordering as SQL. Priority keeps bulk backfill from starving
@@ -6907,35 +7640,173 @@ class MemoryPaperRepository(PaperRepository):
         claimed = job.model_copy(
             update={
                 "status": "running",
-                "started_at": utcnow(),
-                "updated_at": utcnow(),
-                "last_attempted_at": utcnow(),
+                "effective_status": "running",
+                "started_at": now,
+                "updated_at": now,
+                "last_attempted_at": now,
+                "worker_id": worker_id,
+                "lease_token": new_id("lease"),
+                "heartbeat_at": now,
+                "lease_expires_at": _lease_expires_at(now=now, lease_seconds=lease_seconds),
+                "cancel_requested_at": None,
                 "attempts": (job.attempts or 0) + 1,
             }
         )
         self.jobs[job_id] = claimed
         return claimed
 
-    def mark_job_running(self, job_id: str) -> None:
+    def heartbeat_job(
+        self,
+        job_id: str,
+        *,
+        lease_token: str,
+        worker_id: str | None = None,
+        lease_seconds: int = JOB_LEASE_SECONDS,
+    ) -> JobResponse | None:
         job = self.jobs.get(job_id)
-        if job:
+        if job is None or job.status != "running" or job.lease_token != lease_token:
+            return None
+        if worker_id is not None and job.worker_id not in {None, worker_id}:
+            return None
+        now = utcnow()
+        updated = job.model_copy(
+            update={
+                "worker_id": worker_id or job.worker_id,
+                "heartbeat_at": now,
+                "lease_expires_at": _lease_expires_at(now=now, lease_seconds=lease_seconds),
+                "updated_at": now,
+            }
+        )
+        self.jobs[job_id] = updated
+        return _job_response_with_effective_status(updated, now=now)
+
+    def is_job_cancel_requested(self, job_id: str, *, lease_token: str | None = None) -> bool:
+        job = self.jobs.get(job_id)
+        if job is None:
+            return False
+        if lease_token is not None and job.lease_token != lease_token:
+            return False
+        return job.cancel_requested_at is not None or job.status == "canceled"
+
+    def cancel_job(self, job_id: str) -> JobResponse | None:
+        job = self.jobs.get(job_id)
+        if job is None:
+            return None
+        now = utcnow()
+        if job.status == "pending":
+            updated = job.model_copy(
+                update={
+                    "status": "canceled",
+                    "effective_status": "canceled",
+                    "cancel_requested_at": now,
+                    "finished_at": now,
+                    "updated_at": now,
+                    "worker_id": None,
+                    "lease_token": None,
+                    "heartbeat_at": None,
+                    "lease_expires_at": None,
+                }
+            )
+            self.jobs[job_id] = updated
+            return updated
+        if job.status == "running":
+            if _effective_job_status(
+                status=job.status,
+                lease_expires_at=job.lease_expires_at,
+                cancel_requested_at=job.cancel_requested_at,
+                now=now,
+            ) == "stalled":
+                updated = job.model_copy(
+                    update={
+                        "status": "canceled",
+                        "effective_status": "canceled",
+                        "cancel_requested_at": now,
+                        "finished_at": now,
+                        "updated_at": now,
+                        "worker_id": None,
+                        "lease_token": None,
+                        "heartbeat_at": None,
+                        "lease_expires_at": None,
+                    }
+                )
+                self.jobs[job_id] = updated
+                return updated
+            updated = job.model_copy(
+                update={
+                    "effective_status": "canceling",
+                    "cancel_requested_at": job.cancel_requested_at or now,
+                    "updated_at": now,
+                }
+            )
+            self.jobs[job_id] = updated
+            return updated
+        return None
+
+    def _claim_matches(self, job: JobResponse, lease_token: str | None) -> bool:
+        return lease_token is None or job.lease_token == lease_token
+
+    def mark_job_running(
+        self,
+        job_id: str,
+        *,
+        lease_token: str | None = None,
+        worker_id: str | None = None,
+        lease_seconds: int = JOB_LEASE_SECONDS,
+    ) -> None:
+        job = self.jobs.get(job_id)
+        if job and self._claim_matches(job, lease_token):
+            now = utcnow()
             self.jobs[job_id] = job.model_copy(
-                update={"status": "running", "updated_at": utcnow(), "started_at": job.started_at or utcnow()}
+                update={
+                    "status": "running",
+                    "effective_status": "running",
+                    "updated_at": now,
+                    "started_at": job.started_at or now,
+                    "worker_id": worker_id or job.worker_id,
+                    "lease_token": lease_token or job.lease_token or new_id("lease"),
+                    "heartbeat_at": now,
+                    "lease_expires_at": _lease_expires_at(now=now, lease_seconds=lease_seconds),
+                }
             )
 
-    def mark_job_completed(self, job_id: str) -> None:
+    def mark_job_completed(self, job_id: str, *, lease_token: str | None = None) -> None:
         job = self.jobs.get(job_id)
-        if job:
+        if job and self._claim_matches(job, lease_token):
             # Clear retry metadata from prior failed attempts so the
             # completed JobResponse doesn't surface a stale transient
             # error message or a dangling next_run_at.
+            status = "canceled" if job.cancel_requested_at is not None else "completed"
             self.jobs[job_id] = job.model_copy(
                 update={
-                    "status": "completed",
+                    "status": status,
+                    "effective_status": status,
                     "updated_at": utcnow(),
                     "finished_at": utcnow(),
                     "error": None,
                     "next_run_at": None,
+                    "worker_id": None,
+                    "lease_token": None,
+                    "heartbeat_at": None,
+                    "lease_expires_at": None,
+                }
+            )
+
+    def mark_job_canceled(self, job_id: str, *, lease_token: str | None = None) -> None:
+        job = self.jobs.get(job_id)
+        if job and self._claim_matches(job, lease_token):
+            now = utcnow()
+            self.jobs[job_id] = job.model_copy(
+                update={
+                    "status": "canceled",
+                    "effective_status": "canceled",
+                    "cancel_requested_at": job.cancel_requested_at or now,
+                    "updated_at": now,
+                    "finished_at": now,
+                    "next_run_at": None,
+                    "worker_id": None,
+                    "lease_token": None,
+                    "heartbeat_at": None,
+                    "lease_expires_at": None,
                 }
             )
 
@@ -6946,9 +7817,13 @@ class MemoryPaperRepository(PaperRepository):
         *,
         permanent: bool = False,
         next_run_at: Any | None = None,
+        lease_token: str | None = None,
     ) -> None:
         job = self.jobs.get(job_id)
-        if job is None:
+        if job is None or not self._claim_matches(job, lease_token):
+            return
+        if job.cancel_requested_at is not None:
+            self.mark_job_canceled(job_id, lease_token=lease_token)
             return
         attempts = job.attempts or 0
         max_attempts = job.max_attempts or 3
@@ -6956,19 +7831,29 @@ class MemoryPaperRepository(PaperRepository):
             self.jobs[job_id] = job.model_copy(
                 update={
                     "status": "dead",
+                    "effective_status": "dead",
                     "error": error,
                     "updated_at": utcnow(),
                     "finished_at": utcnow(),
                     "next_run_at": None,
+                    "worker_id": None,
+                    "lease_token": None,
+                    "heartbeat_at": None,
+                    "lease_expires_at": None,
                 }
             )
         else:
             self.jobs[job_id] = job.model_copy(
                 update={
                     "status": "pending",
+                    "effective_status": "pending",
                     "error": error,
                     "updated_at": utcnow(),
                     "next_run_at": next_run_at,
+                    "worker_id": None,
+                    "lease_token": None,
+                    "heartbeat_at": None,
+                    "lease_expires_at": None,
                 }
             )
 
@@ -6979,17 +7864,35 @@ class MemoryPaperRepository(PaperRepository):
         self.jobs[job_id] = job.model_copy(
             update={
                 "status": "pending",
+                "effective_status": "pending",
                 "attempts": 0,
                 "error": None,
                 "next_run_at": None,
                 "finished_at": None,
+                "worker_id": None,
+                "lease_token": None,
+                "heartbeat_at": None,
+                "lease_expires_at": None,
+                "cancel_requested_at": None,
                 "updated_at": utcnow(),
             }
         )
-        return self.jobs[job_id]
+        return self.get_job(job_id)
 
     def list_jobs_by_status(self, status: str, *, limit: int = 50) -> list[JobResponse]:
-        jobs = [job for job in self.jobs.values() if job.status == status]
+        now = utcnow()
+        jobs = [
+            _job_response_with_effective_status(job, now=now)
+            for job in self.jobs.values()
+            if _effective_job_status(
+                status=job.status,
+                lease_expires_at=job.lease_expires_at,
+                cancel_requested_at=job.cancel_requested_at,
+                now=now,
+            )
+            == status
+            or (status not in {"running", "stalled", "canceling"} and job.status == status)
+        ]
         jobs.sort(key=lambda item: item.updated_at, reverse=True)
         return jobs[:limit]
 

@@ -108,6 +108,21 @@ def test_job_orm_carries_retry_policy_columns():
     assert default_max_attempts("reindex_embeddings") == 2
 
 
+def test_job_orm_carries_lease_and_cancel_columns():
+    from paperbase.repository import JobORM
+
+    for column in (
+        "worker_id",
+        "lease_token",
+        "heartbeat_at",
+        "lease_expires_at",
+        "cancel_requested_at",
+    ):
+        assert column in JobORM.__table__.columns, (
+            f"JobORM must carry '{column}' for reliable running/stalled/cancel status"
+        )
+
+
 def test_build_manifest_includes_preview_key_in_available_artifacts():
     paper = PaperMetadata(
         arxiv_id="2401.00001",
@@ -169,6 +184,25 @@ def test_paper_schema_carries_venue_signal_fields():
     assert paper.venue_source is None
 
 
+def test_paper_schema_carries_author_signal_fields():
+    """Regression test for #39 PR C: author-signal harvest needs the
+    ``top_author_s2_id`` column on ``papers`` and a separate
+    ``paper_authors`` table so the planner can run the cite-mass
+    aggregation. Locks both."""
+    from paperbase.repository import PaperAuthorORM, PaperORM
+
+    assert "top_author_s2_id" in PaperORM.__table__.columns, (
+        "PaperORM must carry 'top_author_s2_id' for author harvest provenance (#39 PR C)"
+    )
+    for column in ("paper_id", "author_s2_id", "author_name", "author_position"):
+        assert column in PaperAuthorORM.__table__.columns, (
+            f"PaperAuthorORM must carry '{column}' for author harvest (#39 PR C)"
+        )
+
+    paper = PaperMetadata(arxiv_id="2401.99999")
+    assert paper.top_author_s2_id is None
+
+
 def test_job_orm_carries_priority_for_backfill_starvation_guard():
     """Regression test for #33: harvest jobs must run at lower priority than
     interactive on-demand work so a multi-year backfill cannot starve
@@ -186,3 +220,31 @@ def test_job_orm_carries_priority_for_backfill_starvation_guard():
     assert default_priority("harvest_chunk") == 10
     assert default_priority("harvest_range") == 5
     assert default_priority("brand_new_job_type") == 0
+
+
+def test_paper_schema_carries_code_url_provenance_fields():
+    """Regression test for #46: the 3-layer code_url decision requires
+    ``code_url_source`` (``extracted``/``hf_papers``/``admin``) and
+    ``code_url_candidates`` (the full ranker input) on the papers table
+    so admin pins survive re-index and a later operator can pick an
+    alternate repo from the rejected candidates."""
+    from paperbase.repository import PaperORM
+
+    for column in ("code_url_source", "code_url_candidates"):
+        assert column in PaperORM.__table__.columns, (
+            f"PaperORM must carry '{column}' for #46 code_url provenance"
+        )
+
+    paper = PaperMetadata(arxiv_id="2401.99999")
+    assert paper.code_url_source is None
+    assert paper.code_url_candidates is None
+
+
+def test_code_crosslink_setting_defaults_on(monkeypatch):
+    """The layer-1 Hugging Face paper-page crosslink is intended to run
+    by default on index-time paths; operators can still disable it via
+    env when they want a pure text-only run."""
+    from paperbase.config import Settings
+
+    monkeypatch.delenv("PAPERBASE_FETCH_CODE_CROSSLINKS_AT_INDEX", raising=False)
+    assert Settings(_env_file=None).fetch_code_crosslinks_at_index is True

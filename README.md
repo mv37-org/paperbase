@@ -42,6 +42,7 @@ Optional browser-account settings now hang off the same API env surface:
 - `PAPERBASE_GITHUB_*` powers the in-app GitHub connection flow and project repo sync
 - `PAPERBASE_ADMIN_EMAILS` is a comma-separated allowlist for the signed-in admin jobs workspace
 - `PAPERBASE_WORKER_STATUS_URL` lets the API read worker `/health` and `/metrics` so the admin jobs table can surface `stalled` runs
+- `PAPERBASE_FETCH_CODE_CROSSLINKS_AT_INDEX` controls the default-on Hugging Face paper-page lookup that prefers an exact arXiv-id `githubRepo` match over raw text extraction; turn it off for pure text-only harvests
 - logged-in users can store Anthropic keys, Modal sandbox credentials, a signed-in-only light/dark appearance preference, and a weekly papers review email preference
 
 ## Commands
@@ -99,7 +100,20 @@ Worker job triage goes through the same admin CLI:
 ```bash
 .venv/bin/paperbase-dev jobs list-dead
 .venv/bin/paperbase-dev jobs retry <job_id>
+.venv/bin/paperbase-dev jobs cancel <job_id>
 ```
+
+Job responses include both raw `status` and server-computed `effective_status`. A running job is `stalled` when its worker lease expires without a heartbeat; pending jobs cancel immediately, while running jobs move through cooperative cancellation.
+
+Code-url cleanup can be re-run with the same admin CLI:
+
+```bash
+.venv/bin/paperbase-dev backfill-code-urls --dry-run
+.venv/bin/paperbase-dev backfill-code-urls
+```
+
+The backfill uses Hugging Face paper search's exact arXiv-id match before
+falling back to the in-text GitHub ranker.
 
 Historical arXiv backfills are queued with:
 
@@ -117,6 +131,7 @@ The repo has four moving pieces:
 - `paperbase-plugin/` contains the MCP bridge used by Codex and Claude Code
 - `chat/` contains the React frontend
 - `paperbase/src/paperbase/static/` is generated build output, not source
+- the `paperbase-api` root HTML response injects the current browser session into the shell so the frontend can boot without an immediate session fetch and can apply signed-in theme state before React mounts
 
 `paperbase-api` and `paperbase-worker` are the same codebase and image with different entrypoints:
 
@@ -148,10 +163,11 @@ The browser chat experience is project-based:
 - allowlisted admin emails also get an Admin panel jobs workspace for creating one-off indexing/backfill jobs, monitoring env-driven latest-sync runs, drilling into tracked indexed papers, and browsing stored paper artifacts through the browser session
 - the admin indexed-papers drilldown now paginates per job run instead of loading the entire tracked paper list at once
 - creating, importing, or saving project files requires a connected GitHub account with repo access
-- the coding agent is PyTorch-first for generated ML code, uses a Codex-style single turn loop with `tool_choice=auto`, prefers reading and patching existing workspace files before broad rewrites, exposes research tools as optional support rather than the primary posture on project threads, can edit repo-relative text files beyond just managed `.py` sources, keeps turn-local diff and exec-session state visible to the model during long turns and compaction, streams final answers live instead of buffering them until the end, and can run stateful project commands with follow-up wait/log/cancel steps alongside compatibility `project_run` smoke/full entrypoints
+- the coding agent is PyTorch-first for generated ML code, uses a Codex-style single turn loop with `tool_choice=auto`, prefers reading and patching existing workspace files before broad rewrites, grounds AI/code implementation turns in relevant paper or uploaded-document evidence when available, briefly redirects off-topic requests back to AI research or project code, can edit repo-relative text files beyond just managed `.py` sources, keeps turn-local diff and exec-session state visible to the model during long turns and compaction, streams final answers live instead of buffering them until the end, and can run stateful project commands with follow-up wait/log/cancel steps alongside compatibility `project_run` smoke/full entrypoints
 - `Save` creates a single Paperbase-managed GitHub commit for the current project, and `Run` saves first, then executes the full saved project workspace through the user’s Modal sandbox credentials with `full` mode by default
 - project sync writes only Paperbase-managed paths tracked in `.paperbase`, preserving unrelated files in existing repositories
 - if GitHub has moved ahead since the last project save, Paperbase opens a Monaco conflict-resolution flow before creating the next commit
+- @-mentioning a paper in the chat composer sends the paper's id with the request; if the row is not yet at `index_status='indexed'` the send path synchronously fetches and indexes it from arXiv before the chat turn runs, with `mention_indexing_*` SSE events surfacing fetch progress on the streaming endpoint
 
 `make dev` runs all of these locally:
 

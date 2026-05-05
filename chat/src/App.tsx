@@ -15,6 +15,7 @@ import {
   getBrowserPaperFigure,
   getBrowserPaperFile,
   getBrowserPaperTable,
+  getBootstrapSession,
   getProjectRepoSync,
   getPythonFile,
   githubLoginUrl,
@@ -64,6 +65,7 @@ import type {
   GitHubRepoImportCandidate,
   GitHubRepoMetadataResponse,
   GitHubRepoSummary,
+  MentionTag,
   PaperResponse,
   ProjectFileKind,
   ProjectItemKind,
@@ -568,16 +570,92 @@ function sourceCardId(messageId: string, sourceId: string) {
   return `source-card-${messageId}-${sourceId}`;
 }
 
-function consumePendingPrompt() {
-  const prompt = sessionStorage.getItem(PENDING_PROMPT_KEY);
-  sessionStorage.removeItem(PENDING_PROMPT_KEY);
-  return prompt ?? "";
+type PendingPromptState = {
+  prompt: string;
+  paperIds: string[];
+  mentions: MentionTag[];
+};
+
+function normalizePendingPromptMentions(value: unknown): MentionTag[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const mentions: MentionTag[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") {
+      continue;
+    }
+    const id = typeof entry.id === "string" ? entry.id : "";
+    if (!id || seen.has(id)) {
+      continue;
+    }
+    seen.add(id);
+    mentions.push({
+      id,
+      title: typeof entry.title === "string" ? entry.title : "",
+    });
+  }
+  return mentions;
 }
 
-function rememberPendingPrompt(prompt: string) {
-  if (prompt.trim()) {
-    sessionStorage.setItem(PENDING_PROMPT_KEY, prompt.trim());
+function mentionedPaperIdsInText(text: string, mentions: MentionTag[]) {
+  const paperIds: string[] = [];
+  const seen = new Set<string>();
+  for (const mention of mentions) {
+    if (!mention.id || seen.has(mention.id)) {
+      continue;
+    }
+    if (mention.title.trim() && !text.includes(`@${mention.title}`)) {
+      continue;
+    }
+    seen.add(mention.id);
+    paperIds.push(mention.id);
   }
+  return paperIds;
+}
+
+function consumePendingPrompt(): PendingPromptState {
+  const raw = sessionStorage.getItem(PENDING_PROMPT_KEY);
+  sessionStorage.removeItem(PENDING_PROMPT_KEY);
+  if (!raw) {
+    return { prompt: "", paperIds: [], mentions: [] };
+  }
+  if (raw.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(raw);
+      const prompt = typeof parsed?.prompt === "string" ? parsed.prompt : "";
+      const legacyPaperIds = Array.isArray(parsed?.paperIds)
+        ? parsed.paperIds.filter((id: unknown): id is string => typeof id === "string")
+        : [];
+      const mentions = normalizePendingPromptMentions(parsed?.mentions);
+      const paperIds = [...new Set([...legacyPaperIds, ...mentions.map((mention) => mention.id)])];
+      return {
+        prompt,
+        paperIds,
+        mentions: mentions.length ? mentions : paperIds.map((id) => ({ id, title: "" })),
+      };
+    } catch {
+      return { prompt: "", paperIds: [], mentions: [] };
+    }
+  }
+  return { prompt: raw, paperIds: [], mentions: [] };
+}
+
+function rememberPendingPrompt(prompt: string, mentions: MentionTag[] = []) {
+  const trimmed = prompt.trim();
+  if (!trimmed) {
+    return;
+  }
+  const normalizedMentions = normalizePendingPromptMentions(mentions);
+  sessionStorage.setItem(
+    PENDING_PROMPT_KEY,
+    JSON.stringify({
+      prompt: trimmed,
+      paperIds: normalizedMentions.map((mention) => mention.id),
+      mentions: normalizedMentions,
+    }),
+  );
 }
 
 function restoreTabs() {
@@ -1279,7 +1357,8 @@ function EmptyStateActionIcon({ asset }: { asset: string }) {
 }
 
 export default function App() {
-  const [session, setSession] = useState<BrowserSessionResponse | null>(null);
+  const bootstrapSession = useMemo(() => getBootstrapSession(), []);
+  const [session, setSession] = useState<BrowserSessionResponse | null>(bootstrapSession);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [projectItems, setProjectItems] = useState<Record<string, ProjectItemState>>({});
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(() =>
@@ -1334,16 +1413,20 @@ export default function App() {
   >(null);
   const [deleteModalState, setDeleteModalState] = useState<DeleteModalState>(null);
   const [saveModalState, setSaveModalState] = useState<SaveModalState>(null);
+  const [threadDebugModalOpen, setThreadDebugModalOpen] = useState(false);
   const [syncConflictState, setSyncConflictState] = useState<SyncConflictState>(null);
   const [authView, setAuthView] = useState<AuthView>("login");
   const [authModalOpen, setAuthModalOpen] = useState(false);
-  const [authReady, setAuthReady] = useState(false);
+  const [authReady, setAuthReady] = useState(Boolean(bootstrapSession));
   const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTab>("inference");
   const [appearanceThemeDraft, setAppearanceThemeDraft] = useState<AppearanceTheme>("light");
   const [flash, setFlash] = useState("");
   const [flashKind, setFlashKind] = useState<ModalFlashKind>("note");
   const [landingPrompt, setLandingPrompt] = useState("");
   const [composerInput, setComposerInput] = useState("");
+  const [composerTags, setComposerTags] = useState<MentionTag[]>([]);
+  const [landingTags, setLandingTags] = useState<MentionTag[]>([]);
+  const [restoredComposerMentions, setRestoredComposerMentions] = useState<MentionTag[]>([]);
   const [composerStatus, setComposerStatus] = useState("");
   const [includeUploads] = useState(true);
   const [includePapers] = useState(true);
@@ -1616,6 +1699,9 @@ export default function App() {
     activeTab == null
       ? workspaceView == null
       : activeTab.kind === "thread" && (!activeThread || activeThread.messages.length === 0);
+  const showThreadDebugButton = Boolean(
+    activeTab?.kind === "thread" && activeThreadDebugBundle && !isChatEmpty,
+  );
   const paperDrawerOpen = Boolean(paperDrawer);
   const hasProjects = projects.length > 0;
   const emptyStateProject =
@@ -1731,6 +1817,25 @@ export default function App() {
   const activeContextUsagePercent = activeContextUsage
     ? contextUsagePercent(activeContextUsage)
     : 0;
+
+  useEffect(() => {
+    if (!showThreadDebugButton) {
+      setThreadDebugModalOpen(false);
+    }
+  }, [showThreadDebugButton]);
+
+  useEffect(() => {
+    if (!threadDebugModalOpen) {
+      return;
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setThreadDebugModalOpen(false);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [threadDebugModalOpen]);
 
   useEffect(() => {
     if (!contextUsagePopoverOpen) {
@@ -2798,7 +2903,12 @@ export default function App() {
   );
 
   const sendMessage = useCallback(
-    async (threadId: string, content: string, currentSession?: BrowserSessionResponse | null) => {
+    async (
+      threadId: string,
+      content: string,
+      currentSession?: BrowserSessionResponse | null,
+      paperIds: string[] = [],
+    ) => {
       if (!requireInferenceAccess(currentSession)) {
         return null;
       }
@@ -2949,9 +3059,29 @@ export default function App() {
             content,
             include_uploads: includeUploads,
             include_papers: includePapers,
+            paper_ids: paperIds,
           },
           (eventName, payload) => {
             if (eventName === "turn_started") {
+              return;
+            }
+
+            if (eventName === "mention_indexing_started") {
+              const title = payload.title || payload.arxiv_id || payload.paper_id;
+              setComposerStatus(`Fetching paper: ${title}…`);
+              return;
+            }
+            if (eventName === "mention_indexing_completed") {
+              setComposerStatus("");
+              return;
+            }
+            if (eventName === "mention_indexing_failed") {
+              const title = payload.title || payload.arxiv_id || payload.paper_id;
+              setComposerStatus(
+                payload.detail
+                  ? `Could not fetch ${title}: ${payload.detail}`
+                  : `Could not fetch ${title}`,
+              );
               return;
             }
 
@@ -3096,6 +3226,7 @@ export default function App() {
             content,
             include_uploads: includeUploads,
             include_papers: includePapers,
+            paper_ids: paperIds,
           });
           const normalizedThread = normalizeThreadForState(payload.thread);
           setThreadMap((current) => ({ ...current, [threadId]: normalizedThread }));
@@ -3280,10 +3411,16 @@ export default function App() {
       }
       setOpenTabs(validRestoredTabs);
 
-      const pendingPrompt = consumePendingPrompt().trim();
-      if (pendingPrompt) {
+      const {
+        prompt: pendingPrompt,
+        paperIds: pendingPaperIds,
+        mentions: pendingMentions,
+      } = consumePendingPrompt();
+      const trimmedPendingPrompt = pendingPrompt.trim();
+      if (trimmedPendingPrompt) {
         if (!requireInferenceAccess(currentSession)) {
-          setComposerInput(pendingPrompt);
+          setComposerInput(trimmedPendingPrompt);
+          setRestoredComposerMentions(pendingMentions);
           return;
         }
         const thread = await createNewThread(
@@ -3291,7 +3428,9 @@ export default function App() {
           selectedProjectId ?? loadedProjects[0]?.project_id,
         );
         setLandingPrompt("");
-        await sendMessage(thread.thread_id, pendingPrompt, currentSession);
+        setLandingTags([]);
+        setRestoredComposerMentions([]);
+        await sendMessage(thread.thread_id, trimmedPendingPrompt, currentSession, pendingPaperIds);
         return;
       }
 
@@ -3366,7 +3505,7 @@ export default function App() {
         const nextUrl = `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`;
         window.history.replaceState({}, "", nextUrl);
       }
-      const nextSession = await loadSession();
+      const nextSession = bootstrapSession ?? (await loadSession());
       setSession(nextSession);
       setAuthReady(true);
       if (
@@ -3401,7 +3540,7 @@ export default function App() {
       setComposerStatus("The chat app could not reach paperbase.");
       setAuthReady(true);
     });
-  }, [bootstrapAuthenticatedUi, showErrorFlash, showNoteFlash]);
+  }, [bootstrapAuthenticatedUi, bootstrapSession, showErrorFlash, showNoteFlash]);
 
   const openAuthModal = useCallback(
     (view: AuthView, settingsTab: SettingsTab = "inference") => {
@@ -3448,8 +3587,9 @@ export default function App() {
     if (!prompt) {
       return;
     }
+    const mentions = landingTags.filter((tag) => tag.id);
     if (!sessionRef.current?.authenticated) {
-      rememberPendingPrompt(prompt);
+      rememberPendingPrompt(prompt, mentions);
       openAuthModal("login");
       return;
     }
@@ -3457,9 +3597,18 @@ export default function App() {
       return;
     }
     const thread = await createNewThread();
+    const paperIds = mentions.map((tag) => tag.id);
     setLandingPrompt("");
-    await sendMessage(thread.thread_id, prompt);
-  }, [createNewThread, landingPrompt, openAuthModal, requireInferenceAccess, sendMessage]);
+    setLandingTags([]);
+    await sendMessage(thread.thread_id, prompt, undefined, paperIds);
+  }, [
+    createNewThread,
+    landingPrompt,
+    landingTags,
+    openAuthModal,
+    requireInferenceAccess,
+    sendMessage,
+  ]);
 
   const handleExample = useCallback(
     async (prompt: string) => {
@@ -3522,14 +3671,24 @@ export default function App() {
       return;
     }
     const threadId = activeThreadId ?? (await createNewThread()).thread_id;
+    const paperIds = [
+      ...new Set([
+        ...composerTags.map((tag) => tag.id),
+        ...mentionedPaperIdsInText(content, restoredComposerMentions),
+      ]),
+    ];
     setComposerInput("");
+    setComposerTags([]);
+    setRestoredComposerMentions([]);
     scrollMessageListToBottom();
-    await sendMessage(threadId, content);
+    await sendMessage(threadId, content, undefined, paperIds);
   }, [
     activeThreadId,
     composerInput,
+    composerTags,
     createNewThread,
     requireInferenceAccess,
+    restoredComposerMentions,
     scrollMessageListToBottom,
     sendMessage,
     streamingThreadId,
@@ -3557,6 +3716,7 @@ export default function App() {
     setSyncConflictState(null);
     setLandingPrompt("");
     setComposerInput("");
+    setRestoredComposerMentions([]);
     setComposerStatus("");
     setMobileSidebarOpen(false);
     setAccountMenuOpen(false);
@@ -4683,10 +4843,29 @@ export default function App() {
         ) : null}
       </div>
     ) : null;
+  const threadDebugAccessory =
+    showThreadDebugButton && activeThreadDebugBundle ? (
+      <button
+        type="button"
+        className="thread-debug-icon-button"
+        aria-label="Open chat debug info"
+        title="Open chat debug info"
+        onClick={() => setThreadDebugModalOpen(true)}
+      >
+        <span aria-hidden="true">i</span>
+      </button>
+    ) : null;
+  const composerActionAccessory =
+    composerContextUsageAccessory || threadDebugAccessory ? (
+      <>
+        {composerContextUsageAccessory}
+        {threadDebugAccessory}
+      </>
+    ) : null;
 
   const composerEditor = (
     <LandingMentionEditor
-      actionAccessory={composerContextUsageAccessory}
+      actionAccessory={composerActionAccessory}
       attachButtonId="composer-upload-trigger"
       disabled={Boolean(streamingThreadId)}
       formId="composer-form"
@@ -4695,6 +4874,7 @@ export default function App() {
       onChange={setComposerInput}
       onStop={handleStopStreaming}
       onSubmit={() => void handleComposerSubmit()}
+      onTagsChange={setComposerTags}
       placeholder="Ask about the latest agent and AI systems research. Type @ to tag a paper."
       searchPapers={suggestBrowserPapers}
       submitButtonId="composer-send"
@@ -4805,6 +4985,7 @@ export default function App() {
                 onAttach={() => openAuthModal("login")}
                 onChange={setLandingPrompt}
                 onSubmit={() => void handleLandingSubmit()}
+                onTagsChange={setLandingTags}
                 searchPapers={suggestBrowserPapers}
                 submitButtonId="landing-start-button"
                 submitLabel="Start"
@@ -5557,29 +5738,6 @@ export default function App() {
               className={`chat-message-list${isChatEmpty ? " empty" : ""}${activeTab?.kind === "python_file" ? " python-file-view" : ""}${isWorkspaceView ? " workspace-view" : ""}${isAdminWorkspaceView ? " workspace-admin-view" : ""}`}
               onScroll={handleMessageListScroll}
             >
-              {showThreadStageChrome && activeThreadDebugBundle ? (
-                <div className="chat-thread-debug-strip" data-testid="thread-debug-strip">
-                  <div className="chat-thread-debug-copy-row">
-                    <span className="chat-thread-debug-label">Debug IDs</span>
-                    <button
-                      type="button"
-                      className="chat-thread-debug-copy-button"
-                      aria-label="Copy chat debug bundle"
-                      title="Copy chat debug bundle"
-                      onClick={() => void copyThreadDebugBundle(activeThreadDebugBundle)}
-                    >
-                      Copy
-                    </button>
-                  </div>
-                  <div className="chat-thread-debug-values">
-                    <span>{`user ${activeThreadDebugBundle.user_id ?? "none"}`}</span>
-                    <span>{`project ${activeThreadDebugBundle.project_id}`}</span>
-                    <span>{`thread ${activeThreadDebugBundle.thread_id}`}</span>
-                    <span>{`last ${activeThreadDebugBundle.latest_message_id ?? "none"}`}</span>
-                    <span>{`assistant ${activeThreadDebugBundle.latest_assistant_message_id ?? "none"}`}</span>
-                  </div>
-                </div>
-              ) : null}
               {workspaceView ? (
                 workspaceView.kind === "trending" ? (
                   <div className="workspace-page workspace-page-wide">
@@ -6342,6 +6500,65 @@ export default function App() {
           ) : null}
         </div>
       ) : null}
+
+      <div
+        id="thread-debug-modal"
+        className={`modal${threadDebugModalOpen && activeThreadDebugBundle ? "" : " hidden"}`}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="thread-debug-modal-title"
+      >
+        <div className="modal-backdrop" onClick={() => setThreadDebugModalOpen(false)} />
+        <div className="modal-panel thread-debug-modal-panel">
+          <button
+            className="modal-close"
+            type="button"
+            aria-label="Close chat debug info"
+            onClick={() => setThreadDebugModalOpen(false)}
+          >
+            ×
+          </button>
+          <div className="modal-heading modal-heading-copy">
+            <h2 id="thread-debug-modal-title" className="modal-title">
+              Chat debug
+            </h2>
+            <p className="modal-caption">Local identifiers for this thread.</p>
+          </div>
+          {activeThreadDebugBundle ? (
+            <div className="thread-debug-modal-body" data-testid="thread-debug-modal-body">
+              <dl className="thread-debug-modal-values">
+                <div>
+                  <dt>User</dt>
+                  <dd>{activeThreadDebugBundle.user_id ?? "none"}</dd>
+                </div>
+                <div>
+                  <dt>Project</dt>
+                  <dd>{activeThreadDebugBundle.project_id}</dd>
+                </div>
+                <div>
+                  <dt>Thread</dt>
+                  <dd>{activeThreadDebugBundle.thread_id}</dd>
+                </div>
+                <div>
+                  <dt>Last message</dt>
+                  <dd>{activeThreadDebugBundle.latest_message_id ?? "none"}</dd>
+                </div>
+                <div>
+                  <dt>Assistant</dt>
+                  <dd>{activeThreadDebugBundle.latest_assistant_message_id ?? "none"}</dd>
+                </div>
+              </dl>
+              <button
+                type="button"
+                className="secondary-button thread-debug-copy-button"
+                onClick={() => void copyThreadDebugBundle(activeThreadDebugBundle)}
+              >
+                Copy debug bundle
+              </button>
+            </div>
+          ) : null}
+        </div>
+      </div>
 
       <div
         id="python-save-modal"

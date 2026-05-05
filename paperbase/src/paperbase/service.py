@@ -19,6 +19,7 @@ from urllib import error as urllib_error
 from urllib.parse import quote
 from urllib import request as urllib_request
 from collections.abc import Generator, Iterator
+from contextvars import ContextVar
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import timedelta
@@ -42,6 +43,8 @@ from .config import Settings, get_settings
 from .emailer import EmailSender, ResendEmailSender
 from .extractors import (
     build_manifest,
+    extract_github_candidates,
+    rank_github_candidates,
     extract_uploaded_document,
     figure_index_payload,
     index_paper_artifacts,
@@ -142,7 +145,7 @@ from .models import (
     UploadListResponse,
     UploadedDocumentResponse,
 )
-from .repository import PaperRepository, build_repository
+from .repository import JOB_LEASE_SECONDS, PaperRepository, build_repository
 from .security import (
     SecretCipher,
     api_key_hint,
@@ -155,11 +158,13 @@ from .security import (
 from .summaries import build_paper_summaries
 from .storage import ObjectStore, build_object_store
 from . import sources
-from .errors import PermanentError, RetryableError
+from .errors import JobCanceled, PermanentError, RetryableError
 from .utils import canonical_paper_id, new_id, slugify, utcnow
 
 
 logger = logging.getLogger(__name__)
+_CURRENT_JOB: ContextVar[JobResponse | None] = ContextVar("paperbase_current_job", default=None)
+JOB_HEARTBEAT_INTERVAL_SECONDS = 60
 
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -1726,6 +1731,7 @@ class PaperbaseService:
         self._project_exec_sessions: dict[str, ProjectExecSession] = {}
         self._project_exec_index: dict[tuple[str, str], set[str]] = {}
         self._project_exec_lock = threading.Lock()
+        self._worker_id = f"{os.environ.get('HOSTNAME') or 'local'}:{os.getpid()}:{new_id('worker')}"
 
     def _call_index_arxiv_paper(
         self,
@@ -1747,6 +1753,41 @@ class PaperbaseService:
 
     def init(self) -> None:
         self.repository.init()
+
+    def _start_job_heartbeat(self, job: JobResponse) -> tuple[threading.Event, threading.Thread | None]:
+        if not job.lease_token:
+            return threading.Event(), None
+        stop = threading.Event()
+
+        def _loop() -> None:
+            while not stop.wait(JOB_HEARTBEAT_INTERVAL_SECONDS):
+                refreshed = self.repository.heartbeat_job(
+                    job.job_id,
+                    lease_token=job.lease_token or "",
+                    worker_id=self._worker_id,
+                    lease_seconds=JOB_LEASE_SECONDS,
+                )
+                if refreshed is None:
+                    logger.warning(
+                        "Job heartbeat lost its lease",
+                        extra={"event": "jobs.heartbeat_lost", "job_id": job.job_id},
+                    )
+                    return
+
+        thread = threading.Thread(
+            target=_loop,
+            name=f"paperbase-job-heartbeat-{job.job_id}",
+            daemon=True,
+        )
+        thread.start()
+        return stop, thread
+
+    def _raise_if_current_job_canceled(self) -> None:
+        job = _CURRENT_JOB.get()
+        if job is None or not job.lease_token:
+            return
+        if self.repository.is_job_cancel_requested(job.job_id, lease_token=job.lease_token):
+            raise JobCanceled(f"Job {job.job_id} was canceled")
 
     def _browser_user_settings_response(
         self,
@@ -3524,6 +3565,81 @@ class PaperbaseService:
 
     def _choose_anthropic_api_key(self, user: BrowserUser) -> tuple[str | None, bool, str]:
         return self._choose_openai_api_key(user)
+
+    def _ensure_mentioned_papers_indexed(
+        self, paper_ids: list[str]
+    ) -> Iterator[tuple[str, dict[str, Any]]]:
+        """Resolve each @-mentioned ``paper_id`` and, if the row is not already
+        at ``index_status='indexed'``, synchronously fetch and index it from
+        arXiv before the chat turn runs. Yields SSE-shaped events
+        (``mention_indexing_started`` / ``mention_indexing_completed`` /
+        ``mention_indexing_failed``) so the streaming chat path can surface
+        per-paper progress; the non-streaming caller drains the iterator and
+        discards the events. Failures (unknown paper, missing arxiv_id, or a
+        ``PermanentError`` from ``index_arxiv_paper``) are reported as a
+        ``mention_indexing_failed`` event but do not abort the turn — the chat
+        will simply run without that paper at full fidelity."""
+        seen: set[str] = set()
+        for paper_id in paper_ids:
+            if not paper_id or paper_id in seen:
+                continue
+            seen.add(paper_id)
+            existing = self.repository.get_paper(paper_id)  # type: ignore[attr-defined]
+            if existing is None:
+                yield (
+                    "mention_indexing_failed",
+                    {"paper_id": paper_id, "detail": "Paper not found"},
+                )
+                continue
+            if existing.index_status == "indexed":
+                continue
+            if not existing.arxiv_id:
+                yield (
+                    "mention_indexing_failed",
+                    {
+                        "paper_id": paper_id,
+                        "title": existing.title or "",
+                        "detail": "Paper has no arxiv_id; cannot fetch on demand",
+                    },
+                )
+                continue
+            yield (
+                "mention_indexing_started",
+                {
+                    "paper_id": paper_id,
+                    "arxiv_id": existing.arxiv_id,
+                    "title": existing.title or "",
+                },
+            )
+            try:
+                indexed = self.index_arxiv_paper(existing.arxiv_id, force=False)
+            except Exception as exc:
+                logger.exception(
+                    "On-demand mention indexing failed",
+                    extra={
+                        "event": "chat.mention_indexing_failed",
+                        "paper_id": paper_id,
+                        "arxiv_id": existing.arxiv_id,
+                    },
+                )
+                yield (
+                    "mention_indexing_failed",
+                    {
+                        "paper_id": paper_id,
+                        "arxiv_id": existing.arxiv_id,
+                        "title": existing.title or "",
+                        "detail": str(exc),
+                    },
+                )
+                continue
+            yield (
+                "mention_indexing_completed",
+                {
+                    "paper_id": indexed.paper_id,
+                    "arxiv_id": indexed.arxiv_id,
+                    "title": indexed.title or "",
+                },
+            )
 
     def _prepare_chat_generation(
         self,
@@ -5482,6 +5598,11 @@ class PaperbaseService:
                 thread_id=thread_id,
                 state=api_key_state,
             )
+        # Drain mention-resolution events. The non-streaming path can't
+        # surface them to the UI, so just run the side effect (fetch + index)
+        # and discard the per-paper events.
+        for _ in self._ensure_mentioned_papers_indexed(request.paper_ids):
+            pass
         prepared = self._prepare_chat_generation(
             user=user,
             thread_id=thread_id,
@@ -5531,6 +5652,9 @@ class PaperbaseService:
                 ).model_dump(mode="json"),
             )
             return
+        # Forward per-paper resolve-and-index events to the SSE stream so the
+        # UI can show a "Fetching paper…" state for any unindexed mention.
+        yield from self._ensure_mentioned_papers_indexed(request.paper_ids)
         prepared = self._prepare_chat_generation(
             user=user,
             thread_id=thread_id,
@@ -5660,6 +5784,7 @@ class PaperbaseService:
         after: PaperResponse | None = None
 
         while remaining > 0:
+            self._raise_if_current_job_canceled()
             batch = self.repository.list_papers_needing_embedding_backfill(
                 limit=min(page, remaining),
                 include_chunks=include_chunks,
@@ -5677,11 +5802,13 @@ class PaperbaseService:
             vectors = self.embeddings.encode_paper_batch(pairs)
             if vectors is not None and len(vectors) == len(batch):
                 for paper, vector in zip(batch, vectors):
+                    self._raise_if_current_job_canceled()
                     self.repository.update_paper_embedding(paper.paper_id, vector)
                     papers_updated += 1
 
             if include_chunks:
                 for paper in batch:
+                    self._raise_if_current_job_canceled()
                     chunks = self.repository.list_chunks_missing_embedding(
                         paper.paper_id,
                         include_existing=rewrite_existing,
@@ -5690,12 +5817,14 @@ class PaperbaseService:
                         continue
                     cap = self.settings.chunk_max_chars + self.settings.chunk_overlap_chars
                     for start in range(0, len(chunks), chunk_page):
+                        self._raise_if_current_job_canceled()
                         chunk_batch = chunks[start : start + chunk_page]
                         chunk_inputs = [(chunk.get("content") or "")[:cap] for chunk in chunk_batch]
                         chunk_vectors = self.embeddings.encode_batch(chunk_inputs)
                         if chunk_vectors is None or len(chunk_vectors) != len(chunk_batch):
                             continue
                         for chunk, vector in zip(chunk_batch, chunk_vectors):
+                            self._raise_if_current_job_canceled()
                             self.repository.update_chunk_embedding(chunk["chunk_id"], vector)
                             chunks_updated += 1
 
@@ -5766,6 +5895,7 @@ class PaperbaseService:
         after: PaperResponse | None = None
 
         while remaining > 0:
+            self._raise_if_current_job_canceled()
             batch = self.repository.list_papers_needing_enrichment(
                 limit=min(page_size, remaining),
                 min_age_seconds=min_age_seconds,
@@ -5794,6 +5924,7 @@ class PaperbaseService:
             outcome = sources.enrich_with_semantic_scholar(metas, batch_size=batch_size)
             total_batches_failed += outcome.batches_failed
             for paper, meta in zip(batch, metas):
+                self._raise_if_current_job_canceled()
                 if not (meta.semantic_scholar_id or (meta.citation_count and meta.citation_count > 0)):
                     continue
                 # Re-use the shallow upsert path to persist enrichment —
@@ -5801,6 +5932,11 @@ class PaperbaseService:
                 # semantic_scholar_id / tldr without touching index artifacts.
                 self.repository.upsert_paper_shallow(meta)
                 total_updated += 1
+                # #39 PR C: persist S2 author rows alongside the enrichment.
+                if outcome is not None:
+                    author_rows = outcome.authors_by_arxiv.get(meta.arxiv_id) or []
+                    if author_rows:
+                        self.repository.replace_paper_authors(paper.paper_id, authors=author_rows)
 
             after = batch[-1]
             remaining -= len(batch)
@@ -5837,6 +5973,125 @@ class PaperbaseService:
                 f"batch(es) un-persisted after internal retries"
             )
         return result
+
+    def backfill_code_urls_from_hf_papers(
+        self, *, limit: int = 100_000, page_size: int = 200, dry_run: bool = False
+    ) -> dict[str, Any]:
+        """Sweep indexed papers, ask Hugging Face paper search for the
+        paper-page ``githubRepo`` field, and overwrite ``code_url`` where
+        the source is not ``admin`` (#46 cleanup story).
+
+        Returns a counts dict so callers (CLI + tests) can verify how
+        many rows were inspected vs changed. ``dry_run=True`` logs the
+        diffs without writing — use that to sanity-check before a real
+        run against 10k+ papers.
+        """
+        total_scanned = 0
+        total_crosslink_hits = 0
+        total_updated = 0
+        total_skipped_admin = 0
+        total_unchanged = 0
+        after_paper_id: str | None = None
+        remaining = limit
+        while remaining > 0:
+            batch_size = min(page_size, remaining)
+            batch = self.repository.list_papers_for_code_url_backfill(
+                limit=batch_size, after_paper_id=after_paper_id
+            )
+            if not batch:
+                break
+            for paper in batch:
+                total_scanned += 1
+                if paper.code_url_source == "admin":
+                    # Defensive — the repo method already filters these out,
+                    # but a race during long backfill shouldn't clobber a
+                    # newly-created admin pin.
+                    total_skipped_admin += 1
+                    continue
+                crosslink_url = sources.fetch_hf_paper_repo(paper.arxiv_id)
+                if not crosslink_url:
+                    total_unchanged += 1
+                    continue
+                total_crosslink_hits += 1
+                if crosslink_url == paper.code_url and paper.code_url_source in {"hf_papers", "pwc"}:
+                    total_unchanged += 1
+                    continue
+                logger.info(
+                    "Code URL backfill diff",
+                    extra={
+                        "event": "code_url.backfill.diff",
+                        "paper_id": paper.paper_id,
+                        "arxiv_id": paper.arxiv_id,
+                        "old_code_url": paper.code_url,
+                        "old_source": paper.code_url_source,
+                        "new_code_url": crosslink_url,
+                        "new_source": "hf_papers",
+                        "dry_run": dry_run,
+                    },
+                )
+                if not dry_run:
+                    self.repository.update_code_url(
+                        paper.paper_id, code_url=crosslink_url, code_url_source="hf_papers"
+                    )
+                    # update_code_url wipes prior code-ingest state on
+                    # any URL transition (#45 review). Queue a fresh
+                    # ingest so the chat surface sees the new repo's
+                    # contents without waiting on a manual reindex.
+                    self.enqueue_ingest_repo_job(paper.paper_id, force=True)
+                total_updated += 1
+            last = batch[-1]
+            after_paper_id = last.paper_id
+            remaining -= len(batch)
+            if len(batch) < batch_size:
+                break
+        return {
+            "scanned": total_scanned,
+            "crosslink_hits": total_crosslink_hits,
+            "updated": total_updated,
+            "skipped_admin": total_skipped_admin,
+            "unchanged": total_unchanged,
+            "dry_run": dry_run,
+        }
+
+    def set_admin_code_url(self, paper_id: str, *, code_url: str | None) -> PaperResponse | None:
+        """Pin ``papers.code_url`` to an operator-chosen value (#46 layer 3).
+
+        Passing ``code_url=None`` clears the pin (and any extracted URL
+        alongside it, returning the paper to "no code attached"). Any
+        non-empty value must parse through ``code_ingest.parse_github_url``
+        — unsupported hosts / malformed strings raise ``HTTPException`` so
+        the API surface can return a clean 400. Pins survive re-index
+        runs via the ``code_url_source='admin'`` sticky bit checked in
+        :meth:`index_arxiv_paper`.
+
+        When the URL changes, the underlying ``update_code_url`` resets
+        the code-ingest state (status, manifest, code chunks) so the
+        paper isn't left serving the previous repo's metadata. For
+        non-null new URLs we then enqueue a fresh ``ingest_repo`` job so
+        the chat surface picks up the new repo's contents without
+        waiting for an unrelated reindex.
+        """
+        paper = self.repository.get_paper(paper_id)
+        if paper is None:
+            return None
+        previous_url = paper.code_url
+        if code_url is None or not code_url.strip():
+            return self.repository.update_code_url(
+                paper_id, code_url=None, code_url_source=None
+            )
+        ref = code_ingest.parse_github_url(code_url)
+        if ref is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported code_url: {code_url!r}",
+            )
+        canonical = f"https://github.com/{ref.owner}/{ref.repo}"
+        updated = self.repository.update_code_url(
+            paper_id, code_url=canonical, code_url_source="admin"
+        )
+        if updated is not None and previous_url != canonical:
+            self.enqueue_ingest_repo_job(paper_id, force=True)
+        return updated
 
     def enqueue_ingest_repo_job(
         self,
@@ -5879,6 +6134,7 @@ class PaperbaseService:
         read-only ingestion foundation; indexing the extracted files into
         ``text_chunks`` is PR 2 scope.
         """
+        self._raise_if_current_job_canceled()
         paper = self.repository.get_paper(paper_id)
         if paper is None:
             return None
@@ -5909,6 +6165,7 @@ class PaperbaseService:
                 token=self.settings.github_token,
                 max_bytes=self.settings.code_repo_max_archive_bytes,
             )
+            self._raise_if_current_job_canceled()
             prev_manifest = paper.code_manifest or {}
             if (
                 not force
@@ -5919,6 +6176,7 @@ class PaperbaseService:
             ):
                 # Same commit as last time — restore the terminal state after
                 # the transient indexing marker and skip re-extracting.
+                self._raise_if_current_job_canceled()
                 return self.repository.update_code_ingest_state(
                     paper_id,
                     status="indexed",
@@ -5934,6 +6192,7 @@ class PaperbaseService:
                     max_stored_file_bytes=self.settings.code_repo_max_stored_file_bytes,
                     max_scanned_files=self.settings.code_repo_max_scanned_files,
                 )
+                self._raise_if_current_job_canceled()
                 is_python, reason = code_ingest.classify_python(report)
                 # Selective code indexing (#5 PR 2): only Python-eligible
                 # repos get high-signal chunks (README / docs / manifests /
@@ -5944,6 +6203,7 @@ class PaperbaseService:
                 code_chunks = (
                     code_ingest.build_code_chunks(scratch, report) if is_python else []
                 )
+                self._raise_if_current_job_canceled()
                 indexed_paths = sorted({chunk.repo_path for chunk in code_chunks})
                 manifest = code_ingest.build_manifest(
                     code_url=code_url,
@@ -5955,6 +6215,7 @@ class PaperbaseService:
                 )
                 manifest["indexed_paths"] = indexed_paths
                 code_prefix = f"papers/{paper_id}/code"
+                self._raise_if_current_job_canceled()
                 self.object_store.delete_prefix(f"{code_prefix}/")
                 self.object_store.put_bytes(
                     f"{code_prefix}/raw/source.tar.gz",
@@ -5967,6 +6228,7 @@ class PaperbaseService:
                     content_type="application/json",
                 )
                 for rel in report.stored_paths:
+                    self._raise_if_current_job_canceled()
                     source = scratch / rel
                     if not source.exists():
                         continue
@@ -5988,6 +6250,7 @@ class PaperbaseService:
                         for idx, chunk in enumerate(code_chunks)
                     ],
                 )
+            self._raise_if_current_job_canceled()
             logger.info(
                 "Completed code ingest",
                 extra={
@@ -6325,11 +6588,13 @@ class PaperbaseService:
 
         with ThreadPoolExecutor(max_workers=concurrency) as pool:
             while remaining > 0:
+                self._raise_if_current_job_canceled()
                 page_size = min(window, remaining)
                 batch = self.repository.list_papers_needing_summary(limit=page_size, after=after)
                 if not batch:
                     break
                 for paper in batch:
+                    self._raise_if_current_job_canceled()
                     if len(in_flight) >= window:
                         _drain(wait_all=False)
                     in_flight.add(pool.submit(_summarize_one, paper))
@@ -6444,7 +6709,9 @@ class PaperbaseService:
         windows = _month_windows(start_date, end_date, chunk_months=chunk_months)
         chunks_created = 0
         for category in categories:
+            self._raise_if_current_job_canceled()
             for win_start, win_end in windows:
+                self._raise_if_current_job_canceled()
                 self.repository.create_job(
                     "harvest_chunk",
                     {
@@ -6546,6 +6813,7 @@ class PaperbaseService:
         fetched_this_page = 0
         indexed = 0
         for paper in page:
+            self._raise_if_current_job_canceled()
             if cap is not None and running_fetched + fetched_this_page >= cap:
                 break
             fetched_this_page += 1
@@ -6733,6 +7001,7 @@ class PaperbaseService:
             pending_batch = []
 
         while True:
+            self._raise_if_current_job_canceled()
             if max_papers is not None and candidates_emitted >= max_papers:
                 break
             page, next_cursor = sources.fetch_top_cited_cs(
@@ -6741,6 +7010,7 @@ class PaperbaseService:
             )
             pages_fetched += 1
             for candidate in page:
+                self._raise_if_current_job_canceled()
                 if max_papers is not None and candidates_emitted >= max_papers:
                     break
                 pending_batch.append(candidate.arxiv_id)
@@ -6797,6 +7067,7 @@ class PaperbaseService:
         indexed = 0
         skipped = 0
         for arxiv_id in arxiv_ids:
+            self._raise_if_current_job_canceled()
             if not arxiv_id:
                 skipped += 1
                 continue
@@ -6941,6 +7212,7 @@ class PaperbaseService:
             pending_batch = []
 
         while True:
+            self._raise_if_current_job_canceled()
             if max_papers is not None and candidates_emitted >= max_papers:
                 break
             page, next_cursor = sources.fetch_venue_accepted(
@@ -6950,6 +7222,7 @@ class PaperbaseService:
             )
             pages_fetched += 1
             for candidate in page:
+                self._raise_if_current_job_canceled()
                 if max_papers is not None and candidates_emitted >= max_papers:
                     break
                 pending_batch.append({
@@ -7013,6 +7286,7 @@ class PaperbaseService:
         stamped = 0
         skipped = 0
         for entry in papers:
+            self._raise_if_current_job_canceled()
             arxiv_id = (entry or {}).get("arxiv_id") or ""
             if not arxiv_id:
                 skipped += 1
@@ -7065,6 +7339,235 @@ class PaperbaseService:
             "skipped": skipped,
         }
 
+    # --- Author-signal harvest (#39 PR C) -------------------------------- #
+
+    def enqueue_harvest_author_job(
+        self,
+        *,
+        min_paper_count: int = 2,
+        min_cite_mass: int = 5_000,
+        max_authors: int = 100,
+        max_papers_per_author: int | None = None,
+        chunk_size: int = 50,
+    ) -> JobResponse:
+        """Queue a ``harvest_author`` planner job (#39 PR C).
+
+        The planner derives the top-author list from the indexed
+        corpus by aggregating ``paper_authors`` ↔ ``papers``,
+        picks the top ``max_authors`` by cite mass, then for each
+        pages S2's ``/author/{id}/papers`` and enqueues
+        ``harvest_chunk`` jobs (``source='s2_author'``) for the
+        arxiv-linked papers.
+
+        Defaults: ``min_cite_mass=5000`` matches the #39 spec
+        threshold ("≥5000 in Computer Science"). Operators raise
+        the bar for tighter coverage or lower it for wider sweep.
+        """
+        if min_paper_count < 1:
+            raise PermanentError("min_paper_count must be >= 1")
+        if min_cite_mass < 0:
+            raise PermanentError("min_cite_mass must be >= 0")
+        if max_authors < 1:
+            raise PermanentError("max_authors must be >= 1")
+        if max_papers_per_author is not None and max_papers_per_author < 1:
+            raise PermanentError("max_papers_per_author must be >= 1 when provided")
+        if chunk_size < 1 or chunk_size > 500:
+            raise PermanentError("chunk_size must be in [1, 500]")
+        job = self.repository.create_job(
+            "harvest_author",
+            {
+                "min_paper_count": int(min_paper_count),
+                "min_cite_mass": int(min_cite_mass),
+                "max_authors": int(max_authors),
+                "max_papers_per_author": max_papers_per_author,
+                "chunk_size": int(chunk_size),
+            },
+        )
+        logger.info(
+            "Created harvest_author job",
+            extra={
+                "event": "jobs.harvest_author.created",
+                "job_id": job.job_id,
+                "min_paper_count": min_paper_count,
+                "min_cite_mass": min_cite_mass,
+                "max_authors": max_authors,
+                "max_papers_per_author": max_papers_per_author,
+                "chunk_size": chunk_size,
+            },
+        )
+        return job
+
+    def run_harvest_author(
+        self,
+        *,
+        min_paper_count: int,
+        min_cite_mass: int,
+        max_authors: int,
+        max_papers_per_author: int | None,
+        chunk_size: int,
+        harvest_id: str | None = None,
+    ) -> dict[str, int]:
+        """Planner: derive top authors from the indexed corpus, then for
+        each page S2 and enqueue ``harvest_chunk`` jobs
+        (``source='s2_author'``) for arxiv-linked papers.
+
+        The chunk payload carries ``arxiv_ids`` plus the
+        ``top_author_s2_id`` so the chunk worker can stamp the
+        provenance column when it indexes each paper.
+        """
+        if min_paper_count < 1:
+            raise PermanentError("min_paper_count must be >= 1")
+        if min_cite_mass < 0:
+            raise PermanentError("min_cite_mass must be >= 0")
+        if max_authors < 1:
+            raise PermanentError("max_authors must be >= 1")
+        if chunk_size < 1 or chunk_size > 500:
+            raise PermanentError("chunk_size must be in [1, 500]")
+
+        run_harvest_id = harvest_id or new_id("harvest")
+        top_authors = self.repository.list_top_authors(
+            min_paper_count=min_paper_count,
+            min_cite_mass=min_cite_mass,
+            limit=max_authors,
+        )
+        chunks_created = 0
+        candidates_emitted = 0
+        authors_visited = 0
+
+        for top_author in top_authors:
+            self._raise_if_current_job_canceled()
+            author_s2_id = top_author["author_s2_id"]
+            authors_visited += 1
+            cursor: int | None = 0
+            per_author_emitted = 0
+            pending_batch: list[str] = []
+
+            def _flush_batch(author_id: str = author_s2_id) -> None:
+                nonlocal chunks_created, pending_batch
+                if not pending_batch:
+                    return
+                self.repository.create_job(
+                    "harvest_chunk",
+                    {
+                        "harvest_id": run_harvest_id,
+                        "source": "s2_author",
+                        "arxiv_ids": list(pending_batch),
+                        "top_author_s2_id": author_id,
+                    },
+                    dedupe_key=(
+                        f"harvest_chunk:{run_harvest_id}:s2_author:{author_id}:"
+                        f"{pending_batch[0]}-{pending_batch[-1]}-{len(pending_batch)}"
+                    ),
+                )
+                chunks_created += 1
+                pending_batch = []
+
+            while cursor is not None:
+                self._raise_if_current_job_canceled()
+                if max_papers_per_author is not None and per_author_emitted >= max_papers_per_author:
+                    break
+                page, next_cursor = sources.fetch_author_papers(
+                    s2_author_id=author_s2_id,
+                    cursor=cursor,
+                )
+                for candidate in page:
+                    self._raise_if_current_job_canceled()
+                    if max_papers_per_author is not None and per_author_emitted >= max_papers_per_author:
+                        break
+                    pending_batch.append(candidate.arxiv_id)
+                    candidates_emitted += 1
+                    per_author_emitted += 1
+                    if len(pending_batch) >= chunk_size:
+                        _flush_batch()
+                # Keep paging until S2 itself signals last page (same shape
+                # as the PR #50 / #52 EOF fixes). ``fetch_author_papers``
+                # filters non-arxiv rows client-side and may return an
+                # empty ``page`` while ``next_cursor`` is still set; only
+                # ``next_cursor is None`` means end-of-stream.
+                cursor = next_cursor
+            _flush_batch()
+
+        logger.info(
+            "harvest_author planner enqueued chunks",
+            extra={
+                "event": "harvest_author.planned",
+                "harvest_id": run_harvest_id,
+                "authors_visited": authors_visited,
+                "chunks_created": chunks_created,
+                "candidates_emitted": candidates_emitted,
+            },
+        )
+        return {
+            "authors_visited": authors_visited,
+            "chunks_created": chunks_created,
+            "candidates_emitted": candidates_emitted,
+        }
+
+    def run_harvest_chunk_author(
+        self,
+        *,
+        arxiv_ids: list[str],
+        top_author_s2_id: str | None = None,
+        harvest_id: str | None = None,
+    ) -> dict[str, int]:
+        """Chunk worker for ``source='s2_author'``.
+
+        Iterates ``arxiv_ids``, calls ``index_arxiv_paper``, and stamps
+        ``top_author_s2_id`` via ``set_paper_top_author``. Per-id
+        ``PermanentError`` is swallowed.
+
+        ``arxiv_ids`` is deduped on entry — multiple top authors can
+        surface the same paper, and the planner can produce duplicate
+        ids in a single chunk. ``index_arxiv_paper`` is idempotent so
+        duplicates are safe, but the work is wasted.
+
+        ``stamped`` counts papers whose post-call ``top_author_s2_id``
+        equals what we asked for, so under first-write-wins a paper
+        already stamped by a different author does not get
+        double-counted as our success.
+        """
+        if not arxiv_ids:
+            return {"requested": 0, "indexed": 0, "stamped": 0, "skipped": 0}
+        run_harvest_id = harvest_id or new_id("harvest")
+        # Preserve order while deduping; drop empties up front.
+        deduped_ids = list(dict.fromkeys(aid for aid in arxiv_ids if aid))
+        indexed = 0
+        stamped = 0
+        skipped = len(arxiv_ids) - len(deduped_ids)  # empty/duplicate entries
+        for arxiv_id in deduped_ids:
+            self._raise_if_current_job_canceled()
+            try:
+                stored = self.index_arxiv_paper(arxiv_id, force=False)
+                indexed += 1
+            except PermanentError:
+                skipped += 1
+                continue
+            if top_author_s2_id:
+                updated = self.repository.set_paper_top_author(
+                    stored.paper_id,
+                    top_author_s2_id=top_author_s2_id,
+                )
+                if updated is not None and updated.top_author_s2_id == top_author_s2_id:
+                    stamped += 1
+        logger.info(
+            "harvest_author chunk completed",
+            extra={
+                "event": "harvest_author.chunk_completed",
+                "harvest_id": run_harvest_id,
+                "top_author_s2_id": top_author_s2_id,
+                "requested": len(arxiv_ids),
+                "indexed": indexed,
+                "stamped": stamped,
+                "skipped": skipped,
+            },
+        )
+        return {
+            "requested": len(arxiv_ids),
+            "indexed": indexed,
+            "stamped": stamped,
+            "skipped": skipped,
+        }
+
     def enqueue_latest_sync_job(self) -> JobResponse:
         job = self.repository.create_job(
             "sync_latest",
@@ -7087,7 +7590,7 @@ class PaperbaseService:
         return job
 
     def process_next_job(self) -> JobResponse | None:
-        job = self.repository.claim_pending_job()
+        job = self.repository.claim_pending_job(worker_id=self._worker_id, lease_seconds=JOB_LEASE_SECONDS)
         if job is None:
             return None
         logger.info(
@@ -7098,7 +7601,10 @@ class PaperbaseService:
                 "job_type": job.job_type,
             },
         )
+        heartbeat_stop, heartbeat_thread = self._start_job_heartbeat(job)
+        current_job_token = _CURRENT_JOB.set(job)
         try:
+            self._raise_if_current_job_canceled()
             if job.job_type == "index_paper":
                 self._call_index_arxiv_paper(
                     job.payload["arxiv_id"],
@@ -7155,6 +7661,13 @@ class PaperbaseService:
                         harvest_id=str(job.payload.get("harvest_id") or job.job_id),
                         tracking_job=job,
                     )
+                elif source == "s2_author":
+                    # #39 PR C: arxiv_ids list + top_author_s2_id stamp.
+                    self.run_harvest_chunk_author(
+                        arxiv_ids=list(job.payload.get("arxiv_ids", [])),
+                        top_author_s2_id=job.payload.get("top_author_s2_id"),
+                        harvest_id=str(job.payload.get("harvest_id") or job.job_id),
+                    )
                 else:
                     self.run_harvest_chunk(
                         source=source,
@@ -7185,6 +7698,15 @@ class PaperbaseService:
                     harvest_id=str(job.payload.get("harvest_id") or job.job_id),
                     root_job_id=job.root_job_id or job.job_id,
                 )
+            elif job.job_type == "harvest_author":
+                self.run_harvest_author(
+                    min_paper_count=int(job.payload.get("min_paper_count", 2)),
+                    min_cite_mass=int(job.payload.get("min_cite_mass", 5_000)),
+                    max_authors=int(job.payload.get("max_authors", 100)),
+                    max_papers_per_author=job.payload.get("max_papers_per_author"),
+                    chunk_size=int(job.payload.get("chunk_size", 50)),
+                    harvest_id=str(job.payload.get("harvest_id") or job.job_id),
+                )
             elif job.job_type in {"reindex_embeddings", "reindex_missing_embeddings"}:
                 self.reindex_embeddings(
                     limit=int(job.payload.get("limit", 100_000)),
@@ -7206,7 +7728,8 @@ class PaperbaseService:
                 )
             else:
                 raise ValueError(f"Unsupported job type: {job.job_type}")
-            self.repository.mark_job_completed(job.job_id)
+            self._raise_if_current_job_canceled()
+            self.repository.mark_job_completed(job.job_id, lease_token=job.lease_token)
             logger.info(
                 "Completed job",
                 extra={
@@ -7215,8 +7738,23 @@ class PaperbaseService:
                     "job_type": job.job_type,
                 },
             )
+        except JobCanceled:
+            self.repository.mark_job_canceled(job.job_id, lease_token=job.lease_token)
+            logger.info(
+                "Canceled job",
+                extra={
+                    "event": "jobs.canceled",
+                    "job_id": job.job_id,
+                    "job_type": job.job_type,
+                },
+            )
         except Exception as exc:  # pragma: no cover - surfaced via job state and API
             self._handle_job_failure(job, exc)
+        finally:
+            _CURRENT_JOB.reset(current_job_token)
+            heartbeat_stop.set()
+            if heartbeat_thread is not None:
+                heartbeat_thread.join(timeout=1)
         return self.repository.get_job(job.job_id)
 
     def _handle_job_failure(self, job: JobResponse, exc: Exception) -> None:
@@ -7236,6 +7774,7 @@ class PaperbaseService:
             str(exc),
             permanent=permanent,
             next_run_at=next_run_at,
+            lease_token=job.lease_token,
         )
         logger.exception(
             "Job failed",
@@ -7255,6 +7794,11 @@ class PaperbaseService:
         """Promote a dead job back to pending with attempts reset. Returns
         the updated job, or None if the id isn't dead/failed."""
         return self.repository.requeue_dead_job(job_id)
+
+    def cancel_job(self, job_id: str) -> JobResponse | None:
+        """Cancel a pending job immediately or request cooperative
+        cancellation from the worker currently holding the running lease."""
+        return self.repository.cancel_job(job_id)
 
     def list_dead_jobs(self, *, limit: int = 50) -> list[JobResponse]:
         return self.list_jobs_by_status("dead", limit=limit)
@@ -7622,9 +8166,11 @@ class PaperbaseService:
         indexed: list[PaperResponse] = []
         seen: set[str] = set()
         for category in categories:
+            self._raise_if_current_job_canceled()
             papers = sources.fetch_recent(category, days=days, max_results=limit_per_category)
             sources.enrich_with_semantic_scholar(papers)
             for paper in papers:
+                self._raise_if_current_job_canceled()
                 if paper.arxiv_id in seen:
                     continue
                 seen.add(paper.arxiv_id)
@@ -7654,6 +8200,7 @@ class PaperbaseService:
         force: bool = False,
         tracking_job: JobResponse | None = None,
     ) -> PaperResponse:
+        self._raise_if_current_job_canceled()
         existing = self.repository.get_paper_by_arxiv_id(arxiv_id)
         if existing and existing.index_status == "indexed" and not force:
             if tracking_job is not None:
@@ -7685,6 +8232,7 @@ class PaperbaseService:
             },
         )
         metadata = paper or sources.get_paper_details(arxiv_id)
+        self._raise_if_current_job_canceled()
         if metadata is None:
             # Worker context: a missing arxiv id will never resolve, so this
             # must dead-letter rather than spin through the retry ladder.
@@ -7693,11 +8241,33 @@ class PaperbaseService:
         # failure here leaves citation_count=0 rather than blocking ingestion;
         # the enrich_missing_metadata backfill job will pick this paper up
         # later with aggressive retry.
-        sources.enrich_with_semantic_scholar([metadata], max_retries=0)
+        enrich_outcome = sources.enrich_with_semantic_scholar([metadata], max_retries=0)
+        self._raise_if_current_job_canceled()
+        # Snapshot an existing admin pin BEFORE the intermediate upsert so
+        # it flows through every subsequent upsert on this metadata object.
+        # A later ``get_paper_by_arxiv_id`` can't recover the pin because
+        # this upsert would have wiped it onto an empty code_url (#46).
+        existing_for_admin = self.repository.get_paper_by_arxiv_id(metadata.arxiv_id)
+        if (
+            existing_for_admin is not None
+            and existing_for_admin.code_url_source == "admin"
+            and existing_for_admin.code_url
+        ):
+            metadata.code_url = existing_for_admin.code_url
+            metadata.code_url_source = "admin"
         metadata.index_status = "indexing"
         stored = self.repository.upsert_paper(metadata, search_document=metadata.abstract)
         try:
+            # #39 PR C: persist S2 author rows so the top-author discovery
+            # aggregation has data. Skipped silently if enrichment was rate-
+            # limited — the backfill CLI fills in the gap. ``enrich_outcome``
+            # can be None in test contexts that stub the source-layer call.
+            if enrich_outcome is not None:
+                author_rows = enrich_outcome.authors_by_arxiv.get(metadata.arxiv_id) or []
+                if author_rows:
+                    self.repository.replace_paper_authors(stored.paper_id, authors=author_rows)
             extraction = index_paper_artifacts(metadata)
+            self._raise_if_current_job_canceled()
 
             metadata.source_type = extraction.source_type
             metadata.index_status = "indexed"
@@ -7705,6 +8275,70 @@ class PaperbaseService:
             metadata.summary_short, metadata.summary_eli5 = build_paper_summaries(
                 metadata, extraction, self.settings
             )
+
+            # Populate ``code_url`` + ``code_url_source`` with the 3-layer
+            # decision from #46. Priority order:
+            #   1. admin (already on ``metadata`` from a ``set_admin_code_url``
+            #      call or persisted row) — sticky, never overwritten here.
+            #   2. Hugging Face paper-page ``githubRepo`` crosslink, when
+            #      ``fetch_code_crosslinks_at_index`` is enabled.
+            #   3. In-text ranker over all extracted GitHub candidates.
+            # Rejected candidates are always stored in ``code_url_candidates``
+            # so admins + future agent-side logic can revisit them without
+            # re-scanning paper text.
+            candidates = extract_github_candidates(
+                metadata.abstract or "", extraction.text_markdown or ""
+            )
+            metadata.code_url_candidates = [c.url for c in candidates] or None
+            existing = self.repository.get_paper_by_arxiv_id(metadata.arxiv_id)
+            if existing is not None and existing.code_url_source == "admin" and existing.code_url:
+                # Admin pin survives re-index regardless of what's in the paper.
+                metadata.code_url = existing.code_url
+                metadata.code_url_source = "admin"
+            else:
+                crosslink_url: str | None = None
+                if self.settings.fetch_code_crosslinks_at_index:
+                    crosslink_url = sources.fetch_hf_paper_repo(metadata.arxiv_id)
+                if crosslink_url:
+                    metadata.code_url = crosslink_url
+                    metadata.code_url_source = "hf_papers"
+                else:
+                    winner = rank_github_candidates(
+                        candidates,
+                        abstract=metadata.abstract or "",
+                        body=extraction.text_markdown or "",
+                        authors=metadata.authors or "",
+                    )
+                    if winner is not None:
+                        metadata.code_url = winner.url
+                        metadata.code_url_source = "extracted"
+                    else:
+                        # Ambiguous / no candidates: decline rather than best-guess
+                        # so the code-ingest pipeline (#41) does not auto-enqueue
+                        # an ingest job against a repo we are not confident about.
+                        metadata.code_url = None
+                        metadata.code_url_source = None
+
+                    # GitHub README verifier (#46 follow-up). This remains an
+                    # optional precision filter on top of the in-text ranker:
+                    # fetch the candidate repo's README and confirm it
+                    # references the paper. Off by default — see config docs
+                    # for the precision/recall tradeoff measured on the
+                    # 30-paper benchmark.
+                    if (
+                        winner is not None
+                        and self.settings.verify_code_url_via_github_readme
+                    ):
+                        verified = sources.verify_repo_owns_paper(
+                            winner.owner,
+                            winner.repo,
+                            metadata.arxiv_id,
+                            title=metadata.title or None,
+                            token=self.settings.github_token,
+                        )
+                        if not verified:
+                            metadata.code_url = None
+                            metadata.code_url_source = None
 
             search_document_parts = [metadata.title, metadata.tldr, metadata.summary_short, extraction.text_markdown]
             search_document = "\n\n".join(part for part in search_document_parts if part)
@@ -7751,6 +8385,7 @@ class PaperbaseService:
             ]
 
             for section_order, section in enumerate(extraction.sections):
+                self._raise_if_current_job_canceled()
                 section_path = f"{prefix}/sections/{section.slug}.md"
                 self.object_store.put_text(section_path, section.markdown, content_type="text/markdown")
                 section_depth = _section_depth_for(section)
@@ -7779,6 +8414,7 @@ class PaperbaseService:
                     content_type="application/json",
                 )
                 for figure_order, figure in enumerate(extraction.figures):
+                    self._raise_if_current_job_canceled()
                     caption_path = f"{prefix}/figures/{figure.figure_id}/caption.md"
                     self.object_store.put_text(caption_path, figure.caption, content_type="text/markdown")
                     text_chunks.append(
@@ -7806,6 +8442,7 @@ class PaperbaseService:
                     content_type="application/json",
                 )
                 for table_order, table in enumerate(extraction.tables):
+                    self._raise_if_current_job_canceled()
                     json_path = f"{prefix}/tables/{table.table_id}.json"
                     csv_path = f"{prefix}/tables/{table.table_id}.csv"
                     self.object_store.put_bytes(
@@ -7832,6 +8469,7 @@ class PaperbaseService:
             # sections/tables stay focused.
             chunk_texts: list[str] = []
             for chunk in text_chunks:
+                self._raise_if_current_job_canceled()
                 cap = (
                     4000
                     if chunk["chunk_kind"] == "full_text"
@@ -7839,11 +8477,13 @@ class PaperbaseService:
                 )
                 chunk_texts.append((chunk["content"] or "")[:cap])
             chunk_embeddings = self.embeddings.encode_batch(chunk_texts)
+            self._raise_if_current_job_canceled()
             if chunk_embeddings is not None and len(chunk_embeddings) == len(text_chunks):
                 for chunk, vector in zip(text_chunks, chunk_embeddings):
                     chunk["embedding"] = vector
 
             for artifact in extraction.raw_artifacts:
+                self._raise_if_current_job_canceled()
                 self.object_store.put_bytes(
                     f"{prefix}/{artifact.path}",
                     artifact.data,
@@ -8376,17 +9016,37 @@ class PaperbaseService:
         preview_path = self._preview_object_path(paper_id)
         return self.object_store.get_bytes(preview_path), "image/webp"
 
+    # Extension → content-type for the figure-serving probe. Order is
+    # render-cheap-first so when a figure was stored under multiple
+    # representations (rare, but the LaTeX path has produced both pdf
+    # raw bytes and a png rasterization for the same figure under early
+    # ingest paths) the browser-renderable one wins. eps/pdf cover the
+    # raw-bytes fallback the LaTeX rasterizer takes when Ghostscript /
+    # pypdfium2 fail (#48); without their MIME types here, those figures
+    # came back as ``image_url=None``.
+    _FIGURE_EXTENSION_CONTENT_TYPES: tuple[tuple[str, str], ...] = (
+        ("png", "image/png"),
+        ("jpg", "image/jpeg"),
+        ("jpeg", "image/jpeg"),
+        ("svg", "image/svg+xml"),
+        ("gif", "image/gif"),
+        ("webp", "image/webp"),
+        ("pdf", "application/pdf"),
+        ("eps", "application/postscript"),
+        ("bin", "application/octet-stream"),
+    )
+
     def get_figure(self, paper_id: str, figure_id: str) -> FigureResponse:
         caption_path = f"papers/{paper_id}/figures/{figure_id}/caption.md"
         if not self.object_store.exists(caption_path):
             raise HTTPException(status_code=404, detail=f"Figure {figure_id} not found for {paper_id}")
         image_url = None
         content_type = None
-        for extension in ("png", "jpg", "jpeg", "svg", "gif", "webp", "bin"):
+        for extension, mime in self._FIGURE_EXTENSION_CONTENT_TYPES:
             image_path = f"papers/{paper_id}/figures/{figure_id}/image.{extension}"
             if self.object_store.exists(image_path):
                 image_url = self.object_store.presign_get(image_path, expires_in=self.settings.presign_ttl_seconds)
-                content_type = "image/" + ("jpeg" if extension == "jpg" else extension)
+                content_type = mime
                 break
         return FigureResponse(
             paper_id=paper_id,

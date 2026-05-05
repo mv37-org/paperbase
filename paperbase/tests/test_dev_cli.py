@@ -383,6 +383,20 @@ def test_main_dispatches_reindex_embeddings(monkeypatch):
     }
 
 
+def test_main_dispatches_jobs_cancel(monkeypatch):
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "paperbase.dev_cli.jobs_cancel",
+        lambda *, job_id: captured.update({"job_id": job_id}) or 31,
+    )
+
+    exit_code = main(["jobs", "cancel", "job_123"])
+
+    assert exit_code == 31
+    assert captured == {"job_id": "job_123"}
+
+
 def test_main_dispatches_doctor_mode(monkeypatch):
     captured: list[DoctorMode] = []
     monkeypatch.setattr("paperbase.dev_cli.doctor", lambda *, mode: captured.append(mode) or 0)

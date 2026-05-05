@@ -335,18 +335,44 @@ def _browser_session_response_with_csrf(
     return session_response
 
 
+def _current_browser_session(
+    request: Request, service: PaperbaseService
+) -> BrowserSessionResponse:
+    raw_token = _browser_session_token(request)
+    session = service.get_browser_session(raw_token)
+    if session.authenticated and raw_token:
+        session.csrf_token = csrf_token_for_session(raw_token, get_settings())
+    return session
+
+
+def _serialize_browser_session_for_html(
+    session_response: BrowserSessionResponse,
+) -> str:
+    payload = json.dumps(jsonable_encoder(session_response), ensure_ascii=False, separators=(",", ":"))
+    return (
+        payload.replace("&", "\\u0026")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+    )
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
 @app.get("/", response_class=HTMLResponse)
-def home(request: Request) -> HTMLResponse:
+def home(request: Request, service: PaperbaseService = Depends(get_service)) -> HTMLResponse:
     if not _STATIC_DIR.exists():
         return HTMLResponse("Chat frontend not built. Run `cd chat && vp build`.", status_code=503)
     html = (_STATIC_DIR / "index.html").read_text(encoding="utf-8")
     api_base_url = _public_base_url(request)
+    bootstrap_session = _current_browser_session(request, service)
     html = html.replace("__PAPERBASE_BASE_URL__", api_base_url)
+    html = html.replace(
+        "__PAPERBASE_BOOTSTRAP_SESSION__",
+        _serialize_browser_session_for_html(bootstrap_session),
+    )
     response = HTMLResponse(html)
     set_no_store_headers(response)
     return response
@@ -453,6 +479,48 @@ def harvest_venue(
     return _enqueue_harvest_venue_request(request, service)
 
 
+class HarvestAuthorRequest(_BaseModel):
+    # Aggregation thresholds for picking top authors from the indexed corpus.
+    # ``min_cite_mass=5000`` matches the #39 spec ("≥5000 citations in CS").
+    # ``min_paper_count=2`` requires the author to have a real publication
+    # footprint in our corpus, not just a single paper that happens to clear
+    # the cite-mass bar — keeps the planner aimed at established researchers
+    # rather than the first author of any one heavily-cited paper.
+    min_paper_count: int = _Field(default=2, ge=1, le=1_000)
+    min_cite_mass: int = _Field(default=5_000, ge=0, le=10_000_000)
+    max_authors: int = _Field(default=100, ge=1, le=10_000)
+    # Bound per-author paging so a prolific author doesn't monopolize the run.
+    max_papers_per_author: int | None = _Field(default=None, ge=1, le=100_000)
+    chunk_size: int = _Field(default=50, ge=1, le=500)
+
+
+@app.post(
+    "/v1/index/harvest-author",
+    response_model=JobResponse,
+    dependencies=[Depends(require_bearer_token)],
+)
+def harvest_author(
+    request: HarvestAuthorRequest,
+    service: PaperbaseService = Depends(get_service),
+) -> JobResponse:
+    """Queue a ``harvest_author`` planner job (#39 PR C). Derives the
+    top-author list from the indexed corpus by aggregating
+    ``paper_authors`` JOIN ``papers``, then for each author pages S2
+    and enqueues ``harvest_chunk`` jobs (``source='s2_author'``)."""
+    from .errors import PermanentError
+
+    try:
+        return service.enqueue_harvest_author_job(
+            min_paper_count=request.min_paper_count,
+            min_cite_mass=request.min_cite_mass,
+            max_authors=request.max_authors,
+            max_papers_per_author=request.max_papers_per_author,
+            chunk_size=request.chunk_size,
+        )
+    except PermanentError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @app.post("/v1/index/summarize-top-cited", response_model=JobResponse, dependencies=[Depends(require_bearer_token)])
 def summarize_top_cited(
     limit: int = Query(default=500_000, ge=1, le=5_000_000),
@@ -522,6 +590,37 @@ def stats(service: PaperbaseService = Depends(get_service)) -> dict:
 @app.get("/v1/papers/{paper_id}", response_model=PaperResponse, dependencies=[Depends(require_bearer_token)])
 def get_paper(paper_id: str, service: PaperbaseService = Depends(get_service)) -> PaperResponse:
     return service.get_paper(paper_id)
+
+
+class _CodeUrlPatchRequest(_BaseModel):
+    """Body for the admin code_url override (#46)."""
+
+    code_url: str | None = _Field(
+        default=None,
+        description="Canonical GitHub URL (or None to clear). Must parse via code_ingest.parse_github_url.",
+    )
+
+
+@app.patch(
+    "/v1/papers/{paper_id}/code-url",
+    response_model=PaperResponse,
+    dependencies=[Depends(require_bearer_token)],
+)
+def patch_code_url(
+    paper_id: str,
+    request: _CodeUrlPatchRequest,
+    service: PaperbaseService = Depends(get_service),
+) -> PaperResponse:
+    """Pin ``papers.code_url`` to an operator-chosen value (#46 layer 3).
+
+    Pins set through this endpoint survive automatic re-index runs via the
+    sticky ``code_url_source='admin'`` bit. Pass ``code_url=null`` in the
+    body to clear the pin. A malformed / unsupported URL surfaces as 400.
+    """
+    response = service.set_admin_code_url(paper_id, code_url=request.code_url)
+    if response is None:
+        raise HTTPException(status_code=404, detail=f"Paper {paper_id} not found")
+    return response
 
 
 @app.get(
@@ -835,7 +934,10 @@ def browser_admin_jobs_overview(
 def browser_admin_list_jobs(
     status: str = Query(
         default="all",
-        description="Job status to filter on (all|dead|failed|pending|running|completed).",
+        description=(
+            "Job status to filter on "
+            "(all|dead|failed|pending|running|stalled|canceling|canceled|completed)."
+        ),
     ),
     limit: int = Query(default=50, ge=1, le=500),
     user=Depends(require_browser_admin_user),
@@ -983,7 +1085,10 @@ def get_job(job_id: str, service: PaperbaseService = Depends(get_service)) -> Jo
 def list_jobs(
     status: str = Query(
         default="dead",
-        description="Job status to filter on (all|dead|failed|pending|running|completed).",
+        description=(
+            "Job status to filter on "
+            "(all|dead|failed|pending|running|stalled|canceling|canceled|completed)."
+        ),
     ),
     limit: int = Query(default=50, ge=1, le=500),
     service: PaperbaseService = Depends(get_service),
@@ -1007,6 +1112,23 @@ def retry_job(
 
 
 @app.post(
+    "/v1/jobs/{job_id}/cancel",
+    response_model=JobResponse,
+    dependencies=[Depends(require_bearer_token)],
+)
+def cancel_job(
+    job_id: str,
+    service: PaperbaseService = Depends(get_service),
+) -> JobResponse:
+    """Cancel a pending job immediately or request cooperative cancellation
+    from the worker that currently owns a running job lease."""
+    result = service.cancel_job(job_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} is not in a cancelable state")
+    return result
+
+
+@app.post(
     "/v1/debug/integrations", response_model=IntegrationProbeResponse, dependencies=[Depends(require_bearer_token)]
 )
 def probe_integrations(
@@ -1022,10 +1144,7 @@ def probe_integrations(
 def browser_session(
     request: Request, response: Response, service: PaperbaseService = Depends(get_service)
 ) -> BrowserSessionResponse:
-    raw_token = _browser_session_token(request)
-    session = service.get_browser_session(raw_token)
-    if session.authenticated and raw_token:
-        session.csrf_token = csrf_token_for_session(raw_token, get_settings())
+    session = _current_browser_session(request, service)
     set_no_store_headers(response)
     return session
 

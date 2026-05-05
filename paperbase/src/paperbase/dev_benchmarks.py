@@ -1170,7 +1170,8 @@ def _patched_attr(target: Any, attribute: str, replacement: Any):
 @contextmanager
 def _patched_indexing(extractions: dict[str, ExtractionOutput]):
     with (
-        _patched_attr(sources, "enrich_with_semantic_scholar", lambda papers, **_: papers),
+        _patched_attr(sources, "enrich_with_semantic_scholar", lambda papers, **_: None),
+        _patched_attr(sources, "fetch_hf_paper_repo", lambda *args, **kwargs: None),
         _patched_attr(
             service_module,
             "index_paper_artifacts",

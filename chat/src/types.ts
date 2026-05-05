@@ -583,6 +583,13 @@ export interface ChatStreamErrorEvent {
   detail: string;
 }
 
+export interface ChatStreamMentionIndexingEvent {
+  paper_id: string;
+  arxiv_id?: string;
+  title?: string;
+  detail?: string;
+}
+
 export type ChatStreamEventMap = {
   turn_started: ChatStreamTurnStartedEvent;
   item_started: ChatStreamItemStartedEvent;
@@ -593,6 +600,9 @@ export type ChatStreamEventMap = {
   turn_failed: ChatStreamTurnFailedEvent;
   api_key_required: SendChatMessageResponse;
   error: ChatStreamErrorEvent;
+  mention_indexing_started: ChatStreamMentionIndexingEvent;
+  mention_indexing_completed: ChatStreamMentionIndexingEvent;
+  mention_indexing_failed: ChatStreamMentionIndexingEvent;
 };
 
 export interface MentionTag {

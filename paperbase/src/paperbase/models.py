@@ -29,6 +29,13 @@ class PaperMetadata(BaseModel):
     influential_citation_count: int = 0
     semantic_scholar_id: str | None = None
     code_url: str | None = None
+    # Provenance + candidate history for ``code_url`` (#46). See PaperORM
+    # for authoritative column docs; ``code_url_source`` in {None,
+    # "extracted", "hf_papers", "admin"} tells consumers whether the URL
+    # came from the ranker, Hugging Face paper pages, or a human pin.
+    # Admin pins must not be overwritten by automatic re-index runs.
+    code_url_source: str | None = None
+    code_url_candidates: list[str] | None = None
     # Paper-code ingestion state (#5). See PaperORM.code_index_status /
     # code_is_python / code_python_reason / code_manifest for the
     # authoritative column docs.
@@ -41,6 +48,8 @@ class PaperMetadata(BaseModel):
     venue: str | None = None
     venue_year: int | None = None
     venue_source: str | None = None
+    # Author-signal harvest provenance (#39 PR C). See PaperORM.top_author_s2_id.
+    top_author_s2_id: str | None = None
     source_type: str | None = None
     index_status: str = "discovered"
     indexed_at: datetime | None = None
@@ -225,12 +234,18 @@ class JobResponse(BaseModel):
     root_job_id: str | None = None
     job_type: str
     status: str
+    effective_status: str | None = None
     payload: dict[str, Any]
     error: str | None = None
     attempts: int = 0
     max_attempts: int = 3
     next_run_at: datetime | None = None
     last_attempted_at: datetime | None = None
+    worker_id: str | None = None
+    heartbeat_at: datetime | None = None
+    lease_expires_at: datetime | None = None
+    cancel_requested_at: datetime | None = None
+    lease_token: str | None = Field(default=None, exclude=True)
     # Smaller = claimed first. Interactive on-demand work sits at -10, hourly
     # sync at 0, bulk backfill at 10.
     priority: int = 0
@@ -238,6 +253,12 @@ class JobResponse(BaseModel):
     updated_at: datetime
     started_at: datetime | None = None
     finished_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def _default_effective_status(self):
+        if self.effective_status is None:
+            self.effective_status = self.status
+        return self
 
 
 class JobPaperRecord(BaseModel):
@@ -868,6 +889,11 @@ class SendChatMessageRequest(BaseModel):
     tag_filters: list[str] = Field(default_factory=list)
     include_uploads: bool = True
     include_papers: bool = True
+    # Paper IDs the user @-mentioned in the composer. The send path resolves
+    # each id and fetches+indexes it from arXiv if it is not already at
+    # index_status='indexed', so the chat turn always sees a fully indexed
+    # paper for anything the user tagged.
+    paper_ids: list[str] = Field(default_factory=list)
 
 
 class SendChatMessageResponse(BaseModel):
