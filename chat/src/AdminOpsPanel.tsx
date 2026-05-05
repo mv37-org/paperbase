@@ -1766,43 +1766,6 @@ export function AdminOpsPanel({
 
           {jobPapersError ? <div className="admin-jobs-inline-error">{jobPapersError}</div> : null}
           <div className="admin-jobs-surface">
-            <div className="admin-jobs-results-bar">
-              <span>
-                {jobPapersLoading && jobPapersTotalCount === 0
-                  ? "Loading papers..."
-                  : jobPapersTotalCount === 0
-                    ? "No tracked papers yet"
-                    : `${formatWholeNumber(jobPapersPageStart)}-${formatWholeNumber(
-                        jobPapersPageEnd,
-                      )} of ${formatWholeNumber(jobPapersTotalCount)}`}
-              </span>
-              <div className="admin-jobs-results-actions">
-                <button
-                  type="button"
-                  className="admin-compact-action admin-compact-action-secondary"
-                  disabled={jobPapersLoading || !jobPapersHasPrevious}
-                  onClick={() => {
-                    setSelectedJobPaper(null);
-                    setJobPapersOffset((current) =>
-                      Math.max(0, current - ADMIN_JOB_PAPERS_PAGE_SIZE),
-                    );
-                  }}
-                >
-                  Prev
-                </button>
-                <button
-                  type="button"
-                  className="admin-compact-action admin-compact-action-secondary"
-                  disabled={jobPapersLoading || !jobPapersHasMore}
-                  onClick={() => {
-                    setSelectedJobPaper(null);
-                    setJobPapersOffset((current) => current + ADMIN_JOB_PAPERS_PAGE_SIZE);
-                  }}
-                >
-                  Next
-                </button>
-              </div>
-            </div>
             {jobPapersLoading && jobPapersTotalCount === 0 ? (
               <div className="admin-jobs-empty">Loading papers...</div>
             ) : null}
@@ -1853,6 +1816,43 @@ export function AdminOpsPanel({
                 </table>
               </div>
             ) : null}
+            <div className="admin-jobs-results-bar">
+              <span>
+                {jobPapersLoading && jobPapersTotalCount === 0
+                  ? "Loading papers..."
+                  : jobPapersTotalCount === 0
+                    ? "No tracked papers yet"
+                    : `${formatWholeNumber(jobPapersPageStart)}-${formatWholeNumber(
+                        jobPapersPageEnd,
+                      )} of ${formatWholeNumber(jobPapersTotalCount)}`}
+              </span>
+              <div className="admin-jobs-results-actions">
+                <button
+                  type="button"
+                  className="admin-compact-action admin-compact-action-secondary"
+                  disabled={jobPapersLoading || !jobPapersHasPrevious}
+                  onClick={() => {
+                    setSelectedJobPaper(null);
+                    setJobPapersOffset((current) =>
+                      Math.max(0, current - ADMIN_JOB_PAPERS_PAGE_SIZE),
+                    );
+                  }}
+                >
+                  Prev
+                </button>
+                <button
+                  type="button"
+                  className="admin-compact-action admin-compact-action-secondary"
+                  disabled={jobPapersLoading || !jobPapersHasMore}
+                  onClick={() => {
+                    setSelectedJobPaper(null);
+                    setJobPapersOffset((current) => current + ADMIN_JOB_PAPERS_PAGE_SIZE);
+                  }}
+                >
+                  Next
+                </button>
+              </div>
+            </div>
           </div>
         </>
       )}

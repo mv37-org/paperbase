@@ -5500,7 +5500,7 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
   justify-content: space-between;
   gap: 12px;
   padding: 12px 0;
-  border-bottom: 1px solid var(--line);
+  border-top: 1px solid var(--line);
   color: var(--muted);
   font-size: 13px;
 }
