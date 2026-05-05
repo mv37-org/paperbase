@@ -19,8 +19,11 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from .auth import (
     clear_browser_session_cookie,
+    get_optional_browser_user,
     require_bearer_token,
+    require_browser_admin_user,
     require_browser_user,
+    require_browser_write_admin_user,
     require_browser_write_user,
     set_browser_session_cookie,
     set_no_store_headers,
@@ -28,6 +31,8 @@ from .auth import (
 from .config import get_settings
 from .logging_utils import build_log_config
 from .models import (
+    AdminJobPapersResponse,
+    AdminJobsOverviewResponse,
     BrowserSessionResponse,
     ChatThreadListResponse,
     ChatThreadResponse,
@@ -35,6 +40,7 @@ from .models import (
     CodeFileListResponse,
     CodeReadResponse,
     CodeSearchResponse,
+    CreatePaperCommentRequest,
     CreateProjectRequest,
     CreateChatThreadRequest,
     FileContentResponse,
@@ -50,8 +56,11 @@ from .models import (
     LoginRequest,
     ManifestResponse,
     MoveChatThreadProjectRequest,
+    PaperAssetResponse,
+    PaperCommentsResponse,
     PaperPreviewResponse,
     PaperResponse,
+    PaperVoteSummary,
     ProjectItemPageResponse,
     ProjectRepoSyncRequest,
     ProjectRepoSyncResponse,
@@ -75,6 +84,8 @@ from .models import (
     SendChatMessageResponse,
     SignupRequest,
     TableResponse,
+    TrendingFeedResponse,
+    TrendingPaperDetailResponse,
     UpdateAppearanceRequest,
     UpdatePythonFileRequest,
     UpdateNotificationsRequest,
@@ -94,6 +105,11 @@ app = FastAPI(
 _app_settings = get_settings()
 _PACKAGE_DIR = Path(__file__).resolve().parent
 _STATIC_DIR = _PACKAGE_DIR / "static"
+
+
+def _env_flag(name: str) -> bool:
+    value = os.getenv(name, "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _allowed_browser_origins() -> list[str]:
@@ -210,6 +226,66 @@ def _suggestion_response(service: PaperbaseService, q: str, *, limit: int) -> di
         suggestions = service.suggest_fallback_papers(limit=min(limit, 6))
         fallback = True
     return {"suggestions": suggestions, "fallback": fallback}
+
+
+def _retry_job_or_404(service: PaperbaseService, job_id: str) -> JobResponse:
+    result = service.retry_dead_job(job_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} is not in a retryable state")
+    return result
+
+
+def _enqueue_harvest_range_request(
+    request: "HarvestRangeRequest",
+    service: PaperbaseService,
+) -> JobResponse:
+    from .errors import PermanentError
+
+    categories = request.categories or list(get_settings().arxiv_categories)
+    try:
+        return service.enqueue_harvest_range_job(
+            categories=categories,
+            start_date=request.start_date,
+            end_date=request.end_date,
+            limit_per_window=request.limit_per_window,
+            chunk_months=request.chunk_months,
+            source=request.source,
+        )
+    except PermanentError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+def _enqueue_harvest_top_cited_request(
+    request: "HarvestTopCitedRequest",
+    service: PaperbaseService,
+) -> JobResponse:
+    from .errors import PermanentError
+
+    try:
+        return service.enqueue_harvest_top_cited_job(
+            min_citations=request.min_citations,
+            max_papers=request.max_papers,
+            chunk_size=request.chunk_size,
+        )
+    except PermanentError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+def _enqueue_harvest_venue_request(
+    request: "HarvestVenueRequest",
+    service: PaperbaseService,
+) -> JobResponse:
+    from .errors import PermanentError
+
+    try:
+        return service.enqueue_harvest_venue_job(
+            venue=request.venue,
+            year=request.year,
+            max_papers=request.max_papers,
+            chunk_size=request.chunk_size,
+        )
+    except PermanentError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @lru_cache(maxsize=1)
@@ -343,20 +419,7 @@ def harvest_range(
     category and enqueues one ``harvest_chunk`` per window. Chunks run at
     lower priority than interactive work so a large backfill does not
     starve on-demand indexing."""
-    from .errors import PermanentError
-
-    categories = request.categories or list(get_settings().arxiv_categories)
-    try:
-        return service.enqueue_harvest_range_job(
-            categories=categories,
-            start_date=request.start_date,
-            end_date=request.end_date,
-            limit_per_window=request.limit_per_window,
-            chunk_months=request.chunk_months,
-            source=request.source,
-        )
-    except PermanentError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    return _enqueue_harvest_range_request(request, service)
 
 
 class HarvestTopCitedRequest(_BaseModel):
@@ -385,16 +448,7 @@ def harvest_top_cited(
     (``source='s2_top_cited'``) in fixed-size arxiv-id batches. Chunks
     run at the same low priority as ``harvest_range`` so an on-demand
     ``index_paper`` always cuts in front."""
-    from .errors import PermanentError
-
-    try:
-        return service.enqueue_harvest_top_cited_job(
-            min_citations=request.min_citations,
-            max_papers=request.max_papers,
-            chunk_size=request.chunk_size,
-        )
-    except PermanentError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    return _enqueue_harvest_top_cited_request(request, service)
 
 
 class HarvestVenueRequest(_BaseModel):
@@ -422,17 +476,7 @@ def harvest_venue(
     Semantic Scholar's bulk search filtered by venue + year, enqueues
     ``harvest_chunk`` jobs (``source='s2_venue'``); the chunk worker
     indexes each paper and stamps the ``venue`` columns."""
-    from .errors import PermanentError
-
-    try:
-        return service.enqueue_harvest_venue_job(
-            venue=request.venue,
-            year=request.year,
-            max_papers=request.max_papers,
-            chunk_size=request.chunk_size,
-        )
-    except PermanentError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    return _enqueue_harvest_venue_request(request, service)
 
 
 class HarvestAuthorRequest(_BaseModel):
@@ -756,6 +800,64 @@ def browser_suggest_papers(
     return _suggestion_response(service, q, limit=limit)
 
 
+@app.get("/v1/browser/trending", response_model=TrendingFeedResponse)
+def browser_list_trending_papers(
+    date: str = Query(..., min_length=10, max_length=10),
+    sort: str = Query(default="default"),
+    user=Depends(get_optional_browser_user),
+    service: PaperbaseService = Depends(get_service),
+) -> TrendingFeedResponse:
+    return service.list_browser_trending_papers(date=date, sort=sort, viewer=user)
+
+
+@app.get("/v1/browser/trending/papers/{paper_id}", response_model=TrendingPaperDetailResponse)
+def browser_get_trending_paper(
+    paper_id: str,
+    user=Depends(get_optional_browser_user),
+    service: PaperbaseService = Depends(get_service),
+) -> TrendingPaperDetailResponse:
+    return service.get_browser_trending_paper(paper_id, viewer=user)
+
+
+@app.get("/v1/browser/trending/papers/{paper_id}/preview/content")
+def browser_get_trending_paper_preview_content(
+    paper_id: str,
+    service: PaperbaseService = Depends(get_service),
+) -> Response:
+    payload, content_type = service.get_browser_trending_paper_preview_content(paper_id)
+    output = Response(content=payload, media_type=content_type)
+    set_no_store_headers(output)
+    return output
+
+
+@app.put("/v1/browser/trending/papers/{paper_id}/upvote", response_model=PaperVoteSummary)
+def browser_upvote_trending_paper(
+    paper_id: str,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> PaperVoteSummary:
+    return service.set_browser_trending_paper_upvote(paper_id, user=user, upvoted=True)
+
+
+@app.delete("/v1/browser/trending/papers/{paper_id}/upvote", response_model=PaperVoteSummary)
+def browser_remove_trending_paper_upvote(
+    paper_id: str,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> PaperVoteSummary:
+    return service.set_browser_trending_paper_upvote(paper_id, user=user, upvoted=False)
+
+
+@app.post("/v1/browser/trending/papers/{paper_id}/comments", response_model=PaperCommentsResponse)
+def browser_create_trending_paper_comment(
+    paper_id: str,
+    request: CreatePaperCommentRequest,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> PaperCommentsResponse:
+    return service.create_browser_trending_paper_comment(paper_id, user=user, request=request)
+
+
 @app.get("/v1/browser/papers/{paper_id}", response_model=PaperResponse)
 def browser_get_paper(
     paper_id: str,
@@ -797,6 +899,18 @@ def browser_get_paper_preview(
     return preview
 
 
+@app.get("/v1/browser/papers/{paper_id}/preview/content")
+def browser_get_paper_preview_content(
+    paper_id: str,
+    user=Depends(require_browser_user),
+    service: PaperbaseService = Depends(get_service),
+) -> Response:
+    payload, content_type = service.get_paper_preview_content(paper_id)
+    response = Response(content=payload, media_type=content_type)
+    set_no_store_headers(response)
+    return response
+
+
 @app.get("/v1/browser/papers/{paper_id}/tables/{table_id}", response_model=TableResponse)
 def browser_get_paper_table(
     paper_id: str,
@@ -805,6 +919,157 @@ def browser_get_paper_table(
     service: PaperbaseService = Depends(get_service),
 ) -> TableResponse:
     return service.get_table(paper_id, table_id)
+
+
+@app.get("/v1/browser/admin/jobs/overview", response_model=AdminJobsOverviewResponse)
+def browser_admin_jobs_overview(
+    limit: int = Query(default=50, ge=1, le=200),
+    user=Depends(require_browser_admin_user),
+    service: PaperbaseService = Depends(get_service),
+) -> AdminJobsOverviewResponse:
+    return service.get_admin_jobs_overview(limit=limit)
+
+
+@app.get("/v1/browser/admin/jobs", response_model=list[JobResponse])
+def browser_admin_list_jobs(
+    status: str = Query(
+        default="all",
+        description=(
+            "Job status to filter on "
+            "(all|dead|failed|pending|running|stalled|canceling|canceled|completed)."
+        ),
+    ),
+    limit: int = Query(default=50, ge=1, le=500),
+    user=Depends(require_browser_admin_user),
+    service: PaperbaseService = Depends(get_service),
+) -> list[JobResponse]:
+    return service.list_jobs_by_status(status, limit=limit)
+
+
+@app.get("/v1/browser/admin/jobs/{root_job_id}/papers", response_model=AdminJobPapersResponse)
+def browser_admin_job_papers(
+    root_job_id: str,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=200),
+    user=Depends(require_browser_admin_user),
+    service: PaperbaseService = Depends(get_service),
+) -> AdminJobPapersResponse:
+    return service.get_admin_job_papers(root_job_id, offset=offset, limit=limit)
+
+
+@app.post("/v1/browser/admin/jobs/{job_id}/retry", response_model=JobResponse)
+def browser_admin_retry_job(
+    job_id: str,
+    user=Depends(require_browser_write_admin_user),
+    service: PaperbaseService = Depends(get_service),
+) -> JobResponse:
+    return _retry_job_or_404(service, job_id)
+
+
+@app.post("/v1/browser/admin/index/papers/arxiv/{arxiv_id}", response_model=JobResponse)
+def browser_admin_index_paper(
+    arxiv_id: str,
+    force: bool = Query(default=False),
+    user=Depends(require_browser_write_admin_user),
+    service: PaperbaseService = Depends(get_service),
+) -> JobResponse:
+    return service.enqueue_index_job(arxiv_id, force=force)
+
+
+@app.post("/v1/browser/admin/index/harvest", response_model=JobResponse)
+def browser_admin_harvest_range(
+    request: HarvestRangeRequest,
+    user=Depends(require_browser_write_admin_user),
+    service: PaperbaseService = Depends(get_service),
+) -> JobResponse:
+    return _enqueue_harvest_range_request(request, service)
+
+
+@app.post("/v1/browser/admin/index/harvest-top-cited", response_model=JobResponse)
+def browser_admin_harvest_top_cited(
+    request: HarvestTopCitedRequest,
+    user=Depends(require_browser_write_admin_user),
+    service: PaperbaseService = Depends(get_service),
+) -> JobResponse:
+    return _enqueue_harvest_top_cited_request(request, service)
+
+
+@app.post("/v1/browser/admin/index/harvest-venue", response_model=JobResponse)
+def browser_admin_harvest_venue(
+    request: HarvestVenueRequest,
+    user=Depends(require_browser_write_admin_user),
+    service: PaperbaseService = Depends(get_service),
+) -> JobResponse:
+    return _enqueue_harvest_venue_request(request, service)
+
+
+@app.post("/v1/browser/admin/index/enrich-missing-metadata", response_model=JobResponse)
+def browser_admin_enrich_missing_metadata(
+    limit: int = Query(default=50_000, ge=1, le=5_000_000),
+    min_age_seconds: int = Query(default=3600, ge=0, le=30 * 24 * 3600),
+    user=Depends(require_browser_write_admin_user),
+    service: PaperbaseService = Depends(get_service),
+) -> JobResponse:
+    return service.enqueue_enrich_missing_metadata_job(
+        limit=limit,
+        min_age_seconds=min_age_seconds,
+    )
+
+
+@app.get("/v1/browser/admin/papers", response_model=list[PaperResponse])
+def browser_admin_list_papers(
+    q: str = Query(default="", max_length=200),
+    index_status: str = Query(default="all"),
+    limit: int = Query(default=50, ge=1, le=200),
+    user=Depends(require_browser_admin_user),
+    service: PaperbaseService = Depends(get_service),
+) -> list[PaperResponse]:
+    return service.list_papers(query=q or None, index_status=index_status, limit=limit)
+
+
+@app.get("/v1/browser/admin/papers/{paper_id}/files", response_model=FileListResponse)
+def browser_admin_list_paper_files(
+    paper_id: str,
+    user=Depends(require_browser_admin_user),
+    service: PaperbaseService = Depends(get_service),
+) -> FileListResponse:
+    return service.list_files(paper_id)
+
+
+@app.get("/v1/browser/admin/papers/{paper_id}/files/{path:path}", response_model=FileContentResponse)
+def browser_admin_read_paper_file(
+    paper_id: str,
+    path: str,
+    user=Depends(require_browser_admin_user),
+    service: PaperbaseService = Depends(get_service),
+) -> FileContentResponse:
+    return service.read_file(paper_id, path)
+
+
+@app.get("/v1/browser/admin/papers/{paper_id}/assets/{path:path}", response_model=PaperAssetResponse)
+def browser_admin_get_paper_asset(
+    paper_id: str,
+    path: str,
+    response: Response,
+    user=Depends(require_browser_admin_user),
+    service: PaperbaseService = Depends(get_service),
+) -> PaperAssetResponse:
+    asset = service.get_paper_asset(paper_id, path)
+    set_no_store_headers(response)
+    return asset
+
+
+@app.get("/v1/browser/admin/papers/{paper_id}/asset-content/{path:path}")
+def browser_admin_get_paper_asset_content(
+    paper_id: str,
+    path: str,
+    user=Depends(require_browser_admin_user),
+    service: PaperbaseService = Depends(get_service),
+) -> Response:
+    payload, content_type = service.get_paper_asset_content(paper_id, path)
+    response = Response(content=payload, media_type=content_type)
+    set_no_store_headers(response)
+    return response
 
 
 @app.get("/v1/jobs/{job_id}", response_model=JobResponse, dependencies=[Depends(require_bearer_token)])
@@ -822,7 +1087,7 @@ def list_jobs(
         default="dead",
         description=(
             "Job status to filter on "
-            "(dead|failed|pending|running|stalled|canceling|canceled|completed)."
+            "(all|dead|failed|pending|running|stalled|canceling|canceled|completed)."
         ),
     ),
     limit: int = Query(default=50, ge=1, le=500),
@@ -843,10 +1108,7 @@ def retry_job(
     """Promote a dead (or legacy-failed) job back to pending with its
     attempt counter reset. Returns 404 if the id isn't in a dead-letter
     state."""
-    result = service.retry_dead_job(job_id)
-    if result is None:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} is not in a retryable state")
-    return result
+    return _retry_job_or_404(service, job_id)
 
 
 @app.post(
@@ -1457,11 +1719,12 @@ def main() -> None:
 
     settings = get_settings()
     host, port = _resolve_bind_address()
+    reload_enabled = _env_flag("PAPERBASE_API_RELOAD")
     uvicorn.run(
         "paperbase.api:app",
         host=host,
         port=port,
-        reload=False,
+        reload=reload_enabled,
         log_config=build_log_config(component="api", level=settings.log_level, log_format=settings.log_format),
         log_level=settings.log_level.lower(),
     )

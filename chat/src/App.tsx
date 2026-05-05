@@ -43,9 +43,13 @@ import {
   updatePythonFile,
   uploadDocument,
 } from "./api";
+import { AdminOpsPanel } from "./AdminOpsPanel";
+import { CredentialFormUsernameField } from "./CredentialFormUsernameField";
 import { CodeSnippet, extractStreamingPythonPreview } from "./CodeSnippet";
 import { LandingMentionEditor } from "./LandingMentionEditor";
 import { MarkdownRenderer } from "./MarkdownRenderer";
+import { formatLocalTimestamp } from "./time";
+import { TrendingPapersPage, type TrendingBrowseState } from "./TrendingPapersPage";
 import type {
   AuthView,
   BrowserSessionResponse,
@@ -136,13 +140,11 @@ type OpenTab =
   | { kind: "thread"; id: string }
   | { kind: "python_file"; id: string }
   | { kind: "project_home"; id: string };
-type ProjectSidebarCategoryKey =
-  | "workflows"
-  | "experiments"
-  | "data"
-  | "notes"
-  | "sessions"
-  | "code";
+type WorkspaceView =
+  | { kind: "trending" }
+  | { kind: "admin_jobs" }
+  | { kind: "admin_job_papers"; rootJobId: string };
+type ProjectSidebarCategoryKey = "notes" | "sessions" | "code";
 type ProjectItemState = {
   items: ProjectItemSummary[];
   totalCount: number;
@@ -241,7 +243,11 @@ const DEFAULT_BROWSER_SETTINGS: NonNullable<BrowserSessionResponse["settings"]> 
 type AppearanceTheme = "light" | "dark";
 type SettingsTab = "inference" | "sandbox" | "version-control" | "appearance";
 
-const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; caption: string }> = [
+const BASE_SETTINGS_TABS: Array<{
+  id: SettingsTab;
+  label: string;
+  caption: string;
+}> = [
   {
     id: "inference",
     label: "Inference",
@@ -294,29 +300,20 @@ const APPEARANCE_OPTIONS: Array<{
 ];
 
 const AUTHENTICATED_DARK_THEME_CLASS = "authenticated-theme-dark";
-const PROJECT_SIDEBAR_CATEGORY_KEYS: ProjectSidebarCategoryKey[] = [
-  "workflows",
-  "experiments",
-  "data",
-  "notes",
-  "sessions",
-  "code",
-];
+const PROJECT_SIDEBAR_CATEGORY_KEYS: ProjectSidebarCategoryKey[] = ["notes", "sessions", "code"];
 const PUBLIC_ASSET_CACHE_KEY = `pb-${Date.now().toString(36)}`;
 const buildProjectCategoryCollapseState = (collapsed: boolean) =>
   Object.fromEntries(PROJECT_SIDEBAR_CATEGORY_KEYS.map((key) => [key, collapsed])) as Partial<
     Record<ProjectSidebarCategoryKey, boolean>
   >;
-const PROJECT_PLACEHOLDER_CATEGORIES = [
-  { key: "workflows", label: "Workflows", asset: "workflow.svg", showCount: true },
-  { key: "experiments", label: "Experiments", asset: "experiments.svg", showCount: true },
-  { key: "data", label: "Data", asset: "data.svg", showCount: false },
-  { key: "notes", label: "Notes", asset: "notes.svg", showCount: false },
+const WORKSPACE_SIDEBAR_ITEMS = [
+  { id: "trending", label: "Trending papers", asset: "docs.svg" },
+  { id: "admin_jobs", label: "Control panel", asset: "settings.svg", adminOnly: true },
 ] satisfies Array<{
-  key: ProjectSidebarCategoryKey;
+  id: "trending" | "admin_jobs";
   label: string;
   asset: string;
-  showCount: boolean;
+  adminOnly?: boolean;
 }>;
 
 function SettingsSectionHeading({ title, caption }: { title: string; caption: string }) {
@@ -501,6 +498,48 @@ function drawerStateFromUrl(): PaperDrawerState {
   return { paperId, path };
 }
 
+function localDateString(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function trendingBrowseStateFromUrl(): TrendingBrowseState | null {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("browse") !== "trending") {
+    return null;
+  }
+  const date = params.get("trendingDate");
+  return {
+    date: date && /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : localDateString(),
+    sort: params.get("trendingSort") === "upvotes" ? "upvotes" : "default",
+    paperId: params.get("trendingPaper"),
+  };
+}
+
+function updateTrendingBrowseUrl(nextState: TrendingBrowseState | null) {
+  const params = new URLSearchParams(window.location.search);
+  if (nextState) {
+    params.set("browse", "trending");
+    params.set("trendingDate", nextState.date);
+    params.set("trendingSort", nextState.sort);
+    if (nextState.paperId) {
+      params.set("trendingPaper", nextState.paperId);
+    } else {
+      params.delete("trendingPaper");
+    }
+  } else {
+    params.delete("browse");
+    params.delete("trendingDate");
+    params.delete("trendingSort");
+    params.delete("trendingPaper");
+  }
+  const query = params.toString();
+  const nextUrl = `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`;
+  window.history.pushState({}, "", nextUrl);
+}
+
 function updateDrawerUrl(nextState: PaperDrawerState) {
   const params = new URLSearchParams(window.location.search);
   if (nextState) {
@@ -636,12 +675,15 @@ function restoreTabs() {
         typeof value === "object" &&
         "kind" in value &&
         "id" in value &&
-        (value.kind === "thread" ||
-          value.kind === "python_file" ||
-          value.kind === "project_home") &&
         typeof value.id === "string"
       ) {
-        restored.push({ kind: value.kind, id: value.id });
+        if (
+          value.kind === "thread" ||
+          value.kind === "python_file" ||
+          value.kind === "project_home"
+        ) {
+          restored.push({ kind: value.kind, id: value.id });
+        }
       }
     }
     return restored.slice(-MAX_OPEN_TABS);
@@ -734,25 +776,6 @@ function truncateTabTitle(title: string) {
     return words.join(" ");
   }
   return `${words.slice(0, 4).join(" ")}…`;
-}
-
-function formatTodayTimeLabel(value: string) {
-  const timestamp = new Date(value);
-  if (Number.isNaN(timestamp.getTime())) {
-    return null;
-  }
-  const now = new Date();
-  const isToday =
-    timestamp.getFullYear() === now.getFullYear() &&
-    timestamp.getMonth() === now.getMonth() &&
-    timestamp.getDate() === now.getDate();
-  if (!isToday) {
-    return null;
-  }
-  return new Intl.DateTimeFormat(undefined, {
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(timestamp);
 }
 
 function pickThinkingWord(previous?: string | null) {
@@ -1354,6 +1377,7 @@ export default function App() {
   const [pythonFileRuns, setPythonFileRuns] = useState<Record<string, PythonFileRunState>>({});
   const [openTabs, setOpenTabs] = useState<OpenTab[]>([]);
   const [activeTab, setActiveTab] = useState<OpenTab | null>(null);
+  const [workspaceView, setWorkspaceView] = useState<WorkspaceView | null>(null);
   const [projectMenuProjectId, setProjectMenuProjectId] = useState<string | null>(null);
   const [projectModalState, setProjectModalState] = useState<ProjectModalState | null>(null);
   const [projectFormName, setProjectFormName] = useState("");
@@ -1425,6 +1449,9 @@ export default function App() {
   const [toolActivities, setToolActivities] = useState<Record<string, ToolActivityEntry[]>>({});
   const [contextUsagePopoverOpen, setContextUsagePopoverOpen] = useState(false);
   const [paperDrawer, setPaperDrawer] = useState<PaperDrawerState>(() => drawerStateFromUrl());
+  const [trendingBrowseState, setTrendingBrowseState] = useState<TrendingBrowseState | null>(() =>
+    trendingBrowseStateFromUrl(),
+  );
   const [paperDrawerPaper, setPaperDrawerPaper] = useState<PaperResponse | null>(null);
   const [paperDrawerContent, setPaperDrawerContent] = useState<PaperDrawerContent | null>(null);
   const [paperDrawerStatus, setPaperDrawerStatus] = useState<
@@ -1503,6 +1530,16 @@ export default function App() {
     }
     localStorage.setItem(OPEN_TABS_KEY, JSON.stringify(openTabs));
   }, [openTabs]);
+
+  useEffect(() => {
+    if (activeTab !== null) {
+      setWorkspaceView(null);
+      if (trendingBrowseState) {
+        setTrendingBrowseState(null);
+        updateTrendingBrowseUrl(null);
+      }
+    }
+  }, [activeTab, trendingBrowseState]);
 
   useEffect(() => {
     setSidebarCollapsed(restoreSidebarCollapsed());
@@ -1613,6 +1650,12 @@ export default function App() {
   const activeThreadId = activeTab?.kind === "thread" ? activeTab.id : null;
   const activePythonFileId = activeTab?.kind === "python_file" ? activeTab.id : null;
   const activeProjectHomeId = activeTab?.kind === "project_home" ? activeTab.id : null;
+  const activeWorkspacePageId =
+    workspaceView?.kind === "admin_jobs" || workspaceView?.kind === "admin_job_papers"
+      ? "admin_jobs"
+      : workspaceView?.kind === "trending" || trendingBrowseState
+        ? "trending"
+        : null;
   const activeThread = activeThreadId ? (threadMap[activeThreadId] ?? null) : null;
   const activePythonFile = activePythonFileId ? (pythonFileMap[activePythonFileId] ?? null) : null;
   const activeProjectHome = activeProjectHomeId
@@ -1653,8 +1696,9 @@ export default function App() {
       selectedSyncConflict.local_content)
     : "";
   const isChatEmpty =
-    activeTab == null ||
-    (activeTab.kind === "thread" && (!activeThread || activeThread.messages.length === 0));
+    activeTab == null
+      ? workspaceView == null
+      : activeTab.kind === "thread" && (!activeThread || activeThread.messages.length === 0);
   const showThreadDebugButton = Boolean(
     activeTab?.kind === "thread" && activeThreadDebugBundle && !isChatEmpty,
   );
@@ -1728,6 +1772,11 @@ export default function App() {
     });
   }, [openTabs, projects, pythonFileMap, streamingThreadId, threadMap]);
   const hasOpenTabs = openTabItems.length > 0;
+  const isWorkspaceView = workspaceView !== null;
+  const isAdminWorkspaceView =
+    workspaceView?.kind === "admin_jobs" || workspaceView?.kind === "admin_job_papers";
+  const showOpenTabHeader = hasOpenTabs && !isWorkspaceView;
+  const showThreadStageChrome = !isWorkspaceView && activeTab?.kind === "thread" && !isChatEmpty;
   const tabStripStyle = useMemo(
     () =>
       ({
@@ -1838,6 +1887,14 @@ export default function App() {
   useEffect(() => {
     const handlePopState = () => {
       setPaperDrawer(drawerStateFromUrl());
+      const nextTrendingBrowseState = trendingBrowseStateFromUrl();
+      setTrendingBrowseState(nextTrendingBrowseState);
+      setWorkspaceView((current) => {
+        if (nextTrendingBrowseState) {
+          return { kind: "trending" };
+        }
+        return current?.kind === "trending" ? null : current;
+      });
     };
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
@@ -1932,11 +1989,17 @@ export default function App() {
     }
     return {
       email: session.user.email,
+      isAdmin: Boolean(session.user.is_admin),
       hasOpenAIApiKey: session.has_openai_api_key ?? session.has_anthropic_api_key ?? false,
       settings: session.settings ?? DEFAULT_BROWSER_SETTINGS,
     };
   }, [session]);
   const sessionSettings = sessionSummary?.settings ?? DEFAULT_BROWSER_SETTINGS;
+  const settingsTabs = BASE_SETTINGS_TABS;
+  const workspaceSidebarItems = useMemo(
+    () => WORKSPACE_SIDEBAR_ITEMS.filter((item) => !item.adminOnly || sessionSummary?.isAdmin),
+    [sessionSummary?.isAdmin],
+  );
   const hasInferenceAccess = Boolean(sessionSummary?.hasOpenAIApiKey);
   const chatSetupProjectName = emptyStateProject?.name ?? activeThread?.project_name ?? "Project";
   const chatSetupItems = [
@@ -1989,10 +2052,16 @@ export default function App() {
   const appliedAppearanceTheme = sessionSettings.appearance_theme === "dark" ? "dark" : "light";
   const authenticatedDarkThemeEnabled = authenticated && appliedAppearanceTheme === "dark";
   const activeSettingsConfig = useMemo(
-    () => SETTINGS_TABS.find((tab) => tab.id === activeSettingsTab) ?? SETTINGS_TABS[0],
-    [activeSettingsTab],
+    () => settingsTabs.find((tab) => tab.id === activeSettingsTab) ?? settingsTabs[0],
+    [activeSettingsTab, settingsTabs],
   );
   const authCaption = authView === "settings" ? activeSettingsConfig.caption : authCopy.caption;
+
+  useEffect(() => {
+    if (!settingsTabs.some((tab) => tab.id === activeSettingsTab)) {
+      setActiveSettingsTab("inference");
+    }
+  }, [activeSettingsTab, settingsTabs]);
 
   useEffect(() => {
     setAppearanceThemeDraft(appliedAppearanceTheme);
@@ -2033,6 +2102,11 @@ export default function App() {
   const closePaperDrawer = useCallback(() => {
     setPaperDrawer(null);
     updateDrawerUrl(null);
+  }, []);
+
+  const updateTrendingBrowseState = useCallback((nextState: TrendingBrowseState | null) => {
+    setTrendingBrowseState(nextState);
+    updateTrendingBrowseUrl(nextState);
   }, []);
 
   const openPaperDrawer = useCallback((paperId: string, path: string) => {
@@ -2720,6 +2794,37 @@ export default function App() {
     setSelectedProjectId(projectId);
   }, []);
 
+  const openWorkspacePage = useCallback(
+    (pageId: "trending" | "admin_jobs") => {
+      if (pageId === "trending") {
+        updateTrendingBrowseState({
+          date: trendingBrowseState?.date ?? localDateString(),
+          sort: trendingBrowseState?.sort ?? "default",
+          paperId: trendingBrowseState?.paperId ?? null,
+        });
+        setWorkspaceView({ kind: "trending" });
+      } else {
+        updateTrendingBrowseState(null);
+        setWorkspaceView({ kind: "admin_jobs" });
+      }
+      setMobileSidebarOpen(false);
+      setAccountMenuOpen(false);
+      setProjectMenuProjectId(null);
+    },
+    [trendingBrowseState, updateTrendingBrowseState],
+  );
+
+  const openAdminJobPapers = useCallback(
+    (rootJobId: string) => {
+      updateTrendingBrowseState(null);
+      setWorkspaceView({ kind: "admin_job_papers", rootJobId });
+      setMobileSidebarOpen(false);
+      setAccountMenuOpen(false);
+      setProjectMenuProjectId(null);
+    },
+    [updateTrendingBrowseState],
+  );
+
   const createNewThread = useCallback(
     async (title = "", explicitProjectId?: string) => {
       const projectId =
@@ -3329,6 +3434,13 @@ export default function App() {
         return;
       }
 
+      const initialTrendingBrowseState = trendingBrowseStateFromUrl();
+      if (initialTrendingBrowseState) {
+        setTrendingBrowseState(initialTrendingBrowseState);
+        setWorkspaceView({ kind: "trending" });
+        return;
+      }
+
       const firstOpen = validRestoredTabs[0];
       if (firstOpen) {
         setActiveTab(firstOpen);
@@ -3508,6 +3620,14 @@ export default function App() {
     },
     [openAuthModal],
   );
+
+  const openTrendingFromLanding = useCallback(() => {
+    updateTrendingBrowseState({
+      date: trendingBrowseState?.date ?? localDateString(),
+      sort: trendingBrowseState?.sort ?? "default",
+      paperId: trendingBrowseState?.paperId ?? null,
+    });
+  }, [trendingBrowseState, updateTrendingBrowseState]);
 
   const handleUpload = useCallback(
     async (file: File) => {
@@ -4786,69 +4906,111 @@ export default function App() {
   return (
     <>
       {!authenticated ? (
-        <main id="landing-page" className="landing-page">
-          <button
-            id="landing-login-button"
-            className="landing-login-button"
-            type="button"
-            onClick={() => openAuthModal("login")}
-          >
-            <span className="landing-login-icon" aria-hidden="true">
-              <AppIcon src={staticAssetPath("login.svg")} className="landing-login-icon-image" />
-            </span>
-            <span className="landing-login-label">Log in</span>
-          </button>
-          <div className="landing-column">
-            <a
-              className="brandline brandline-link"
-              href="https://mv37.org"
-              target="_blank"
-              rel="noreferrer"
+        trendingBrowseState ? (
+          <main id="landing-page" className="landing-page landing-page-trending">
+            <button
+              id="landing-login-button"
+              className="landing-login-button"
+              type="button"
+              onClick={() => openAuthModal("login")}
             >
-              MV37
-            </a>
-            <h1 className="landing-title">Paperbase</h1>
-            <p className="landing-subtitle">
-              Research patterns for building better AI agents and systems.
-            </p>
-            <div className="landing-copy">
-              <p>
-                Paperbase helps AI researchers and agent builders keep up with fast-moving work
-                without losing track of the original sources, so they can ask broad questions,
-                compare ideas across papers, and pull out the design patterns that matter when
-                building agents and AI systems.
-              </p>
+              <span className="landing-login-icon" aria-hidden="true">
+                <AppIcon src={staticAssetPath("login.svg")} className="landing-login-icon-image" />
+              </span>
+              <span className="landing-login-label">Log in</span>
+            </button>
+            <div className="landing-column landing-column-wide">
+              <a
+                className="brandline brandline-link"
+                href="https://mv37.org"
+                target="_blank"
+                rel="noreferrer"
+              >
+                MV37
+              </a>
+              <TrendingPapersPage
+                variant="public"
+                authenticated={false}
+                browseState={trendingBrowseState}
+                onChangeBrowseState={updateTrendingBrowseState}
+                onRequireAuth={() => openAuthModal("login")}
+              />
             </div>
-            <LandingMentionEditor
-              attachButtonId="landing-upload-trigger"
-              onAttach={() => openAuthModal("login")}
-              onChange={setLandingPrompt}
-              onSubmit={() => void handleLandingSubmit()}
-              onTagsChange={setLandingTags}
-              searchPapers={suggestBrowserPapers}
-              submitButtonId="landing-start-button"
-              submitLabel="Start"
-              value={landingPrompt}
-            />
-
-            <section className="examples">
-              <div className="section-label">Examples</div>
-              <div className="example-list">
-                {EXAMPLES.map((example) => (
-                  <button
-                    key={example.label}
-                    type="button"
-                    className="example-pill"
-                    onClick={() => void handleExample(example.prompt)}
-                  >
-                    <span className="example-title">{example.label}</span>
-                    <span className="example-description">{example.description}</span>
-                  </button>
-                ))}
+          </main>
+        ) : (
+          <main id="landing-page" className="landing-page">
+            <button
+              id="landing-login-button"
+              className="landing-login-button"
+              type="button"
+              onClick={() => openAuthModal("login")}
+            >
+              <span className="landing-login-icon" aria-hidden="true">
+                <AppIcon src={staticAssetPath("login.svg")} className="landing-login-icon-image" />
+              </span>
+              <span className="landing-login-label">Log in</span>
+            </button>
+            <div className="landing-column">
+              <a
+                className="brandline brandline-link"
+                href="https://mv37.org"
+                target="_blank"
+                rel="noreferrer"
+              >
+                MV37
+              </a>
+              <h1 className="landing-title">Paperbase</h1>
+              <p className="landing-subtitle">
+                Research patterns for building better AI agents and systems.
+              </p>
+              <div className="landing-copy">
+                <p>
+                  Paperbase helps AI researchers and agent builders keep up with fast-moving work
+                  without losing track of the original sources, so they can ask broad questions,
+                  compare ideas across papers, and pull out the design patterns that matter when
+                  building agents and AI systems.
+                </p>
               </div>
-            </section>
-          </div>
-        </main>
+              <div className="landing-browse-row">
+                <button
+                  type="button"
+                  className="landing-browse-button"
+                  onClick={openTrendingFromLanding}
+                >
+                  Browse trending papers
+                </button>
+              </div>
+              <LandingMentionEditor
+                attachButtonId="landing-upload-trigger"
+                onAttach={() => openAuthModal("login")}
+                onChange={setLandingPrompt}
+                onSubmit={() => void handleLandingSubmit()}
+                onTagsChange={setLandingTags}
+                searchPapers={suggestBrowserPapers}
+                submitButtonId="landing-start-button"
+                submitLabel="Start"
+                value={landingPrompt}
+              />
+
+              <section className="examples">
+                <div className="section-label">Examples</div>
+                <div className="example-list">
+                  {EXAMPLES.map((example) => (
+                    <button
+                      key={example.label}
+                      type="button"
+                      className="example-pill"
+                      onClick={() => void handleExample(example.prompt)}
+                    >
+                      <span className="example-title">{example.label}</span>
+                      <span className="example-description">{example.description}</span>
+                    </button>
+                  ))}
+                </div>
+              </section>
+            </div>
+          </main>
+        )
       ) : null}
 
       {authenticated ? (
@@ -4908,6 +5070,28 @@ export default function App() {
                 </button>
               </div>
             </div>
+
+            <section className="sidebar-section sidebar-card workspace-nav-section">
+              <div className="sidebar-section-header">
+                <div className="section-label sidebar-section-label">Browse</div>
+              </div>
+              <div className="workspace-nav-list">
+                {workspaceSidebarItems.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className={`workspace-nav-item${activeWorkspacePageId === item.id ? " active" : ""}`}
+                    onClick={() => openWorkspacePage(item.id)}
+                  >
+                    <AppIcon
+                      src={staticAssetPath(item.asset)}
+                      className="workspace-nav-item-icon"
+                    />
+                    <span className="workspace-nav-item-label">{item.label}</span>
+                  </button>
+                ))}
+              </div>
+            </section>
 
             <section className="sidebar-section sidebar-card history-section">
               <div className="sidebar-section-header">
@@ -5098,38 +5282,31 @@ export default function App() {
                             {itemState?.loaded ? (
                               <>
                                 <div className="project-tree">
-                                  {PROJECT_PLACEHOLDER_CATEGORIES.map((category) => (
-                                    <div key={category.label} className="project-tree-category">
-                                      <div className="project-tree-category-header">
-                                        <button
-                                          type="button"
-                                          className="project-tree-category-label"
-                                          aria-expanded={!collapsedCategories[category.key]}
-                                          onClick={() =>
-                                            toggleProjectCategory(project.project_id, category.key)
-                                          }
-                                        >
-                                          <span
-                                            className="project-tree-category-chevron"
-                                            aria-hidden="true"
-                                          />
-                                          <MaskedAssetIcon
-                                            asset={category.asset}
-                                            className="project-tree-category-icon"
-                                          />
-                                          <span>{category.label}</span>
-                                        </button>
-                                        {category.showCount ? (
-                                          <div className="project-tree-category-actions">
-                                            <em className="project-tree-category-count">0</em>
-                                          </div>
-                                        ) : null}
-                                      </div>
-                                      {!collapsedCategories[category.key] ? (
-                                        <div className="project-tree-empty">Empty</div>
-                                      ) : null}
+                                  <div className="project-tree-category">
+                                    <div className="project-tree-category-header">
+                                      <button
+                                        type="button"
+                                        className="project-tree-category-label"
+                                        aria-expanded={!collapsedCategories.notes}
+                                        onClick={() =>
+                                          toggleProjectCategory(project.project_id, "notes")
+                                        }
+                                      >
+                                        <span
+                                          className="project-tree-category-chevron"
+                                          aria-hidden="true"
+                                        />
+                                        <MaskedAssetIcon
+                                          asset="notes.svg"
+                                          className="project-tree-category-icon"
+                                        />
+                                        <span>Notes</span>
+                                      </button>
                                     </div>
-                                  ))}
+                                    {!collapsedCategories.notes ? (
+                                      <div className="project-tree-empty">No notes yet.</div>
+                                    ) : null}
+                                  </div>
                                   <div className="project-tree-category">
                                     <div className="project-tree-category-header">
                                       <button
@@ -5474,8 +5651,8 @@ export default function App() {
             ) : null}
           </aside>
 
-          <section className={`chat-stage${hasOpenTabs ? "" : " no-tabs"}`}>
-            {hasOpenTabs ? (
+          <section className={`chat-stage${showOpenTabHeader ? "" : " no-tabs"}`}>
+            {showOpenTabHeader ? (
               <header className="chat-stage-header">
                 <div className="chat-stage-header-inner">
                   <button
@@ -5558,10 +5735,50 @@ export default function App() {
 
             <div
               ref={messageListRef}
-              className={`chat-message-list${isChatEmpty ? " empty" : ""}${activeTab?.kind === "python_file" ? " python-file-view" : ""}`}
+              className={`chat-message-list${isChatEmpty ? " empty" : ""}${activeTab?.kind === "python_file" ? " python-file-view" : ""}${isWorkspaceView ? " workspace-view" : ""}${isAdminWorkspaceView ? " workspace-admin-view" : ""}`}
               onScroll={handleMessageListScroll}
             >
-              {activeTab?.kind === "project_home" ? (
+              {workspaceView ? (
+                workspaceView.kind === "trending" ? (
+                  <div className="workspace-page workspace-page-wide">
+                    <TrendingPapersPage
+                      variant="workspace"
+                      authenticated={authenticated}
+                      browseState={
+                        trendingBrowseState ?? {
+                          date: localDateString(),
+                          sort: "default",
+                          paperId: null,
+                        }
+                      }
+                      onChangeBrowseState={(nextState) => updateTrendingBrowseState(nextState)}
+                      onRequireAuth={() => openAuthModal("login")}
+                    />
+                  </div>
+                ) : sessionSummary?.isAdmin ? (
+                  <div className="workspace-page workspace-page-admin">
+                    <AdminOpsPanel
+                      view={
+                        workspaceView.kind === "admin_job_papers"
+                          ? { kind: "papers", rootJobId: workspaceView.rootJobId }
+                          : { kind: "jobs" }
+                      }
+                      onBackToJobs={() => setWorkspaceView({ kind: "admin_jobs" })}
+                      onError={showErrorFlash}
+                      onNote={showNoteFlash}
+                      onOpenJobPapers={openAdminJobPapers}
+                    />
+                  </div>
+                ) : (
+                  <div className="workspace-page">
+                    <div className="workspace-page-header">
+                      <span>Control panel</span>
+                      <h1>Admin access required</h1>
+                      <p>This area is only available to allowlisted admin accounts.</p>
+                    </div>
+                  </div>
+                )
+              ) : activeTab?.kind === "project_home" ? (
                 activeProjectHome ? (
                   <div className="project-home-page">
                     <div className="project-home-header">
@@ -5582,14 +5799,6 @@ export default function App() {
                       </div>
                       <div className="project-home-stat">
                         <span>Notes</span>
-                        <strong>0</strong>
-                      </div>
-                      <div className="project-home-stat">
-                        <span>Data</span>
-                        <strong>0</strong>
-                      </div>
-                      <div className="project-home-stat">
-                        <span>Experiments</span>
                         <strong>0</strong>
                       </div>
                     </div>
@@ -5982,7 +6191,7 @@ export default function App() {
                         activeThreadStreamState?.turnIndex === userTurnIndex &&
                         !activeThreadStreamState.assistantStarted &&
                         turnActivities.length === 0;
-                      const hoverTime = formatTodayTimeLabel(message.created_at);
+                      const hoverTime = formatLocalTimestamp(message.created_at, "");
                       return (
                         <Fragment key={message.message_id}>
                           <article
@@ -6162,10 +6371,10 @@ export default function App() {
               )}
             </div>
 
-            {activeTab?.kind === "thread" && !isChatEmpty ? (
+            {showThreadStageChrome ? (
               <div className="chat-composer-fade" aria-hidden="true" />
             ) : null}
-            {showScrollToLatest ? (
+            {showThreadStageChrome && showScrollToLatest ? (
               <button
                 type="button"
                 className="chat-scroll-to-latest"
@@ -6178,7 +6387,7 @@ export default function App() {
                 </svg>
               </button>
             ) : null}
-            {activeTab?.kind === "thread" && !isChatEmpty ? (
+            {showThreadStageChrome ? (
               <>
                 {composerStatus ? <div className="composer-status">{composerStatus}</div> : null}
                 {composerEditor}
@@ -7295,6 +7504,7 @@ export default function App() {
                 }
               }}
             >
+              <CredentialFormUsernameField />
               <input
                 name="token"
                 type="text"
@@ -7324,7 +7534,7 @@ export default function App() {
           >
             <div className="settings-panel">
               <div className="settings-tabs" role="tablist" aria-label="Settings sections">
-                {SETTINGS_TABS.map((tab) => (
+                {settingsTabs.map((tab) => (
                   <button
                     key={tab.id}
                     type="button"
@@ -7419,6 +7629,7 @@ export default function App() {
                           }
                         }}
                       >
+                        <CredentialFormUsernameField email={session?.user?.email ?? ""} />
                         <div className="settings-field">
                           <label className="settings-field-label" htmlFor="settings-openai-api-key">
                             OpenAI API key
@@ -7522,6 +7733,7 @@ export default function App() {
                           }
                         }}
                       >
+                        <CredentialFormUsernameField email={session?.user?.email ?? ""} />
                         <div className="settings-field">
                           <label className="settings-field-label" htmlFor="settings-modal-token-id">
                             Modal token ID

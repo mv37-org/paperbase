@@ -104,6 +104,22 @@ def require_browser_user(
     return user
 
 
+def _require_admin_browser_user(user: BrowserUser) -> BrowserUser:
+    if not user.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
+    return user
+
+
+def require_browser_admin_user(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    service: PaperbaseService = Depends(get_service),
+) -> BrowserUser:
+    return _require_admin_browser_user(
+        require_browser_user(request=request, settings=settings, service=service)
+    )
+
+
 def require_browser_write_user(
     request: Request,
     settings: Settings = Depends(get_settings),
@@ -127,3 +143,13 @@ def require_browser_write_user(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid CSRF token")
 
     return user
+
+
+def require_browser_write_admin_user(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    service: PaperbaseService = Depends(get_service),
+) -> BrowserUser:
+    return _require_admin_browser_user(
+        require_browser_write_user(request=request, settings=settings, service=service)
+    )

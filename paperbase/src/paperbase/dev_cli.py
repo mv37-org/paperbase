@@ -17,7 +17,7 @@ from psycopg import sql
 from sqlalchemy.engine import URL, make_url
 
 from .config import Settings, get_settings, repo_root, resolve_repo_path, settings_env_file
-from .dev_benchmarks import profile_hotpaths, record_test_times
+from .dev_benchmarks import benchmark_definitions, list_benchmarks_cli, profile_hotpaths, record_test_times, run_named_benchmark
 from .repository import Base, build_repository
 from .service import PaperbaseService
 from .storage import build_object_store
@@ -964,6 +964,49 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     profile_parser.add_argument("--update-baseline", action="store_true")
 
+    benchmark_ids = [definition.benchmark_id for definition in benchmark_definitions()]
+
+    def _add_benchmark_run_flags(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument(
+            "--verbose",
+            action="store_true",
+            help="Show stage-by-stage progress and extra benchmark details while the run is executing.",
+        )
+        parser.add_argument(
+            "--plain",
+            action="store_true",
+            help="Disable the richer terminal UI and use plain text output only.",
+        )
+
+    benchmark_parser = subparsers.add_parser(
+        "benchmark",
+        help="Run repo-native benchmark helpers and write reports under benchmarks/out/.",
+    )
+    benchmark_sub = benchmark_parser.add_subparsers(dest="benchmark_command", required=True)
+    benchmark_list_parser = benchmark_sub.add_parser(
+        "list",
+        help="List the available repo-native benchmarks and the artifacts they produce.",
+    )
+    benchmark_list_parser.add_argument(
+        "--plain",
+        action="store_true",
+        help="Disable the richer terminal UI and use plain text output only.",
+    )
+    benchmark_run_parser = benchmark_sub.add_parser(
+        "run",
+        help="Run a named benchmark from the repo-native benchmark catalog.",
+    )
+    benchmark_run_parser.add_argument("benchmark_id", choices=benchmark_ids)
+    _add_benchmark_run_flags(benchmark_run_parser)
+    benchmark_iq1_parser = benchmark_sub.add_parser(
+        "iq-1",
+        help=(
+            "Compatibility alias for `paperbase-dev benchmark run iq-1`. "
+            "Runs the IQ-1 indexing census."
+        ),
+    )
+    _add_benchmark_run_flags(benchmark_iq1_parser)
+
     reindex_parser = subparsers.add_parser(
         "reindex-embeddings",
         help="Queue a paper/chunk embedding rewrite job using the current embedding model.",
@@ -1235,6 +1278,23 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.command == "profile":
         return profile_hotpaths(settings=_settings(), update_baseline=args.update_baseline)
+    if args.command == "benchmark":
+        if args.benchmark_command == "list":
+            return list_benchmarks_cli(use_rich=not args.plain)
+        if args.benchmark_command == "run":
+            return run_named_benchmark(
+                benchmark_id=args.benchmark_id,
+                settings=_settings(),
+                verbose=args.verbose,
+                use_rich=not args.plain,
+            )
+        if args.benchmark_command == "iq-1":
+            return run_named_benchmark(
+                benchmark_id="iq-1",
+                settings=_settings(),
+                verbose=args.verbose,
+                use_rich=not args.plain,
+            )
     if args.command == "reindex-embeddings":
         return reindex_embeddings(
             limit=args.limit,

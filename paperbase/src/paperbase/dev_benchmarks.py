@@ -3,19 +3,40 @@
 from __future__ import annotations
 
 import cProfile
+from collections.abc import Callable
+from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
+import platform
 import pstats
+from statistics import median
 import subprocess
 import time
 from typing import Any
 from xml.etree import ElementTree as ET
 
 import psycopg
+from psycopg.rows import dict_row
 from sqlalchemy.engine import make_url
+
+try:
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn, TimeElapsedColumn
+    from rich.table import Table
+except Exception:  # pragma: no cover - exercised through the plain-text fallback
+    Console = None
+    Panel = None
+    Progress = None
+    SpinnerColumn = None
+    TextColumn = None
+    BarColumn = None
+    TaskProgressColumn = None
+    TimeElapsedColumn = None
+    Table = None
 
 from . import service as service_module
 from . import sources
@@ -30,6 +51,145 @@ from .storage import build_object_store
 BENCHMARK_ENV_LABEL = "local-dev"
 BENCHMARK_QUERY_TOKEN = "zzbench"
 BENCHMARK_USER_EMAIL = "bench+profile@paperbase.local"
+
+
+@dataclass(frozen=True, slots=True)
+class BenchmarkDefinition:
+    benchmark_id: str
+    title: str
+    eli5: str
+    tier: str
+    outputs: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class BenchmarkRunOptions:
+    verbose: bool = False
+    use_rich: bool = True
+
+
+class _BenchmarkUi:
+    def __init__(self, *, definition: BenchmarkDefinition, options: BenchmarkRunOptions) -> None:
+        self.definition = definition
+        self.options = options
+        self.rich_enabled = bool(options.use_rich and Console and Table and Panel and Progress)
+        self.console = Console() if self.rich_enabled and Console else None
+        self.progress = None
+        self.progress_task_id: int | None = None
+        self.progress_total = 0
+
+    def start(self) -> None:
+        if self.rich_enabled and self.console and Panel:
+            self.console.print(
+                Panel.fit(
+                    self.definition.eli5,
+                    title=f"{self.definition.benchmark_id.upper()} · {self.definition.title}",
+                    border_style="cyan",
+                )
+            )
+            return
+        print(f"{self.definition.benchmark_id}: {self.definition.title}")
+        print(f"ELI5: {self.definition.eli5}")
+
+    def announce(self, message: str) -> None:
+        if self.rich_enabled and self.console:
+            self.console.print(f"[cyan]{message}[/cyan]")
+            return
+        print(message)
+
+    def detail(self, message: str) -> None:
+        if not self.options.verbose:
+            return
+        if self.rich_enabled and self.console:
+            self.console.print(f"[dim]{message}[/dim]")
+            return
+        print(message)
+
+    def start_stage(self, label: str, *, total: int | None = None) -> None:
+        self.finish_stage()
+        if total is None or total <= 0:
+            suffix = f" ({total} items)" if total == 0 else ""
+            self.announce(f"{label}{suffix}")
+            return
+        self.progress_total = total
+        if self.rich_enabled and self.console and Progress:
+            self.progress = Progress(
+                SpinnerColumn(),
+                TextColumn("{task.description}"),
+                BarColumn(),
+                TaskProgressColumn(),
+                TimeElapsedColumn(),
+                console=self.console,
+            )
+            self.progress.start()
+            self.progress_task_id = self.progress.add_task(label, total=total)
+            return
+        self.announce(f"{label} ({total} items)")
+
+    def advance(self, amount: int = 1) -> None:
+        if self.progress is not None and self.progress_task_id is not None:
+            self.progress.advance(self.progress_task_id, amount)
+
+    def finish_stage(self, *, message: str | None = None) -> None:
+        if self.progress is not None and self.progress_task_id is not None:
+            self.progress.update(self.progress_task_id, completed=self.progress_total)
+            self.progress.stop()
+        self.progress = None
+        self.progress_task_id = None
+        self.progress_total = 0
+        if message:
+            self.announce(message)
+
+    def render_catalog(self, definitions: list[BenchmarkDefinition]) -> None:
+        if self.rich_enabled and self.console and Table:
+            table = Table(title="Available Benchmarks")
+            table.add_column("ID", style="bold cyan")
+            table.add_column("Title")
+            table.add_column("Tier")
+            table.add_column("ELI5")
+            table.add_column("Outputs")
+            for definition in definitions:
+                table.add_row(
+                    definition.benchmark_id,
+                    definition.title,
+                    definition.tier,
+                    definition.eli5,
+                    "\n".join(definition.outputs),
+                )
+            self.console.print(table)
+            return
+        print("Available benchmarks:")
+        for definition in definitions:
+            print(
+                f"  {definition.benchmark_id}: {definition.title} [{definition.tier}] "
+                f"- {definition.eli5}"
+            )
+            print(f"    outputs: {', '.join(definition.outputs)}")
+
+    def render_summary(
+        self,
+        *,
+        headline_rows: list[tuple[str, str]],
+        output_rows: list[tuple[str, str]],
+    ) -> None:
+        if self.rich_enabled and self.console and Table:
+            summary = Table(title=f"{self.definition.benchmark_id.upper()} Summary")
+            summary.add_column("Metric")
+            summary.add_column("Value", justify="right", style="bold")
+            for label, value in headline_rows:
+                summary.add_row(label, value)
+            outputs = Table(title="Artifacts")
+            outputs.add_column("Kind")
+            outputs.add_column("Path")
+            for label, value in output_rows:
+                outputs.add_row(label, value)
+            self.console.print(summary)
+            self.console.print(outputs)
+            return
+        for label, value in headline_rows:
+            print(f"{label:<22} {value}")
+        for label, value in output_rows:
+            print(f"{label:<22} {value}")
 
 
 def _repo_root() -> Path:
@@ -83,6 +243,36 @@ def _profile_current_md_path() -> Path:
     return _out_dir() / "hotpaths.current.md"
 
 
+def _iq1_current_path() -> Path:
+    return _out_dir() / "iq1.current.json"
+
+
+def _iq1_current_md_path() -> Path:
+    return _out_dir() / "iq1.current.md"
+
+
+def benchmark_definitions() -> list[BenchmarkDefinition]:
+    return [
+        BenchmarkDefinition(
+            benchmark_id="iq-1",
+            title="Indexing census",
+            eli5=(
+                "Count how many papers are really indexed, how rich those artifacts are, "
+                "and how much of the corpus is embedding-searchable."
+            ),
+            tier="representative",
+            outputs=("benchmarks/out/iq1.current.json", "benchmarks/out/iq1.current.md"),
+        )
+    ]
+
+
+def _benchmark_definition(benchmark_id: str) -> BenchmarkDefinition:
+    for definition in benchmark_definitions():
+        if definition.benchmark_id == benchmark_id:
+            return definition
+    raise KeyError(f"Unknown benchmark id: {benchmark_id}")
+
+
 def _ensure_benchmark_dirs() -> None:
     _baseline_dir().mkdir(parents=True, exist_ok=True)
     _out_dir().mkdir(parents=True, exist_ok=True)
@@ -131,6 +321,49 @@ def _safe_float(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _ratio(numerator: int, denominator: int) -> float | None:
+    if denominator <= 0:
+        return None
+    return numerator / denominator
+
+
+def _format_ratio(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value * 100:.1f}%"
+
+
+def _percentile(values: list[float], percentile: float) -> float | None:
+    if not values:
+        return None
+    if len(values) == 1:
+        return values[0]
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * (percentile / 100.0)
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    if upper == lower:
+        return ordered[lower]
+    weight = position - lower
+    return ordered[lower] + ((ordered[upper] - ordered[lower]) * weight)
+
+
+def _benchmark_runtime() -> dict[str, Any]:
+    return {
+        "platform": platform.platform(),
+        "system": platform.system(),
+        "machine": platform.machine(),
+        "processor": platform.processor() or None,
+    }
 
 
 def _metadata(kind: str) -> dict[str, Any]:
@@ -267,6 +500,448 @@ def _render_test_markdown(report: dict[str, Any]) -> str:
             lines.append("| _No slower tests_ | n/a | n/a | n/a |")
 
     return "\n".join(lines)
+
+
+def _psycopg_dsn(settings: Settings) -> str:
+    return make_url(settings.database_url).set(drivername="postgresql").render_as_string(hide_password=False)
+
+
+def _category_family(value: str | None) -> str:
+    normalized = (value or "").strip()
+    if not normalized:
+        return "unknown"
+    return normalized.split(".", 1)[0] or "unknown"
+
+
+def _published_year(value: str | None) -> str:
+    normalized = (value or "").strip()
+    year = normalized[:4]
+    return year if year.isdigit() else "unknown"
+
+
+def _distribution(counter: Counter[str], *, denominator: int) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for key, count in sorted(counter.items(), key=lambda item: (-item[1], item[0])):
+        rows.append(
+            {
+                "key": key,
+                "count": count,
+                "rate": _ratio(count, denominator),
+            }
+        )
+    return rows
+
+
+def _preview_paper_ids(
+    *,
+    paper_ids: list[str],
+    object_store,
+    on_checked: Callable[[str, bool], None] | None = None,
+) -> set[str]:
+    preview_ids: set[str] = set()
+    for paper_id in paper_ids:
+        exists = object_store.exists(f"papers/{paper_id}/preview/first-page-top.webp")
+        if exists:
+            preview_ids.add(paper_id)
+        if on_checked is not None:
+            on_checked(paper_id, exists)
+    return preview_ids
+
+
+def _load_iq1_rows(settings: Settings) -> list[dict[str, Any]]:
+    sql = """
+        SELECT
+            p.paper_id,
+            p.arxiv_id,
+            p.primary_category,
+            p.published,
+            p.source_type,
+            p.index_status,
+            p.created_at,
+            p.indexed_at,
+            (p.embedding IS NOT NULL) AS has_paper_embedding,
+            COALESCE(chunk_stats.total_chunks, 0) AS total_chunks,
+            COALESCE(chunk_stats.chunks_with_embedding, 0) AS chunks_with_embedding,
+            COALESCE(chunk_stats.section_count, 0) AS section_count,
+            COALESCE(chunk_stats.figure_caption_count, 0) AS figure_caption_count,
+            COALESCE(chunk_stats.table_count, 0) AS table_count,
+            COALESCE(chunk_stats.full_text_count, 0) AS full_text_count
+        FROM papers p
+        LEFT JOIN (
+            SELECT
+                paper_id,
+                COUNT(*) AS total_chunks,
+                COUNT(*) FILTER (WHERE embedding IS NOT NULL) AS chunks_with_embedding,
+                COUNT(DISTINCT path) FILTER (WHERE path LIKE 'sections/%') AS section_count,
+                COUNT(*) FILTER (WHERE chunk_kind = 'figure_caption') AS figure_caption_count,
+                COUNT(*) FILTER (WHERE chunk_kind = 'table') AS table_count,
+                COUNT(*) FILTER (WHERE chunk_kind = 'full_text') AS full_text_count
+            FROM text_chunks
+            GROUP BY paper_id
+        ) AS chunk_stats
+          ON chunk_stats.paper_id = p.paper_id
+        ORDER BY p.paper_id ASC
+    """
+    with psycopg.connect(_psycopg_dsn(settings), row_factory=dict_row) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(sql)
+            return list(cursor.fetchall())
+
+
+def _load_iq1_index_job_stats(settings: Settings) -> dict[str, int]:
+    sql = """
+        SELECT
+            COUNT(*) AS total_jobs,
+            COUNT(*) FILTER (WHERE status = 'completed') AS completed_jobs,
+            COUNT(*) FILTER (WHERE status = 'dead') AS dead_jobs,
+            COUNT(*) FILTER (WHERE status = 'failed') AS legacy_failed_jobs,
+            COUNT(*) FILTER (WHERE status = 'pending') AS pending_jobs,
+            COUNT(*) FILTER (WHERE status = 'running') AS running_jobs,
+            COUNT(*) FILTER (WHERE attempts > 1) AS retried_jobs
+        FROM jobs
+        WHERE job_type = 'index_paper'
+    """
+    with psycopg.connect(_psycopg_dsn(settings), row_factory=dict_row) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(sql)
+            row = cursor.fetchone() or {}
+    return {
+        "total_jobs": _safe_int(row.get("total_jobs")),
+        "completed_jobs": _safe_int(row.get("completed_jobs")),
+        "dead_jobs": _safe_int(row.get("dead_jobs")),
+        "legacy_failed_jobs": _safe_int(row.get("legacy_failed_jobs")),
+        "pending_jobs": _safe_int(row.get("pending_jobs")),
+        "running_jobs": _safe_int(row.get("running_jobs")),
+        "retried_jobs": _safe_int(row.get("retried_jobs")),
+    }
+
+
+def _build_iq1_report(
+    *,
+    rows: list[dict[str, Any]],
+    preview_paper_ids: set[str],
+    index_job_stats: dict[str, int],
+    settings: Settings,
+) -> dict[str, Any]:
+    total_papers = len(rows)
+    status_counts = Counter(str(row.get("index_status") or "unknown") for row in rows)
+    indexed_rows = [row for row in rows if str(row.get("index_status") or "") == "indexed"]
+    indexed_papers = len(indexed_rows)
+
+    source_types = Counter(str(row.get("source_type") or "unknown") for row in indexed_rows)
+    category_families = Counter(_category_family(str(row.get("primary_category") or "")) for row in indexed_rows)
+    published_years = Counter(_published_year(str(row.get("published") or "")) for row in indexed_rows)
+
+    papers_with_sections = sum(1 for row in indexed_rows if _safe_int(row.get("section_count")) > 0)
+    papers_with_five_sections = sum(1 for row in indexed_rows if _safe_int(row.get("section_count")) >= 5)
+    papers_with_figure_captions = sum(1 for row in indexed_rows if _safe_int(row.get("figure_caption_count")) > 0)
+    papers_with_tables = sum(1 for row in indexed_rows if _safe_int(row.get("table_count")) > 0)
+    papers_with_full_text = sum(1 for row in indexed_rows if _safe_int(row.get("full_text_count")) > 0)
+    papers_with_preview = sum(1 for row in indexed_rows if str(row.get("paper_id")) in preview_paper_ids)
+
+    section_counts = [_safe_int(row.get("section_count")) for row in indexed_rows]
+    chunk_counts = [_safe_int(row.get("total_chunks")) for row in indexed_rows]
+    total_chunks = sum(chunk_counts)
+    chunks_with_embedding = sum(_safe_int(row.get("chunks_with_embedding")) for row in indexed_rows)
+    papers_with_embedding = sum(1 for row in indexed_rows if bool(row.get("has_paper_embedding")))
+
+    latency_seconds: list[float] = []
+    for row in indexed_rows:
+        created_at = row.get("created_at")
+        indexed_at = row.get("indexed_at")
+        if created_at is None or indexed_at is None:
+            continue
+        delta = (indexed_at - created_at).total_seconds()
+        if delta >= 0:
+            latency_seconds.append(delta)
+
+    rich_source_count = sum(source_types.get(kind, 0) for kind in ("html", "latex", "pdf-docling"))
+    terminal_failed_jobs = index_job_stats["dead_jobs"] + index_job_stats.get("legacy_failed_jobs", 0)
+    terminal_jobs = index_job_stats["completed_jobs"] + terminal_failed_jobs
+    active_jobs = index_job_stats["pending_jobs"] + index_job_stats["running_jobs"]
+
+    return {
+        "metadata": _metadata("iq-1-indexing-census"),
+        "runtime": _benchmark_runtime(),
+        "fixture": {
+            "database_backend": make_url(settings.database_url).get_backend_name(),
+            "storage_backend": settings.storage_backend,
+            "population_window": "current-local-snapshot",
+            "reliability_window": "all-current-index_paper-job-rows",
+            "preview_probe_path": "papers/<paper_id>/preview/first-page-top.webp",
+        },
+        "population": {
+            "total_papers": total_papers,
+            "indexed_papers": indexed_papers,
+            "status_counts": dict(status_counts),
+        },
+        "source_richness": {
+            "distribution": _distribution(source_types, denominator=indexed_papers),
+            "rich_index_rate": _ratio(rich_source_count, indexed_papers),
+            "abstract_only_rate": _ratio(source_types.get("abstract-only", 0), indexed_papers),
+        },
+        "artifact_completeness": {
+            "papers_with_sections": papers_with_sections,
+            "papers_with_sections_rate": _ratio(papers_with_sections, indexed_papers),
+            "papers_with_five_sections": papers_with_five_sections,
+            "papers_with_five_sections_rate": _ratio(papers_with_five_sections, indexed_papers),
+            "papers_with_figure_captions": papers_with_figure_captions,
+            "papers_with_figure_captions_rate": _ratio(papers_with_figure_captions, indexed_papers),
+            "papers_with_tables": papers_with_tables,
+            "papers_with_tables_rate": _ratio(papers_with_tables, indexed_papers),
+            "papers_with_full_text": papers_with_full_text,
+            "papers_with_full_text_rate": _ratio(papers_with_full_text, indexed_papers),
+            "papers_with_preview": papers_with_preview,
+            "papers_with_preview_rate": _ratio(papers_with_preview, indexed_papers),
+            "median_sections_per_paper": float(median(section_counts)) if section_counts else None,
+            "median_chunks_per_paper": float(median(chunk_counts)) if chunk_counts else None,
+        },
+        "embedding_coverage": {
+            "papers_with_embedding": papers_with_embedding,
+            "paper_embedding_rate": _ratio(papers_with_embedding, indexed_papers),
+            "papers_missing_embedding": max(indexed_papers - papers_with_embedding, 0),
+            "total_chunks": total_chunks,
+            "chunks_with_embedding": chunks_with_embedding,
+            "chunk_embedding_rate": _ratio(chunks_with_embedding, total_chunks),
+            "chunks_missing_embedding": max(total_chunks - chunks_with_embedding, 0),
+        },
+        "freshness": {
+            "measured_papers": len(latency_seconds),
+            "created_to_indexed_p50_seconds": _percentile(latency_seconds, 50),
+            "created_to_indexed_p95_seconds": _percentile(latency_seconds, 95),
+            "created_to_indexed_p99_seconds": _percentile(latency_seconds, 99),
+        },
+        "reliability": {
+            **index_job_stats,
+            "terminal_failed_jobs": terminal_failed_jobs,
+            "active_jobs": active_jobs,
+            "terminal_success_rate": _ratio(index_job_stats["completed_jobs"], terminal_jobs),
+            "terminal_failure_rate": _ratio(terminal_failed_jobs, terminal_jobs),
+            "retry_rate": _ratio(index_job_stats.get("retried_jobs", 0), index_job_stats["total_jobs"]),
+            "active_rate": _ratio(active_jobs, index_job_stats["total_jobs"]),
+        },
+        "strata": {
+            "source_type": _distribution(source_types, denominator=indexed_papers),
+            "category_family": _distribution(category_families, denominator=indexed_papers),
+            "published_year": _distribution(published_years, denominator=indexed_papers),
+        },
+        "notes": [
+            "IQ-1 is a census-style corpus health check over the current local paper snapshot.",
+            "Freshness is measured as papers.created_at -> papers.indexed_at; this approximates first-seen to indexed for the current schema.",
+            "Reliability metrics currently reflect all current job-backed index_paper rows only; direct non-job indexing paths are not counted there.",
+            "Legacy jobs with status=failed are included in the terminal failure counts so older rows do not make the census look healthier than it is.",
+            "Preview coverage is measured via object-store existence checks on preview/first-page-top.webp.",
+        ],
+    }
+
+
+def _render_iq1_markdown(report: dict[str, Any]) -> str:
+    population = report["population"]
+    source = report["source_richness"]
+    artifacts = report["artifact_completeness"]
+    embeddings = report["embedding_coverage"]
+    freshness = report["freshness"]
+    reliability = report["reliability"]
+
+    lines = [
+        "# IQ-1 Indexing Census",
+        "",
+        f"- Generated: `{report['metadata']['generated_at']}`",
+        f"- Git SHA: `{report['metadata'].get('git_sha') or 'unknown'}`",
+        f"- Storage backend: `{report['fixture']['storage_backend']}`",
+        "",
+        "## ELI5",
+        "",
+        "IQ-1 is a census of the current library. It asks: how many papers are really indexed, how rich are those indexed artifacts, how much of the corpus is searchable by embeddings, and how healthy is the indexing pipeline overall?",
+        "",
+        "## Population",
+        "",
+        f"- Total papers: `{population['total_papers']}`",
+        f"- Indexed papers: `{population['indexed_papers']}`",
+        f"- Status counts: `{population['status_counts']}`",
+        "",
+        "## Headline Metrics",
+        "",
+        f"- Rich-source rate: `{_format_ratio(source['rich_index_rate'])}`",
+        f"- Abstract-only rate: `{_format_ratio(source['abstract_only_rate'])}`",
+        f"- Papers with >=1 section: `{_format_ratio(artifacts['papers_with_sections_rate'])}`",
+        f"- Papers with >=5 sections: `{_format_ratio(artifacts['papers_with_five_sections_rate'])}`",
+        f"- Papers with figure captions: `{_format_ratio(artifacts['papers_with_figure_captions_rate'])}`",
+        f"- Papers with tables: `{_format_ratio(artifacts['papers_with_tables_rate'])}`",
+        f"- Preview coverage: `{_format_ratio(artifacts['papers_with_preview_rate'])}`",
+        f"- Paper embedding coverage: `{_format_ratio(embeddings['paper_embedding_rate'])}`",
+        f"- Chunk embedding coverage: `{_format_ratio(embeddings['chunk_embedding_rate'])}`",
+        f"- Median sections per indexed paper: `{artifacts['median_sections_per_paper']}`",
+        f"- Median chunks per indexed paper: `{artifacts['median_chunks_per_paper']}`",
+        "",
+        "## Freshness",
+        "",
+        f"- Measured papers: `{freshness['measured_papers']}`",
+        f"- created->indexed p50: `{_format_seconds(freshness['created_to_indexed_p50_seconds'] or 0.0) if freshness['created_to_indexed_p50_seconds'] is not None else 'n/a'}`",
+        f"- created->indexed p95: `{_format_seconds(freshness['created_to_indexed_p95_seconds'] or 0.0) if freshness['created_to_indexed_p95_seconds'] is not None else 'n/a'}`",
+        f"- created->indexed p99: `{_format_seconds(freshness['created_to_indexed_p99_seconds'] or 0.0) if freshness['created_to_indexed_p99_seconds'] is not None else 'n/a'}`",
+        "",
+        "## Job Reliability",
+        "",
+        f"- index_paper jobs: `{reliability['total_jobs']}`",
+        f"- Completed: `{reliability['completed_jobs']}`",
+        f"- Dead: `{reliability['dead_jobs']}`",
+        f"- Legacy failed: `{reliability['legacy_failed_jobs']}`",
+        f"- Pending: `{reliability['pending_jobs']}`",
+        f"- Running: `{reliability['running_jobs']}`",
+        f"- Retried at least once: `{reliability['retried_jobs']}`",
+        f"- Terminal success rate: `{_format_ratio(reliability['terminal_success_rate'])}`",
+        f"- Terminal failure rate: `{_format_ratio(reliability['terminal_failure_rate'])}`",
+        f"- Retry rate: `{_format_ratio(reliability['retry_rate'])}`",
+        f"- Active backlog rate: `{_format_ratio(reliability['active_rate'])}`",
+        "",
+        "## Source Types",
+        "",
+        "| Source type | Count | Rate |",
+        "| --- | ---: | ---: |",
+    ]
+    for item in report["strata"]["source_type"]:
+        lines.append(f"| `{item['key']}` | {item['count']} | {_format_ratio(item['rate'])} |")
+    if not report["strata"]["source_type"]:
+        lines.append("| _No indexed papers_ | 0 | n/a |")
+
+    lines.extend(
+        [
+            "",
+            "## Category Families",
+            "",
+            "| Family | Count | Rate |",
+            "| --- | ---: | ---: |",
+        ]
+    )
+    for item in report["strata"]["category_family"]:
+        lines.append(f"| `{item['key']}` | {item['count']} | {_format_ratio(item['rate'])} |")
+    if not report["strata"]["category_family"]:
+        lines.append("| _No indexed papers_ | 0 | n/a |")
+
+    lines.extend(
+        [
+            "",
+            "## Published Years",
+            "",
+            "| Year | Count | Rate |",
+            "| --- | ---: | ---: |",
+        ]
+    )
+    for item in report["strata"]["published_year"]:
+        lines.append(f"| `{item['key']}` | {item['count']} | {_format_ratio(item['rate'])} |")
+    if not report["strata"]["published_year"]:
+        lines.append("| _No indexed papers_ | 0 | n/a |")
+
+    lines.extend(["", "## Notes", ""])
+    for note in report.get("notes", []):
+        lines.append(f"- {note}")
+    return "\n".join(lines)
+
+
+def _iq1_summary_rows(report: dict[str, Any]) -> list[tuple[str, str]]:
+    population = report["population"]
+    return [
+        ("Indexed papers", f"{population['indexed_papers']}/{population['total_papers']}"),
+        ("Rich-source rate", _format_ratio(report["source_richness"]["rich_index_rate"])),
+        ("Paper embeddings", _format_ratio(report["embedding_coverage"]["paper_embedding_rate"])),
+        ("Chunk embeddings", _format_ratio(report["embedding_coverage"]["chunk_embedding_rate"])),
+        ("Preview coverage", _format_ratio(report["artifact_completeness"]["papers_with_preview_rate"])),
+        ("Index job success", _format_ratio(report["reliability"]["terminal_success_rate"])),
+        ("Index job retry rate", _format_ratio(report["reliability"]["retry_rate"])),
+    ]
+
+
+def list_benchmarks_cli(*, use_rich: bool = True) -> int:
+    ui = _BenchmarkUi(
+        definition=BenchmarkDefinition(
+            benchmark_id="catalog",
+            title="Benchmark catalog",
+            eli5="Show the repo-native benchmarks you can run from paperbase-dev.",
+            tier="info",
+            outputs=(),
+        ),
+        options=BenchmarkRunOptions(verbose=False, use_rich=use_rich),
+    )
+    ui.render_catalog(benchmark_definitions())
+    return 0
+
+
+def run_named_benchmark(
+    *,
+    benchmark_id: str,
+    settings: Settings,
+    verbose: bool = False,
+    use_rich: bool = True,
+) -> int:
+    if benchmark_id == "iq-1":
+        return run_indexing_census(
+            settings=settings,
+            verbose=verbose,
+            use_rich=use_rich,
+        )
+    raise KeyError(f"Unknown benchmark id: {benchmark_id}")
+
+
+def run_indexing_census(
+    *,
+    settings: Settings,
+    verbose: bool = False,
+    use_rich: bool = True,
+) -> int:
+    _ensure_benchmark_dirs()
+    definition = _benchmark_definition("iq-1")
+    ui = _BenchmarkUi(definition=definition, options=BenchmarkRunOptions(verbose=verbose, use_rich=use_rich))
+    ui.start()
+
+    ui.start_stage("Loading paper and chunk telemetry")
+    rows = _load_iq1_rows(settings)
+    ui.finish_stage(message=f"Loaded {len(rows)} paper rows from Postgres.")
+
+    object_store = build_object_store(settings)
+    paper_ids = [str(row.get("paper_id")) for row in rows if row.get("paper_id")]
+    checked = 0
+
+    def _on_preview_checked(_paper_id: str, _exists: bool) -> None:
+        nonlocal checked
+        checked += 1
+        ui.advance()
+        if verbose and not ui.rich_enabled and (checked % 250 == 0 or checked == len(paper_ids)):
+            ui.detail(f"Checked {checked}/{len(paper_ids)} preview artifacts.")
+
+    ui.start_stage("Checking preview artifacts", total=len(paper_ids))
+    preview_paper_ids = _preview_paper_ids(
+        paper_ids=paper_ids,
+        object_store=object_store,
+        on_checked=_on_preview_checked,
+    )
+    ui.finish_stage(message=f"Found preview artifacts for {len(preview_paper_ids)} papers.")
+
+    ui.start_stage("Loading index job telemetry")
+    index_job_stats = _load_iq1_index_job_stats(settings)
+    ui.finish_stage(message=f"Loaded {index_job_stats['total_jobs']} index_paper job rows.")
+
+    ui.start_stage("Assembling benchmark report")
+    report = _build_iq1_report(
+        rows=rows,
+        preview_paper_ids=preview_paper_ids,
+        index_job_stats=index_job_stats,
+        settings=settings,
+    )
+    ui.finish_stage(message="Computed IQ-1 census metrics.")
+
+    ui.start_stage("Writing benchmark artifacts")
+    _write_json(_iq1_current_path(), report)
+    _write_text(_iq1_current_md_path(), _render_iq1_markdown(report))
+    ui.finish_stage(message="Wrote JSON and Markdown reports.")
+    ui.render_summary(
+        headline_rows=_iq1_summary_rows(report),
+        output_rows=[
+            ("JSON report", str(_iq1_current_path())),
+            ("Markdown report", str(_iq1_current_md_path())),
+        ],
+    )
+    return 0
 
 
 def record_test_times(

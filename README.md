@@ -40,6 +40,8 @@ Optional browser-account settings now hang off the same API env surface:
 
 - `PAPERBASE_GOOGLE_*` powers Google sign-in
 - `PAPERBASE_GITHUB_*` powers the in-app GitHub connection flow and project repo sync
+- `PAPERBASE_ADMIN_EMAILS` is a comma-separated allowlist for the signed-in admin jobs workspace
+- `PAPERBASE_WORKER_STATUS_URL` lets the API read worker `/health` and `/metrics` so the admin jobs table can surface `stalled` runs
 - `PAPERBASE_FETCH_CODE_CROSSLINKS_AT_INDEX` controls the default-on Hugging Face paper-page lookup that prefers an exact arXiv-id `githubRepo` match over raw text extraction; turn it off for pure text-only harvests
 - logged-in users can store Anthropic keys, Modal sandbox credentials, a signed-in-only light/dark appearance preference, and a weekly papers review email preference
 
@@ -49,11 +51,12 @@ Optional browser-account settings now hang off the same API env surface:
 
 - `make setup` installs the Python packages, chat dependencies, repo hooks, and a starter `.env`
 - `make doctor` verifies `vp`, Python, Postgres, `pgvector`, ports, and the repo env
-- `make dev` initializes the local database and storage, then runs the API, worker, MCP bridge, and chat dev server
+- `make dev` initializes the local database and storage, then runs the API, worker, MCP bridge, and chat dev server; the API auto-reloads backend code changes during local development
 - `make reset-local` stops the local stack, wipes the local database/storage, and recreates the latest schema
 - `make test-smoke` runs the PR-oriented CI smoke gate: lint, chat checks/tests/build, a focused backend subset, and plugin tests
 - `make test` runs `ruff check`, `vp check`, a frontend build, backend tests, and plugin tests
 - `make profile` runs the deterministic hotpath profiling flow used for performance tracking
+- `make benchmark BENCHMARK=iq-1 BENCHMARK_ARGS="--verbose"` runs a repo-native benchmark through the supported benchmark workflow
 - `make clean` stops local services and removes generated logs, caches, and frontend output
 
 ## CI
@@ -62,6 +65,16 @@ Optional browser-account settings now hang off the same API env surface:
 - pushes to `main` and manual verify dispatches run full `make test`
 - verify and profile workflows cancel superseded in-progress runs on the same PR or branch
 - profiling runs only on `main` pushes or manual dispatch
+
+## Benchmarks
+
+- deterministic hotpath and test-time artifacts live under `benchmarks/`
+- [benchmarks/impact-scorecard-spec.md](./benchmarks/impact-scorecard-spec.md) defines the scientific measurement spec for indexing quality, retrieval quality, and harness lift with vs without Paperbase
+- `make benchmark BENCHMARK=iq-1 BENCHMARK_ARGS="--verbose"` is the easiest way to run the first implemented scorecard slice
+- `.venv/bin/paperbase-dev benchmark list` shows the available repo-native benchmarks
+- `.venv/bin/paperbase-dev benchmark run iq-1 --verbose` runs the first implemented scorecard slice: a current-snapshot indexing census that writes `benchmarks/out/iq1.current.json` and `benchmarks/out/iq1.current.md`
+- `.venv/bin/paperbase-dev benchmark iq-1 --verbose` remains as a compatibility alias for the direct IQ-1 runner
+- benchmark runs use a `rich`-backed live terminal UI during local dev and automatically fall back to plain text when the richer UI is unavailable
 
 For a full reset of the local database and storage, use:
 
@@ -132,6 +145,7 @@ The browser chat experience is project-based:
 - the new-project modal can refresh the accessible repo list, link to GitHub's Paperbase access settings, and expose optional inference/sandbox credential fields
 - existing repos expose a branch picker and optional import selection for `.py` and `.ipynb` files; new repos start on a fixed `main` branch
 - the sidebar lazily loads mixed project items per project, persists the last selected project across reloads, and reopens with only that project tree expanded by default
+- the product exposes a public-readable `Trending papers` daily feed plus a signed-in Browse entry for the same surface; signed-in users can upvote, comment, and reply, and allowlisted admins also get a non-tabbed `Admin panel` jobs workspace
 - the empty first-chat state now shows a dismissible setup checklist for GitHub, inference, and sandbox access so users can connect required services before the coding agent hits save/run failures
 - project descriptions are snapped onto new sessions as per-session prompt context, so later project edits do not rewrite existing chats
 - once the first user prompt lands in a `New chat` thread, Paperbase renames the session to a compact 3-5 word summary and keeps that title for later turns
@@ -146,6 +160,8 @@ The browser chat experience is project-based:
 - local `localhost` chat threads render a compact debug strip with the current user, project, thread, and latest message ids so Codex can inspect backend state from a pasted bundle without displacing the empty-chat layout
 - notebooks are converted with Jupytext to `py:percent` source for editing/running, then regenerated back to `.ipynb` when saved to GitHub
 - signed-in pages support a persisted appearance setting, so the sidebar, chat shell, markdown surfaces, drawers, and modals can switch between light and dark mode without affecting the public landing page
+- allowlisted admin emails also get an Admin panel jobs workspace for creating one-off indexing/backfill jobs, monitoring env-driven latest-sync runs, drilling into tracked indexed papers, and browsing stored paper artifacts through the browser session
+- the admin indexed-papers drilldown now paginates per job run instead of loading the entire tracked paper list at once
 - creating, importing, or saving project files requires a connected GitHub account with repo access
 - the coding agent is PyTorch-first for generated ML code, uses a Codex-style single turn loop with `tool_choice=auto`, prefers reading and patching existing workspace files before broad rewrites, grounds AI/code implementation turns in relevant paper or uploaded-document evidence when available, briefly redirects off-topic requests back to AI research or project code, can edit repo-relative text files beyond just managed `.py` sources, keeps turn-local diff and exec-session state visible to the model during long turns and compaction, streams final answers live instead of buffering them until the end, and can run stateful project commands with follow-up wait/log/cancel steps alongside compatibility `project_run` smoke/full entrypoints
 - `Save` creates a single Paperbase-managed GitHub commit for the current project, and `Run` saves first, then executes the full saved project workspace through the user’s Modal sandbox credentials with `full` mode by default
@@ -160,6 +176,7 @@ The browser chat experience is project-based:
 - MCP bridge at `http://127.0.0.1:8090/mcp`
 
 API, worker, and plugin logs go to `.run/`.
+When `make dev` is running, backend route and handler changes should reload into `paperbase-api` automatically without a manual restart.
 
 ## Frontend Output
 

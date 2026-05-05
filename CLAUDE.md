@@ -13,9 +13,10 @@ Primary commands:
 - `make test-smoke`
 - `make test`
 - `make profile`
+- `make benchmark`
 - `make clean`
 
-Lower-level workflow operations should go through `paperbase-dev`, not ad hoc scripts. Operator-facing `paperbase-dev` commands include `jobs list-dead`, `jobs retry <job_id>`, `jobs cancel <job_id>`, and `harvest`; for harvests, `--limit-per-window` caps each category-window chunk, not the whole category across the requested range.
+Lower-level workflow operations should go through `paperbase-dev`, not ad hoc scripts. Operator-facing `paperbase-dev` commands include `benchmark list`, `benchmark run iq-1`, `jobs list-dead`, `jobs retry <job_id>`, `jobs cancel <job_id>`, and `harvest`; for harvests, `--limit-per-window` caps each category-window chunk, not the whole category across the requested range.
 
 ## Required Validation Flow
 

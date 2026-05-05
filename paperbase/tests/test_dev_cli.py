@@ -276,6 +276,86 @@ def test_main_dispatches_profile_with_current_settings(monkeypatch):
     assert captured == {"settings": settings, "update_baseline": True}
 
 
+def test_main_dispatches_benchmark_iq1_with_current_settings(monkeypatch):
+    settings = Settings(
+        database_url="postgresql+psycopg:///paperbase",
+        storage_backend="local",
+        local_storage_root=".paperbase-data",
+    )
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr("paperbase.dev_cli._settings", lambda: settings)
+    monkeypatch.setattr(
+        "paperbase.dev_cli.run_named_benchmark",
+        lambda *, benchmark_id, settings, verbose, use_rich: captured.update(
+            {
+                "benchmark_id": benchmark_id,
+                "settings": settings,
+                "verbose": verbose,
+                "use_rich": use_rich,
+            }
+        )
+        or 31,
+    )
+
+    exit_code = main(["benchmark", "iq-1"])
+
+    assert exit_code == 31
+    assert captured == {
+        "benchmark_id": "iq-1",
+        "settings": settings,
+        "verbose": False,
+        "use_rich": True,
+    }
+
+
+def test_main_dispatches_benchmark_list(monkeypatch):
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "paperbase.dev_cli.list_benchmarks_cli",
+        lambda *, use_rich: captured.update({"use_rich": use_rich}) or 37,
+    )
+
+    exit_code = main(["benchmark", "list", "--plain"])
+
+    assert exit_code == 37
+    assert captured == {"use_rich": False}
+
+
+def test_main_dispatches_benchmark_run_with_flags(monkeypatch):
+    settings = Settings(
+        database_url="postgresql+psycopg:///paperbase",
+        storage_backend="local",
+        local_storage_root=".paperbase-data",
+    )
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr("paperbase.dev_cli._settings", lambda: settings)
+    monkeypatch.setattr(
+        "paperbase.dev_cli.run_named_benchmark",
+        lambda *, benchmark_id, settings, verbose, use_rich: captured.update(
+            {
+                "benchmark_id": benchmark_id,
+                "settings": settings,
+                "verbose": verbose,
+                "use_rich": use_rich,
+            }
+        )
+        or 41,
+    )
+
+    exit_code = main(["benchmark", "run", "iq-1", "--verbose", "--plain"])
+
+    assert exit_code == 41
+    assert captured == {
+        "benchmark_id": "iq-1",
+        "settings": settings,
+        "verbose": True,
+        "use_rich": False,
+    }
+
+
 def test_main_dispatches_flush_local(monkeypatch):
     monkeypatch.setattr("paperbase.dev_cli.flush_local", lambda: 19)
 

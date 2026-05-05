@@ -266,6 +266,154 @@ describe("chat api", () => {
     expect(result.suggestions[0]?.matched_field).toBe("fallback");
   });
 
+  it("loads the trending feed and paper detail from the browser endpoints", async () => {
+    const fetchMock = vi
+      .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          date: "2026-04-21",
+          sort: "upvotes",
+          papers: [
+            {
+              paper_id: "arxiv:2401.12345",
+              arxiv_id: "2401.12345",
+              title: "Benchmark Paper",
+              authors: "Ada Lovelace",
+              published: "2026-04-21",
+              html_url: "https://arxiv.org/abs/2401.12345",
+              pdf_url: "https://arxiv.org/pdf/2401.12345.pdf",
+              image_url: "/v1/browser/trending/papers/arxiv%3A2401.12345/preview/content",
+              upvote_count: 12,
+              viewer_has_upvoted: false,
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          paper_id: "arxiv:2401.12345",
+          arxiv_id: "2401.12345",
+          title: "Benchmark Paper",
+          authors: "Ada Lovelace",
+          published: "2026-04-21",
+          primary_category: "cs.AI",
+          categories: "cs.AI",
+          summary_eli5: "Simple summary",
+          html_url: "https://arxiv.org/abs/2401.12345",
+          pdf_url: "https://arxiv.org/pdf/2401.12345.pdf",
+          image_url: "/v1/browser/trending/papers/arxiv%3A2401.12345/preview/content",
+          upvote_count: 12,
+          viewer_has_upvoted: false,
+          comments: [],
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await loadApiModule();
+
+    const feed = await api.loadBrowserTrendingPapers("2026-04-21", "upvotes");
+    const detail = await api.getBrowserTrendingPaper("arxiv:2401.12345");
+
+    const [feedPath, feedInit] = fetchMock.mock.calls[0] as FetchCall;
+    const feedUrl = new URL(String(feedPath), "http://localhost");
+    expect(`${feedUrl.pathname}${feedUrl.search}`).toBe(
+      "/v1/browser/trending?date=2026-04-21&sort=upvotes",
+    );
+    expect(feedInit?.method).toBe("GET");
+    const [detailPath, detailInit] = fetchMock.mock.calls[1] as FetchCall;
+    expect(requestPath(detailPath)).toBe("/v1/browser/trending/papers/arxiv%3A2401.12345");
+    expect(detailInit?.method).toBe("GET");
+    expect(feed.papers[0]?.upvote_count).toBe(12);
+    expect(detail.summary_eli5).toBe("Simple summary");
+  });
+
+  it("attaches CSRF headers to trending write operations", async () => {
+    const fetchMock = vi
+      .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          authenticated: true,
+          user: {
+            user_id: "user_1",
+            email: "user@example.com",
+            display_name: "User",
+          },
+          has_anthropic_api_key: false,
+          csrf_token: "csrf-123",
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          paper_id: "arxiv:2401.12345",
+          upvote_count: 9,
+          viewer_has_upvoted: true,
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          paper_id: "arxiv:2401.12345",
+          comments: [],
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await loadApiModule();
+
+    await api.loadSession();
+    await api.upvoteBrowserTrendingPaper("arxiv:2401.12345");
+    await api.createBrowserTrendingPaperComment("arxiv:2401.12345", {
+      body: "Useful paper",
+      parent_comment_id: null,
+    });
+
+    const [, voteInit] = fetchMock.mock.calls[1] as FetchCall;
+    expect(new Headers(voteInit?.headers).get("X-Paperbase-CSRF")).toBe("csrf-123");
+    expect(voteInit?.method).toBe("PUT");
+    const [commentPath, commentInit] = fetchMock.mock.calls[2] as FetchCall;
+    expect(requestPath(commentPath)).toBe(
+      "/v1/browser/trending/papers/arxiv%3A2401.12345/comments",
+    );
+    expect(new Headers(commentInit?.headers).get("X-Paperbase-CSRF")).toBe("csrf-123");
+    expect(commentInit?.method).toBe("POST");
+  });
+
+  it("falls back to the legacy admin jobs endpoint when overview is unavailable", async () => {
+    const fetchMock = vi
+      .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()
+      .mockResolvedValueOnce(jsonResponse({ detail: "Not Found" }, { status: 404 }))
+      .mockResolvedValueOnce(
+        jsonResponse([
+          {
+            job_id: "job_1",
+            root_job_id: null,
+            job_type: "index_paper",
+            status: "completed",
+            payload: { arxiv_id: "2401.12345" },
+            error: null,
+            attempts: 1,
+            max_attempts: 3,
+            next_run_at: null,
+            last_attempted_at: null,
+            priority: 10,
+            created_at: "2026-04-21T00:00:00Z",
+            updated_at: "2026-04-21T01:00:00Z",
+            started_at: null,
+            finished_at: null,
+          },
+        ]),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await loadApiModule();
+
+    const overview = await api.loadBrowserAdminJobsOverview(200);
+
+    expect(fetchMock.mock.calls).toHaveLength(2);
+    expect(requestPath(fetchMock.mock.calls[0]![0])).toBe("/v1/browser/admin/jobs/overview");
+    expect(requestPath(fetchMock.mock.calls[1]![0])).toBe("/v1/browser/admin/jobs");
+    expect(overview.worker).toBeNull();
+    expect(overview.jobs[0]?.root_job_id).toBe("job_1");
+    expect(overview.jobs[0]?.tracking_available).toBe(false);
+    expect(overview.jobs[0]?.latest_status_summary).toBe("completed");
+  });
+
   it("creates, moves, and deletes project chats with CSRF", async () => {
     const fetchMock = vi
       .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()
@@ -321,6 +469,87 @@ describe("chat api", () => {
     expect(requestPath(movePath)).toBe("/v1/browser/chats/thread_3/project");
     expect(moveInit?.body).toBe(JSON.stringify({ project_id: "proj_2" }));
     expect(new Headers(deleteInit?.headers).get("X-Paperbase-CSRF")).toBe("csrf-123");
+  });
+
+  it("calls browser-admin job endpoints with the browser session CSRF token", async () => {
+    const fetchMock = vi
+      .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          authenticated: true,
+          user: {
+            user_id: "user_1",
+            email: "admin@example.com",
+            display_name: "Admin",
+            is_admin: true,
+          },
+          has_anthropic_api_key: false,
+          csrf_token: "csrf-123",
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          job_id: "job_admin_1",
+          root_job_id: "job_admin_1",
+          job_type: "index_paper",
+          status: "pending",
+          payload: { arxiv_id: "2401.12345", force: true },
+          attempts: 0,
+          max_attempts: 3,
+          priority: -10,
+          created_at: "2026-04-21T00:00:00Z",
+          updated_at: "2026-04-21T00:00:00Z",
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(jsonResponse({ jobs: [], worker: null }))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          root_job_id: "job_admin_1",
+          total_count: 0,
+          offset: 0,
+          limit: 100,
+          has_more: false,
+          papers: [],
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await loadApiModule();
+
+    await api.loadSession();
+    await api.queueBrowserAdminPaperIndex("2401.12345", true);
+    await api.loadBrowserAdminJobs("all", 75);
+    await api.loadBrowserAdminJobsOverview(75);
+    await api.loadBrowserAdminJobPapers("job_admin_1");
+
+    const [queuePath, queueInit] = fetchMock.mock.calls[1] as FetchCall;
+    const queueUrl = new URL(String(queuePath), "http://localhost");
+    expect(`${queueUrl.pathname}${queueUrl.search}`).toBe(
+      "/v1/browser/admin/index/papers/arxiv/2401.12345?force=true",
+    );
+    expect(queueInit?.method).toBe("POST");
+    expect(new Headers(queueInit?.headers).get("X-Paperbase-CSRF")).toBe("csrf-123");
+
+    const [listPath, listInit] = fetchMock.mock.calls[2] as FetchCall;
+    const listUrl = new URL(String(listPath), "http://localhost");
+    expect(`${listUrl.pathname}${listUrl.search}`).toBe(
+      "/v1/browser/admin/jobs?status=all&limit=75",
+    );
+    expect(listInit?.method).toBe("GET");
+
+    const [overviewPath, overviewInit] = fetchMock.mock.calls[3] as FetchCall;
+    const overviewUrl = new URL(String(overviewPath), "http://localhost");
+    expect(`${overviewUrl.pathname}${overviewUrl.search}`).toBe(
+      "/v1/browser/admin/jobs/overview?limit=75",
+    );
+    expect(overviewInit?.method).toBe("GET");
+
+    const [papersPath, papersInit] = fetchMock.mock.calls[4] as FetchCall;
+    const papersUrl = new URL(String(papersPath), "http://localhost");
+    expect(`${papersUrl.pathname}${papersUrl.search}`).toBe(
+      "/v1/browser/admin/jobs/job_admin_1/papers?offset=0&limit=100",
+    );
+    expect(papersInit?.method).toBe("GET");
   });
 
   it("loads and mutates projects through the browser endpoints", async () => {

@@ -1,4 +1,7 @@
 import type {
+  AdminJobOverviewRow,
+  AdminJobPapersResponse,
+  AdminJobsOverviewResponse,
   BrowserSessionResponse,
   ChatMessageResponse,
   ChatStreamEventMap,
@@ -9,11 +12,17 @@ import type {
   CreateProjectGitHubRepoPayload,
   FigureResponse,
   FileContentResponse,
+  FileListResponse,
   GitHubRepoImportCandidateResponse,
   GitHubRepoListResponse,
   GitHubRepoMetadataResponse,
+  JobResponse,
   MentionSuggestionResult,
+  PaperAssetResponse,
+  PaperCommentsResponse,
+  PaperPreviewResponse,
   PaperResponse,
+  PaperVoteSummary,
   ProjectItemKind,
   ProjectItemPageResponse,
   ProjectRepoConflictResolution,
@@ -26,6 +35,8 @@ import type {
   RunPythonFileResponse,
   SendChatMessageResponse,
   TableResponse,
+  TrendingFeedResponse,
+  TrendingPaperDetail,
   UploadListResponse,
 } from "./types";
 
@@ -38,6 +49,17 @@ const CONFIGURED_API_BASE =
 const API_BASE = resolveApiBase(CONFIGURED_API_BASE);
 
 let browserCsrfToken: string | null = null;
+
+function apiUrl(path: string) {
+  return `${API_BASE}${path}`;
+}
+
+function encodePathPreservingSlashes(path: string) {
+  return path
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+}
 
 export type SendThreadMessagePayload = {
   content: string;
@@ -78,6 +100,16 @@ export class ApiError extends Error {
     this.status = status;
     this.payload = payload;
   }
+}
+
+export function browserPaperPreviewContentUrl(paperId: string) {
+  return apiUrl(`/v1/browser/papers/${encodeURIComponent(paperId)}/preview/content`);
+}
+
+export function browserAdminPaperAssetContentUrl(paperId: string, path: string) {
+  return apiUrl(
+    `/v1/browser/admin/papers/${encodeURIComponent(paperId)}/asset-content/${encodePathPreservingSlashes(path)}`,
+  );
 }
 
 export function resolveApiBase(rawBase: string, currentPageUrl = window.location.href) {
@@ -665,6 +697,56 @@ export function getBrowserPaper(paperId: string) {
   return api<PaperResponse>(`/v1/browser/papers/${paperId}`, { method: "GET" });
 }
 
+export function loadBrowserTrendingPapers(date: string, sort: "default" | "upvotes" = "default") {
+  const params = new URLSearchParams({ date, sort });
+  return api<TrendingFeedResponse>(`/v1/browser/trending?${params.toString()}`, { method: "GET" });
+}
+
+export function getBrowserTrendingPaper(paperId: string) {
+  return api<TrendingPaperDetail>(`/v1/browser/trending/papers/${encodeURIComponent(paperId)}`, {
+    method: "GET",
+  });
+}
+
+export function browserTrendingPaperPreviewContentUrl(paperId: string) {
+  return apiUrl(`/v1/browser/trending/papers/${encodeURIComponent(paperId)}/preview/content`);
+}
+
+export function upvoteBrowserTrendingPaper(paperId: string) {
+  return api<PaperVoteSummary>(
+    `/v1/browser/trending/papers/${encodeURIComponent(paperId)}/upvote`,
+    {
+      method: "PUT",
+    },
+  );
+}
+
+export function removeUpvoteBrowserTrendingPaper(paperId: string) {
+  return api<PaperVoteSummary>(
+    `/v1/browser/trending/papers/${encodeURIComponent(paperId)}/upvote`,
+    {
+      method: "DELETE",
+    },
+  );
+}
+
+export function createBrowserTrendingPaperComment(
+  paperId: string,
+  payload: { body: string; parent_comment_id?: string | null },
+) {
+  return api<PaperCommentsResponse>(
+    `/v1/browser/trending/papers/${encodeURIComponent(paperId)}/comments`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function getBrowserPaperPreview(paperId: string) {
+  return api<PaperPreviewResponse>(`/v1/browser/papers/${paperId}/preview`, { method: "GET" });
+}
+
 export function getBrowserPaperFile(paperId: string, path: string) {
   return api<FileContentResponse>(`/v1/browser/papers/${paperId}/files/${path}`, { method: "GET" });
 }
@@ -677,4 +759,149 @@ export function getBrowserPaperFigure(paperId: string, figureId: string) {
 
 export function getBrowserPaperTable(paperId: string, tableId: string) {
   return api<TableResponse>(`/v1/browser/papers/${paperId}/tables/${tableId}`, { method: "GET" });
+}
+
+export function loadBrowserAdminJobs(status = "all", limit = 50) {
+  const params = new URLSearchParams({ status, limit: String(limit) });
+  return api<JobResponse[]>(`/v1/browser/admin/jobs?${params.toString()}`, { method: "GET" });
+}
+
+function legacyAdminOverviewRow(job: JobResponse): AdminJobOverviewRow {
+  return {
+    job_id: job.job_id,
+    root_job_id: job.root_job_id ?? job.job_id,
+    job_type: job.job_type,
+    status: job.status,
+    display_status: job.status,
+    payload: job.payload,
+    error: job.error ?? null,
+    attempts: job.attempts,
+    max_attempts: job.max_attempts,
+    priority: job.priority,
+    created_at: job.created_at,
+    updated_at: job.updated_at,
+    started_at: job.started_at ?? null,
+    finished_at: job.finished_at ?? null,
+    is_synthetic: false,
+    tracking_available: false,
+    indexed_paper_count: null,
+    latest_status_summary: job.error ? `${job.status}: ${job.error}` : job.status,
+    child_job_count: 0,
+    details: job.payload ?? {},
+  };
+}
+
+export async function loadBrowserAdminJobsOverview(limit = 50) {
+  const params = new URLSearchParams({ limit: String(limit) });
+  try {
+    return await api<AdminJobsOverviewResponse>(
+      `/v1/browser/admin/jobs/overview?${params.toString()}`,
+      {
+        method: "GET",
+      },
+    );
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) {
+      const jobs = await loadBrowserAdminJobs("all", limit);
+      return {
+        jobs: jobs.map(legacyAdminOverviewRow),
+        worker: null,
+      };
+    }
+    throw error;
+  }
+}
+
+export function loadBrowserAdminJobPapers(rootJobId: string, offset = 0, limit = 100) {
+  const params = new URLSearchParams({ offset: String(offset), limit: String(limit) });
+  return api<AdminJobPapersResponse>(
+    `/v1/browser/admin/jobs/${rootJobId}/papers?${params.toString()}`,
+    {
+      method: "GET",
+    },
+  );
+}
+
+export function retryBrowserAdminJob(jobId: string) {
+  return api<JobResponse>(`/v1/browser/admin/jobs/${jobId}/retry`, { method: "POST" });
+}
+
+export function queueBrowserAdminPaperIndex(arxivId: string, force = false) {
+  const params = new URLSearchParams({ force: String(force) });
+  return api<JobResponse>(
+    `/v1/browser/admin/index/papers/arxiv/${encodeURIComponent(arxivId)}?${params.toString()}`,
+    { method: "POST" },
+  );
+}
+
+export function queueBrowserAdminHarvestRange(payload: {
+  categories: string[];
+  start_date: string;
+  end_date: string;
+  limit_per_window?: number | null;
+  chunk_months: number;
+  source?: string;
+}) {
+  return api<JobResponse>("/v1/browser/admin/index/harvest", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function queueBrowserAdminHarvestTopCited(payload: {
+  min_citations: number;
+  max_papers?: number | null;
+  chunk_size: number;
+}) {
+  return api<JobResponse>("/v1/browser/admin/index/harvest-top-cited", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function queueBrowserAdminHarvestVenue(payload: {
+  venue: string;
+  year: number;
+  max_papers?: number | null;
+  chunk_size: number;
+}) {
+  return api<JobResponse>("/v1/browser/admin/index/harvest-venue", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function queueBrowserAdminEnrichMissingMetadata(limit = 50000, minAgeSeconds = 3600) {
+  const params = new URLSearchParams({
+    limit: String(limit),
+    min_age_seconds: String(minAgeSeconds),
+  });
+  return api<JobResponse>(`/v1/browser/admin/index/enrich-missing-metadata?${params.toString()}`, {
+    method: "POST",
+  });
+}
+
+export function loadBrowserAdminPapers(query = "", indexStatus = "all", limit = 50) {
+  const params = new URLSearchParams({
+    q: query,
+    index_status: indexStatus,
+    limit: String(limit),
+  });
+  return api<PaperResponse[]>(`/v1/browser/admin/papers?${params.toString()}`, { method: "GET" });
+}
+
+export function loadBrowserAdminPaperFiles(paperId: string) {
+  return api<FileListResponse>(`/v1/browser/admin/papers/${paperId}/files`, { method: "GET" });
+}
+
+export function getBrowserAdminPaperFile(paperId: string, path: string) {
+  return api<FileContentResponse>(`/v1/browser/admin/papers/${paperId}/files/${path}`, {
+    method: "GET",
+  });
+}
+
+export function getBrowserAdminPaperAsset(paperId: string, path: string) {
+  return api<PaperAssetResponse>(`/v1/browser/admin/papers/${paperId}/assets/${path}`, {
+    method: "GET",
+  });
 }

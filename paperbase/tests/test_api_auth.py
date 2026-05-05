@@ -21,12 +21,17 @@ from paperbase.auth import (
 )
 from paperbase.config import Settings, get_settings
 from paperbase.models import (
+    AdminJobOverviewRow,
+    AdminJobPaperResponse,
+    AdminJobPapersResponse,
+    AdminJobsOverviewResponse,
     BrowserSessionResponse,
     BrowserUser,
     ChatMessageResponse,
     ChatThreadListResponse,
     ChatThreadResponse,
     ChatThreadSummary,
+    FileContentResponse,
     FileListResponse,
     FileObject,
     GitHubRepoBranchSummary,
@@ -36,8 +41,11 @@ from paperbase.models import (
     GitHubRepoMetadataResponse,
     GitHubRepoSummary,
     JobResponse,
+    PaperCommentsResponse,
+    PaperAssetResponse,
     PaperPreviewResponse,
     PaperResponse,
+    PaperVoteSummary,
     ProjectItemPageResponse,
     ProjectItemSummary,
     ProjectListResponse,
@@ -48,6 +56,8 @@ from paperbase.models import (
     ResultSetResponse,
     RunPythonFileResponse,
     SearchPaperResult,
+    TrendingFeedResponse,
+    TrendingPaperDetailResponse,
     UploadListResponse,
 )
 from paperbase.security import csrf_token_for_session
@@ -60,6 +70,7 @@ NOW = datetime(2026, 4, 21, tzinfo=timezone.utc)
 def _job(job_type: str, *, payload: dict[str, object] | None = None) -> JobResponse:
     return JobResponse(
         job_id=f"job_{job_type}",
+        root_job_id=f"job_{job_type}",
         job_type=job_type,
         status="pending",
         payload=payload or {},
@@ -243,6 +254,109 @@ class StubApiService:
         self.calls.append(("get_paper", paper_id))
         return _paper("2401.54321")
 
+    def list_papers(
+        self,
+        *,
+        query: str | None = None,
+        index_status: str | None = None,
+        limit: int = 50,
+    ) -> list[PaperResponse]:
+        self.calls.append(("list_papers", (query, index_status, limit)))
+        return [_paper("2401.54321")]
+
+    def list_browser_trending_papers(
+        self,
+        *,
+        date: str,
+        sort: str,
+        viewer: BrowserUser | None = None,
+    ) -> TrendingFeedResponse:
+        self.calls.append(("list_browser_trending_papers", (date, sort, viewer.user_id if viewer else None)))
+        paper = _paper("2401.54321")
+        return TrendingFeedResponse(
+            date=date,
+            sort=sort,  # type: ignore[arg-type]
+            papers=[
+                {
+                    "paper_id": paper.paper_id,
+                    "arxiv_id": paper.arxiv_id,
+                    "title": paper.title,
+                    "authors": paper.authors,
+                    "published": paper.published,
+                    "html_url": paper.html_url,
+                    "pdf_url": paper.pdf_url,
+                    "image_url": "/v1/browser/trending/papers/arxiv%3A2401.54321/preview/content",
+                    "upvote_count": 7,
+                    "viewer_has_upvoted": viewer is not None,
+                }
+            ],
+        )
+
+    def get_browser_trending_paper(
+        self,
+        paper_id: str,
+        *,
+        viewer: BrowserUser | None = None,
+    ) -> TrendingPaperDetailResponse:
+        self.calls.append(("get_browser_trending_paper", (paper_id, viewer.user_id if viewer else None)))
+        paper = _paper("2401.54321")
+        return TrendingPaperDetailResponse(
+            paper_id=paper.paper_id,
+            arxiv_id=paper.arxiv_id,
+            title=paper.title,
+            authors=paper.authors,
+            published=paper.published,
+            primary_category=paper.primary_category,
+            categories=paper.categories,
+            summary_eli5=paper.summary_eli5,
+            html_url=paper.html_url,
+            pdf_url=paper.pdf_url,
+            image_url="/v1/browser/trending/papers/arxiv%3A2401.54321/preview/content",
+            upvote_count=7,
+            viewer_has_upvoted=viewer is not None,
+            comments=[],
+        )
+
+    def get_browser_trending_paper_preview_content(self, paper_id: str) -> tuple[bytes, str]:
+        self.calls.append(("get_browser_trending_paper_preview_content", paper_id))
+        return (b"trending-preview-bytes", "image/webp")
+
+    def set_browser_trending_paper_upvote(
+        self,
+        paper_id: str,
+        *,
+        user: BrowserUser,
+        upvoted: bool,
+    ) -> PaperVoteSummary:
+        self.calls.append(("set_browser_trending_paper_upvote", (paper_id, user.user_id, upvoted)))
+        return PaperVoteSummary(paper_id=paper_id, upvote_count=8 if upvoted else 7, viewer_has_upvoted=upvoted)
+
+    def create_browser_trending_paper_comment(
+        self,
+        paper_id: str,
+        *,
+        user: BrowserUser,
+        request,
+    ) -> PaperCommentsResponse:
+        self.calls.append(
+            ("create_browser_trending_paper_comment", (paper_id, user.user_id, request.body, request.parent_comment_id))
+        )
+        return PaperCommentsResponse(
+            paper_id=paper_id,
+            comments=[
+                {
+                    "comment_id": "pcmt_1",
+                    "paper_id": paper_id,
+                    "parent_comment_id": None,
+                    "author": {"user_id": user.user_id, "display_name": user.display_name},
+                    "body": request.body,
+                    "created_at": NOW,
+                    "updated_at": NOW,
+                    "replies": [],
+                }
+            ],
+        )
+
     def get_paper_preview(self, paper_id: str) -> PaperPreviewResponse:
         self.calls.append(("get_paper_preview", paper_id))
         if paper_id == "missing":
@@ -254,12 +368,37 @@ class StubApiService:
             content_type="image/webp",
         )
 
+    def get_paper_preview_content(self, paper_id: str) -> tuple[bytes, str]:
+        self.calls.append(("get_paper_preview_content", paper_id))
+        return (b"preview-bytes", "image/webp")
+
     def list_files(self, paper_id: str) -> FileListResponse:
         self.calls.append(("list_files", paper_id))
         return FileListResponse(
             paper_id=paper_id,
             files=[FileObject(path="text/full.md", size=10, content_type="text/markdown")],
         )
+
+    def read_file(self, paper_id: str, path: str) -> FileContentResponse:
+        self.calls.append(("read_file", (paper_id, path)))
+        return FileContentResponse(
+            paper_id=paper_id,
+            path=path,
+            content=f"Contents for {path}",
+        )
+
+    def get_paper_asset(self, paper_id: str, path: str) -> PaperAssetResponse:
+        self.calls.append(("get_paper_asset", (paper_id, path)))
+        return PaperAssetResponse(
+            paper_id=paper_id,
+            path=path,
+            url=f"https://signed.example/{paper_id}/{quote(path, safe='/')}",
+            content_type="application/pdf",
+        )
+
+    def get_paper_asset_content(self, paper_id: str, path: str) -> tuple[bytes, str]:
+        self.calls.append(("get_paper_asset_content", (paper_id, path)))
+        return (b"%PDF-1.4", "application/pdf")
 
     def get_results(self, result_set_id: str) -> ResultSetResponse:
         self.calls.append(("get_results", result_set_id))
@@ -288,6 +427,55 @@ class StubApiService:
         self.calls.append(("list_jobs_by_status", (status, limit)))
         return [_job("index_paper", payload={"job_id": f"dead_{status}"})]
 
+    def get_admin_jobs_overview(self, *, limit: int = 50) -> AdminJobsOverviewResponse:
+        self.calls.append(("get_admin_jobs_overview", limit))
+        return AdminJobsOverviewResponse(
+            jobs=[
+                AdminJobOverviewRow(
+                    job_id="job_root_1",
+                    root_job_id="job_root_1",
+                    job_type="harvest_range",
+                    status="completed",
+                    display_status="completed",
+                    payload={},
+                    attempts=1,
+                    max_attempts=3,
+                    priority=10,
+                    created_at=NOW,
+                    updated_at=NOW,
+                    tracking_available=True,
+                    indexed_paper_count=2,
+                    latest_status_summary="1 completed · 1 total",
+                    child_job_count=0,
+                    details={},
+                )
+            ],
+            worker=None,
+        )
+
+    def get_admin_job_papers(self, root_job_id: str, *, offset: int = 0, limit: int = 100) -> AdminJobPapersResponse:
+        self.calls.append(("get_admin_job_papers", (root_job_id, offset, limit)))
+        return AdminJobPapersResponse(
+            root_job_id=root_job_id,
+            total_count=1,
+            offset=offset,
+            limit=limit,
+            has_more=False,
+            papers=[
+                AdminJobPaperResponse(
+                    root_job_id=root_job_id,
+                    job_id="job_chunk_1",
+                    paper_id="arxiv:2401.54321",
+                    arxiv_id="2401.54321",
+                    title="Benchmark Paper",
+                    outcome="indexed",
+                    created_at=NOW,
+                    updated_at=NOW,
+                    paper=_paper("2401.54321"),
+                )
+            ],
+        )
+
     def enqueue_harvest_range_job(self, **kwargs):
         self.calls.append(("enqueue_harvest_range_job", kwargs))
         return _job("harvest_range", payload=kwargs)
@@ -310,6 +498,9 @@ class StubApiService:
             return None
         return _job("index_paper", payload={"job_id": job_id, "retried": True})
 
+    def enqueue_index_job(self, arxiv_id: str, *, force: bool = False):
+        self.calls.append(("enqueue_index_job", (arxiv_id, force)))
+        return _job("index_paper", payload={"arxiv_id": arxiv_id, "force": force})
     def cancel_job(self, job_id: str):
         self.calls.append(("cancel_job", job_id))
         if job_id == "job_nonexistent":
@@ -402,6 +593,16 @@ class StubApiService:
         if raw_token == "browser-session-token":
             return self.browser_user
         return None
+
+    def get_browser_session(self, raw_token: str | None) -> BrowserSessionResponse:
+        self.calls.append(("get_browser_session", raw_token))
+        user = self.browser_user if raw_token == "browser-session-token" else None
+        return BrowserSessionResponse(
+            authenticated=user is not None,
+            user=user,
+            has_anthropic_api_key=False,
+            csrf_token=None,
+        )
 
     def delete_user_anthropic_key(self, user: BrowserUser) -> BrowserSessionResponse:
         self.calls.append(("delete_user_anthropic_key", user.user_id))
@@ -1059,6 +1260,132 @@ def test_browser_get_routes_accept_session_cookie_without_csrf(api_client):
     assert ("get_chat_thread", ("user_1", "thread_1")) in service.calls
 
 
+def test_browser_admin_read_routes_require_admin_session(api_client):
+    client, _, settings = api_client
+    client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
+
+    response = client.get("/v1/browser/admin/jobs?status=all&limit=5")
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Admin access required"
+
+
+def test_browser_admin_routes_delegate_for_admin_users(api_client):
+    client, service, settings = api_client
+    service.browser_user = service.browser_user.model_copy(update={"is_admin": True})
+    client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
+    csrf = csrf_token_for_session("browser-session-token", settings)
+    headers = {
+        "Origin": settings.browser_origin,
+        "X-Paperbase-CSRF": csrf,
+    }
+
+    jobs = client.get("/v1/browser/admin/jobs?status=all&limit=5")
+    overview = client.get("/v1/browser/admin/jobs/overview?limit=7")
+    job_papers = client.get("/v1/browser/admin/jobs/job_root_1/papers?offset=20&limit=10")
+    papers = client.get("/v1/browser/admin/papers?q=benchmark&index_status=indexed&limit=3")
+    files = client.get("/v1/browser/admin/papers/arxiv:2401.54321/files")
+    file_contents = client.get("/v1/browser/admin/papers/arxiv:2401.54321/files/text/full.md")
+    asset = client.get("/v1/browser/admin/papers/arxiv:2401.54321/assets/bundle.pdf")
+    retried = client.post("/v1/browser/admin/jobs/job_dead_1/retry", headers=headers)
+    indexed = client.post("/v1/browser/admin/index/papers/arxiv/2401.54321?force=true", headers=headers)
+    harvest = client.post(
+        "/v1/browser/admin/index/harvest",
+        json={
+            "categories": ["cs.LG"],
+            "start_date": "2025-01-01",
+            "end_date": "2025-03-31",
+            "chunk_months": 3,
+            "limit_per_window": 100,
+        },
+        headers=headers,
+    )
+    top_cited = client.post(
+        "/v1/browser/admin/index/harvest-top-cited",
+        json={"min_citations": 50, "max_papers": 200, "chunk_size": 25},
+        headers=headers,
+    )
+    venue = client.post(
+        "/v1/browser/admin/index/harvest-venue",
+        json={"venue": "ICLR", "year": 2024, "max_papers": 200, "chunk_size": 25},
+        headers=headers,
+    )
+    enriched = client.post(
+        "/v1/browser/admin/index/enrich-missing-metadata?limit=123&min_age_seconds=7200",
+        headers=headers,
+    )
+
+    assert jobs.status_code == 200
+    assert jobs.json()[0]["payload"]["job_id"] == "dead_all"
+    assert overview.status_code == 200
+    assert overview.json()["jobs"][0]["job_id"] == "job_root_1"
+    assert job_papers.status_code == 200
+    assert job_papers.json()["papers"][0]["paper_id"] == "arxiv:2401.54321"
+    assert papers.status_code == 200
+    assert papers.json()[0]["paper_id"] == "arxiv:2401.54321"
+    assert files.status_code == 200
+    assert files.json()["files"][0]["path"] == "text/full.md"
+    assert file_contents.status_code == 200
+    assert file_contents.json()["content"] == "Contents for text/full.md"
+    assert asset.status_code == 200
+    assert asset.json()["url"].startswith("https://signed.example/")
+    assert asset.headers["Cache-Control"] == "no-store"
+    assert retried.status_code == 200
+    assert retried.json()["payload"]["retried"] is True
+    assert indexed.status_code == 200
+    assert indexed.json()["payload"] == {"arxiv_id": "2401.54321", "force": True}
+    assert harvest.status_code == 200
+    assert top_cited.status_code == 200
+    assert venue.status_code == 200
+    assert enriched.status_code == 200
+    assert ("list_jobs_by_status", ("all", 5)) in service.calls
+    assert ("get_admin_jobs_overview", 7) in service.calls
+    assert ("get_admin_job_papers", ("job_root_1", 20, 10)) in service.calls
+    assert ("list_papers", ("benchmark", "indexed", 3)) in service.calls
+    assert ("list_files", "arxiv:2401.54321") in service.calls
+    assert ("read_file", ("arxiv:2401.54321", "text/full.md")) in service.calls
+    assert ("get_paper_asset", ("arxiv:2401.54321", "bundle.pdf")) in service.calls
+    assert ("retry_dead_job", "job_dead_1") in service.calls
+    assert ("enqueue_index_job", ("2401.54321", True)) in service.calls
+    assert (
+        "enqueue_harvest_range_job",
+        {
+            "categories": ["cs.LG"],
+            "start_date": "2025-01-01",
+            "end_date": "2025-03-31",
+            "limit_per_window": 100,
+            "chunk_months": 3,
+            "source": "arxiv",
+        },
+    ) in service.calls
+    assert (
+        "enqueue_harvest_top_cited_job",
+        {"min_citations": 50, "max_papers": 200, "chunk_size": 25},
+    ) in service.calls
+    assert (
+        "enqueue_harvest_venue_job",
+        {"venue": "ICLR", "year": 2024, "max_papers": 200, "chunk_size": 25},
+    ) in service.calls
+    assert ("enqueue_enrich_missing_metadata_job", (123, 7200)) in service.calls
+
+
+def test_browser_admin_write_routes_reject_non_admin_users(api_client):
+    client, _, settings = api_client
+    client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
+    csrf = csrf_token_for_session("browser-session-token", settings)
+
+    response = client.post(
+        "/v1/browser/admin/jobs/job_dead_1/retry",
+        headers={
+            "Origin": settings.browser_origin,
+            "X-Paperbase-CSRF": csrf,
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Admin access required"
+
+
 def test_browser_delete_anthropic_key_requires_valid_csrf(api_client):
     client, service, settings = api_client
     client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
@@ -1427,6 +1754,98 @@ def test_retry_job_endpoint_returns_404_for_unknown_job(api_client):
     assert ("retry_dead_job", "job_nonexistent") in service.calls
 
 
+def test_home_route_returns_no_store_cache_headers(api_client, monkeypatch, tmp_path):
+    client, _, _ = api_client
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    (static_dir / "index.html").write_text(
+        '<html><body><script>window.API="__PAPERBASE_BASE_URL__"</script></body></html>',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(api_module, "_STATIC_DIR", static_dir)
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "no-store"
+    assert response.headers["Pragma"] == "no-cache"
+    assert 'window.API="http://testserver"' in response.text
+
+
+def test_browser_trending_feed_is_public(api_client):
+    client, service, _ = api_client
+
+    response = client.get("/v1/browser/trending?date=2026-04-21&sort=upvotes")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["date"] == "2026-04-21"
+    assert payload["sort"] == "upvotes"
+    assert payload["papers"][0]["paper_id"] == "arxiv:2401.54321"
+    assert ("list_browser_trending_papers", ("2026-04-21", "upvotes", None)) in service.calls
+
+
+def test_browser_trending_detail_is_public(api_client):
+    client, service, _ = api_client
+
+    response = client.get("/v1/browser/trending/papers/arxiv:2401.54321")
+
+    assert response.status_code == 200
+    assert response.json()["paper_id"] == "arxiv:2401.54321"
+    assert ("get_browser_trending_paper", ("arxiv:2401.54321", None)) in service.calls
+
+
+def test_browser_trending_preview_content_is_public_and_no_store(api_client):
+    client, service, _ = api_client
+
+    response = client.get("/v1/browser/trending/papers/arxiv:2401.54321/preview/content")
+
+    assert response.status_code == 200
+    assert response.content == b"trending-preview-bytes"
+    assert response.headers["Cache-Control"] == "no-store"
+    assert ("get_browser_trending_paper_preview_content", "arxiv:2401.54321") in service.calls
+
+
+def test_browser_trending_upvote_requires_session_and_csrf(api_client):
+    client, _, settings = api_client
+
+    unauthenticated = client.put("/v1/browser/trending/papers/arxiv:2401.54321/upvote")
+
+    client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
+    missing_csrf = client.put("/v1/browser/trending/papers/arxiv:2401.54321/upvote")
+
+    assert unauthenticated.status_code == 401
+    assert missing_csrf.status_code == 403
+
+
+def test_browser_trending_upvote_and_comment_write_routes_use_authenticated_browser_user(api_client):
+    client, service, settings = api_client
+    client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
+    csrf = csrf_token_for_session("browser-session-token", settings)
+    headers = {
+        "Origin": settings.browser_origin,
+        "X-Paperbase-CSRF": csrf,
+    }
+
+    upvote = client.put("/v1/browser/trending/papers/arxiv:2401.54321/upvote", headers=headers)
+    comment = client.post(
+        "/v1/browser/trending/papers/arxiv:2401.54321/comments",
+        headers=headers,
+        json={"body": "Useful paper", "parent_comment_id": None},
+    )
+
+    assert upvote.status_code == 200
+    assert upvote.json()["viewer_has_upvoted"] is True
+    assert comment.status_code == 200
+    assert comment.json()["comments"][0]["body"] == "Useful paper"
+    assert (
+        "set_browser_trending_paper_upvote",
+        ("arxiv:2401.54321", "user_1", True),
+    ) in service.calls
+    assert (
+        "create_browser_trending_paper_comment",
+        ("arxiv:2401.54321", "user_1", "Useful paper", None),
+    ) in service.calls
 def test_cancel_job_endpoint_delegates_to_service(api_client):
     client, service, settings = api_client
     headers = {"Authorization": f"Bearer {settings.api_key}"}
@@ -1464,6 +1883,19 @@ def test_browser_preview_route_returns_signed_url_and_no_store_cache(api_client)
     assert ("get_paper_preview", "arxiv:2401.54321") in service.calls
 
 
+def test_browser_preview_content_route_streams_bytes_and_no_store_cache(api_client):
+    client, service, settings = api_client
+    client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
+
+    response = client.get("/v1/browser/papers/arxiv:2401.54321/preview/content")
+
+    assert response.status_code == 200
+    assert response.content == b"preview-bytes"
+    assert response.headers["content-type"] == "image/webp"
+    assert response.headers["Cache-Control"] == "no-store"
+    assert ("get_paper_preview_content", "arxiv:2401.54321") in service.calls
+
+
 def test_browser_preview_route_requires_browser_session(api_client):
     client, _, _ = api_client
 
@@ -1479,6 +1911,20 @@ def test_browser_preview_route_returns_404_when_preview_missing(api_client):
     response = client.get("/v1/browser/papers/missing/preview")
 
     assert response.status_code == 404
+
+
+def test_browser_admin_asset_content_route_streams_bytes_and_no_store_cache(api_client):
+    client, service, settings = api_client
+    service.browser_user = service.browser_user.model_copy(update={"is_admin": True})
+    client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
+
+    response = client.get("/v1/browser/admin/papers/arxiv:2401.54321/asset-content/bundle.pdf")
+
+    assert response.status_code == 200
+    assert response.content == b"%PDF-1.4"
+    assert response.headers["content-type"] == "application/pdf"
+    assert response.headers["Cache-Control"] == "no-store"
+    assert ("get_paper_asset_content", ("arxiv:2401.54321", "bundle.pdf")) in service.calls
 
 
 def test_harvest_endpoint_delegates_to_service(api_client):

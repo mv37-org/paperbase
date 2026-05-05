@@ -33,6 +33,7 @@ from paperbase.llm import (
 from paperbase.models import (
     ChatCitation,
     ChatThreadItemResponse,
+    CreatePaperCommentRequest,
     CreateChatThreadRequest,
     CreateProjectGitHubRepoRequest,
     CreateProjectRequest,
@@ -887,6 +888,218 @@ def test_index_writes_manifest_and_artifacts(monkeypatch, service: PaperbaseServ
     assert "raw/source.tar.gz" in files
 
 
+def test_index_job_tracks_papers_for_admin_overview(monkeypatch, service: PaperbaseService):
+    paper = _sample_paper("2401.77777", title="Tracked Paper", abstract="Tracked abstract.")
+    monkeypatch.setattr("paperbase.service.sources.get_paper_details", lambda arxiv_id: paper)
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda current_paper: _rich_extraction(text="Tracked text"),
+    )
+
+    job = service.enqueue_index_job(paper.arxiv_id)
+    completed = service.process_next_job()
+
+    assert completed is not None
+    assert completed.job_id == job.job_id
+    assert completed.root_job_id == job.job_id
+
+    overview = service.get_admin_jobs_overview(limit=10)
+    tracked_row = next(row for row in overview.jobs if row.job_id == job.job_id)
+    assert tracked_row.indexed_paper_count == 1
+    assert tracked_row.paper_outcome_counts == {"indexed": 1}
+    assert tracked_row.tracking_available is True
+
+    job_papers = service.get_admin_job_papers(job.job_id)
+    assert len(job_papers.papers) == 1
+    assert job_papers.total_count == 1
+    assert job_papers.offset == 0
+    assert job_papers.limit == 100
+    assert job_papers.has_more is False
+    assert job_papers.papers[0].paper_id == "arxiv:2401.77777"
+    assert job_papers.papers[0].outcome == "indexed"
+    assert job_papers.outcome_counts == {"indexed": 1}
+
+
+def test_index_job_records_skip_reason_for_already_indexed_paper(monkeypatch, service: PaperbaseService):
+    paper = _sample_paper("2401.77778", title="Already Indexed Paper", abstract="Tracked abstract.")
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda current_paper: _rich_extraction(text="Tracked text"),
+    )
+    service.index_arxiv_paper(paper.arxiv_id, paper=paper)
+
+    job = service.enqueue_index_job(paper.arxiv_id)
+    completed = service.process_next_job()
+
+    assert completed is not None
+    job_papers = service.get_admin_job_papers(job.job_id)
+    assert job_papers.outcome_counts == {"skipped": 1}
+    assert job_papers.skipped_reason_counts == {"already_indexed": 1}
+    assert job_papers.papers[0].outcome == "skipped"
+    assert job_papers.papers[0].skip_reason == "already_indexed"
+
+
+def test_skipped_job_papers_require_skip_reason(service: PaperbaseService):
+    with pytest.raises(ValueError, match="skip_reason is required"):
+        service.repository.record_job_paper(
+            "job_missing_reason",
+            "arxiv:2401.77779",
+            outcome="skipped",
+            arxiv_id="2401.77779",
+            title="Skipped Without Reason",
+        )
+
+
+def test_admin_jobs_overview_counts_tracked_paper_outcomes(service: PaperbaseService):
+    job = service.repository.create_job(
+        "harvest_range",
+        {
+            "harvest_id": "harvest-test",
+            "categories": ["cs.LG"],
+            "start_date": "2026-01-01",
+            "end_date": "2026-01-31",
+        },
+    )
+    service.repository.jobs[job.job_id] = job.model_copy(update={"status": "completed"})
+    service.repository.record_job_paper(
+        job.job_id,
+        "arxiv:2401.00001",
+        outcome="indexed",
+        arxiv_id="2401.00001",
+        title="Indexed Paper",
+    )
+    service.repository.record_job_paper(
+        job.job_id,
+        "arxiv:2401.00002",
+        outcome="skipped",
+        arxiv_id="2401.00002",
+        title="Skipped Paper",
+        skip_reason="already_indexed",
+    )
+    service.repository.record_job_paper(
+        job.job_id,
+        "arxiv:2401.00003",
+        outcome="failed",
+        arxiv_id="2401.00003",
+        title="Failed Paper",
+    )
+
+    overview = service.get_admin_jobs_overview(limit=10)
+    row = next(row for row in overview.jobs if row.job_id == job.job_id)
+
+    assert row.tracking_available is True
+    assert row.indexed_paper_count == 1
+    assert row.paper_outcome_counts == {"failed": 1, "indexed": 1, "skipped": 1}
+
+    job_papers = service.get_admin_job_papers(job.job_id)
+    skipped = next(paper for paper in job_papers.papers if paper.outcome == "skipped")
+    assert skipped.skip_reason == "already_indexed"
+    assert job_papers.outcome_counts == {"failed": 1, "indexed": 1, "skipped": 1}
+    assert job_papers.skipped_reason_counts == {"already_indexed": 1}
+
+
+def test_summarize_top_cited_admin_row_does_not_claim_index_tracking(service: PaperbaseService):
+    job = service.enqueue_summarize_top_cited_job(limit=25)
+
+    overview = service.get_admin_jobs_overview(limit=10)
+    row = next(row for row in overview.jobs if row.job_id == job.job_id)
+
+    assert row.job_type == "summarize_top_cited"
+    assert row.tracking_available is False
+    assert row.indexed_paper_count is None
+
+
+def test_latest_sync_schedule_uses_latest_run_tracking_for_legacy_rootless_jobs():
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            worker_auto_sync_latest=True,
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+    )
+    job = service.repository.create_job(
+        "sync_latest",
+        {
+            "days": service.settings.latest_sync_days,
+            "categories": service.settings.arxiv_categories,
+            "limit_per_category": service.settings.latest_sync_limit_per_category,
+        },
+    )
+    service.repository.jobs[job.job_id] = job.model_copy(
+        update={
+            "root_job_id": None,
+            "status": "completed",
+            "updated_at": datetime.now(timezone.utc),
+        }
+    )
+    service.repository.record_job_paper(
+        job.job_id,
+        "arxiv:2401.88888",
+        outcome="indexed",
+        arxiv_id="2401.88888",
+        title="Legacy Sync Paper",
+    )
+
+    overview = service.get_admin_jobs_overview(limit=10)
+    schedule_row = next(row for row in overview.jobs if row.job_type == "latest_sync_schedule")
+
+    assert schedule_row.root_job_id == job.job_id
+    assert schedule_row.tracking_available is True
+    assert schedule_row.indexed_paper_count == 1
+    assert schedule_row.paper_outcome_counts == {"indexed": 1}
+
+    job_papers = service.get_admin_job_papers(schedule_row.root_job_id)
+    assert [paper.paper_id for paper in job_papers.papers] == ["arxiv:2401.88888"]
+
+
+def test_admin_job_papers_response_is_paginated(service: PaperbaseService):
+    job = service.repository.create_job("harvest_range", {"harvest_id": "harvest-page"})
+    service.repository.jobs[job.job_id] = job.model_copy(update={"status": "completed"})
+    service.repository.record_job_paper(
+        job.job_id,
+        "arxiv:2401.00001",
+        outcome="indexed",
+        arxiv_id="2401.00001",
+        title="Paper One",
+    )
+    service.repository.record_job_paper(
+        job.job_id,
+        "arxiv:2401.00002",
+        outcome="indexed",
+        arxiv_id="2401.00002",
+        title="Paper Two",
+    )
+    service.repository.record_job_paper(
+        job.job_id,
+        "arxiv:2401.00003",
+        outcome="indexed",
+        arxiv_id="2401.00003",
+        title="Paper Three",
+    )
+    now = datetime.now(timezone.utc)
+    service.repository.job_papers[(job.job_id, "arxiv:2401.00001")] = service.repository.job_papers[
+        (job.job_id, "arxiv:2401.00001")
+    ].model_copy(update={"updated_at": now.replace(microsecond=1)})
+    service.repository.job_papers[(job.job_id, "arxiv:2401.00002")] = service.repository.job_papers[
+        (job.job_id, "arxiv:2401.00002")
+    ].model_copy(update={"updated_at": now.replace(microsecond=2)})
+    service.repository.job_papers[(job.job_id, "arxiv:2401.00003")] = service.repository.job_papers[
+        (job.job_id, "arxiv:2401.00003")
+    ].model_copy(update={"updated_at": now.replace(microsecond=3)})
+
+    page = service.get_admin_job_papers(job.job_id, offset=1, limit=1)
+
+    assert page.root_job_id == job.job_id
+    assert page.total_count == 3
+    assert page.offset == 1
+    assert page.limit == 1
+    assert page.has_more is True
+    assert [paper.paper_id for paper in page.papers] == ["arxiv:2401.00002"]
 def test_get_figure_serves_eps_and_pdf_raw_fallbacks(service: PaperbaseService):
     """LaTeX-path figures fall back to raw eps/pdf bytes when Ghostscript /
     pypdfium2 fail to rasterize. The figure-serving probe must recognize
@@ -1200,6 +1413,42 @@ def test_api_bind_address_prefers_explicit_port_then_platform_port(monkeypatch):
     monkeypatch.setenv("PAPERBASE_API_HOST", "127.0.0.1")
     monkeypatch.setenv("PAPERBASE_API_PORT", "9100")
     assert _resolve_bind_address() == ("127.0.0.1", 9100)
+
+
+def test_api_main_respects_reload_env(monkeypatch):
+    import paperbase.api as api_module
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(api_module, "get_settings", lambda: Settings(log_level="WARNING", log_format="json"))
+    monkeypatch.setattr(
+        api_module,
+        "build_log_config",
+        lambda *, component, level, log_format: {
+            "component": component,
+            "level": level,
+            "format": log_format,
+        },
+    )
+    monkeypatch.setenv("PAPERBASE_API_RELOAD", "1")
+
+    def fake_uvicorn_run(app, *, host, port, reload, log_config, log_level):
+        captured["app"] = app
+        captured["host"] = host
+        captured["port"] = port
+        captured["reload"] = reload
+        captured["log_config"] = log_config
+        captured["log_level"] = log_level
+
+    monkeypatch.setattr("uvicorn.run", fake_uvicorn_run)
+
+    api_module.main()
+
+    assert captured["app"] == "paperbase.api:app"
+    assert captured["host"] == "0.0.0.0"
+    assert captured["port"] == 8080
+    assert captured["reload"] is True
+    assert captured["log_level"] == "warning"
 
 
 def test_probe_integrations_returns_database_and_storage_status(service: PaperbaseService):
@@ -1802,6 +2051,7 @@ def test_init_creates_trigram_indexes_for_summary_and_tldr():
         Base.metadata.create_all = original_create_all
 
     combined = "\n".join(statements)
+    assert "UPDATE jobs SET root_job_id = job_id WHERE root_job_id IS NULL AND job_type <> 'harvest_chunk'" in combined
     assert "ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS embedding VECTOR(768)" in combined
     assert "ALTER TABLE IF EXISTS text_chunks ADD COLUMN IF NOT EXISTS embedding VECTOR(768)" in combined
     assert "papers_summary_short_trgm" in combined
@@ -1953,6 +2203,234 @@ def test_browser_settings_round_trip(browser_service):
 
     assert cleared.settings.has_modal_credentials is False
     assert disconnected.settings.has_github_connection is False
+
+
+def test_browser_session_marks_admin_users():
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            admin_emails="admin@example.com",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=FakeChatModel(),
+        github_repo_manager=FakeGitHubRepoManager(),
+    )
+
+    session, raw_token = service.register_browser_user(
+        SignupRequest(email="admin@example.com", password="topsecret123", display_name="Admin User")
+    )
+
+    assert session.user is not None
+    assert session.user.is_admin is True
+    current_user = service.get_current_browser_user(raw_token)
+    assert current_user is not None
+    assert current_user.is_admin is True
+
+
+def test_admin_paper_listing_filters_and_sorts(service):
+    first = _sample_paper("2401.11111", title="Benchmark Systems", abstract="Grounding benchmark.")
+    first.index_status = "indexed"
+    first.indexed_at = datetime(2026, 4, 21, tzinfo=timezone.utc)
+    second = _sample_paper("2401.22222", title="Other Work", abstract="Other abstract.")
+    second.index_status = "discovered"
+    service.repository.upsert_paper(first)  # type: ignore[attr-defined]
+    service.repository.upsert_paper(second)  # type: ignore[attr-defined]
+
+    results = service.list_papers(query="benchmark", index_status="indexed", limit=10)
+
+    assert [paper.paper_id for paper in results] == ["arxiv:2401.11111"]
+
+
+def test_trending_feed_filters_caps_sorts_and_handles_missing_preview(browser_service):
+    service, _, _ = browser_service
+    session_a, _ = service.register_browser_user(
+        SignupRequest(email="alice@example.com", password="secret12345", display_name="Alice")
+    )
+    session_b, _ = service.register_browser_user(
+        SignupRequest(email="bob@example.com", password="secret12345", display_name="Bob")
+    )
+    session_c, _ = service.register_browser_user(
+        SignupRequest(email="carol@example.com", password="secret12345", display_name="Carol")
+    )
+    assert session_a.user is not None
+    assert session_b.user is not None
+    assert session_c.user is not None
+
+    for index in range(52):
+        arxiv_id = f"2402.{index:05d}"
+        paper = _sample_paper(arxiv_id, title=f"Trending Paper {index}", abstract="Daily paper")
+        paper.index_status = "indexed"
+        paper.published = "2024-02-01"
+        paper.indexed_at = datetime(2026, 4, 1, 0, index % 60, tzinfo=timezone.utc)
+        service.repository.upsert_paper(paper)  # type: ignore[attr-defined]
+
+    off_day = _sample_paper("2403.99999", title="Wrong Day", abstract="Ignore me")
+    off_day.index_status = "indexed"
+    off_day.published = "2024-02-02"
+    off_day.indexed_at = datetime(2026, 4, 2, tzinfo=timezone.utc)
+    service.repository.upsert_paper(off_day)  # type: ignore[attr-defined]
+
+    service.object_store.put_bytes(  # type: ignore[attr-defined]
+        "papers/arxiv:2402.00051/preview/first-page-top.webp",
+        b"preview",
+        content_type="image/webp",
+    )
+
+    service.set_browser_trending_paper_upvote("arxiv:2402.00000", user=session_a.user, upvoted=True)
+    service.set_browser_trending_paper_upvote("arxiv:2402.00000", user=session_b.user, upvoted=True)
+    service.set_browser_trending_paper_upvote("arxiv:2402.00000", user=session_c.user, upvoted=True)
+    service.set_browser_trending_paper_upvote("arxiv:2402.00051", user=session_a.user, upvoted=True)
+
+    default_feed = service.list_browser_trending_papers(
+        date="2024-02-01",
+        sort="default",
+        viewer=session_a.user,
+    )
+    upvote_feed = service.list_browser_trending_papers(
+        date="2024-02-01",
+        sort="upvotes",
+        viewer=session_a.user,
+    )
+
+    assert len(default_feed.papers) == 50
+    assert default_feed.papers[0].paper_id == "arxiv:2402.00051"
+    assert default_feed.papers[0].image_url is not None
+    assert default_feed.papers[1].image_url is None
+    assert all(paper.published == "2024-02-01" for paper in default_feed.papers)
+    assert upvote_feed.papers[0].paper_id == "arxiv:2402.00000"
+    assert upvote_feed.papers[0].upvote_count == 3
+    assert upvote_feed.papers[0].viewer_has_upvoted is True
+
+
+def test_trending_detail_builds_nested_comments_and_vote_summary(browser_service):
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="reader@example.com", password="secret12345", display_name="Reader")
+    )
+    assert session.user is not None
+    paper = _sample_paper("2404.11111", title="Nested Replies", abstract="Threaded discussion")
+    paper.index_status = "indexed"
+    service.repository.upsert_paper(paper)  # type: ignore[attr-defined]
+
+    service.object_store.put_bytes(  # type: ignore[attr-defined]
+        "papers/arxiv:2404.11111/preview/first-page-top.webp",
+        b"preview",
+        content_type="image/webp",
+    )
+    service.set_browser_trending_paper_upvote("arxiv:2404.11111", user=session.user, upvoted=True)
+    root_comments = service.create_browser_trending_paper_comment(
+        "arxiv:2404.11111",
+        user=session.user,
+        request=CreatePaperCommentRequest(body="Root note"),
+    )
+    root_id = root_comments.comments[0].comment_id
+    service.create_browser_trending_paper_comment(
+        "arxiv:2404.11111",
+        user=session.user,
+        request=CreatePaperCommentRequest(body="Reply note", parent_comment_id=root_id),
+    )
+
+    detail = service.get_browser_trending_paper("arxiv:2404.11111", viewer=session.user)
+
+    assert detail.upvote_count == 1
+    assert detail.viewer_has_upvoted is True
+    assert detail.image_url is not None
+    assert len(detail.comments) == 1
+    assert detail.comments[0].body == "Root note"
+    assert detail.comments[0].replies[0].body == "Reply note"
+
+
+def test_trending_comment_rejects_reply_target_from_another_paper(browser_service):
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="writer@example.com", password="secret12345", display_name="Writer")
+    )
+    assert session.user is not None
+
+    first = _sample_paper("2405.11111", title="Paper One", abstract="First")
+    first.index_status = "indexed"
+    second = _sample_paper("2405.22222", title="Paper Two", abstract="Second")
+    second.index_status = "indexed"
+    service.repository.upsert_paper(first)  # type: ignore[attr-defined]
+    service.repository.upsert_paper(second)  # type: ignore[attr-defined]
+
+    created = service.create_browser_trending_paper_comment(
+        "arxiv:2405.11111",
+        user=session.user,
+        request=CreatePaperCommentRequest(body="Root comment"),
+    )
+    root_id = created.comments[0].comment_id
+
+    with pytest.raises(HTTPException) as exc:
+        service.create_browser_trending_paper_comment(
+            "arxiv:2405.22222",
+            user=session.user,
+            request=CreatePaperCommentRequest(body="Wrong reply", parent_comment_id=root_id),
+        )
+
+    assert exc.value.status_code == 400
+
+
+def test_get_paper_asset_returns_browser_content_url_for_local_storage(service):
+    paper = _sample_paper("2401.33333", title="Artifact Paper", abstract="Artifact abstract.")
+    paper.index_status = "indexed"
+    service.repository.upsert_paper(paper)  # type: ignore[attr-defined]
+    service.object_store.put_bytes(  # type: ignore[attr-defined]
+        "papers/arxiv:2401.33333/bundle.pdf",
+        b"%PDF-1.4",
+        content_type="application/pdf",
+    )
+
+    asset = service.get_paper_asset("arxiv:2401.33333", "bundle.pdf")
+    expected_base = service.settings.chat_public_url.rstrip("/")
+
+    assert asset.paper_id == "arxiv:2401.33333"
+    assert (
+        asset.url
+        == f"{expected_base}/v1/browser/admin/papers/arxiv%3A2401.33333/asset-content/bundle.pdf"
+    )
+    assert asset.content_type == "application/pdf"
+
+
+def test_get_paper_preview_content_returns_bytes(service):
+    paper = _sample_paper("2401.33334", title="Artifact Bytes", abstract="Artifact abstract.")
+    paper.index_status = "indexed"
+    service.repository.upsert_paper(paper)  # type: ignore[attr-defined]
+    service.object_store.put_bytes(  # type: ignore[attr-defined]
+        "papers/arxiv:2401.33334/preview/first-page-top.webp",
+        b"preview-bytes",
+        content_type="image/webp",
+    )
+
+    payload, content_type = service.get_paper_preview_content("arxiv:2401.33334")
+
+    assert payload == b"preview-bytes"
+    assert content_type == "image/webp"
+
+
+def test_get_paper_preview_returns_browser_content_url_for_local_storage(service):
+    paper = _sample_paper("2401.33335", title="Preview Paper", abstract="Artifact abstract.")
+    paper.index_status = "indexed"
+    service.repository.upsert_paper(paper)  # type: ignore[attr-defined]
+    service.object_store.put_bytes(  # type: ignore[attr-defined]
+        "papers/arxiv:2401.33335/preview/first-page-top.webp",
+        b"preview-bytes",
+        content_type="image/webp",
+    )
+
+    preview = service.get_paper_preview("arxiv:2401.33335")
+    expected_base = service.settings.chat_public_url.rstrip("/")
+
+    assert preview.paper_id == "arxiv:2401.33335"
+    assert (
+        preview.image_url
+        == f"{expected_base}/v1/browser/papers/arxiv%3A2401.33335/preview/content"
+    )
+    assert preview.content_type == "image/webp"
 
 
 def test_invalid_saved_anthropic_key_is_cleared_and_gates_chat(browser_service):

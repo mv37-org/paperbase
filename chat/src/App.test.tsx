@@ -34,13 +34,25 @@ const apiMocks = vi.hoisted(() => {
   return {
     ApiError: MockApiError,
     api: vi.fn(),
+    browserAdminPaperAssetContentUrl: vi.fn(
+      (paperId: string, path: string) =>
+        `/v1/browser/admin/papers/${encodeURIComponent(paperId)}/asset-content/${path}`,
+    ),
+    browserPaperPreviewContentUrl: vi.fn(
+      (paperId: string) => `/v1/browser/papers/${encodeURIComponent(paperId)}/preview/content`,
+    ),
     createPythonFile: vi.fn(),
     createProject: vi.fn(),
     createThread: vi.fn(),
+    createBrowserTrendingPaperComment: vi.fn(),
     deleteProject: vi.fn(),
     deletePythonFile: vi.fn(),
     deleteThread: vi.fn(),
+    getBrowserTrendingPaper: vi.fn(),
+    getBrowserAdminPaperAsset: vi.fn(),
+    getBrowserAdminPaperFile: vi.fn(),
     getBrowserPaper: vi.fn(),
+    getBrowserPaperPreview: vi.fn(),
     getBrowserPaperFigure: vi.fn(),
     getBrowserPaperFile: vi.fn(),
     getBrowserPaperTable: vi.fn(),
@@ -54,6 +66,12 @@ const apiMocks = vi.hoisted(() => {
     loadGitHubRepositories: vi.fn(),
     loadGitHubRepoImportCandidates: vi.fn(),
     loadGitHubRepoMetadata: vi.fn(),
+    loadBrowserAdminJobPapers: vi.fn(),
+    loadBrowserAdminJobs: vi.fn(),
+    loadBrowserAdminJobsOverview: vi.fn(),
+    loadBrowserAdminPaperFiles: vi.fn(),
+    loadBrowserAdminPapers: vi.fn(),
+    loadBrowserTrendingPapers: vi.fn(),
     loadProjectItems: vi.fn(),
     loadProjectSessions: vi.fn(),
     loadProjects: vi.fn(),
@@ -92,6 +110,13 @@ const apiMocks = vi.hoisted(() => {
     moveThreadToProject: vi.fn(),
     logoutBrowserSession: vi.fn(),
     postForm: vi.fn(),
+    queueBrowserAdminEnrichMissingMetadata: vi.fn(),
+    queueBrowserAdminHarvestRange: vi.fn(),
+    queueBrowserAdminHarvestTopCited: vi.fn(),
+    queueBrowserAdminHarvestVenue: vi.fn(),
+    queueBrowserAdminPaperIndex: vi.fn(),
+    retryBrowserAdminJob: vi.fn(),
+    removeUpvoteBrowserTrendingPaper: vi.fn(),
     runPythonFile: vi.fn(),
     sendThreadMessage: vi.fn(),
     sendThreadMessageStream: vi.fn(),
@@ -99,6 +124,7 @@ const apiMocks = vi.hoisted(() => {
     StreamingChatAbortError: MockStreamingChatAbortError,
     StreamingChatError: MockStreamingChatError,
     syncProjectRepo: vi.fn(),
+    upvoteBrowserTrendingPaper: vi.fn(),
     updateProject: vi.fn(),
     updatePythonFile: vi.fn(),
     uploadDocument: vi.fn(),
@@ -108,16 +134,23 @@ const apiMocks = vi.hoisted(() => {
 vi.mock("./api", () => ({
   ApiError: apiMocks.ApiError,
   api: apiMocks.api,
+  browserAdminPaperAssetContentUrl: apiMocks.browserAdminPaperAssetContentUrl,
+  browserPaperPreviewContentUrl: apiMocks.browserPaperPreviewContentUrl,
+  createBrowserTrendingPaperComment: apiMocks.createBrowserTrendingPaperComment,
   createPythonFile: apiMocks.createPythonFile,
   createProject: apiMocks.createProject,
   createThread: apiMocks.createThread,
   deleteProject: apiMocks.deleteProject,
   deletePythonFile: apiMocks.deletePythonFile,
   deleteThread: apiMocks.deleteThread,
+  getBrowserAdminPaperAsset: apiMocks.getBrowserAdminPaperAsset,
+  getBrowserAdminPaperFile: apiMocks.getBrowserAdminPaperFile,
   getBrowserPaper: apiMocks.getBrowserPaper,
+  getBrowserPaperPreview: apiMocks.getBrowserPaperPreview,
   getBrowserPaperFigure: apiMocks.getBrowserPaperFigure,
   getBrowserPaperFile: apiMocks.getBrowserPaperFile,
   getBrowserPaperTable: apiMocks.getBrowserPaperTable,
+  getBrowserTrendingPaper: apiMocks.getBrowserTrendingPaper,
   getBootstrapSession: apiMocks.getBootstrapSession,
   getProjectRepoSync: apiMocks.getProjectRepoSync,
   getPythonFile: apiMocks.getPythonFile,
@@ -128,6 +161,12 @@ vi.mock("./api", () => ({
   loadGitHubRepositories: apiMocks.loadGitHubRepositories,
   loadGitHubRepoImportCandidates: apiMocks.loadGitHubRepoImportCandidates,
   loadGitHubRepoMetadata: apiMocks.loadGitHubRepoMetadata,
+  loadBrowserAdminJobPapers: apiMocks.loadBrowserAdminJobPapers,
+  loadBrowserAdminJobs: apiMocks.loadBrowserAdminJobs,
+  loadBrowserAdminJobsOverview: apiMocks.loadBrowserAdminJobsOverview,
+  loadBrowserAdminPaperFiles: apiMocks.loadBrowserAdminPaperFiles,
+  loadBrowserAdminPapers: apiMocks.loadBrowserAdminPapers,
+  loadBrowserTrendingPapers: apiMocks.loadBrowserTrendingPapers,
   loadProjectItems: apiMocks.loadProjectItems,
   loadProjectSessions: apiMocks.loadProjectSessions,
   loadProjects: apiMocks.loadProjects,
@@ -136,6 +175,13 @@ vi.mock("./api", () => ({
   moveThreadToProject: apiMocks.moveThreadToProject,
   logoutBrowserSession: apiMocks.logoutBrowserSession,
   postForm: apiMocks.postForm,
+  queueBrowserAdminEnrichMissingMetadata: apiMocks.queueBrowserAdminEnrichMissingMetadata,
+  queueBrowserAdminHarvestRange: apiMocks.queueBrowserAdminHarvestRange,
+  queueBrowserAdminHarvestTopCited: apiMocks.queueBrowserAdminHarvestTopCited,
+  queueBrowserAdminHarvestVenue: apiMocks.queueBrowserAdminHarvestVenue,
+  queueBrowserAdminPaperIndex: apiMocks.queueBrowserAdminPaperIndex,
+  removeUpvoteBrowserTrendingPaper: apiMocks.removeUpvoteBrowserTrendingPaper,
+  retryBrowserAdminJob: apiMocks.retryBrowserAdminJob,
   runPythonFile: apiMocks.runPythonFile,
   sendThreadMessage: apiMocks.sendThreadMessage,
   sendThreadMessageStream: apiMocks.sendThreadMessageStream,
@@ -143,6 +189,7 @@ vi.mock("./api", () => ({
   StreamingChatAbortError: apiMocks.StreamingChatAbortError,
   StreamingChatError: apiMocks.StreamingChatError,
   syncProjectRepo: apiMocks.syncProjectRepo,
+  upvoteBrowserTrendingPaper: apiMocks.upvoteBrowserTrendingPaper,
   updateProject: apiMocks.updateProject,
   updatePythonFile: apiMocks.updatePythonFile,
   uploadDocument: apiMocks.uploadDocument,
@@ -178,6 +225,80 @@ vi.mock("@monaco-editor/react", () => ({
   ),
 }));
 
+vi.mock("echarts-for-react", () => ({
+  default: ({
+    className,
+    option,
+    style,
+  }: {
+    className?: string;
+    option?: {
+      dataZoom?: unknown;
+      grid?: unknown;
+      series?: unknown;
+      xAxis?: unknown;
+      yAxis?: unknown;
+    };
+    style?: { height?: string; width?: string };
+  }) => {
+    const grid = option?.grid && typeof option.grid === "object" ? option.grid : {};
+    const xAxis = option?.xAxis && typeof option.xAxis === "object" ? option.xAxis : {};
+    const yAxis = option?.yAxis && typeof option.yAxis === "object" ? option.yAxis : {};
+    const series = Array.isArray(option?.series) ? option.series : [];
+    const seriesObjects = series.filter(
+      (item): item is Record<string, unknown> => Boolean(item) && typeof item === "object",
+    );
+    const xAxisLabel =
+      (xAxis as Record<string, unknown>).axisLabel &&
+      typeof (xAxis as Record<string, unknown>).axisLabel === "object"
+        ? ((xAxis as Record<string, unknown>).axisLabel as Record<string, unknown>)
+        : {};
+    const xAxisTick =
+      (xAxis as Record<string, unknown>).axisTick &&
+      typeof (xAxis as Record<string, unknown>).axisTick === "object"
+        ? ((xAxis as Record<string, unknown>).axisTick as Record<string, unknown>)
+        : {};
+    return (
+      <div
+        data-testid="admin-jobs-chart-inner"
+        className={className}
+        data-grid-bottom={String((grid as Record<string, unknown>).bottom ?? "")}
+        data-grid-left={String((grid as Record<string, unknown>).left ?? "")}
+        data-has-data-zoom={option && "dataZoom" in option ? "true" : "false"}
+        data-x-axis-data-count={String(
+          Array.isArray((xAxis as Record<string, unknown>).data)
+            ? ((xAxis as Record<string, unknown>).data as unknown[]).length
+            : 0,
+        )}
+        data-x-axis-label-align-max={String(xAxisLabel.alignMaxLabel ?? "")}
+        data-x-axis-label-align-min={String(xAxisLabel.alignMinLabel ?? "")}
+        data-x-axis-label-font-size={String(xAxisLabel.fontSize ?? "")}
+        data-x-axis-label-interval={String(xAxisLabel.interval ?? "")}
+        data-x-axis-label-show={String(xAxisLabel.show ?? "")}
+        data-x-axis-tick-show={String(xAxisTick.show ?? "")}
+        data-x-axis-tick-interval={String(xAxisTick.interval ?? "")}
+        data-series-colors={seriesObjects
+          .map((seriesItem) => {
+            const itemStyle = seriesItem.itemStyle;
+            return itemStyle && typeof itemStyle === "object"
+              ? String((itemStyle as Record<string, unknown>).color ?? "")
+              : "";
+          })
+          .join(",")}
+        data-series-names={seriesObjects
+          .map((seriesItem) => String(seriesItem.name ?? ""))
+          .join(",")}
+        data-series-stacks={seriesObjects
+          .map((seriesItem) => String(seriesItem.stack ?? ""))
+          .join(",")}
+        data-y-max={String((yAxis as Record<string, unknown>).max ?? "")}
+        data-y-split-number={String((yAxis as Record<string, unknown>).splitNumber ?? "")}
+        style={style}
+      />
+    );
+  },
+}));
+
 import App from "./App";
 
 const OPEN_TABS_KEY = "paperbase-open-tabs";
@@ -189,6 +310,7 @@ function authenticatedSession(
     has_openai_api_key: boolean;
     has_anthropic_api_key: boolean;
     csrf_token: string | null;
+    is_admin: boolean;
     settings: Partial<{
       openai_api_key_hint: string;
       anthropic_api_key_hint: string;
@@ -209,6 +331,7 @@ function authenticatedSession(
       user_id: "user_1",
       email: "user@example.com",
       display_name: "User Example",
+      is_admin: overrides.is_admin ?? false,
     },
     has_openai_api_key: overrides.has_openai_api_key ?? overrides.has_anthropic_api_key ?? true,
     has_anthropic_api_key: overrides.has_anthropic_api_key ?? overrides.has_openai_api_key ?? true,
@@ -604,6 +727,154 @@ describe("App", () => {
       caption: "Table caption",
       rows: [["Metric", "Value"]],
     });
+    apiMocks.getBrowserPaperPreview.mockResolvedValue({
+      paper_id: "arxiv:2401.12345",
+      image_url: "https://example.test/preview.webp",
+      content_type: "image/webp",
+    });
+    apiMocks.loadBrowserTrendingPapers.mockResolvedValue({
+      date: "2026-04-21",
+      sort: "default",
+      papers: [
+        {
+          paper_id: "arxiv:2401.12345",
+          arxiv_id: "2401.12345",
+          title: "Trending Paper",
+          authors: "Ada Lovelace",
+          published: "2026-04-21",
+          html_url: "https://example.test/2401.12345",
+          pdf_url: "https://example.test/2401.12345.pdf",
+          image_url: "https://example.test/trending-preview.webp",
+          upvote_count: 12,
+          viewer_has_upvoted: false,
+        },
+      ],
+    });
+    apiMocks.getBrowserTrendingPaper.mockResolvedValue({
+      paper_id: "arxiv:2401.12345",
+      arxiv_id: "2401.12345",
+      title: "Trending Paper",
+      authors: "Ada Lovelace",
+      published: "2026-04-21",
+      primary_category: "cs.AI",
+      categories: "cs.AI",
+      summary_eli5: "Simple summary",
+      html_url: "https://example.test/2401.12345",
+      pdf_url: "https://example.test/2401.12345.pdf",
+      image_url: "https://example.test/trending-preview.webp",
+      upvote_count: 12,
+      viewer_has_upvoted: false,
+      comments: [],
+    });
+    apiMocks.upvoteBrowserTrendingPaper.mockResolvedValue({
+      paper_id: "arxiv:2401.12345",
+      upvote_count: 13,
+      viewer_has_upvoted: true,
+    });
+    apiMocks.removeUpvoteBrowserTrendingPaper.mockResolvedValue({
+      paper_id: "arxiv:2401.12345",
+      upvote_count: 12,
+      viewer_has_upvoted: false,
+    });
+    apiMocks.createBrowserTrendingPaperComment.mockResolvedValue({
+      paper_id: "arxiv:2401.12345",
+      comments: [],
+    });
+    apiMocks.loadBrowserAdminJobPapers.mockResolvedValue({
+      root_job_id: "job_root_1",
+      total_count: 0,
+      offset: 0,
+      limit: 100,
+      has_more: false,
+      papers: [],
+    });
+    apiMocks.loadBrowserAdminJobs.mockResolvedValue([]);
+    apiMocks.loadBrowserAdminJobsOverview.mockResolvedValue({
+      jobs: [],
+      worker: null,
+    });
+    apiMocks.loadBrowserAdminPapers.mockResolvedValue([]);
+    apiMocks.loadBrowserAdminPaperFiles.mockResolvedValue({
+      paper_id: "arxiv:2401.12345",
+      files: [],
+    });
+    apiMocks.getBrowserAdminPaperFile.mockResolvedValue({
+      paper_id: "arxiv:2401.12345",
+      path: "text/full.md",
+      content: "full text",
+    });
+    apiMocks.getBrowserAdminPaperAsset.mockResolvedValue({
+      paper_id: "arxiv:2401.12345",
+      path: "preview/first-page-top.webp",
+      url: "https://example.test/preview.webp",
+      content_type: "image/webp",
+    });
+    apiMocks.queueBrowserAdminPaperIndex.mockResolvedValue({
+      job_id: "job_admin_1",
+      job_type: "index_paper",
+      status: "pending",
+      payload: {},
+      attempts: 0,
+      max_attempts: 3,
+      priority: -10,
+      created_at: "2026-04-21T00:00:00Z",
+      updated_at: "2026-04-21T00:00:00Z",
+    });
+    apiMocks.queueBrowserAdminHarvestRange.mockResolvedValue({
+      job_id: "job_admin_range",
+      job_type: "harvest_range",
+      status: "pending",
+      payload: {},
+      attempts: 0,
+      max_attempts: 3,
+      priority: 10,
+      created_at: "2026-04-21T00:00:00Z",
+      updated_at: "2026-04-21T00:00:00Z",
+    });
+    apiMocks.queueBrowserAdminHarvestTopCited.mockResolvedValue({
+      job_id: "job_admin_top",
+      job_type: "harvest_top_cited",
+      status: "pending",
+      payload: {},
+      attempts: 0,
+      max_attempts: 3,
+      priority: 10,
+      created_at: "2026-04-21T00:00:00Z",
+      updated_at: "2026-04-21T00:00:00Z",
+    });
+    apiMocks.queueBrowserAdminHarvestVenue.mockResolvedValue({
+      job_id: "job_admin_venue",
+      job_type: "harvest_venue",
+      status: "pending",
+      payload: {},
+      attempts: 0,
+      max_attempts: 3,
+      priority: 10,
+      created_at: "2026-04-21T00:00:00Z",
+      updated_at: "2026-04-21T00:00:00Z",
+    });
+    apiMocks.queueBrowserAdminEnrichMissingMetadata.mockResolvedValue({
+      job_id: "job_admin_enrich",
+      job_type: "enrich_missing_metadata",
+      status: "pending",
+      payload: {},
+      attempts: 0,
+      max_attempts: 3,
+      priority: 10,
+      created_at: "2026-04-21T00:00:00Z",
+      updated_at: "2026-04-21T00:00:00Z",
+    });
+    apiMocks.retryBrowserAdminJob.mockResolvedValue({
+      job_id: "job_admin_retry",
+      job_type: "index_paper",
+      status: "pending",
+      payload: { retried: true },
+      attempts: 0,
+      max_attempts: 3,
+      priority: -10,
+      created_at: "2026-04-21T00:00:00Z",
+      updated_at: "2026-04-21T00:00:00Z",
+    });
     apiMocks.syncProjectRepo.mockResolvedValue(repoSyncResponse("proj_1", true));
     apiMocks.updatePythonFile.mockImplementation(
       async (fileId: string, payload: { filename?: string | null; content?: string | null }) =>
@@ -632,6 +903,46 @@ describe("App", () => {
     });
     expect(document.querySelector("#app-shell")).toBeNull();
     expect(apiMocks.landingMentionEditor).toHaveBeenCalled();
+  });
+
+  it("opens the public trending page from landing and routes unauthenticated upvotes to login", async () => {
+    apiMocks.loadSession.mockResolvedValue({
+      authenticated: false,
+      user: null,
+      has_anthropic_api_key: false,
+      csrf_token: null,
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Browse trending papers" })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Browse trending papers" }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("trending-papers-page")).toBeTruthy();
+    });
+    expect(apiMocks.loadBrowserTrendingPapers).toHaveBeenCalledWith(expect.any(String), "default");
+
+    fireEvent.click(screen.getByRole("button", { name: "Upvote 12" }));
+
+    await waitFor(() => {
+      expect(document.querySelector("#auth-modal-title")).toBeTruthy();
+    });
+  });
+
+  it("boots from the server session payload without refetching the browser session", async () => {
+    apiMocks.getBootstrapSession.mockReturnValue(authenticatedSession());
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(document.querySelector("#account-menu-button")).toBeTruthy();
+    });
+
+    expect(apiMocks.loadSession).not.toHaveBeenCalled();
   });
 
   it("boots from the server session payload without refetching the browser session", async () => {
@@ -754,20 +1065,10 @@ describe("App", () => {
     const categoryLabels = [
       ...document.querySelectorAll<HTMLElement>(".project-tree-category-label"),
     ].map((element) => element.textContent?.trim());
-    expect(categoryLabels).toEqual([
-      "Workflows",
-      "Experiments",
-      "Data",
-      "Notes",
-      "Sessions",
-      "Code",
-    ]);
-    expect(document.querySelectorAll(".project-tree-category-count")).toHaveLength(2);
+    expect(categoryLabels).toEqual(["Notes", "Sessions", "Code"]);
+    expect(document.querySelectorAll(".project-tree-category-count")).toHaveLength(0);
     expect(screen.getByText("Home")).toBeTruthy();
-    expect(screen.getByText("Workflows")).toBeTruthy();
-    expect(screen.getByText("Experiments")).toBeTruthy();
     expect(screen.getByText("Notes")).toBeTruthy();
-    expect(screen.getByText("Data")).toBeTruthy();
     expect(screen.getByText("Sessions")).toBeTruthy();
     expect(screen.getByText("Code")).toBeTruthy();
     expect(screen.getByLabelText("Collapse all sections in General")).toBeTruthy();
@@ -779,12 +1080,12 @@ describe("App", () => {
 
     fireEvent.click(screen.getByLabelText("Collapse all sections in General"));
     expect(screen.queryByText("Recovered thread")).toBeNull();
-    expect(screen.queryByText("Workflows")).toBeNull();
+    expect(screen.queryByText("Notes")).toBeNull();
     expect(screen.queryByText("Home")).toBeNull();
     expect(screen.getByLabelText("Expand all sections in General")).toBeTruthy();
 
     fireEvent.click(screen.getByLabelText("Expand all sections in General"));
-    expect(await screen.findByText("Workflows")).toBeTruthy();
+    expect(await screen.findByText("Notes")).toBeTruthy();
     expect(await screen.findByText("Recovered thread")).toBeTruthy();
 
     fireEvent.click(screen.getByText("Home"));
@@ -2086,7 +2387,10 @@ describe("App", () => {
     await waitFor(() => {
       expect(apiMocks.api).toHaveBeenCalledWith("/v1/browser/settings/openai-key", {
         method: "PUT",
-        body: JSON.stringify({ api_key: "sk-test-pending-mention" }),
+        body: JSON.stringify({
+          username: "user@example.com",
+          api_key: "sk-test-pending-mention",
+        }),
       });
     });
     await waitFor(() => {
@@ -2909,6 +3213,14 @@ describe("App", () => {
     await waitFor(() => {
       expect(document.querySelector("#account-menu-button")).toBeTruthy();
     });
+    expect(screen.getByRole("button", { name: "Trending papers" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Control panel" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Trending papers" }));
+    await waitFor(() => {
+      expect(screen.getByTestId("trending-papers-page")).toBeTruthy();
+    });
+    expect(screen.queryByRole("button", { name: "Close Trending papers" })).toBeNull();
 
     fireEvent.click(document.querySelector("#account-menu-button") as HTMLElement);
     fireEvent.click(screen.getByRole("menuitem", { name: "Settings" }));
@@ -2919,6 +3231,7 @@ describe("App", () => {
     expect(screen.getByRole("tab", { name: "Sandbox" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "GitHub" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "Appearance" })).toBeTruthy();
+    expect(screen.queryByRole("tab", { name: "Admin" })).toBeNull();
     expect(screen.queryByRole("tab", { name: "Notifications" })).toBeNull();
     expect(document.querySelector("#auth-modal-title")).toBeNull();
     expect(document.querySelector(".settings-section-title")?.textContent).toBe("Inference");
@@ -2935,6 +3248,896 @@ describe("App", () => {
     expect(screen.getAllByText("Choose the theme for signed-in pages.")).toHaveLength(1);
     expect(screen.getByRole("radio", { name: /Light/i })).toBeTruthy();
     expect(screen.getByRole("radio", { name: /Dark/i })).toBeTruthy();
+  });
+
+  it("opens the sidebar admin panel for admin users and keeps it out of settings", async () => {
+    const dateNowSpy = vi
+      .spyOn(Date, "now")
+      .mockReturnValue(new Date("2026-04-21T12:00:00Z").getTime());
+    const longSkippedTitle =
+      "This Paper Title Is Deliberately Long Enough To Need Truncation In The Admin Paper Table";
+    const truncatedSkippedTitle = `${longSkippedTitle.slice(0, 60).trimEnd()}...`;
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession({ is_admin: true }));
+    apiMocks.loadBrowserAdminJobsOverview.mockResolvedValue({
+      jobs: [
+        {
+          job_id: "job_root_1",
+          root_job_id: "job_root_1",
+          job_type: "harvest_range",
+          status: "completed",
+          display_status: "completed",
+          payload: {},
+          attempts: 1,
+          max_attempts: 3,
+          priority: 10,
+          created_at: "2026-04-21T00:00:00Z",
+          updated_at: "2026-04-21T01:00:00Z",
+          is_synthetic: false,
+          tracking_available: true,
+          indexed_paper_count: 2,
+          paper_outcome_counts: { indexed: 2, skipped: 1, failed: 0 },
+          latest_status_summary: "1 completed · 1 total",
+          child_job_count: 0,
+          details: {},
+        },
+      ],
+      worker: null,
+    });
+    apiMocks.loadBrowserAdminJobPapers.mockResolvedValue({
+      root_job_id: "job_root_1",
+      total_count: 3,
+      offset: 0,
+      limit: 100,
+      has_more: false,
+      outcome_counts: { indexed: 2, skipped: 1 },
+      skipped_reason_counts: { already_indexed: 1 },
+      papers: [
+        {
+          root_job_id: "job_root_1",
+          job_id: "job_chunk_1",
+          paper_id: "arxiv:2401.12345",
+          arxiv_id: "2401.12345",
+          title: "Benchmark Paper",
+          outcome: "indexed",
+          created_at: "2026-04-21T00:00:00Z",
+          updated_at: "2026-04-21T01:10:00Z",
+          paper: null,
+        },
+        {
+          root_job_id: "job_root_1",
+          job_id: "job_chunk_1",
+          paper_id: "arxiv:2401.12346",
+          arxiv_id: "2401.12346",
+          title: longSkippedTitle,
+          outcome: "skipped",
+          skip_reason: "already_indexed",
+          created_at: "2026-04-21T00:00:00Z",
+          updated_at: "2026-04-21T01:11:00Z",
+          paper: null,
+        },
+      ],
+    });
+    localStorage.setItem(OPEN_TABS_KEY, JSON.stringify(["thread_1"]));
+    try {
+      render(<App />);
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Control panel" })).toBeTruthy();
+      });
+      await waitFor(() => {
+        expect(screen.getByRole("tablist", { name: "Open tabs" })).toBeTruthy();
+      });
+      expect(screen.getByRole("button", { name: "Send" })).toBeTruthy();
+      expect(screen.getByText("Grounded answer")).toBeTruthy();
+
+      fireEvent.click(screen.getByRole("button", { name: "Control panel" }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("heading", { name: "Control panel" })).toBeTruthy();
+      });
+      expect(screen.queryByRole("tablist", { name: "Open tabs" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
+      expect(screen.queryByText("Grounded answer")).toBeNull();
+      expect(await screen.findByTestId("admin-jobs-chart")).toBeTruthy();
+      const chart = screen.getByTestId("admin-jobs-chart-inner");
+      expect(chart.getAttribute("data-grid-bottom")).toBe("26");
+      expect(chart.getAttribute("data-grid-left")).toBe("0");
+      expect(chart.getAttribute("data-has-data-zoom")).toBe("false");
+      expect(chart.getAttribute("data-x-axis-label-align-min")).toBe("left");
+      expect(chart.getAttribute("data-x-axis-label-align-max")).toBe("right");
+      expect(chart.getAttribute("data-x-axis-label-font-size")).toBe("8");
+      expect(chart.getAttribute("data-x-axis-label-show")).toBe("true");
+      expect(chart.getAttribute("data-x-axis-tick-show")).toBe("true");
+      expect(chart.getAttribute("data-x-axis-tick-interval")).toBe("0");
+      expect(Number(chart.getAttribute("data-x-axis-data-count"))).toBeGreaterThanOrEqual(80);
+      expect(chart.getAttribute("data-series-names")).toBe("Indexed,Skipped,Failed");
+      expect(chart.getAttribute("data-series-colors")).toBe("#432818,#99582a,#b42318");
+      expect(chart.getAttribute("data-series-stacks")).toBe(
+        "paper outcomes,paper outcomes,paper outcomes",
+      );
+      expect((chart as HTMLElement).style.height).toBe("320px");
+      expect(
+        within(screen.getByRole("table")).getByRole("columnheader", { name: "Trigger" }),
+      ).toBeTruthy();
+      expect(screen.getAllByText("Requested").length).toBeGreaterThan(0);
+      expect(screen.queryByRole("button", { name: "Close Control panel" })).toBeNull();
+      expect(apiMocks.loadBrowserAdminJobsOverview).toHaveBeenCalledWith(200);
+
+      const jobRow = screen.getByText("job_root_1").closest("tr");
+      expect(jobRow).toBeTruthy();
+      fireEvent.click(jobRow as HTMLTableRowElement);
+      await waitFor(() => {
+        expect(screen.getByText("Latest status: 1 completed · 1 total")).toBeTruthy();
+      });
+
+      fireEvent.click(within(screen.getByRole("table")).getByRole("button", { name: "2" }));
+      await waitFor(() => {
+        expect(screen.getByRole("heading", { name: "Papers in job_root_1" })).toBeTruthy();
+      });
+      const backButton = screen.getByRole("button", { name: "Back to jobs" });
+      expect(backButton.textContent).toBe("←");
+      expect(screen.getByText("1-2 of 3")).toBeTruthy();
+      expect(screen.queryAllByText("job_root_1")).toHaveLength(1);
+      expect(screen.getByRole("button", { name: "Previous page" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Next page" })).toBeTruthy();
+      const statusSummary = screen.getByRole("group", { name: "Indexed paper outcomes" });
+      expect(within(statusSummary).getByText("Indexed")).toBeTruthy();
+      expect(within(statusSummary).getByText("Skipped: Already indexed")).toBeTruthy();
+      expect(screen.getByText(truncatedSkippedTitle)).toBeTruthy();
+      expect(screen.queryByText(longSkippedTitle)).toBeNull();
+      expect(screen.getByText("Skipped").getAttribute("title")).toBe("Skipped: Already indexed");
+      expect(screen.getAllByText(/\d{1,2} \w{3} at \d{1,2}:\d{2} [AP]M/).length).toBeGreaterThan(0);
+      expect(screen.queryByRole("button", { name: "Close Control panel" })).toBeNull();
+      expect(apiMocks.loadBrowserAdminJobPapers).toHaveBeenCalledWith("job_root_1", 0, 100);
+
+      fireEvent.click(document.querySelector("#account-menu-button") as HTMLElement);
+      fireEvent.click(screen.getByRole("menuitem", { name: "Settings" }));
+
+      await waitFor(() => {
+        expect(screen.queryByRole("tab", { name: "Admin" })).toBeNull();
+      });
+    } finally {
+      dateNowSpy.mockRestore();
+    }
+  });
+
+  it("shows skeleton admin jobs placeholders when the selected window has no jobs", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession({ is_admin: true }));
+    apiMocks.loadBrowserAdminJobsOverview.mockResolvedValue({
+      jobs: [],
+      worker: null,
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Control panel" })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Control panel" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Control panel" })).toBeTruthy();
+    });
+    const table = screen.getByRole("table");
+    expect(screen.getAllByText("No indexed papers in this window").length).toBeGreaterThan(0);
+    expect(screen.getByTestId("admin-jobs-chart-skeleton")).toBeTruthy();
+    expect(screen.getByTestId("admin-jobs-table-skeleton")).toBeTruthy();
+    expect(within(table).getByRole("columnheader", { name: "Type" })).toBeTruthy();
+    expect(within(table).queryByText("No jobs yet.")).toBeNull();
+  });
+
+  it("shows why each admin job ran", async () => {
+    const dateNowSpy = vi
+      .spyOn(Date, "now")
+      .mockReturnValue(new Date("2026-04-21T12:00:00Z").getTime());
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession({ is_admin: true }));
+    apiMocks.loadBrowserAdminJobsOverview.mockResolvedValue({
+      jobs: [
+        {
+          job_id: "env:latest_sync",
+          root_job_id: "job_sync_1",
+          job_type: "latest_sync_schedule",
+          status: "scheduled",
+          display_status: "scheduled",
+          payload: {},
+          attempts: 0,
+          max_attempts: 0,
+          priority: 0,
+          created_at: "2026-04-21T00:00:00Z",
+          updated_at: "2026-04-21T01:00:00Z",
+          is_synthetic: true,
+          tracking_available: false,
+          indexed_paper_count: null,
+          latest_status_summary: "Runs on the worker schedule.",
+          child_job_count: 0,
+          details: {},
+        },
+        {
+          job_id: "job_range_1",
+          root_job_id: "job_range_1",
+          job_type: "harvest_range",
+          status: "completed",
+          display_status: "completed",
+          payload: {},
+          attempts: 1,
+          max_attempts: 3,
+          priority: 10,
+          created_at: "2026-04-21T00:00:00Z",
+          updated_at: "2026-04-21T01:00:00Z",
+          is_synthetic: false,
+          tracking_available: false,
+          indexed_paper_count: null,
+          latest_status_summary: "1 completed · 1 total",
+          child_job_count: 0,
+          details: {},
+        },
+        {
+          job_id: "job_summary_1",
+          root_job_id: "job_summary_1",
+          job_type: "summarize_top_cited",
+          status: "completed",
+          display_status: "completed",
+          payload: {},
+          attempts: 1,
+          max_attempts: 2,
+          priority: 0,
+          created_at: "2026-04-21T00:00:00Z",
+          updated_at: "2026-04-21T01:00:00Z",
+          is_synthetic: false,
+          tracking_available: false,
+          indexed_paper_count: null,
+          latest_status_summary: "completed",
+          child_job_count: 0,
+          details: {},
+        },
+      ],
+      worker: null,
+    });
+
+    try {
+      render(<App />);
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Control panel" })).toBeTruthy();
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Control panel" }));
+
+      await waitFor(() => {
+        expect(screen.getByTitle("Env scheduled · latest sync")).toBeTruthy();
+      });
+      expect(
+        within(screen.getByRole("table")).getByRole("columnheader", { name: "Trigger" }),
+      ).toBeTruthy();
+      expect(screen.getByTitle("On-demand request · date range")).toBeTruthy();
+      expect(screen.getByTitle("System generated · summarize top cited")).toBeTruthy();
+    } finally {
+      dateNowSpy.mockRestore();
+    }
+  });
+
+  it("keeps zero-valued admin job timelines fixed with denser grid lines", async () => {
+    const dateNowSpy = vi
+      .spyOn(Date, "now")
+      .mockReturnValue(new Date("2026-04-21T12:00:00Z").getTime());
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession({ is_admin: true }));
+    apiMocks.loadBrowserAdminJobsOverview.mockResolvedValue({
+      jobs: [
+        {
+          job_id: "job_zero",
+          root_job_id: "job_zero",
+          job_type: "harvest_range",
+          status: "completed",
+          display_status: "completed",
+          payload: {},
+          attempts: 1,
+          max_attempts: 3,
+          priority: 10,
+          created_at: "2026-04-21T00:00:00Z",
+          updated_at: "2026-04-21T01:00:00Z",
+          is_synthetic: false,
+          tracking_available: true,
+          indexed_paper_count: 0,
+          paper_outcome_counts: { indexed: 0, skipped: 0, failed: 0 },
+          latest_status_summary: "1 completed · 1 total",
+          child_job_count: 0,
+          details: {},
+        },
+      ],
+      worker: null,
+    });
+
+    try {
+      render(<App />);
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Control panel" })).toBeTruthy();
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Control panel" }));
+
+      await waitFor(() => {
+        expect(screen.getByTestId("admin-jobs-chart-inner")).toBeTruthy();
+      });
+      const chart = screen.getByTestId("admin-jobs-chart-inner");
+      expect(chart.getAttribute("data-y-max")).toBe("8");
+      expect(chart.getAttribute("data-y-split-number")).toBe("8");
+      expect(screen.queryByTestId("admin-jobs-chart-skeleton")).toBeNull();
+    } finally {
+      dateNowSpy.mockRestore();
+    }
+  });
+
+  it("filters admin jobs by preset and custom time windows", async () => {
+    const dateNowSpy = vi
+      .spyOn(Date, "now")
+      .mockReturnValue(new Date("2026-04-21T12:00:00Z").getTime());
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession({ is_admin: true }));
+    apiMocks.loadBrowserAdminJobsOverview.mockResolvedValue({
+      jobs: [
+        {
+          job_id: "job_recent",
+          root_job_id: "job_recent",
+          job_type: "index_paper",
+          status: "completed",
+          display_status: "completed",
+          payload: {},
+          attempts: 1,
+          max_attempts: 3,
+          priority: 10,
+          created_at: "2026-04-21T11:00:00Z",
+          updated_at: "2026-04-21T11:30:00Z",
+          is_synthetic: false,
+          tracking_available: true,
+          indexed_paper_count: 3,
+          latest_status_summary: "completed",
+          child_job_count: 0,
+          details: {},
+        },
+        {
+          job_id: "job_old",
+          root_job_id: "job_old",
+          job_type: "harvest_range",
+          status: "completed",
+          display_status: "completed",
+          payload: {},
+          attempts: 1,
+          max_attempts: 3,
+          priority: 10,
+          created_at: "2026-04-15T11:00:00Z",
+          updated_at: "2026-04-15T12:00:00Z",
+          is_synthetic: false,
+          tracking_available: true,
+          indexed_paper_count: 12,
+          latest_status_summary: "completed",
+          child_job_count: 0,
+          details: {},
+        },
+      ],
+      worker: null,
+    });
+
+    try {
+      render(<App />);
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Control panel" })).toBeTruthy();
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Control panel" }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("heading", { name: "Control panel" })).toBeTruthy();
+      });
+
+      expect(screen.getByText("job_recent")).toBeTruthy();
+      expect(screen.getByText("job_old")).toBeTruthy();
+
+      fireEvent.click(screen.getByRole("button", { name: "Jobs window" }));
+      fireEvent.click(screen.getByRole("option", { name: "Last hour" }));
+
+      await waitFor(() => {
+        expect(screen.getByText("job_recent")).toBeTruthy();
+      });
+      expect(screen.queryByText("job_old")).toBeNull();
+
+      fireEvent.click(screen.getByRole("button", { name: "Jobs window" }));
+      fireEvent.click(screen.getByRole("option", { name: "Custom range" }));
+      fireEvent.change(screen.getByLabelText("Custom range start"), {
+        target: { value: "2026-04-15T00:00" },
+      });
+      fireEvent.change(screen.getByLabelText("Custom range end"), {
+        target: { value: "2026-04-15T23:59" },
+      });
+
+      await waitFor(() => {
+        expect(screen.getByText("job_old")).toBeTruthy();
+      });
+      expect(screen.queryByText("job_recent")).toBeNull();
+    } finally {
+      dateNowSpy.mockRestore();
+    }
+  });
+
+  it("auto-refreshes admin jobs using the selected refresh interval", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession({ is_admin: true }));
+    apiMocks.loadBrowserAdminJobsOverview.mockResolvedValue({
+      jobs: [],
+      worker: null,
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Control panel" })).toBeTruthy();
+    });
+
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "Control panel" }));
+
+      expect(screen.getByRole("heading", { name: "Control panel" })).toBeTruthy();
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(apiMocks.loadBrowserAdminJobsOverview).toHaveBeenCalledTimes(1);
+
+      fireEvent.click(screen.getByRole("button", { name: "Jobs refresh interval" }));
+      expect(screen.getByRole("option", { name: "5 seconds" })).toBeTruthy();
+      expect(screen.getByRole("option", { name: "30 seconds" })).toBeTruthy();
+      expect(screen.getByRole("option", { name: "1 min" })).toBeTruthy();
+      fireEvent.click(screen.getByRole("option", { name: "5 seconds" }));
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4999);
+      });
+      expect(apiMocks.loadBrowserAdminJobsOverview).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1);
+      });
+      expect(apiMocks.loadBrowserAdminJobsOverview).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("paginates indexed papers in the admin drilldown", async () => {
+    const dateNowSpy = vi
+      .spyOn(Date, "now")
+      .mockReturnValue(new Date("2026-05-04T12:00:00Z").getTime());
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession({ is_admin: true }));
+    apiMocks.loadBrowserAdminJobsOverview.mockResolvedValue({
+      jobs: [
+        {
+          job_id: "job_root_1",
+          root_job_id: "job_root_1",
+          job_type: "harvest_range",
+          status: "completed",
+          display_status: "completed",
+          payload: {},
+          attempts: 1,
+          max_attempts: 3,
+          priority: 10,
+          created_at: "2026-05-04T00:00:00Z",
+          updated_at: "2026-05-04T01:00:00Z",
+          is_synthetic: false,
+          tracking_available: true,
+          indexed_paper_count: 140,
+          paper_outcome_counts: { indexed: 140 },
+          latest_status_summary: "completed",
+          child_job_count: 0,
+          details: {},
+        },
+      ],
+      worker: null,
+    });
+    apiMocks.loadBrowserAdminJobPapers
+      .mockResolvedValueOnce({
+        root_job_id: "job_root_1",
+        total_count: 140,
+        offset: 0,
+        limit: 100,
+        has_more: true,
+        papers: [
+          {
+            root_job_id: "job_root_1",
+            job_id: "job_chunk_1",
+            paper_id: "arxiv:2401.00001",
+            arxiv_id: "2401.00001",
+            title: "Page One Paper",
+            outcome: "indexed",
+            created_at: "2026-04-21T00:00:00Z",
+            updated_at: "2026-04-21T01:10:00Z",
+            paper: null,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        root_job_id: "job_root_1",
+        total_count: 140,
+        offset: 100,
+        limit: 100,
+        has_more: false,
+        papers: [
+          {
+            root_job_id: "job_root_1",
+            job_id: "job_chunk_2",
+            paper_id: "arxiv:2401.00002",
+            arxiv_id: "2401.00002",
+            title: "Page Two Paper",
+            outcome: "indexed",
+            created_at: "2026-04-21T00:00:00Z",
+            updated_at: "2026-04-21T02:10:00Z",
+            paper: null,
+          },
+        ],
+      });
+
+    try {
+      render(<App />);
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Control panel" })).toBeTruthy();
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Control panel" }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("heading", { name: "Control panel" })).toBeTruthy();
+      });
+
+      const indexedPapersButton = await within(screen.getByRole("table")).findByRole("button", {
+        name: "140",
+      });
+      fireEvent.click(indexedPapersButton);
+
+      await waitFor(() => {
+        expect(screen.getByRole("heading", { name: "Papers in job_root_1" })).toBeTruthy();
+      });
+      expect(apiMocks.loadBrowserAdminJobPapers).toHaveBeenNthCalledWith(1, "job_root_1", 0, 100);
+      expect(screen.getByText("Page One Paper")).toBeTruthy();
+      expect(screen.getAllByText("1-1 of 140").length).toBeGreaterThan(0);
+
+      fireEvent.click(screen.getByRole("button", { name: "Next page" }));
+
+      await waitFor(() => {
+        expect(apiMocks.loadBrowserAdminJobPapers).toHaveBeenNthCalledWith(
+          2,
+          "job_root_1",
+          100,
+          100,
+        );
+      });
+      await waitFor(() => {
+        expect(screen.getByText("Page Two Paper")).toBeTruthy();
+      });
+      expect(screen.getAllByText("101-101 of 140").length).toBeGreaterThan(0);
+    } finally {
+      dateNowSpy.mockRestore();
+    }
+  });
+
+  it("shows arXiv links and raw asset previews in the admin paper modal", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession({ is_admin: true }));
+    apiMocks.loadBrowserAdminJobsOverview.mockResolvedValue({
+      jobs: [
+        {
+          job_id: "job_root_modal",
+          root_job_id: "job_root_modal",
+          job_type: "harvest_range",
+          status: "completed",
+          display_status: "completed",
+          payload: {},
+          attempts: 1,
+          max_attempts: 3,
+          priority: 10,
+          created_at: "2026-05-04T00:00:00Z",
+          updated_at: "2026-05-04T01:00:00Z",
+          is_synthetic: false,
+          tracking_available: true,
+          indexed_paper_count: 1,
+          paper_outcome_counts: { indexed: 1 },
+          latest_status_summary: "completed",
+          child_job_count: 0,
+          details: {},
+        },
+      ],
+      worker: null,
+    });
+    apiMocks.loadBrowserAdminJobPapers.mockResolvedValue({
+      root_job_id: "job_root_modal",
+      total_count: 1,
+      offset: 0,
+      limit: 100,
+      has_more: false,
+      papers: [
+        {
+          root_job_id: "job_root_modal",
+          job_id: "job_chunk_modal",
+          paper_id: "arxiv:2401.00001",
+          arxiv_id: "2401.00001",
+          title: "Modal Paper",
+          outcome: "indexed",
+          created_at: "2026-05-04T00:00:00Z",
+          updated_at: "2026-05-04T01:00:00Z",
+          paper: null,
+        },
+      ],
+    });
+    apiMocks.getBrowserPaper.mockResolvedValue({
+      paper_id: "arxiv:2401.00001",
+      arxiv_id: "2401.00001",
+      title: "Modal Paper",
+      authors: "Modal Author",
+      abstract: "Modal abstract",
+      summary_short: "Modal summary",
+      summary_eli5: "Modal simple summary",
+      categories: "cs.AI",
+      primary_category: "cs.AI",
+      published: "2026-05-01",
+      updated: "2026-05-02",
+      pdf_url: "https://example.test/2401.00001.pdf",
+      html_url: "https://arxiv.org/abs/2401.00001",
+      citation_count: 12,
+      influential_citation_count: 3,
+      index_status: "indexed",
+    });
+    apiMocks.getBrowserPaperPreview.mockResolvedValue({
+      paper_id: "arxiv:2401.00001",
+      image_url: "https://example.test/preview.webp",
+      content_type: "image/webp",
+    });
+    apiMocks.loadBrowserAdminPaperFiles.mockResolvedValue({
+      paper_id: "arxiv:2401.00001",
+      files: [
+        {
+          path: "preview/first-page-top.webp",
+          size: 1234,
+          content_type: "image/webp",
+        },
+      ],
+    });
+    apiMocks.getBrowserAdminPaperAsset.mockResolvedValue({
+      paper_id: "arxiv:2401.00001",
+      path: "preview/first-page-top.webp",
+      url: "https://example.test/preview.webp",
+      content_type: "image/webp",
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Control panel" })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Control panel" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Control panel" })).toBeTruthy();
+    });
+
+    fireEvent.click(await within(screen.getByRole("table")).findByRole("button", { name: "1" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Papers in job_root_modal" })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByText("Modal Paper"));
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Modal Paper" })).toBeTruthy();
+    });
+
+    expect(screen.getByRole("link", { name: "Open arXiv 2401.00001" }).getAttribute("href")).toBe(
+      "https://arxiv.org/abs/2401.00001",
+    );
+
+    fireEvent.click(screen.getByRole("tab", { name: "File structure" }));
+
+    await waitFor(() => {
+      expect(apiMocks.loadBrowserAdminPaperFiles).toHaveBeenCalledWith("arxiv:2401.00001");
+    });
+
+    const previewFolderButton = screen.getByRole("button", { name: "preview" });
+    expect(previewFolderButton).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /first-page-top\.webp/i })).toBeNull();
+
+    fireEvent.click(previewFolderButton);
+    fireEvent.click(screen.getByRole("button", { name: /first-page-top\.webp/i }));
+
+    await waitFor(() => {
+      expect(apiMocks.getBrowserAdminPaperAsset).toHaveBeenCalledWith(
+        "arxiv:2401.00001",
+        "preview/first-page-top.webp",
+      );
+    });
+
+    expect(screen.getByRole("link", { name: "Open raw file" }).getAttribute("href")).toBe(
+      "/v1/browser/admin/papers/arxiv%3A2401.00001/asset-content/preview/first-page-top.webp",
+    );
+    expect(screen.getByAltText("preview/first-page-top.webp").getAttribute("src")).toBe(
+      "/v1/browser/admin/papers/arxiv%3A2401.00001/asset-content/preview/first-page-top.webp",
+    );
+  });
+
+  it("lets admins switch job types from the create-job modal before queueing", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession({ is_admin: true }));
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Control panel" })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Control panel" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Control panel" })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Create job" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Create job" })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Single paper/i }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Change type" })).toBeTruthy();
+    });
+
+    const actionButtons = Array.from(
+      document.querySelectorAll(".admin-create-job-actions button"),
+    ).map((button) => button.textContent);
+    expect(actionButtons).toEqual(["Change type", "Queue job"]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Change type" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Single paper/i })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Single paper/i }));
+    fireEvent.change(screen.getByLabelText("arXiv ID"), {
+      target: { value: "2401.12345" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Queue job" }));
+
+    await waitFor(() => {
+      expect(apiMocks.queueBrowserAdminPaperIndex).toHaveBeenCalledWith("2401.12345", false);
+    });
+  });
+
+  it("prevents duplicate create-job submissions while queueing", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession({ is_admin: true }));
+    let resolveQueue: (value: unknown) => void = () => {};
+    apiMocks.queueBrowserAdminPaperIndex.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveQueue = resolve;
+        }),
+    );
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Control panel" })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Control panel" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Control panel" })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Create job" }));
+    fireEvent.click(screen.getByRole("button", { name: /Single paper/i }));
+    fireEvent.change(screen.getByLabelText("arXiv ID"), {
+      target: { value: "2401.12345" },
+    });
+
+    const form = document.querySelector(".admin-create-job-form") as HTMLFormElement;
+    fireEvent.submit(form);
+    fireEvent.submit(form);
+
+    await waitFor(() => {
+      expect(apiMocks.queueBrowserAdminPaperIndex).toHaveBeenCalledTimes(1);
+    });
+    expect(form.getAttribute("aria-busy")).toBe("true");
+    expect((screen.getByRole("button", { name: "Queuing..." }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+
+    await act(async () => {
+      resolveQueue({
+        job_id: "job_admin_1",
+        job_type: "index_paper",
+        status: "pending",
+        payload: {},
+        attempts: 0,
+        max_attempts: 3,
+        priority: -10,
+        created_at: "2026-04-21T00:00:00Z",
+        updated_at: "2026-04-21T00:00:00Z",
+      });
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "Queuing..." })).toBeNull();
+    });
+  });
+
+  it("shows field help for create-job forms and falls back to optional defaults", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession({ is_admin: true }));
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Control panel" })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Control panel" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Control panel" })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Create job" }));
+    fireEvent.click(screen.getByRole("button", { name: /Single paper/i }));
+
+    const arxivIdInput = screen.getByLabelText("arXiv ID") as HTMLInputElement;
+    expect(arxivIdInput.required).toBe(true);
+    expect(screen.getByLabelText("Explain arXiv ID")).toBeTruthy();
+    expect(
+      screen.getByText(
+        "The identifier for the single paper you want the worker to fetch and index. Required.",
+      ),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(
+        "Re-run the indexing pipeline even if this paper already exists in storage. Optional. Default: Off, so existing papers are left alone.",
+      ),
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Change type" }));
+    fireEvent.click(screen.getByRole("button", { name: /Date range/i }));
+
+    expect((screen.getByLabelText("Categories") as HTMLTextAreaElement).required).toBe(false);
+    expect((screen.getByLabelText("Start date") as HTMLInputElement).required).toBe(true);
+    expect((screen.getByLabelText("End date") as HTMLInputElement).required).toBe(true);
+    expect(
+      screen.getByText(
+        "The arXiv subjects to scan, like cs.LG or cs.CL, so the backfill stays in the area you care about. Optional. Default: The server's configured AI/ML arXiv categories.",
+      ),
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Change type" }));
+    fireEvent.click(screen.getByRole("button", { name: /Venue year/i }));
+
+    expect((screen.getByLabelText("Venue") as HTMLInputElement).required).toBe(true);
+    expect((screen.getByLabelText("Year") as HTMLInputElement).required).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Change type" }));
+    fireEvent.click(screen.getByRole("button", { name: /Top cited/i }));
+
+    fireEvent.change(screen.getByLabelText("Minimum citations"), {
+      target: { value: "" },
+    });
+    fireEvent.change(screen.getByLabelText("Chunk size"), {
+      target: { value: "" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Queue job" }));
+
+    await waitFor(() => {
+      expect(apiMocks.queueBrowserAdminHarvestTopCited).toHaveBeenCalledWith({
+        min_citations: 100,
+        max_papers: null,
+        chunk_size: 50,
+      });
+    });
   });
 
   it("applies dark mode only after saving the appearance setting", async () => {

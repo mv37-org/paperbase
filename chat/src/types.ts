@@ -4,6 +4,7 @@ export interface BrowserUser {
   user_id: string;
   email: string;
   display_name: string;
+  is_admin?: boolean;
 }
 
 export interface BrowserUserSettingsResponse {
@@ -54,10 +55,117 @@ export interface PaperResponse {
   indexed_at?: string | null;
 }
 
+export interface JobResponse {
+  job_id: string;
+  root_job_id?: string | null;
+  job_type: string;
+  status: string;
+  payload: Record<string, unknown>;
+  error?: string | null;
+  attempts: number;
+  max_attempts: number;
+  next_run_at?: string | null;
+  last_attempted_at?: string | null;
+  priority: number;
+  created_at: string;
+  updated_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+}
+
+export interface AdminWorkerSummary {
+  status: string;
+  stalled: boolean;
+  reachable: boolean;
+  source: string;
+  last_loop_at?: string | null;
+  retry_scheduled_count: number;
+  dead_count: number;
+  last_error?: string | null;
+  last_terminal_error?: string | null;
+}
+
+export interface AdminJobOverviewRow {
+  job_id: string;
+  root_job_id: string;
+  job_type: string;
+  status: string;
+  display_status: string;
+  payload: Record<string, unknown>;
+  error?: string | null;
+  attempts: number;
+  max_attempts: number;
+  priority: number;
+  created_at: string;
+  updated_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  is_synthetic: boolean;
+  tracking_available: boolean;
+  indexed_paper_count?: number | null;
+  paper_outcome_counts?: Record<string, number> | null;
+  latest_status_summary: string;
+  child_job_count: number;
+  details: Record<string, unknown>;
+}
+
+export interface AdminJobsOverviewResponse {
+  jobs: AdminJobOverviewRow[];
+  worker?: AdminWorkerSummary | null;
+}
+
+export interface AdminJobPaperResponse {
+  root_job_id: string;
+  job_id: string;
+  paper_id: string;
+  arxiv_id?: string | null;
+  title?: string | null;
+  outcome: string;
+  skip_reason?: string | null;
+  created_at: string;
+  updated_at: string;
+  paper?: PaperResponse | null;
+}
+
+export interface AdminJobPapersResponse {
+  root_job_id: string;
+  total_count: number;
+  offset: number;
+  limit: number;
+  has_more: boolean;
+  outcome_counts?: Record<string, number>;
+  skipped_reason_counts?: Record<string, number>;
+  papers: AdminJobPaperResponse[];
+}
+
 export interface FileContentResponse {
   paper_id: string;
   path: string;
   content: string;
+}
+
+export interface FileObject {
+  path: string;
+  size: number;
+  content_type?: string | null;
+}
+
+export interface FileListResponse {
+  paper_id: string;
+  files: FileObject[];
+}
+
+export interface PaperAssetResponse {
+  paper_id: string;
+  path: string;
+  url: string;
+  content_type?: string | null;
+}
+
+export interface PaperPreviewResponse {
+  paper_id: string;
+  image_url: string;
+  content_type: string;
 }
 
 export interface FigureResponse {
@@ -74,6 +182,69 @@ export interface TableResponse {
   caption?: string | null;
   rows: string[][];
   csv_url?: string | null;
+}
+
+export interface PaperVoteSummary {
+  paper_id: string;
+  upvote_count: number;
+  viewer_has_upvoted: boolean;
+}
+
+export interface PaperCommentAuthor {
+  user_id: string;
+  display_name: string;
+}
+
+export interface PaperComment {
+  comment_id: string;
+  paper_id: string;
+  parent_comment_id?: string | null;
+  author: PaperCommentAuthor;
+  body: string;
+  created_at: string;
+  updated_at: string;
+  replies: PaperComment[];
+}
+
+export interface PaperCommentsResponse {
+  paper_id: string;
+  comments: PaperComment[];
+}
+
+export interface TrendingPaperCard {
+  paper_id: string;
+  arxiv_id: string;
+  title: string;
+  authors: string;
+  published: string;
+  html_url: string;
+  pdf_url: string;
+  image_url?: string | null;
+  upvote_count: number;
+  viewer_has_upvoted: boolean;
+}
+
+export interface TrendingPaperDetail {
+  paper_id: string;
+  arxiv_id: string;
+  title: string;
+  authors: string;
+  published: string;
+  primary_category: string;
+  categories: string;
+  summary_eli5: string;
+  html_url: string;
+  pdf_url: string;
+  image_url?: string | null;
+  upvote_count: number;
+  viewer_has_upvoted: boolean;
+  comments: PaperComment[];
+}
+
+export interface TrendingFeedResponse {
+  date: string;
+  sort: "default" | "upvotes";
+  papers: TrendingPaperCard[];
 }
 
 export interface UploadedDocumentResponse {

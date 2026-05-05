@@ -4,6 +4,9 @@
 
 The admin CLI includes:
 
+- `paperbase-dev benchmark list` for the current repo-native benchmark catalog
+- `paperbase-dev benchmark run iq-1 --verbose` for a current-snapshot indexing census report with live CLI progress under `benchmarks/out/`
+- `paperbase-dev benchmark iq-1 --verbose` as a compatibility alias for the direct IQ-1 runner
 - `paperbase-dev reindex-embeddings` for queuing a full paper/chunk embedding rewrite after an embedding-model change
 - `paperbase-dev jobs list-dead` for dead-letter triage
 - `paperbase-dev jobs retry <job_id>` for promoting a dead job back to pending
@@ -22,5 +25,6 @@ The browser backend now persists first-class projects in addition to chat sessio
 - project descriptions are copied onto new chat threads as snapped prompt context so existing chats stay stable when a project is edited later
 - project files store their repo path and kind (`python` or `notebook`), with notebooks converted through Jupytext for Python-source editing and regenerated to `.ipynb` during repo sync
 - repo sync overlays only paths tracked in `.paperbase`, so unrelated existing-repo content is preserved
+- allowlisted browser users (`PAPERBASE_ADMIN_EMAILS`) also get an admin-only jobs workspace in the main shell for queueing one-off harvest/index jobs, monitoring env-driven latest sync status, drilling into tracked indexed papers, and browsing stored paper artifacts
 
 Use the repo-root [README](../README.md) for setup, env, and supported commands.

@@ -35,6 +35,19 @@ def test_makefile_exposes_reset_local_workflow():
     assert "make reset-local" in makefile
 
 
+def test_makefile_exposes_benchmark_workflow():
+    makefile = _read_repo_file("Makefile")
+
+    assert "benchmark:" in makefile
+    assert "make benchmark" in makefile
+
+
+def test_makefile_dev_enables_api_reload():
+    makefile = _read_repo_file("Makefile")
+
+    assert 'PAPERBASE_API_RELOAD=1 "$(PAPERBASE_API)"' in makefile
+
+
 def test_profile_workflow_delegates_to_make_profile():
     workflow = _read_repo_file(".github/workflows/profile.yml")
 
@@ -66,16 +79,27 @@ def test_pyproject_packages_prompt_assets():
     assert "prompt_assets/*/*.md" in package_data
 
 
+def test_pyproject_dev_dependencies_include_rich_for_benchmark_ui():
+    pyproject = tomllib.loads(_read_repo_file("paperbase/pyproject.toml"))
+    dev_dependencies = pyproject["project"]["optional-dependencies"]["dev"]
+
+    assert "rich>=13" in dev_dependencies
+
+
 def test_job_orm_carries_retry_policy_columns():
     """Regression test for #32: the worker retry policy requires four new
     columns on the jobs table plus a ``dead`` terminal state. This locks the
     schema so a future migration can't accidentally drop the retry fields.
     """
-    from paperbase.repository import JobORM, default_max_attempts
+    from paperbase.repository import JobORM, JobPaperORM, default_max_attempts
 
-    for column in ("attempts", "max_attempts", "next_run_at", "last_attempted_at", "dedupe_key"):
+    for column in ("attempts", "max_attempts", "next_run_at", "last_attempted_at", "dedupe_key", "root_job_id"):
         assert column in JobORM.__table__.columns, (
             f"JobORM must carry '{column}' for the worker retry policy"
+        )
+    for column in ("job_id", "paper_id", "outcome", "updated_at"):
+        assert column in JobPaperORM.__table__.columns, (
+            f"JobPaperORM must carry '{column}' for tracked job papers"
         )
 
     # Per-job-type attempt budgets per the #32 spec.

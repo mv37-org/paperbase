@@ -59,6 +59,88 @@ class PaperResponse(PaperMetadata):
     paper_id: str
 
 
+class PaperVoteSummary(BaseModel):
+    paper_id: str
+    upvote_count: int = 0
+    viewer_has_upvoted: bool = False
+
+
+class PaperCommentAuthor(BaseModel):
+    user_id: str
+    display_name: str
+
+
+class PaperCommentRecord(BaseModel):
+    comment_id: str
+    paper_id: str
+    parent_comment_id: str | None = None
+    user_id: str
+    author_display_name: str
+    body: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class PaperCommentResponse(BaseModel):
+    comment_id: str
+    paper_id: str
+    parent_comment_id: str | None = None
+    author: PaperCommentAuthor
+    body: str
+    created_at: datetime
+    updated_at: datetime
+    replies: list["PaperCommentResponse"] = Field(default_factory=list)
+
+
+class PaperCommentsResponse(BaseModel):
+    paper_id: str
+    comments: list[PaperCommentResponse] = Field(default_factory=list)
+
+
+class TrendingPaperCardResponse(BaseModel):
+    paper_id: str
+    arxiv_id: str
+    title: str
+    authors: str
+    published: str
+    html_url: str
+    pdf_url: str
+    image_url: str | None = None
+    upvote_count: int = 0
+    viewer_has_upvoted: bool = False
+
+
+class TrendingPaperDetailResponse(BaseModel):
+    paper_id: str
+    arxiv_id: str
+    title: str
+    authors: str
+    published: str
+    primary_category: str
+    categories: str
+    summary_eli5: str
+    html_url: str
+    pdf_url: str
+    image_url: str | None = None
+    upvote_count: int = 0
+    viewer_has_upvoted: bool = False
+    comments: list[PaperCommentResponse] = Field(default_factory=list)
+
+
+class TrendingFeedResponse(BaseModel):
+    date: str
+    sort: Literal["default", "upvotes"] = "default"
+    papers: list[TrendingPaperCardResponse] = Field(default_factory=list)
+
+
+class CreatePaperCommentRequest(BaseModel):
+    body: str = Field(..., min_length=1, max_length=4000)
+    parent_comment_id: str | None = None
+
+
+PaperCommentResponse.model_rebuild()
+
+
 class SearchRequest(BaseModel):
     query: str
     limit: int = Field(default=20, ge=1, le=100)
@@ -149,6 +231,7 @@ class GrepResponse(BaseModel):
 
 class JobResponse(BaseModel):
     job_id: str
+    root_job_id: str | None = None
     job_type: str
     status: str
     effective_status: str | None = None
@@ -178,6 +261,82 @@ class JobResponse(BaseModel):
         return self
 
 
+class JobPaperRecord(BaseModel):
+    job_id: str
+    paper_id: str
+    arxiv_id: str | None = None
+    title: str | None = None
+    outcome: str
+    skip_reason: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AdminWorkerSummary(BaseModel):
+    status: str
+    stalled: bool = False
+    reachable: bool = False
+    source: str = "unavailable"
+    last_loop_at: datetime | None = None
+    retry_scheduled_count: int = 0
+    dead_count: int = 0
+    last_error: str | None = None
+    last_terminal_error: str | None = None
+
+
+class AdminJobOverviewRow(BaseModel):
+    job_id: str
+    root_job_id: str
+    job_type: str
+    status: str
+    display_status: str
+    payload: dict[str, Any]
+    error: str | None = None
+    attempts: int = 0
+    max_attempts: int = 3
+    priority: int = 0
+    created_at: datetime
+    updated_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    is_synthetic: bool = False
+    tracking_available: bool = False
+    indexed_paper_count: int | None = None
+    paper_outcome_counts: dict[str, int] = Field(default_factory=dict)
+    latest_status_summary: str = ""
+    child_job_count: int = 0
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class AdminJobsOverviewResponse(BaseModel):
+    jobs: list[AdminJobOverviewRow]
+    worker: AdminWorkerSummary | None = None
+
+
+class AdminJobPaperResponse(BaseModel):
+    root_job_id: str
+    job_id: str
+    paper_id: str
+    arxiv_id: str | None = None
+    title: str | None = None
+    outcome: str
+    skip_reason: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    paper: PaperResponse | None = None
+
+
+class AdminJobPapersResponse(BaseModel):
+    root_job_id: str
+    total_count: int = 0
+    offset: int = 0
+    limit: int = 100
+    has_more: bool = False
+    outcome_counts: dict[str, int] = Field(default_factory=dict)
+    skipped_reason_counts: dict[str, int] = Field(default_factory=dict)
+    papers: list[AdminJobPaperResponse]
+
+
 class FileObject(BaseModel):
     path: str
     size: int
@@ -193,6 +352,13 @@ class FileContentResponse(BaseModel):
     paper_id: str
     path: str
     content: str
+
+
+class PaperAssetResponse(BaseModel):
+    paper_id: str
+    path: str
+    url: str
+    content_type: str | None = None
 
 
 class FigureResponse(BaseModel):
@@ -241,6 +407,7 @@ class BrowserUser(BaseModel):
     user_id: str
     email: str
     display_name: str = ""
+    is_admin: bool = False
 
 
 class BrowserUserSettingsResponse(BaseModel):

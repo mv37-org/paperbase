@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import difflib
+import inspect
 import json
 import logging
+import mimetypes
 import os
 import re
 import shlex
@@ -13,6 +15,9 @@ import subprocess
 import sys
 import tempfile
 import threading
+from urllib import error as urllib_error
+from urllib.parse import quote
+from urllib import request as urllib_request
 from collections.abc import Generator, Iterator
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -57,6 +62,11 @@ from .llm import (
     ChatModelUsage,
 )
 from .models import (
+    AdminJobOverviewRow,
+    AdminJobPaperResponse,
+    AdminJobPapersResponse,
+    AdminJobsOverviewResponse,
+    AdminWorkerSummary,
     BrowserSessionResponse,
     BrowserUser,
     BrowserUserSettingsResponse,
@@ -73,6 +83,7 @@ from .models import (
     CodeReadResponse,
     CodeSearchHit,
     CodeSearchResponse,
+    CreatePaperCommentRequest,
     CreateChatThreadRequest,
     MoveChatThreadProjectRequest,
     FileContentResponse,
@@ -83,12 +94,19 @@ from .models import (
     GrepResponse,
     IntegrationProbeComponent,
     IntegrationProbeResponse,
+    JobPaperRecord,
     JobResponse,
     LoginRequest,
     ManifestResponse,
+    PaperCommentsResponse,
     PaperMetadata,
+    PaperAssetResponse,
+    PaperCommentAuthor,
+    PaperCommentRecord,
+    PaperCommentResponse,
     PaperPreviewResponse,
     PaperResponse,
+    PaperVoteSummary,
     GitHubRepoBranchSummary,
     GitHubRepoImportCandidate,
     GitHubRepoImportCandidateResponse,
@@ -118,6 +136,8 @@ from .models import (
     SendChatMessageResponse,
     SignupRequest,
     TableResponse,
+    TrendingFeedResponse,
+    TrendingPaperDetailResponse,
     UpdateAppearanceRequest,
     UpdateNotificationsRequest,
     UpdateProjectRequest,
@@ -139,7 +159,7 @@ from .summaries import build_paper_summaries
 from .storage import ObjectStore, build_object_store
 from . import sources
 from .errors import JobCanceled, PermanentError, RetryableError
-from .utils import new_id, slugify, utcnow
+from .utils import canonical_paper_id, new_id, slugify, utcnow
 
 
 logger = logging.getLogger(__name__)
@@ -181,6 +201,14 @@ _PROJECT_WORKSPACE_BINARY_EXTENSIONS = {
     ".wav",
     ".webp",
     ".zip",
+}
+_TEXTUAL_MIME_PREFIXES = ("text/",)
+_TEXTUAL_MIME_TYPES = {
+    "application/json",
+    "application/ld+json",
+    "application/xml",
+    "application/x-yaml",
+    "image/svg+xml",
 }
 
 
@@ -255,6 +283,17 @@ def _retry_delay_for(attempts: int):
 
 _MODEL_CACHE: dict[str, Any] = {}
 _RERANKER_CACHE: dict[str, Any] = {}
+_ADMIN_LATEST_SYNC_JOB_ID = "env:latest_sync"
+_ADMIN_STALLED_AFTER = timedelta(minutes=10)
+_ADMIN_INDEXED_PAPER_JOB_TYPES = frozenset(
+    {
+        "index_paper",
+        "sync_latest",
+        "harvest_range",
+        "harvest_top_cited",
+        "harvest_venue",
+    }
+)
 
 _RECENCY_SIGNAL_RE = re.compile(
     r"\b(recent(?:ly)?|latest|newest|new|this\s+year|202[4-9]|203[0-9])\b",
@@ -279,6 +318,82 @@ _FORCE_TOOL_QUERY_RE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+
+
+def _admin_display_status(status: str) -> str:
+    if status in {"dead", "failed"}:
+        return "error"
+    return status
+
+
+def _admin_status_sort_key(status: str) -> int:
+    order = {
+        "stalled": 0,
+        "running": 1,
+        "pending": 2,
+        "error": 3,
+        "completed": 4,
+        "scheduled": 5,
+    }
+    return order.get(status, 9)
+
+
+def _job_activity_stalled(updated_at, *, now) -> bool:
+    return bool(updated_at and now - updated_at > _ADMIN_STALLED_AFTER)
+
+
+def _job_type_tracks_indexed_papers(job_type: str) -> bool:
+    return job_type in _ADMIN_INDEXED_PAPER_JOB_TYPES
+
+
+def _job_paper_outcome_rank(value: str) -> int:
+    return {"indexed": 0, "failed": 1, "skipped": 2}.get(value, 9)
+
+
+def _group_job_paper_records(records: list[JobPaperRecord]) -> dict[str, JobPaperRecord]:
+    grouped: dict[str, JobPaperRecord] = {}
+    for record in records:
+        existing = grouped.get(record.paper_id)
+        if existing is None:
+            grouped[record.paper_id] = record
+            continue
+        if _job_paper_outcome_rank(record.outcome) < _job_paper_outcome_rank(existing.outcome) or (
+            _job_paper_outcome_rank(record.outcome) == _job_paper_outcome_rank(existing.outcome)
+            and record.updated_at > existing.updated_at
+        ):
+            grouped[record.paper_id] = record
+
+    return grouped
+
+
+def _job_paper_outcome_counts(records: list[JobPaperRecord]) -> dict[str, int]:
+    grouped = _group_job_paper_records(records)
+    counts: dict[str, int] = {}
+    for record in grouped.values():
+        counts[record.outcome] = counts.get(record.outcome, 0) + 1
+    return counts
+
+
+def _job_paper_skipped_reason_counts(records: list[JobPaperRecord]) -> dict[str, int]:
+    grouped = _group_job_paper_records(records)
+    counts: dict[str, int] = {}
+    for record in grouped.values():
+        if record.outcome != "skipped":
+            continue
+        reason = (record.skip_reason or "unknown").strip() or "unknown"
+        counts[reason] = counts.get(reason, 0) + 1
+    return counts
+
+
+def _latest_status_summary(status_counts: dict[str, int], *, total: int) -> str:
+    parts: list[str] = []
+    for key in ("running", "pending", "completed", "dead", "failed"):
+        count = status_counts.get(key, 0)
+        if count > 0:
+            parts.append(f"{count} {key}")
+    if not parts:
+        return "No recorded activity yet."
+    return f"{' · '.join(parts)} · {total} total"
 
 _CHAT_TITLE_TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:['-][A-Za-z0-9]+)*")
 _CHAT_TITLE_STOP_WORDS = {
@@ -457,6 +572,23 @@ def _normalize_project_workspace_repo_path(value: str) -> str:
     if suffix in _PROJECT_WORKSPACE_BINARY_EXTENSIONS:
         raise HTTPException(status_code=422, detail="Only text workspace files are supported")
     return path
+
+
+def _normalize_paper_artifact_path(value: str) -> str:
+    path = (value or "").strip()
+    if not path or "\\" in path:
+        raise HTTPException(status_code=422, detail="Use a valid paper artifact path")
+    parsed = PurePosixPath(path)
+    if parsed.is_absolute() or any(part in {"", ".", ".."} for part in parsed.parts):
+        raise HTTPException(status_code=422, detail="Use a valid paper artifact path")
+    return parsed.as_posix()
+
+
+def _is_textual_content_type(content_type: str | None) -> bool:
+    if not content_type:
+        return False
+    normalized = content_type.split(";", 1)[0].strip().lower()
+    return normalized.startswith(_TEXTUAL_MIME_PREFIXES) or normalized in _TEXTUAL_MIME_TYPES
 
 
 def _file_kind_for_repo_path(path: str) -> str:
@@ -1601,6 +1733,24 @@ class PaperbaseService:
         self._project_exec_lock = threading.Lock()
         self._worker_id = f"{os.environ.get('HOSTNAME') or 'local'}:{os.getpid()}:{new_id('worker')}"
 
+    def _call_index_arxiv_paper(
+        self,
+        arxiv_id: str,
+        *,
+        paper: PaperMetadata | None = None,
+        force: bool = False,
+        tracking_job: JobResponse | None = None,
+    ) -> PaperResponse:
+        parameters = inspect.signature(self.index_arxiv_paper).parameters
+        kwargs: dict[str, Any] = {}
+        if paper is not None and "paper" in parameters:
+            kwargs["paper"] = paper
+        if "force" in parameters:
+            kwargs["force"] = force
+        if tracking_job is not None and "tracking_job" in parameters:
+            kwargs["tracking_job"] = tracking_job
+        return self.index_arxiv_paper(arxiv_id, **kwargs)
+
     def init(self) -> None:
         self.repository.init()
 
@@ -1658,7 +1808,16 @@ class PaperbaseService:
             }
         )
 
+    def _decorate_browser_user(self, user: BrowserUser | None) -> BrowserUser | None:
+        if user is None:
+            return None
+        is_admin = self.settings.is_admin_email(user.email)
+        if user.is_admin == is_admin:
+            return user
+        return user.model_copy(update={"is_admin": is_admin})
+
     def _browser_session_response(self, user: BrowserUser | None) -> BrowserSessionResponse:
+        user = self._decorate_browser_user(user)
         if user is None:
             return BrowserSessionResponse(authenticated=False)
         api_key_record = self.repository.get_openai_api_key_record(user.user_id)  # type: ignore[attr-defined]
@@ -1716,7 +1875,8 @@ class PaperbaseService:
     def get_current_browser_user(self, raw_token: str | None) -> BrowserUser | None:
         if not raw_token:
             return None
-        return self.repository.get_browser_user_by_session_token_hash(token_hash(raw_token))  # type: ignore[attr-defined]
+        user = self.repository.get_browser_user_by_session_token_hash(token_hash(raw_token))  # type: ignore[attr-defined]
+        return self._decorate_browser_user(user)
 
     def logout_browser_session(self, raw_token: str | None) -> None:
         if raw_token:
@@ -5933,7 +6093,13 @@ class PaperbaseService:
             self.enqueue_ingest_repo_job(paper_id, force=True)
         return updated
 
-    def enqueue_ingest_repo_job(self, paper_id: str, *, force: bool = False) -> JobResponse:
+    def enqueue_ingest_repo_job(
+        self,
+        paper_id: str,
+        *,
+        force: bool = False,
+        root_job_id: str | None = None,
+    ) -> JobResponse:
         """Queue an ``ingest_repo`` job for a single paper (#5).
 
         Called automatically from :meth:`index_arxiv_paper` when the indexed
@@ -5944,6 +6110,7 @@ class PaperbaseService:
         job = self.repository.create_job(
             "ingest_repo",
             {"paper_id": paper_id, "force": force},
+            root_job_id=root_job_id,
         )
         logger.info(
             "Created ingest_repo job",
@@ -6517,6 +6684,7 @@ class PaperbaseService:
         limit_per_window: int | None,
         chunk_months: int,
         harvest_id: str | None = None,
+        root_job_id: str | None = None,
     ) -> dict[str, int]:
         """Planner: split ``[start_date, end_date]`` into ``chunk_months``
         windows per category and enqueue a ``harvest_chunk`` per window.
@@ -6564,6 +6732,7 @@ class PaperbaseService:
                         end_date=win_end,
                         cursor=0,
                     ),
+                    root_job_id=root_job_id or run_harvest_id,
                 )
                 chunks_created += 1
         logger.info(
@@ -6589,6 +6758,8 @@ class PaperbaseService:
         cursor: int,
         fetched: int = 0,
         harvest_id: str | None = None,
+        root_job_id: str | None = None,
+        tracking_job: JobResponse | None = None,
     ) -> dict[str, Any]:
         """Worker: fetch ONE page of one arxiv date window and index each
         paper, then enqueue a continuation ``harvest_chunk`` if more pages
@@ -6647,9 +6818,22 @@ class PaperbaseService:
                 break
             fetched_this_page += 1
             try:
-                self.index_arxiv_paper(paper.arxiv_id, paper=paper, force=False)
+                self._call_index_arxiv_paper(
+                    paper.arxiv_id,
+                    paper=paper,
+                    force=False,
+                    tracking_job=tracking_job,
+                )
                 indexed += 1
             except PermanentError:
+                if tracking_job is not None:
+                    self.repository.record_job_paper(
+                        tracking_job.job_id,
+                        canonical_paper_id(paper.arxiv_id),
+                        outcome="failed",
+                        arxiv_id=paper.arxiv_id,
+                        title=paper.title,
+                    )
                 # Individual paper can't be indexed (e.g. withdrawn) —
                 # swallow so the chunk keeps going.
                 continue
@@ -6683,6 +6867,7 @@ class PaperbaseService:
                     end_date=end_date,
                     cursor=next_cursor,
                 ),
+                root_job_id=root_job_id or run_harvest_id,
             )
             enqueued_continuation = True
 
@@ -6764,6 +6949,7 @@ class PaperbaseService:
         max_papers: int | None,
         chunk_size: int,
         harvest_id: str | None = None,
+        root_job_id: str | None = None,
     ) -> dict[str, int]:
         """Planner: stream S2 bulk-search pages and enqueue
         ``harvest_chunk`` jobs in ``chunk_size`` arxiv-id batches.
@@ -6809,6 +6995,7 @@ class PaperbaseService:
                     f"harvest_chunk:{run_harvest_id}:s2_top_cited:"
                     f"{pending_batch[0]}-{pending_batch[-1]}-{len(pending_batch)}"
                 ),
+                root_job_id=root_job_id or run_harvest_id,
             )
             chunks_created += 1
             pending_batch = []
@@ -6863,6 +7050,7 @@ class PaperbaseService:
         arxiv_ids: list[str],
         min_citations: int = 0,
         harvest_id: str | None = None,
+        tracking_job: JobResponse | None = None,
     ) -> dict[str, int]:
         """Chunk worker for ``source='s2_top_cited'``.
 
@@ -6884,9 +7072,20 @@ class PaperbaseService:
                 skipped += 1
                 continue
             try:
-                self.index_arxiv_paper(arxiv_id, force=False)
+                self._call_index_arxiv_paper(
+                    arxiv_id,
+                    force=False,
+                    tracking_job=tracking_job,
+                )
                 indexed += 1
             except PermanentError:
+                if tracking_job is not None:
+                    self.repository.record_job_paper(
+                        tracking_job.job_id,
+                        canonical_paper_id(arxiv_id),
+                        outcome="failed",
+                        arxiv_id=arxiv_id,
+                    )
                 skipped += 1
                 continue
         logger.info(
@@ -6962,6 +7161,7 @@ class PaperbaseService:
         max_papers: int | None,
         chunk_size: int,
         harvest_id: str | None = None,
+        root_job_id: str | None = None,
     ) -> dict[str, int]:
         """Planner: page S2 bulk-search by ``venue`` + ``year`` and
         enqueue ``harvest_chunk`` jobs (``source='s2_venue'``) in
@@ -7006,6 +7206,7 @@ class PaperbaseService:
                     f"harvest_chunk:{run_harvest_id}:s2_venue:"
                     f"{first_id}-{last_id}-{len(pending_batch)}"
                 ),
+                root_job_id=root_job_id or run_harvest_id,
             )
             chunks_created += 1
             pending_batch = []
@@ -7067,6 +7268,7 @@ class PaperbaseService:
         venue: str | None = None,
         year: int | None = None,
         harvest_id: str | None = None,
+        tracking_job: JobResponse | None = None,
     ) -> dict[str, int]:
         """Chunk worker for ``source='s2_venue'``.
 
@@ -7090,9 +7292,21 @@ class PaperbaseService:
                 skipped += 1
                 continue
             try:
-                stored = self.index_arxiv_paper(arxiv_id, force=False)
+                stored = self._call_index_arxiv_paper(
+                    arxiv_id,
+                    force=False,
+                    tracking_job=tracking_job,
+                )
                 indexed += 1
             except PermanentError:
+                if tracking_job is not None:
+                    self.repository.record_job_paper(
+                        tracking_job.job_id,
+                        canonical_paper_id(arxiv_id),
+                        outcome="failed",
+                        arxiv_id=arxiv_id,
+                        title=str((entry or {}).get("title") or "") or None,
+                    )
                 skipped += 1
                 continue
             paper_venue = entry.get("venue") or venue
@@ -7392,7 +7606,11 @@ class PaperbaseService:
         try:
             self._raise_if_current_job_canceled()
             if job.job_type == "index_paper":
-                self.index_arxiv_paper(job.payload["arxiv_id"], force=bool(job.payload.get("force")))
+                self._call_index_arxiv_paper(
+                    job.payload["arxiv_id"],
+                    force=bool(job.payload.get("force")),
+                    tracking_job=job,
+                )
             elif job.job_type == "sync_latest":
                 self.sync_latest_papers(
                     days=int(job.payload.get("days", self.settings.latest_sync_days)),
@@ -7400,6 +7618,7 @@ class PaperbaseService:
                     limit_per_category=int(
                         job.payload.get("limit_per_category", self.settings.latest_sync_limit_per_category)
                     ),
+                    tracking_job=job,
                 )
             elif job.job_type == "summarize_top_cited":
                 self.summarize_top_cited(limit=int(job.payload.get("limit", 500_000)))
@@ -7418,6 +7637,7 @@ class PaperbaseService:
                     end_date=str(job.payload["end_date"]),
                     limit_per_window=limit_per_window,
                     chunk_months=int(job.payload.get("chunk_months", 3)),
+                    root_job_id=job.root_job_id or job.job_id,
                 )
             elif job.job_type == "harvest_chunk":
                 source = str(job.payload.get("source", "arxiv"))
@@ -7430,6 +7650,7 @@ class PaperbaseService:
                         arxiv_ids=list(job.payload.get("arxiv_ids", [])),
                         min_citations=int(job.payload.get("min_citations", 0)),
                         harvest_id=str(job.payload.get("harvest_id") or job.job_id),
+                        tracking_job=job,
                     )
                 elif source == "s2_venue":
                     # #39 PR B: list of {arxiv_id, venue, year} dicts.
@@ -7438,6 +7659,7 @@ class PaperbaseService:
                         venue=job.payload.get("venue"),
                         year=job.payload.get("year"),
                         harvest_id=str(job.payload.get("harvest_id") or job.job_id),
+                        tracking_job=job,
                     )
                 elif source == "s2_author":
                     # #39 PR C: arxiv_ids list + top_author_s2_id stamp.
@@ -7456,6 +7678,8 @@ class PaperbaseService:
                         limit=job.payload.get("limit"),
                         cursor=int(job.payload.get("cursor", 0)),
                         fetched=int(job.payload.get("fetched", 0)),
+                        root_job_id=job.root_job_id or job.job_id,
+                        tracking_job=job,
                     )
             elif job.job_type == "harvest_top_cited":
                 self.run_harvest_top_cited(
@@ -7463,6 +7687,7 @@ class PaperbaseService:
                     max_papers=job.payload.get("max_papers"),
                     chunk_size=int(job.payload.get("chunk_size", 50)),
                     harvest_id=str(job.payload.get("harvest_id") or job.job_id),
+                    root_job_id=job.root_job_id or job.job_id,
                 )
             elif job.job_type == "harvest_venue":
                 self.run_harvest_venue(
@@ -7471,6 +7696,7 @@ class PaperbaseService:
                     max_papers=job.payload.get("max_papers"),
                     chunk_size=int(job.payload.get("chunk_size", 50)),
                     harvest_id=str(job.payload.get("harvest_id") or job.job_id),
+                    root_job_id=job.root_job_id or job.job_id,
                 )
             elif job.job_type == "harvest_author":
                 self.run_harvest_author(
@@ -7578,6 +7804,17 @@ class PaperbaseService:
         return self.list_jobs_by_status("dead", limit=limit)
 
     def list_jobs_by_status(self, status: str, *, limit: int = 50) -> list[JobResponse]:
+        if status == "all":
+            jobs: list[JobResponse] = []
+            seen: set[str] = set()
+            for bucket in ("pending", "running", "completed", "dead", "failed"):
+                for job in self.repository.list_jobs_by_status(bucket, limit=limit):
+                    if job.job_id in seen:
+                        continue
+                    seen.add(job.job_id)
+                    jobs.append(job)
+            jobs.sort(key=lambda job: job.updated_at, reverse=True)
+            return jobs[:limit]
         if status == "dead":
             jobs = [
                 *self.repository.list_jobs_by_status("dead", limit=limit),
@@ -7587,7 +7824,336 @@ class PaperbaseService:
             return jobs[:limit]
         return self.repository.list_jobs_by_status(status, limit=limit)
 
-    def sync_latest_papers(self, *, days: int, categories: list[str], limit_per_category: int) -> list[PaperResponse]:
+    def _load_worker_summary(self) -> AdminWorkerSummary:
+        status_url = (self.settings.worker_status_url or "").strip().rstrip("/")
+        if not status_url:
+            return AdminWorkerSummary(status="unknown", source="unconfigured")
+
+        try:
+            with urllib_request.urlopen(f"{status_url}/health", timeout=2) as response:
+                health_payload = json.loads(response.read().decode("utf-8"))
+            with urllib_request.urlopen(f"{status_url}/metrics", timeout=2) as response:
+                metrics_payload = json.loads(response.read().decode("utf-8"))
+        except (OSError, ValueError, urllib_error.URLError):
+            return AdminWorkerSummary(status="unknown", source="unreachable")
+
+        last_loop_at = metrics_payload.get("last_loop_at")
+        loop_dt = None
+        if isinstance(last_loop_at, (int, float)) and last_loop_at > 0:
+            from datetime import datetime, timezone
+
+            loop_dt = datetime.fromtimestamp(float(last_loop_at), tz=timezone.utc)
+        status = str(health_payload.get("status") or "unknown")
+        return AdminWorkerSummary(
+            status=status,
+            stalled=status == "stalled",
+            reachable=True,
+            source="worker_status_url",
+            last_loop_at=loop_dt,
+            retry_scheduled_count=int(metrics_payload.get("retry_scheduled_count") or 0),
+            dead_count=int(metrics_payload.get("dead_count") or 0),
+            last_error=(str(metrics_payload.get("last_error")) if metrics_payload.get("last_error") else None),
+            last_terminal_error=(
+                str(metrics_payload.get("last_terminal_error"))
+                if metrics_payload.get("last_terminal_error")
+                else None
+            ),
+        )
+
+    def _admin_row_from_jobs(
+        self,
+        jobs: list[JobResponse],
+        *,
+        worker_summary: AdminWorkerSummary,
+        now,
+    ) -> AdminJobOverviewRow:
+        representative = next((job for job in jobs if job.job_id == (job.root_job_id or job.job_id)), jobs[0])
+        root_job_id = representative.root_job_id or representative.job_id
+        status_counts: dict[str, int] = {}
+        latest_error = representative.error
+        latest_error_at = representative.updated_at
+        latest_updated_at = representative.updated_at
+        earliest_created_at = representative.created_at
+        for job in jobs:
+            status_counts[job.status] = status_counts.get(job.status, 0) + 1
+            if job.updated_at > latest_updated_at:
+                latest_updated_at = job.updated_at
+            if job.created_at < earliest_created_at:
+                earliest_created_at = job.created_at
+            if job.error and (latest_error is None or job.updated_at >= latest_error_at):
+                latest_error = job.error
+                latest_error_at = job.updated_at
+
+        base_status = representative.status
+        if status_counts.get("running", 0) > 0:
+            base_status = "running"
+        elif status_counts.get("pending", 0) > 0:
+            base_status = "pending"
+        elif status_counts.get("dead", 0) > 0 or status_counts.get("failed", 0) > 0:
+            base_status = "dead"
+        elif status_counts.get("completed", 0) == len(jobs):
+            base_status = "completed"
+
+        display_status = _admin_display_status(base_status)
+        if base_status == "running" and (
+            worker_summary.stalled or _job_activity_stalled(latest_updated_at, now=now)
+        ):
+            display_status = "stalled"
+
+        tracked: list[Any] = []
+        tracking_available = False
+        indexed_paper_count: int | None = None
+        paper_outcome_counts: dict[str, int] = {}
+        if _job_type_tracks_indexed_papers(representative.job_type):
+            tracked = self.repository.list_job_papers_for_root(root_job_id)
+            tracking_available = bool(tracked)
+        if tracking_available:
+            paper_outcome_counts = _job_paper_outcome_counts(tracked)
+            indexed_paper_count = paper_outcome_counts.get("indexed", 0)
+
+        details: dict[str, Any] = {
+            "status_counts": status_counts,
+            "job_count": len(jobs),
+        }
+        payload = dict(representative.payload)
+        if representative.job_type == "harvest_range":
+            details.update(
+                {
+                    "harvest_id": payload.get("harvest_id"),
+                    "categories": payload.get("categories") or [],
+                    "start_date": payload.get("start_date"),
+                    "end_date": payload.get("end_date"),
+                    "chunk_months": payload.get("chunk_months"),
+                    "limit_per_window": payload.get("limit_per_window") or payload.get("limit_per_category"),
+                }
+            )
+        elif representative.job_type == "harvest_top_cited":
+            details.update(
+                {
+                    "min_citations": payload.get("min_citations"),
+                    "max_papers": payload.get("max_papers"),
+                    "chunk_size": payload.get("chunk_size"),
+                    "harvest_id": payload.get("harvest_id"),
+                }
+            )
+        elif representative.job_type == "harvest_venue":
+            details.update(
+                {
+                    "venue": payload.get("venue"),
+                    "year": payload.get("year"),
+                    "max_papers": payload.get("max_papers"),
+                    "chunk_size": payload.get("chunk_size"),
+                    "harvest_id": payload.get("harvest_id"),
+                }
+            )
+        elif representative.job_type == "sync_latest":
+            details.update(
+                {
+                    "days": payload.get("days", self.settings.latest_sync_days),
+                    "categories": payload.get("categories", self.settings.arxiv_categories),
+                    "limit_per_category": payload.get(
+                        "limit_per_category", self.settings.latest_sync_limit_per_category
+                    ),
+                }
+            )
+        elif representative.job_type == "index_paper":
+            details.update(
+                {
+                    "arxiv_id": payload.get("arxiv_id"),
+                    "force": bool(payload.get("force")),
+                }
+            )
+        elif representative.job_type == "enrich_missing_metadata":
+            details.update(
+                {
+                    "limit": payload.get("limit"),
+                    "min_age_seconds": payload.get("min_age_seconds"),
+                }
+            )
+
+        return AdminJobOverviewRow(
+            job_id=representative.job_id,
+            root_job_id=root_job_id,
+            job_type=representative.job_type,
+            status=base_status,
+            display_status=display_status,
+            payload=payload,
+            error=latest_error,
+            attempts=representative.attempts,
+            max_attempts=representative.max_attempts,
+            priority=representative.priority,
+            created_at=earliest_created_at,
+            updated_at=latest_updated_at,
+            started_at=representative.started_at,
+            finished_at=representative.finished_at,
+            is_synthetic=False,
+            tracking_available=tracking_available,
+            indexed_paper_count=indexed_paper_count,
+            paper_outcome_counts=paper_outcome_counts,
+            latest_status_summary=_latest_status_summary(status_counts, total=len(jobs)),
+            child_job_count=max(0, len(jobs) - 1),
+            details=details,
+        )
+
+    def get_admin_jobs_overview(self, *, limit: int = 50) -> AdminJobsOverviewResponse:
+        worker_summary = self._load_worker_summary()
+        recent_jobs = self.repository.list_recent_jobs(limit=max(limit * 20, 250))
+        grouped: dict[str, list[JobResponse]] = {}
+        sync_jobs: list[JobResponse] = []
+
+        for job in recent_jobs:
+            if self.settings.worker_auto_sync_latest and job.job_type == "sync_latest":
+                sync_jobs.append(job)
+                continue
+            if job.job_type == "harvest_chunk" and job.root_job_id is None:
+                continue
+            root_job_id = job.root_job_id or job.job_id
+            grouped.setdefault(root_job_id, []).append(job)
+
+        now = utcnow()
+        rows = [self._admin_row_from_jobs(jobs, worker_summary=worker_summary, now=now) for jobs in grouped.values()]
+
+        if self.settings.worker_auto_sync_latest:
+            latest_sync = sync_jobs[0] if sync_jobs else None
+            sync_status_counts: dict[str, int] = {}
+            for job in sync_jobs:
+                sync_status_counts[job.status] = sync_status_counts.get(job.status, 0) + 1
+            latest_sync_root_job_id = latest_sync.root_job_id or latest_sync.job_id if latest_sync is not None else None
+            latest_sync_tracking_available = False
+            latest_sync_indexed_paper_count: int | None = None
+            latest_sync_paper_outcome_counts: dict[str, int] = {}
+            if latest_sync is not None and latest_sync_root_job_id is not None and _job_type_tracks_indexed_papers(
+                latest_sync.job_type
+            ):
+                tracked = self.repository.list_job_papers_for_root(latest_sync_root_job_id)
+                latest_sync_tracking_available = bool(tracked)
+            else:
+                tracked = []
+            if latest_sync_tracking_available:
+                latest_sync_paper_outcome_counts = _job_paper_outcome_counts(tracked)
+                latest_sync_indexed_paper_count = latest_sync_paper_outcome_counts.get("indexed", 0)
+            if latest_sync and latest_sync.status == "running":
+                display_status = "stalled" if (
+                    worker_summary.stalled or _job_activity_stalled(latest_sync.updated_at, now=now)
+                ) else "running"
+            elif latest_sync and latest_sync.status in {"dead", "failed"}:
+                display_status = "error"
+            elif latest_sync and latest_sync.status == "pending":
+                display_status = "pending"
+            else:
+                display_status = "scheduled"
+            if latest_sync is not None:
+                next_expected_run_at = latest_sync.updated_at + timedelta(seconds=self.settings.sync_interval_seconds)
+                latest_run_status = _admin_display_status(latest_sync.status)
+                latest_run_updated_at = latest_sync.updated_at
+                latest_run_job_id = latest_sync.job_id
+            else:
+                next_expected_run_at = now
+                latest_run_status = None
+                latest_run_updated_at = None
+                latest_run_job_id = None
+            rows.append(
+                AdminJobOverviewRow(
+                    job_id=_ADMIN_LATEST_SYNC_JOB_ID,
+                    root_job_id=latest_sync_root_job_id or _ADMIN_LATEST_SYNC_JOB_ID,
+                    job_type="latest_sync_schedule",
+                    status="scheduled",
+                    display_status=display_status,
+                    payload={},
+                    error=latest_sync.error if latest_sync is not None else None,
+                    attempts=0,
+                    max_attempts=0,
+                    priority=0,
+                    created_at=latest_sync.created_at if latest_sync is not None else now,
+                    updated_at=latest_run_updated_at or now,
+                    started_at=None,
+                    finished_at=None,
+                    is_synthetic=True,
+                    tracking_available=latest_sync_tracking_available,
+                    indexed_paper_count=latest_sync_indexed_paper_count,
+                    paper_outcome_counts=latest_sync_paper_outcome_counts,
+                    latest_status_summary=(
+                        _latest_status_summary(sync_status_counts, total=len(sync_jobs))
+                        if sync_jobs
+                        else "Runs on the worker schedule."
+                    ),
+                    child_job_count=0,
+                    details={
+                        "sync_interval_seconds": self.settings.sync_interval_seconds,
+                        "categories": self.settings.arxiv_categories,
+                        "days": self.settings.latest_sync_days,
+                        "limit_per_category": self.settings.latest_sync_limit_per_category,
+                        "next_expected_run_at": next_expected_run_at,
+                        "latest_run_status": latest_run_status,
+                        "latest_run_updated_at": latest_run_updated_at,
+                        "latest_run_job_id": latest_run_job_id,
+                        "status_counts": sync_status_counts,
+                    },
+                )
+            )
+
+        rows.sort(key=lambda row: (row.updated_at, -_admin_status_sort_key(row.display_status)), reverse=True)
+        return AdminJobsOverviewResponse(jobs=rows[:limit], worker=worker_summary)
+
+    def get_admin_job_papers(self, root_job_id: str, *, offset: int = 0, limit: int = 100) -> AdminJobPapersResponse:
+        jobs = self.repository.list_jobs_for_root(root_job_id)
+        if not jobs:
+            raise HTTPException(status_code=404, detail=f"Job run {root_job_id} not found")
+        normalized_offset = max(0, int(offset))
+        normalized_limit = max(1, int(limit))
+
+        records = self.repository.list_job_papers_for_root(root_job_id)
+        grouped = _group_job_paper_records(records)
+
+        ordered_records = sorted(grouped.values(), key=lambda item: item.updated_at, reverse=True)
+        total_count = len(ordered_records)
+        page_records = ordered_records[normalized_offset : normalized_offset + normalized_limit]
+
+        papers = []
+        for record in page_records:
+            paper = self.repository.get_paper(record.paper_id)
+            papers.append(
+                AdminJobPaperResponse(
+                    root_job_id=root_job_id,
+                    job_id=record.job_id,
+                    paper_id=record.paper_id,
+                    arxiv_id=record.arxiv_id or (paper.arxiv_id if paper is not None else None),
+                    title=record.title or (paper.title if paper is not None else None),
+                    outcome=record.outcome,
+                    skip_reason=record.skip_reason,
+                    created_at=record.created_at,
+                    updated_at=record.updated_at,
+                    paper=paper,
+                )
+            )
+        return AdminJobPapersResponse(
+            root_job_id=root_job_id,
+            total_count=total_count,
+            offset=normalized_offset,
+            limit=normalized_limit,
+            has_more=normalized_offset + len(page_records) < total_count,
+            outcome_counts=_job_paper_outcome_counts(records),
+            skipped_reason_counts=_job_paper_skipped_reason_counts(records),
+            papers=papers,
+        )
+
+    def list_papers(
+        self,
+        *,
+        query: str | None = None,
+        index_status: str | None = None,
+        limit: int = 50,
+    ) -> list[PaperResponse]:
+        return self.repository.list_papers(query=query, index_status=index_status, limit=limit)
+
+    def sync_latest_papers(
+        self,
+        *,
+        days: int,
+        categories: list[str],
+        limit_per_category: int,
+        tracking_job: JobResponse | None = None,
+    ) -> list[PaperResponse]:
         logger.info(
             "Starting latest sync",
             extra={
@@ -7608,7 +8174,14 @@ class PaperbaseService:
                 if paper.arxiv_id in seen:
                     continue
                 seen.add(paper.arxiv_id)
-                indexed.append(self.index_arxiv_paper(paper.arxiv_id, paper=paper, force=False))
+                indexed.append(
+                    self._call_index_arxiv_paper(
+                        paper.arxiv_id,
+                        paper=paper,
+                        force=False,
+                        tracking_job=tracking_job,
+                    )
+                )
         logger.info(
             "Completed latest sync",
             extra={
@@ -7620,17 +8193,32 @@ class PaperbaseService:
         return indexed
 
     def index_arxiv_paper(
-        self, arxiv_id: str, *, paper: PaperMetadata | None = None, force: bool = False
+        self,
+        arxiv_id: str,
+        *,
+        paper: PaperMetadata | None = None,
+        force: bool = False,
+        tracking_job: JobResponse | None = None,
     ) -> PaperResponse:
         self._raise_if_current_job_canceled()
         existing = self.repository.get_paper_by_arxiv_id(arxiv_id)
         if existing and existing.index_status == "indexed" and not force:
+            if tracking_job is not None:
+                self.repository.record_job_paper(
+                    tracking_job.job_id,
+                    existing.paper_id,
+                    outcome="skipped",
+                    arxiv_id=existing.arxiv_id,
+                    title=existing.title,
+                    skip_reason="already_indexed",
+                )
             logger.info(
                 "Skipped already indexed paper",
                 extra={
                     "event": "index.skipped",
                     "arxiv_id": arxiv_id,
                     "paper_id": existing.paper_id,
+                    "skip_reason": "already_indexed",
                 },
             )
             return existing
@@ -7669,257 +8257,308 @@ class PaperbaseService:
             metadata.code_url_source = "admin"
         metadata.index_status = "indexing"
         stored = self.repository.upsert_paper(metadata, search_document=metadata.abstract)
-        # #39 PR C: persist S2 author rows so the top-author discovery
-        # aggregation has data. Skipped silently if enrichment was rate-
-        # limited — the backfill CLI fills in the gap. ``enrich_outcome``
-        # can be None in test contexts that stub the source-layer call.
-        if enrich_outcome is not None:
-            author_rows = enrich_outcome.authors_by_arxiv.get(metadata.arxiv_id) or []
-            if author_rows:
-                self.repository.replace_paper_authors(stored.paper_id, authors=author_rows)
-        extraction = index_paper_artifacts(metadata)
-        self._raise_if_current_job_canceled()
+        try:
+            # #39 PR C: persist S2 author rows so the top-author discovery
+            # aggregation has data. Skipped silently if enrichment was rate-
+            # limited — the backfill CLI fills in the gap. ``enrich_outcome``
+            # can be None in test contexts that stub the source-layer call.
+            if enrich_outcome is not None:
+                author_rows = enrich_outcome.authors_by_arxiv.get(metadata.arxiv_id) or []
+                if author_rows:
+                    self.repository.replace_paper_authors(stored.paper_id, authors=author_rows)
+            extraction = index_paper_artifacts(metadata)
+            self._raise_if_current_job_canceled()
 
-        metadata.source_type = extraction.source_type
-        metadata.index_status = "indexed"
-        metadata.indexed_at = utcnow()
-        metadata.summary_short, metadata.summary_eli5 = build_paper_summaries(metadata, extraction, self.settings)
+            metadata.source_type = extraction.source_type
+            metadata.index_status = "indexed"
+            metadata.indexed_at = utcnow()
+            metadata.summary_short, metadata.summary_eli5 = build_paper_summaries(
+                metadata, extraction, self.settings
+            )
 
-        # Populate ``code_url`` + ``code_url_source`` with the 3-layer
-        # decision from #46. Priority order:
-        #   1. admin (already on ``metadata`` from a ``set_admin_code_url``
-        #      call or persisted row) — sticky, never overwritten here.
-        #   2. Hugging Face paper-page ``githubRepo`` crosslink, when
-        #      ``fetch_code_crosslinks_at_index`` is enabled.
-        #   3. In-text ranker over all extracted GitHub candidates.
-        # Rejected candidates are always stored in ``code_url_candidates``
-        # so admins + future agent-side logic can revisit them without
-        # re-scanning paper text.
-        candidates = extract_github_candidates(
-            metadata.abstract or "", extraction.text_markdown or ""
-        )
-        metadata.code_url_candidates = [c.url for c in candidates] or None
-        existing = self.repository.get_paper_by_arxiv_id(metadata.arxiv_id)
-        if existing is not None and existing.code_url_source == "admin" and existing.code_url:
-            # Admin pin survives re-index regardless of what's in the paper.
-            metadata.code_url = existing.code_url
-            metadata.code_url_source = "admin"
-        else:
-            crosslink_url: str | None = None
-            if self.settings.fetch_code_crosslinks_at_index:
-                crosslink_url = sources.fetch_hf_paper_repo(metadata.arxiv_id)
-            if crosslink_url:
-                metadata.code_url = crosslink_url
-                metadata.code_url_source = "hf_papers"
+            # Populate ``code_url`` + ``code_url_source`` with the 3-layer
+            # decision from #46. Priority order:
+            #   1. admin (already on ``metadata`` from a ``set_admin_code_url``
+            #      call or persisted row) — sticky, never overwritten here.
+            #   2. Hugging Face paper-page ``githubRepo`` crosslink, when
+            #      ``fetch_code_crosslinks_at_index`` is enabled.
+            #   3. In-text ranker over all extracted GitHub candidates.
+            # Rejected candidates are always stored in ``code_url_candidates``
+            # so admins + future agent-side logic can revisit them without
+            # re-scanning paper text.
+            candidates = extract_github_candidates(
+                metadata.abstract or "", extraction.text_markdown or ""
+            )
+            metadata.code_url_candidates = [c.url for c in candidates] or None
+            existing = self.repository.get_paper_by_arxiv_id(metadata.arxiv_id)
+            if existing is not None and existing.code_url_source == "admin" and existing.code_url:
+                # Admin pin survives re-index regardless of what's in the paper.
+                metadata.code_url = existing.code_url
+                metadata.code_url_source = "admin"
             else:
-                winner = rank_github_candidates(
-                    candidates,
-                    abstract=metadata.abstract or "",
-                    body=extraction.text_markdown or "",
-                    authors=metadata.authors or "",
-                )
-                if winner is not None:
-                    metadata.code_url = winner.url
-                    metadata.code_url_source = "extracted"
+                crosslink_url: str | None = None
+                if self.settings.fetch_code_crosslinks_at_index:
+                    crosslink_url = sources.fetch_hf_paper_repo(metadata.arxiv_id)
+                if crosslink_url:
+                    metadata.code_url = crosslink_url
+                    metadata.code_url_source = "hf_papers"
                 else:
-                    # Ambiguous / no candidates: decline rather than best-guess
-                    # so the code-ingest pipeline (#41) does not auto-enqueue
-                    # an ingest job against a repo we are not confident about.
-                    metadata.code_url = None
-                    metadata.code_url_source = None
-
-                # GitHub README verifier (#46 follow-up). This remains an
-                # optional precision filter on top of the in-text ranker:
-                # fetch the candidate repo's README and confirm it
-                # references the paper. Off by default — see config docs
-                # for the precision/recall tradeoff measured on the
-                # 30-paper benchmark.
-                if (
-                    winner is not None
-                    and self.settings.verify_code_url_via_github_readme
-                ):
-                    verified = sources.verify_repo_owns_paper(
-                        winner.owner,
-                        winner.repo,
-                        metadata.arxiv_id,
-                        title=metadata.title or None,
-                        token=self.settings.github_token,
+                    winner = rank_github_candidates(
+                        candidates,
+                        abstract=metadata.abstract or "",
+                        body=extraction.text_markdown or "",
+                        authors=metadata.authors or "",
                     )
-                    if not verified:
+                    if winner is not None:
+                        metadata.code_url = winner.url
+                        metadata.code_url_source = "extracted"
+                    else:
+                        # Ambiguous / no candidates: decline rather than best-guess
+                        # so the code-ingest pipeline (#41) does not auto-enqueue
+                        # an ingest job against a repo we are not confident about.
                         metadata.code_url = None
                         metadata.code_url_source = None
 
-        search_document_parts = [metadata.title, metadata.tldr, metadata.summary_short, extraction.text_markdown]
-        search_document = "\n\n".join(part for part in search_document_parts if part)
+                    # GitHub README verifier (#46 follow-up). This remains an
+                    # optional precision filter on top of the in-text ranker:
+                    # fetch the candidate repo's README and confirm it
+                    # references the paper. Off by default — see config docs
+                    # for the precision/recall tradeoff measured on the
+                    # 30-paper benchmark.
+                    if (
+                        winner is not None
+                        and self.settings.verify_code_url_via_github_readme
+                    ):
+                        verified = sources.verify_repo_owns_paper(
+                            winner.owner,
+                            winner.repo,
+                            metadata.arxiv_id,
+                            title=metadata.title or None,
+                            token=self.settings.github_token,
+                        )
+                        if not verified:
+                            metadata.code_url = None
+                            metadata.code_url_source = None
 
-        # Paper-level embedding uses the (title, body) pair contract that
-        # SPECTER2 is trained on. summary_short is intentionally *not* fed
-        # into this vector — it is heuristic text with a noisy signal, and
-        # SPECTER2's training distribution never saw it. It stays in
-        # search_document for lexical scoring and lives on chunks.
-        paper_title = metadata.title or ""
-        paper_body = metadata.tldr or metadata.abstract or ""
-        paper_embedding = self.embeddings.encode_paper(paper_title, paper_body) if (paper_title or paper_body) else None
+            search_document_parts = [metadata.title, metadata.tldr, metadata.summary_short, extraction.text_markdown]
+            search_document = "\n\n".join(part for part in search_document_parts if part)
 
-        stored = self.repository.upsert_paper(metadata, search_document=search_document, embedding=paper_embedding)
+            # Paper-level embedding uses the (title, body) pair contract that
+            # SPECTER2 is trained on. summary_short is intentionally *not* fed
+            # into this vector — it is heuristic text with a noisy signal, and
+            # SPECTER2's training distribution never saw it. It stays in
+            # search_document for lexical scoring and lives on chunks.
+            paper_title = metadata.title or ""
+            paper_body = metadata.tldr or metadata.abstract or ""
+            paper_embedding = (
+                self.embeddings.encode_paper(paper_title, paper_body) if (paper_title or paper_body) else None
+            )
 
-        prefix = f"papers/{stored.paper_id}"
-        self.object_store.delete_prefix(prefix)
-        self.object_store.put_text(
-            f"{prefix}/meta.json",
-            json.dumps(metadata.model_dump(mode="json"), indent=2),
-            content_type="application/json",
-        )
-        self.object_store.put_text(f"{prefix}/text/full.md", extraction.text_markdown, content_type="text/markdown")
+            stored = self.repository.upsert_paper(
+                metadata,
+                search_document=search_document,
+                embedding=paper_embedding,
+            )
 
-        text_chunks: list[dict[str, Any]] = [
-            {
-                "path": "text/full.md",
-                "chunk_kind": "full_text",
-                "content": extraction.text_markdown,
-                "chunk_index": 0,
-                "section_depth": 0,
-                "section_order": 0,
-            }
-        ]
-
-        for section_order, section in enumerate(extraction.sections):
-            self._raise_if_current_job_canceled()
-            section_path = f"{prefix}/sections/{section.slug}.md"
-            self.object_store.put_text(section_path, section.markdown, content_type="text/markdown")
-            section_depth = _section_depth_for(section)
-            for chunk_index, sub_content in enumerate(
-                _stride_chunks(
-                    section.markdown,
-                    max_chars=self.settings.chunk_max_chars,
-                    overlap=self.settings.chunk_overlap_chars,
-                )
-            ):
-                text_chunks.append(
-                    {
-                        "path": f"sections/{section.slug}.md",
-                        "chunk_kind": "section",
-                        "content": sub_content,
-                        "chunk_index": chunk_index,
-                        "section_depth": section_depth,
-                        "section_order": section_order,
-                    }
-                )
-
-        if extraction.figures:
+            prefix = f"papers/{stored.paper_id}"
+            self.object_store.delete_prefix(prefix)
             self.object_store.put_text(
-                f"{prefix}/figures/index.json",
-                json.dumps(figure_index_payload(extraction.figures), indent=2),
+                f"{prefix}/meta.json",
+                json.dumps(metadata.model_dump(mode="json"), indent=2),
                 content_type="application/json",
             )
-            for figure_order, figure in enumerate(extraction.figures):
-                self._raise_if_current_job_canceled()
-                caption_path = f"{prefix}/figures/{figure.figure_id}/caption.md"
-                self.object_store.put_text(caption_path, figure.caption, content_type="text/markdown")
-                text_chunks.append(
-                    {
-                        "path": f"figures/{figure.figure_id}/caption.md",
-                        "chunk_kind": "figure_caption",
-                        "content": figure.caption,
-                        "chunk_index": 0,
-                        "section_depth": 1,
-                        "section_order": figure_order,
-                    }
-                )
-                if figure.image_bytes is not None:
-                    image_path = f"{prefix}/figures/{figure.figure_id}/image.{figure.file_extension}"
-                    self.object_store.put_bytes(image_path, figure.image_bytes, content_type=figure.content_type)
-
-        if extraction.tables:
             self.object_store.put_text(
-                f"{prefix}/tables/index.json",
-                json.dumps(table_index_payload(extraction.tables), indent=2),
-                content_type="application/json",
+                f"{prefix}/text/full.md",
+                extraction.text_markdown,
+                content_type="text/markdown",
             )
-            for table_order, table in enumerate(extraction.tables):
+
+            text_chunks: list[dict[str, Any]] = [
+                {
+                    "path": "text/full.md",
+                    "chunk_kind": "full_text",
+                    "content": extraction.text_markdown,
+                    "chunk_index": 0,
+                    "section_depth": 0,
+                    "section_order": 0,
+                }
+            ]
+
+            for section_order, section in enumerate(extraction.sections):
                 self._raise_if_current_job_canceled()
-                json_path = f"{prefix}/tables/{table.table_id}.json"
-                csv_path = f"{prefix}/tables/{table.table_id}.csv"
-                self.object_store.put_bytes(json_path, table_json_bytes(table), content_type="application/json")
-                self.object_store.put_bytes(csv_path, table_csv_bytes(table), content_type="text/csv")
-                table_text = _table_to_indexable_text(table)
-                if table_text:
+                section_path = f"{prefix}/sections/{section.slug}.md"
+                self.object_store.put_text(section_path, section.markdown, content_type="text/markdown")
+                section_depth = _section_depth_for(section)
+                for chunk_index, sub_content in enumerate(
+                    _stride_chunks(
+                        section.markdown,
+                        max_chars=self.settings.chunk_max_chars,
+                        overlap=self.settings.chunk_overlap_chars,
+                    )
+                ):
                     text_chunks.append(
                         {
-                            "path": f"tables/{table.table_id}.json",
-                            "chunk_kind": "table",
-                            "content": table_text,
-                            "chunk_index": 0,
-                            "section_depth": 1,
-                            "section_order": table_order,
+                            "path": f"sections/{section.slug}.md",
+                            "chunk_kind": "section",
+                            "content": sub_content,
+                            "chunk_index": chunk_index,
+                            "section_depth": section_depth,
+                            "section_order": section_order,
                         }
                     )
 
-        # Truncate per-kind before embedding — full_text stays large so that
-        # vector search can still recover it as a coarse fallback, but
-        # sections/tables stay focused.
-        chunk_texts: list[str] = []
-        for chunk in text_chunks:
+            if extraction.figures:
+                self.object_store.put_text(
+                    f"{prefix}/figures/index.json",
+                    json.dumps(figure_index_payload(extraction.figures), indent=2),
+                    content_type="application/json",
+                )
+                for figure_order, figure in enumerate(extraction.figures):
+                    self._raise_if_current_job_canceled()
+                    caption_path = f"{prefix}/figures/{figure.figure_id}/caption.md"
+                    self.object_store.put_text(caption_path, figure.caption, content_type="text/markdown")
+                    text_chunks.append(
+                        {
+                            "path": f"figures/{figure.figure_id}/caption.md",
+                            "chunk_kind": "figure_caption",
+                            "content": figure.caption,
+                            "chunk_index": 0,
+                            "section_depth": 1,
+                            "section_order": figure_order,
+                        }
+                    )
+                    if figure.image_bytes is not None:
+                        image_path = f"{prefix}/figures/{figure.figure_id}/image.{figure.file_extension}"
+                        self.object_store.put_bytes(
+                            image_path,
+                            figure.image_bytes,
+                            content_type=figure.content_type,
+                        )
+
+            if extraction.tables:
+                self.object_store.put_text(
+                    f"{prefix}/tables/index.json",
+                    json.dumps(table_index_payload(extraction.tables), indent=2),
+                    content_type="application/json",
+                )
+                for table_order, table in enumerate(extraction.tables):
+                    self._raise_if_current_job_canceled()
+                    json_path = f"{prefix}/tables/{table.table_id}.json"
+                    csv_path = f"{prefix}/tables/{table.table_id}.csv"
+                    self.object_store.put_bytes(
+                        json_path,
+                        table_json_bytes(table),
+                        content_type="application/json",
+                    )
+                    self.object_store.put_bytes(csv_path, table_csv_bytes(table), content_type="text/csv")
+                    table_text = _table_to_indexable_text(table)
+                    if table_text:
+                        text_chunks.append(
+                            {
+                                "path": f"tables/{table.table_id}.json",
+                                "chunk_kind": "table",
+                                "content": table_text,
+                                "chunk_index": 0,
+                                "section_depth": 1,
+                                "section_order": table_order,
+                            }
+                        )
+
+            # Truncate per-kind before embedding — full_text stays large so that
+            # vector search can still recover it as a coarse fallback, but
+            # sections/tables stay focused.
+            chunk_texts: list[str] = []
+            for chunk in text_chunks:
+                self._raise_if_current_job_canceled()
+                cap = (
+                    4000
+                    if chunk["chunk_kind"] == "full_text"
+                    else self.settings.chunk_max_chars + self.settings.chunk_overlap_chars
+                )
+                chunk_texts.append((chunk["content"] or "")[:cap])
+            chunk_embeddings = self.embeddings.encode_batch(chunk_texts)
             self._raise_if_current_job_canceled()
-            cap = (
-                4000
-                if chunk["chunk_kind"] == "full_text"
-                else self.settings.chunk_max_chars + self.settings.chunk_overlap_chars
-            )
-            chunk_texts.append((chunk["content"] or "")[:cap])
-        chunk_embeddings = self.embeddings.encode_batch(chunk_texts)
-        self._raise_if_current_job_canceled()
-        if chunk_embeddings is not None and len(chunk_embeddings) == len(text_chunks):
-            for chunk, vector in zip(text_chunks, chunk_embeddings):
-                chunk["embedding"] = vector
+            if chunk_embeddings is not None and len(chunk_embeddings) == len(text_chunks):
+                for chunk, vector in zip(text_chunks, chunk_embeddings):
+                    chunk["embedding"] = vector
 
-        for artifact in extraction.raw_artifacts:
-            self._raise_if_current_job_canceled()
-            self.object_store.put_bytes(f"{prefix}/{artifact.path}", artifact.data, content_type=artifact.content_type)
-
-        manifest = build_manifest(stored.paper_id, metadata, extraction)
-        self.object_store.put_text(
-            f"{prefix}/manifest.json",
-            json.dumps(manifest, indent=2),
-            content_type="application/json",
-        )
-
-        self.repository.replace_text_chunks(stored.paper_id, text_chunks)
-
-        if self.settings.fetch_references_at_index:
-            try:
-                refs = sources.fetch_references(metadata.arxiv_id, metadata.semantic_scholar_id)
-                if refs:
-                    self.repository.replace_paper_refs(stored.paper_id, refs)
-            except Exception as exc:
-                logger.warning(
-                    "Failed to fetch references",
-                    extra={"event": "index.refs_failed", "arxiv_id": arxiv_id, "error": str(exc)},
+            for artifact in extraction.raw_artifacts:
+                self._raise_if_current_job_canceled()
+                self.object_store.put_bytes(
+                    f"{prefix}/{artifact.path}",
+                    artifact.data,
+                    content_type=artifact.content_type,
                 )
 
-        logger.info(
-            "Completed paper indexing",
-            extra={
-                "event": "index.completed",
-                "arxiv_id": arxiv_id,
-                "paper_id": stored.paper_id,
-                "section_count": len(extraction.sections),
-                "figure_count": len(extraction.figures),
-                "table_count": len(extraction.tables),
-                "raw_artifact_count": len(extraction.raw_artifacts),
-            },
-        )
-        # Paper-code ingestion (#5): auto-enqueue ingest_repo when the paper
-        # ships a GitHub code_url. We enqueue unconditionally — the worker
-        # itself short-circuits on matching resolved_sha, so repeated
-        # indexing of the same commit is cheap. force=True here mirrors the
-        # caller's intent to refresh all artifacts.
-        if stored.code_url and code_ingest.parse_github_url(stored.code_url) is not None:
-            prev_url = (stored.code_manifest or {}).get("code_url")
-            url_changed = prev_url is not None and prev_url != stored.code_url
-            if force or url_changed or stored.code_index_status in {"none", "stale"}:
-                self.enqueue_ingest_repo_job(stored.paper_id, force=force or url_changed)
-        return stored
+            manifest = build_manifest(stored.paper_id, metadata, extraction)
+            self.object_store.put_text(
+                f"{prefix}/manifest.json",
+                json.dumps(manifest, indent=2),
+                content_type="application/json",
+            )
+
+            self.repository.replace_text_chunks(stored.paper_id, text_chunks)
+
+            if self.settings.fetch_references_at_index:
+                try:
+                    refs = sources.fetch_references(metadata.arxiv_id, metadata.semantic_scholar_id)
+                    if refs:
+                        self.repository.replace_paper_refs(stored.paper_id, refs)
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to fetch references",
+                        extra={"event": "index.refs_failed", "arxiv_id": arxiv_id, "error": str(exc)},
+                    )
+
+            logger.info(
+                "Completed paper indexing",
+                extra={
+                    "event": "index.completed",
+                    "arxiv_id": arxiv_id,
+                    "paper_id": stored.paper_id,
+                    "section_count": len(extraction.sections),
+                    "figure_count": len(extraction.figures),
+                    "table_count": len(extraction.tables),
+                    "raw_artifact_count": len(extraction.raw_artifacts),
+                },
+            )
+            if tracking_job is not None:
+                self.repository.record_job_paper(
+                    tracking_job.job_id,
+                    stored.paper_id,
+                    outcome="indexed",
+                    arxiv_id=stored.arxiv_id,
+                    title=stored.title,
+                )
+            # Paper-code ingestion (#5): auto-enqueue ingest_repo when the paper
+            # ships a GitHub code_url. We enqueue unconditionally — the worker
+            # itself short-circuits on matching resolved_sha, so repeated
+            # indexing of the same commit is cheap. force=True here mirrors the
+            # caller's intent to refresh all artifacts.
+            if stored.code_url and code_ingest.parse_github_url(stored.code_url) is not None:
+                prev_url = (stored.code_manifest or {}).get("code_url")
+                url_changed = prev_url is not None and prev_url != stored.code_url
+                if force or url_changed or stored.code_index_status in {"none", "stale"}:
+                    self.enqueue_ingest_repo_job(
+                        stored.paper_id,
+                        force=force or url_changed,
+                        root_job_id=(
+                            (tracking_job.root_job_id or tracking_job.job_id)
+                            if tracking_job is not None
+                            else None
+                        ),
+                    )
+            return stored
+        except Exception:
+            if tracking_job is not None:
+                self.repository.record_job_paper(
+                    tracking_job.job_id,
+                    stored.paper_id,
+                    outcome="failed",
+                    arxiv_id=stored.arxiv_id,
+                    title=stored.title,
+                )
+            raise
 
     def search(self, request: SearchRequest, *, user_id: str | None = None) -> SearchResponse:
         import time as _time
@@ -8125,6 +8764,128 @@ class PaperbaseService:
             expires_at=saved.expires_at,
         )
 
+    def _trending_preview_image_url(self, paper_id: str) -> str | None:
+        preview_path = f"papers/{paper_id}/preview/first-page-top.webp"
+        if not self.object_store.exists(preview_path):
+            return None
+        return self._browser_app_url(f"/v1/browser/trending/papers/{quote(paper_id, safe='')}/preview/content")
+
+    def _build_paper_comment_tree(self, records: list[PaperCommentRecord]) -> list[PaperCommentResponse]:
+        nodes: dict[str, PaperCommentResponse] = {}
+        roots: list[PaperCommentResponse] = []
+        for record in records:
+            nodes[record.comment_id] = PaperCommentResponse(
+                comment_id=record.comment_id,
+                paper_id=record.paper_id,
+                parent_comment_id=record.parent_comment_id,
+                author=PaperCommentAuthor(
+                    user_id=record.user_id,
+                    display_name=record.author_display_name,
+                ),
+                body=record.body,
+                created_at=record.created_at,
+                updated_at=record.updated_at,
+                replies=[],
+            )
+        for record in records:
+            node = nodes[record.comment_id]
+            if record.parent_comment_id and record.parent_comment_id in nodes:
+                nodes[record.parent_comment_id].replies.append(node)
+            else:
+                roots.append(node)
+        return roots
+
+    def list_browser_trending_papers(
+        self,
+        *,
+        date: str,
+        sort: str,
+        viewer: BrowserUser | None = None,
+    ) -> TrendingFeedResponse:
+        _validate_date(date, name="date")
+        if sort not in {"default", "upvotes"}:
+            raise HTTPException(status_code=400, detail=f"Unsupported trending sort {sort!r}")
+        papers = self.repository.list_trending_papers(
+            published_date=date,
+            sort=sort,
+            viewer_user_id=viewer.user_id if viewer else None,
+            limit=50,
+        )
+        return TrendingFeedResponse(
+            date=date,
+            sort=sort,  # type: ignore[arg-type]
+            papers=[
+                paper.model_copy(update={"image_url": self._trending_preview_image_url(paper.paper_id)})
+                for paper in papers
+            ],
+        )
+
+    def get_browser_trending_paper(
+        self,
+        paper_id: str,
+        *,
+        viewer: BrowserUser | None = None,
+    ) -> TrendingPaperDetailResponse:
+        detail = self.repository.get_trending_paper(
+            paper_id,
+            viewer_user_id=viewer.user_id if viewer else None,
+        )
+        if detail is None:
+            raise HTTPException(status_code=404, detail=f"Trending paper {paper_id} not found")
+        comments = self.repository.list_paper_comment_records(paper_id)
+        return detail.model_copy(
+            update={
+                "image_url": self._trending_preview_image_url(paper_id),
+                "comments": self._build_paper_comment_tree(comments),
+            }
+        )
+
+    def get_browser_trending_paper_preview_content(self, paper_id: str) -> tuple[bytes, str]:
+        detail = self.repository.get_trending_paper(paper_id)
+        if detail is None:
+            raise HTTPException(status_code=404, detail=f"Trending paper {paper_id} not found")
+        preview_path = f"papers/{paper_id}/preview/first-page-top.webp"
+        if not self.object_store.exists(preview_path):
+            raise HTTPException(status_code=404, detail=f"Preview for {paper_id} not found")
+        return self.object_store.get_bytes(preview_path), "image/webp"
+
+    def set_browser_trending_paper_upvote(self, paper_id: str, *, user: BrowserUser, upvoted: bool) -> PaperVoteSummary:
+        summary = self.repository.set_paper_upvote(paper_id=paper_id, user_id=user.user_id, upvoted=upvoted)
+        if summary is None:
+            raise HTTPException(status_code=404, detail=f"Trending paper {paper_id} not found")
+        return summary
+
+    def create_browser_trending_paper_comment(
+        self,
+        paper_id: str,
+        *,
+        user: BrowserUser,
+        request: CreatePaperCommentRequest,
+    ) -> PaperCommentsResponse:
+        detail = self.repository.get_trending_paper(paper_id, viewer_user_id=user.user_id)
+        if detail is None:
+            raise HTTPException(status_code=404, detail=f"Trending paper {paper_id} not found")
+        body = request.body.strip()
+        if not body:
+            raise HTTPException(status_code=400, detail="Comment body must not be empty")
+        if request.parent_comment_id:
+            parent = self.repository.get_paper_comment(request.parent_comment_id)
+            if parent is None or parent.paper_id != paper_id:
+                raise HTTPException(status_code=400, detail="Reply target is invalid for this paper")
+        created = self.repository.create_paper_comment(
+            paper_id=paper_id,
+            user_id=user.user_id,
+            body=body,
+            parent_comment_id=request.parent_comment_id,
+        )
+        if created is None:
+            raise HTTPException(status_code=404, detail=f"Trending paper {paper_id} not found")
+        comments = self.repository.list_paper_comment_records(paper_id)
+        return PaperCommentsResponse(
+            paper_id=paper_id,
+            comments=self._build_paper_comment_tree(comments),
+        )
+
     def get_paper(self, paper_id: str) -> PaperResponse:
         paper = self.repository.get_paper(paper_id)
         if paper is None:
@@ -8162,7 +8923,36 @@ class PaperbaseService:
             raise HTTPException(status_code=404, detail=f"Manifest for {paper_id} not found")
         return ManifestResponse(paper_id=paper_id, manifest=json.loads(self.object_store.get_text(path)))
 
+    def _browser_app_url(self, path: str) -> str:
+        base = self.settings.chat_public_url.rstrip("/")
+        if not base:
+            return path
+        return f"{base}{path}"
+
+    def _paper_artifact_location(self, paper_id: str, path: str) -> tuple[str, str]:
+        self.get_paper(paper_id)
+        safe_path = _normalize_paper_artifact_path(path)
+        full_path = f"papers/{paper_id}/{safe_path}"
+        if not self.object_store.exists(full_path):
+            raise HTTPException(status_code=404, detail=f"File {safe_path} not found for {paper_id}")
+        return safe_path, full_path
+
+    def _paper_artifact_content_type(self, paper_id: str, safe_path: str) -> str | None:
+        files = {item.path: item for item in self.list_files(paper_id).files}
+        content_type = files.get(safe_path, FileObject(path=safe_path, size=0)).content_type
+        if content_type:
+            return content_type
+        return mimetypes.guess_type(safe_path)[0]
+
+    def _preview_object_path(self, paper_id: str) -> str:
+        self.get_paper(paper_id)
+        preview_path = f"papers/{paper_id}/preview/first-page-top.webp"
+        if not self.object_store.exists(preview_path):
+            raise HTTPException(status_code=404, detail=f"Preview not found for {paper_id}")
+        return preview_path
+
     def list_files(self, paper_id: str) -> FileListResponse:
+        self.get_paper(paper_id)
         prefix = f"papers/{paper_id}/"
         objects = self.object_store.list_prefix(prefix)
         files = [
@@ -8172,10 +8962,35 @@ class PaperbaseService:
         return FileListResponse(paper_id=paper_id, files=files)
 
     def read_file(self, paper_id: str, path: str) -> FileContentResponse:
-        full_path = f"papers/{paper_id}/{path}"
-        if not self.object_store.exists(full_path):
-            raise HTTPException(status_code=404, detail=f"File {path} not found for {paper_id}")
-        return FileContentResponse(paper_id=paper_id, path=path, content=self.object_store.get_text(full_path))
+        safe_path, full_path = self._paper_artifact_location(paper_id, path)
+        try:
+            content = self.object_store.get_text(full_path)
+        except UnicodeDecodeError as exc:
+            raise HTTPException(status_code=415, detail=f"File {safe_path} is not a UTF-8 text artifact") from exc
+        return FileContentResponse(paper_id=paper_id, path=safe_path, content=content)
+
+    def get_paper_asset(self, paper_id: str, path: str) -> PaperAssetResponse:
+        safe_path, full_path = self._paper_artifact_location(paper_id, path)
+        if self.settings.storage_backend in {"local", "memory"}:
+            url = self._browser_app_url(
+                "/v1/browser/admin/papers/"
+                f"{quote(paper_id, safe='')}/asset-content/{quote(safe_path, safe='/')}"
+            )
+        else:
+            url = self.object_store.presign_get(full_path, expires_in=self.settings.presign_ttl_seconds)
+            if not url:
+                raise HTTPException(status_code=404, detail=f"File {safe_path} is not available for {paper_id}")
+        content_type = self._paper_artifact_content_type(paper_id, safe_path)
+        return PaperAssetResponse(
+            paper_id=paper_id,
+            path=safe_path,
+            url=url,
+            content_type=content_type,
+        )
+
+    def get_paper_asset_content(self, paper_id: str, path: str) -> tuple[bytes, str | None]:
+        safe_path, full_path = self._paper_artifact_location(paper_id, path)
+        return self.object_store.get_bytes(full_path), self._paper_artifact_content_type(paper_id, safe_path)
 
     def get_paper_preview(self, paper_id: str) -> PaperPreviewResponse:
         """Return a short-lived signed URL for the paper's first-page preview.
@@ -8183,14 +8998,23 @@ class PaperbaseService:
         Fixed-function: the object path is resolved server-side from ``paper_id`` only.
         Raises 404 when the paper or the preview artifact is missing.
         """
-        self.get_paper(paper_id)
-        preview_path = f"papers/{paper_id}/preview/first-page-top.webp"
-        if not self.object_store.exists(preview_path):
-            raise HTTPException(status_code=404, detail=f"Preview not found for {paper_id}")
-        image_url = self.object_store.presign_get(preview_path, expires_in=self.settings.presign_ttl_seconds)
-        if not image_url:
-            raise HTTPException(status_code=404, detail=f"Preview not available for {paper_id}")
+        preview_path = self._preview_object_path(paper_id)
+        if self.settings.storage_backend in {"local", "memory"}:
+            image_url = self._browser_app_url(
+                f"/v1/browser/papers/{quote(paper_id, safe='')}/preview/content"
+            )
+        else:
+            image_url = self.object_store.presign_get(
+                preview_path,
+                expires_in=self.settings.presign_ttl_seconds,
+            )
+            if not image_url:
+                raise HTTPException(status_code=404, detail=f"Preview not available for {paper_id}")
         return PaperPreviewResponse(paper_id=paper_id, image_url=image_url, content_type="image/webp")
+
+    def get_paper_preview_content(self, paper_id: str) -> tuple[bytes, str]:
+        preview_path = self._preview_object_path(paper_id)
+        return self.object_store.get_bytes(preview_path), "image/webp"
 
     # Extension → content-type for the figure-serving probe. Order is
     # render-cheap-first so when a figure was stored under multiple
