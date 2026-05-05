@@ -2386,9 +2386,13 @@ def test_get_paper_asset_returns_browser_content_url_for_local_storage(service):
     )
 
     asset = service.get_paper_asset("arxiv:2401.33333", "bundle.pdf")
+    expected_base = service.settings.chat_public_url.rstrip("/")
 
     assert asset.paper_id == "arxiv:2401.33333"
-    assert asset.url == "http://127.0.0.1:8080/v1/browser/admin/papers/arxiv%3A2401.33333/asset-content/bundle.pdf"
+    assert (
+        asset.url
+        == f"{expected_base}/v1/browser/admin/papers/arxiv%3A2401.33333/asset-content/bundle.pdf"
+    )
     assert asset.content_type == "application/pdf"
 
 
@@ -2419,9 +2423,13 @@ def test_get_paper_preview_returns_browser_content_url_for_local_storage(service
     )
 
     preview = service.get_paper_preview("arxiv:2401.33335")
+    expected_base = service.settings.chat_public_url.rstrip("/")
 
     assert preview.paper_id == "arxiv:2401.33335"
-    assert preview.image_url == "http://127.0.0.1:8080/v1/browser/papers/arxiv%3A2401.33335/preview/content"
+    assert (
+        preview.image_url
+        == f"{expected_base}/v1/browser/papers/arxiv%3A2401.33335/preview/content"
+    )
     assert preview.content_type == "image/webp"
 
 
