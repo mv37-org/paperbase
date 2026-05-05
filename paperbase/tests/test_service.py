@@ -914,6 +914,62 @@ def test_index_job_tracks_papers_for_admin_overview(monkeypatch, service: Paperb
     assert job_papers.papers[0].outcome == "indexed"
 
 
+def test_summarize_top_cited_admin_row_does_not_claim_index_tracking(service: PaperbaseService):
+    job = service.enqueue_summarize_top_cited_job(limit=25)
+
+    overview = service.get_admin_jobs_overview(limit=10)
+    row = next(row for row in overview.jobs if row.job_id == job.job_id)
+
+    assert row.job_type == "summarize_top_cited"
+    assert row.tracking_available is False
+    assert row.indexed_paper_count is None
+
+
+def test_latest_sync_schedule_uses_latest_run_tracking_for_legacy_rootless_jobs():
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            worker_auto_sync_latest=True,
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+    )
+    job = service.repository.create_job(
+        "sync_latest",
+        {
+            "days": service.settings.latest_sync_days,
+            "categories": service.settings.arxiv_categories,
+            "limit_per_category": service.settings.latest_sync_limit_per_category,
+        },
+    )
+    service.repository.jobs[job.job_id] = job.model_copy(
+        update={
+            "root_job_id": None,
+            "status": "completed",
+            "updated_at": datetime.now(timezone.utc),
+        }
+    )
+    service.repository.record_job_paper(
+        job.job_id,
+        "arxiv:2401.88888",
+        outcome="indexed",
+        arxiv_id="2401.88888",
+        title="Legacy Sync Paper",
+    )
+
+    overview = service.get_admin_jobs_overview(limit=10)
+    schedule_row = next(row for row in overview.jobs if row.job_type == "latest_sync_schedule")
+
+    assert schedule_row.root_job_id == job.job_id
+    assert schedule_row.tracking_available is True
+    assert schedule_row.indexed_paper_count == 1
+
+    job_papers = service.get_admin_job_papers(schedule_row.root_job_id)
+    assert [paper.paper_id for paper in job_papers.papers] == ["arxiv:2401.88888"]
+
+
 def test_reindex_replaces_stale_artifacts(monkeypatch, service: PaperbaseService):
     paper = _sample_paper("2401.33333", title="Transformer Paper", abstract="Attention and transformers.")
     monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
@@ -1748,6 +1804,7 @@ def test_init_creates_trigram_indexes_for_summary_and_tldr():
         Base.metadata.create_all = original_create_all
 
     combined = "\n".join(statements)
+    assert "UPDATE jobs SET root_job_id = job_id WHERE root_job_id IS NULL AND job_type <> 'harvest_chunk'" in combined
     assert "ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS embedding VECTOR(768)" in combined
     assert "ALTER TABLE IF EXISTS text_chunks ADD COLUMN IF NOT EXISTS embedding VECTOR(768)" in combined
     assert "papers_summary_short_trgm" in combined

@@ -271,6 +271,15 @@ _MODEL_CACHE: dict[str, Any] = {}
 _RERANKER_CACHE: dict[str, Any] = {}
 _ADMIN_LATEST_SYNC_JOB_ID = "env:latest_sync"
 _ADMIN_STALLED_AFTER = timedelta(minutes=10)
+_ADMIN_INDEXED_PAPER_JOB_TYPES = frozenset(
+    {
+        "index_paper",
+        "sync_latest",
+        "harvest_range",
+        "harvest_top_cited",
+        "harvest_venue",
+    }
+)
 
 _RECENCY_SIGNAL_RE = re.compile(
     r"\b(recent(?:ly)?|latest|newest|new|this\s+year|202[4-9]|203[0-9])\b",
@@ -317,6 +326,10 @@ def _admin_status_sort_key(status: str) -> int:
 
 def _job_activity_stalled(updated_at, *, now) -> bool:
     return bool(updated_at and now - updated_at > _ADMIN_STALLED_AFTER)
+
+
+def _job_type_tracks_indexed_papers(job_type: str) -> bool:
+    return job_type in _ADMIN_INDEXED_PAPER_JOB_TYPES
 
 
 def _latest_status_summary(status_counts: dict[str, int], *, total: int) -> str:
@@ -7295,10 +7308,13 @@ class PaperbaseService:
         ):
             display_status = "stalled"
 
-        tracking_available = representative.root_job_id is not None
+        tracked: list[Any] = []
+        tracking_available = False
         indexed_paper_count: int | None = None
-        if tracking_available:
+        if _job_type_tracks_indexed_papers(representative.job_type):
             tracked = self.repository.list_job_papers_for_root(root_job_id)
+            tracking_available = bool(tracked)
+        if tracking_available:
             indexed_paper_count = len({record.paper_id for record in tracked if record.outcome == "indexed"})
 
         details: dict[str, Any] = {
@@ -7407,6 +7423,20 @@ class PaperbaseService:
             sync_status_counts: dict[str, int] = {}
             for job in sync_jobs:
                 sync_status_counts[job.status] = sync_status_counts.get(job.status, 0) + 1
+            latest_sync_root_job_id = latest_sync.root_job_id or latest_sync.job_id if latest_sync is not None else None
+            latest_sync_tracking_available = False
+            latest_sync_indexed_paper_count: int | None = None
+            if latest_sync is not None and latest_sync_root_job_id is not None and _job_type_tracks_indexed_papers(
+                latest_sync.job_type
+            ):
+                tracked = self.repository.list_job_papers_for_root(latest_sync_root_job_id)
+                latest_sync_tracking_available = bool(tracked)
+            else:
+                tracked = []
+            if latest_sync_tracking_available:
+                latest_sync_indexed_paper_count = len(
+                    {record.paper_id for record in tracked if record.outcome == "indexed"}
+                )
             if latest_sync and latest_sync.status == "running":
                 display_status = "stalled" if (
                     worker_summary.stalled or _job_activity_stalled(latest_sync.updated_at, now=now)
@@ -7430,7 +7460,7 @@ class PaperbaseService:
             rows.append(
                 AdminJobOverviewRow(
                     job_id=_ADMIN_LATEST_SYNC_JOB_ID,
-                    root_job_id=_ADMIN_LATEST_SYNC_JOB_ID,
+                    root_job_id=latest_sync_root_job_id or _ADMIN_LATEST_SYNC_JOB_ID,
                     job_type="latest_sync_schedule",
                     status="scheduled",
                     display_status=display_status,
@@ -7444,8 +7474,8 @@ class PaperbaseService:
                     started_at=None,
                     finished_at=None,
                     is_synthetic=True,
-                    tracking_available=False,
-                    indexed_paper_count=None,
+                    tracking_available=latest_sync_tracking_available,
+                    indexed_paper_count=latest_sync_indexed_paper_count,
                     latest_status_summary=(
                         _latest_status_summary(sync_status_counts, total=len(sync_jobs))
                         if sync_jobs

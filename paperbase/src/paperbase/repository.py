@@ -1574,6 +1574,16 @@ class SqlAlchemyPaperRepository(PaperRepository):
             )
         Base.metadata.create_all(self._engine)
         with self._engine.begin() as connection:
+            # Pre-root-job-id installs only have top-level jobs. Backfill those
+            # rows in place so admin drilldowns can still resolve them after the
+            # feature lands. Leave legacy chunk rows alone because their parent
+            # root cannot be reconstructed reliably.
+            connection.execute(
+                text(
+                    "UPDATE jobs SET root_job_id = job_id "
+                    "WHERE root_job_id IS NULL AND job_type <> 'harvest_chunk'"
+                )
+            )
             # search_tsv is added after create_all() so it works for both
             # fresh installs (papers table just created by ORM) and existing
             # databases (column added via IF NOT EXISTS).
@@ -4544,7 +4554,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
         with self._session() as session:
             rows = session.scalars(
                 select(JobORM)
-                .where(JobORM.root_job_id == root_job_id)
+                .where(or_(JobORM.root_job_id == root_job_id, JobORM.job_id == root_job_id))
                 .order_by(JobORM.updated_at.desc())
             ).all()
         return [self.get_job(row.job_id) for row in rows if row is not None]  # type: ignore[list-item]
@@ -4584,7 +4594,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
             rows = session.scalars(
                 select(JobPaperORM)
                 .join(JobORM, JobORM.job_id == JobPaperORM.job_id)
-                .where(JobORM.root_job_id == root_job_id)
+                .where(or_(JobORM.root_job_id == root_job_id, JobORM.job_id == root_job_id))
                 .order_by(JobPaperORM.updated_at.desc())
             ).all()
         return [
@@ -6475,7 +6485,11 @@ class MemoryPaperRepository(PaperRepository):
         return jobs[:limit]
 
     def list_jobs_for_root(self, root_job_id: str) -> list[JobResponse]:
-        jobs = [job for job in self.jobs.values() if job.root_job_id == root_job_id]
+        jobs = [
+            job
+            for job in self.jobs.values()
+            if job.root_job_id == root_job_id or job.job_id == root_job_id
+        ]
         jobs.sort(key=lambda item: item.updated_at, reverse=True)
         return jobs
 
@@ -6502,7 +6516,11 @@ class MemoryPaperRepository(PaperRepository):
         )
 
     def list_job_papers_for_root(self, root_job_id: str) -> list[JobPaperRecord]:
-        job_ids = {job.job_id for job in self.jobs.values() if job.root_job_id == root_job_id}
+        job_ids = {
+            job.job_id
+            for job in self.jobs.values()
+            if job.root_job_id == root_job_id or job.job_id == root_job_id
+        }
         records = [record for record in self.job_papers.values() if record.job_id in job_ids]
         records.sort(key=lambda item: item.updated_at, reverse=True)
         return records
