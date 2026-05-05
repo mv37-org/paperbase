@@ -6398,6 +6398,11 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
   padding-right: 2px;
 }
 
+.admin-paper-file-preview-body.text-mode {
+  border-radius: var(--radius);
+  background: #11161d;
+}
+
 .admin-paper-tree {
   display: grid;
   gap: 1px;

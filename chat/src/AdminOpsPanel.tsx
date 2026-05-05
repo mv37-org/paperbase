@@ -2753,7 +2753,9 @@ export function AdminOpsPanel({
                             </a>
                           ) : null}
                         </div>
-                        <div className="admin-paper-file-preview-body">
+                        <div
+                          className={`admin-paper-file-preview-body${selectedFileContent ? " text-mode" : ""}`}
+                        >
                           {selectedFileError ? (
                             <div className="admin-jobs-inline-error">{selectedFileError}</div>
                           ) : null}
