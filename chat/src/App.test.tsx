@@ -729,6 +729,54 @@ describe("App", () => {
       image_url: "https://example.test/preview.webp",
       content_type: "image/webp",
     });
+    apiMocks.loadBrowserTrendingPapers.mockResolvedValue({
+      date: "2026-04-21",
+      sort: "default",
+      papers: [
+        {
+          paper_id: "arxiv:2401.12345",
+          arxiv_id: "2401.12345",
+          title: "Trending Paper",
+          authors: "Ada Lovelace",
+          published: "2026-04-21",
+          html_url: "https://example.test/2401.12345",
+          pdf_url: "https://example.test/2401.12345.pdf",
+          image_url: "https://example.test/trending-preview.webp",
+          upvote_count: 12,
+          viewer_has_upvoted: false,
+        },
+      ],
+    });
+    apiMocks.getBrowserTrendingPaper.mockResolvedValue({
+      paper_id: "arxiv:2401.12345",
+      arxiv_id: "2401.12345",
+      title: "Trending Paper",
+      authors: "Ada Lovelace",
+      published: "2026-04-21",
+      primary_category: "cs.AI",
+      categories: "cs.AI",
+      summary_eli5: "Simple summary",
+      html_url: "https://example.test/2401.12345",
+      pdf_url: "https://example.test/2401.12345.pdf",
+      image_url: "https://example.test/trending-preview.webp",
+      upvote_count: 12,
+      viewer_has_upvoted: false,
+      comments: [],
+    });
+    apiMocks.upvoteBrowserTrendingPaper.mockResolvedValue({
+      paper_id: "arxiv:2401.12345",
+      upvote_count: 13,
+      viewer_has_upvoted: true,
+    });
+    apiMocks.removeUpvoteBrowserTrendingPaper.mockResolvedValue({
+      paper_id: "arxiv:2401.12345",
+      upvote_count: 12,
+      viewer_has_upvoted: false,
+    });
+    apiMocks.createBrowserTrendingPaperComment.mockResolvedValue({
+      paper_id: "arxiv:2401.12345",
+      comments: [],
+    });
     apiMocks.loadBrowserAdminJobPapers.mockResolvedValue({
       root_job_id: "job_root_1",
       total_count: 0,
@@ -852,6 +900,34 @@ describe("App", () => {
     });
     expect(document.querySelector("#app-shell")).toBeNull();
     expect(apiMocks.landingMentionEditor).toHaveBeenCalled();
+  });
+
+  it("opens the public trending page from landing and routes unauthenticated upvotes to login", async () => {
+    apiMocks.loadSession.mockResolvedValue({
+      authenticated: false,
+      user: null,
+      has_anthropic_api_key: false,
+      csrf_token: null,
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Browse trending papers" })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Browse trending papers" }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("trending-papers-page")).toBeTruthy();
+    });
+    expect(apiMocks.loadBrowserTrendingPapers).toHaveBeenCalledWith(expect.any(String), "default");
+
+    fireEvent.click(screen.getByRole("button", { name: "Upvote 12" }));
+
+    await waitFor(() => {
+      expect(document.querySelector("#auth-modal-title")).toBeTruthy();
+    });
   });
 
   it("restores previously open tabs for an authenticated session", async () => {
