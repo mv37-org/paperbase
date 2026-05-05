@@ -26,6 +26,7 @@ from sqlalchemy import (
     create_engine,
     delete,
     func,
+    literal,
     or_,
     select,
     text,
@@ -49,6 +50,8 @@ from .models import (
     IntegrationProbeComponent,
     JobPaperRecord,
     JobResponse,
+    PaperCommentRecord,
+    PaperVoteSummary,
     PaperMetadata,
     PaperResponse,
     ProjectItemPageResponse,
@@ -60,6 +63,8 @@ from .models import (
     PythonFileResponse,
     PythonFileSummary,
     ResultSetResponse,
+    TrendingPaperCardResponse,
+    TrendingPaperDetailResponse,
     UploadedDocumentResponse,
     UploadedDocumentSectionResult,
     SearchPaperResult,
@@ -623,6 +628,31 @@ class BrowserUserSettingsORM(Base):
     updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class PaperUpvoteORM(Base):
+    __tablename__ = "paper_upvotes"
+
+    paper_upvote_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    paper_id: Mapped[str] = mapped_column(ForeignKey("papers.paper_id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("browser_users.user_id", ondelete="CASCADE"), index=True)
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class PaperCommentORM(Base):
+    __tablename__ = "paper_comments"
+
+    comment_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    paper_id: Mapped[str] = mapped_column(ForeignKey("papers.paper_id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("browser_users.user_id", ondelete="CASCADE"), index=True)
+    parent_comment_id: Mapped[str | None] = mapped_column(
+        ForeignKey("paper_comments.comment_id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    body: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class UploadedDocumentORM(Base):
     __tablename__ = "uploaded_documents"
 
@@ -800,6 +830,16 @@ def _paper_from_orm(row: PaperORM) -> PaperResponse:
         index_status=row.index_status,
         indexed_at=row.indexed_at,
     )
+
+
+def _browser_display_name(display_name: str | None, email: str | None) -> str:
+    if display_name and display_name.strip():
+        return display_name.strip()
+    if email and email.strip():
+        local_part = email.split("@", 1)[0].strip()
+        if local_part:
+            return local_part
+    return "Anonymous"
 
 
 def _paper_needs_summary_after(paper: PaperResponse, after: PaperResponse) -> bool:
@@ -1046,6 +1086,58 @@ class PaperRepository(ABC):
         index_status: str | None = None,
         limit: int = 50,
     ) -> list[PaperResponse]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_trending_papers(
+        self,
+        *,
+        published_date: str,
+        sort: str,
+        viewer_user_id: str | None = None,
+        limit: int = 50,
+    ) -> list[TrendingPaperCardResponse]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_trending_paper(
+        self,
+        paper_id: str,
+        *,
+        viewer_user_id: str | None = None,
+    ) -> TrendingPaperDetailResponse | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_paper_vote_summary(
+        self,
+        paper_id: str,
+        *,
+        viewer_user_id: str | None = None,
+    ) -> PaperVoteSummary | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def set_paper_upvote(self, *, paper_id: str, user_id: str, upvoted: bool) -> PaperVoteSummary | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_paper_comment(self, comment_id: str) -> PaperCommentRecord | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_paper_comment_records(self, paper_id: str) -> list[PaperCommentRecord]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def create_paper_comment(
+        self,
+        *,
+        paper_id: str,
+        user_id: str,
+        body: str,
+        parent_comment_id: str | None = None,
+    ) -> PaperCommentRecord | None:
         raise NotImplementedError
 
     @abstractmethod
@@ -1734,6 +1826,21 @@ class SqlAlchemyPaperRepository(PaperRepository):
             )
             connection.execute(
                 text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS paper_upvotes_paper_user_unique "
+                    "ON paper_upvotes (paper_id, user_id)"
+                )
+            )
+            connection.execute(
+                text("CREATE INDEX IF NOT EXISTS paper_upvotes_paper_idx ON paper_upvotes (paper_id)")
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS paper_comments_paper_parent_created_idx "
+                    "ON paper_comments (paper_id, parent_comment_id, created_at, comment_id)"
+                )
+            )
+            connection.execute(
+                text(
                     "CREATE INDEX IF NOT EXISTS text_chunks_content_trgm "
                     "ON text_chunks USING gin (content gin_trgm_ops)"
                 )
@@ -1945,6 +2052,266 @@ class SqlAlchemyPaperRepository(PaperRepository):
         with self._session() as session:
             rows = session.scalars(statement).all()
         return [_paper_from_orm(row) for row in rows]
+
+    def list_trending_papers(
+        self,
+        *,
+        published_date: str,
+        sort: str,
+        viewer_user_id: str | None = None,
+        limit: int = 50,
+    ) -> list[TrendingPaperCardResponse]:
+        upvote_counts = (
+            select(
+                PaperUpvoteORM.paper_id.label("paper_id"),
+                func.count(PaperUpvoteORM.paper_upvote_id).label("upvote_count"),
+            )
+            .group_by(PaperUpvoteORM.paper_id)
+            .subquery()
+        )
+        viewer_has_upvoted = literal(False)
+        if viewer_user_id:
+            viewer_has_upvoted = (
+                select(func.count(PaperUpvoteORM.paper_upvote_id))
+                .where(
+                    PaperUpvoteORM.paper_id == PaperORM.paper_id,
+                    PaperUpvoteORM.user_id == viewer_user_id,
+                )
+                .scalar_subquery()
+                > 0
+            )
+        statement = (
+            select(
+                PaperORM,
+                func.coalesce(upvote_counts.c.upvote_count, 0).label("upvote_count"),
+                viewer_has_upvoted.label("viewer_has_upvoted"),
+            )
+            .outerjoin(upvote_counts, upvote_counts.c.paper_id == PaperORM.paper_id)
+            .where(PaperORM.index_status == "indexed", PaperORM.published == published_date)
+        )
+        if sort == "upvotes":
+            statement = statement.order_by(
+                text("upvote_count DESC"),
+                PaperORM.indexed_at.desc().nullslast(),
+                PaperORM.paper_id.asc(),
+            )
+        else:
+            statement = statement.order_by(PaperORM.indexed_at.desc().nullslast(), PaperORM.paper_id.asc())
+        statement = statement.limit(min(max(limit, 1), 50))
+        with self._session() as session:
+            rows = session.execute(statement).all()
+        return [
+            TrendingPaperCardResponse(
+                paper_id=paper.paper_id,
+                arxiv_id=paper.arxiv_id,
+                title=paper.title,
+                authors=paper.authors,
+                published=paper.published,
+                html_url=paper.html_url,
+                pdf_url=paper.pdf_url,
+                image_url=None,
+                upvote_count=int(upvote_count or 0),
+                viewer_has_upvoted=bool(viewer_upvoted),
+            )
+            for paper, upvote_count, viewer_upvoted in rows
+        ]
+
+    def get_trending_paper(
+        self,
+        paper_id: str,
+        *,
+        viewer_user_id: str | None = None,
+    ) -> TrendingPaperDetailResponse | None:
+        upvote_counts = (
+            select(func.count(PaperUpvoteORM.paper_upvote_id))
+            .where(PaperUpvoteORM.paper_id == PaperORM.paper_id)
+            .scalar_subquery()
+        )
+        viewer_has_upvoted = literal(False)
+        if viewer_user_id:
+            viewer_has_upvoted = (
+                select(func.count(PaperUpvoteORM.paper_upvote_id))
+                .where(
+                    PaperUpvoteORM.paper_id == PaperORM.paper_id,
+                    PaperUpvoteORM.user_id == viewer_user_id,
+                )
+                .scalar_subquery()
+                > 0
+            )
+        statement = select(
+            PaperORM,
+            func.coalesce(upvote_counts, 0).label("upvote_count"),
+            viewer_has_upvoted.label("viewer_has_upvoted"),
+        ).where(PaperORM.paper_id == paper_id, PaperORM.index_status == "indexed")
+        with self._session() as session:
+            row = session.execute(statement).first()
+        if row is None:
+            return None
+        paper, upvote_count, viewer_upvoted = row
+        return TrendingPaperDetailResponse(
+            paper_id=paper.paper_id,
+            arxiv_id=paper.arxiv_id,
+            title=paper.title,
+            authors=paper.authors,
+            published=paper.published,
+            primary_category=paper.primary_category,
+            categories=paper.categories,
+            summary_eli5=paper.summary_eli5 or "",
+            html_url=paper.html_url,
+            pdf_url=paper.pdf_url,
+            image_url=None,
+            upvote_count=int(upvote_count or 0),
+            viewer_has_upvoted=bool(viewer_upvoted),
+            comments=[],
+        )
+
+    def get_paper_vote_summary(
+        self,
+        paper_id: str,
+        *,
+        viewer_user_id: str | None = None,
+    ) -> PaperVoteSummary | None:
+        with self._session() as session:
+            paper_exists = session.scalar(
+                select(PaperORM.paper_id).where(PaperORM.paper_id == paper_id, PaperORM.index_status == "indexed")
+            )
+            if paper_exists is None:
+                return None
+            upvote_count = (
+                session.scalar(
+                    select(func.count(PaperUpvoteORM.paper_upvote_id)).where(PaperUpvoteORM.paper_id == paper_id)
+                )
+                or 0
+            )
+            viewer_has_upvoted = False
+            if viewer_user_id:
+                viewer_has_upvoted = bool(
+                    (
+                        session.scalar(
+                            select(func.count(PaperUpvoteORM.paper_upvote_id)).where(
+                                PaperUpvoteORM.paper_id == paper_id,
+                                PaperUpvoteORM.user_id == viewer_user_id,
+                            )
+                        )
+                        or 0
+                    )
+                    > 0
+                )
+        return PaperVoteSummary(
+            paper_id=paper_id,
+            upvote_count=int(upvote_count),
+            viewer_has_upvoted=viewer_has_upvoted,
+        )
+
+    def set_paper_upvote(self, *, paper_id: str, user_id: str, upvoted: bool) -> PaperVoteSummary | None:
+        def _do() -> bool | None:
+            with self._session() as session:
+                paper_exists = session.scalar(
+                    select(PaperORM.paper_id).where(PaperORM.paper_id == paper_id, PaperORM.index_status == "indexed")
+                )
+                if paper_exists is None:
+                    return None
+                existing = session.scalar(
+                    select(PaperUpvoteORM).where(
+                        PaperUpvoteORM.paper_id == paper_id,
+                        PaperUpvoteORM.user_id == user_id,
+                    )
+                )
+                if upvoted:
+                    if existing is None:
+                        session.add(
+                            PaperUpvoteORM(
+                                paper_upvote_id=new_id("pup"),
+                                paper_id=paper_id,
+                                user_id=user_id,
+                            )
+                        )
+                elif existing is not None:
+                    session.delete(existing)
+                return True
+
+        updated = _retry_on_deadlock(_do, label="set_paper_upvote")
+        if updated is None:
+            return None
+        return self.get_paper_vote_summary(paper_id, viewer_user_id=user_id)
+
+    def get_paper_comment(self, comment_id: str) -> PaperCommentRecord | None:
+        statement = (
+            select(PaperCommentORM, BrowserUserORM.display_name, BrowserUserORM.email)
+            .join(BrowserUserORM, BrowserUserORM.user_id == PaperCommentORM.user_id)
+            .where(PaperCommentORM.comment_id == comment_id)
+        )
+        with self._session() as session:
+            row = session.execute(statement).first()
+        if row is None:
+            return None
+        comment, display_name, email = row
+        return PaperCommentRecord(
+            comment_id=comment.comment_id,
+            paper_id=comment.paper_id,
+            parent_comment_id=comment.parent_comment_id,
+            user_id=comment.user_id,
+            author_display_name=_browser_display_name(display_name, email),
+            body=comment.body,
+            created_at=comment.created_at,
+            updated_at=comment.updated_at,
+        )
+
+    def list_paper_comment_records(self, paper_id: str) -> list[PaperCommentRecord]:
+        statement = (
+            select(PaperCommentORM, BrowserUserORM.display_name, BrowserUserORM.email)
+            .join(BrowserUserORM, BrowserUserORM.user_id == PaperCommentORM.user_id)
+            .where(PaperCommentORM.paper_id == paper_id)
+            .order_by(PaperCommentORM.created_at.asc(), PaperCommentORM.comment_id.asc())
+        )
+        with self._session() as session:
+            rows = session.execute(statement).all()
+        return [
+            PaperCommentRecord(
+                comment_id=comment.comment_id,
+                paper_id=comment.paper_id,
+                parent_comment_id=comment.parent_comment_id,
+                user_id=comment.user_id,
+                author_display_name=_browser_display_name(display_name, email),
+                body=comment.body,
+                created_at=comment.created_at,
+                updated_at=comment.updated_at,
+            )
+            for comment, display_name, email in rows
+        ]
+
+    def create_paper_comment(
+        self,
+        *,
+        paper_id: str,
+        user_id: str,
+        body: str,
+        parent_comment_id: str | None = None,
+    ) -> PaperCommentRecord | None:
+        comment_id = new_id("pcmt")
+
+        def _do() -> bool | None:
+            with self._session() as session:
+                paper_exists = session.scalar(
+                    select(PaperORM.paper_id).where(PaperORM.paper_id == paper_id, PaperORM.index_status == "indexed")
+                )
+                if paper_exists is None:
+                    return None
+                session.add(
+                    PaperCommentORM(
+                        comment_id=comment_id,
+                        paper_id=paper_id,
+                        user_id=user_id,
+                        parent_comment_id=parent_comment_id,
+                        body=body,
+                    )
+                )
+                return True
+
+        created = _retry_on_deadlock(_do, label="create_paper_comment")
+        if created is None:
+            return None
+        return self.get_paper_comment(comment_id)
 
     def replace_text_chunks(self, paper_id: str, chunks: list[dict[str, Any]]) -> None:
         # Wrapped in deadlock-retry per #51. The DELETE + INSERT pattern
@@ -4707,6 +5074,8 @@ class MemoryPaperRepository(PaperRepository):
         self.search_logs: dict[str, dict[str, Any]] = {}
         self.job_dedupe_keys: dict[str, str] = {}
         self.job_papers: dict[tuple[str, str], JobPaperRecord] = {}
+        self.paper_upvotes: dict[tuple[str, str], datetime] = {}
+        self.paper_comments: dict[str, PaperCommentRecord] = {}
 
     def init(self) -> None:
         return None
@@ -4747,6 +5116,14 @@ class MemoryPaperRepository(PaperRepository):
         settings = BrowserUserSettingsResponse()
         self.browser_user_settings[user_id] = settings
         return settings
+
+    def _paper_upvote_count(self, paper_id: str) -> int:
+        return sum(1 for voted_paper_id, _user_id in self.paper_upvotes if voted_paper_id == paper_id)
+
+    def _viewer_has_upvoted(self, paper_id: str, user_id: str | None) -> bool:
+        if not user_id:
+            return False
+        return (paper_id, user_id) in self.paper_upvotes
 
     def upsert_paper(
         self,
@@ -4829,6 +5206,125 @@ class MemoryPaperRepository(PaperRepository):
         candidates.sort(key=lambda paper: paper.indexed_at or floor, reverse=True)
         candidates.sort(key=lambda paper: paper.indexed_at is None)
         return candidates[:limit]
+
+    def list_trending_papers(
+        self,
+        *,
+        published_date: str,
+        sort: str,
+        viewer_user_id: str | None = None,
+        limit: int = 50,
+    ) -> list[TrendingPaperCardResponse]:
+        candidates = [
+            paper
+            for paper in self.papers.values()
+            if paper.index_status == "indexed" and paper.published == published_date
+        ]
+        floor = datetime.min.replace(tzinfo=timezone.utc)
+        candidates.sort(key=lambda paper: paper.paper_id)
+        candidates.sort(key=lambda paper: paper.indexed_at or floor, reverse=True)
+        if sort == "upvotes":
+            candidates.sort(key=lambda paper: self._paper_upvote_count(paper.paper_id), reverse=True)
+        return [
+            TrendingPaperCardResponse(
+                paper_id=paper.paper_id,
+                arxiv_id=paper.arxiv_id,
+                title=paper.title,
+                authors=paper.authors,
+                published=paper.published,
+                html_url=paper.html_url,
+                pdf_url=paper.pdf_url,
+                image_url=None,
+                upvote_count=self._paper_upvote_count(paper.paper_id),
+                viewer_has_upvoted=self._viewer_has_upvoted(paper.paper_id, viewer_user_id),
+            )
+            for paper in candidates[: min(max(limit, 1), 50)]
+        ]
+
+    def get_trending_paper(
+        self,
+        paper_id: str,
+        *,
+        viewer_user_id: str | None = None,
+    ) -> TrendingPaperDetailResponse | None:
+        paper = self.papers.get(paper_id)
+        if paper is None or paper.index_status != "indexed":
+            return None
+        return TrendingPaperDetailResponse(
+            paper_id=paper.paper_id,
+            arxiv_id=paper.arxiv_id,
+            title=paper.title,
+            authors=paper.authors,
+            published=paper.published,
+            primary_category=paper.primary_category,
+            categories=paper.categories,
+            summary_eli5=paper.summary_eli5 or "",
+            html_url=paper.html_url,
+            pdf_url=paper.pdf_url,
+            image_url=None,
+            upvote_count=self._paper_upvote_count(paper.paper_id),
+            viewer_has_upvoted=self._viewer_has_upvoted(paper.paper_id, viewer_user_id),
+            comments=[],
+        )
+
+    def get_paper_vote_summary(
+        self,
+        paper_id: str,
+        *,
+        viewer_user_id: str | None = None,
+    ) -> PaperVoteSummary | None:
+        paper = self.papers.get(paper_id)
+        if paper is None or paper.index_status != "indexed":
+            return None
+        return PaperVoteSummary(
+            paper_id=paper_id,
+            upvote_count=self._paper_upvote_count(paper_id),
+            viewer_has_upvoted=self._viewer_has_upvoted(paper_id, viewer_user_id),
+        )
+
+    def set_paper_upvote(self, *, paper_id: str, user_id: str, upvoted: bool) -> PaperVoteSummary | None:
+        paper = self.papers.get(paper_id)
+        if paper is None or paper.index_status != "indexed":
+            return None
+        key = (paper_id, user_id)
+        if upvoted:
+            self.paper_upvotes.setdefault(key, utcnow())
+        else:
+            self.paper_upvotes.pop(key, None)
+        return self.get_paper_vote_summary(paper_id, viewer_user_id=user_id)
+
+    def get_paper_comment(self, comment_id: str) -> PaperCommentRecord | None:
+        return self.paper_comments.get(comment_id)
+
+    def list_paper_comment_records(self, paper_id: str) -> list[PaperCommentRecord]:
+        comments = [comment for comment in self.paper_comments.values() if comment.paper_id == paper_id]
+        comments.sort(key=lambda comment: (comment.created_at, comment.comment_id))
+        return comments
+
+    def create_paper_comment(
+        self,
+        *,
+        paper_id: str,
+        user_id: str,
+        body: str,
+        parent_comment_id: str | None = None,
+    ) -> PaperCommentRecord | None:
+        paper = self.papers.get(paper_id)
+        user = self.browser_users.get(user_id)
+        if paper is None or paper.index_status != "indexed" or user is None:
+            return None
+        comment = PaperCommentRecord(
+            comment_id=new_id("pcmt"),
+            paper_id=paper_id,
+            parent_comment_id=parent_comment_id,
+            user_id=user_id,
+            author_display_name=_browser_display_name(user.display_name, user.email),
+            body=body,
+            created_at=utcnow(),
+            updated_at=utcnow(),
+        )
+        self.paper_comments[comment.comment_id] = comment
+        return comment
 
     def replace_text_chunks(self, paper_id: str, chunks: list[dict[str, Any]]) -> None:
         # Match the SQL path: assign a stable chunk_id so downstream updates

@@ -50,6 +50,85 @@ class PaperResponse(PaperMetadata):
     paper_id: str
 
 
+class PaperVoteSummary(BaseModel):
+    paper_id: str
+    upvote_count: int = 0
+    viewer_has_upvoted: bool = False
+
+
+class PaperCommentAuthor(BaseModel):
+    user_id: str
+    display_name: str
+
+
+class PaperCommentRecord(BaseModel):
+    comment_id: str
+    paper_id: str
+    parent_comment_id: str | None = None
+    user_id: str
+    author_display_name: str
+    body: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class PaperCommentResponse(BaseModel):
+    comment_id: str
+    paper_id: str
+    parent_comment_id: str | None = None
+    author: PaperCommentAuthor
+    body: str
+    created_at: datetime
+    updated_at: datetime
+    replies: list["PaperCommentResponse"] = Field(default_factory=list)
+
+
+class PaperCommentsResponse(BaseModel):
+    paper_id: str
+    comments: list[PaperCommentResponse] = Field(default_factory=list)
+
+
+class TrendingPaperCardResponse(BaseModel):
+    paper_id: str
+    arxiv_id: str
+    title: str
+    authors: str
+    published: str
+    html_url: str
+    pdf_url: str
+    image_url: str | None = None
+    upvote_count: int = 0
+    viewer_has_upvoted: bool = False
+
+
+class TrendingPaperDetailResponse(BaseModel):
+    paper_id: str
+    arxiv_id: str
+    title: str
+    authors: str
+    published: str
+    primary_category: str
+    categories: str
+    summary_eli5: str
+    html_url: str
+    pdf_url: str
+    image_url: str | None = None
+    upvote_count: int = 0
+    viewer_has_upvoted: bool = False
+    comments: list[PaperCommentResponse] = Field(default_factory=list)
+
+
+class TrendingFeedResponse(BaseModel):
+    date: str
+    sort: Literal["default", "upvotes"] = "default"
+    papers: list[TrendingPaperCardResponse] = Field(default_factory=list)
+
+
+class CreatePaperCommentRequest(BaseModel):
+    body: str = Field(..., min_length=1, max_length=4000)
+    parent_comment_id: str | None = None
+
+
 class SearchRequest(BaseModel):
     query: str
     limit: int = Field(default=20, ge=1, le=100)

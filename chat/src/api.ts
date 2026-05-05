@@ -19,8 +19,10 @@ import type {
   JobResponse,
   MentionSuggestionResult,
   PaperAssetResponse,
+  PaperCommentsResponse,
   PaperPreviewResponse,
   PaperResponse,
+  PaperVoteSummary,
   ProjectItemKind,
   ProjectItemPageResponse,
   ProjectRepoConflictResolution,
@@ -33,6 +35,8 @@ import type {
   RunPythonFileResponse,
   SendChatMessageResponse,
   TableResponse,
+  TrendingFeedResponse,
+  TrendingPaperDetail,
   UploadListResponse,
 } from "./types";
 
@@ -660,6 +664,52 @@ export function postForm(path: string, form: HTMLFormElement) {
 
 export function getBrowserPaper(paperId: string) {
   return api<PaperResponse>(`/v1/browser/papers/${paperId}`, { method: "GET" });
+}
+
+export function loadBrowserTrendingPapers(date: string, sort: "default" | "upvotes" = "default") {
+  const params = new URLSearchParams({ date, sort });
+  return api<TrendingFeedResponse>(`/v1/browser/trending?${params.toString()}`, { method: "GET" });
+}
+
+export function getBrowserTrendingPaper(paperId: string) {
+  return api<TrendingPaperDetail>(`/v1/browser/trending/papers/${encodeURIComponent(paperId)}`, {
+    method: "GET",
+  });
+}
+
+export function browserTrendingPaperPreviewContentUrl(paperId: string) {
+  return apiUrl(`/v1/browser/trending/papers/${encodeURIComponent(paperId)}/preview/content`);
+}
+
+export function upvoteBrowserTrendingPaper(paperId: string) {
+  return api<PaperVoteSummary>(
+    `/v1/browser/trending/papers/${encodeURIComponent(paperId)}/upvote`,
+    {
+      method: "PUT",
+    },
+  );
+}
+
+export function removeUpvoteBrowserTrendingPaper(paperId: string) {
+  return api<PaperVoteSummary>(
+    `/v1/browser/trending/papers/${encodeURIComponent(paperId)}/upvote`,
+    {
+      method: "DELETE",
+    },
+  );
+}
+
+export function createBrowserTrendingPaperComment(
+  paperId: string,
+  payload: { body: string; parent_comment_id?: string | null },
+) {
+  return api<PaperCommentsResponse>(
+    `/v1/browser/trending/papers/${encodeURIComponent(paperId)}/comments`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
 }
 
 export function getBrowserPaperPreview(paperId: string) {

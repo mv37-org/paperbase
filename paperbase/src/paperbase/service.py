@@ -80,6 +80,7 @@ from .models import (
     CodeReadResponse,
     CodeSearchHit,
     CodeSearchResponse,
+    CreatePaperCommentRequest,
     CreateChatThreadRequest,
     MoveChatThreadProjectRequest,
     FileContentResponse,
@@ -94,10 +95,15 @@ from .models import (
     JobResponse,
     LoginRequest,
     ManifestResponse,
+    PaperCommentsResponse,
     PaperMetadata,
     PaperAssetResponse,
+    PaperCommentAuthor,
+    PaperCommentRecord,
+    PaperCommentResponse,
     PaperPreviewResponse,
     PaperResponse,
+    PaperVoteSummary,
     GitHubRepoBranchSummary,
     GitHubRepoImportCandidate,
     GitHubRepoImportCandidateResponse,
@@ -127,6 +133,8 @@ from .models import (
     SendChatMessageResponse,
     SignupRequest,
     TableResponse,
+    TrendingFeedResponse,
+    TrendingPaperDetailResponse,
     UpdateAppearanceRequest,
     UpdateNotificationsRequest,
     UpdateProjectRequest,
@@ -8114,6 +8122,128 @@ class PaperbaseService:
             pattern=pattern,
             papers=matches,
             expires_at=saved.expires_at,
+        )
+
+    def _trending_preview_image_url(self, paper_id: str) -> str | None:
+        preview_path = f"papers/{paper_id}/preview/first-page-top.webp"
+        if not self.object_store.exists(preview_path):
+            return None
+        return self._browser_app_url(f"/v1/browser/trending/papers/{quote(paper_id, safe='')}/preview/content")
+
+    def _build_paper_comment_tree(self, records: list[PaperCommentRecord]) -> list[PaperCommentResponse]:
+        nodes: dict[str, PaperCommentResponse] = {}
+        roots: list[PaperCommentResponse] = []
+        for record in records:
+            nodes[record.comment_id] = PaperCommentResponse(
+                comment_id=record.comment_id,
+                paper_id=record.paper_id,
+                parent_comment_id=record.parent_comment_id,
+                author=PaperCommentAuthor(
+                    user_id=record.user_id,
+                    display_name=record.author_display_name,
+                ),
+                body=record.body,
+                created_at=record.created_at,
+                updated_at=record.updated_at,
+                replies=[],
+            )
+        for record in records:
+            node = nodes[record.comment_id]
+            if record.parent_comment_id and record.parent_comment_id in nodes:
+                nodes[record.parent_comment_id].replies.append(node)
+            else:
+                roots.append(node)
+        return roots
+
+    def list_browser_trending_papers(
+        self,
+        *,
+        date: str,
+        sort: str,
+        viewer: BrowserUser | None = None,
+    ) -> TrendingFeedResponse:
+        _validate_date(date, name="date")
+        if sort not in {"default", "upvotes"}:
+            raise HTTPException(status_code=400, detail=f"Unsupported trending sort {sort!r}")
+        papers = self.repository.list_trending_papers(
+            published_date=date,
+            sort=sort,
+            viewer_user_id=viewer.user_id if viewer else None,
+            limit=50,
+        )
+        return TrendingFeedResponse(
+            date=date,
+            sort=sort,  # type: ignore[arg-type]
+            papers=[
+                paper.model_copy(update={"image_url": self._trending_preview_image_url(paper.paper_id)})
+                for paper in papers
+            ],
+        )
+
+    def get_browser_trending_paper(
+        self,
+        paper_id: str,
+        *,
+        viewer: BrowserUser | None = None,
+    ) -> TrendingPaperDetailResponse:
+        detail = self.repository.get_trending_paper(
+            paper_id,
+            viewer_user_id=viewer.user_id if viewer else None,
+        )
+        if detail is None:
+            raise HTTPException(status_code=404, detail=f"Trending paper {paper_id} not found")
+        comments = self.repository.list_paper_comment_records(paper_id)
+        return detail.model_copy(
+            update={
+                "image_url": self._trending_preview_image_url(paper_id),
+                "comments": self._build_paper_comment_tree(comments),
+            }
+        )
+
+    def get_browser_trending_paper_preview_content(self, paper_id: str) -> tuple[bytes, str]:
+        detail = self.repository.get_trending_paper(paper_id)
+        if detail is None:
+            raise HTTPException(status_code=404, detail=f"Trending paper {paper_id} not found")
+        preview_path = f"papers/{paper_id}/preview/first-page-top.webp"
+        if not self.object_store.exists(preview_path):
+            raise HTTPException(status_code=404, detail=f"Preview for {paper_id} not found")
+        return self.object_store.get_bytes(preview_path), "image/webp"
+
+    def set_browser_trending_paper_upvote(self, paper_id: str, *, user: BrowserUser, upvoted: bool) -> PaperVoteSummary:
+        summary = self.repository.set_paper_upvote(paper_id=paper_id, user_id=user.user_id, upvoted=upvoted)
+        if summary is None:
+            raise HTTPException(status_code=404, detail=f"Trending paper {paper_id} not found")
+        return summary
+
+    def create_browser_trending_paper_comment(
+        self,
+        paper_id: str,
+        *,
+        user: BrowserUser,
+        request: CreatePaperCommentRequest,
+    ) -> PaperCommentsResponse:
+        detail = self.repository.get_trending_paper(paper_id, viewer_user_id=user.user_id)
+        if detail is None:
+            raise HTTPException(status_code=404, detail=f"Trending paper {paper_id} not found")
+        body = request.body.strip()
+        if not body:
+            raise HTTPException(status_code=400, detail="Comment body must not be empty")
+        if request.parent_comment_id:
+            parent = self.repository.get_paper_comment(request.parent_comment_id)
+            if parent is None or parent.paper_id != paper_id:
+                raise HTTPException(status_code=400, detail="Reply target is invalid for this paper")
+        created = self.repository.create_paper_comment(
+            paper_id=paper_id,
+            user_id=user.user_id,
+            body=body,
+            parent_comment_id=request.parent_comment_id,
+        )
+        if created is None:
+            raise HTTPException(status_code=404, detail=f"Trending paper {paper_id} not found")
+        comments = self.repository.list_paper_comment_records(paper_id)
+        return PaperCommentsResponse(
+            paper_id=paper_id,
+            comments=self._build_paper_comment_tree(comments),
         )
 
     def get_paper(self, paper_id: str) -> PaperResponse:

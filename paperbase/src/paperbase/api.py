@@ -19,6 +19,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from .auth import (
     clear_browser_session_cookie,
+    get_optional_browser_user,
     require_bearer_token,
     require_browser_admin_user,
     require_browser_user,
@@ -39,6 +40,7 @@ from .models import (
     CodeFileListResponse,
     CodeReadResponse,
     CodeSearchResponse,
+    CreatePaperCommentRequest,
     CreateProjectRequest,
     CreateChatThreadRequest,
     FileContentResponse,
@@ -55,8 +57,10 @@ from .models import (
     ManifestResponse,
     MoveChatThreadProjectRequest,
     PaperAssetResponse,
+    PaperCommentsResponse,
     PaperPreviewResponse,
     PaperResponse,
+    PaperVoteSummary,
     ProjectItemPageResponse,
     ProjectRepoSyncRequest,
     ProjectRepoSyncResponse,
@@ -80,6 +84,8 @@ from .models import (
     SendChatMessageResponse,
     SignupRequest,
     TableResponse,
+    TrendingFeedResponse,
+    TrendingPaperDetailResponse,
     UpdateAppearanceRequest,
     UpdatePythonFileRequest,
     UpdateNotificationsRequest,
@@ -693,6 +699,65 @@ def browser_suggest_papers(
     service: PaperbaseService = Depends(get_service),
 ) -> dict[str, object]:
     return _suggestion_response(service, q, limit=limit)
+
+
+@app.get("/v1/browser/trending", response_model=TrendingFeedResponse)
+def browser_list_trending_papers(
+    date: str = Query(..., min_length=10, max_length=10),
+    sort: str = Query(default="default"),
+    user=Depends(get_optional_browser_user),
+    service: PaperbaseService = Depends(get_service),
+) -> TrendingFeedResponse:
+    return service.list_browser_trending_papers(date=date, sort=sort, viewer=user)
+
+
+@app.get("/v1/browser/trending/papers/{paper_id}", response_model=TrendingPaperDetailResponse)
+def browser_get_trending_paper(
+    paper_id: str,
+    user=Depends(get_optional_browser_user),
+    service: PaperbaseService = Depends(get_service),
+) -> TrendingPaperDetailResponse:
+    return service.get_browser_trending_paper(paper_id, viewer=user)
+
+
+@app.get("/v1/browser/trending/papers/{paper_id}/preview/content")
+def browser_get_trending_paper_preview_content(
+    paper_id: str,
+    response: Response,
+    service: PaperbaseService = Depends(get_service),
+) -> Response:
+    payload, content_type = service.get_browser_trending_paper_preview_content(paper_id)
+    output = Response(content=payload, media_type=content_type)
+    set_no_store_headers(output)
+    return output
+
+
+@app.put("/v1/browser/trending/papers/{paper_id}/upvote", response_model=PaperVoteSummary)
+def browser_upvote_trending_paper(
+    paper_id: str,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> PaperVoteSummary:
+    return service.set_browser_trending_paper_upvote(paper_id, user=user, upvoted=True)
+
+
+@app.delete("/v1/browser/trending/papers/{paper_id}/upvote", response_model=PaperVoteSummary)
+def browser_remove_trending_paper_upvote(
+    paper_id: str,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> PaperVoteSummary:
+    return service.set_browser_trending_paper_upvote(paper_id, user=user, upvoted=False)
+
+
+@app.post("/v1/browser/trending/papers/{paper_id}/comments", response_model=PaperCommentsResponse)
+def browser_create_trending_paper_comment(
+    paper_id: str,
+    request: CreatePaperCommentRequest,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> PaperCommentsResponse:
+    return service.create_browser_trending_paper_comment(paper_id, user=user, request=request)
 
 
 @app.get("/v1/browser/papers/{paper_id}", response_model=PaperResponse)

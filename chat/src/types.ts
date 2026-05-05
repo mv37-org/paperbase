@@ -184,6 +184,69 @@ export interface TableResponse {
   csv_url?: string | null;
 }
 
+export interface PaperVoteSummary {
+  paper_id: string;
+  upvote_count: number;
+  viewer_has_upvoted: boolean;
+}
+
+export interface PaperCommentAuthor {
+  user_id: string;
+  display_name: string;
+}
+
+export interface PaperComment {
+  comment_id: string;
+  paper_id: string;
+  parent_comment_id?: string | null;
+  author: PaperCommentAuthor;
+  body: string;
+  created_at: string;
+  updated_at: string;
+  replies: PaperComment[];
+}
+
+export interface PaperCommentsResponse {
+  paper_id: string;
+  comments: PaperComment[];
+}
+
+export interface TrendingPaperCard {
+  paper_id: string;
+  arxiv_id: string;
+  title: string;
+  authors: string;
+  published: string;
+  html_url: string;
+  pdf_url: string;
+  image_url?: string | null;
+  upvote_count: number;
+  viewer_has_upvoted: boolean;
+}
+
+export interface TrendingPaperDetail {
+  paper_id: string;
+  arxiv_id: string;
+  title: string;
+  authors: string;
+  published: string;
+  primary_category: string;
+  categories: string;
+  summary_eli5: string;
+  html_url: string;
+  pdf_url: string;
+  image_url?: string | null;
+  upvote_count: number;
+  viewer_has_upvoted: boolean;
+  comments: PaperComment[];
+}
+
+export interface TrendingFeedResponse {
+  date: string;
+  sort: "default" | "upvotes";
+  papers: TrendingPaperCard[];
+}
+
 export interface UploadedDocumentResponse {
   document_id: string;
   user_id: string;

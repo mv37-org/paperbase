@@ -48,6 +48,7 @@ import { CodeSnippet, extractStreamingPythonPreview } from "./CodeSnippet";
 import { LandingMentionEditor } from "./LandingMentionEditor";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 import { formatLocalTimestamp } from "./time";
+import { TrendingPapersPage, type TrendingBrowseState } from "./TrendingPapersPage";
 import type {
   AuthView,
   BrowserSessionResponse,
@@ -493,6 +494,48 @@ function drawerStateFromUrl(): PaperDrawerState {
     return null;
   }
   return { paperId, path };
+}
+
+function localDateString(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function trendingBrowseStateFromUrl(): TrendingBrowseState | null {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("browse") !== "trending") {
+    return null;
+  }
+  const date = params.get("trendingDate");
+  return {
+    date: date && /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : localDateString(),
+    sort: params.get("trendingSort") === "upvotes" ? "upvotes" : "default",
+    paperId: params.get("trendingPaper"),
+  };
+}
+
+function updateTrendingBrowseUrl(nextState: TrendingBrowseState | null) {
+  const params = new URLSearchParams(window.location.search);
+  if (nextState) {
+    params.set("browse", "trending");
+    params.set("trendingDate", nextState.date);
+    params.set("trendingSort", nextState.sort);
+    if (nextState.paperId) {
+      params.set("trendingPaper", nextState.paperId);
+    } else {
+      params.delete("trendingPaper");
+    }
+  } else {
+    params.delete("browse");
+    params.delete("trendingDate");
+    params.delete("trendingSort");
+    params.delete("trendingPaper");
+  }
+  const query = params.toString();
+  const nextUrl = `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`;
+  window.history.pushState({}, "", nextUrl);
 }
 
 function updateDrawerUrl(nextState: PaperDrawerState) {
