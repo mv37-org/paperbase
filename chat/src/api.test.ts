@@ -225,6 +225,45 @@ describe("chat api", () => {
     expect(result.suggestions[0]?.matched_field).toBe("fallback");
   });
 
+  it("falls back to the legacy admin jobs endpoint when overview is unavailable", async () => {
+    const fetchMock = vi
+      .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()
+      .mockResolvedValueOnce(jsonResponse({ detail: "Not Found" }, { status: 404 }))
+      .mockResolvedValueOnce(
+        jsonResponse([
+          {
+            job_id: "job_1",
+            root_job_id: null,
+            job_type: "index_paper",
+            status: "completed",
+            payload: { arxiv_id: "2401.12345" },
+            error: null,
+            attempts: 1,
+            max_attempts: 3,
+            next_run_at: null,
+            last_attempted_at: null,
+            priority: 10,
+            created_at: "2026-04-21T00:00:00Z",
+            updated_at: "2026-04-21T01:00:00Z",
+            started_at: null,
+            finished_at: null,
+          },
+        ]),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await loadApiModule();
+
+    const overview = await api.loadBrowserAdminJobsOverview(200);
+
+    expect(fetchMock.mock.calls).toHaveLength(2);
+    expect(requestPath(fetchMock.mock.calls[0]![0])).toBe("/v1/browser/admin/jobs/overview");
+    expect(requestPath(fetchMock.mock.calls[1]![0])).toBe("/v1/browser/admin/jobs");
+    expect(overview.worker).toBeNull();
+    expect(overview.jobs[0]?.root_job_id).toBe("job_1");
+    expect(overview.jobs[0]?.tracking_available).toBe(false);
+    expect(overview.jobs[0]?.latest_status_summary).toBe("completed");
+  });
+
   it("creates, moves, and deletes project chats with CSRF", async () => {
     const fetchMock = vi
       .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()

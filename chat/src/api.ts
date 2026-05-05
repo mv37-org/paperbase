@@ -1,4 +1,5 @@
 import type {
+  AdminJobOverviewRow,
   AdminJobPapersResponse,
   AdminJobsOverviewResponse,
   BrowserSessionResponse,
@@ -663,11 +664,50 @@ export function loadBrowserAdminJobs(status = "all", limit = 50) {
   return api<JobResponse[]>(`/v1/browser/admin/jobs?${params.toString()}`, { method: "GET" });
 }
 
-export function loadBrowserAdminJobsOverview(limit = 50) {
+function legacyAdminOverviewRow(job: JobResponse): AdminJobOverviewRow {
+  return {
+    job_id: job.job_id,
+    root_job_id: job.root_job_id ?? job.job_id,
+    job_type: job.job_type,
+    status: job.status,
+    display_status: job.status,
+    payload: job.payload,
+    error: job.error ?? null,
+    attempts: job.attempts,
+    max_attempts: job.max_attempts,
+    priority: job.priority,
+    created_at: job.created_at,
+    updated_at: job.updated_at,
+    started_at: job.started_at ?? null,
+    finished_at: job.finished_at ?? null,
+    is_synthetic: false,
+    tracking_available: false,
+    indexed_paper_count: null,
+    latest_status_summary: job.error ? `${job.status}: ${job.error}` : job.status,
+    child_job_count: 0,
+    details: job.payload ?? {},
+  };
+}
+
+export async function loadBrowserAdminJobsOverview(limit = 50) {
   const params = new URLSearchParams({ limit: String(limit) });
-  return api<AdminJobsOverviewResponse>(`/v1/browser/admin/jobs/overview?${params.toString()}`, {
-    method: "GET",
-  });
+  try {
+    return await api<AdminJobsOverviewResponse>(
+      `/v1/browser/admin/jobs/overview?${params.toString()}`,
+      {
+        method: "GET",
+      },
+    );
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) {
+      const jobs = await loadBrowserAdminJobs("all", limit);
+      return {
+        jobs: jobs.map(legacyAdminOverviewRow),
+        worker: null,
+      };
+    }
+    throw error;
+  }
 }
 
 export function loadBrowserAdminJobPapers(rootJobId: string) {

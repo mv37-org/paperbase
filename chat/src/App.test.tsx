@@ -2997,6 +2997,9 @@ describe("App", () => {
   });
 
   it("opens the sidebar admin panel for admin users and keeps it out of settings", async () => {
+    const dateNowSpy = vi
+      .spyOn(Date, "now")
+      .mockReturnValue(new Date("2026-04-21T12:00:00Z").getTime());
     apiMocks.loadSession.mockResolvedValue(authenticatedSession({ is_admin: true }));
     apiMocks.loadBrowserAdminJobsOverview.mockResolvedValue({
       jobs: [
@@ -3038,38 +3041,41 @@ describe("App", () => {
         },
       ],
     });
+    try {
+      render(<App />);
 
-    render(<App />);
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Admin panel" })).toBeTruthy();
+      });
 
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Admin panel" })).toBeTruthy();
-    });
+      fireEvent.click(screen.getByRole("button", { name: "Admin panel" }));
 
-    fireEvent.click(screen.getByRole("button", { name: "Admin panel" }));
+      await waitFor(() => {
+        expect(screen.getByRole("heading", { name: "Jobs" })).toBeTruthy();
+      });
+      expect(screen.getByTestId("admin-jobs-chart")).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "Close Admin panel" })).toBeNull();
+      expect(apiMocks.loadBrowserAdminJobsOverview).toHaveBeenCalledWith(200);
 
-    await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "Jobs" })).toBeTruthy();
-    });
-    expect(screen.getByTestId("admin-jobs-chart")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Close Admin panel" })).toBeNull();
-    expect(apiMocks.loadBrowserAdminJobsOverview).toHaveBeenCalledWith(75);
+      fireEvent.click(within(screen.getByRole("table")).getByRole("button", { name: "2" }));
+      await waitFor(() => {
+        expect(screen.getByRole("heading", { name: "Indexed papers" })).toBeTruthy();
+      });
+      expect(screen.queryByRole("button", { name: "Close Admin panel" })).toBeNull();
+      expect(apiMocks.loadBrowserAdminJobPapers).toHaveBeenCalledWith("job_root_1");
 
-    fireEvent.click(within(screen.getByRole("table")).getByRole("button", { name: "2" }));
-    await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "Indexed papers" })).toBeTruthy();
-    });
-    expect(screen.queryByRole("button", { name: "Close Admin panel" })).toBeNull();
-    expect(apiMocks.loadBrowserAdminJobPapers).toHaveBeenCalledWith("job_root_1");
+      fireEvent.click(document.querySelector("#account-menu-button") as HTMLElement);
+      fireEvent.click(screen.getByRole("menuitem", { name: "Settings" }));
 
-    fireEvent.click(document.querySelector("#account-menu-button") as HTMLElement);
-    fireEvent.click(screen.getByRole("menuitem", { name: "Settings" }));
-
-    await waitFor(() => {
-      expect(screen.queryByRole("tab", { name: "Admin" })).toBeNull();
-    });
+      await waitFor(() => {
+        expect(screen.queryByRole("tab", { name: "Admin" })).toBeNull();
+      });
+    } finally {
+      dateNowSpy.mockRestore();
+    }
   });
 
-  it("shows an empty jobs table when the admin panel has no jobs", async () => {
+  it("shows skeleton admin jobs placeholders when the selected window has no jobs", async () => {
     apiMocks.loadSession.mockResolvedValue(authenticatedSession({ is_admin: true }));
     apiMocks.loadBrowserAdminJobsOverview.mockResolvedValue({
       jobs: [],
@@ -3088,9 +3094,100 @@ describe("App", () => {
       expect(screen.getByRole("heading", { name: "Jobs" })).toBeTruthy();
     });
     const table = screen.getByRole("table");
-    expect(screen.getByText("No indexed-paper history yet.")).toBeTruthy();
+    expect(screen.getByText("No indexed papers in this window")).toBeTruthy();
+    expect(screen.getByTestId("admin-jobs-chart-skeleton")).toBeTruthy();
+    expect(screen.getByTestId("admin-jobs-table-skeleton")).toBeTruthy();
     expect(within(table).getByRole("columnheader", { name: "Type" })).toBeTruthy();
-    expect(within(table).getByText("No jobs yet.")).toBeTruthy();
+    expect(within(table).queryByText("No jobs yet.")).toBeNull();
+  });
+
+  it("filters admin jobs by preset and custom time windows", async () => {
+    const dateNowSpy = vi
+      .spyOn(Date, "now")
+      .mockReturnValue(new Date("2026-04-21T12:00:00Z").getTime());
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession({ is_admin: true }));
+    apiMocks.loadBrowserAdminJobsOverview.mockResolvedValue({
+      jobs: [
+        {
+          job_id: "job_recent",
+          root_job_id: "job_recent",
+          job_type: "index_paper",
+          status: "completed",
+          display_status: "completed",
+          payload: {},
+          attempts: 1,
+          max_attempts: 3,
+          priority: 10,
+          created_at: "2026-04-21T11:00:00Z",
+          updated_at: "2026-04-21T11:30:00Z",
+          is_synthetic: false,
+          tracking_available: true,
+          indexed_paper_count: 3,
+          latest_status_summary: "completed",
+          child_job_count: 0,
+          details: {},
+        },
+        {
+          job_id: "job_old",
+          root_job_id: "job_old",
+          job_type: "harvest_range",
+          status: "completed",
+          display_status: "completed",
+          payload: {},
+          attempts: 1,
+          max_attempts: 3,
+          priority: 10,
+          created_at: "2026-04-15T11:00:00Z",
+          updated_at: "2026-04-15T12:00:00Z",
+          is_synthetic: false,
+          tracking_available: true,
+          indexed_paper_count: 12,
+          latest_status_summary: "completed",
+          child_job_count: 0,
+          details: {},
+        },
+      ],
+      worker: null,
+    });
+
+    try {
+      render(<App />);
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Admin panel" })).toBeTruthy();
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Admin panel" }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("heading", { name: "Jobs" })).toBeTruthy();
+      });
+
+      expect(screen.getByText("job_recent")).toBeTruthy();
+      expect(screen.getByText("job_old")).toBeTruthy();
+
+      fireEvent.click(screen.getByRole("button", { name: "Last hour" }));
+
+      await waitFor(() => {
+        expect(screen.getByText("job_recent")).toBeTruthy();
+      });
+      expect(screen.queryByText("job_old")).toBeNull();
+
+      fireEvent.click(screen.getByRole("button", { name: "Custom" }));
+      fireEvent.change(screen.getByLabelText("Custom range start"), {
+        target: { value: "2026-04-15T00:00" },
+      });
+      fireEvent.change(screen.getByLabelText("Custom range end"), {
+        target: { value: "2026-04-15T23:59" },
+      });
+
+      await waitFor(() => {
+        expect(screen.getByText("job_old")).toBeTruthy();
+      });
+      expect(screen.queryByText("job_recent")).toBeNull();
+    } finally {
+      dateNowSpy.mockRestore();
+    }
   });
 
   it("lets admins switch job types from the create-job modal before queueing", async () => {

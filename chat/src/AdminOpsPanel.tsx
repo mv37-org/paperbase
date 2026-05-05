@@ -116,17 +116,57 @@ const JOB_TYPE_LABELS: Record<string, string> = {
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
+const ADMIN_JOBS_OVERVIEW_LIMIT = 200;
+const CUSTOM_TIME_RANGE_ID = "custom";
 const TIMELINE_BUCKETS = [
   { maxSpanMs: 2 * DAY_MS, sizeMs: HOUR_MS, label: "Hourly buckets" },
   { maxSpanMs: 14 * DAY_MS, sizeMs: 6 * HOUR_MS, label: "6-hour buckets" },
   { maxSpanMs: 90 * DAY_MS, sizeMs: DAY_MS, label: "Daily buckets" },
   { maxSpanMs: 365 * DAY_MS, sizeMs: 7 * DAY_MS, label: "Weekly buckets" },
 ];
-const LOG_SURFACE_TEXT = "#edf3fb";
-const LOG_SURFACE_MUTED = "#90a0b5";
-const LOG_SURFACE_LINE = "rgba(144, 160, 181, 0.2)";
-const TIMELINE_BAR = "#5f87ff";
 const INTEGER_FORMATTER = new Intl.NumberFormat("en-US");
+
+type JobsTimeRangeId =
+  | "1h"
+  | "6h"
+  | "12h"
+  | "24h"
+  | "3d"
+  | "7d"
+  | "14d"
+  | typeof CUSTOM_TIME_RANGE_ID;
+
+type JobsTimeRangePreset = {
+  durationMs: number;
+  id: Exclude<JobsTimeRangeId, typeof CUSTOM_TIME_RANGE_ID>;
+  label: string;
+};
+
+type JobsTimeWindow = {
+  endMs: number;
+  label: string;
+  startMs: number;
+};
+
+type AdminJobsTheme = {
+  accent: string;
+  areaFill: string;
+  axisText: string;
+  barFill: string;
+  line: string;
+  text: string;
+  tooltipBackground: string;
+};
+
+const JOBS_TIME_RANGE_PRESETS: JobsTimeRangePreset[] = [
+  { id: "1h", label: "Last hour", durationMs: HOUR_MS },
+  { id: "6h", label: "Last 6 hours", durationMs: 6 * HOUR_MS },
+  { id: "12h", label: "Last 12 hours", durationMs: 12 * HOUR_MS },
+  { id: "24h", label: "Last 24 hours", durationMs: DAY_MS },
+  { id: "3d", label: "Last 3 days", durationMs: 3 * DAY_MS },
+  { id: "7d", label: "Last 7 days", durationMs: 7 * DAY_MS },
+  { id: "14d", label: "Last 2 weeks", durationMs: 14 * DAY_MS },
+];
 
 type TimelineBucketPoint = {
   axisLabel: string;
@@ -141,6 +181,11 @@ type TimelineSummary = {
   latestUpdatedAt: string | null;
   totalIndexed: number;
   trackedJobs: number;
+};
+
+type CustomTimeRangeState = {
+  end: string;
+  start: string;
 };
 
 type CreateJobFieldDefinition = {
@@ -259,6 +304,68 @@ const CREATE_JOB_FIELD_DEFINITIONS: Record<
 
 const DATE_PATTERN = "\\d{4}-\\d{2}-\\d{2}";
 
+function defaultCustomTimeRange(nowMs = Date.now()): CustomTimeRangeState {
+  const end = new Date(nowMs);
+  const start = new Date(nowMs - DAY_MS);
+  return {
+    end: formatDateTimeLocalValue(end),
+    start: formatDateTimeLocalValue(start),
+  };
+}
+
+function formatDateTimeLocalValue(date: Date) {
+  const shifted = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return shifted.toISOString().slice(0, 16);
+}
+
+function parseDateTimeLocalValue(value: string) {
+  const text = value.trim();
+  if (!text) {
+    return null;
+  }
+  const parsed = new Date(text);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.getTime();
+}
+
+function formatTimeWindowLabel(startMs: number, endMs: number) {
+  const start = new Date(startMs);
+  const end = new Date(endMs);
+  const sameDay = start.toDateString() === end.toDateString();
+  const startOptions: Intl.DateTimeFormatOptions = sameDay
+    ? { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }
+    : { month: "short", day: "numeric", hour: "numeric" };
+  const endOptions: Intl.DateTimeFormatOptions = sameDay
+    ? { hour: "numeric", minute: "2-digit" }
+    : { month: "short", day: "numeric", hour: "numeric" };
+  return `${start.toLocaleString([], startOptions)} to ${end.toLocaleString([], endOptions)}`;
+}
+
+function presetTimeWindow(
+  presetId: Exclude<JobsTimeRangeId, typeof CUSTOM_TIME_RANGE_ID>,
+  nowMs = Date.now(),
+): JobsTimeWindow {
+  const preset =
+    JOBS_TIME_RANGE_PRESETS.find((option) => option.id === presetId) ?? JOBS_TIME_RANGE_PRESETS[5]!;
+  return {
+    endMs: nowMs,
+    label: preset.label,
+    startMs: nowMs - preset.durationMs,
+  };
+}
+
+function customTimeWindow(range: CustomTimeRangeState, nowMs = Date.now()): JobsTimeWindow {
+  const fallback = defaultCustomTimeRange(nowMs);
+  const startMs = parseDateTimeLocalValue(range.start) ?? parseDateTimeLocalValue(fallback.start)!;
+  const endMs = parseDateTimeLocalValue(range.end) ?? parseDateTimeLocalValue(fallback.end)!;
+  const normalizedStartMs = Math.min(startMs, endMs);
+  const normalizedEndMs = Math.max(startMs, endMs);
+  return {
+    endMs: normalizedEndMs,
+    label: formatTimeWindowLabel(normalizedStartMs, normalizedEndMs),
+    startMs: normalizedStartMs,
+  };
+}
+
 function parseCsvList(value: string) {
   return value
     .split(/[\n,]/)
@@ -370,6 +477,15 @@ function selectTimelineBucket(spanMs: number) {
   return TIMELINE_BUCKETS.find((bucket) => spanMs <= bucket.maxSpanMs) ?? TIMELINE_BUCKETS.at(-1)!;
 }
 
+function jobsInTimeWindow(jobs: AdminJobOverviewRow[], timeWindow: JobsTimeWindow) {
+  return jobs.filter((job) => {
+    const timestamp = new Date(job.updated_at).getTime();
+    return (
+      !Number.isNaN(timestamp) && timestamp >= timeWindow.startMs && timestamp <= timeWindow.endMs
+    );
+  });
+}
+
 function formatTimelineAxisLabel(timestamp: number, bucketMs: number) {
   const date = new Date(timestamp);
   const options: Intl.DateTimeFormatOptions =
@@ -388,7 +504,10 @@ function formatTimelineTooltipLabel(timestamp: number, bucketMs: number) {
   return `${start.toLocaleString()} to ${end.toLocaleString()}`;
 }
 
-function buildJobsTimeline(jobs: AdminJobOverviewRow[]): TimelineSummary {
+function buildJobsTimeline(
+  jobs: AdminJobOverviewRow[],
+  timeWindow: JobsTimeWindow,
+): TimelineSummary {
   const trackedJobs = jobs
     .filter(
       (job) =>
@@ -413,11 +532,10 @@ function buildJobsTimeline(jobs: AdminJobOverviewRow[]): TimelineSummary {
     };
   }
 
-  const minTimestamp = Math.min(...trackedJobs.map((job) => job.timestamp));
-  const maxTimestamp = Math.max(...trackedJobs.map((job) => job.timestamp));
-  const selectedBucket = selectTimelineBucket(Math.max(maxTimestamp - minTimestamp, 1));
-  const startTimestamp = Math.floor(minTimestamp / selectedBucket.sizeMs) * selectedBucket.sizeMs;
-  const endTimestamp = Math.floor(maxTimestamp / selectedBucket.sizeMs) * selectedBucket.sizeMs;
+  const selectedBucket = selectTimelineBucket(Math.max(timeWindow.endMs - timeWindow.startMs, 1));
+  const startTimestamp =
+    Math.floor(timeWindow.startMs / selectedBucket.sizeMs) * selectedBucket.sizeMs;
+  const endTimestamp = Math.ceil(timeWindow.endMs / selectedBucket.sizeMs) * selectedBucket.sizeMs;
   const byBucket = new Map<number, { count: number; jobCount: number }>();
 
   for (const job of trackedJobs) {
@@ -453,6 +571,35 @@ function buildJobsTimeline(jobs: AdminJobOverviewRow[]): TimelineSummary {
       0,
     ),
     trackedJobs: trackedJobs.length,
+  };
+}
+
+function readAdminJobsTheme(): AdminJobsTheme {
+  if (typeof window === "undefined") {
+    return {
+      accent: "#2563eb",
+      areaFill: "rgba(37, 99, 235, 0.08)",
+      axisText: "#6b6259",
+      barFill: "#2563eb",
+      line: "rgba(27, 22, 17, 0.12)",
+      text: "#1b1611",
+      tooltipBackground: "#ffffff",
+    };
+  }
+  const styles = getComputedStyle(document.body);
+  const text = styles.getPropertyValue("--text").trim() || "#1b1611";
+  const axisText = styles.getPropertyValue("--muted").trim() || "#6b6259";
+  const line = styles.getPropertyValue("--line").trim() || "rgba(27, 22, 17, 0.12)";
+  const accent = styles.getPropertyValue("--blue").trim() || "#2563eb";
+  const isDark = document.body.classList.contains("authenticated-theme-dark");
+  return {
+    accent,
+    areaFill: isDark ? "rgba(79, 140, 255, 0.08)" : "rgba(37, 99, 235, 0.08)",
+    axisText,
+    barFill: isDark ? "#6fa4ff" : accent,
+    line,
+    text,
+    tooltipBackground: isDark ? "#0f151d" : "#ffffff",
   };
 }
 
@@ -671,27 +818,98 @@ function CreateJobCheckboxField({
   );
 }
 
-function JobsTimeline({ jobs, loading }: { jobs: AdminJobOverviewRow[]; loading: boolean }) {
-  const timeline = useMemo(() => buildJobsTimeline(jobs), [jobs]);
+function TimelineSkeleton() {
+  return (
+    <div className="admin-jobs-skeleton-chart" data-testid="admin-jobs-chart-skeleton">
+      <div className="admin-jobs-skeleton-grid">
+        {Array.from({ length: 4 }, (_, index) => (
+          <span key={`grid-${index}`} className="admin-jobs-skeleton-grid-line" />
+        ))}
+      </div>
+      <div className="admin-jobs-skeleton-bars" aria-hidden="true">
+        {[0.34, 0.58, 0.41, 0.69, 0.47, 0.76, 0.52, 0.61, 0.43, 0.72, 0.56, 0.67].map(
+          (height, index) => (
+            <span
+              key={`bar-${index}`}
+              className="admin-jobs-skeleton-bar"
+              style={{ height: `${height * 100}%` }}
+            />
+          ),
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TableSkeletonRows({ columns, rows = 5 }: { columns: number; rows?: number }) {
+  return (
+    <>
+      {Array.from({ length: rows }, (_, rowIndex) => (
+        <tr key={`skeleton-row-${rowIndex}`} className="admin-jobs-skeleton-row">
+          {Array.from({ length: columns }, (_, columnIndex) => (
+            <td key={`skeleton-cell-${rowIndex}-${columnIndex}`}>
+              <span
+                className={`admin-jobs-skeleton-cell ${columnIndex === 0 ? "wide" : ""}`}
+                aria-hidden="true"
+              />
+            </td>
+          ))}
+        </tr>
+      ))}
+    </>
+  );
+}
+
+function JobsTimeline({
+  jobs,
+  loading,
+  customRange,
+  onCustomRangeChange,
+  onSelectRangeId,
+  selectedRangeId,
+  timeWindow,
+}: {
+  jobs: AdminJobOverviewRow[];
+  loading: boolean;
+  customRange: CustomTimeRangeState;
+  onCustomRangeChange: (range: CustomTimeRangeState) => void;
+  onSelectRangeId: (nextRangeId: JobsTimeRangeId) => void;
+  selectedRangeId: JobsTimeRangeId;
+  timeWindow: JobsTimeWindow;
+}) {
+  const theme = readAdminJobsTheme();
+  const timeline = useMemo(() => buildJobsTimeline(jobs, timeWindow), [jobs, timeWindow]);
+  const showSkeleton = loading || timeline.trackedJobs === 0;
+  const headline = loading
+    ? "Loading indexed-paper history"
+    : timeline.trackedJobs > 0
+      ? `${formatWholeNumber(timeline.totalIndexed)} indexed papers`
+      : "No indexed papers in this window";
+  const subheadline = loading
+    ? "Fetching tracked jobs"
+    : timeline.trackedJobs > 0
+      ? `${formatWholeNumber(timeline.trackedJobs)} tracked jobs · ${timeline.bucketLabel}`
+      : "Pick another window, widen the range, or run a backfill job.";
+
   const option = useMemo<EChartsOption>(() => {
     return {
       animation: false,
       backgroundColor: "transparent",
       textStyle: {
-        color: LOG_SURFACE_TEXT,
+        color: theme.text,
         fontFamily: '"JetBrains Mono", "SFMono-Regular", monospace',
       },
-      grid: { top: 18, right: 18, bottom: 56, left: 56 },
+      grid: { top: 18, right: 0, bottom: 56, left: 56 },
       tooltip: {
         trigger: "axis",
         axisPointer: {
           type: "shadow",
-          shadowStyle: { color: "rgba(95, 135, 255, 0.12)" },
+          shadowStyle: { color: theme.areaFill },
         },
-        backgroundColor: "#0a0f15",
-        borderColor: LOG_SURFACE_LINE,
+        backgroundColor: theme.tooltipBackground,
+        borderColor: theme.line,
         textStyle: {
-          color: LOG_SURFACE_TEXT,
+          color: theme.text,
           fontFamily: '"JetBrains Mono", "SFMono-Regular", monospace',
         },
         formatter: (params: unknown) => {
@@ -715,10 +933,10 @@ function JobsTimeline({ jobs, loading }: { jobs: AdminJobOverviewRow[]; loading:
         type: "category",
         data: timeline.buckets.map((bucket) => bucket.axisLabel),
         boundaryGap: true,
-        axisLine: { lineStyle: { color: LOG_SURFACE_LINE } },
+        axisLine: { lineStyle: { color: theme.line } },
         axisTick: { show: false },
         axisLabel: {
-          color: LOG_SURFACE_MUTED,
+          color: theme.axisText,
           hideOverlap: true,
           margin: 12,
         },
@@ -730,12 +948,12 @@ function JobsTimeline({ jobs, loading }: { jobs: AdminJobOverviewRow[]; loading:
         axisLine: { show: false },
         axisTick: { show: false },
         axisLabel: {
-          color: LOG_SURFACE_MUTED,
+          color: theme.axisText,
           formatter: (value: number) =>
             value >= 1000 ? `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}k` : `${value}`,
         },
         splitLine: {
-          lineStyle: { color: LOG_SURFACE_LINE },
+          lineStyle: { color: theme.line },
         },
       },
       dataZoom: [
@@ -749,16 +967,16 @@ function JobsTimeline({ jobs, loading }: { jobs: AdminJobOverviewRow[]; loading:
           height: 20,
           bottom: 16,
           brushSelect: false,
-          borderColor: LOG_SURFACE_LINE,
-          fillerColor: "rgba(95, 135, 255, 0.16)",
-          backgroundColor: "rgba(255, 255, 255, 0.03)",
+          borderColor: theme.line,
+          fillerColor: theme.areaFill,
+          backgroundColor: "transparent",
           handleStyle: {
-            color: "#9db6ff",
-            borderColor: "#9db6ff",
+            color: theme.accent,
+            borderColor: theme.accent,
           },
           moveHandleStyle: { color: "transparent", opacity: 0 },
           textStyle: {
-            color: LOG_SURFACE_MUTED,
+            color: theme.axisText,
             fontFamily: '"JetBrains Mono", "SFMono-Regular", monospace',
           },
         },
@@ -771,51 +989,92 @@ function JobsTimeline({ jobs, loading }: { jobs: AdminJobOverviewRow[]; loading:
           barMinHeight: 2,
           barMaxWidth: 20,
           itemStyle: {
-            color: TIMELINE_BAR,
+            color: theme.barFill,
             borderRadius: [4, 4, 0, 0],
           },
           emphasis: {
             itemStyle: {
-              color: "#7ea0ff",
+              color: theme.accent,
             },
           },
         },
       ],
     };
-  }, [timeline]);
+  }, [theme, timeline]);
 
   return (
     <section className="admin-jobs-timeline-panel" aria-label="Indexed papers timeline">
       <div className="admin-jobs-timeline-head">
         <div className="admin-jobs-timeline-copy">
           <span className="admin-jobs-timeline-kicker">Timeline</span>
-          <strong>
-            {loading
-              ? "Loading indexed-paper history"
-              : `${formatWholeNumber(timeline.totalIndexed)} indexed papers`}
-          </strong>
-          <span>
-            {loading
-              ? "Fetching tracked jobs"
-              : `${formatWholeNumber(timeline.trackedJobs)} tracked jobs${timeline.trackedJobs > 0 ? ` · ${timeline.bucketLabel}` : ""}`}
-          </span>
+          <strong>{headline}</strong>
+          <span>{subheadline}</span>
         </div>
-        {timeline.latestUpdatedAt ? (
-          <div className="admin-jobs-timeline-meta">
-            Last update
-            <strong>{formatTimestamp(timeline.latestUpdatedAt)}</strong>
+        <div className="admin-jobs-timeline-meta">
+          <span>{selectedRangeId === CUSTOM_TIME_RANGE_ID ? "Custom range" : "Window"}</span>
+          <strong>{timeWindow.label}</strong>
+          {timeline.latestUpdatedAt ? (
+            <span>Last update {formatTimestamp(timeline.latestUpdatedAt)}</span>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="admin-jobs-filter-row" aria-label="Jobs timeline range filters">
+        <div className="admin-jobs-filter-pills">
+          {JOBS_TIME_RANGE_PRESETS.map((preset) => (
+            <button
+              key={preset.id}
+              type="button"
+              className={`admin-jobs-filter-pill${selectedRangeId === preset.id ? " active" : ""}`}
+              aria-pressed={selectedRangeId === preset.id}
+              onClick={() => onSelectRangeId(preset.id)}
+            >
+              {preset.label}
+            </button>
+          ))}
+          <button
+            type="button"
+            className={`admin-jobs-filter-pill${selectedRangeId === CUSTOM_TIME_RANGE_ID ? " active" : ""}`}
+            aria-pressed={selectedRangeId === CUSTOM_TIME_RANGE_ID}
+            onClick={() => onSelectRangeId(CUSTOM_TIME_RANGE_ID)}
+          >
+            Custom
+          </button>
+        </div>
+        {selectedRangeId === CUSTOM_TIME_RANGE_ID ? (
+          <div className="admin-jobs-custom-range">
+            <label className="admin-jobs-custom-field">
+              <span>From</span>
+              <input
+                type="datetime-local"
+                aria-label="Custom range start"
+                value={customRange.start}
+                onChange={(event) =>
+                  onCustomRangeChange({ ...customRange, start: event.target.value })
+                }
+              />
+            </label>
+            <label className="admin-jobs-custom-field">
+              <span>To</span>
+              <input
+                type="datetime-local"
+                aria-label="Custom range end"
+                value={customRange.end}
+                onChange={(event) =>
+                  onCustomRangeChange({ ...customRange, end: event.target.value })
+                }
+              />
+            </label>
           </div>
         ) : null}
       </div>
 
-      {loading ? (
-        <div className="admin-jobs-timeline-empty">Loading timeline...</div>
-      ) : timeline.buckets.length > 0 ? (
+      {showSkeleton ? (
+        <TimelineSkeleton />
+      ) : (
         <div className="admin-jobs-chart-shell" data-testid="admin-jobs-chart">
           <ReactECharts option={option} className="admin-jobs-chart" notMerge lazyUpdate />
         </div>
-      ) : (
-        <div className="admin-jobs-timeline-empty">No indexed-paper history yet.</div>
       )}
     </section>
   );
@@ -832,6 +1091,10 @@ export function AdminOpsPanel({
   const [jobsLoading, setJobsLoading] = useState(false);
   const [jobsError, setJobsError] = useState("");
   const [expandedJobIds, setExpandedJobIds] = useState<Record<string, boolean>>({});
+  const [selectedRangeId, setSelectedRangeId] = useState<JobsTimeRangeId>("7d");
+  const [customRange, setCustomRange] = useState<CustomTimeRangeState>(() =>
+    defaultCustomTimeRange(),
+  );
 
   const [jobPapers, setJobPapers] = useState<AdminJobPaperResponse[]>([]);
   const [jobPapersLoading, setJobPapersLoading] = useState(false);
@@ -862,11 +1125,20 @@ export function AdminOpsPanel({
     [createJobKind],
   );
 
+  const timeWindow = useMemo(
+    () =>
+      selectedRangeId === CUSTOM_TIME_RANGE_ID
+        ? customTimeWindow(customRange)
+        : presetTimeWindow(selectedRangeId),
+    [customRange, selectedRangeId],
+  );
+  const filteredJobs = useMemo(() => jobsInTimeWindow(jobs, timeWindow), [jobs, timeWindow]);
+
   async function refreshJobs() {
     setJobsLoading(true);
     setJobsError("");
     try {
-      const response = await loadBrowserAdminJobsOverview(75);
+      const response = await loadBrowserAdminJobsOverview(ADMIN_JOBS_OVERVIEW_LIMIT);
       setJobs(response.jobs);
     } catch (error) {
       setJobsError(panelErrorMessage(error, "Jobs could not be loaded."));
@@ -1070,6 +1342,20 @@ export function AdminOpsPanel({
     }
   }
 
+  function handleSelectRangeId(nextRangeId: JobsTimeRangeId) {
+    if (nextRangeId === CUSTOM_TIME_RANGE_ID && selectedRangeId !== CUSTOM_TIME_RANGE_ID) {
+      const seedWindow =
+        selectedRangeId === CUSTOM_TIME_RANGE_ID
+          ? customTimeWindow(customRange)
+          : presetTimeWindow(selectedRangeId);
+      setCustomRange({
+        end: formatDateTimeLocalValue(new Date(seedWindow.endMs)),
+        start: formatDateTimeLocalValue(new Date(seedWindow.startMs)),
+      });
+    }
+    setSelectedRangeId(nextRangeId);
+  }
+
   return (
     <section className="admin-jobs-shell">
       {view.kind === "jobs" ? (
@@ -1093,102 +1379,113 @@ export function AdminOpsPanel({
 
           {jobsError ? <div className="admin-jobs-inline-error">{jobsError}</div> : null}
           <div className="admin-jobs-surface">
-            <JobsTimeline jobs={jobs} loading={jobsLoading} />
+            <JobsTimeline
+              jobs={filteredJobs}
+              loading={jobsLoading}
+              customRange={customRange}
+              onCustomRangeChange={setCustomRange}
+              onSelectRangeId={handleSelectRangeId}
+              selectedRangeId={selectedRangeId}
+              timeWindow={timeWindow}
+            />
             <div className="admin-jobs-results-bar">
-              {jobsLoading ? "Loading jobs" : `${formatWholeNumber(jobs.length)} jobs`}
+              {jobsLoading
+                ? "Loading jobs"
+                : filteredJobs.length > 0
+                  ? `${formatWholeNumber(filteredJobs.length)} jobs in ${timeWindow.label}`
+                  : `No jobs in ${timeWindow.label.toLowerCase()}`}
             </div>
-            {jobsLoading ? <div className="admin-jobs-empty">Loading jobs...</div> : null}
-            {!jobsLoading ? (
-              <div className="admin-jobs-table-shell">
-                <table className="admin-jobs-table">
-                  <thead>
-                    <tr>
-                      <th>Type</th>
-                      <th>ID</th>
-                      <th>Status</th>
-                      <th>Indexed papers</th>
-                      <th>Updated</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {jobs.length === 0 ? (
-                      <tr className="admin-jobs-empty-row">
-                        <td colSpan={5}>
-                          <div className="admin-jobs-empty">No jobs yet.</div>
-                        </td>
-                      </tr>
-                    ) : (
-                      jobs.map((job) => {
-                        const expanded = Boolean(expandedJobIds[job.job_id]);
-                        const detailPairs = detailRows(job);
-                        return (
-                          <FragmentRow key={job.job_id}>
-                            <tr className="admin-jobs-row">
-                              <td>
+            <div className="admin-jobs-table-shell">
+              <table className="admin-jobs-table">
+                <thead>
+                  <tr>
+                    <th>Type</th>
+                    <th>ID</th>
+                    <th>Status</th>
+                    <th>Indexed papers</th>
+                    <th>Updated</th>
+                  </tr>
+                </thead>
+                <tbody
+                  data-testid={
+                    jobsLoading || filteredJobs.length === 0
+                      ? "admin-jobs-table-skeleton"
+                      : undefined
+                  }
+                >
+                  {jobsLoading || filteredJobs.length === 0 ? (
+                    <TableSkeletonRows columns={5} />
+                  ) : (
+                    filteredJobs.map((job) => {
+                      const expanded = Boolean(expandedJobIds[job.job_id]);
+                      const detailPairs = detailRows(job);
+                      return (
+                        <FragmentRow key={job.job_id}>
+                          <tr className="admin-jobs-row">
+                            <td>
+                              <button
+                                type="button"
+                                className="admin-jobs-expand"
+                                onClick={() =>
+                                  setExpandedJobIds((current) => ({
+                                    ...current,
+                                    [job.job_id]: !current[job.job_id],
+                                  }))
+                                }
+                                aria-expanded={expanded}
+                              >
+                                <span>{expanded ? "−" : "+"}</span>
+                                <span>{jobTypeLabel(job.job_type)}</span>
+                              </button>
+                            </td>
+                            <td>
+                              <code>{job.job_id}</code>
+                            </td>
+                            <td>
+                              <span className={`admin-jobs-status status-${job.display_status}`}>
+                                {statusLabel(job.display_status)}
+                              </span>
+                            </td>
+                            <td>
+                              {job.tracking_available ? (
                                 <button
                                   type="button"
-                                  className="admin-jobs-expand"
-                                  onClick={() =>
-                                    setExpandedJobIds((current) => ({
-                                      ...current,
-                                      [job.job_id]: !current[job.job_id],
-                                    }))
-                                  }
-                                  aria-expanded={expanded}
+                                  className="admin-jobs-link-button"
+                                  onClick={() => onOpenJobPapers(job.root_job_id)}
                                 >
-                                  <span>{expanded ? "−" : "+"}</span>
-                                  <span>{jobTypeLabel(job.job_type)}</span>
+                                  {job.indexed_paper_count ?? 0}
                                 </button>
+                              ) : (
+                                <span>—</span>
+                              )}
+                            </td>
+                            <td>{formatTimestamp(job.updated_at)}</td>
+                          </tr>
+                          {expanded ? (
+                            <tr className="admin-jobs-expanded-row">
+                              <td colSpan={5}>
+                                <div className="admin-jobs-expanded">
+                                  <div>Latest status: {job.latest_status_summary}</div>
+                                  {job.error ? <div>Error: {job.error}</div> : null}
+                                  {detailPairs.map(([label, value]) => (
+                                    <div key={label}>
+                                      {label}: {value}
+                                    </div>
+                                  ))}
+                                  {job.child_job_count > 0 ? (
+                                    <div>Sub-jobs: {job.child_job_count}</div>
+                                  ) : null}
+                                </div>
                               </td>
-                              <td>
-                                <code>{job.job_id}</code>
-                              </td>
-                              <td>
-                                <span className={`admin-jobs-status status-${job.display_status}`}>
-                                  {statusLabel(job.display_status)}
-                                </span>
-                              </td>
-                              <td>
-                                {job.tracking_available ? (
-                                  <button
-                                    type="button"
-                                    className="admin-jobs-link-button"
-                                    onClick={() => onOpenJobPapers(job.root_job_id)}
-                                  >
-                                    {job.indexed_paper_count ?? 0}
-                                  </button>
-                                ) : (
-                                  <span>—</span>
-                                )}
-                              </td>
-                              <td>{formatTimestamp(job.updated_at)}</td>
                             </tr>
-                            {expanded ? (
-                              <tr className="admin-jobs-expanded-row">
-                                <td colSpan={5}>
-                                  <div className="admin-jobs-expanded">
-                                    <div>Latest status: {job.latest_status_summary}</div>
-                                    {job.error ? <div>Error: {job.error}</div> : null}
-                                    {detailPairs.map(([label, value]) => (
-                                      <div key={label}>
-                                        {label}: {value}
-                                      </div>
-                                    ))}
-                                    {job.child_job_count > 0 ? (
-                                      <div>Sub-jobs: {job.child_job_count}</div>
-                                    ) : null}
-                                  </div>
-                                </td>
-                              </tr>
-                            ) : null}
-                          </FragmentRow>
-                        );
-                      })
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            ) : null}
+                          ) : null}
+                        </FragmentRow>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         </>
       ) : (
