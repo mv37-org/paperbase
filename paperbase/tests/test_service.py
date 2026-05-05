@@ -33,6 +33,7 @@ from paperbase.llm import (
 from paperbase.models import (
     ChatCitation,
     ChatThreadItemResponse,
+    CreatePaperCommentRequest,
     CreateChatThreadRequest,
     CreateProjectGitHubRepoRequest,
     CreateProjectRequest,
@@ -2160,6 +2161,136 @@ def test_admin_paper_listing_filters_and_sorts(service):
     results = service.list_papers(query="benchmark", index_status="indexed", limit=10)
 
     assert [paper.paper_id for paper in results] == ["arxiv:2401.11111"]
+
+
+def test_trending_feed_filters_caps_sorts_and_handles_missing_preview(browser_service):
+    service, _, _ = browser_service
+    session_a, _ = service.register_browser_user(
+        SignupRequest(email="alice@example.com", password="secret12345", display_name="Alice")
+    )
+    session_b, _ = service.register_browser_user(
+        SignupRequest(email="bob@example.com", password="secret12345", display_name="Bob")
+    )
+    session_c, _ = service.register_browser_user(
+        SignupRequest(email="carol@example.com", password="secret12345", display_name="Carol")
+    )
+    assert session_a.user is not None
+    assert session_b.user is not None
+    assert session_c.user is not None
+
+    for index in range(52):
+        arxiv_id = f"2402.{index:05d}"
+        paper = _sample_paper(arxiv_id, title=f"Trending Paper {index}", abstract="Daily paper")
+        paper.index_status = "indexed"
+        paper.published = "2024-02-01"
+        paper.indexed_at = datetime(2026, 4, 1, 0, index % 60, tzinfo=timezone.utc)
+        service.repository.upsert_paper(paper)  # type: ignore[attr-defined]
+
+    off_day = _sample_paper("2403.99999", title="Wrong Day", abstract="Ignore me")
+    off_day.index_status = "indexed"
+    off_day.published = "2024-02-02"
+    off_day.indexed_at = datetime(2026, 4, 2, tzinfo=timezone.utc)
+    service.repository.upsert_paper(off_day)  # type: ignore[attr-defined]
+
+    service.object_store.put_bytes(  # type: ignore[attr-defined]
+        "papers/arxiv:2402.00051/preview/first-page-top.webp",
+        b"preview",
+        content_type="image/webp",
+    )
+
+    service.set_browser_trending_paper_upvote("arxiv:2402.00000", user=session_a.user, upvoted=True)
+    service.set_browser_trending_paper_upvote("arxiv:2402.00000", user=session_b.user, upvoted=True)
+    service.set_browser_trending_paper_upvote("arxiv:2402.00000", user=session_c.user, upvoted=True)
+    service.set_browser_trending_paper_upvote("arxiv:2402.00051", user=session_a.user, upvoted=True)
+
+    default_feed = service.list_browser_trending_papers(
+        date="2024-02-01",
+        sort="default",
+        viewer=session_a.user,
+    )
+    upvote_feed = service.list_browser_trending_papers(
+        date="2024-02-01",
+        sort="upvotes",
+        viewer=session_a.user,
+    )
+
+    assert len(default_feed.papers) == 50
+    assert default_feed.papers[0].paper_id == "arxiv:2402.00051"
+    assert default_feed.papers[0].image_url is not None
+    assert default_feed.papers[1].image_url is None
+    assert all(paper.published == "2024-02-01" for paper in default_feed.papers)
+    assert upvote_feed.papers[0].paper_id == "arxiv:2402.00000"
+    assert upvote_feed.papers[0].upvote_count == 3
+    assert upvote_feed.papers[0].viewer_has_upvoted is True
+
+
+def test_trending_detail_builds_nested_comments_and_vote_summary(browser_service):
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="reader@example.com", password="secret12345", display_name="Reader")
+    )
+    assert session.user is not None
+    paper = _sample_paper("2404.11111", title="Nested Replies", abstract="Threaded discussion")
+    paper.index_status = "indexed"
+    service.repository.upsert_paper(paper)  # type: ignore[attr-defined]
+
+    service.object_store.put_bytes(  # type: ignore[attr-defined]
+        "papers/arxiv:2404.11111/preview/first-page-top.webp",
+        b"preview",
+        content_type="image/webp",
+    )
+    service.set_browser_trending_paper_upvote("arxiv:2404.11111", user=session.user, upvoted=True)
+    root_comments = service.create_browser_trending_paper_comment(
+        "arxiv:2404.11111",
+        user=session.user,
+        request=CreatePaperCommentRequest(body="Root note"),
+    )
+    root_id = root_comments.comments[0].comment_id
+    service.create_browser_trending_paper_comment(
+        "arxiv:2404.11111",
+        user=session.user,
+        request=CreatePaperCommentRequest(body="Reply note", parent_comment_id=root_id),
+    )
+
+    detail = service.get_browser_trending_paper("arxiv:2404.11111", viewer=session.user)
+
+    assert detail.upvote_count == 1
+    assert detail.viewer_has_upvoted is True
+    assert detail.image_url is not None
+    assert len(detail.comments) == 1
+    assert detail.comments[0].body == "Root note"
+    assert detail.comments[0].replies[0].body == "Reply note"
+
+
+def test_trending_comment_rejects_reply_target_from_another_paper(browser_service):
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="writer@example.com", password="secret12345", display_name="Writer")
+    )
+    assert session.user is not None
+
+    first = _sample_paper("2405.11111", title="Paper One", abstract="First")
+    first.index_status = "indexed"
+    second = _sample_paper("2405.22222", title="Paper Two", abstract="Second")
+    second.index_status = "indexed"
+    service.repository.upsert_paper(first)  # type: ignore[attr-defined]
+    service.repository.upsert_paper(second)  # type: ignore[attr-defined]
+
+    created = service.create_browser_trending_paper_comment(
+        "arxiv:2405.11111",
+        user=session.user,
+        request=CreatePaperCommentRequest(body="Root comment"),
+    )
+    root_id = created.comments[0].comment_id
+
+    with pytest.raises(HTTPException) as exc:
+        service.create_browser_trending_paper_comment(
+            "arxiv:2405.22222",
+            user=session.user,
+            request=CreatePaperCommentRequest(body="Wrong reply", parent_comment_id=root_id),
+        )
+
+    assert exc.value.status_code == 400
 
 
 def test_get_paper_asset_returns_browser_content_url_for_local_storage(service):

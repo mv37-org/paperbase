@@ -225,6 +225,113 @@ describe("chat api", () => {
     expect(result.suggestions[0]?.matched_field).toBe("fallback");
   });
 
+  it("loads the trending feed and paper detail from the browser endpoints", async () => {
+    const fetchMock = vi
+      .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          date: "2026-04-21",
+          sort: "upvotes",
+          papers: [
+            {
+              paper_id: "arxiv:2401.12345",
+              arxiv_id: "2401.12345",
+              title: "Benchmark Paper",
+              authors: "Ada Lovelace",
+              published: "2026-04-21",
+              html_url: "https://arxiv.org/abs/2401.12345",
+              pdf_url: "https://arxiv.org/pdf/2401.12345.pdf",
+              image_url: "/v1/browser/trending/papers/arxiv%3A2401.12345/preview/content",
+              upvote_count: 12,
+              viewer_has_upvoted: false,
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          paper_id: "arxiv:2401.12345",
+          arxiv_id: "2401.12345",
+          title: "Benchmark Paper",
+          authors: "Ada Lovelace",
+          published: "2026-04-21",
+          primary_category: "cs.AI",
+          categories: "cs.AI",
+          summary_eli5: "Simple summary",
+          html_url: "https://arxiv.org/abs/2401.12345",
+          pdf_url: "https://arxiv.org/pdf/2401.12345.pdf",
+          image_url: "/v1/browser/trending/papers/arxiv%3A2401.12345/preview/content",
+          upvote_count: 12,
+          viewer_has_upvoted: false,
+          comments: [],
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await loadApiModule();
+
+    const feed = await api.loadBrowserTrendingPapers("2026-04-21", "upvotes");
+    const detail = await api.getBrowserTrendingPaper("arxiv:2401.12345");
+
+    const [feedPath, feedInit] = fetchMock.mock.calls[0] as FetchCall;
+    const feedUrl = new URL(String(feedPath), "http://localhost");
+    expect(`${feedUrl.pathname}${feedUrl.search}`).toBe(
+      "/v1/browser/trending?date=2026-04-21&sort=upvotes",
+    );
+    expect(feedInit?.method).toBe("GET");
+    const [detailPath, detailInit] = fetchMock.mock.calls[1] as FetchCall;
+    expect(requestPath(detailPath)).toBe("/v1/browser/trending/papers/arxiv%3A2401.12345");
+    expect(detailInit?.method).toBe("GET");
+    expect(feed.papers[0]?.upvote_count).toBe(12);
+    expect(detail.summary_eli5).toBe("Simple summary");
+  });
+
+  it("attaches CSRF headers to trending write operations", async () => {
+    const fetchMock = vi
+      .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          authenticated: true,
+          user: {
+            user_id: "user_1",
+            email: "user@example.com",
+            display_name: "User",
+          },
+          has_anthropic_api_key: false,
+          csrf_token: "csrf-123",
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          paper_id: "arxiv:2401.12345",
+          upvote_count: 9,
+          viewer_has_upvoted: true,
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          paper_id: "arxiv:2401.12345",
+          comments: [],
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await loadApiModule();
+
+    await api.loadSession();
+    await api.upvoteBrowserTrendingPaper("arxiv:2401.12345");
+    await api.createBrowserTrendingPaperComment("arxiv:2401.12345", {
+      body: "Useful paper",
+      parent_comment_id: null,
+    });
+
+    const [, voteInit] = fetchMock.mock.calls[1] as FetchCall;
+    expect(new Headers(voteInit?.headers).get("X-Paperbase-CSRF")).toBe("csrf-123");
+    expect(voteInit?.method).toBe("PUT");
+    const [commentPath, commentInit] = fetchMock.mock.calls[2] as FetchCall;
+    expect(requestPath(commentPath)).toBe("/v1/browser/trending/papers/arxiv%3A2401.12345/comments");
+    expect(new Headers(commentInit?.headers).get("X-Paperbase-CSRF")).toBe("csrf-123");
+    expect(commentInit?.method).toBe("POST");
+  });
+
   it("falls back to the legacy admin jobs endpoint when overview is unavailable", async () => {
     const fetchMock = vi
       .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()
