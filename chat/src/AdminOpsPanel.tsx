@@ -196,17 +196,29 @@ const TIMELINE_SKELETON_BAR_HEIGHTS = Array.from({ length: 106 }, (_, index) => 
   return Math.min(pattern[index % pattern.length] + step * 0.05, 0.7);
 });
 
+type TimelineOutcomeKey = "indexed" | "skipped" | "failed";
+
+type TimelineOutcomeCounts = Record<TimelineOutcomeKey, number>;
+
+const TIMELINE_OUTCOMES: Array<{ key: TimelineOutcomeKey; label: string; color: string }> = [
+  { key: "indexed", label: "Indexed", color: "#432818" },
+  { key: "skipped", label: "Skipped", color: "#99582a" },
+  { key: "failed", label: "Failed", color: "#b42318" },
+];
+
 type TimelineBucketPoint = {
   axisLabel: string;
   bucketLabel: string;
-  count: number;
   jobCount: number;
+  outcomes: TimelineOutcomeCounts;
+  totalCount: number;
 };
 
 type TimelineSummary = {
   bucketLabel: string;
   buckets: TimelineBucketPoint[];
   latestUpdatedAt: string | null;
+  maxTotal: number;
   totalIndexed: number;
   trackedJobs: number;
 };
@@ -532,6 +544,35 @@ function formatTimelineTooltipLabel(timestamp: number, bucketMs: number) {
   return `${start.toLocaleString()} to ${end.toLocaleString()}`;
 }
 
+function emptyTimelineOutcomeCounts(): TimelineOutcomeCounts {
+  return { indexed: 0, skipped: 0, failed: 0 };
+}
+
+function timelineOutcomeCountsForJob(job: AdminJobOverviewRow): TimelineOutcomeCounts {
+  const counts = emptyTimelineOutcomeCounts();
+  const rawCounts = job.paper_outcome_counts ?? {};
+  let hasOutcomeCounts = false;
+  for (const { key } of TIMELINE_OUTCOMES) {
+    const value = rawCounts[key];
+    if (typeof value === "number" && Number.isFinite(value)) {
+      counts[key] = Math.max(value, 0);
+      hasOutcomeCounts = true;
+    }
+  }
+  if (
+    !hasOutcomeCounts &&
+    typeof job.indexed_paper_count === "number" &&
+    Number.isFinite(job.indexed_paper_count)
+  ) {
+    counts.indexed = Math.max(job.indexed_paper_count, 0);
+  }
+  return counts;
+}
+
+function sumTimelineOutcomeCounts(counts: TimelineOutcomeCounts) {
+  return TIMELINE_OUTCOMES.reduce((sum, outcome) => sum + counts[outcome.key], 0);
+}
+
 function buildJobsTimeline(
   jobs: AdminJobOverviewRow[],
   timeWindow: JobsTimeWindow,
@@ -555,6 +596,7 @@ function buildJobsTimeline(
       bucketLabel: "Daily buckets",
       buckets: [],
       latestUpdatedAt: null,
+      maxTotal: 0,
       totalIndexed: 0,
       trackedJobs: 0,
     };
@@ -564,25 +606,33 @@ function buildJobsTimeline(
   const startTimestamp =
     Math.floor(timeWindow.startMs / selectedBucket.sizeMs) * selectedBucket.sizeMs;
   const endTimestamp = Math.ceil(timeWindow.endMs / selectedBucket.sizeMs) * selectedBucket.sizeMs;
-  const byBucket = new Map<number, { count: number; jobCount: number }>();
+  const byBucket = new Map<number, { jobCount: number; outcomes: TimelineOutcomeCounts }>();
 
   for (const job of trackedJobs) {
     const bucketTimestamp =
       Math.floor(job.timestamp / selectedBucket.sizeMs) * selectedBucket.sizeMs;
-    const current = byBucket.get(bucketTimestamp) ?? { count: 0, jobCount: 0 };
-    current.count += Math.max(job.indexed_paper_count ?? 0, 0);
+    const current = byBucket.get(bucketTimestamp) ?? {
+      jobCount: 0,
+      outcomes: emptyTimelineOutcomeCounts(),
+    };
+    const counts = timelineOutcomeCountsForJob(job);
+    for (const { key } of TIMELINE_OUTCOMES) {
+      current.outcomes[key] += counts[key];
+    }
     current.jobCount += 1;
     byBucket.set(bucketTimestamp, current);
   }
 
   const buckets: TimelineBucketPoint[] = [];
   for (let cursor = startTimestamp; cursor <= endTimestamp; cursor += selectedBucket.sizeMs) {
-    const entry = byBucket.get(cursor) ?? { count: 0, jobCount: 0 };
+    const entry = byBucket.get(cursor) ?? { jobCount: 0, outcomes: emptyTimelineOutcomeCounts() };
+    const outcomes = { ...entry.outcomes };
     buckets.push({
       axisLabel: formatTimelineAxisLabel(cursor, selectedBucket.sizeMs),
       bucketLabel: formatTimelineTooltipLabel(cursor, selectedBucket.sizeMs),
-      count: entry.count,
       jobCount: entry.jobCount,
+      outcomes,
+      totalCount: sumTimelineOutcomeCounts(outcomes),
     });
   }
 
@@ -594,8 +644,9 @@ function buildJobsTimeline(
     bucketLabel: selectedBucket.label,
     buckets,
     latestUpdatedAt: latestJob.updated_at,
+    maxTotal: buckets.reduce((max, bucket) => Math.max(max, bucket.totalCount), 0),
     totalIndexed: trackedJobs.reduce(
-      (sum, job) => sum + Math.max(job.indexed_paper_count ?? 0, 0),
+      (sum, job) => sum + timelineOutcomeCountsForJob(job).indexed,
       0,
     ),
     trackedJobs: trackedJobs.length,
@@ -1050,6 +1101,7 @@ function JobsTimeline({
   const theme = readAdminJobsTheme();
   const timeline = useMemo(() => buildJobsTimeline(jobs, timeWindow), [jobs, timeWindow]);
   const showSkeleton = loading || timeline.trackedJobs === 0;
+  const isZeroTimeline = timeline.maxTotal === 0;
 
   const option = useMemo<EChartsOption>(() => {
     return {
@@ -1064,7 +1116,7 @@ function JobsTimeline({
         color: theme.text,
         fontFamily: '"JetBrains Mono", "SFMono-Regular", monospace',
       },
-      grid: { top: 18, right: 0, bottom: 0, left: 0 },
+      grid: { top: 8, right: 0, bottom: 0, left: 0 },
       tooltip: {
         trigger: "axis",
         axisPointer: {
@@ -1089,7 +1141,9 @@ function JobsTimeline({
           }
           return [
             bucket.bucketLabel,
-            `${formatWholeNumber(bucket.count)} indexed papers`,
+            `${formatWholeNumber(bucket.outcomes.indexed)} indexed`,
+            `${formatWholeNumber(bucket.outcomes.skipped)} skipped`,
+            `${formatWholeNumber(bucket.outcomes.failed)} failed`,
             `${formatWholeNumber(bucket.jobCount)} tracked jobs`,
           ].join("<br/>");
         },
@@ -1108,8 +1162,9 @@ function JobsTimeline({
       },
       yAxis: {
         type: "value",
+        max: isZeroTimeline ? 8 : undefined,
         minInterval: 1,
-        splitNumber: 5,
+        splitNumber: isZeroTimeline ? 8 : 5,
         axisLine: { show: false },
         axisTick: { show: false },
         axisLabel: {
@@ -1122,26 +1177,24 @@ function JobsTimeline({
           lineStyle: { color: theme.line },
         },
       },
-      series: [
-        {
-          name: "Indexed papers",
-          type: "bar",
-          data: timeline.buckets.map((bucket) => bucket.count),
-          barMinHeight: 2,
-          barMaxWidth: 10,
+      series: TIMELINE_OUTCOMES.map((outcome, index) => ({
+        name: outcome.label,
+        type: "bar",
+        stack: "paper outcomes",
+        data: timeline.buckets.map((bucket) => bucket.outcomes[outcome.key]),
+        barMaxWidth: 10,
+        itemStyle: {
+          color: outcome.color,
+          borderRadius: index === TIMELINE_OUTCOMES.length - 1 ? [4, 4, 0, 0] : 0,
+        },
+        emphasis: {
           itemStyle: {
-            color: theme.barFill,
-            borderRadius: [4, 4, 0, 0],
-          },
-          emphasis: {
-            itemStyle: {
-              color: theme.barFill,
-            },
+            color: outcome.color,
           },
         },
-      ],
+      })),
     };
-  }, [theme, timeline]);
+  }, [isZeroTimeline, theme, timeline]);
 
   const emptyChartMessage = (
     <>
@@ -1156,7 +1209,13 @@ function JobsTimeline({
         <TimelineSkeleton message={!loading ? emptyChartMessage : undefined} />
       ) : (
         <div className="admin-jobs-chart-shell" data-testid="admin-jobs-chart">
-          <ReactECharts option={option} className="admin-jobs-chart" notMerge lazyUpdate />
+          <ReactECharts
+            option={option}
+            className="admin-jobs-chart"
+            style={{ height: "320px", width: "100%" }}
+            notMerge
+            lazyUpdate
+          />
         </div>
       )}
     </section>

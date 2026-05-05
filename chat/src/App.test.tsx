@@ -208,11 +208,18 @@ vi.mock("echarts-for-react", () => ({
   default: ({
     className,
     option,
+    style,
   }: {
     className?: string;
-    option?: { dataZoom?: unknown; grid?: unknown };
+    option?: { dataZoom?: unknown; grid?: unknown; series?: unknown; yAxis?: unknown };
+    style?: { height?: string; width?: string };
   }) => {
     const grid = option?.grid && typeof option.grid === "object" ? option.grid : {};
+    const yAxis = option?.yAxis && typeof option.yAxis === "object" ? option.yAxis : {};
+    const series = Array.isArray(option?.series) ? option.series : [];
+    const seriesObjects = series.filter(
+      (item): item is Record<string, unknown> => Boolean(item) && typeof item === "object",
+    );
     return (
       <div
         data-testid="admin-jobs-chart-inner"
@@ -220,6 +227,23 @@ vi.mock("echarts-for-react", () => ({
         data-grid-bottom={String((grid as Record<string, unknown>).bottom ?? "")}
         data-grid-left={String((grid as Record<string, unknown>).left ?? "")}
         data-has-data-zoom={option && "dataZoom" in option ? "true" : "false"}
+        data-series-colors={seriesObjects
+          .map((seriesItem) => {
+            const itemStyle = seriesItem.itemStyle;
+            return itemStyle && typeof itemStyle === "object"
+              ? String((itemStyle as Record<string, unknown>).color ?? "")
+              : "";
+          })
+          .join(",")}
+        data-series-names={seriesObjects
+          .map((seriesItem) => String(seriesItem.name ?? ""))
+          .join(",")}
+        data-series-stacks={seriesObjects
+          .map((seriesItem) => String(seriesItem.stack ?? ""))
+          .join(",")}
+        data-y-max={String((yAxis as Record<string, unknown>).max ?? "")}
+        data-y-split-number={String((yAxis as Record<string, unknown>).splitNumber ?? "")}
+        style={style}
       />
     );
   },
@@ -3033,6 +3057,7 @@ describe("App", () => {
           is_synthetic: false,
           tracking_available: true,
           indexed_paper_count: 2,
+          paper_outcome_counts: { indexed: 2, skipped: 1, failed: 0 },
           latest_status_summary: "1 completed · 1 total",
           child_job_count: 0,
           details: {},
@@ -3073,6 +3098,12 @@ describe("App", () => {
       expect(chart.getAttribute("data-grid-bottom")).toBe("0");
       expect(chart.getAttribute("data-grid-left")).toBe("0");
       expect(chart.getAttribute("data-has-data-zoom")).toBe("false");
+      expect(chart.getAttribute("data-series-names")).toBe("Indexed,Skipped,Failed");
+      expect(chart.getAttribute("data-series-colors")).toBe("#432818,#99582a,#b42318");
+      expect(chart.getAttribute("data-series-stacks")).toBe(
+        "paper outcomes,paper outcomes,paper outcomes",
+      );
+      expect((chart as HTMLElement).style.height).toBe("320px");
       expect(screen.queryByRole("button", { name: "Close Control panel" })).toBeNull();
       expect(apiMocks.loadBrowserAdminJobsOverview).toHaveBeenCalledWith(200);
 
@@ -3125,6 +3156,58 @@ describe("App", () => {
     expect(screen.getByTestId("admin-jobs-table-skeleton")).toBeTruthy();
     expect(within(table).getByRole("columnheader", { name: "Type" })).toBeTruthy();
     expect(within(table).queryByText("No jobs yet.")).toBeNull();
+  });
+
+  it("keeps zero-valued admin job timelines fixed with denser grid lines", async () => {
+    const dateNowSpy = vi
+      .spyOn(Date, "now")
+      .mockReturnValue(new Date("2026-04-21T12:00:00Z").getTime());
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession({ is_admin: true }));
+    apiMocks.loadBrowserAdminJobsOverview.mockResolvedValue({
+      jobs: [
+        {
+          job_id: "job_zero",
+          root_job_id: "job_zero",
+          job_type: "harvest_range",
+          status: "completed",
+          display_status: "completed",
+          payload: {},
+          attempts: 1,
+          max_attempts: 3,
+          priority: 10,
+          created_at: "2026-04-21T00:00:00Z",
+          updated_at: "2026-04-21T01:00:00Z",
+          is_synthetic: false,
+          tracking_available: true,
+          indexed_paper_count: 0,
+          paper_outcome_counts: { indexed: 0, skipped: 0, failed: 0 },
+          latest_status_summary: "1 completed · 1 total",
+          child_job_count: 0,
+          details: {},
+        },
+      ],
+      worker: null,
+    });
+
+    try {
+      render(<App />);
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Control panel" })).toBeTruthy();
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Control panel" }));
+
+      await waitFor(() => {
+        expect(screen.getByTestId("admin-jobs-chart-inner")).toBeTruthy();
+      });
+      const chart = screen.getByTestId("admin-jobs-chart-inner");
+      expect(chart.getAttribute("data-y-max")).toBe("8");
+      expect(chart.getAttribute("data-y-split-number")).toBe("8");
+      expect(screen.queryByTestId("admin-jobs-chart-skeleton")).toBeNull();
+    } finally {
+      dateNowSpy.mockRestore();
+    }
   });
 
   it("filters admin jobs by preset and custom time windows", async () => {

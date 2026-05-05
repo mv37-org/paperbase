@@ -332,6 +332,29 @@ def _job_type_tracks_indexed_papers(job_type: str) -> bool:
     return job_type in _ADMIN_INDEXED_PAPER_JOB_TYPES
 
 
+def _job_paper_outcome_rank(value: str) -> int:
+    return {"indexed": 0, "failed": 1, "skipped": 2}.get(value, 9)
+
+
+def _job_paper_outcome_counts(records: list[JobPaperRecord]) -> dict[str, int]:
+    grouped: dict[str, JobPaperRecord] = {}
+    for record in records:
+        existing = grouped.get(record.paper_id)
+        if existing is None:
+            grouped[record.paper_id] = record
+            continue
+        if _job_paper_outcome_rank(record.outcome) < _job_paper_outcome_rank(existing.outcome) or (
+            _job_paper_outcome_rank(record.outcome) == _job_paper_outcome_rank(existing.outcome)
+            and record.updated_at > existing.updated_at
+        ):
+            grouped[record.paper_id] = record
+
+    counts: dict[str, int] = {}
+    for record in grouped.values():
+        counts[record.outcome] = counts.get(record.outcome, 0) + 1
+    return counts
+
+
 def _latest_status_summary(status_counts: dict[str, int], *, total: int) -> str:
     parts: list[str] = []
     for key in ("running", "pending", "completed", "dead", "failed"):
@@ -7311,11 +7334,13 @@ class PaperbaseService:
         tracked: list[Any] = []
         tracking_available = False
         indexed_paper_count: int | None = None
+        paper_outcome_counts: dict[str, int] = {}
         if _job_type_tracks_indexed_papers(representative.job_type):
             tracked = self.repository.list_job_papers_for_root(root_job_id)
             tracking_available = bool(tracked)
         if tracking_available:
-            indexed_paper_count = len({record.paper_id for record in tracked if record.outcome == "indexed"})
+            paper_outcome_counts = _job_paper_outcome_counts(tracked)
+            indexed_paper_count = paper_outcome_counts.get("indexed", 0)
 
         details: dict[str, Any] = {
             "status_counts": status_counts,
@@ -7395,6 +7420,7 @@ class PaperbaseService:
             is_synthetic=False,
             tracking_available=tracking_available,
             indexed_paper_count=indexed_paper_count,
+            paper_outcome_counts=paper_outcome_counts,
             latest_status_summary=_latest_status_summary(status_counts, total=len(jobs)),
             child_job_count=max(0, len(jobs) - 1),
             details=details,
@@ -7426,6 +7452,7 @@ class PaperbaseService:
             latest_sync_root_job_id = latest_sync.root_job_id or latest_sync.job_id if latest_sync is not None else None
             latest_sync_tracking_available = False
             latest_sync_indexed_paper_count: int | None = None
+            latest_sync_paper_outcome_counts: dict[str, int] = {}
             if latest_sync is not None and latest_sync_root_job_id is not None and _job_type_tracks_indexed_papers(
                 latest_sync.job_type
             ):
@@ -7434,9 +7461,8 @@ class PaperbaseService:
             else:
                 tracked = []
             if latest_sync_tracking_available:
-                latest_sync_indexed_paper_count = len(
-                    {record.paper_id for record in tracked if record.outcome == "indexed"}
-                )
+                latest_sync_paper_outcome_counts = _job_paper_outcome_counts(tracked)
+                latest_sync_indexed_paper_count = latest_sync_paper_outcome_counts.get("indexed", 0)
             if latest_sync and latest_sync.status == "running":
                 display_status = "stalled" if (
                     worker_summary.stalled or _job_activity_stalled(latest_sync.updated_at, now=now)
@@ -7476,6 +7502,7 @@ class PaperbaseService:
                     is_synthetic=True,
                     tracking_available=latest_sync_tracking_available,
                     indexed_paper_count=latest_sync_indexed_paper_count,
+                    paper_outcome_counts=latest_sync_paper_outcome_counts,
                     latest_status_summary=(
                         _latest_status_summary(sync_status_counts, total=len(sync_jobs))
                         if sync_jobs
@@ -7504,17 +7531,14 @@ class PaperbaseService:
         if not jobs:
             raise HTTPException(status_code=404, detail=f"Job run {root_job_id} not found")
 
-        def _outcome_rank(value: str) -> int:
-            return {"indexed": 0, "failed": 1, "skipped": 2}.get(value, 9)
-
         grouped: dict[str, JobPaperRecord] = {}
         for record in self.repository.list_job_papers_for_root(root_job_id):
             existing = grouped.get(record.paper_id)
             if existing is None:
                 grouped[record.paper_id] = record
                 continue
-            if _outcome_rank(record.outcome) < _outcome_rank(existing.outcome) or (
-                _outcome_rank(record.outcome) == _outcome_rank(existing.outcome)
+            if _job_paper_outcome_rank(record.outcome) < _job_paper_outcome_rank(existing.outcome) or (
+                _job_paper_outcome_rank(record.outcome) == _job_paper_outcome_rank(existing.outcome)
                 and record.updated_at > existing.updated_at
             ):
                 grouped[record.paper_id] = record

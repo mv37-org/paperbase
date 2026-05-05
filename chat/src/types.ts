@@ -103,6 +103,7 @@ export interface AdminJobOverviewRow {
   is_synthetic: boolean;
   tracking_available: boolean;
   indexed_paper_count?: number | null;
+  paper_outcome_counts?: Record<string, number> | null;
   latest_status_summary: string;
   child_job_count: number;
   details: Record<string, unknown>;

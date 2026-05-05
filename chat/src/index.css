@@ -5394,13 +5394,15 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
 
 .admin-jobs-chart-shell {
   width: 100%;
-  min-height: 340px;
+  height: 320px;
+  min-height: 0;
+  overflow: hidden;
   background: linear-gradient(180deg, rgba(159, 178, 232, 0.08) 0%, rgba(159, 178, 232, 0) 72%);
 }
 
 .admin-jobs-chart {
   width: 100%;
-  height: 340px;
+  height: 320px;
 }
 
 .admin-jobs-timeline-empty,
@@ -5589,16 +5591,20 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
 }
 
 .admin-jobs-status.status-pending,
-.admin-jobs-status.status-scheduled,
-.admin-jobs-status.status-skipped {
+.admin-jobs-status.status-scheduled {
   background: rgba(180, 83, 9, 0.12);
   color: #9a5300;
 }
 
 .admin-jobs-status.status-completed,
 .admin-jobs-status.status-indexed {
-  background: rgba(18, 120, 72, 0.12);
-  color: #127848;
+  background: rgba(67, 40, 24, 0.12);
+  color: #432818;
+}
+
+.admin-jobs-status.status-skipped {
+  background: rgba(153, 88, 42, 0.14);
+  color: #99582a;
 }
 
 .admin-jobs-status.status-error,

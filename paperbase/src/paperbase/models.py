@@ -198,6 +198,7 @@ class AdminJobOverviewRow(BaseModel):
     is_synthetic: bool = False
     tracking_available: bool = False
     indexed_paper_count: int | None = None
+    paper_outcome_counts: dict[str, int] = Field(default_factory=dict)
     latest_status_summary: str = ""
     child_job_count: int = 0
     details: dict[str, Any] = Field(default_factory=dict)

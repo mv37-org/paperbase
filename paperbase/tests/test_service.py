@@ -906,12 +906,54 @@ def test_index_job_tracks_papers_for_admin_overview(monkeypatch, service: Paperb
     overview = service.get_admin_jobs_overview(limit=10)
     tracked_row = next(row for row in overview.jobs if row.job_id == job.job_id)
     assert tracked_row.indexed_paper_count == 1
+    assert tracked_row.paper_outcome_counts == {"indexed": 1}
     assert tracked_row.tracking_available is True
 
     job_papers = service.get_admin_job_papers(job.job_id)
     assert len(job_papers.papers) == 1
     assert job_papers.papers[0].paper_id == "arxiv:2401.77777"
     assert job_papers.papers[0].outcome == "indexed"
+
+
+def test_admin_jobs_overview_counts_tracked_paper_outcomes(service: PaperbaseService):
+    job = service.repository.create_job(
+        "harvest_range",
+        {
+            "harvest_id": "harvest-test",
+            "categories": ["cs.LG"],
+            "start_date": "2026-01-01",
+            "end_date": "2026-01-31",
+        },
+    )
+    service.repository.jobs[job.job_id] = job.model_copy(update={"status": "completed"})
+    service.repository.record_job_paper(
+        job.job_id,
+        "arxiv:2401.00001",
+        outcome="indexed",
+        arxiv_id="2401.00001",
+        title="Indexed Paper",
+    )
+    service.repository.record_job_paper(
+        job.job_id,
+        "arxiv:2401.00002",
+        outcome="skipped",
+        arxiv_id="2401.00002",
+        title="Skipped Paper",
+    )
+    service.repository.record_job_paper(
+        job.job_id,
+        "arxiv:2401.00003",
+        outcome="failed",
+        arxiv_id="2401.00003",
+        title="Failed Paper",
+    )
+
+    overview = service.get_admin_jobs_overview(limit=10)
+    row = next(row for row in overview.jobs if row.job_id == job.job_id)
+
+    assert row.tracking_available is True
+    assert row.indexed_paper_count == 1
+    assert row.paper_outcome_counts == {"failed": 1, "indexed": 1, "skipped": 1}
 
 
 def test_summarize_top_cited_admin_row_does_not_claim_index_tracking(service: PaperbaseService):
@@ -965,6 +1007,7 @@ def test_latest_sync_schedule_uses_latest_run_tracking_for_legacy_rootless_jobs(
     assert schedule_row.root_job_id == job.job_id
     assert schedule_row.tracking_available is True
     assert schedule_row.indexed_paper_count == 1
+    assert schedule_row.paper_outcome_counts == {"indexed": 1}
 
     job_papers = service.get_admin_job_papers(schedule_row.root_job_id)
     assert [paper.paper_id for paper in job_papers.papers] == ["arxiv:2401.88888"]
