@@ -1389,6 +1389,7 @@ export default function App() {
   >(null);
   const [deleteModalState, setDeleteModalState] = useState<DeleteModalState>(null);
   const [saveModalState, setSaveModalState] = useState<SaveModalState>(null);
+  const [threadDebugModalOpen, setThreadDebugModalOpen] = useState(false);
   const [syncConflictState, setSyncConflictState] = useState<SyncConflictState>(null);
   const [authView, setAuthView] = useState<AuthView>("login");
   const [authModalOpen, setAuthModalOpen] = useState(false);
@@ -1654,6 +1655,9 @@ export default function App() {
   const isChatEmpty =
     activeTab == null ||
     (activeTab.kind === "thread" && (!activeThread || activeThread.messages.length === 0));
+  const showThreadDebugButton = Boolean(
+    activeTab?.kind === "thread" && activeThreadDebugBundle && !isChatEmpty,
+  );
   const paperDrawerOpen = Boolean(paperDrawer);
   const hasProjects = projects.length > 0;
   const emptyStateProject =
@@ -1764,6 +1768,25 @@ export default function App() {
   const activeContextUsagePercent = activeContextUsage
     ? contextUsagePercent(activeContextUsage)
     : 0;
+
+  useEffect(() => {
+    if (!showThreadDebugButton) {
+      setThreadDebugModalOpen(false);
+    }
+  }, [showThreadDebugButton]);
+
+  useEffect(() => {
+    if (!threadDebugModalOpen) {
+      return;
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setThreadDebugModalOpen(false);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [threadDebugModalOpen]);
 
   useEffect(() => {
     if (!contextUsagePopoverOpen) {
@@ -4700,10 +4723,29 @@ export default function App() {
         ) : null}
       </div>
     ) : null;
+  const threadDebugAccessory =
+    showThreadDebugButton && activeThreadDebugBundle ? (
+      <button
+        type="button"
+        className="thread-debug-icon-button"
+        aria-label="Open chat debug info"
+        title="Open chat debug info"
+        onClick={() => setThreadDebugModalOpen(true)}
+      >
+        <span aria-hidden="true">i</span>
+      </button>
+    ) : null;
+  const composerActionAccessory =
+    composerContextUsageAccessory || threadDebugAccessory ? (
+      <>
+        {composerContextUsageAccessory}
+        {threadDebugAccessory}
+      </>
+    ) : null;
 
   const composerEditor = (
     <LandingMentionEditor
-      actionAccessory={composerContextUsageAccessory}
+      actionAccessory={composerActionAccessory}
       attachButtonId="composer-upload-trigger"
       disabled={Boolean(streamingThreadId)}
       formId="composer-form"
@@ -5519,29 +5561,6 @@ export default function App() {
               className={`chat-message-list${isChatEmpty ? " empty" : ""}${activeTab?.kind === "python_file" ? " python-file-view" : ""}`}
               onScroll={handleMessageListScroll}
             >
-              {activeTab?.kind === "thread" && activeThreadDebugBundle && !isChatEmpty ? (
-                <div className="chat-thread-debug-strip" data-testid="thread-debug-strip">
-                  <div className="chat-thread-debug-copy-row">
-                    <span className="chat-thread-debug-label">Debug IDs</span>
-                    <button
-                      type="button"
-                      className="chat-thread-debug-copy-button"
-                      aria-label="Copy chat debug bundle"
-                      title="Copy chat debug bundle"
-                      onClick={() => void copyThreadDebugBundle(activeThreadDebugBundle)}
-                    >
-                      Copy
-                    </button>
-                  </div>
-                  <div className="chat-thread-debug-values">
-                    <span>{`user ${activeThreadDebugBundle.user_id ?? "none"}`}</span>
-                    <span>{`project ${activeThreadDebugBundle.project_id}`}</span>
-                    <span>{`thread ${activeThreadDebugBundle.thread_id}`}</span>
-                    <span>{`last ${activeThreadDebugBundle.latest_message_id ?? "none"}`}</span>
-                    <span>{`assistant ${activeThreadDebugBundle.latest_assistant_message_id ?? "none"}`}</span>
-                  </div>
-                </div>
-              ) : null}
               {activeTab?.kind === "project_home" ? (
                 activeProjectHome ? (
                   <div className="project-home-page">
@@ -6272,6 +6291,65 @@ export default function App() {
           ) : null}
         </div>
       ) : null}
+
+      <div
+        id="thread-debug-modal"
+        className={`modal${threadDebugModalOpen && activeThreadDebugBundle ? "" : " hidden"}`}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="thread-debug-modal-title"
+      >
+        <div className="modal-backdrop" onClick={() => setThreadDebugModalOpen(false)} />
+        <div className="modal-panel thread-debug-modal-panel">
+          <button
+            className="modal-close"
+            type="button"
+            aria-label="Close chat debug info"
+            onClick={() => setThreadDebugModalOpen(false)}
+          >
+            ×
+          </button>
+          <div className="modal-heading modal-heading-copy">
+            <h2 id="thread-debug-modal-title" className="modal-title">
+              Chat debug
+            </h2>
+            <p className="modal-caption">Local identifiers for this thread.</p>
+          </div>
+          {activeThreadDebugBundle ? (
+            <div className="thread-debug-modal-body" data-testid="thread-debug-modal-body">
+              <dl className="thread-debug-modal-values">
+                <div>
+                  <dt>User</dt>
+                  <dd>{activeThreadDebugBundle.user_id ?? "none"}</dd>
+                </div>
+                <div>
+                  <dt>Project</dt>
+                  <dd>{activeThreadDebugBundle.project_id}</dd>
+                </div>
+                <div>
+                  <dt>Thread</dt>
+                  <dd>{activeThreadDebugBundle.thread_id}</dd>
+                </div>
+                <div>
+                  <dt>Last message</dt>
+                  <dd>{activeThreadDebugBundle.latest_message_id ?? "none"}</dd>
+                </div>
+                <div>
+                  <dt>Assistant</dt>
+                  <dd>{activeThreadDebugBundle.latest_assistant_message_id ?? "none"}</dd>
+                </div>
+              </dl>
+              <button
+                type="button"
+                className="secondary-button thread-debug-copy-button"
+                onClick={() => void copyThreadDebugBundle(activeThreadDebugBundle)}
+              >
+                Copy debug bundle
+              </button>
+            </div>
+          ) : null}
+        </div>
+      </div>
 
       <div
         id="python-save-modal"

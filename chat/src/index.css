@@ -2080,56 +2080,6 @@ textarea::placeholder,
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
-.chat-thread-debug-strip {
-  width: min(var(--chat-content-max-width), 100%);
-  max-width: 100%;
-  margin: 0 auto 18px;
-  display: grid;
-  gap: 8px;
-  padding: 10px 12px;
-  border: 1px solid rgba(111, 93, 76, 0.18);
-  border-radius: 8px;
-  background: rgba(251, 247, 241, 0.86);
-  color: #4b4339;
-  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, monospace;
-  font-size: 11px;
-  line-height: 1.45;
-}
-
-.chat-thread-debug-copy-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.chat-thread-debug-label {
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
-}
-
-.chat-thread-debug-copy-button {
-  border: 0;
-  background: transparent;
-  padding: 0;
-  color: inherit;
-  cursor: pointer;
-  font: inherit;
-  opacity: 0.8;
-}
-
-.chat-thread-debug-copy-button:hover,
-.chat-thread-debug-copy-button:focus-visible {
-  opacity: 1;
-}
-
-.chat-thread-debug-values {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 14px;
-}
-
 .message-row {
   display: grid;
   gap: 6px;
@@ -2524,6 +2474,30 @@ textarea::placeholder,
   color: rgba(255, 255, 255, 0.84);
   font-size: 12px;
   line-height: 1.35;
+}
+
+.thread-debug-icon-button {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid rgba(27, 22, 17, 0.22);
+  border-radius: 50%;
+  background: transparent;
+  color: rgba(27, 22, 17, 0.72);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.thread-debug-icon-button:hover,
+.thread-debug-icon-button:focus-visible {
+  border-color: rgba(27, 22, 17, 0.4);
+  color: var(--text);
 }
 
 .message-bubble {
@@ -3702,6 +3676,48 @@ textarea {
   width: min(560px, calc(100vw - 32px));
   max-height: min(92vh, 820px);
   overflow: auto;
+}
+
+.thread-debug-modal-panel {
+  width: min(420px, calc(100vw - 32px));
+}
+
+.thread-debug-modal-body {
+  display: grid;
+  gap: 14px;
+}
+
+.thread-debug-modal-values {
+  margin: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.thread-debug-modal-values > div {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: 12px;
+  align-items: baseline;
+}
+
+.thread-debug-modal-values dt {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.thread-debug-modal-values dd {
+  margin: 0;
+  min-width: 0;
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.thread-debug-copy-button {
+  justify-self: end;
 }
 
 .python-save-success {
@@ -5688,12 +5704,6 @@ body.authenticated-theme-dark .message-bubble.compaction {
   background: rgba(255, 255, 255, 0.05);
 }
 
-body.authenticated-theme-dark .chat-thread-debug-strip {
-  border-color: rgba(223, 232, 244, 0.12);
-  background: rgba(12, 18, 25, 0.88);
-  color: rgba(223, 232, 244, 0.82);
-}
-
 body.authenticated-theme-dark .message-markdown blockquote,
 body.authenticated-theme-dark .paper-drawer-markdown blockquote {
   border-left-color: rgba(223, 232, 244, 0.18);
@@ -5877,6 +5887,17 @@ body.authenticated-theme-dark .context-usage-popover-eyebrow {
 body.authenticated-theme-dark .context-usage-popover-summary,
 body.authenticated-theme-dark .context-usage-popover-note {
   color: rgba(255, 255, 255, 0.88);
+}
+
+body.authenticated-theme-dark .thread-debug-icon-button {
+  border-color: rgba(223, 232, 244, 0.24);
+  color: rgba(223, 232, 244, 0.74);
+}
+
+body.authenticated-theme-dark .thread-debug-icon-button:hover,
+body.authenticated-theme-dark .thread-debug-icon-button:focus-visible {
+  border-color: rgba(244, 247, 251, 0.48);
+  color: var(--text);
 }
 
 body.authenticated-theme-dark .thinking-shimmer {
