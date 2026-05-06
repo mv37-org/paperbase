@@ -6331,6 +6331,13 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
   background: rgba(27, 22, 17, 0.025);
 }
 
+.admin-jobs-type-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
 .admin-jobs-expand,
 .admin-jobs-link-button {
   display: inline-flex;
@@ -6351,6 +6358,81 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
   font-size: 16px;
   line-height: 1;
   color: var(--muted);
+}
+
+.admin-jobs-type-help {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.admin-jobs-type-help-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 1px solid rgba(27, 22, 17, 0.16);
+  border-radius: 999px;
+  background: #ffffff;
+  color: var(--muted);
+  cursor: help;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.admin-jobs-type-help-trigger:focus-visible {
+  outline: none;
+  border-color: rgba(43, 98, 228, 0.42);
+  box-shadow: 0 0 0 3px rgba(43, 98, 228, 0.12);
+}
+
+.admin-jobs-type-help-tooltip {
+  position: absolute;
+  top: 50%;
+  left: calc(100% + 8px);
+  width: max-content;
+  min-width: 220px;
+  max-width: min(320px, calc(100vw - 96px));
+  padding: 8px 10px;
+  border: 1px solid rgba(27, 22, 17, 0.16);
+  border-radius: 8px;
+  background: #1b1611;
+  color: #fffdfa;
+  font-size: 11px;
+  line-height: 1.45;
+  letter-spacing: normal;
+  text-transform: none;
+  white-space: normal;
+  box-shadow: 0 16px 32px rgba(16, 24, 40, 0.18);
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(4px, -50%);
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease;
+  z-index: 35;
+}
+
+.admin-jobs-type-help-tooltip::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: 100%;
+  width: 8px;
+  height: 8px;
+  border-bottom: 1px solid rgba(27, 22, 17, 0.16);
+  border-left: 1px solid rgba(27, 22, 17, 0.16);
+  background: #1b1611;
+  transform: rotate(45deg) translate(4px, -50%);
+}
+
+.admin-jobs-type-help:hover .admin-jobs-type-help-tooltip,
+.admin-jobs-type-help:focus-within .admin-jobs-type-help-tooltip {
+  opacity: 1;
+  transform: translate(0, -50%);
 }
 
 .admin-jobs-trigger-tag {
@@ -8330,8 +8412,16 @@ body.authenticated-theme-dark .admin-create-job-help-trigger {
   color: var(--muted);
 }
 
+body.authenticated-theme-dark .admin-jobs-type-help-trigger {
+  border-color: rgba(223, 232, 244, 0.16);
+  background: #0d141c;
+  color: var(--muted);
+}
+
 body.authenticated-theme-dark .admin-create-job-help-tooltip,
-body.authenticated-theme-dark .admin-create-job-help-tooltip::before {
+body.authenticated-theme-dark .admin-create-job-help-tooltip::before,
+body.authenticated-theme-dark .admin-jobs-type-help-tooltip,
+body.authenticated-theme-dark .admin-jobs-type-help-tooltip::before {
   border-color: rgba(223, 232, 244, 0.16);
   background: #0d141c;
 }

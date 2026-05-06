@@ -96,6 +96,45 @@ const TEXT_FILE_EXTENSIONS = new Set([
   ".yml",
 ]);
 
+const JOB_TYPE_LABELS: Record<string, string> = {
+  index_paper: "Single paper",
+  harvest_range: "Date range",
+  harvest_top_cited: "Top cited",
+  harvest_venue: "Venue year",
+  harvest_chunk: "Harvest chunk",
+  harvest_author: "Author harvest",
+  enrich_missing_metadata: "Metadata enrichment",
+  ingest_repo: "Code ingest",
+  latest_sync_schedule: "Latest sync",
+  reindex_embeddings: "Reindex embeddings",
+  reindex_missing_embeddings: "Reindex missing embeddings",
+  summarize_top_cited: "Summarize top cited",
+  sync_latest: "Latest sync",
+};
+
+const JOB_TYPE_DESCRIPTIONS: Record<string, string> = {
+  index_paper:
+    "Index one paper from arXiv so it becomes searchable and its artifacts land in storage.",
+  harvest_range:
+    "Walk a date window across one or more arXiv categories and index each matching paper in chunks.",
+  harvest_top_cited:
+    "Ask Semantic Scholar for highly cited papers, then index the arXiv-linked ones in batches.",
+  harvest_venue:
+    "Fetch papers from one conference or journal year, then index the arXiv-linked subset.",
+  harvest_chunk:
+    "Worker chunk for harvest planners; handles arXiv range chunks plus Semantic Scholar top-cited, venue, and author chunks.",
+  harvest_author:
+    "Find papers from top authors derived from the indexed corpus, then enqueue harvest chunks for them.",
+  enrich_missing_metadata:
+    "Revisit already stored papers and fill in missing Semantic Scholar fields like citations and TLDRs.",
+  ingest_repo: "Fetch and index GitHub repository artifacts for a paper with a code URL.",
+  latest_sync_schedule: "Scheduled latest-paper sync from configured arXiv categories.",
+  reindex_embeddings: "Rewrite paper and chunk embeddings for indexed papers.",
+  reindex_missing_embeddings: "Fill only missing paper and chunk embeddings.",
+  summarize_top_cited: "Summarize already-indexed high-citation papers.",
+  sync_latest: "Scheduled latest-paper sync from configured arXiv categories.",
+};
+
 const JOB_TYPE_OPTIONS: Array<{
   kind: CreateJobKind;
   label: string;
@@ -105,49 +144,34 @@ const JOB_TYPE_OPTIONS: Array<{
   {
     kind: "index_paper",
     label: "Single paper",
-    description:
-      "Index one paper from arXiv so it becomes searchable and its artifacts land in storage.",
+    description: JOB_TYPE_DESCRIPTIONS.index_paper,
     estimate: "Usually 1-3 minutes.",
   },
   {
     kind: "harvest_range",
     label: "Date range",
-    description:
-      "Walk a date window across one or more arXiv categories and index each matching paper in chunks.",
+    description: JOB_TYPE_DESCRIPTIONS.harvest_range,
     estimate: "Usually 10 minutes to a few hours, depending on the date span and limits.",
   },
   {
     kind: "harvest_top_cited",
     label: "Top cited",
-    description:
-      "Ask Semantic Scholar for highly cited papers, then index the arXiv-linked ones in batches.",
+    description: JOB_TYPE_DESCRIPTIONS.harvest_top_cited,
     estimate: "Usually 15 minutes to a few hours, depending on the paper cap.",
   },
   {
     kind: "harvest_venue",
     label: "Venue year",
-    description:
-      "Fetch papers from one conference or journal year, then index the arXiv-linked subset.",
+    description: JOB_TYPE_DESCRIPTIONS.harvest_venue,
     estimate: "Usually 15 minutes to a few hours, depending on the venue size.",
   },
   {
     kind: "enrich_missing_metadata",
     label: "Metadata enrichment",
-    description:
-      "Revisit already stored papers and fill in missing Semantic Scholar fields like citations and TLDRs.",
+    description: JOB_TYPE_DESCRIPTIONS.enrich_missing_metadata,
     estimate: "Usually a few minutes to an hour, depending on how many papers need backfill.",
   },
 ];
-
-const JOB_TYPE_LABELS: Record<string, string> = {
-  index_paper: "Single paper",
-  harvest_range: "Date range",
-  harvest_top_cited: "Top cited",
-  harvest_venue: "Venue year",
-  enrich_missing_metadata: "Metadata enrichment",
-  latest_sync_schedule: "Latest sync",
-  sync_latest: "Latest sync",
-};
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
@@ -541,6 +565,58 @@ function humanizeReason(value?: string | null) {
 
 function jobTypeLabel(jobType: string) {
   return JOB_TYPE_LABELS[jobType] ?? jobType.replaceAll("_", " ");
+}
+
+function jobTypeDescription(jobType: string) {
+  return JOB_TYPE_DESCRIPTIONS[jobType] ?? "Worker job tracked by Paperbase.";
+}
+
+function JobTypeCell({
+  expanded,
+  job,
+  onToggle,
+}: {
+  expanded: boolean;
+  job: AdminJobOverviewRow;
+  onToggle: () => void;
+}) {
+  const label = jobTypeLabel(job.job_type);
+  const description = jobTypeDescription(job.job_type);
+  const tooltipId = `admin-job-type-help-${job.job_id}`;
+  return (
+    <div className="admin-jobs-type-cell">
+      <button
+        type="button"
+        className="admin-jobs-expand"
+        onClick={(event) => {
+          event.stopPropagation();
+          onToggle();
+        }}
+        aria-expanded={expanded}
+      >
+        <span>{expanded ? "−" : "+"}</span>
+        <span>{label}</span>
+      </button>
+      <span className="admin-jobs-type-help">
+        <button
+          type="button"
+          className="admin-jobs-type-help-trigger"
+          aria-label={`Describe ${label}`}
+          aria-describedby={tooltipId}
+          title={description}
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+          }}
+        >
+          i
+        </button>
+        <span id={tooltipId} role="tooltip" className="admin-jobs-type-help-tooltip">
+          {description}
+        </span>
+      </span>
+    </div>
+  );
 }
 
 type AdminJobTrigger = {
@@ -2118,33 +2194,23 @@ export function AdminOpsPanel({
                       const detailPairs = detailRows(job);
                       const trigger = adminJobTrigger(job);
                       const trackedPaperCount = trackedPaperCountForJob(job);
+                      const toggleJobExpanded = () =>
+                        setExpandedJobIds((current) => ({
+                          ...current,
+                          [job.job_id]: !current[job.job_id],
+                        }));
                       return (
                         <FragmentRow key={job.job_id}>
                           <tr
                             className={`admin-jobs-row${expanded ? " expanded" : ""}`}
-                            onClick={() =>
-                              setExpandedJobIds((current) => ({
-                                ...current,
-                                [job.job_id]: !current[job.job_id],
-                              }))
-                            }
+                            onClick={toggleJobExpanded}
                           >
                             <td>
-                              <button
-                                type="button"
-                                className="admin-jobs-expand"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  setExpandedJobIds((current) => ({
-                                    ...current,
-                                    [job.job_id]: !current[job.job_id],
-                                  }));
-                                }}
-                                aria-expanded={expanded}
-                              >
-                                <span>{expanded ? "−" : "+"}</span>
-                                <span>{jobTypeLabel(job.job_type)}</span>
-                              </button>
+                              <JobTypeCell
+                                expanded={expanded}
+                                job={job}
+                                onToggle={toggleJobExpanded}
+                              />
                             </td>
                             <td>
                               <span
