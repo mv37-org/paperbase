@@ -3600,10 +3600,10 @@ describe("App", () => {
       expect(chart.getAttribute("data-x-axis-tick-show")).toBe("true");
       expect(chart.getAttribute("data-x-axis-tick-interval")).toBe("0");
       expect(Number(chart.getAttribute("data-x-axis-data-count"))).toBeGreaterThanOrEqual(80);
-      expect(chart.getAttribute("data-series-names")).toBe("Indexed,Skipped,Failed");
-      expect(chart.getAttribute("data-series-colors")).toBe("#432818,#99582a,#b42318");
+      expect(chart.getAttribute("data-series-names")).toBe("Indexed,Updated,Skipped,Failed");
+      expect(chart.getAttribute("data-series-colors")).toBe("#432818,#2563eb,#99582a,#b42318");
       expect(chart.getAttribute("data-series-stacks")).toBe(
-        "paper outcomes,paper outcomes,paper outcomes",
+        "paper outcomes,paper outcomes,paper outcomes,paper outcomes",
       );
       expect((chart as HTMLElement).style.height).toBe("320px");
       expect(
@@ -3630,7 +3630,7 @@ describe("App", () => {
       expect(screen.queryAllByText("job_root_1")).toHaveLength(1);
       expect(screen.getByRole("button", { name: "Previous page" })).toBeTruthy();
       expect(screen.getByRole("button", { name: "Next page" })).toBeTruthy();
-      const statusSummary = screen.getByRole("group", { name: "Indexed paper outcomes" });
+      const statusSummary = screen.getByRole("group", { name: "Tracked paper outcomes" });
       expect(within(statusSummary).getByText("Indexed")).toBeTruthy();
       expect(within(statusSummary).getByText("Skipped: Already indexed")).toBeTruthy();
       expect(screen.getByText(truncatedSkippedTitle)).toBeTruthy();
@@ -3646,6 +3646,87 @@ describe("App", () => {
       await waitFor(() => {
         expect(screen.queryByRole("tab", { name: "Admin" })).toBeNull();
       });
+    } finally {
+      dateNowSpy.mockRestore();
+    }
+  });
+
+  it("opens summarized-paper admin drilldowns from summary jobs", async () => {
+    const dateNowSpy = vi
+      .spyOn(Date, "now")
+      .mockReturnValue(new Date("2026-04-21T12:00:00Z").getTime());
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession({ is_admin: true }));
+    apiMocks.loadBrowserAdminJobsOverview.mockResolvedValue({
+      jobs: [
+        {
+          job_id: "job_summary_1",
+          root_job_id: "job_summary_1",
+          job_type: "summarize_top_cited",
+          status: "completed",
+          display_status: "completed",
+          payload: {},
+          attempts: 1,
+          max_attempts: 2,
+          priority: 0,
+          created_at: "2026-04-21T00:00:00Z",
+          updated_at: "2026-04-21T01:00:00Z",
+          is_synthetic: false,
+          tracking_available: true,
+          indexed_paper_count: 0,
+          tracked_paper_count: 1,
+          paper_outcome_counts: { updated: 1 },
+          latest_status_summary: "1 completed · 1 total",
+          child_job_count: 0,
+          details: {},
+        },
+      ],
+      worker: null,
+    });
+    apiMocks.loadBrowserAdminJobPapers.mockResolvedValue({
+      root_job_id: "job_summary_1",
+      total_count: 1,
+      offset: 0,
+      limit: 100,
+      has_more: false,
+      outcome_counts: { updated: 1 },
+      skipped_reason_counts: {},
+      papers: [
+        {
+          root_job_id: "job_summary_1",
+          job_id: "job_summary_1",
+          paper_id: "arxiv:2401.22222",
+          arxiv_id: "2401.22222",
+          title: "Summarized Paper",
+          outcome: "updated",
+          created_at: "2026-04-21T00:00:00Z",
+          updated_at: "2026-04-21T01:10:00Z",
+          paper: null,
+        },
+      ],
+    });
+
+    try {
+      render(<App />);
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Control panel" })).toBeTruthy();
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Control panel" }));
+
+      const trackedPapersButton = await within(screen.getByRole("table")).findByRole("button", {
+        name: "1",
+      });
+      fireEvent.click(trackedPapersButton);
+
+      await waitFor(() => {
+        expect(screen.getByRole("heading", { name: "Papers in job_summary_1" })).toBeTruthy();
+      });
+      const statusSummary = screen.getByRole("group", { name: "Tracked paper outcomes" });
+      expect(within(statusSummary).getByText("Updated")).toBeTruthy();
+      expect(screen.getByText("Summarized Paper")).toBeTruthy();
+      expect(screen.getAllByText("Updated").length).toBeGreaterThan(0);
+      expect(apiMocks.loadBrowserAdminJobPapers).toHaveBeenCalledWith("job_summary_1", 0, 100);
     } finally {
       dateNowSpy.mockRestore();
     }
@@ -3670,7 +3751,7 @@ describe("App", () => {
       expect(screen.getByRole("heading", { name: "Control panel" })).toBeTruthy();
     });
     const table = screen.getByRole("table");
-    expect(screen.getAllByText("No indexed papers in this window").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("No tracked papers in this window").length).toBeGreaterThan(0);
     expect(screen.getByTestId("admin-jobs-chart-skeleton")).toBeTruthy();
     expect(screen.getByTestId("admin-jobs-table-skeleton")).toBeTruthy();
     expect(within(table).getByRole("columnheader", { name: "Type" })).toBeTruthy();

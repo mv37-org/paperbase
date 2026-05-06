@@ -288,13 +288,14 @@ _MODEL_CACHE: dict[str, Any] = {}
 _RERANKER_CACHE: dict[str, Any] = {}
 _ADMIN_LATEST_SYNC_JOB_ID = "env:latest_sync"
 _ADMIN_STALLED_AFTER = timedelta(minutes=10)
-_ADMIN_INDEXED_PAPER_JOB_TYPES = frozenset(
+_ADMIN_TRACKED_PAPER_JOB_TYPES = frozenset(
     {
         "index_paper",
         "sync_latest",
         "harvest_range",
         "harvest_top_cited",
         "harvest_venue",
+        "summarize_top_cited",
     }
 )
 
@@ -346,12 +347,12 @@ def _job_activity_stalled(updated_at, *, now) -> bool:
     return bool(updated_at and now - updated_at > _ADMIN_STALLED_AFTER)
 
 
-def _job_type_tracks_indexed_papers(job_type: str) -> bool:
-    return job_type in _ADMIN_INDEXED_PAPER_JOB_TYPES
+def _job_type_tracks_papers(job_type: str) -> bool:
+    return job_type in _ADMIN_TRACKED_PAPER_JOB_TYPES
 
 
 def _job_paper_outcome_rank(value: str) -> int:
-    return {"indexed": 0, "failed": 1, "skipped": 2}.get(value, 9)
+    return {"indexed": 0, "updated": 0, "failed": 1, "skipped": 2}.get(value, 9)
 
 
 def _group_job_paper_records(records: list[JobPaperRecord]) -> dict[str, JobPaperRecord]:
@@ -6686,7 +6687,7 @@ class PaperbaseService:
         )
         return job
 
-    def summarize_top_cited(self, *, limit: int) -> dict[str, int]:
+    def summarize_top_cited(self, *, limit: int, tracking_job: JobResponse | None = None) -> dict[str, int]:
         from concurrent.futures import ThreadPoolExecutor, FIRST_COMPLETED, wait
 
         from .summaries import generate_summary_on_demand
@@ -6714,9 +6715,9 @@ class PaperbaseService:
             },
         )
 
-        def _summarize_one(paper: PaperResponse) -> tuple[str, tuple[str, str] | None]:
+        def _summarize_one(paper: PaperResponse) -> tuple[PaperResponse, tuple[str, str] | None]:
             try:
-                return paper.paper_id, generate_summary_on_demand(paper, self.settings)
+                return paper, generate_summary_on_demand(paper, self.settings)
             except Exception as exc:
                 logger.warning(
                     "featured-tier paper summary failed",
@@ -6726,7 +6727,7 @@ class PaperbaseService:
                         "error": str(exc),
                     },
                 )
-                return paper.paper_id, None
+                return paper, None
 
         processed = 0
         updated = 0
@@ -6746,14 +6747,35 @@ class PaperbaseService:
             mode = None if wait_all else FIRST_COMPLETED
             done, still_in_flight = wait(in_flight, return_when=mode) if mode else (set(in_flight), set())
             for future in done:
-                paper_id, result = future.result()
+                paper, result = future.result()
                 processed += 1
                 if result is None:
                     failed += 1
+                    if tracking_job is not None:
+                        self.repository.record_job_paper(
+                            tracking_job.job_id,
+                            paper.paper_id,
+                            outcome="failed",
+                            arxiv_id=paper.arxiv_id,
+                            title=paper.title,
+                        )
                 else:
                     short, eli5 = result
-                    if self.repository.update_summaries(paper_id, summary_short=short, summary_eli5=eli5) is not None:
+                    updated_paper = self.repository.update_summaries(
+                        paper.paper_id,
+                        summary_short=short,
+                        summary_eli5=eli5,
+                    )
+                    if updated_paper is not None:
                         updated += 1
+                        if tracking_job is not None:
+                            self.repository.record_job_paper(
+                                tracking_job.job_id,
+                                updated_paper.paper_id,
+                                outcome="updated",
+                                arxiv_id=updated_paper.arxiv_id,
+                                title=updated_paper.title,
+                            )
                 if processed % 500 == 0:
                     logger.info(
                         "summarize_top_cited progress",
@@ -7801,7 +7823,7 @@ class PaperbaseService:
                     tracking_job=job,
                 )
             elif job.job_type == "summarize_top_cited":
-                self.summarize_top_cited(limit=int(job.payload.get("limit", 500_000)))
+                self.summarize_top_cited(limit=int(job.payload.get("limit", 500_000)), tracking_job=job)
             elif job.job_type == "harvest_range":
                 # Accept legacy ``limit_per_category`` payloads written
                 # before the rename so in-flight planner jobs still run
@@ -8083,13 +8105,15 @@ class PaperbaseService:
         tracked: list[Any] = []
         tracking_available = False
         indexed_paper_count: int | None = None
+        tracked_paper_count: int | None = None
         paper_outcome_counts: dict[str, int] = {}
-        if _job_type_tracks_indexed_papers(representative.job_type):
+        if _job_type_tracks_papers(representative.job_type):
             tracked = self.repository.list_job_papers_for_root(root_job_id)
             tracking_available = bool(tracked)
         if tracking_available:
             paper_outcome_counts = _job_paper_outcome_counts(tracked)
             indexed_paper_count = paper_outcome_counts.get("indexed", 0)
+            tracked_paper_count = sum(paper_outcome_counts.values())
 
         details: dict[str, Any] = {
             "status_counts": status_counts,
@@ -8169,6 +8193,7 @@ class PaperbaseService:
             is_synthetic=False,
             tracking_available=tracking_available,
             indexed_paper_count=indexed_paper_count,
+            tracked_paper_count=tracked_paper_count,
             paper_outcome_counts=paper_outcome_counts,
             latest_status_summary=_latest_status_summary(status_counts, total=len(jobs)),
             child_job_count=max(0, len(jobs) - 1),
@@ -8201,8 +8226,9 @@ class PaperbaseService:
             latest_sync_root_job_id = latest_sync.root_job_id or latest_sync.job_id if latest_sync is not None else None
             latest_sync_tracking_available = False
             latest_sync_indexed_paper_count: int | None = None
+            latest_sync_tracked_paper_count: int | None = None
             latest_sync_paper_outcome_counts: dict[str, int] = {}
-            if latest_sync is not None and latest_sync_root_job_id is not None and _job_type_tracks_indexed_papers(
+            if latest_sync is not None and latest_sync_root_job_id is not None and _job_type_tracks_papers(
                 latest_sync.job_type
             ):
                 tracked = self.repository.list_job_papers_for_root(latest_sync_root_job_id)
@@ -8212,6 +8238,7 @@ class PaperbaseService:
             if latest_sync_tracking_available:
                 latest_sync_paper_outcome_counts = _job_paper_outcome_counts(tracked)
                 latest_sync_indexed_paper_count = latest_sync_paper_outcome_counts.get("indexed", 0)
+                latest_sync_tracked_paper_count = sum(latest_sync_paper_outcome_counts.values())
             if latest_sync and latest_sync.status == "running":
                 display_status = "stalled" if (
                     worker_summary.stalled or _job_activity_stalled(latest_sync.updated_at, now=now)
@@ -8251,6 +8278,7 @@ class PaperbaseService:
                     is_synthetic=True,
                     tracking_available=latest_sync_tracking_available,
                     indexed_paper_count=latest_sync_indexed_paper_count,
+                    tracked_paper_count=latest_sync_tracked_paper_count,
                     paper_outcome_counts=latest_sync_paper_outcome_counts,
                     latest_status_summary=(
                         _latest_status_summary(sync_status_counts, total=len(sync_jobs))

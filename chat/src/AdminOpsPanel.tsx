@@ -256,12 +256,13 @@ const TIMELINE_SKELETON_BAR_HEIGHTS = Array.from({ length: 106 }, (_, index) => 
   return Math.min(pattern[index % pattern.length] + step * 0.05, 0.7);
 });
 
-type TimelineOutcomeKey = "indexed" | "skipped" | "failed";
+type TimelineOutcomeKey = "indexed" | "updated" | "skipped" | "failed";
 
 type TimelineOutcomeCounts = Record<TimelineOutcomeKey, number>;
 
 const TIMELINE_OUTCOMES: Array<{ key: TimelineOutcomeKey; label: string; color: string }> = [
   { key: "indexed", label: "Indexed", color: "#432818" },
+  { key: "updated", label: "Updated", color: "#2563eb" },
   { key: "skipped", label: "Skipped", color: "#99582a" },
   { key: "failed", label: "Failed", color: "#b42318" },
 ];
@@ -280,7 +281,6 @@ type TimelineSummary = {
   buckets: TimelineBucketPoint[];
   latestUpdatedAt: string | null;
   maxTotal: number;
-  totalIndexed: number;
   trackedJobs: number;
 };
 
@@ -770,7 +770,17 @@ function formatTimelineTooltipLabel(timestamp: number, bucketMs: number) {
 }
 
 function emptyTimelineOutcomeCounts(): TimelineOutcomeCounts {
-  return { indexed: 0, skipped: 0, failed: 0 };
+  return { indexed: 0, updated: 0, skipped: 0, failed: 0 };
+}
+
+function trackedPaperCountForJob(job: AdminJobOverviewRow) {
+  if (typeof job.tracked_paper_count === "number" && Number.isFinite(job.tracked_paper_count)) {
+    return Math.max(job.tracked_paper_count, 0);
+  }
+  if (typeof job.indexed_paper_count === "number" && Number.isFinite(job.indexed_paper_count)) {
+    return Math.max(job.indexed_paper_count, 0);
+  }
+  return null;
 }
 
 function timelineOutcomeCountsForJob(job: AdminJobOverviewRow): TimelineOutcomeCounts {
@@ -822,10 +832,14 @@ function buildJobPaperStatusSegments(
 ): JobPaperStatusSegment[] {
   const segments: JobPaperStatusSegment[] = [];
   const indexed = Math.max(0, outcomeCounts.indexed ?? 0);
+  const updated = Math.max(0, outcomeCounts.updated ?? 0);
   const skipped = Math.max(0, outcomeCounts.skipped ?? 0);
   const failed = Math.max(0, outcomeCounts.failed ?? 0);
   if (indexed > 0) {
     segments.push({ label: "Indexed", count: indexed, color: "#432818" });
+  }
+  if (updated > 0) {
+    segments.push({ label: "Updated", count: updated, color: "#2563eb" });
   }
 
   const skippedReasonEntries = Object.entries(skippedReasonCounts)
@@ -870,11 +884,7 @@ function buildJobsTimeline(
 ): TimelineSummary {
   const trackedJobs = jobs
     .filter(
-      (job) =>
-        job.tracking_available &&
-        typeof job.indexed_paper_count === "number" &&
-        Number.isFinite(job.indexed_paper_count) &&
-        job.updated_at,
+      (job) => job.tracking_available && trackedPaperCountForJob(job) !== null && job.updated_at,
     )
     .map((job) => {
       const timestamp = new Date(job.updated_at).getTime();
@@ -888,7 +898,6 @@ function buildJobsTimeline(
       buckets: [],
       latestUpdatedAt: null,
       maxTotal: 0,
-      totalIndexed: 0,
       trackedJobs: 0,
     };
   }
@@ -936,10 +945,6 @@ function buildJobsTimeline(
     buckets,
     latestUpdatedAt: latestJob.updated_at,
     maxTotal: buckets.reduce((max, bucket) => Math.max(max, bucket.totalCount), 0),
-    totalIndexed: trackedJobs.reduce(
-      (sum, job) => sum + timelineOutcomeCountsForJob(job).indexed,
-      0,
-    ),
     trackedJobs: trackedJobs.length,
   };
 }
@@ -1510,6 +1515,7 @@ function JobsTimeline({
           return [
             bucket.bucketLabel,
             `${formatWholeNumber(bucket.outcomes.indexed)} indexed`,
+            `${formatWholeNumber(bucket.outcomes.updated)} updated`,
             `${formatWholeNumber(bucket.outcomes.skipped)} skipped`,
             `${formatWholeNumber(bucket.outcomes.failed)} failed`,
             `${formatWholeNumber(bucket.jobCount)} tracked jobs`,
@@ -1577,13 +1583,13 @@ function JobsTimeline({
 
   const emptyChartMessage = (
     <>
-      <strong>No indexed papers in this window</strong>
+      <strong>No tracked papers in this window</strong>
       <span>Pick another window, widen the range, or run a backfill job.</span>
     </>
   );
 
   return (
-    <section className="admin-jobs-timeline-panel" aria-label="Indexed papers timeline">
+    <section className="admin-jobs-timeline-panel" aria-label="Tracked papers timeline">
       {showSkeleton ? (
         <TimelineSkeleton message={!loading ? emptyChartMessage : undefined} />
       ) : (
@@ -1722,7 +1728,7 @@ export function AdminOpsPanel({
       setJobPapersOutcomeCounts(response.outcome_counts ?? {});
       setJobPapersSkippedReasonCounts(response.skipped_reason_counts ?? {});
     } catch (error) {
-      setJobPapersError(panelErrorMessage(error, "Indexed papers could not be loaded."));
+      setJobPapersError(panelErrorMessage(error, "Papers could not be loaded."));
     } finally {
       setJobPapersLoading(false);
     }
@@ -2027,7 +2033,7 @@ export function AdminOpsPanel({
                     <th>Trigger</th>
                     <th>ID</th>
                     <th>Status</th>
-                    <th>Indexed papers</th>
+                    <th>Papers</th>
                     <th>Updated</th>
                   </tr>
                 </thead>
@@ -2045,6 +2051,7 @@ export function AdminOpsPanel({
                       const expanded = Boolean(expandedJobIds[job.job_id]);
                       const detailPairs = detailRows(job);
                       const trigger = adminJobTrigger(job);
+                      const trackedPaperCount = trackedPaperCountForJob(job);
                       return (
                         <FragmentRow key={job.job_id}>
                           <tr
@@ -2099,7 +2106,7 @@ export function AdminOpsPanel({
                                     onOpenJobPapers(job.root_job_id);
                                   }}
                                 >
-                                  {job.indexed_paper_count ?? 0}
+                                  {trackedPaperCount ?? 0}
                                 </button>
                               ) : (
                                 <span>—</span>
@@ -2200,7 +2207,7 @@ export function AdminOpsPanel({
               <div
                 className="admin-paper-status-summary"
                 role="group"
-                aria-label="Indexed paper outcomes"
+                aria-label="Tracked paper outcomes"
               >
                 <div
                   className="admin-paper-status-donut"

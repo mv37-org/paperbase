@@ -1024,15 +1024,41 @@ def test_admin_jobs_overview_counts_tracked_paper_outcomes(service: PaperbaseSer
     assert job_papers.skipped_reason_counts == {"already_indexed": 1}
 
 
-def test_summarize_top_cited_admin_row_does_not_claim_index_tracking(service: PaperbaseService):
+def test_summarize_top_cited_job_tracks_updated_papers_for_admin(monkeypatch, service: PaperbaseService):
+    service.settings.summary_provider = "vertex"
+    service.settings.vertex_project = "stub"
+    service.settings.featured_tier_concurrency = 1
+    paper = _sample_paper("2401.77780", title="Summary Candidate", abstract="Needs a summary.")
+    paper.index_status = "indexed"
+    paper.citation_count = 100
+    paper.influential_citation_count = 50
+    stored = service.repository.upsert_paper(paper)
+    service.repository.update_summaries(stored.paper_id, summary_short="", summary_eli5="")
+    monkeypatch.setattr(
+        "paperbase.summaries.generate_summary_on_demand",
+        lambda paper, settings: ("Updated technical summary", "Updated plain summary"),
+    )
+
     job = service.enqueue_summarize_top_cited_job(limit=25)
+    completed = service.process_next_job()
+
+    assert completed is not None
+    assert completed.status == "completed"
 
     overview = service.get_admin_jobs_overview(limit=10)
     row = next(row for row in overview.jobs if row.job_id == job.job_id)
 
     assert row.job_type == "summarize_top_cited"
-    assert row.tracking_available is False
-    assert row.indexed_paper_count is None
+    assert row.tracking_available is True
+    assert row.indexed_paper_count == 0
+    assert row.tracked_paper_count == 1
+    assert row.paper_outcome_counts == {"updated": 1}
+
+    job_papers = service.get_admin_job_papers(job.job_id)
+    assert job_papers.outcome_counts == {"updated": 1}
+    assert job_papers.papers[0].paper_id == stored.paper_id
+    assert job_papers.papers[0].outcome == "updated"
+    assert job_papers.papers[0].title == "Summary Candidate"
 
 
 def test_latest_sync_schedule_uses_latest_run_tracking_for_legacy_rootless_jobs():

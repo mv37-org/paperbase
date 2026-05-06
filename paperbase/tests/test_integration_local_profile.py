@@ -27,7 +27,11 @@ def _cleanup_namespace(namespace: str) -> None:
         with connection.cursor() as cursor:
             cursor.execute("DELETE FROM result_items WHERE result_set_id IN (SELECT result_set_id FROM result_sets WHERE query LIKE %s OR pattern LIKE %s)", (f"{namespace}%", f"{namespace}%"))
             cursor.execute("DELETE FROM result_sets WHERE query LIKE %s OR pattern LIKE %s", (f"{namespace}%", f"{namespace}%"))
-            cursor.execute("DELETE FROM jobs WHERE payload::text LIKE %s", (f"%{namespace}/%",))
+            cursor.execute(
+                "DELETE FROM job_papers WHERE job_id IN (SELECT job_id FROM jobs WHERE payload::text LIKE %s) OR paper_id LIKE %s",
+                (f"%{namespace}%", f"arxiv:{namespace}/%"),
+            )
+            cursor.execute("DELETE FROM jobs WHERE payload::text LIKE %s", (f"%{namespace}%",))
             cursor.execute("DELETE FROM paper_refs WHERE src_paper_id LIKE %s OR dst_paper_id LIKE %s OR dst_arxiv_id LIKE %s", (f"arxiv:{namespace}/%", f"arxiv:{namespace}/%", f"{namespace}/%",))
             cursor.execute("DELETE FROM text_chunks WHERE paper_id LIKE %s", (f"arxiv:{namespace}/%",))
             cursor.execute("DELETE FROM papers WHERE paper_id LIKE %s OR arxiv_id LIKE %s", (f"arxiv:{namespace}/%", f"{namespace}/%",))

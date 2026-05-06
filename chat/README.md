@@ -12,7 +12,7 @@ The authenticated sidebar is project-first, with a small signed-in Browse area a
 
 - `Trending papers` now works for public read and signed-in interaction, with paginated 50-paper `Latest` and `Hottest` feeds over fully indexed and enriched papers, full paper detail, and nested comments/replies
 - allowlisted admins also get an `Admin panel` jobs workspace in that Browse section
-- the admin indexed-papers drilldown fetches paginated paper pages per job run instead of loading all tracked papers at once
+- the admin tracked-papers drilldown fetches paginated paper pages per job run, including summarized top-cited papers, instead of loading all tracked papers at once
 - projects expand and collapse independently and lazily fetch mixed project items
 - each project can start new chats, be renamed, or be deleted from the sidebar, but new projects require a connected GitHub repo
 - the new-project modal lists accessible GitHub repos in a custom dropdown, with "Create new repo" as the first option and `main` fixed for newly created repos
