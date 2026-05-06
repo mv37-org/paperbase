@@ -1964,6 +1964,21 @@ textarea::placeholder,
   display: block;
 }
 
+.paper-exploration-card-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.paper-exploration-card-image {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  object-fit: cover;
+  background: rgba(27, 22, 17, 0.08);
+}
+
 .thread-card-title {
   font-size: 13px;
   line-height: 1.25;
@@ -2334,6 +2349,10 @@ textarea::placeholder,
   padding: 0;
   overflow: hidden;
   background: #0b0d10;
+}
+
+.chat-message-list.paper-exploration-view {
+  padding: 24px 24px 40px;
 }
 
 .python-file-stage {
@@ -3048,6 +3067,7 @@ textarea::placeholder,
 
 .markdown-renderer,
 .message-citations,
+.message-citations-items,
 .citation-card {
   min-width: 0;
   max-width: 100%;
@@ -3245,7 +3265,43 @@ textarea::placeholder,
 
 .message-citations {
   display: grid;
-  gap: 10px;
+  gap: 8px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.message-citations-summary {
+  width: max-content;
+  max-width: 100%;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1.3;
+  list-style: none;
+}
+
+.message-citations-summary::-webkit-details-marker {
+  display: none;
+}
+
+.message-citations-summary::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  margin-right: 7px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  display: inline-block;
+  transform: translateY(-1px) rotate(-45deg);
+  transition: transform 120ms ease;
+}
+
+.message-citations[open] .message-citations-summary::before {
+  transform: translateY(-3px) rotate(45deg);
+}
+
+.message-citations-items {
+  display: grid;
+  gap: 6px;
 }
 
 .message-actions {
@@ -3381,6 +3437,10 @@ textarea::placeholder,
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
+.thread-paper-card.clickable {
+  cursor: pointer;
+}
+
 .thread-paper-card-main {
   min-width: 0;
   display: grid;
@@ -3420,6 +3480,90 @@ textarea::placeholder,
 
 .thread-papers-empty {
   padding: 48px 0;
+  text-align: center;
+}
+
+.paper-exploration-page {
+  width: min(980px, 100%);
+  min-height: 100%;
+  margin: 0 auto;
+  padding: 0 0 40px;
+  display: grid;
+  grid-template-rows: auto minmax(640px, 1fr);
+  gap: 14px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.paper-exploration-page.missing {
+  align-content: center;
+  justify-items: center;
+}
+
+.paper-exploration-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(27, 22, 17, 0.1);
+}
+
+.paper-exploration-heading {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.paper-exploration-heading span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.paper-exploration-heading h1 {
+  margin: 0;
+  font-size: 22px;
+  line-height: 1.15;
+  letter-spacing: 0;
+}
+
+.paper-exploration-heading p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.paper-exploration-delete {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid rgba(143, 45, 31, 0.18);
+  border-radius: 6px;
+  background: rgba(143, 45, 31, 0.04);
+  color: #8f2d1f;
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.paper-exploration-frame {
+  width: 100%;
+  min-height: 640px;
+  height: calc(100vh - 176px);
+  border: 1px solid rgba(27, 22, 17, 0.12);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.paper-exploration-empty {
+  padding: 28px;
+  border: 1px solid rgba(27, 22, 17, 0.12);
+  border-radius: 8px;
+  background: #ffffff;
+  color: var(--muted);
+  font-size: 13px;
   text-align: center;
 }
 
@@ -3469,131 +3613,141 @@ textarea::placeholder,
 }
 
 .citation-card {
-  padding: 12px 14px;
+  padding: 7px;
   border: 1px solid var(--line);
-  border-radius: var(--radius);
+  border-radius: 8px;
   background: #fcfbf8;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
-.citation-card-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
+.citation-card-compact {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
 }
 
-.citation-card-source-id {
-  display: inline-flex;
-  margin-right: 8px;
-  color: #1d4ed8;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.citation-card-title {
-  display: inline;
-  font-size: 13px;
-  line-height: 1.45;
-}
-
-.citation-card-action {
+.citation-card-compact-main {
+  min-width: 0;
   padding: 0;
   border: 0;
   background: transparent;
+  color: inherit;
+  cursor: pointer;
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  text-align: left;
+}
+
+.citation-card-compact-image,
+.citation-card-compact-placeholder {
+  width: 48px;
+  height: 48px;
+  border: 1px solid rgba(27, 22, 17, 0.1);
+  border-radius: 6px;
+  background: #f3efe6;
+}
+
+.citation-card-compact-image {
+  display: block;
+  object-fit: cover;
+}
+
+.citation-card-compact-placeholder {
+  display: grid;
+  place-items: center;
+  color: rgba(27, 22, 17, 0.44);
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 1;
+}
+
+.citation-card-compact-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.citation-card-title-line {
+  min-width: 0;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.citation-card-source-id {
+  flex: 0 0 auto;
+  color: #1d4ed8;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.citation-card-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.citation-card-action {
+  min-height: 24px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
   color: #1d4ed8;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
   font-size: 12px;
   white-space: nowrap;
 }
 
-.citation-card-path {
-  margin-top: 4px;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.4;
-}
-
-.citation-card-preview-shell {
-  display: grid;
-  grid-template-columns: 120px minmax(0, 1fr);
-  gap: 12px;
-  margin-top: 10px;
-}
-
-.citation-card-preview-image,
-.citation-card-preview-placeholder {
-  width: 120px;
-  height: 156px;
-  border: 1px solid rgba(27, 22, 17, 0.1);
-  border-radius: 10px;
-  background: #f3efe6;
-}
-
-.citation-card-preview-image {
-  object-fit: cover;
-  display: block;
-}
-
-.citation-card-preview-placeholder {
-  display: grid;
-  place-items: center;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.4;
-  text-align: center;
-  padding: 10px;
-}
-
-.citation-card-preview-copy {
-  min-width: 0;
-}
-
-.citation-card-preview-meta,
 .citation-card-preview-authors,
 .citation-card-preview-error {
   color: var(--muted);
   font-size: 12px;
-  line-height: 1.45;
+  line-height: 1.25;
 }
 
 .citation-card-preview-authors {
-  margin-top: 4px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.citation-card-preview-summary {
-  margin: 8px 0 0;
-  color: var(--text);
-  font-size: 13px;
-  line-height: 1.55;
-}
-
-.citation-card-preview-links {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  margin-top: 10px;
+.citation-card-compact-action {
+  align-self: center;
 }
 
 @media (max-width: 720px) {
-  .citation-card-preview-shell {
+  .citation-card-compact {
     grid-template-columns: 1fr;
   }
 
-  .citation-card-preview-image,
-  .citation-card-preview-placeholder {
-    width: 100%;
-    max-width: 220px;
+  .citation-card-compact-main {
+    grid-template-columns: 44px minmax(0, 1fr);
   }
-}
 
-.citation-card-excerpt {
-  margin: 8px 0 0;
-  color: var(--text);
-  font-size: 13px;
-  line-height: 1.55;
+  .citation-card-compact-image,
+  .citation-card-compact-placeholder {
+    width: 44px;
+    height: 44px;
+  }
+
+  .citation-card-compact-action {
+    justify-self: start;
+    min-height: 22px;
+    padding-inline: 0;
+  }
 }
 
 .composer-status {
@@ -4321,6 +4475,132 @@ textarea {
   border: 1px solid rgba(27, 22, 17, 0.1);
   border-radius: var(--radius);
   background: #ffffff;
+}
+
+.paper-pdf-modal-shell {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.paper-pdf-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  background: rgba(18, 16, 12, 0.44);
+  cursor: pointer;
+}
+
+.paper-pdf-modal {
+  position: relative;
+  z-index: 1;
+  width: min(1120px, calc(100vw - 48px));
+  height: min(900px, calc(100dvh - 48px));
+  min-height: 520px;
+  border: 1px solid rgba(27, 22, 17, 0.12);
+  border-radius: 10px;
+  background: #fffdfa;
+  box-shadow: 0 24px 80px rgba(16, 24, 40, 0.24);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.paper-pdf-modal-header {
+  min-height: 50px;
+  padding: 9px 10px 9px 14px;
+  border-bottom: 1px solid rgba(27, 22, 17, 0.1);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.paper-pdf-modal-title {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.paper-pdf-modal-title strong,
+.paper-pdf-modal-title span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.paper-pdf-modal-title strong {
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.2;
+}
+
+.paper-pdf-modal-title span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.paper-pdf-modal-actions {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.paper-pdf-explore-button {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid rgba(29, 78, 216, 0.18);
+  border-radius: 6px;
+  background: rgba(37, 99, 235, 0.08);
+  color: #1d4ed8;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.paper-pdf-modal-close {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 22px;
+  line-height: 1;
+}
+
+.paper-pdf-modal-body {
+  min-height: 0;
+  background: #ffffff;
+}
+
+.paper-pdf-frame {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #ffffff;
+}
+
+.paper-pdf-modal-state {
+  height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.paper-pdf-modal-state.error {
+  color: #8f2d1f;
 }
 
 .history-section,
@@ -8212,7 +8492,8 @@ body.authenticated-theme-dark .project-menu-popover,
 body.authenticated-theme-dark .account-menu,
 body.authenticated-theme-dark .composer-form,
 body.authenticated-theme-dark .modal-panel,
-body.authenticated-theme-dark .chat-empty-project-menu {
+body.authenticated-theme-dark .chat-empty-project-menu,
+body.authenticated-theme-dark .paper-pdf-modal {
   background: var(--paper);
 }
 
@@ -8229,7 +8510,12 @@ body.authenticated-theme-dark .paper-drawer,
 body.authenticated-theme-dark .sidebar-settings-footer,
 body.authenticated-theme-dark .settings-tabs,
 body.authenticated-theme-dark .chat-prompt-shell .mention-editor,
-body.authenticated-theme-dark .account-menu-divider {
+body.authenticated-theme-dark .account-menu-divider,
+body.authenticated-theme-dark .paper-pdf-modal,
+body.authenticated-theme-dark .paper-pdf-modal-header,
+body.authenticated-theme-dark .paper-exploration-header,
+body.authenticated-theme-dark .paper-exploration-frame,
+body.authenticated-theme-dark .paper-exploration-empty {
   border-color: var(--line);
 }
 
@@ -8271,10 +8557,13 @@ body.authenticated-theme-dark .python-save-success-line,
 body.authenticated-theme-dark .paper-drawer-path,
 body.authenticated-theme-dark .paper-drawer-meta,
 body.authenticated-theme-dark .paper-drawer-eyebrow,
-body.authenticated-theme-dark .citation-card-path,
-body.authenticated-theme-dark .citation-card-preview-meta,
 body.authenticated-theme-dark .citation-card-preview-authors,
 body.authenticated-theme-dark .citation-card-preview-error,
+body.authenticated-theme-dark .paper-exploration-heading span,
+body.authenticated-theme-dark .paper-exploration-heading p,
+body.authenticated-theme-dark .paper-exploration-empty,
+body.authenticated-theme-dark .paper-pdf-modal-title span,
+body.authenticated-theme-dark .paper-pdf-modal-state,
 body.authenticated-theme-dark .project-repo-status,
 body.authenticated-theme-dark .project-repo-import-item em,
 body.authenticated-theme-dark .project-repo-option small,
@@ -8302,11 +8591,13 @@ body.authenticated-theme-dark .modal-title,
 body.authenticated-theme-dark .settings-secret-value,
 body.authenticated-theme-dark .settings-appearance-label,
 body.authenticated-theme-dark .citation-card-title,
-body.authenticated-theme-dark .citation-card-excerpt,
 body.authenticated-theme-dark .paper-drawer-title,
 body.authenticated-theme-dark .paper-drawer-body,
 body.authenticated-theme-dark .project-home-header h1,
 body.authenticated-theme-dark .project-home-stat strong,
+body.authenticated-theme-dark .paper-exploration-heading h1,
+body.authenticated-theme-dark .paper-pdf-modal-title strong,
+body.authenticated-theme-dark .paper-pdf-modal-close,
 body.authenticated-theme-dark .project-field,
 body.authenticated-theme-dark .project-github-heading,
 body.authenticated-theme-dark .project-repo-option,
@@ -8524,9 +8815,10 @@ body.authenticated-theme-dark .settings-appearance-option,
 body.authenticated-theme-dark .paper-drawer-placeholder,
 body.authenticated-theme-dark .paper-drawer-error,
 body.authenticated-theme-dark .citation-card,
-body.authenticated-theme-dark .citation-card-preview-image,
-body.authenticated-theme-dark .citation-card-preview-placeholder,
+body.authenticated-theme-dark .citation-card-compact-image,
+body.authenticated-theme-dark .citation-card-compact-placeholder,
 body.authenticated-theme-dark .project-home-stat,
+body.authenticated-theme-dark .paper-exploration-empty,
 body.authenticated-theme-dark .project-repo-info-button,
 body.authenticated-theme-dark .project-github-required,
 body.authenticated-theme-dark .project-repo-menu,
@@ -8553,6 +8845,28 @@ body.authenticated-theme-dark .project-repo-info-popover {
 body.authenticated-theme-dark .project-repo-info-button {
   border: 0;
   background: transparent;
+}
+
+body.authenticated-theme-dark .paper-pdf-modal-body,
+body.authenticated-theme-dark .paper-pdf-frame,
+body.authenticated-theme-dark .paper-exploration-frame {
+  background: #0d141c;
+}
+
+body.authenticated-theme-dark .paper-pdf-modal-backdrop {
+  background: rgba(0, 0, 0, 0.62);
+}
+
+body.authenticated-theme-dark .paper-exploration-delete {
+  border-color: rgba(241, 153, 141, 0.22);
+  background: rgba(241, 153, 141, 0.08);
+  color: #f1998d;
+}
+
+body.authenticated-theme-dark .paper-pdf-explore-button {
+  border-color: rgba(111, 164, 255, 0.26);
+  background: rgba(79, 140, 255, 0.14);
+  color: #8ab4ff;
 }
 
 body.authenticated-theme-dark .project-repo-info-icon {
@@ -9325,6 +9639,10 @@ body.authenticated-theme-dark .project-menu-item:disabled {
     padding: 0;
   }
 
+  .chat-message-list.paper-exploration-view {
+    padding: 16px 16px 32px;
+  }
+
   .chat-stage-spacer {
     padding: 16px;
   }
@@ -9363,5 +9681,35 @@ body.authenticated-theme-dark .project-menu-item:disabled {
     min-height: 100dvh;
     z-index: 4;
     box-shadow: -4px 0 12px rgba(16, 24, 40, 0.08);
+  }
+
+  .paper-pdf-modal-shell {
+    padding: 10px;
+  }
+
+  .paper-pdf-modal {
+    width: calc(100vw - 20px);
+    height: calc(100dvh - 20px);
+    min-height: 0;
+    border-radius: 8px;
+  }
+
+  .paper-pdf-modal-header,
+  .paper-exploration-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .paper-pdf-modal-actions {
+    justify-content: flex-end;
+  }
+
+  .paper-exploration-page {
+    grid-template-rows: auto minmax(520px, 1fr);
+  }
+
+  .paper-exploration-frame {
+    min-height: 520px;
+    height: calc(100dvh - 186px);
   }
 }

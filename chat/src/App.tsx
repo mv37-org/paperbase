@@ -65,9 +65,12 @@ import type {
   FeedbackSentiment,
   ModalFlashKind,
   OpenTab,
+  PaperActionTarget,
   PaperCitationPreviewState,
   PaperDrawerContent,
   PaperDrawerState,
+  PaperExploration,
+  PaperPdfModalState,
   ProjectItemState,
   ProjectModalState,
   ProjectSidebarCategoryKey,
@@ -133,7 +136,6 @@ import {
   SIDEBAR_COLLAPSED_KEY,
   sourceCardId,
   staticAssetPath,
-  summarizeCitationPreview,
   summarizeThreadTitle,
   threadMarkdownExport,
   toolActivityCommandForItem,
@@ -181,6 +183,7 @@ const RESUME_PROJECT_MODAL_KEY = "paperbase-resume-new-project";
 const LANDING_TRENDING_PAGE_SIZE = 10;
 const PROJECT_ITEM_PAGE_SIZE = 5;
 const PROJECT_SIDEBAR_ITEM_KINDS: ProjectItemKind[] = ["python_file", "thread"];
+const PAPER_EXPLORATIONS_KEY = "paperbase-paper-explorations";
 const AUTH_VIEW_COPY: Record<AuthView, { title: string; caption: string }> = {
   login: { title: "Log in", caption: "Use your account to continue." },
   signup: { title: "Create account", caption: "Create your account." },
@@ -307,6 +310,63 @@ function formatWorkedDuration(startMs: number | null, endMs: number | null) {
     : `${totalHours} ${totalHours === 1 ? "hour" : "hours"}`;
 }
 
+function paperExplorationIdFor(projectId: string, paperId: string) {
+  return `paper-exploration:${projectId}:${paperId}`;
+}
+
+function normalizePaperExploration(value: unknown): PaperExploration | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const entry = value as Partial<Record<keyof PaperExploration, unknown>>;
+  const explorationId = typeof entry.explorationId === "string" ? entry.explorationId : "";
+  const projectId = typeof entry.projectId === "string" ? entry.projectId : "";
+  const paperId = typeof entry.paperId === "string" ? entry.paperId : "";
+  const path = typeof entry.path === "string" ? entry.path : "";
+  const title = typeof entry.title === "string" ? entry.title : "";
+  if (!explorationId || !projectId || !paperId || !title) {
+    return null;
+  }
+  return {
+    explorationId,
+    projectId,
+    paperId,
+    path,
+    title,
+    authors: typeof entry.authors === "string" ? entry.authors : "",
+    previewImageUrl: typeof entry.previewImageUrl === "string" ? entry.previewImageUrl : "",
+    pdfUrl: typeof entry.pdfUrl === "string" ? entry.pdfUrl : "",
+    createdAt: typeof entry.createdAt === "string" ? entry.createdAt : new Date().toISOString(),
+    updatedAt: typeof entry.updatedAt === "string" ? entry.updatedAt : new Date().toISOString(),
+  };
+}
+
+function restorePaperExplorations() {
+  try {
+    const value = localStorage.getItem(PAPER_EXPLORATIONS_KEY);
+    if (!value) {
+      return [];
+    }
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed
+      .map((entry) => normalizePaperExploration(entry))
+      .filter((entry): entry is PaperExploration => Boolean(entry));
+  } catch {
+    return [];
+  }
+}
+
+function persistPaperExplorations(explorations: PaperExploration[]) {
+  if (explorations.length === 0) {
+    localStorage.removeItem(PAPER_EXPLORATIONS_KEY);
+    return;
+  }
+  localStorage.setItem(PAPER_EXPLORATIONS_KEY, JSON.stringify(explorations));
+}
+
 export default function App() {
   const bootstrapSession = useMemo(() => getBootstrapSession(), []);
   const [session, setSession] = useState<BrowserSessionResponse | null>(bootstrapSession);
@@ -406,6 +466,10 @@ export default function App() {
   const [toolActivities, setToolActivities] = useState<Record<string, ToolActivityEntry[]>>({});
   const [contextUsagePopoverOpen, setContextUsagePopoverOpen] = useState(false);
   const [paperDrawer, setPaperDrawer] = useState<PaperDrawerState>(() => drawerStateFromUrl());
+  const [paperPdfModal, setPaperPdfModal] = useState<PaperPdfModalState | null>(null);
+  const [paperExplorations, setPaperExplorations] = useState<PaperExploration[]>(() =>
+    restorePaperExplorations(),
+  );
   const [trendingBrowseState, setTrendingBrowseState] = useState<TrendingBrowseState | null>(() =>
     trendingBrowseStateFromUrl(),
   );
@@ -433,6 +497,7 @@ export default function App() {
   const selectedProjectIdRef = useRef<string | null>(restoreSelectedProjectId());
   const projectItemsRef = useRef<Record<string, ProjectItemState>>({});
   const paperCitationPreviewsRef = useRef<Record<string, PaperCitationPreviewState>>({});
+  const paperExplorationsRef = useRef<PaperExploration[]>(paperExplorations);
   const paperCitationPreviewFetchesRef = useRef(new Set<string>());
   const threadMapRef = useRef<Record<string, ChatThreadResponse>>({});
   const pythonFileMapRef = useRef<Record<string, PythonFileResponse>>({});
@@ -480,6 +545,11 @@ export default function App() {
   useEffect(() => {
     paperCitationPreviewsRef.current = paperCitationPreviews;
   }, [paperCitationPreviews]);
+
+  useEffect(() => {
+    paperExplorationsRef.current = paperExplorations;
+    persistPaperExplorations(paperExplorations);
+  }, [paperExplorations]);
 
   useEffect(() => {
     pythonFileMapRef.current = pythonFileMap;
@@ -628,6 +698,7 @@ export default function App() {
   const activeThreadId = activeTab?.kind === "thread" ? activeTab.id : null;
   const activePythonFileId = activeTab?.kind === "python_file" ? activeTab.id : null;
   const activeProjectHomeId = activeTab?.kind === "project_home" ? activeTab.id : null;
+  const activePaperExplorationId = activeTab?.kind === "paper_exploration" ? activeTab.id : null;
   const activeWorkspacePageId =
     workspaceView?.kind === "admin_jobs" || workspaceView?.kind === "admin_job_papers"
       ? "admin_jobs"
@@ -638,6 +709,11 @@ export default function App() {
   const activePythonFile = activePythonFileId ? (pythonFileMap[activePythonFileId] ?? null) : null;
   const activeProjectHome = activeProjectHomeId
     ? (projects.find((project) => project.project_id === activeProjectHomeId) ?? null)
+    : null;
+  const activePaperExploration = activePaperExplorationId
+    ? (paperExplorations.find(
+        (exploration) => exploration.explorationId === activePaperExplorationId,
+      ) ?? null)
     : null;
   const activePythonDraft = activePythonFileId
     ? (pythonFileDrafts[activePythonFileId] ?? null)
@@ -679,6 +755,17 @@ export default function App() {
   const activeProjectHomeSessionCount = activeProjectHomeItems.filter(
     (item) => item.item_kind === "thread",
   ).length;
+  const activeProjectHomeExplorationCount = activeProjectHomeId
+    ? paperExplorations.filter((exploration) => exploration.projectId === activeProjectHomeId)
+        .length
+    : 0;
+  const paperExplorationIdsByPaperId = useMemo(
+    () =>
+      Object.fromEntries(
+        paperExplorations.map((exploration) => [exploration.paperId, exploration.explorationId]),
+      ) as Record<string, string>,
+    [paperExplorations],
+  );
   const selectedSyncConflict = syncConflictState
     ? (syncConflictState.conflicts.find(
         (conflict) => conflict.path === syncConflictState.selectedPath,
@@ -1165,11 +1252,206 @@ export default function App() {
     updateTrendingBrowseUrl(nextState);
   }, []);
 
-  const openPaperDrawer = useCallback((paperId: string, path: string) => {
-    const nextState = { paperId, path };
-    setPaperDrawer(nextState);
-    updateDrawerUrl(nextState);
+  const closePaperPdfModal = useCallback(() => {
+    setPaperPdfModal(null);
   }, []);
+
+  const openPaperPdfModal = useCallback((target: PaperActionTarget) => {
+    const cachedPreview = paperCitationPreviewsRef.current[target.paperId];
+    const paper = target.paper ?? cachedPreview?.paper ?? null;
+    const pdfUrl = target.pdfUrl ?? paper?.pdf_url ?? "";
+    setPaperPdfModal({
+      paperId: target.paperId,
+      path: target.path,
+      paper,
+      title: paper?.title ?? target.title ?? "Paper",
+      authors: paper?.authors ?? target.authors ?? "",
+      pdfUrl,
+      status: paper || pdfUrl ? "ready" : "loading",
+      error: "",
+    });
+
+    if (paper || pdfUrl) {
+      return;
+    }
+
+    void (async () => {
+      try {
+        const fetchedPaper = await getBrowserPaper(target.paperId);
+        setPaperPdfModal((current) =>
+          current?.paperId === target.paperId && current.path === target.path
+            ? {
+                ...current,
+                paper: fetchedPaper,
+                title: fetchedPaper.title,
+                authors: fetchedPaper.authors,
+                pdfUrl: fetchedPaper.pdf_url,
+                status: "ready",
+                error: "",
+              }
+            : current,
+        );
+      } catch (error) {
+        setPaperPdfModal((current) =>
+          current?.paperId === target.paperId && current.path === target.path
+            ? {
+                ...current,
+                status: "error",
+                error: error instanceof Error ? error.message : "Paper PDF could not be loaded.",
+              }
+            : current,
+        );
+      }
+    })();
+  }, []);
+
+  const openPaperExploration = useCallback((explorationId: string) => {
+    const exploration = paperExplorationsRef.current.find(
+      (entry) => entry.explorationId === explorationId,
+    );
+    if (!exploration) {
+      return;
+    }
+    selectedProjectIdRef.current = exploration.projectId;
+    setSelectedProjectId(exploration.projectId);
+    setExpandedProjectIds((current) =>
+      current.includes(exploration.projectId) ? current : [...current, exploration.projectId],
+    );
+    setCollapsedProjectCategories((current) => ({
+      ...current,
+      [exploration.projectId]: {
+        ...current[exploration.projectId],
+        notes: false,
+      },
+    }));
+    setWorkspaceView(null);
+    setMobileSidebarOpen(false);
+    setAccountMenuOpen(false);
+    setProjectMenuProjectId(null);
+    setThreadPane("chat");
+    setActiveTab({ kind: "paper_exploration", id: exploration.explorationId });
+  }, []);
+
+  const startPaperExploration = useCallback(
+    async (target: PaperActionTarget) => {
+      const preferredProjectId =
+        target.projectId ??
+        activeThread?.project_id ??
+        activeProjectHomeId ??
+        selectedProjectIdRef.current ??
+        projectsRef.current[0]?.project_id ??
+        null;
+      const existingExploration =
+        paperExplorationsRef.current.find(
+          (entry) => entry.projectId === preferredProjectId && entry.paperId === target.paperId,
+        ) ?? paperExplorationsRef.current.find((entry) => entry.paperId === target.paperId);
+      if (existingExploration) {
+        openPaperExploration(existingExploration.explorationId);
+        return;
+      }
+      if (!preferredProjectId) {
+        showErrorFlash("Create a project before starting a paper exploration.");
+        return;
+      }
+
+      const cachedPreview = paperCitationPreviewsRef.current[target.paperId];
+      let paper = target.paper ?? cachedPreview?.paper ?? null;
+      let previewImageUrl = target.previewImageUrl ?? cachedPreview?.preview?.image_url ?? "";
+
+      if (!paper) {
+        try {
+          paper = await getBrowserPaper(target.paperId);
+        } catch {
+          paper = null;
+        }
+      }
+      if (!previewImageUrl) {
+        try {
+          previewImageUrl = (await getBrowserPaperPreview(target.paperId)).image_url;
+        } catch {
+          previewImageUrl = "";
+        }
+      }
+
+      const postFetchExisting =
+        paperExplorationsRef.current.find(
+          (entry) => entry.projectId === preferredProjectId && entry.paperId === target.paperId,
+        ) ?? paperExplorationsRef.current.find((entry) => entry.paperId === target.paperId);
+      if (postFetchExisting) {
+        openPaperExploration(postFetchExisting.explorationId);
+        return;
+      }
+
+      const now = new Date().toISOString();
+      const exploration: PaperExploration = {
+        explorationId: paperExplorationIdFor(preferredProjectId, target.paperId),
+        projectId: preferredProjectId,
+        paperId: target.paperId,
+        path: target.path,
+        title: paper?.title ?? target.title ?? target.paperId,
+        authors: paper?.authors ?? target.authors ?? "",
+        previewImageUrl: previewImageUrl ?? "",
+        pdfUrl: paper?.pdf_url ?? target.pdfUrl ?? "",
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      setPaperExplorations((current) => [exploration, ...current]);
+      paperExplorationsRef.current = [exploration, ...paperExplorationsRef.current];
+      selectedProjectIdRef.current = preferredProjectId;
+      setSelectedProjectId(preferredProjectId);
+      setExpandedProjectIds((current) =>
+        current.includes(preferredProjectId) ? current : [...current, preferredProjectId],
+      );
+      setCollapsedProjectCategories((current) => ({
+        ...current,
+        [preferredProjectId]: {
+          ...current[preferredProjectId],
+          notes: false,
+        },
+      }));
+      setWorkspaceView(null);
+      setMobileSidebarOpen(false);
+      setAccountMenuOpen(false);
+      setProjectMenuProjectId(null);
+      setThreadPane("chat");
+      setActiveTab({ kind: "paper_exploration", id: exploration.explorationId });
+    },
+    [activeProjectHomeId, activeThread?.project_id, openPaperExploration, showErrorFlash],
+  );
+
+  const deletePaperExploration = useCallback((explorationId: string) => {
+    const deletedExploration = paperExplorationsRef.current.find(
+      (entry) => entry.explorationId === explorationId,
+    );
+    setPaperExplorations((current) =>
+      current.filter((entry) => entry.explorationId !== explorationId),
+    );
+    paperExplorationsRef.current = paperExplorationsRef.current.filter(
+      (entry) => entry.explorationId !== explorationId,
+    );
+    setActiveTab((current) => {
+      if (current?.kind !== "paper_exploration" || current.id !== explorationId) {
+        return current;
+      }
+      return deletedExploration?.projectId
+        ? { kind: "project_home", id: deletedExploration.projectId }
+        : null;
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!paperPdfModal) {
+      return;
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        closePaperPdfModal();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [closePaperPdfModal, paperPdfModal]);
 
   const updateThread = useCallback(
     (threadId: string, updater: (thread: ChatThreadResponse | null) => ChatThreadResponse) => {
@@ -1330,17 +1612,40 @@ export default function App() {
 
   const handleCitationClick = useCallback(
     (message: ChatMessageResponse, citation: ChatCitation) => {
-      document
-        .getElementById(sourceCardId(message.message_id, citation.source_id))
-        ?.scrollIntoView({
-          behavior: "smooth",
-          block: "nearest",
-        });
       if (citation.paper_id) {
-        openPaperDrawer(citation.paper_id, citation.path);
+        const existingExploration = paperExplorationsRef.current.find(
+          (entry) => entry.paperId === citation.paper_id,
+        );
+        if (existingExploration) {
+          openPaperExploration(existingExploration.explorationId);
+          return;
+        }
+        const paperPreview = paperCitationPreviewsRef.current[citation.paper_id];
+        openPaperPdfModal({
+          paperId: citation.paper_id,
+          path: citation.path,
+          paper: paperPreview?.paper ?? null,
+          title: paperPreview?.paper?.title ?? citation.title,
+          authors: paperPreview?.paper?.authors ?? "",
+          previewImageUrl: paperPreview?.preview?.image_url ?? null,
+          pdfUrl: paperPreview?.paper?.pdf_url ?? null,
+          projectId: activeThread?.project_id ?? null,
+        });
+        return;
       }
+      const sourceCard = document.getElementById(
+        sourceCardId(message.message_id, citation.source_id),
+      );
+      const sourceDetails = sourceCard?.closest("details");
+      if (sourceDetails instanceof HTMLDetailsElement) {
+        sourceDetails.open = true;
+      }
+      sourceCard?.scrollIntoView({
+        behavior: "smooth",
+        block: "nearest",
+      });
     },
-    [openPaperDrawer],
+    [activeThread?.project_id, openPaperExploration, openPaperPdfModal],
   );
 
   const refreshUploads = useCallback(async () => {
@@ -2590,6 +2895,32 @@ export default function App() {
             await fetchAndStoreThread(restoredActiveTab.id, false);
           } else if (restoredActiveTab.kind === "python_file") {
             await fetchAndStorePythonFile(restoredActiveTab.id, false);
+          } else if (restoredActiveTab.kind === "paper_exploration") {
+            const restoredExploration = restorePaperExplorations().find(
+              (exploration) => exploration.explorationId === restoredActiveTab.id,
+            );
+            if (
+              !restoredExploration ||
+              !loadedProjects.some(
+                (project) => project.project_id === restoredExploration.projectId,
+              )
+            ) {
+              throw new Error("Stored paper exploration no longer exists.");
+            }
+            selectedProjectIdRef.current = restoredExploration.projectId;
+            setSelectedProjectId(restoredExploration.projectId);
+            setExpandedProjectIds((current) =>
+              current.includes(restoredExploration.projectId)
+                ? current
+                : [...current, restoredExploration.projectId],
+            );
+            setCollapsedProjectCategories((current) => ({
+              ...current,
+              [restoredExploration.projectId]: {
+                ...current[restoredExploration.projectId],
+                notes: false,
+              },
+            }));
           } else if (
             !loadedProjects.some((project) => project.project_id === restoredActiveTab.id)
           ) {
@@ -4259,6 +4590,11 @@ export default function App() {
                         last_message_preview: item.last_message_preview,
                       });
                     });
+                    const projectExplorations = paperExplorations
+                      .filter((exploration) => exploration.projectId === project.project_id)
+                      .sort(
+                        (left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt),
+                      );
                     const codeHasMore = Boolean(itemState?.hasMoreByKind?.python_file);
                     const sessionsHasMore = Boolean(itemState?.hasMoreByKind?.thread);
                     const codeLoadingMore = Boolean(itemState?.loadingMoreByKind?.python_file);
@@ -4380,7 +4716,7 @@ export default function App() {
                             {itemState?.error ? (
                               <div className="project-session-state error">{itemState.error}</div>
                             ) : null}
-                            {itemState?.loaded ? (
+                            {itemState?.loaded || projectExplorations.length > 0 ? (
                               <>
                                 <div className="project-tree">
                                   <div className="project-tree-category">
@@ -4401,11 +4737,63 @@ export default function App() {
                                           asset="notes.svg"
                                           className="project-tree-category-icon"
                                         />
-                                        <span>Notes</span>
+                                        <span>Explorations</span>
                                       </button>
                                     </div>
-                                    {!collapsedCategories.notes ? (
-                                      <div className="project-tree-empty">No notes yet.</div>
+                                    {!collapsedCategories.notes &&
+                                    projectExplorations.length > 0 ? (
+                                      <div className="thread-list project-thread-list project-category-list">
+                                        {projectExplorations.map((exploration) => (
+                                          <div
+                                            key={exploration.explorationId}
+                                            role="button"
+                                            tabIndex={0}
+                                            className={`thread-card paper-exploration-card${activePaperExplorationId === exploration.explorationId ? " active" : ""}`}
+                                            title={exploration.title}
+                                            onClick={() =>
+                                              openPaperExploration(exploration.explorationId)
+                                            }
+                                            onKeyDown={(event) => {
+                                              if (event.key === "Enter" || event.key === " ") {
+                                                event.preventDefault();
+                                                openPaperExploration(exploration.explorationId);
+                                              }
+                                            }}
+                                          >
+                                            <div className="thread-card-copy paper-exploration-card-copy">
+                                              {exploration.previewImageUrl ? (
+                                                <img
+                                                  className="paper-exploration-card-image"
+                                                  src={exploration.previewImageUrl}
+                                                  alt=""
+                                                />
+                                              ) : null}
+                                              <strong className="thread-card-title">
+                                                {exploration.title}
+                                              </strong>
+                                            </div>
+                                            <span className="thread-card-age">
+                                              {formatThreadAge(exploration.updatedAt)}
+                                            </span>
+                                            <button
+                                              type="button"
+                                              className="thread-card-delete"
+                                              aria-label={`Delete exploration ${exploration.title}`}
+                                              onClick={(event) => {
+                                                event.stopPropagation();
+                                                deletePaperExploration(exploration.explorationId);
+                                              }}
+                                            >
+                                              <AppIcon
+                                                src={staticAssetPath("delete-session.svg")}
+                                                className="thread-card-delete-icon"
+                                              />
+                                            </button>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    ) : !collapsedCategories.notes ? (
+                                      <div className="project-tree-empty">No explorations yet.</div>
                                     ) : null}
                                   </div>
                                   <div className="project-tree-category">
@@ -4495,10 +4883,12 @@ export default function App() {
                                           );
                                         })}
                                       </div>
-                                    ) : !collapsedCategories.sessions ? (
+                                    ) : !collapsedCategories.sessions && itemState?.loaded ? (
                                       <div className="project-tree-empty">No sessions yet.</div>
                                     ) : null}
-                                    {!collapsedCategories.sessions && sessionsHasMore ? (
+                                    {!collapsedCategories.sessions &&
+                                    itemState?.loaded &&
+                                    sessionsHasMore ? (
                                       <button
                                         type="button"
                                         className="project-show-more"
@@ -4647,10 +5037,12 @@ export default function App() {
                                           });
                                         })()}
                                       </div>
-                                    ) : !collapsedCategories.code ? (
+                                    ) : !collapsedCategories.code && itemState?.loaded ? (
                                       <div className="project-tree-empty">No code files yet.</div>
                                     ) : null}
-                                    {!collapsedCategories.code && codeHasMore ? (
+                                    {!collapsedCategories.code &&
+                                    itemState?.loaded &&
+                                    codeHasMore ? (
                                       <button
                                         type="button"
                                         className="project-show-more"
@@ -4787,7 +5179,7 @@ export default function App() {
 
             <div
               ref={messageListRef}
-              className={`chat-message-list${isChatEmpty ? " empty" : ""}${showChatThreadHeader ? " thread-header-visible" : ""}${activeTab?.kind === "python_file" ? " python-file-view" : ""}${isWorkspaceView ? " workspace-view" : ""}${isAdminWorkspaceView ? " workspace-admin-view" : ""}`}
+              className={`chat-message-list${isChatEmpty ? " empty" : ""}${showChatThreadHeader ? " thread-header-visible" : ""}${activeTab?.kind === "python_file" ? " python-file-view" : ""}${activeTab?.kind === "paper_exploration" ? " paper-exploration-view" : ""}${isWorkspaceView ? " workspace-view" : ""}${isAdminWorkspaceView ? " workspace-admin-view" : ""}`}
               onScroll={handleMessageListScroll}
             >
               {workspaceView ? (
@@ -4831,6 +5223,42 @@ export default function App() {
                     </div>
                   </div>
                 )
+              ) : activeTab?.kind === "paper_exploration" ? (
+                activePaperExploration ? (
+                  <div className="paper-exploration-page">
+                    <header className="paper-exploration-header">
+                      <div className="paper-exploration-heading">
+                        <span>Exploration</span>
+                        <h1>{activePaperExploration.title}</h1>
+                        {activePaperExploration.authors ? (
+                          <p>{activePaperExploration.authors}</p>
+                        ) : null}
+                      </div>
+                      <button
+                        type="button"
+                        className="paper-exploration-delete"
+                        onClick={() => deletePaperExploration(activePaperExploration.explorationId)}
+                      >
+                        Delete exploration
+                      </button>
+                    </header>
+                    {activePaperExploration.pdfUrl ? (
+                      <iframe
+                        className="paper-exploration-frame"
+                        title={`${activePaperExploration.title} PDF`}
+                        src={activePaperExploration.pdfUrl}
+                      />
+                    ) : (
+                      <div className="paper-exploration-empty">
+                        No PDF URL is available for this paper.
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="paper-exploration-page missing">
+                    <div className="paper-exploration-empty">Exploration not found.</div>
+                  </div>
+                )
               ) : activeTab?.kind === "project_home" ? (
                 activeProjectHome ? (
                   <div className="project-home-page">
@@ -4851,8 +5279,8 @@ export default function App() {
                         <strong>{activeProjectHomeSessionCount}</strong>
                       </div>
                       <div className="project-home-stat">
-                        <span>Notes</span>
-                        <strong>0</strong>
+                        <span>Explorations</span>
+                        <strong>{activeProjectHomeExplorationCount}</strong>
                       </div>
                     </div>
                   </div>
@@ -4973,7 +5401,10 @@ export default function App() {
                 <ThreadPapersView
                   citations={activeThreadCitations}
                   paperCitationPreviews={paperCitationPreviews}
-                  openPaperDrawer={openPaperDrawer}
+                  openPaperPdfModal={openPaperPdfModal}
+                  openPaperExploration={openPaperExploration}
+                  startPaperExploration={(target) => void startPaperExploration(target)}
+                  paperExplorationIdsByPaperId={paperExplorationIdsByPaperId}
                 />
               ) : isChatEmpty ? (
                 <div className="chat-stage-spacer">
@@ -5170,7 +5601,7 @@ export default function App() {
                           <span className="chat-empty-action-icon" aria-hidden="true">
                             <EmptyStateActionIcon asset="note.svg" />
                           </span>
-                          <span className="chat-empty-action-label">Add notes</span>
+                          <span className="chat-empty-action-label">Add exploration</span>
                         </button>
                       </div>
                     </div>
@@ -5609,120 +6040,102 @@ export default function App() {
                               </div>
                             ) : null}
                             {message.role === "assistant" && message.citations.length > 0 ? (
-                              <div className="message-citations">
-                                {message.citations.map((citation) => {
-                                  const paperPreview = citation.paper_id
-                                    ? (paperCitationPreviews[citation.paper_id] ?? null)
-                                    : null;
-                                  const paperSummary = summarizeCitationPreview(
-                                    paperPreview?.paper ?? null,
-                                  );
-                                  return (
-                                    <div
-                                      key={citation.source_id}
-                                      id={sourceCardId(message.message_id, citation.source_id)}
-                                      className="citation-card"
-                                    >
-                                      <div className="citation-card-header">
-                                        <div>
-                                          <span className="citation-card-source-id">
-                                            {citation.source_id}
-                                          </span>
-                                          <strong className="citation-card-title">
-                                            {citation.title}
-                                          </strong>
-                                        </div>
-                                        {citation.paper_id ? (
-                                          <button
-                                            type="button"
-                                            className="citation-card-action"
-                                            onClick={() =>
-                                              openPaperDrawer(citation.paper_id!, citation.path)
-                                            }
-                                          >
-                                            Open paper
-                                          </button>
-                                        ) : null}
-                                      </div>
-                                      <div className="citation-card-path">
-                                        {citation.source_kind === "paperbase_paper"
-                                          ? "Paper"
-                                          : "Upload"}{" "}
-                                        · {citation.path}
-                                      </div>
-                                      {citation.paper_id ? (
-                                        <div className="citation-card-preview-shell">
+                              <details className="message-citations citation-compact-list">
+                                <summary className="message-citations-summary">
+                                  {messagePaperCount > 0
+                                    ? `Cited papers (${messagePaperCount})`
+                                    : `Sources (${message.citations.length})`}
+                                </summary>
+                                <div className="message-citations-items">
+                                  {message.citations.map((citation) => {
+                                    const paperPreview = citation.paper_id
+                                      ? (paperCitationPreviews[citation.paper_id] ?? null)
+                                      : null;
+                                    const paper = paperPreview?.paper ?? null;
+                                    const actionTarget: PaperActionTarget | null = citation.paper_id
+                                      ? {
+                                          paperId: citation.paper_id,
+                                          path: citation.path,
+                                          paper,
+                                          title: paper?.title ?? citation.title,
+                                          authors: paper?.authors ?? "",
+                                          previewImageUrl: paperPreview?.preview?.image_url ?? null,
+                                          pdfUrl: paper?.pdf_url ?? null,
+                                          projectId: activeThread?.project_id ?? null,
+                                        }
+                                      : null;
+                                    const hasExploration = Boolean(
+                                      citation.paper_id &&
+                                      paperExplorationIdsByPaperId[citation.paper_id],
+                                    );
+                                    const explorationId = citation.paper_id
+                                      ? paperExplorationIdsByPaperId[citation.paper_id]
+                                      : "";
+                                    const openCitationPaper = () => {
+                                      if (!actionTarget) {
+                                        return;
+                                      }
+                                      if (explorationId) {
+                                        openPaperExploration(explorationId);
+                                        return;
+                                      }
+                                      openPaperPdfModal(actionTarget);
+                                    };
+                                    return (
+                                      <div
+                                        key={citation.source_id}
+                                        id={sourceCardId(message.message_id, citation.source_id)}
+                                        className="citation-card citation-card-compact"
+                                      >
+                                        <button
+                                          type="button"
+                                          className="citation-card-compact-main"
+                                          onClick={openCitationPaper}
+                                        >
                                           {paperPreview?.preview?.image_url ? (
                                             <img
                                               src={paperPreview.preview.image_url}
-                                              alt={`${paperPreview.paper?.title ?? citation.title} preview`}
-                                              className="citation-card-preview-image"
+                                              alt={`${paper?.title ?? citation.title} preview`}
+                                              className="citation-card-compact-image"
                                             />
                                           ) : (
-                                            <div className="citation-card-preview-placeholder">
-                                              {paperPreview?.status === "loading"
-                                                ? "Loading preview..."
-                                                : "No preview"}
-                                            </div>
+                                            <span className="citation-card-compact-placeholder">
+                                              {paperPreview?.status === "loading" ? "" : "PDF"}
+                                            </span>
                                           )}
-                                          <div className="citation-card-preview-copy">
-                                            {paperPreview?.paper ? (
-                                              <>
-                                                <div className="citation-card-preview-meta">
-                                                  {paperPreview.paper.primary_category ||
-                                                    paperPreview.paper.categories}
-                                                  {paperPreview.paper.published
-                                                    ? ` · ${paperPreview.paper.published}`
-                                                    : ""}
-                                                </div>
-                                                <div className="citation-card-preview-authors">
-                                                  {paperPreview.paper.authors}
-                                                </div>
-                                                {paperSummary ? (
-                                                  <p className="citation-card-preview-summary">
-                                                    {paperSummary}
-                                                  </p>
-                                                ) : null}
-                                                <div className="citation-card-preview-links">
-                                                  {paperPreview.paper.html_url ? (
-                                                    <a
-                                                      className="citation-card-action"
-                                                      href={paperPreview.paper.html_url}
-                                                      target="_blank"
-                                                      rel="noreferrer"
-                                                    >
-                                                      HTML
-                                                    </a>
-                                                  ) : null}
-                                                  {paperPreview.paper.pdf_url ? (
-                                                    <a
-                                                      className="citation-card-action"
-                                                      href={paperPreview.paper.pdf_url}
-                                                      target="_blank"
-                                                      rel="noreferrer"
-                                                    >
-                                                      PDF
-                                                    </a>
-                                                  ) : null}
-                                                </div>
-                                              </>
-                                            ) : paperPreview?.status === "error" ? (
-                                              <div className="citation-card-preview-error">
-                                                {paperPreview.error}
-                                              </div>
-                                            ) : (
-                                              <div className="citation-card-preview-meta">
-                                                Loading paper details...
-                                              </div>
-                                            )}
-                                          </div>
-                                        </div>
-                                      ) : null}
-                                      <p className="citation-card-excerpt">{citation.excerpt}</p>
-                                    </div>
-                                  );
-                                })}
-                              </div>
+                                          <span className="citation-card-compact-copy">
+                                            <span className="citation-card-title-line">
+                                              <span className="citation-card-source-id">
+                                                {citation.source_id}
+                                              </span>
+                                              <strong className="citation-card-title">
+                                                {paper?.title ?? citation.title}
+                                              </strong>
+                                            </span>
+                                            <span className="citation-card-preview-authors">
+                                              {paper?.authors || "Author unavailable"}
+                                            </span>
+                                          </span>
+                                        </button>
+                                        {actionTarget ? (
+                                          <button
+                                            type="button"
+                                            className="citation-card-action citation-card-compact-action"
+                                            onClick={(event) => {
+                                              event.stopPropagation();
+                                              void startPaperExploration(actionTarget);
+                                            }}
+                                          >
+                                            {hasExploration
+                                              ? "Open exploration"
+                                              : "Start exploration"}
+                                          </button>
+                                        ) : null}
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              </details>
                             ) : null}
                           </article>
                           {turnActivities.map(renderToolActivityRow)}
@@ -5916,6 +6329,72 @@ export default function App() {
               </div>
             </aside>
           ) : null}
+        </div>
+      ) : null}
+
+      {paperPdfModal ? (
+        <div
+          className="paper-pdf-modal-shell"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`${paperPdfModal.title} PDF`}
+        >
+          <button
+            type="button"
+            className="paper-pdf-modal-backdrop"
+            aria-label="Close paper PDF"
+            onClick={closePaperPdfModal}
+          />
+          <div className="paper-pdf-modal">
+            <header className="paper-pdf-modal-header">
+              <div className="paper-pdf-modal-title">
+                <strong>{paperPdfModal.title}</strong>
+                {paperPdfModal.authors ? <span>{paperPdfModal.authors}</span> : null}
+              </div>
+              <div className="paper-pdf-modal-actions">
+                <button
+                  type="button"
+                  className="paper-pdf-explore-button"
+                  onClick={() => {
+                    void startPaperExploration({
+                      paperId: paperPdfModal.paperId,
+                      path: paperPdfModal.path,
+                      paper: paperPdfModal.paper,
+                      title: paperPdfModal.title,
+                      authors: paperPdfModal.authors,
+                      pdfUrl: paperPdfModal.pdfUrl,
+                    });
+                    closePaperPdfModal();
+                  }}
+                >
+                  Explore this paper
+                </button>
+                <button
+                  type="button"
+                  className="paper-pdf-modal-close"
+                  aria-label="Close paper PDF"
+                  onClick={closePaperPdfModal}
+                >
+                  ×
+                </button>
+              </div>
+            </header>
+            <div className="paper-pdf-modal-body">
+              {paperPdfModal.status === "loading" ? (
+                <div className="paper-pdf-modal-state">Loading PDF...</div>
+              ) : paperPdfModal.status === "error" ? (
+                <div className="paper-pdf-modal-state error">{paperPdfModal.error}</div>
+              ) : paperPdfModal.pdfUrl ? (
+                <iframe
+                  className="paper-pdf-frame"
+                  title={`${paperPdfModal.title} PDF`}
+                  src={paperPdfModal.pdfUrl}
+                />
+              ) : (
+                <div className="paper-pdf-modal-state">No PDF URL is available.</div>
+              )}
+            </div>
+          </div>
         </div>
       ) : null}
 

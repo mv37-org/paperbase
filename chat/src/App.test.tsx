@@ -206,7 +206,39 @@ vi.mock("./LandingMentionEditor", () => ({
 }));
 
 vi.mock("./MarkdownRenderer", () => ({
-  MarkdownRenderer: ({ markdown }: { markdown: string }) => <div>{markdown}</div>,
+  MarkdownRenderer: ({
+    markdown,
+    interactiveCitations,
+    onCitationClick,
+  }: {
+    markdown: string;
+    interactiveCitations?: boolean;
+    onCitationClick?: (sourceId: string) => void;
+  }) => {
+    if (!interactiveCitations) {
+      return <div>{markdown}</div>;
+    }
+    return (
+      <div>
+        {markdown.split(/(\[S\d+\])/g).map((part, index) => {
+          const match = part.match(/^\[(S\d+)\]$/);
+          if (!match) {
+            return <span key={`${part}:${index}`}>{part}</span>;
+          }
+          const sourceId = match[1] ?? "";
+          return (
+            <button
+              key={`${part}:${index}`}
+              type="button"
+              onClick={() => onCitationClick?.(sourceId)}
+            >
+              {part}
+            </button>
+          );
+        })}
+      </div>
+    );
+  },
 }));
 
 vi.mock("@monaco-editor/react", () => ({
@@ -1160,10 +1192,10 @@ describe("App", () => {
     const categoryLabels = [
       ...document.querySelectorAll<HTMLElement>(".project-tree-category-label"),
     ].map((element) => element.textContent?.trim());
-    expect(categoryLabels).toEqual(["Notes", "Sessions", "Code"]);
+    expect(categoryLabels).toEqual(["Explorations", "Sessions", "Code"]);
     expect(document.querySelectorAll(".project-tree-category-count")).toHaveLength(0);
     expect(screen.getByText("Home")).toBeTruthy();
-    expect(screen.getByText("Notes")).toBeTruthy();
+    expect(screen.getByText("Explorations")).toBeTruthy();
     expect(screen.getByText("Sessions")).toBeTruthy();
     expect(screen.getByText("Code")).toBeTruthy();
     expect(screen.getByLabelText("Collapse all sections in General")).toBeTruthy();
@@ -1175,12 +1207,12 @@ describe("App", () => {
 
     fireEvent.click(screen.getByLabelText("Collapse all sections in General"));
     expect(screen.queryByText("Recovered thread")).toBeNull();
-    expect(screen.queryByText("Notes")).toBeNull();
+    expect(screen.queryByText("Explorations")).toBeNull();
     expect(screen.queryByText("Home")).toBeNull();
     expect(screen.getByLabelText("Expand all sections in General")).toBeTruthy();
 
     fireEvent.click(screen.getByLabelText("Expand all sections in General"));
-    expect(await screen.findByText("Notes")).toBeTruthy();
+    expect(await screen.findByText("Explorations")).toBeTruthy();
     expect(await screen.findByText("Recovered thread")).toBeTruthy();
 
     fireEvent.click(screen.getByText("Home"));
@@ -1436,7 +1468,7 @@ describe("App", () => {
       expect(screen.getByText("Start new research in")).toBeTruthy();
     });
     expect(screen.getByRole("button", { name: "Add python file" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Add notes" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Add exploration" })).toBeTruthy();
     expect(screen.queryByTestId("thread-debug-strip")).toBeNull();
 
     fireEvent.click(screen.getByLabelText("Open empty state project picker"));
@@ -2604,17 +2636,25 @@ describe("App", () => {
     render(<App />);
 
     await waitFor(() => {
-      expect(screen.getByText("Benchmark Paper")).toBeTruthy();
+      expect(screen.getByRole("button", { name: "[S1]" })).toBeTruthy();
     });
-    expect(await screen.findByText("Short grounded benchmark summary.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "[S1]" }));
+    const pdfDialog = await screen.findByRole("dialog", { name: "Benchmark Paper PDF" });
+    expect(pdfDialog).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.getByTitle("Benchmark Paper PDF").getAttribute("src")).toBe(
+        "https://example.test/2401.12345.pdf",
+      );
+    });
+    fireEvent.click(screen.getAllByLabelText("Close paper PDF")[0]!);
+
+    fireEvent.click(screen.getByText("Cited papers (1)"));
+    expect(await screen.findByText("Benchmark Paper")).toBeTruthy();
     expect(screen.getByText("Ada Lovelace")).toBeTruthy();
     expect(screen.getByRole("img", { name: "Benchmark Paper preview" })).toBeTruthy();
-    expect(screen.getByRole("link", { name: "HTML" }).getAttribute("href")).toBe(
-      "https://example.test/2401.12345",
-    );
-    expect(screen.getByRole("link", { name: "PDF" }).getAttribute("href")).toBe(
-      "https://example.test/2401.12345.pdf",
-    );
+    expect(screen.queryByText("Short grounded benchmark summary.")).toBeNull();
+    expect(screen.queryByRole("link", { name: "HTML" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "PDF" })).toBeNull();
     expect(screen.getByRole("tab", { name: "Chat" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "Papers" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Retry response" })).toBeTruthy();
@@ -2628,6 +2668,13 @@ describe("App", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "1 sources" }));
     expect(await screen.findByText("Benchmark Paper")).toBeTruthy();
+    expect(screen.getByText("Short grounded benchmark summary.")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "HTML" }).getAttribute("href")).toBe(
+      "https://example.test/2401.12345",
+    );
+    expect(screen.getByRole("link", { name: "PDF" }).getAttribute("href")).toBe(
+      "https://example.test/2401.12345.pdf",
+    );
     expect(screen.queryByText("Read this paper [S1].")).toBeNull();
     expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
 
@@ -2654,6 +2701,23 @@ describe("App", () => {
           debug_bundle: expect.objectContaining({ thread_id: "thread_1" }),
         }),
       );
+    });
+
+    fireEvent.click(screen.getByText("Cited papers (1)"));
+    fireEvent.click(screen.getByRole("button", { name: "Start exploration" }));
+    await waitFor(() => {
+      expect(screen.getByText("Exploration")).toBeTruthy();
+    });
+    expect(screen.getByRole("heading", { name: "Benchmark Paper" })).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.getByTitle("Benchmark Paper PDF").getAttribute("src")).toBe(
+        "https://example.test/2401.12345.pdf",
+      );
+    });
+    expect(screen.getByText("Explorations")).toBeTruthy();
+    fireEvent.click(screen.getByLabelText("Delete exploration Benchmark Paper"));
+    await waitFor(() => {
+      expect(screen.getByText("Project Home")).toBeTruthy();
     });
   });
 

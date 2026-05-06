@@ -362,7 +362,10 @@ function normalizeStoredTab(value: unknown): OpenTab | null {
     "kind" in value &&
     "id" in value &&
     typeof value.id === "string" &&
-    (value.kind === "thread" || value.kind === "python_file" || value.kind === "project_home")
+    (value.kind === "thread" ||
+      value.kind === "python_file" ||
+      value.kind === "project_home" ||
+      value.kind === "paper_exploration")
   ) {
     return { kind: value.kind, id: value.id };
   }

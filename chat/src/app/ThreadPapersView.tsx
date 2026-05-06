@@ -1,17 +1,23 @@
 import type { ChatCitation } from "../types";
-import type { PaperCitationPreviewState } from "./appTypes";
+import type { PaperActionTarget, PaperCitationPreviewState } from "./appTypes";
 import { summarizeCitationPreview } from "./appUtils";
 
 type ThreadPapersViewProps = {
   citations: ChatCitation[];
   paperCitationPreviews: Record<string, PaperCitationPreviewState>;
-  openPaperDrawer: (paperId: string, path: string) => void;
+  openPaperPdfModal: (target: PaperActionTarget) => void;
+  openPaperExploration: (explorationId: string) => void;
+  startPaperExploration: (target: PaperActionTarget) => void;
+  paperExplorationIdsByPaperId: Record<string, string>;
 };
 
 export function ThreadPapersView({
   citations,
   paperCitationPreviews,
-  openPaperDrawer,
+  openPaperPdfModal,
+  openPaperExploration,
+  startPaperExploration,
+  paperExplorationIdsByPaperId,
 }: ThreadPapersViewProps) {
   return (
     <div className="thread-papers-view">
@@ -21,19 +27,48 @@ export function ThreadPapersView({
             const paperPreview = citation.paper_id
               ? (paperCitationPreviews[citation.paper_id] ?? null)
               : null;
+            const paper = paperPreview?.paper ?? null;
             const paperSummary = summarizeCitationPreview(paperPreview?.paper ?? null);
+            const actionTarget: PaperActionTarget | null = citation.paper_id
+              ? {
+                  paperId: citation.paper_id,
+                  path: citation.path,
+                  paper,
+                  title: paper?.title ?? citation.title,
+                  authors: paper?.authors ?? "",
+                  previewImageUrl: paperPreview?.preview?.image_url ?? null,
+                  pdfUrl: paper?.pdf_url ?? null,
+                }
+              : null;
+            const hasExploration = Boolean(
+              citation.paper_id && paperExplorationIdsByPaperId[citation.paper_id],
+            );
+            const explorationId = citation.paper_id
+              ? paperExplorationIdsByPaperId[citation.paper_id]
+              : "";
+            const openPaperTarget = () => {
+              if (!actionTarget) {
+                return;
+              }
+              if (explorationId) {
+                openPaperExploration(explorationId);
+                return;
+              }
+              openPaperPdfModal(actionTarget);
+            };
             return (
               <article
                 key={`${citation.source_id}:${citation.paper_id ?? citation.path}`}
-                className="thread-paper-card"
+                className={`thread-paper-card${actionTarget ? " clickable" : ""}`}
+                onClick={openPaperTarget}
               >
                 <div className="thread-paper-card-main">
                   <span className="thread-paper-source">{citation.source_id}</span>
-                  <h2>{paperPreview?.paper?.title ?? citation.title}</h2>
-                  {paperPreview?.paper ? (
+                  <h2>{paper?.title ?? citation.title}</h2>
+                  {paper ? (
                     <div className="thread-paper-meta">
-                      {paperPreview.paper.authors}
-                      {paperPreview.paper.published ? ` · ${paperPreview.paper.published}` : ""}
+                      {paper.authors}
+                      {paper.published ? ` · ${paper.published}` : ""}
                     </div>
                   ) : null}
                   {paperSummary ? (
@@ -43,13 +78,16 @@ export function ThreadPapersView({
                   )}
                 </div>
                 <div className="thread-paper-actions">
-                  {citation.paper_id ? (
+                  {actionTarget ? (
                     <button
                       type="button"
                       className="citation-card-action"
-                      onClick={() => openPaperDrawer(citation.paper_id!, citation.path)}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        startPaperExploration(actionTarget);
+                      }}
                     >
-                      Open paper
+                      {hasExploration ? "Open exploration" : "Start exploration"}
                     </button>
                   ) : null}
                   {paperPreview?.paper?.html_url ? (
@@ -58,6 +96,7 @@ export function ThreadPapersView({
                       href={paperPreview.paper.html_url}
                       target="_blank"
                       rel="noreferrer"
+                      onClick={(event) => event.stopPropagation()}
                     >
                       HTML
                     </a>
@@ -68,6 +107,7 @@ export function ThreadPapersView({
                       href={paperPreview.paper.pdf_url}
                       target="_blank"
                       rel="noreferrer"
+                      onClick={(event) => event.stopPropagation()}
                     >
                       PDF
                     </a>
