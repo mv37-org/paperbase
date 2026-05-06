@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import traceback
 from urllib import error as urllib_error
 from urllib.parse import quote
 from urllib import request as urllib_request
@@ -290,7 +291,13 @@ _ADMIN_LATEST_SYNC_JOB_ID = "env:latest_sync"
 _ADMIN_STALLED_AFTER = timedelta(minutes=10)
 _ADMIN_TRACKED_PAPER_JOB_TYPES = frozenset(
     {
+        "enrich_missing_metadata",
+        "harvest_author",
+        "harvest_chunk",
         "index_paper",
+        "ingest_repo",
+        "reindex_embeddings",
+        "reindex_missing_embeddings",
         "sync_latest",
         "harvest_range",
         "harvest_top_cited",
@@ -349,6 +356,17 @@ def _job_activity_stalled(updated_at, *, now) -> bool:
 
 def _job_type_tracks_papers(job_type: str) -> bool:
     return job_type in _ADMIN_TRACKED_PAPER_JOB_TYPES
+
+
+def _job_public_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    public_payload = dict(payload or {})
+    public_payload.pop("__debug", None)
+    return public_payload
+
+
+def _job_debug_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    debug = (payload or {}).get("__debug")
+    return debug if isinstance(debug, dict) else {}
 
 
 def _job_paper_outcome_rank(value: str) -> int:
@@ -5945,6 +5963,7 @@ class PaperbaseService:
         limit: int,
         include_chunks: bool = True,
         rewrite_existing: bool = True,
+        tracking_job: JobResponse | None = None,
     ) -> dict[str, int]:
         if self.embeddings is None:
             logger.warning(
@@ -5986,6 +6005,14 @@ class PaperbaseService:
                     self._raise_if_current_job_canceled()
                     self.repository.update_paper_embedding(paper.paper_id, vector)
                     papers_updated += 1
+                    if tracking_job is not None:
+                        self.repository.record_job_paper(
+                            tracking_job.job_id,
+                            paper.paper_id,
+                            outcome="updated",
+                            arxiv_id=paper.arxiv_id,
+                            title=paper.title,
+                        )
 
             if include_chunks:
                 for paper in batch:
@@ -5996,6 +6023,7 @@ class PaperbaseService:
                     )
                     if not chunks:
                         continue
+                    paper_chunks_updated = 0
                     cap = self.settings.chunk_max_chars + self.settings.chunk_overlap_chars
                     for start in range(0, len(chunks), chunk_page):
                         self._raise_if_current_job_canceled()
@@ -6008,6 +6036,15 @@ class PaperbaseService:
                             self._raise_if_current_job_canceled()
                             self.repository.update_chunk_embedding(chunk["chunk_id"], vector)
                             chunks_updated += 1
+                            paper_chunks_updated += 1
+                    if tracking_job is not None and paper_chunks_updated > 0:
+                        self.repository.record_job_paper(
+                            tracking_job.job_id,
+                            paper.paper_id,
+                            outcome="updated",
+                            arxiv_id=paper.arxiv_id,
+                            title=paper.title,
+                        )
 
             after = batch[-1]
             remaining -= len(batch)
@@ -6060,6 +6097,7 @@ class PaperbaseService:
         min_age_seconds: int = 3600,
         batch_size: int = 20,
         raise_on_failed_batches: bool = False,
+        tracking_job: JobResponse | None = None,
     ) -> dict[str, int]:
         """Re-run Semantic Scholar enrichment for any paper that inline
         enrichment left unfilled. Uses aggressive retry (default max_retries)
@@ -6107,12 +6145,29 @@ class PaperbaseService:
             for paper, meta in zip(batch, metas):
                 self._raise_if_current_job_canceled()
                 if not (meta.semantic_scholar_id or (meta.citation_count and meta.citation_count > 0)):
+                    if tracking_job is not None:
+                        self.repository.record_job_paper(
+                            tracking_job.job_id,
+                            paper.paper_id,
+                            outcome="skipped",
+                            arxiv_id=paper.arxiv_id,
+                            title=paper.title,
+                            skip_reason="no_enrichment_data",
+                        )
                     continue
                 # Re-use the shallow upsert path to persist enrichment —
                 # it writes citation_count / influential_citation_count /
                 # semantic_scholar_id / tldr without touching index artifacts.
                 self.repository.upsert_paper_shallow(meta)
                 total_updated += 1
+                if tracking_job is not None:
+                    self.repository.record_job_paper(
+                        tracking_job.job_id,
+                        paper.paper_id,
+                        outcome="updated",
+                        arxiv_id=paper.arxiv_id,
+                        title=paper.title,
+                    )
                 # #39 PR C: persist S2 author rows alongside the enrichment.
                 if outcome is not None:
                     author_rows = outcome.authors_by_arxiv.get(meta.arxiv_id) or []
@@ -6304,7 +6359,13 @@ class PaperbaseService:
         )
         return job
 
-    def ingest_repo(self, paper_id: str, *, force: bool = False) -> PaperResponse | None:
+    def ingest_repo(
+        self,
+        paper_id: str,
+        *,
+        force: bool = False,
+        tracking_job: JobResponse | None = None,
+    ) -> PaperResponse | None:
         """Fetch, extract, classify, and persist the paper's linked GitHub
         repo artifacts (#5).
 
@@ -6318,27 +6379,49 @@ class PaperbaseService:
         self._raise_if_current_job_canceled()
         paper = self.repository.get_paper(paper_id)
         if paper is None:
+            if tracking_job is not None:
+                self.repository.record_job_paper(tracking_job.job_id, paper_id, outcome="failed")
             return None
         code_url = (paper.code_url or "").strip()
         if not code_url:
             manifest = code_ingest.skipped_manifest(code_url="", reason="no_code_url")
-            return self.repository.update_code_ingest_state(
+            updated = self.repository.update_code_ingest_state(
                 paper_id,
                 status="skipped",
                 is_python=None,
                 python_reason="no_code_url",
                 manifest=manifest,
             )
+            if tracking_job is not None:
+                self.repository.record_job_paper(
+                    tracking_job.job_id,
+                    paper_id,
+                    outcome="skipped",
+                    arxiv_id=paper.arxiv_id,
+                    title=paper.title,
+                    skip_reason="no_code_url",
+                )
+            return updated
         ref = code_ingest.parse_github_url(code_url)
         if ref is None:
             manifest = code_ingest.skipped_manifest(code_url=code_url, reason="unsupported_host")
-            return self.repository.update_code_ingest_state(
+            updated = self.repository.update_code_ingest_state(
                 paper_id,
                 status="skipped",
                 is_python=None,
                 python_reason="unsupported_host",
                 manifest=manifest,
             )
+            if tracking_job is not None:
+                self.repository.record_job_paper(
+                    tracking_job.job_id,
+                    paper_id,
+                    outcome="skipped",
+                    arxiv_id=paper.arxiv_id,
+                    title=paper.title,
+                    skip_reason="unsupported_host",
+                )
+            return updated
         self.repository.update_code_ingest_state(paper_id, status="indexing")
         try:
             archive = code_ingest.fetch_github_archive(
@@ -6358,13 +6441,23 @@ class PaperbaseService:
                 # Same commit as last time — restore the terminal state after
                 # the transient indexing marker and skip re-extracting.
                 self._raise_if_current_job_canceled()
-                return self.repository.update_code_ingest_state(
+                updated = self.repository.update_code_ingest_state(
                     paper_id,
                     status="indexed",
                     is_python=paper.code_is_python,
                     python_reason=paper.code_python_reason,
                     manifest=paper.code_manifest,
                 )
+                if tracking_job is not None:
+                    self.repository.record_job_paper(
+                        tracking_job.job_id,
+                        paper_id,
+                        outcome="skipped",
+                        arxiv_id=paper.arxiv_id,
+                        title=paper.title,
+                        skip_reason="same_resolved_sha",
+                    )
+                return updated
             with tempfile.TemporaryDirectory() as tmp:
                 scratch = Path(tmp) / "repo"
                 report = code_ingest.extract_archive_safely(
@@ -6449,13 +6542,22 @@ class PaperbaseService:
                     "indexed_chunk_count": len(code_chunks),
                 },
             )
-            return self.repository.update_code_ingest_state(
+            updated = self.repository.update_code_ingest_state(
                 paper_id,
                 status="indexed",
                 is_python=is_python,
                 python_reason=reason,
                 manifest=manifest,
             )
+            if tracking_job is not None:
+                self.repository.record_job_paper(
+                    tracking_job.job_id,
+                    paper_id,
+                    outcome="updated",
+                    arxiv_id=paper.arxiv_id,
+                    title=paper.title,
+                )
+            return updated
         except code_ingest.CodeIngestError as exc:
             reason = f"fetch_failed:{type(exc).__name__}"
             logger.warning(
@@ -6478,13 +6580,22 @@ class PaperbaseService:
                 },
             )
         manifest = code_ingest.skipped_manifest(code_url=code_url, reason=reason)
-        return self.repository.update_code_ingest_state(
+        updated = self.repository.update_code_ingest_state(
             paper_id,
             status="failed",
             is_python=None,
             python_reason=reason,
             manifest=manifest,
         )
+        if tracking_job is not None:
+            self.repository.record_job_paper(
+                tracking_job.job_id,
+                paper_id,
+                outcome="failed",
+                arxiv_id=paper.arxiv_id,
+                title=paper.title,
+            )
+        return updated
 
     # ------------------------------------------------------------------ #
     # Paper-code retrieval primitives (#5 PR 2) — read-only.
@@ -7608,6 +7719,7 @@ class PaperbaseService:
         max_papers_per_author: int | None,
         chunk_size: int,
         harvest_id: str | None = None,
+        root_job_id: str | None = None,
     ) -> dict[str, int]:
         """Planner: derive top authors from the indexed corpus, then for
         each page S2 and enqueue ``harvest_chunk`` jobs
@@ -7660,6 +7772,7 @@ class PaperbaseService:
                         f"harvest_chunk:{run_harvest_id}:s2_author:{author_id}:"
                         f"{pending_batch[0]}-{pending_batch[-1]}-{len(pending_batch)}"
                     ),
+                    root_job_id=root_job_id or run_harvest_id,
                 )
                 chunks_created += 1
                 pending_batch = []
@@ -7711,6 +7824,7 @@ class PaperbaseService:
         arxiv_ids: list[str],
         top_author_s2_id: str | None = None,
         harvest_id: str | None = None,
+        tracking_job: JobResponse | None = None,
     ) -> dict[str, int]:
         """Chunk worker for ``source='s2_author'``.
 
@@ -7739,9 +7853,16 @@ class PaperbaseService:
         for arxiv_id in deduped_ids:
             self._raise_if_current_job_canceled()
             try:
-                stored = self.index_arxiv_paper(arxiv_id, force=False)
+                stored = self._call_index_arxiv_paper(arxiv_id, force=False, tracking_job=tracking_job)
                 indexed += 1
             except PermanentError:
+                if tracking_job is not None:
+                    self.repository.record_job_paper(
+                        tracking_job.job_id,
+                        canonical_paper_id(arxiv_id),
+                        outcome="failed",
+                        arxiv_id=arxiv_id,
+                    )
                 skipped += 1
                 continue
             if top_author_s2_id:
@@ -7869,6 +7990,7 @@ class PaperbaseService:
                         arxiv_ids=list(job.payload.get("arxiv_ids", [])),
                         top_author_s2_id=job.payload.get("top_author_s2_id"),
                         harvest_id=str(job.payload.get("harvest_id") or job.job_id),
+                        tracking_job=job,
                     )
                 else:
                     self.run_harvest_chunk(
@@ -7908,6 +8030,7 @@ class PaperbaseService:
                     max_papers_per_author=job.payload.get("max_papers_per_author"),
                     chunk_size=int(job.payload.get("chunk_size", 50)),
                     harvest_id=str(job.payload.get("harvest_id") or job.job_id),
+                    root_job_id=job.root_job_id or job.job_id,
                 )
             elif job.job_type in {"reindex_embeddings", "reindex_missing_embeddings"}:
                 self.reindex_embeddings(
@@ -7916,17 +8039,20 @@ class PaperbaseService:
                     rewrite_existing=bool(
                         job.payload.get("rewrite_existing", job.job_type == "reindex_embeddings")
                     ),
+                    tracking_job=job,
                 )
             elif job.job_type == "enrich_missing_metadata":
                 self.enrich_missing_metadata(
                     limit=int(job.payload.get("limit", 50_000)),
                     min_age_seconds=int(job.payload.get("min_age_seconds", 3600)),
                     raise_on_failed_batches=True,
+                    tracking_job=job,
                 )
             elif job.job_type == "ingest_repo":
                 self.ingest_repo(
                     job.payload["paper_id"],
                     force=bool(job.payload.get("force")),
+                    tracking_job=job,
                 )
             else:
                 raise ValueError(f"Unsupported job type: {job.job_type}")
@@ -7977,6 +8103,7 @@ class PaperbaseService:
             permanent=permanent,
             next_run_at=next_run_at,
             lease_token=job.lease_token,
+            error_trace=traceback.format_exc(),
         )
         logger.exception(
             "Job failed",
@@ -8074,6 +8201,7 @@ class PaperbaseService:
         status_counts: dict[str, int] = {}
         latest_error = representative.error
         latest_error_at = representative.updated_at
+        latest_error_job = representative if representative.error else None
         latest_updated_at = representative.updated_at
         earliest_created_at = representative.created_at
         for job in jobs:
@@ -8085,6 +8213,7 @@ class PaperbaseService:
             if job.error and (latest_error is None or job.updated_at >= latest_error_at):
                 latest_error = job.error
                 latest_error_at = job.updated_at
+                latest_error_job = job
 
         base_status = representative.status
         if status_counts.get("running", 0) > 0:
@@ -8103,23 +8232,44 @@ class PaperbaseService:
             display_status = "stalled"
 
         tracked: list[Any] = []
-        tracking_available = False
-        indexed_paper_count: int | None = None
-        tracked_paper_count: int | None = None
+        tracking_available = _job_type_tracks_papers(representative.job_type)
+        indexed_paper_count: int | None = 0 if tracking_available else None
+        tracked_paper_count: int | None = 0 if tracking_available else None
         paper_outcome_counts: dict[str, int] = {}
-        if _job_type_tracks_papers(representative.job_type):
+        if tracking_available:
             tracked = self.repository.list_job_papers_for_root(root_job_id)
-            tracking_available = bool(tracked)
         if tracking_available:
             paper_outcome_counts = _job_paper_outcome_counts(tracked)
             indexed_paper_count = paper_outcome_counts.get("indexed", 0)
             tracked_paper_count = sum(paper_outcome_counts.values())
 
+        child_job_ids = [job.job_id for job in jobs if job.job_id != representative.job_id]
+        latest_error_debug = _job_debug_payload(latest_error_job.payload) if latest_error_job is not None else {}
         details: dict[str, Any] = {
             "status_counts": status_counts,
             "job_count": len(jobs),
+            "job_ids": [job.job_id for job in jobs],
+            "child_job_ids": child_job_ids,
+            "root_job_id": root_job_id,
+            "representative_job_id": representative.job_id,
+            "latest_error_job_id": latest_error_job.job_id if latest_error_job is not None else None,
+            "latest_error_trace": latest_error_debug.get("last_error_trace") or None,
+            "latest_error_failed_at": latest_error_debug.get("failed_at") or None,
+            "latest_error_permanent": latest_error_debug.get("permanent"),
+            "latest_error_next_run_at": latest_error_debug.get("next_run_at"),
+            "worker_id": representative.worker_id,
+            "heartbeat_at": representative.heartbeat_at,
+            "lease_expires_at": representative.lease_expires_at,
+            "next_run_at": representative.next_run_at,
+            "last_attempted_at": representative.last_attempted_at,
+            "cancel_requested_at": representative.cancel_requested_at,
+            "cloud_run_log_filter": (
+                f'jsonPayload.job_id="{root_job_id}" OR jsonPayload.root_job_id="{root_job_id}" '
+                f'OR textPayload:"{root_job_id}"'
+            ),
         }
-        payload = dict(representative.payload)
+        payload = _job_public_payload(representative.payload)
+        details["payload_json"] = json.dumps(payload, indent=2, sort_keys=True)
         if representative.job_type == "harvest_range":
             details.update(
                 {
@@ -8224,15 +8374,12 @@ class PaperbaseService:
             for job in sync_jobs:
                 sync_status_counts[job.status] = sync_status_counts.get(job.status, 0) + 1
             latest_sync_root_job_id = latest_sync.root_job_id or latest_sync.job_id if latest_sync is not None else None
-            latest_sync_tracking_available = False
-            latest_sync_indexed_paper_count: int | None = None
-            latest_sync_tracked_paper_count: int | None = None
+            latest_sync_tracking_available = latest_sync is not None and _job_type_tracks_papers(latest_sync.job_type)
+            latest_sync_indexed_paper_count: int | None = 0 if latest_sync_tracking_available else None
+            latest_sync_tracked_paper_count: int | None = 0 if latest_sync_tracking_available else None
             latest_sync_paper_outcome_counts: dict[str, int] = {}
-            if latest_sync is not None and latest_sync_root_job_id is not None and _job_type_tracks_papers(
-                latest_sync.job_type
-            ):
+            if latest_sync_tracking_available and latest_sync_root_job_id is not None:
                 tracked = self.repository.list_job_papers_for_root(latest_sync_root_job_id)
-                latest_sync_tracking_available = bool(tracked)
             else:
                 tracked = []
             if latest_sync_tracking_available:
@@ -8296,6 +8443,9 @@ class PaperbaseService:
                         "latest_run_updated_at": latest_run_updated_at,
                         "latest_run_job_id": latest_run_job_id,
                         "status_counts": sync_status_counts,
+                        "root_job_id": latest_sync_root_job_id or _ADMIN_LATEST_SYNC_JOB_ID,
+                        "job_ids": [job.job_id for job in sync_jobs],
+                        "cloud_run_log_filter": 'jsonPayload.job_type="sync_latest" OR textPayload:"sync_latest"',
                     },
                 )
             )

@@ -12,7 +12,7 @@ The authenticated sidebar is project-first, with a small signed-in Browse area a
 
 - `Trending papers` now works for public read and signed-in interaction, with paginated 50-paper `Latest` and `Hottest` feeds over fully indexed and enriched papers, full paper detail, and nested comments/replies
 - allowlisted admins also get an `Admin panel` jobs workspace in that Browse section
-- the admin tracked-papers drilldown fetches paginated paper pages per job run, including summarized top-cited papers, instead of loading all tracked papers at once
+- the admin tracked-papers drilldown fetches paginated paper pages per job run, including summarized top-cited papers, and expanded job rows expose payloads, Cloud Run log filters, and stored failure traces for debugging
 - projects expand and collapse independently and lazily fetch mixed project items
 - each project can start new chats, be renamed, or be deleted from the sidebar, but new projects require a connected GitHub repo
 - the new-project modal lists accessible GitHub repos in a custom dropdown, with "Create new repo" as the first option and `main` fixed for newly created repos
@@ -24,6 +24,7 @@ The authenticated sidebar is project-first, with a small signed-in Browse area a
 - `New chat` sessions are renamed after the first real user prompt to a compact 3-5 word summary and then keep that title on later turns
 - chat markdown renders inline/block LaTeX formulas, while localhost-only thread debug metadata stays out of the empty-chat landing layout
 - assistant commentary is prompted before non-trivial tool batches, then collapses behind a `Worked for ...` summary once the final answer arrives so session actions stay grouped with the conclusion
+- the fixed Chat/Papers thread header is hidden until an assistant reply exists, and follow-up prompts anchor the new turn at the top of the chat viewport so prior turns move out of focus
 - signed-in pages can switch between light and dark mode from Settings → Appearance, and the theme covers the shell, markdown, drawers, icons, and modals without changing the public landing page
 - Python and imported notebook rows open as the single active Monaco-backed editor view with explicit `Save` and `Run` actions
 - project coding turns use the Codex-style turn loop and can mix commentary, tool calls, and final answers in a single persisted turn while keeping final answers brief and grounded in cited research-paper evidence for in-scope turns; uploaded-document evidence is used only when explicitly requested

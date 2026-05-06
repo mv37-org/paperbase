@@ -977,10 +977,81 @@ function readAdminJobsTheme(): AdminJobsTheme {
   };
 }
 
-function detailRows(job: AdminJobOverviewRow) {
+function debugValue(value: unknown): ReactNode {
+  if (value === null || typeof value === "undefined" || value === "") {
+    return "—";
+  }
+  if (Array.isArray(value)) {
+    return value.length > 0 ? value.join(", ") : "—";
+  }
+  if (typeof value === "object") {
+    return <pre className="admin-jobs-debug-block">{JSON.stringify(value, null, 2)}</pre>;
+  }
+  return String(value);
+}
+
+function debugBlock(value: unknown): ReactNode {
+  const text = typeof value === "string" ? value : JSON.stringify(value ?? "", null, 2);
+  if (!text) {
+    return "—";
+  }
+  return <pre className="admin-jobs-debug-block">{text}</pre>;
+}
+
+function baseDetailRows(job: AdminJobOverviewRow): Array<[string, ReactNode]> {
   const details = job.details ?? {};
+  return [
+    ["Root job id", debugValue(details.root_job_id ?? job.root_job_id)],
+    ["Representative job id", debugValue(details.representative_job_id ?? job.job_id)],
+    ["All job ids", debugValue(details.job_ids)],
+    ["Child job ids", debugValue(details.child_job_ids)],
+    ["Worker id", debugValue(details.worker_id)],
+    ["Heartbeat", details.heartbeat_at ? formatTimestamp(String(details.heartbeat_at)) : "—"],
+    [
+      "Lease expires",
+      details.lease_expires_at ? formatTimestamp(String(details.lease_expires_at)) : "—",
+    ],
+    ["Next run", details.next_run_at ? formatTimestamp(String(details.next_run_at)) : "—"],
+    [
+      "Last attempted",
+      details.last_attempted_at ? formatTimestamp(String(details.last_attempted_at)) : "—",
+    ],
+    [
+      "Cancel requested",
+      details.cancel_requested_at ? formatTimestamp(String(details.cancel_requested_at)) : "—",
+    ],
+    ["Cloud Run log filter", debugBlock(details.cloud_run_log_filter)],
+    ["Payload", debugBlock(details.payload_json)],
+    ["Latest error job", debugValue(details.latest_error_job_id)],
+    [
+      "Latest error failed at",
+      details.latest_error_failed_at
+        ? formatTimestamp(String(details.latest_error_failed_at))
+        : "—",
+    ],
+    [
+      "Latest error permanent",
+      typeof details.latest_error_permanent === "boolean"
+        ? details.latest_error_permanent
+          ? "Yes"
+          : "No"
+        : "—",
+    ],
+    [
+      "Latest error next run",
+      details.latest_error_next_run_at
+        ? formatTimestamp(String(details.latest_error_next_run_at))
+        : "—",
+    ],
+    ["Stack trace", details.latest_error_trace ? debugBlock(details.latest_error_trace) : "—"],
+  ];
+}
+
+function detailRows(job: AdminJobOverviewRow): Array<[string, ReactNode]> {
+  const details = job.details ?? {};
+  let rows: Array<[string, ReactNode]> = [];
   if (job.job_type === "latest_sync_schedule") {
-    return [
+    rows = [
       ["Interval", `${details.sync_interval_seconds ?? 0}s`],
       ["Categories", Array.isArray(details.categories) ? details.categories.join(", ") : "—"],
       ["Days", String(details.days ?? "—")],
@@ -992,46 +1063,41 @@ function detailRows(job: AdminJobOverviewRow) {
       ],
       ["Latest run updated", formatTimestamp(String(details.latest_run_updated_at ?? ""))],
     ];
-  }
-  if (job.job_type === "harvest_range") {
-    return [
+  } else if (job.job_type === "harvest_range") {
+    rows = [
       ["Harvest id", String(details.harvest_id ?? job.root_job_id)],
       ["Categories", Array.isArray(details.categories) ? details.categories.join(", ") : "—"],
       ["Window", `${details.start_date ?? "—"} to ${details.end_date ?? "—"}`],
       ["Chunk months", String(details.chunk_months ?? "—")],
       ["Per-window limit", String(details.limit_per_window ?? "—")],
     ];
-  }
-  if (job.job_type === "harvest_top_cited") {
-    return [
+  } else if (job.job_type === "harvest_top_cited") {
+    rows = [
       ["Harvest id", String(details.harvest_id ?? job.root_job_id)],
       ["Minimum citations", String(details.min_citations ?? "—")],
       ["Paper cap", String(details.max_papers ?? "—")],
       ["Chunk size", String(details.chunk_size ?? "—")],
     ];
-  }
-  if (job.job_type === "harvest_venue") {
-    return [
+  } else if (job.job_type === "harvest_venue") {
+    rows = [
       ["Harvest id", String(details.harvest_id ?? job.root_job_id)],
       ["Venue", String(details.venue ?? "—")],
       ["Year", String(details.year ?? "—")],
       ["Paper cap", String(details.max_papers ?? "—")],
       ["Chunk size", String(details.chunk_size ?? "—")],
     ];
-  }
-  if (job.job_type === "index_paper") {
-    return [
+  } else if (job.job_type === "index_paper") {
+    rows = [
       ["arXiv id", String(details.arxiv_id ?? "—")],
       ["Force reindex", details.force ? "Yes" : "No"],
     ];
-  }
-  if (job.job_type === "enrich_missing_metadata") {
-    return [
+  } else if (job.job_type === "enrich_missing_metadata") {
+    rows = [
       ["Limit", String(details.limit ?? "—")],
       ["Min age (seconds)", String(details.min_age_seconds ?? "—")],
     ];
   }
-  return [];
+  return [...rows, ...baseDetailRows(job)];
 }
 
 function metadataRows(paper: PaperResponse | null, entry: AdminJobPaperResponse | null) {
@@ -2109,7 +2175,7 @@ export function AdminOpsPanel({
                                   {trackedPaperCount ?? 0}
                                 </button>
                               ) : (
-                                <span>—</span>
+                                <span>{trackedPaperCount ?? 0}</span>
                               )}
                             </td>
                             <td>{formatTimestamp(job.updated_at)}</td>

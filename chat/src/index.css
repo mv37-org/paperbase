@@ -6444,6 +6444,21 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
   font-family: "JetBrains Mono", "SFMono-Regular", monospace;
 }
 
+.admin-jobs-debug-block {
+  display: block;
+  max-width: min(100%, 960px);
+  max-height: 280px;
+  overflow: auto;
+  margin: 4px 0 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(27, 22, 17, 0.04);
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .admin-jobs-skeleton-row td {
   padding-top: 14px;
   padding-bottom: 14px;

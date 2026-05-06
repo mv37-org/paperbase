@@ -1061,6 +1061,18 @@ def test_summarize_top_cited_job_tracks_updated_papers_for_admin(monkeypatch, se
     assert job_papers.papers[0].title == "Summary Candidate"
 
 
+def test_admin_jobs_overview_keeps_papers_column_available_without_records(service: PaperbaseService):
+    job = service.repository.create_job("enrich_missing_metadata", {"limit": 1})
+
+    overview = service.get_admin_jobs_overview(limit=10)
+    row = next(row for row in overview.jobs if row.job_id == job.job_id)
+
+    assert row.tracking_available is True
+    assert row.tracked_paper_count == 0
+    assert row.indexed_paper_count == 0
+    assert row.paper_outcome_counts == {}
+
+
 def test_latest_sync_schedule_uses_latest_run_tracking_for_legacy_rootless_jobs():
     service = PaperbaseService(
         settings=Settings(
@@ -1866,6 +1878,30 @@ def test_reindex_rewrites_existing_embeddings_when_requested(service: PaperbaseS
         for chunk in service.repository.list_chunks_missing_embedding(paper_id, include_existing=True)
     ]
     assert updated_chunk_embeddings != original_chunk_embeddings
+
+
+def test_reindex_embeddings_job_tracks_updated_papers_for_admin(service: PaperbaseService):
+    paper_id = _seed_indexed_paper(
+        service.repository,
+        "2402.77777",
+        with_paper_embedding=True,
+        chunks_with_embedding=1,
+        chunks_without_embedding=0,
+    )
+    service.embeddings = _StubEmbeddings()
+
+    job = service.enqueue_reindex_embeddings_job(limit=10, include_chunks=True, rewrite_existing=True)
+    completed = service.process_next_job()
+
+    assert completed is not None
+    assert completed.status == "completed"
+    job_papers = service.get_admin_job_papers(job.job_id)
+    assert job_papers.outcome_counts == {"updated": 1}
+    assert job_papers.papers[0].paper_id == paper_id
+    overview = service.get_admin_jobs_overview(limit=10)
+    row = next(row for row in overview.jobs if row.job_id == job.job_id)
+    assert row.tracking_available is True
+    assert row.tracked_paper_count == 1
 
 
 def test_reindex_batches_large_chunk_rewrites(service: PaperbaseService):
@@ -6129,6 +6165,8 @@ def test_retryable_exception_requeues_with_future_next_run_at(monkeypatch):
         f"{processed.next_run_at}"
     )
     assert "upstream 503" in (processed.error or "")
+    assert processed.payload["__debug"]["last_error"] == "upstream 503"
+    assert "raise_retryable" in processed.payload["__debug"]["last_error_trace"]
 
 
 def test_permanent_exception_dead_letters_immediately(monkeypatch):
@@ -6576,6 +6614,48 @@ def test_enrich_missing_metadata_backfills_papers_that_inline_enrichment_missed(
     assert stored.semantic_scholar_id == "s2-2401.33333"
     # Second pass: the paper is out of the queue now that it has citations.
     assert service.repository.list_papers_needing_enrichment(limit=10) == []
+
+
+def test_enrich_missing_metadata_job_tracks_scanned_papers_for_admin(monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    service = _retry_service()
+    stale = PaperMetadata(
+        arxiv_id="2401.33334",
+        title="Tracked Enrichment Paper",
+        authors="Z",
+        abstract="abstract",
+        categories="cs.AI",
+        primary_category="cs.AI",
+        published="2024-01-01",
+        updated="2024-01-01",
+        pdf_url="https://example.test/s.pdf",
+        html_url="https://example.test/s",
+        citation_count=0,
+        semantic_scholar_id=None,
+        index_status="indexed",
+        indexed_at=datetime.now(UTC) - timedelta(hours=2),
+    )
+    service.repository.upsert_paper(stale, search_document="", embedding=None)
+
+    def fake_enrich(papers, **_kwargs):
+        from paperbase.sources import EnrichmentOutcome
+
+        for paper in papers:
+            paper.citation_count = 99
+            paper.semantic_scholar_id = f"s2-{paper.arxiv_id}"
+        return EnrichmentOutcome(attempted=len(papers), enriched=len(papers), batches_succeeded=1)
+
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", fake_enrich)
+    job = service.enqueue_enrich_missing_metadata_job(limit=10, min_age_seconds=3600)
+
+    completed = service.process_next_job()
+
+    assert completed is not None
+    assert completed.status == "completed"
+    job_papers = service.get_admin_job_papers(job.job_id)
+    assert job_papers.outcome_counts == {"updated": 1}
+    assert job_papers.papers[0].title == "Tracked Enrichment Paper"
 
 
 def test_list_papers_needing_enrichment_respects_min_age_floor():
@@ -7099,6 +7179,10 @@ def test_process_next_job_dispatches_ingest_repo(
     refreshed = service.repository.get_paper(paper_id)
     assert refreshed is not None
     assert refreshed.code_index_status == "indexed"
+
+    job_papers = service.get_admin_job_papers(job.job_id)
+    assert job_papers.outcome_counts == {"updated": 1}
+    assert job_papers.papers[0].paper_id == paper_id
 
 
 def test_enqueue_ingest_repo_job_records_payload(service: PaperbaseService) -> None:

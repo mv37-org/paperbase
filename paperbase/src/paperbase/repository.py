@@ -1702,6 +1702,7 @@ class PaperRepository(ABC):
         permanent: bool = False,
         next_run_at: Any | None = None,
         lease_token: str | None = None,
+        error_trace: str | None = None,
     ) -> None:
         raise NotImplementedError
 
@@ -5510,6 +5511,9 @@ class SqlAlchemyPaperRepository(PaperRepository):
         with self._session() as session:
             row = session.get(JobORM, job_id)
             if row and self._claim_matches(row, lease_token):
+                payload = dict(row.payload or {})
+                payload.pop("__debug", None)
+                row.payload = payload
                 row.status = "canceled" if row.cancel_requested_at is not None else "completed"
                 row.finished_at = utcnow()
                 row.updated_at = utcnow()
@@ -5546,6 +5550,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
         permanent: bool = False,
         next_run_at: Any | None = None,
         lease_token: str | None = None,
+        error_trace: str | None = None,
     ) -> None:
         """Record a failed attempt.
 
@@ -5568,8 +5573,18 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 row.lease_expires_at = None
                 row.next_run_at = None
                 return
+            now = utcnow()
             row.error = error
-            row.updated_at = utcnow()
+            payload = dict(row.payload or {})
+            payload["__debug"] = {
+                "last_error": error,
+                "last_error_trace": error_trace or "",
+                "failed_at": now.isoformat(),
+                "permanent": permanent,
+                "next_run_at": next_run_at.isoformat() if hasattr(next_run_at, "isoformat") else next_run_at,
+            }
+            row.payload = payload
+            row.updated_at = now
             row.worker_id = None
             row.lease_token = None
             row.heartbeat_at = None
@@ -5591,6 +5606,9 @@ class SqlAlchemyPaperRepository(PaperRepository):
             row = session.get(JobORM, job_id)
             if row is None or row.status not in {"dead", "failed"}:
                 return None
+            payload = dict(row.payload or {})
+            payload.pop("__debug", None)
+            row.payload = payload
             row.status = "pending"
             row.attempts = 0
             row.error = None
@@ -7927,10 +7945,13 @@ class MemoryPaperRepository(PaperRepository):
             # completed JobResponse doesn't surface a stale transient
             # error message or a dangling next_run_at.
             status = "canceled" if job.cancel_requested_at is not None else "completed"
+            payload = dict(job.payload or {})
+            payload.pop("__debug", None)
             self.jobs[job_id] = job.model_copy(
                 update={
                     "status": status,
                     "effective_status": status,
+                    "payload": payload,
                     "updated_at": utcnow(),
                     "finished_at": utcnow(),
                     "error": None,
@@ -7969,6 +7990,7 @@ class MemoryPaperRepository(PaperRepository):
         permanent: bool = False,
         next_run_at: Any | None = None,
         lease_token: str | None = None,
+        error_trace: str | None = None,
     ) -> None:
         job = self.jobs.get(job_id)
         if job is None or not self._claim_matches(job, lease_token):
@@ -7978,14 +8000,24 @@ class MemoryPaperRepository(PaperRepository):
             return
         attempts = job.attempts or 0
         max_attempts = job.max_attempts or 3
+        now = utcnow()
+        payload = dict(job.payload or {})
+        payload["__debug"] = {
+            "last_error": error,
+            "last_error_trace": error_trace or "",
+            "failed_at": now.isoformat(),
+            "permanent": permanent,
+            "next_run_at": next_run_at.isoformat() if hasattr(next_run_at, "isoformat") else next_run_at,
+        }
         if permanent or attempts >= max_attempts:
             self.jobs[job_id] = job.model_copy(
                 update={
                     "status": "dead",
                     "effective_status": "dead",
                     "error": error,
-                    "updated_at": utcnow(),
-                    "finished_at": utcnow(),
+                    "payload": payload,
+                    "updated_at": now,
+                    "finished_at": now,
                     "next_run_at": None,
                     "worker_id": None,
                     "lease_token": None,
@@ -7999,7 +8031,8 @@ class MemoryPaperRepository(PaperRepository):
                     "status": "pending",
                     "effective_status": "pending",
                     "error": error,
-                    "updated_at": utcnow(),
+                    "payload": payload,
+                    "updated_at": now,
                     "next_run_at": next_run_at,
                     "worker_id": None,
                     "lease_token": None,
@@ -8012,10 +8045,13 @@ class MemoryPaperRepository(PaperRepository):
         job = self.jobs.get(job_id)
         if job is None or job.status not in {"dead", "failed"}:
             return None
+        payload = dict(job.payload or {})
+        payload.pop("__debug", None)
         self.jobs[job_id] = job.model_copy(
             update={
                 "status": "pending",
                 "effective_status": "pending",
+                "payload": payload,
                 "attempts": 0,
                 "error": None,
                 "next_run_at": None,
