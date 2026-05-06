@@ -2519,6 +2519,64 @@ def test_admin_paper_listing_filters_and_sorts(service):
     assert [paper.paper_id for paper in default_results] == ["arxiv:2401.11111"]
 
 
+def test_admin_paper_detail_includes_jobs_files_and_code(service):
+    paper = _sample_paper("2401.33330", title="Admin Detail Paper", abstract="Detailed abstract.")
+    paper.index_status = "indexed"
+    paper.indexed_at = datetime(2026, 4, 21, tzinfo=timezone.utc)
+    paper.summary_short = "Detailed technical summary."
+    paper.summary_eli5 = "Detailed simple summary."
+    paper.code_url = "https://github.com/example/repo"
+    paper.code_index_status = "indexed"
+    paper.code_is_python = True
+    paper.code_manifest = {
+        "resolved_sha": "abc123",
+        "stored_paths": ["README.md"],
+        "indexed_paths": ["README.md"],
+    }
+    stored = service.repository.upsert_paper(paper)  # type: ignore[attr-defined]
+    service.object_store.put_text(
+        f"papers/{stored.paper_id}/text/full.md",
+        "Full text",
+        content_type="text/markdown",
+    )
+    service.object_store.put_bytes(
+        f"papers/{stored.paper_id}/code/files/README.md",
+        b"# Repo",
+        content_type="text/markdown",
+    )
+    first_job = service.repository.create_job("harvest_range", {"harvest_id": "detail-run"})
+    second_job = service.repository.create_job("summarize_top_cited", {"limit": 10})
+    service.repository.jobs[first_job.job_id] = first_job.model_copy(update={"status": "completed"})
+    service.repository.jobs[second_job.job_id] = second_job.model_copy(update={"status": "completed"})
+    service.repository.record_job_paper(
+        first_job.job_id,
+        stored.paper_id,
+        outcome="indexed",
+        arxiv_id=stored.arxiv_id,
+        title=stored.title,
+    )
+    service.repository.record_job_paper(
+        second_job.job_id,
+        stored.paper_id,
+        outcome="updated",
+        arxiv_id=stored.arxiv_id,
+        title=stored.title,
+    )
+
+    search_results = service.list_papers(query=stored.paper_id, index_status="all", limit=5)
+    detail = service.get_admin_paper_detail(stored.paper_id)
+
+    assert [paper.paper_id for paper in search_results] == [stored.paper_id]
+    assert detail.paper.summary_short == "Detailed technical summary."
+    assert detail.paper.code_url == "https://github.com/example/repo"
+    assert {job.job_id for job in detail.jobs} == {first_job.job_id, second_job.job_id}
+    assert {job.outcome for job in detail.jobs} == {"indexed", "updated"}
+    assert any(file.path == "text/full.md" for file in detail.files)
+    assert detail.code_files is not None
+    assert detail.code_files.eligibility.eligible is True
+    assert [file.repo_path for file in detail.code_files.files] == ["README.md"]
+
+
 def test_trending_feed_pages_ready_papers_and_sorts_by_latest_or_upvotes(browser_service):
     service, _, _ = browser_service
     session_a, _ = service.register_browser_user(

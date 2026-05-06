@@ -49,6 +49,7 @@ const apiMocks = vi.hoisted(() => {
     deletePythonFile: vi.fn(),
     deleteThread: vi.fn(),
     getBrowserTrendingPaper: vi.fn(),
+    getBrowserAdminPaperDetail: vi.fn(),
     getBrowserAdminPaperAsset: vi.fn(),
     getBrowserAdminPaperFile: vi.fn(),
     getBrowserPaper: vi.fn(),
@@ -146,6 +147,7 @@ vi.mock("./api", () => ({
   deletePythonFile: apiMocks.deletePythonFile,
   deleteThread: apiMocks.deleteThread,
   getBrowserAdminPaperAsset: apiMocks.getBrowserAdminPaperAsset,
+  getBrowserAdminPaperDetail: apiMocks.getBrowserAdminPaperDetail,
   getBrowserAdminPaperFile: apiMocks.getBrowserAdminPaperFile,
   getBrowserPaper: apiMocks.getBrowserPaper,
   getBrowserPaperPreview: apiMocks.getBrowserPaperPreview,
@@ -718,6 +720,8 @@ describe("App", () => {
       html_url: "https://example.test/2401.12345",
       citation_count: 7,
       influential_citation_count: 2,
+      code_url: "https://github.com/example/drawer-paper",
+      code_index_status: "indexed",
       index_status: "indexed",
     });
     apiMocks.getBrowserPaperFile.mockResolvedValue({
@@ -807,6 +811,29 @@ describe("App", () => {
       worker: null,
     });
     apiMocks.loadBrowserAdminPapers.mockResolvedValue([]);
+    apiMocks.getBrowserAdminPaperDetail.mockResolvedValue({
+      paper: {
+        paper_id: "arxiv:2401.12345",
+        arxiv_id: "2401.12345",
+        title: "Drawer Paper",
+        authors: "Drawer Author",
+        abstract: "Drawer abstract",
+        summary_short: "Drawer summary",
+        summary_eli5: "Drawer simple summary",
+        categories: "cs.AI",
+        primary_category: "cs.AI",
+        published: "2026-04-21",
+        updated: "2026-04-21",
+        pdf_url: "https://example.test/2401.12345.pdf",
+        html_url: "https://example.test/2401.12345",
+        citation_count: 7,
+        influential_citation_count: 2,
+        index_status: "indexed",
+      },
+      jobs: [],
+      files: [],
+      code_files: null,
+    });
     apiMocks.loadBrowserAdminPaperFiles.mockResolvedValue({
       paper_id: "arxiv:2401.12345",
       files: [],
@@ -2471,6 +2498,12 @@ describe("App", () => {
     await waitFor(() => {
       expect(screen.getByText("Drawer content")).toBeTruthy();
     });
+    expect(screen.getByText("Drawer summary")).toBeTruthy();
+    expect(
+      within(screen.getByLabelText("Cited paper drawer"))
+        .getByRole("link", { name: "Code" })
+        .getAttribute("href"),
+    ).toBe("https://github.com/example/drawer-paper");
   });
 
   it("shows inline paper previews for cited research papers", async () => {
@@ -3810,7 +3843,7 @@ describe("App", () => {
     }
   });
 
-  it("shows skeleton admin jobs placeholders when the selected window has no jobs", async () => {
+  it("shows an empty admin jobs table when the selected window has no jobs", async () => {
     apiMocks.loadSession.mockResolvedValue(authenticatedSession({ is_admin: true }));
     apiMocks.loadBrowserAdminJobsOverview.mockResolvedValue({
       jobs: [],
@@ -3831,9 +3864,9 @@ describe("App", () => {
     const table = screen.getByRole("table");
     expect(screen.getAllByText("No tracked papers in this window").length).toBeGreaterThan(0);
     expect(screen.getByTestId("admin-jobs-chart-skeleton")).toBeTruthy();
-    expect(screen.getByTestId("admin-jobs-table-skeleton")).toBeTruthy();
+    expect(screen.queryByTestId("admin-jobs-table-skeleton")).toBeNull();
     expect(within(table).getByRole("columnheader", { name: "Type" })).toBeTruthy();
-    expect(within(table).queryByText("No jobs yet.")).toBeNull();
+    expect(within(table).getByText(/No jobs in this window/)).toBeTruthy();
   });
 
   it("shows why each admin job ran", async () => {
@@ -4275,7 +4308,7 @@ describe("App", () => {
         },
       ],
     });
-    apiMocks.getBrowserPaper.mockResolvedValue({
+    const modalPaper = {
       paper_id: "arxiv:2401.00001",
       arxiv_id: "2401.00001",
       title: "Modal Paper",
@@ -4291,15 +4324,30 @@ describe("App", () => {
       html_url: "https://arxiv.org/abs/2401.00001",
       citation_count: 12,
       influential_citation_count: 3,
+      code_url: "https://github.com/example/modal-paper",
+      code_index_status: "indexed",
       index_status: "indexed",
-    });
-    apiMocks.getBrowserPaperPreview.mockResolvedValue({
-      paper_id: "arxiv:2401.00001",
-      image_url: "https://example.test/preview.webp",
-      content_type: "image/webp",
-    });
-    apiMocks.loadBrowserAdminPaperFiles.mockResolvedValue({
-      paper_id: "arxiv:2401.00001",
+    };
+    apiMocks.getBrowserAdminPaperDetail.mockResolvedValue({
+      paper: modalPaper,
+      jobs: [
+        {
+          root_job_id: "job_root_modal",
+          job_id: "job_chunk_modal",
+          job_type: "harvest_chunk",
+          status: "completed",
+          display_status: "completed",
+          payload: { arxiv_id: "2401.00001" },
+          outcome: "indexed",
+          attempts: 1,
+          max_attempts: 3,
+          priority: 10,
+          record_created_at: "2026-05-04T00:00:00Z",
+          record_updated_at: "2026-05-04T01:00:00Z",
+          created_at: "2026-05-04T00:00:00Z",
+          updated_at: "2026-05-04T01:00:00Z",
+        },
+      ],
       files: [
         {
           path: "preview/first-page-top.webp",
@@ -4307,6 +4355,17 @@ describe("App", () => {
           content_type: "image/webp",
         },
       ],
+      code_files: {
+        paper_id: "arxiv:2401.00001",
+        eligibility: { eligible: true, status: "indexed" },
+        resolved_sha: "abc123",
+        files: [{ repo_path: "README.md", size_bytes: 42, indexed: true }],
+      },
+    });
+    apiMocks.getBrowserPaperPreview.mockResolvedValue({
+      paper_id: "arxiv:2401.00001",
+      image_url: "https://example.test/preview.webp",
+      content_type: "image/webp",
     });
     apiMocks.getBrowserAdminPaperAsset.mockResolvedValue({
       paper_id: "arxiv:2401.00001",
@@ -4342,11 +4401,16 @@ describe("App", () => {
     expect(screen.getByRole("link", { name: "Open arXiv 2401.00001" }).getAttribute("href")).toBe(
       "https://arxiv.org/abs/2401.00001",
     );
+    expect(screen.getByText("Modal summary")).toBeTruthy();
+    expect(screen.getByText("https://github.com/example/modal-paper")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("tab", { name: "Jobs" }));
+    expect(screen.getByText("Harvest chunk")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("tab", { name: "File structure" }));
 
     await waitFor(() => {
-      expect(apiMocks.loadBrowserAdminPaperFiles).toHaveBeenCalledWith("arxiv:2401.00001");
+      expect(apiMocks.getBrowserAdminPaperDetail).toHaveBeenCalledWith("arxiv:2401.00001");
     });
 
     const previewFolderButton = screen.getByRole("button", { name: "preview" });

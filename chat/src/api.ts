@@ -2,6 +2,7 @@ import type {
   AdminJobOverviewRow,
   AdminJobPapersResponse,
   AdminJobsOverviewResponse,
+  AdminPaperDetailResponse,
   BrowserSessionResponse,
   ChatMessageResponse,
   ChatStreamEventMap,
@@ -1006,6 +1007,13 @@ export function loadBrowserAdminPapers(query = "", indexStatus = "indexed", limi
     limit: String(limit),
   });
   return api<PaperResponse[]>(`/v1/browser/admin/papers?${params.toString()}`, { method: "GET" });
+}
+
+export function getBrowserAdminPaperDetail(paperId: string) {
+  return api<AdminPaperDetailResponse>(
+    `/v1/browser/admin/papers/${encodeURIComponent(paperId)}/detail`,
+    { method: "GET" },
+  );
 }
 
 export function loadBrowserAdminPaperFiles(paperId: string) {

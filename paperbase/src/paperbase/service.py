@@ -67,6 +67,8 @@ from .models import (
     AdminJobPaperResponse,
     AdminJobPapersResponse,
     AdminJobsOverviewResponse,
+    AdminPaperDetailResponse,
+    AdminPaperJobTouchResponse,
     AdminWorkerSummary,
     BrowserSessionResponse,
     BrowserUser,
@@ -8494,6 +8496,69 @@ class PaperbaseService:
             skipped_reason_counts=_job_paper_skipped_reason_counts(records),
             papers=papers,
         )
+
+    def get_admin_paper_detail(self, paper_id: str) -> AdminPaperDetailResponse:
+        paper = self.repository.get_paper(paper_id)
+        if paper is None:
+            raise HTTPException(status_code=404, detail=f"Paper {paper_id} not found")
+
+        jobs: list[AdminPaperJobTouchResponse] = []
+        for record in self.repository.list_job_papers_for_paper(paper.paper_id):
+            job = self.repository.get_job(record.job_id)
+            if job is None:
+                jobs.append(
+                    AdminPaperJobTouchResponse(
+                        root_job_id=record.job_id,
+                        job_id=record.job_id,
+                        job_type="unknown",
+                        status="unknown",
+                        display_status="unknown",
+                        payload={},
+                        error=None,
+                        outcome=record.outcome,
+                        skip_reason=record.skip_reason,
+                        attempts=0,
+                        max_attempts=0,
+                        priority=0,
+                        record_created_at=record.created_at,
+                        record_updated_at=record.updated_at,
+                        created_at=record.created_at,
+                        updated_at=record.updated_at,
+                    )
+                )
+                continue
+            jobs.append(
+                AdminPaperJobTouchResponse(
+                    root_job_id=job.root_job_id or job.job_id,
+                    job_id=job.job_id,
+                    job_type=job.job_type,
+                    status=job.status,
+                    display_status=_admin_display_status(job.status),
+                    payload=_job_public_payload(job.payload),
+                    error=job.error,
+                    outcome=record.outcome,
+                    skip_reason=record.skip_reason,
+                    attempts=job.attempts,
+                    max_attempts=job.max_attempts,
+                    priority=job.priority,
+                    record_created_at=record.created_at,
+                    record_updated_at=record.updated_at,
+                    created_at=job.created_at,
+                    updated_at=job.updated_at,
+                    started_at=job.started_at,
+                    finished_at=job.finished_at,
+                )
+            )
+
+        files: list[FileObject] = []
+        if paper.index_status == "indexed":
+            try:
+                files = self.list_files(paper.paper_id).files
+            except HTTPException:
+                files = []
+
+        code_files = self.list_paper_code_files(paper.paper_id)
+        return AdminPaperDetailResponse(paper=paper, jobs=jobs, files=files, code_files=code_files)
 
     def list_papers(
         self,

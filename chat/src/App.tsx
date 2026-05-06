@@ -5813,6 +5813,52 @@ export default function App() {
               ) : null}
 
               <div className="paper-drawer-body">
+                {paperDrawerPaper ? (
+                  <div className="paper-drawer-details">
+                    {paperDrawerPaper.summary_short ? (
+                      <section>
+                        <span>Summary</span>
+                        <p>{paperDrawerPaper.summary_short}</p>
+                      </section>
+                    ) : null}
+                    {paperDrawerPaper.summary_eli5 ? (
+                      <section>
+                        <span>Simple summary</span>
+                        <p>{paperDrawerPaper.summary_eli5}</p>
+                      </section>
+                    ) : null}
+                    {paperDrawerPaper.abstract ? (
+                      <section>
+                        <span>Abstract</span>
+                        <p>{paperDrawerPaper.abstract}</p>
+                      </section>
+                    ) : null}
+                    <div className="paper-drawer-links">
+                      {paperDrawerPaper.pdf_url ? (
+                        <a href={paperDrawerPaper.pdf_url} target="_blank" rel="noreferrer">
+                          PDF
+                        </a>
+                      ) : null}
+                      {paperDrawerPaper.html_url ? (
+                        <a href={paperDrawerPaper.html_url} target="_blank" rel="noreferrer">
+                          Paper
+                        </a>
+                      ) : null}
+                      {paperDrawerPaper.code_url ? (
+                        <a href={paperDrawerPaper.code_url} target="_blank" rel="noreferrer">
+                          Code
+                        </a>
+                      ) : null}
+                    </div>
+                    <div className="paper-drawer-facts">
+                      <span>{paperDrawerPaper.index_status}</span>
+                      <span>{paperDrawerPaper.citation_count} citations</span>
+                      {paperDrawerPaper.code_index_status ? (
+                        <span>Code {paperDrawerPaper.code_index_status}</span>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : null}
                 {paperDrawerStatus === "loading" ? (
                   <div className="paper-drawer-placeholder">Loading cited paper…</div>
                 ) : null}

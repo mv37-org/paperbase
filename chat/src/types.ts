@@ -50,6 +50,16 @@ export interface PaperResponse {
   influential_citation_count: number;
   semantic_scholar_id?: string | null;
   code_url?: string | null;
+  code_url_source?: string | null;
+  code_url_candidates?: string[] | null;
+  code_index_status?: string | null;
+  code_is_python?: boolean | null;
+  code_python_reason?: string | null;
+  code_manifest?: Record<string, unknown> | null;
+  venue?: string | null;
+  venue_year?: number | null;
+  venue_source?: string | null;
+  top_author_s2_id?: string | null;
   source_type?: string | null;
   index_status: string;
   indexed_at?: string | null;
@@ -139,6 +149,27 @@ export interface AdminJobPapersResponse {
   papers: AdminJobPaperResponse[];
 }
 
+export interface AdminPaperJobTouchResponse {
+  root_job_id: string;
+  job_id: string;
+  job_type: string;
+  status: string;
+  display_status: string;
+  payload: Record<string, unknown>;
+  error?: string | null;
+  outcome: string;
+  skip_reason?: string | null;
+  attempts: number;
+  max_attempts: number;
+  priority: number;
+  record_created_at: string;
+  record_updated_at: string;
+  created_at: string;
+  updated_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+}
+
 export interface FileContentResponse {
   paper_id: string;
   path: string;
@@ -154,6 +185,32 @@ export interface FileObject {
 export interface FileListResponse {
   paper_id: string;
   files: FileObject[];
+}
+
+export interface CodeEligibility {
+  eligible: boolean;
+  status: string;
+  reason?: string | null;
+}
+
+export interface CodeFileSummary {
+  repo_path: string;
+  size_bytes: number;
+  indexed: boolean;
+}
+
+export interface CodeFileListResponse {
+  paper_id: string;
+  eligibility: CodeEligibility;
+  resolved_sha?: string | null;
+  files: CodeFileSummary[];
+}
+
+export interface AdminPaperDetailResponse {
+  paper: PaperResponse;
+  jobs: AdminPaperJobTouchResponse[];
+  files: FileObject[];
+  code_files?: CodeFileListResponse | null;
 }
 
 export interface PaperAssetResponse {

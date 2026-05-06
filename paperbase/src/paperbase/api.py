@@ -31,6 +31,7 @@ from .auth import (
 from .config import get_settings
 from .logging_utils import build_log_config
 from .models import (
+    AdminPaperDetailResponse,
     AdminJobPapersResponse,
     AdminJobsOverviewResponse,
     BrowserSessionResponse,
@@ -1046,6 +1047,15 @@ def browser_admin_list_papers(
     service: PaperbaseService = Depends(get_service),
 ) -> list[PaperResponse]:
     return service.list_papers(query=q or None, index_status=index_status, limit=limit)
+
+
+@app.get("/v1/browser/admin/papers/{paper_id}/detail", response_model=AdminPaperDetailResponse)
+def browser_admin_get_paper_detail(
+    paper_id: str,
+    user=Depends(require_browser_admin_user),
+    service: PaperbaseService = Depends(get_service),
+) -> AdminPaperDetailResponse:
+    return service.get_admin_paper_detail(paper_id)
 
 
 @app.get("/v1/browser/admin/papers/{paper_id}/files", response_model=FileListResponse)

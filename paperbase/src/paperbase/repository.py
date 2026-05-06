@@ -1740,6 +1740,10 @@ class PaperRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def list_job_papers_for_paper(self, paper_id: str) -> list[JobPaperRecord]:
+        raise NotImplementedError
+
+    @abstractmethod
     def cleanup_expired_results(self) -> None:
         raise NotImplementedError
 
@@ -2373,6 +2377,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
             needle = f"%{query.strip().lower()}%"
             statement = statement.where(
                 or_(
+                    func.lower(PaperORM.paper_id).like(needle),
                     func.lower(PaperORM.title).like(needle),
                     func.lower(PaperORM.arxiv_id).like(needle),
                     func.lower(PaperORM.authors).like(needle),
@@ -5725,6 +5730,27 @@ class SqlAlchemyPaperRepository(PaperRepository):
             for row in rows
         ]
 
+    def list_job_papers_for_paper(self, paper_id: str) -> list[JobPaperRecord]:
+        with self._session() as session:
+            rows = session.scalars(
+                select(JobPaperORM)
+                .where(JobPaperORM.paper_id == paper_id)
+                .order_by(JobPaperORM.updated_at.desc())
+            ).all()
+        return [
+            JobPaperRecord(
+                job_id=row.job_id,
+                paper_id=row.paper_id,
+                arxiv_id=row.arxiv_id,
+                title=row.title,
+                outcome=row.outcome,
+                skip_reason=row.skip_reason,
+                created_at=row.created_at,
+                updated_at=row.updated_at,
+            )
+            for row in rows
+        ]
+
     def cleanup_expired_results(self) -> None:
         with self._session() as session:
             expired_ids = session.scalars(
@@ -5930,7 +5956,8 @@ class MemoryPaperRepository(PaperRepository):
             candidates = [
                 paper
                 for paper in candidates
-                if query_lower in paper.title.lower()
+                if query_lower in paper.paper_id.lower()
+                or query_lower in paper.title.lower()
                 or query_lower in paper.arxiv_id.lower()
                 or query_lower in paper.authors.lower()
             ]
@@ -8128,6 +8155,11 @@ class MemoryPaperRepository(PaperRepository):
             if job.root_job_id == root_job_id or job.job_id == root_job_id
         }
         records = [record for record in self.job_papers.values() if record.job_id in job_ids]
+        records.sort(key=lambda item: item.updated_at, reverse=True)
+        return records
+
+    def list_job_papers_for_paper(self, paper_id: str) -> list[JobPaperRecord]:
+        records = [record for record in self.job_papers.values() if record.paper_id == paper_id]
         records.sort(key=lambda item: item.updated_at, reverse=True)
         return records
 

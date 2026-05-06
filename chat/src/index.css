@@ -4225,6 +4225,46 @@ textarea {
   line-height: 1.5;
 }
 
+.paper-drawer-details {
+  display: grid;
+  gap: 10px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.paper-drawer-details section {
+  display: grid;
+  gap: 4px;
+}
+
+.paper-drawer-details section span,
+.paper-drawer-facts span {
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.paper-drawer-details p {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.paper-drawer-links,
+.paper-drawer-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.paper-drawer-links a {
+  color: #176fe6;
+  font-size: 12px;
+  text-decoration: none;
+}
+
 .paper-drawer-close {
   width: 28px;
   height: 28px;
@@ -6891,6 +6931,79 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
   line-height: 1.5;
 }
 
+.admin-paper-search-modal {
+  display: grid;
+  gap: 14px;
+  width: min(720px, calc(100vw - 32px));
+  max-height: min(80vh, 720px);
+  overflow: hidden;
+}
+
+.admin-paper-search-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+}
+
+.admin-paper-search-form input {
+  width: 100%;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--paper);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.admin-paper-search-results {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  min-height: 120px;
+  overflow: auto;
+}
+
+.admin-paper-search-result {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 0;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+
+.admin-paper-search-result-main {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.admin-paper-search-result-main strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.admin-paper-search-result-main span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .admin-paper-modal {
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
@@ -7116,6 +7229,10 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
   overflow: auto;
 }
 
+.admin-paper-metadata.compact {
+  overflow: visible;
+}
+
 .admin-paper-metadata-row {
   display: grid;
   grid-template-columns: 112px minmax(0, 1fr);
@@ -7141,6 +7258,141 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
   line-height: 1.25;
   font-weight: 500;
   word-break: break-word;
+}
+
+.admin-paper-overview-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(220px, 0.65fr);
+  gap: 12px;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.admin-paper-overview-card,
+.admin-paper-jobs-list article {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.admin-paper-overview-card h4 {
+  margin: 0;
+  font-size: 11px;
+}
+
+.admin-paper-summary-block {
+  display: grid;
+  gap: 4px;
+}
+
+.admin-paper-summary-block span,
+.admin-paper-code-summary span {
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.admin-paper-summary-block p {
+  margin: 0;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.admin-paper-code-summary,
+.admin-paper-job-mini-list,
+.admin-paper-jobs-list,
+.admin-paper-code-files {
+  display: grid;
+  gap: 8px;
+  min-height: 0;
+  overflow: auto;
+}
+
+.admin-paper-code-summary a {
+  color: #176fe6;
+  font-size: 12px;
+  word-break: break-word;
+  text-decoration: none;
+}
+
+.admin-paper-job-mini-list div,
+.admin-paper-code-file {
+  display: grid;
+  gap: 2px;
+}
+
+.admin-paper-job-mini-list strong,
+.admin-paper-code-file code {
+  font-size: 11px;
+  word-break: break-word;
+}
+
+.admin-paper-job-mini-list span,
+.admin-paper-code-file span,
+.admin-paper-job-row-meta {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.admin-paper-jobs-list {
+  padding-right: 2px;
+}
+
+.admin-paper-job-row-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.admin-paper-job-row-header div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.admin-paper-job-row-header strong {
+  font-size: 12px;
+}
+
+.admin-paper-job-row-header code {
+  color: var(--muted);
+  font-size: 10px;
+  word-break: break-all;
+}
+
+.admin-paper-job-row-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+}
+
+.admin-paper-job-payload {
+  max-height: 180px;
+  margin: 0;
+  overflow: auto;
+  padding: 8px;
+  border-radius: var(--radius);
+  background: #11161d;
+  color: #f5f7fb;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.admin-paper-code-files {
+  padding-right: 2px;
+}
+
+.admin-paper-code-file {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
 }
 
 .admin-paper-files {
@@ -7332,6 +7584,8 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
 
   .admin-paper-modal-layout,
   .admin-create-job-grid,
+  .admin-paper-search-form,
+  .admin-paper-overview-grid,
   .admin-paper-files {
     grid-template-columns: 1fr;
   }

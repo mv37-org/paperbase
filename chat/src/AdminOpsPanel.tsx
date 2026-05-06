@@ -13,13 +13,14 @@ import ReactECharts from "echarts-for-react";
 import {
   browserAdminPaperAssetContentUrl,
   browserPaperPreviewContentUrl,
+  getBrowserAdminPaperDetail,
   getBrowserAdminPaperAsset,
   getBrowserAdminPaperFile,
-  getBrowserPaper,
   getBrowserPaperPreview,
   loadBrowserAdminJobPapers,
   loadBrowserAdminJobsOverview,
   loadBrowserAdminPaperFiles,
+  loadBrowserAdminPapers,
   queueBrowserAdminEnrichMissingMetadata,
   queueBrowserAdminHarvestRange,
   queueBrowserAdminHarvestTopCited,
@@ -29,6 +30,8 @@ import {
 import type {
   AdminJobOverviewRow,
   AdminJobPaperResponse,
+  AdminPaperJobTouchResponse,
+  CodeFileListResponse,
   FileContentResponse,
   FileObject,
   PaperAssetResponse,
@@ -54,7 +57,7 @@ type CreateJobKind =
   | "harvest_venue"
   | "enrich_missing_metadata";
 
-type PaperModalTab = "screenshot" | "metadata" | "files";
+type PaperModalTab = "overview" | "screenshot" | "metadata" | "jobs" | "files" | "code";
 
 type FileTreeNode =
   | {
@@ -75,9 +78,12 @@ const PAPER_MODAL_TABS: Array<{
   id: PaperModalTab;
   label: string;
 }> = [
+  { id: "overview", label: "Overview", asset: "notes.svg" },
   { id: "screenshot", label: "Screenshot", asset: "notes.svg" },
   { id: "metadata", label: "Metadata", asset: "data.svg" },
+  { id: "jobs", label: "Jobs", asset: "data.svg" },
   { id: "files", label: "File structure", asset: "code.svg" },
+  { id: "code", label: "Code", asset: "code.svg" },
 ];
 
 const TEXT_FILE_EXTENSIONS = new Set([
@@ -816,6 +822,9 @@ function selectTimelineBucket(spanMs: number) {
 
 function jobsInTimeWindow(jobs: AdminJobOverviewRow[], timeWindow: JobsTimeWindow) {
   return jobs.filter((job) => {
+    if (job.is_synthetic || job.job_type === "latest_sync_schedule") {
+      return true;
+    }
     const timestamp = new Date(job.updated_at).getTime();
     return (
       !Number.isNaN(timestamp) && timestamp >= timeWindow.startMs && timestamp <= timeWindow.endMs
@@ -1180,18 +1189,75 @@ function metadataRows(paper: PaperResponse | null, entry: AdminJobPaperResponse 
   if (!paper && !entry) {
     return [];
   }
+  const codeCandidates = paper?.code_url_candidates?.filter(Boolean).join(", ") || "—";
   return [
     ["Paper id", paper?.paper_id ?? entry?.paper_id ?? "—"],
     ["arXiv id", paper?.arxiv_id ?? entry?.arxiv_id ?? "—"],
     ["Title", paper?.title ?? entry?.title ?? "—"],
     ["Authors", paper?.authors ?? "—"],
     ["Status", paper?.index_status ?? entry?.outcome ?? "—"],
+    ["Summary", paper?.summary_short || "—"],
+    ["Simple summary", paper?.summary_eli5 || "—"],
+    ["Abstract", paper?.abstract || "—"],
     ["Categories", paper?.categories ?? "—"],
+    ["Primary category", paper?.primary_category ?? "—"],
     ["Published", paper?.published ?? "—"],
     ["Updated", paper?.updated ?? "—"],
     ["Citations", paper ? String(paper.citation_count) : "—"],
+    ["Influential citations", paper ? String(paper.influential_citation_count) : "—"],
+    ["Semantic Scholar id", paper?.semantic_scholar_id ?? "—"],
+    ["DOI", paper?.doi ?? "—"],
+    ["Journal ref", paper?.journal_ref ?? "—"],
+    ["Comment", paper?.comment ?? "—"],
+    ["Venue", paper?.venue ?? "—"],
+    ["Venue year", paper?.venue_year ? String(paper.venue_year) : "—"],
+    ["Code URL", paper?.code_url ?? "—"],
+    ["Code URL source", paper?.code_url_source ?? "—"],
+    ["Code URL candidates", codeCandidates],
+    ["Code status", paper?.code_index_status ?? "—"],
+    [
+      "Code language",
+      paper?.code_is_python === true
+        ? "Python"
+        : paper?.code_is_python === false
+          ? "Not Python"
+          : "—",
+    ],
+    ["Code note", paper?.code_python_reason ?? "—"],
     ["Source type", paper?.source_type ?? "—"],
+    ["Indexed at", paper?.indexed_at ?? "—"],
   ];
+}
+
+function paperSummaryBlocks(paper: PaperResponse | null) {
+  if (!paper) {
+    return [];
+  }
+  return [
+    ["Summary", paper.summary_short],
+    ["Simple summary", paper.summary_eli5],
+    ["Abstract", paper.abstract],
+  ].filter(([, value]) => Boolean(String(value ?? "").trim()));
+}
+
+function jobPayloadPreview(payload: Record<string, unknown>) {
+  const serialized = JSON.stringify(payload, null, 2);
+  return serialized && serialized !== "{}" ? serialized : "";
+}
+
+function paperSearchEntryFromPaper(paper: PaperResponse): AdminJobPaperResponse {
+  return {
+    root_job_id: "paper-search",
+    job_id: "paper-search",
+    paper_id: paper.paper_id,
+    arxiv_id: paper.arxiv_id,
+    title: paper.title,
+    outcome: paper.index_status,
+    skip_reason: null,
+    created_at: paper.indexed_at ?? paper.updated ?? paper.published,
+    updated_at: paper.indexed_at ?? paper.updated ?? paper.published,
+    paper,
+  };
 }
 
 function PaperFileTreeList({
@@ -1783,9 +1849,17 @@ export function AdminOpsPanel({
   const [createSubmitting, setCreateSubmitting] = useState(false);
   const createSubmittingRef = useRef(false);
 
+  const [paperSearchOpen, setPaperSearchOpen] = useState(false);
+  const [paperSearchQuery, setPaperSearchQuery] = useState("");
+  const [paperSearchResults, setPaperSearchResults] = useState<PaperResponse[]>([]);
+  const [paperSearchLoading, setPaperSearchLoading] = useState(false);
+  const [paperSearchError, setPaperSearchError] = useState("");
+
   const [selectedJobPaper, setSelectedJobPaper] = useState<AdminJobPaperResponse | null>(null);
-  const [paperModalTab, setPaperModalTab] = useState<PaperModalTab>("screenshot");
+  const [paperModalTab, setPaperModalTab] = useState<PaperModalTab>("overview");
   const [paperDetail, setPaperDetail] = useState<PaperResponse | null>(null);
+  const [paperJobTouches, setPaperJobTouches] = useState<AdminPaperJobTouchResponse[]>([]);
+  const [paperCodeFiles, setPaperCodeFiles] = useState<CodeFileListResponse | null>(null);
   const [paperPreview, setPaperPreview] = useState<PaperPreviewResponse | null>(null);
   const [paperModalLoading, setPaperModalLoading] = useState(false);
   const [paperModalError, setPaperModalError] = useState("");
@@ -1920,8 +1994,10 @@ export function AdminOpsPanel({
 
   useEffect(() => {
     if (!selectedJobPaper) {
-      setPaperModalTab("screenshot");
+      setPaperModalTab("overview");
       setPaperDetail(null);
+      setPaperJobTouches([]);
+      setPaperCodeFiles(null);
       setPaperPreview(null);
       setPaperModalLoading(false);
       setPaperModalError("");
@@ -1940,6 +2016,9 @@ export function AdminOpsPanel({
     let cancelled = false;
     setPaperModalLoading(true);
     setPaperModalError("");
+    setPaperDetail(selectedJobPaper.paper ?? null);
+    setPaperJobTouches([]);
+    setPaperCodeFiles(null);
     setPaperFiles([]);
     setPaperFilesError("");
     setSelectedFilePath(null);
@@ -1951,13 +2030,16 @@ export function AdminOpsPanel({
     void (async () => {
       try {
         const [paper, preview] = await Promise.all([
-          getBrowserPaper(selectedJobPaper.paper_id).catch(() => selectedJobPaper.paper ?? null),
+          getBrowserAdminPaperDetail(selectedJobPaper.paper_id).catch(() => null),
           getBrowserPaperPreview(selectedJobPaper.paper_id).catch(() => null),
         ]);
         if (cancelled) {
           return;
         }
-        setPaperDetail(paper);
+        setPaperDetail(paper?.paper ?? selectedJobPaper.paper ?? null);
+        setPaperJobTouches(paper?.jobs ?? []);
+        setPaperCodeFiles(paper?.code_files ?? null);
+        setPaperFiles(paper?.files ?? []);
         setPaperPreview(preview);
       } catch (error) {
         if (cancelled) {
@@ -1977,7 +2059,7 @@ export function AdminOpsPanel({
   }, [selectedJobPaper]);
 
   useEffect(() => {
-    if (!selectedJobPaper || paperModalTab !== "files") {
+    if (!selectedJobPaper || paperModalTab !== "files" || paperFiles.length > 0) {
       return;
     }
     let cancelled = false;
@@ -2004,7 +2086,7 @@ export function AdminOpsPanel({
     return () => {
       cancelled = true;
     };
-  }, [paperModalTab, selectedJobPaper]);
+  }, [paperFiles.length, paperModalTab, selectedJobPaper]);
 
   async function openFile(file: FileObject) {
     if (!selectedJobPaper) {
@@ -2092,6 +2174,35 @@ export function AdminOpsPanel({
     }
   }
 
+  async function submitPaperSearch(formData: FormData) {
+    const query = String(formData.get("paper_search_query") ?? "").trim();
+    setPaperSearchQuery(query);
+    setPaperSearchError("");
+    setPaperSearchResults([]);
+    if (!query) {
+      setPaperSearchError("Enter a paper id, arXiv id, title, or author.");
+      return;
+    }
+    setPaperSearchLoading(true);
+    try {
+      const results = await loadBrowserAdminPapers(query, "all", 25);
+      setPaperSearchResults(results);
+      if (results.length === 0) {
+        setPaperSearchError("No papers matched that search.");
+      }
+    } catch (error) {
+      setPaperSearchError(panelErrorMessage(error, "Paper search could not be loaded."));
+    } finally {
+      setPaperSearchLoading(false);
+    }
+  }
+
+  function openPaperFromSearch(paper: PaperResponse) {
+    setSelectedJobPaper(paperSearchEntryFromPaper(paper));
+    setPaperModalTab("overview");
+    setPaperSearchOpen(false);
+  }
+
   function handleSelectRangeId(nextRangeId: JobsTimeRangeId) {
     if (nextRangeId === CUSTOM_TIME_RANGE_ID && selectedRangeId !== CUSTOM_TIME_RANGE_ID) {
       const seedWindow =
@@ -2144,6 +2255,16 @@ export function AdminOpsPanel({
                 onSelectRangeId={handleSelectRangeId}
                 selectedRangeId={selectedRangeId}
               />
+              <button
+                type="button"
+                className="admin-compact-action admin-compact-action-window admin-jobs-search-button"
+                onClick={() => {
+                  setPaperSearchOpen(true);
+                  setPaperSearchError("");
+                }}
+              >
+                Search
+              </button>
               <JobsRefreshControl
                 onSelectRefreshId={setSelectedRefreshId}
                 selectedRefreshId={selectedRefreshId}
@@ -2179,15 +2300,18 @@ export function AdminOpsPanel({
                     <th>Updated</th>
                   </tr>
                 </thead>
-                <tbody
-                  data-testid={
-                    jobsLoading || filteredJobs.length === 0
-                      ? "admin-jobs-table-skeleton"
-                      : undefined
-                  }
-                >
-                  {jobsLoading || filteredJobs.length === 0 ? (
+                <tbody data-testid={jobsLoading ? "admin-jobs-table-skeleton" : undefined}>
+                  {jobsLoading ? (
                     <TableSkeletonRows columns={6} />
+                  ) : filteredJobs.length === 0 ? (
+                    <tr className="admin-jobs-empty-row">
+                      <td colSpan={6}>
+                        <div className="admin-jobs-empty">
+                          No jobs in this window. Pick another window, widen the range, or create a
+                          job.
+                        </div>
+                      </td>
+                    </tr>
                   ) : (
                     filteredJobs.map((job) => {
                       const expanded = Boolean(expandedJobIds[job.job_id]);
@@ -2421,6 +2545,90 @@ export function AdminOpsPanel({
           </div>
         </>
       )}
+
+      {paperSearchOpen ? (
+        <div
+          className="modal"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="admin-paper-search-title"
+        >
+          <div
+            className="modal-backdrop"
+            onClick={() => {
+              if (!paperSearchLoading) {
+                setPaperSearchOpen(false);
+              }
+            }}
+          />
+          <div className="modal-panel admin-paper-search-modal">
+            <button
+              type="button"
+              className="modal-close"
+              aria-label="Close paper search"
+              onClick={() => setPaperSearchOpen(false)}
+            >
+              ×
+            </button>
+            <h2 id="admin-paper-search-title">Search papers</h2>
+            <form
+              className="admin-paper-search-form"
+              aria-busy={paperSearchLoading}
+              onSubmit={async (event) => {
+                event.preventDefault();
+                await submitPaperSearch(new FormData(event.currentTarget));
+              }}
+            >
+              <input
+                name="paper_search_query"
+                defaultValue={paperSearchQuery}
+                placeholder="Paper id, title, or arXiv id"
+                autoFocus
+              />
+              <button
+                type="submit"
+                className="admin-compact-action admin-compact-action-primary"
+                disabled={paperSearchLoading}
+              >
+                {paperSearchLoading ? "Searching..." : "Search"}
+              </button>
+            </form>
+            {paperSearchError ? (
+              <div className="admin-jobs-inline-error">{paperSearchError}</div>
+            ) : null}
+            <div className="admin-paper-search-results">
+              {paperSearchLoading ? (
+                <div className="admin-jobs-empty">Searching papers...</div>
+              ) : null}
+              {!paperSearchLoading && paperSearchResults.length > 0
+                ? paperSearchResults.map((paper) => (
+                    <button
+                      key={paper.paper_id}
+                      type="button"
+                      className="admin-paper-search-result"
+                      onClick={() => openPaperFromSearch(paper)}
+                    >
+                      <span className="admin-paper-search-result-main">
+                        <strong>{paper.title || paper.paper_id}</strong>
+                        <span>
+                          {paper.arxiv_id || paper.paper_id} · {paper.authors || "Unknown authors"}
+                        </span>
+                      </span>
+                      <span className={`admin-jobs-status status-${paper.index_status}`}>
+                        {statusLabel(paper.index_status)}
+                      </span>
+                    </button>
+                  ))
+                : null}
+              {!paperSearchLoading && !paperSearchError && paperSearchResults.length === 0 ? (
+                <div className="admin-jobs-empty">
+                  Search by paper id, arXiv id, title, or author.
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {createModalOpen ? (
         <div
@@ -2757,7 +2965,7 @@ export function AdminOpsPanel({
                       <strong>
                         {paperFiles.length > 0
                           ? `${paperFiles.length} files`
-                          : paperModalTab === "files" && !paperFilesLoading
+                          : !paperFilesLoading
                             ? "0 files"
                             : "—"}
                       </strong>
@@ -2767,8 +2975,22 @@ export function AdminOpsPanel({
                       <strong>
                         {paperFiles.length > 0
                           ? `${paperFolderCount} folders`
-                          : paperModalTab === "files" && !paperFilesLoading
+                          : !paperFilesLoading
                             ? "0 folders"
+                            : "—"}
+                      </strong>
+                    </div>
+                    <div>
+                      <span>Jobs</span>
+                      <strong>{paperJobTouches.length}</strong>
+                    </div>
+                    <div>
+                      <span>Code</span>
+                      <strong>
+                        {paperCodeFiles?.eligibility.eligible
+                          ? `${paperCodeFiles.files.length} files`
+                          : paperDetail?.code_url
+                            ? "Linked"
                             : "—"}
                       </strong>
                     </div>
@@ -2792,6 +3014,11 @@ export function AdminOpsPanel({
                         Publisher page
                       </a>
                     ) : null}
+                    {paperDetail?.code_url ? (
+                      <a href={paperDetail.code_url} target="_blank" rel="noreferrer">
+                        Code
+                      </a>
+                    ) : null}
                   </div>
                 </div>
               </div>
@@ -2801,6 +3028,84 @@ export function AdminOpsPanel({
                 ) : null}
                 {paperModalLoading ? (
                   <div className="admin-jobs-empty">Loading paper...</div>
+                ) : null}
+
+                {!paperModalLoading && paperModalTab === "overview" ? (
+                  <div className="admin-paper-modal-body">
+                    <div className="admin-paper-section-header">
+                      <h3>Overview</h3>
+                      <span>Summary, identifiers, code, and job activity</span>
+                    </div>
+                    <div className="admin-paper-overview-grid">
+                      <div className="admin-paper-overview-card">
+                        <h4>Summaries</h4>
+                        {paperSummaryBlocks(paperDetail).length > 0 ? (
+                          paperSummaryBlocks(paperDetail).map(([label, value]) => (
+                            <section key={label} className="admin-paper-summary-block">
+                              <span>{label}</span>
+                              <p>{value}</p>
+                            </section>
+                          ))
+                        ) : (
+                          <div className="admin-jobs-empty">No summary or abstract is stored.</div>
+                        )}
+                      </div>
+                      <div className="admin-paper-overview-card">
+                        <h4>Paper</h4>
+                        <div className="admin-paper-metadata compact">
+                          {[
+                            ["Paper id", paperDetail?.paper_id ?? selectedJobPaper.paper_id],
+                            ["arXiv id", paperDetail?.arxiv_id ?? selectedJobPaper.arxiv_id ?? "—"],
+                            ["Status", paperDetail?.index_status ?? selectedJobPaper.outcome],
+                            ["Citations", paperDetail ? String(paperDetail.citation_count) : "—"],
+                            ["Indexed at", paperDetail?.indexed_at ?? "—"],
+                          ].map(([label, value]) => (
+                            <div key={label} className="admin-paper-metadata-row">
+                              <span>{label}</span>
+                              <strong>{value}</strong>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="admin-paper-overview-card">
+                        <h4>Code</h4>
+                        <div className="admin-paper-code-summary">
+                          {paperDetail?.code_url ? (
+                            <a href={paperDetail.code_url} target="_blank" rel="noreferrer">
+                              {paperDetail.code_url}
+                            </a>
+                          ) : (
+                            <span>No code URL stored.</span>
+                          )}
+                          <span>Status: {paperDetail?.code_index_status ?? "none"}</span>
+                          {paperCodeFiles?.resolved_sha ? (
+                            <span>Resolved SHA: {paperCodeFiles.resolved_sha}</span>
+                          ) : null}
+                          {paperCodeFiles?.eligibility.reason ? (
+                            <span>{paperCodeFiles.eligibility.reason}</span>
+                          ) : null}
+                        </div>
+                      </div>
+                      <div className="admin-paper-overview-card">
+                        <h4>Jobs</h4>
+                        {paperJobTouches.length > 0 ? (
+                          <div className="admin-paper-job-mini-list">
+                            {paperJobTouches.slice(0, 5).map((job) => (
+                              <div key={`${job.job_id}:${job.record_updated_at}`}>
+                                <strong>{JOB_TYPE_LABELS[job.job_type] ?? job.job_type}</strong>
+                                <span>
+                                  {statusLabel(job.outcome)} ·{" "}
+                                  {formatTimestamp(job.record_updated_at)}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="admin-jobs-empty">No tracked jobs for this paper.</div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
                 ) : null}
 
                 {!paperModalLoading && paperModalTab === "screenshot" ? (
@@ -2829,7 +3134,7 @@ export function AdminOpsPanel({
                   <div className="admin-paper-modal-body">
                     <div className="admin-paper-section-header">
                       <h3>Metadata</h3>
-                      <span>Compact paper record</span>
+                      <span>Full paper record</span>
                     </div>
                     <div className="admin-paper-metadata">
                       {metadataRows(paperDetail, selectedJobPaper).map(([label, value]) => (
@@ -2839,6 +3144,105 @@ export function AdminOpsPanel({
                         </div>
                       ))}
                     </div>
+                  </div>
+                ) : null}
+
+                {!paperModalLoading && paperModalTab === "jobs" ? (
+                  <div className="admin-paper-modal-body">
+                    <div className="admin-paper-section-header">
+                      <h3>Jobs</h3>
+                      <span>{paperJobTouches.length} tracked touches</span>
+                    </div>
+                    {paperJobTouches.length === 0 ? (
+                      <div className="admin-jobs-empty">No tracked jobs for this paper.</div>
+                    ) : (
+                      <div className="admin-paper-jobs-list">
+                        {paperJobTouches.map((job) => (
+                          <article key={`${job.job_id}:${job.record_updated_at}`}>
+                            <div className="admin-paper-job-row-header">
+                              <div>
+                                <strong>{JOB_TYPE_LABELS[job.job_type] ?? job.job_type}</strong>
+                                <code>{job.job_id}</code>
+                              </div>
+                              <span className={`admin-jobs-status status-${job.display_status}`}>
+                                {statusLabel(job.display_status)}
+                              </span>
+                            </div>
+                            <div className="admin-paper-job-row-meta">
+                              <span>Outcome: {statusLabel(job.outcome)}</span>
+                              {job.skip_reason ? (
+                                <span>Skip reason: {humanizeReason(job.skip_reason)}</span>
+                              ) : null}
+                              <span>Root: {job.root_job_id}</span>
+                              <span>Updated: {formatTimestamp(job.record_updated_at)}</span>
+                              <span>
+                                Attempts: {job.attempts}/{job.max_attempts}
+                              </span>
+                            </div>
+                            {job.error ? (
+                              <div className="admin-jobs-inline-error">{job.error}</div>
+                            ) : null}
+                            {jobPayloadPreview(job.payload) ? (
+                              <pre className="admin-paper-job-payload">
+                                {jobPayloadPreview(job.payload)}
+                              </pre>
+                            ) : null}
+                          </article>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ) : null}
+
+                {!paperModalLoading && paperModalTab === "code" ? (
+                  <div className="admin-paper-modal-body">
+                    <div className="admin-paper-section-header">
+                      <h3>Code</h3>
+                      <span>
+                        {paperCodeFiles?.eligibility.eligible
+                          ? `${paperCodeFiles.files.length} indexed repo files`
+                          : "Repository metadata"}
+                      </span>
+                    </div>
+                    <div className="admin-paper-code-summary">
+                      {paperDetail?.code_url ? (
+                        <a href={paperDetail.code_url} target="_blank" rel="noreferrer">
+                          {paperDetail.code_url}
+                        </a>
+                      ) : (
+                        <span>No code URL stored.</span>
+                      )}
+                      <span>Status: {paperDetail?.code_index_status ?? "none"}</span>
+                      <span>
+                        Python:{" "}
+                        {paperDetail?.code_is_python === true
+                          ? "yes"
+                          : paperDetail?.code_is_python === false
+                            ? "no"
+                            : "unknown"}
+                      </span>
+                      {paperDetail?.code_python_reason ? (
+                        <span>{paperDetail.code_python_reason}</span>
+                      ) : null}
+                      {paperCodeFiles?.resolved_sha ? (
+                        <span>Resolved SHA: {paperCodeFiles.resolved_sha}</span>
+                      ) : null}
+                    </div>
+                    {paperCodeFiles?.files.length ? (
+                      <div className="admin-paper-code-files">
+                        {paperCodeFiles.files.map((file) => (
+                          <div key={file.repo_path} className="admin-paper-code-file">
+                            <code>{file.repo_path}</code>
+                            <span>
+                              {formatWholeNumber(file.size_bytes)} bytes ·{" "}
+                              {file.indexed ? "indexed" : "stored"}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="admin-jobs-empty">No code files are available.</div>
+                    )}
                   </div>
                 ) : null}
 

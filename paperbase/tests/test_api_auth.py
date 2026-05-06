@@ -25,6 +25,8 @@ from paperbase.models import (
     AdminJobPaperResponse,
     AdminJobPapersResponse,
     AdminJobsOverviewResponse,
+    AdminPaperDetailResponse,
+    AdminPaperJobTouchResponse,
     BrowserSessionResponse,
     BrowserUser,
     ChatFeedbackResponse,
@@ -490,6 +492,38 @@ class StubApiService:
                     paper=_paper("2401.54321"),
                 )
             ],
+        )
+
+    def get_admin_paper_detail(self, paper_id: str) -> AdminPaperDetailResponse:
+        from paperbase.models import CodeEligibility, CodeFileListResponse, CodeFileSummary
+
+        self.calls.append(("get_admin_paper_detail", paper_id))
+        return AdminPaperDetailResponse(
+            paper=_paper("2401.54321"),
+            jobs=[
+                AdminPaperJobTouchResponse(
+                    root_job_id="job_root_1",
+                    job_id="job_chunk_1",
+                    job_type="harvest_chunk",
+                    status="completed",
+                    display_status="completed",
+                    payload={"paper_id": paper_id},
+                    outcome="indexed",
+                    attempts=1,
+                    max_attempts=3,
+                    priority=10,
+                    record_created_at=NOW,
+                    record_updated_at=NOW,
+                    created_at=NOW,
+                    updated_at=NOW,
+                )
+            ],
+            files=[FileObject(path="text/full.md", size=10, content_type="text/markdown")],
+            code_files=CodeFileListResponse(
+                paper_id=paper_id,
+                eligibility=CodeEligibility(eligible=True, status="indexed"),
+                files=[CodeFileSummary(repo_path="README.md", size_bytes=10, indexed=True)],
+            ),
         )
 
     def enqueue_harvest_range_job(self, **kwargs):
@@ -1332,6 +1366,7 @@ def test_browser_admin_routes_delegate_for_admin_users(api_client):
     job_papers = client.get("/v1/browser/admin/jobs/job_root_1/papers?offset=20&limit=10")
     papers = client.get("/v1/browser/admin/papers?q=benchmark&index_status=indexed&limit=3")
     default_papers = client.get("/v1/browser/admin/papers?q=benchmark&limit=2")
+    paper_detail = client.get("/v1/browser/admin/papers/arxiv:2401.54321/detail")
     files = client.get("/v1/browser/admin/papers/arxiv:2401.54321/files")
     file_contents = client.get("/v1/browser/admin/papers/arxiv:2401.54321/files/text/full.md")
     asset = client.get("/v1/browser/admin/papers/arxiv:2401.54321/assets/bundle.pdf")
@@ -1373,6 +1408,8 @@ def test_browser_admin_routes_delegate_for_admin_users(api_client):
     assert papers.json()[0]["paper_id"] == "arxiv:2401.54321"
     assert default_papers.status_code == 200
     assert default_papers.json()[0]["paper_id"] == "arxiv:2401.54321"
+    assert paper_detail.status_code == 200
+    assert paper_detail.json()["jobs"][0]["job_id"] == "job_chunk_1"
     assert files.status_code == 200
     assert files.json()["files"][0]["path"] == "text/full.md"
     assert file_contents.status_code == 200
@@ -1393,6 +1430,7 @@ def test_browser_admin_routes_delegate_for_admin_users(api_client):
     assert ("get_admin_job_papers", ("job_root_1", 20, 10)) in service.calls
     assert ("list_papers", ("benchmark", "indexed", 3)) in service.calls
     assert ("list_papers", ("benchmark", "indexed", 2)) in service.calls
+    assert ("get_admin_paper_detail", "arxiv:2401.54321") in service.calls
     assert ("list_files", "arxiv:2401.54321") in service.calls
     assert ("read_file", ("arxiv:2401.54321", "text/full.md")) in service.calls
     assert ("get_paper_asset", ("arxiv:2401.54321", "bundle.pdf")) in service.calls

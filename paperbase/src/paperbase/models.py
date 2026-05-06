@@ -344,6 +344,27 @@ class AdminJobPapersResponse(BaseModel):
     papers: list[AdminJobPaperResponse]
 
 
+class AdminPaperJobTouchResponse(BaseModel):
+    root_job_id: str
+    job_id: str
+    job_type: str
+    status: str
+    display_status: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+    error: str | None = None
+    outcome: str
+    skip_reason: str | None = None
+    attempts: int = 0
+    max_attempts: int = 3
+    priority: int = 0
+    record_created_at: datetime
+    record_updated_at: datetime
+    created_at: datetime
+    updated_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
 class FileObject(BaseModel):
     path: str
     size: int
@@ -1065,6 +1086,13 @@ class CodeFileListResponse(BaseModel):
     eligibility: CodeEligibility
     resolved_sha: str | None = None
     files: list[CodeFileSummary] = Field(default_factory=list)
+
+
+class AdminPaperDetailResponse(BaseModel):
+    paper: PaperResponse
+    jobs: list[AdminPaperJobTouchResponse] = Field(default_factory=list)
+    files: list[FileObject] = Field(default_factory=list)
+    code_files: CodeFileListResponse | None = None
 
 
 class CodeReadResponse(BaseModel):
