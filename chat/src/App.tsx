@@ -273,6 +273,36 @@ const WORKSPACE_SIDEBAR_ITEMS = [
   adminOnly?: boolean;
 }>;
 
+function timestampMs(value: string | null | undefined) {
+  if (!value) {
+    return null;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatWorkedDuration(startMs: number | null, endMs: number | null) {
+  if (startMs === null || endMs === null) {
+    return "a moment";
+  }
+  const totalSeconds = Math.max(1, Math.round(Math.max(0, endMs - startMs) / 1000));
+  if (totalSeconds < 60) {
+    return `${totalSeconds} ${totalSeconds === 1 ? "second" : "seconds"}`;
+  }
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  const remainingSeconds = totalSeconds % 60;
+  if (totalMinutes < 60) {
+    return remainingSeconds > 0
+      ? `${totalMinutes} ${totalMinutes === 1 ? "min" : "mins"} ${remainingSeconds} sec`
+      : `${totalMinutes} ${totalMinutes === 1 ? "min" : "mins"}`;
+  }
+  const totalHours = Math.floor(totalMinutes / 60);
+  const remainingMinutes = totalMinutes % 60;
+  return remainingMinutes > 0
+    ? `${totalHours} ${totalHours === 1 ? "hour" : "hours"} ${remainingMinutes} min`
+    : `${totalHours} ${totalHours === 1 ? "hour" : "hours"}`;
+}
+
 export default function App() {
   const bootstrapSession = useMemo(() => getBootstrapSession(), []);
   const [session, setSession] = useState<BrowserSessionResponse | null>(bootstrapSession);
@@ -5125,13 +5155,60 @@ export default function App() {
                 <div className="chat-message-column">
                   {(() => {
                     const commentaryTurnIndexes = new Set<number>();
+                    const itemByMessageId = new Map(
+                      (activeThread.items ?? [])
+                        .filter((item) =>
+                          ["user_message", "assistant_message", "compaction"].includes(
+                            item.item_type,
+                          ),
+                        )
+                        .map((item) => [item.item_id, item]),
+                    );
+                    const turnIndexById = new Map<string, number>();
+                    for (const [index, turn] of (activeThread.turns ?? []).entries()) {
+                      turnIndexById.set(turn.turn_id, index + 1);
+                    }
+                    for (const item of activeThread.items ?? []) {
+                      if (item.turn_id && !turnIndexById.has(item.turn_id)) {
+                        turnIndexById.set(item.turn_id, turnIndexById.size + 1);
+                      }
+                    }
+                    const messageTurnIndexes = new Map<string, number>();
+                    const userMessagesByTurn = new Map<number, ChatMessageResponse[]>();
+                    const commentaryMessagesByTurn = new Map<number, ChatMessageResponse[]>();
+                    const completedFinalMessagesByTurn = new Map<number, ChatMessageResponse>();
                     let scannedTurnIndex = 0;
+                    let currentTurnIndex = 0;
                     for (const candidate of activeThread.messages) {
+                      if (candidate.kind === "compaction") {
+                        continue;
+                      }
+                      const itemTurnId = itemByMessageId.get(candidate.message_id)?.turn_id;
+                      const itemTurnIndex = itemTurnId ? turnIndexById.get(itemTurnId) : undefined;
                       if (candidate.role === "user" && candidate.kind !== "compaction") {
                         scannedTurnIndex += 1;
+                        currentTurnIndex = itemTurnIndex ?? scannedTurnIndex;
+                      }
+                      const candidateTurnIndex =
+                        itemTurnIndex ?? (currentTurnIndex || scannedTurnIndex || 1);
+                      messageTurnIndexes.set(candidate.message_id, candidateTurnIndex);
+                      if (candidate.role === "user") {
+                        const existing = userMessagesByTurn.get(candidateTurnIndex) ?? [];
+                        existing.push(candidate);
+                        userMessagesByTurn.set(candidateTurnIndex, existing);
                       }
                       if (candidate.role === "assistant" && candidate.phase === "commentary") {
-                        commentaryTurnIndexes.add(scannedTurnIndex);
+                        commentaryTurnIndexes.add(candidateTurnIndex);
+                        const existing = commentaryMessagesByTurn.get(candidateTurnIndex) ?? [];
+                        existing.push(candidate);
+                        commentaryMessagesByTurn.set(candidateTurnIndex, existing);
+                      }
+                      if (
+                        candidate.role === "assistant" &&
+                        candidate.phase !== "commentary" &&
+                        candidate.status === "completed"
+                      ) {
+                        completedFinalMessagesByTurn.set(candidateTurnIndex, candidate);
                       }
                     }
                     const latestRecommendedMessageId =
@@ -5146,6 +5223,98 @@ export default function App() {
                             candidate.phase !== "commentary" &&
                             (candidate.recommended_prompts?.length ?? 0) > 0,
                         )?.message_id ?? null;
+                    const renderToolActivityRow = (activity: ToolActivityEntry) => (
+                      <div
+                        key={activity.id}
+                        className={`tool-activity-row status-${activity.status}${activity.isError ? " error" : ""}`}
+                      >
+                        {toolActivityHasDetails(activity) ? (
+                          <details className="tool-activity-details">
+                            <summary className="tool-activity-summary">
+                              <span
+                                className={`tool-activity-label${activity.status === "running" ? " thinking-shimmer" : ""}`}
+                              >
+                                {formatToolActivityText(activity)}
+                              </span>
+                              <span className="tool-activity-summary-hint">
+                                Command{activity.output ? " and output" : ""}
+                              </span>
+                            </summary>
+                            <div className="tool-activity-content">
+                              {activity.command ? (
+                                <div className="tool-activity-detail-block">
+                                  <span className="tool-activity-detail-label">Command</span>
+                                  <pre className="tool-activity-detail-payload">
+                                    {activity.command}
+                                  </pre>
+                                </div>
+                              ) : null}
+                              {activity.output ? (
+                                <div className="tool-activity-detail-block">
+                                  <span className="tool-activity-detail-label">Output</span>
+                                  <pre className="tool-activity-detail-payload">
+                                    {activity.output}
+                                  </pre>
+                                </div>
+                              ) : null}
+                            </div>
+                          </details>
+                        ) : (
+                          <span
+                            className={`tool-activity-label${activity.status === "running" ? " thinking-shimmer" : ""}`}
+                          >
+                            {formatToolActivityText(activity)}
+                          </span>
+                        )}
+                      </div>
+                    );
+                    const renderCollapsedTurnWork = (
+                      turnIndex: number,
+                      finalMessage: ChatMessageResponse,
+                    ) => {
+                      const commentaryMessages = commentaryMessagesByTurn.get(turnIndex) ?? [];
+                      const turnActivities = activeThreadToolActivitiesByTurn.get(turnIndex) ?? [];
+                      if (commentaryMessages.length === 0 && turnActivities.length === 0) {
+                        return null;
+                      }
+                      const startCandidates = [
+                        ...(userMessagesByTurn.get(turnIndex) ?? []).map((item) =>
+                          timestampMs(item.created_at),
+                        ),
+                        ...commentaryMessages.map((item) => timestampMs(item.created_at)),
+                        ...turnActivities.map((item) => timestampMs(item.startedAt)),
+                      ].filter((value): value is number => value !== null);
+                      const endCandidates = [
+                        timestampMs(finalMessage.created_at),
+                        ...turnActivities.map((item) => timestampMs(item.finishedAt)),
+                      ].filter((value): value is number => value !== null);
+                      const startMs =
+                        startCandidates.length > 0 ? Math.min(...startCandidates) : null;
+                      const endMs = endCandidates.length > 0 ? Math.max(...endCandidates) : null;
+                      return (
+                        <details className="turn-work-details">
+                          <summary className="turn-work-summary">
+                            Worked for {formatWorkedDuration(startMs, endMs)}
+                          </summary>
+                          <div className="turn-work-content">
+                            {commentaryMessages.map((commentaryMessage) => (
+                              <article
+                                key={commentaryMessage.message_id}
+                                className={`message-row assistant status-${commentaryMessage.status}`}
+                              >
+                                <div className="message-bubble assistant">
+                                  <MarkdownRenderer
+                                    markdown={commentaryMessage.content_markdown}
+                                    className="message-markdown"
+                                  />
+                                </div>
+                              </article>
+                            ))}
+                            {turnActivities.map(renderToolActivityRow)}
+                          </div>
+                        </details>
+                      );
+                    };
                     const renderedToolActivityTurnIndexes = new Set<number>();
                     let userTurnIndex = 0;
                     return activeThread.messages.map((message) => {
@@ -5168,6 +5337,8 @@ export default function App() {
                       if (message.role === "user" && !isCompactionMessage) {
                         userTurnIndex += 1;
                       }
+                      const messageTurnIndex =
+                        messageTurnIndexes.get(message.message_id) ?? (userTurnIndex || 1);
                       const latestToolActivityTurnIndex =
                         activeThreadToolActivitiesByTurn.size > 0
                           ? Math.max(...activeThreadToolActivitiesByTurn.keys())
@@ -5177,8 +5348,21 @@ export default function App() {
                           ? activeThreadStreamState.turnIndex
                           : isCompactionMessage
                             ? latestToolActivityTurnIndex
-                            : userTurnIndex;
+                            : messageTurnIndex;
+                      const completedFinalMessage =
+                        completedFinalMessagesByTurn.get(activityTurnIndex) ?? null;
+                      const turnHasCollapsedWork =
+                        Boolean(completedFinalMessage) &&
+                        ((commentaryMessagesByTurn.get(activityTurnIndex) ?? []).length > 0 ||
+                          (activeThreadToolActivitiesByTurn.get(activityTurnIndex) ?? []).length >
+                            0);
+                      if (isCommentaryMessage && turnHasCollapsedWork) {
+                        return null;
+                      }
+                      const isSessionFinalMessage =
+                        completedFinalMessage?.message_id === message.message_id;
                       const shouldRenderTurnActivities =
+                        !turnHasCollapsedWork &&
                         ((message.role === "user" &&
                           !isCompactionMessage &&
                           !commentaryTurnIndexes.has(activityTurnIndex)) ||
@@ -5200,12 +5384,20 @@ export default function App() {
                         turnActivities.length === 0;
                       const hoverTime = formatLocalTimestamp(message.created_at, "");
                       const messagePaperCount = uniquePaperCitationCount(message.citations);
+                      const shouldRenderSessionActions =
+                        message.role === "assistant" &&
+                        !isCompactionMessage &&
+                        isSessionFinalMessage;
                       const recommendedPrompts =
+                        shouldRenderSessionActions &&
                         message.message_id === latestRecommendedMessageId
                           ? (message.recommended_prompts ?? [])
                           : [];
                       return (
                         <Fragment key={message.message_id}>
+                          {isSessionFinalMessage
+                            ? renderCollapsedTurnWork(activityTurnIndex, message)
+                            : null}
                           <article
                             className={`message-row ${isCompactionMessage ? "compaction" : message.role === "assistant" ? "assistant" : "user"} status-${message.status}`}
                           >
@@ -5262,22 +5454,14 @@ export default function App() {
                                 dataTestId="streaming-code-preview"
                               />
                             ) : null}
-                            {!isCompactionMessage ? (
+                            {shouldRenderSessionActions ? (
                               <div className="message-actions">
                                 <div className="message-actions-left">
                                   <button
                                     type="button"
                                     className="message-action-button"
-                                    aria-label={
-                                      message.role === "assistant"
-                                        ? "Copy response"
-                                        : "Copy message"
-                                    }
-                                    title={
-                                      message.role === "assistant"
-                                        ? "Copy response"
-                                        : "Copy message"
-                                    }
+                                    aria-label="Copy response"
+                                    title="Copy response"
                                     onClick={() => void copyMessage(message.content_markdown)}
                                   >
                                     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -5285,44 +5469,38 @@ export default function App() {
                                       <path d="M6 15H5V4h9v1" />
                                     </svg>
                                   </button>
-                                  {message.role === "assistant" ? (
-                                    <button
-                                      type="button"
-                                      className="message-action-button"
-                                      aria-label="Retry response"
-                                      title="Retry response"
-                                      disabled={Boolean(streamingThreadId)}
-                                      onClick={() =>
-                                        void retryAssistantResponse(message.message_id)
-                                      }
-                                    >
-                                      <svg viewBox="0 0 24 24" aria-hidden="true">
-                                        <path d="M7 7h7a5 5 0 1 1-4.35 7.48" />
-                                        <path d="M7 7V3" />
-                                        <path d="M7 7H3" />
-                                      </svg>
-                                    </button>
-                                  ) : null}
-                                  {message.role === "assistant" ? (
-                                    <button
-                                      type="button"
-                                      className="message-action-button"
-                                      aria-label="Download reply"
-                                      title="Download reply"
-                                      onClick={() =>
-                                        setExportModalState({
-                                          source: "message",
-                                          messageId: message.message_id,
-                                        })
-                                      }
-                                    >
-                                      <svg viewBox="0 0 24 24" aria-hidden="true">
-                                        <path d="M12 4v11" />
-                                        <path d="m7 10 5 5 5-5" />
-                                        <path d="M5 20h14" />
-                                      </svg>
-                                    </button>
-                                  ) : null}
+                                  <button
+                                    type="button"
+                                    className="message-action-button"
+                                    aria-label="Retry response"
+                                    title="Retry response"
+                                    disabled={Boolean(streamingThreadId)}
+                                    onClick={() => void retryAssistantResponse(message.message_id)}
+                                  >
+                                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                                      <path d="M7 7h7a5 5 0 1 1-4.35 7.48" />
+                                      <path d="M7 7V3" />
+                                      <path d="M7 7H3" />
+                                    </svg>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="message-action-button"
+                                    aria-label="Download reply"
+                                    title="Download reply"
+                                    onClick={() =>
+                                      setExportModalState({
+                                        source: "message",
+                                        messageId: message.message_id,
+                                      })
+                                    }
+                                  >
+                                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                                      <path d="M12 4v11" />
+                                      <path d="m7 10 5 5 5-5" />
+                                      <path d="M5 20h14" />
+                                    </svg>
+                                  </button>
                                   {messagePaperCount > 0 ? (
                                     <button
                                       type="button"
@@ -5336,34 +5514,32 @@ export default function App() {
                                     <span className="message-action-time">{hoverTime}</span>
                                   ) : null}
                                 </div>
-                                {message.role === "assistant" ? (
-                                  <div className="message-actions-right">
-                                    <button
-                                      type="button"
-                                      className="message-action-button"
-                                      aria-label="Like response"
-                                      title="Like response"
-                                      onClick={() => openFeedbackModal(message, "positive")}
-                                    >
-                                      <svg viewBox="0 0 24 24" aria-hidden="true">
-                                        <path d="M7 10v10H4V10z" />
-                                        <path d="M7 10 12 3l1 1v5h5a2 2 0 0 1 2 2l-1 7a2 2 0 0 1-2 2H7" />
-                                      </svg>
-                                    </button>
-                                    <button
-                                      type="button"
-                                      className="message-action-button"
-                                      aria-label="Dislike response"
-                                      title="Dislike response"
-                                      onClick={() => openFeedbackModal(message, "negative")}
-                                    >
-                                      <svg viewBox="0 0 24 24" aria-hidden="true">
-                                        <path d="M7 14V4H4v10z" />
-                                        <path d="M7 14 12 21l1-1v-5h5a2 2 0 0 0 2-2l-1-7a2 2 0 0 0-2-2H7" />
-                                      </svg>
-                                    </button>
-                                  </div>
-                                ) : null}
+                                <div className="message-actions-right">
+                                  <button
+                                    type="button"
+                                    className="message-action-button"
+                                    aria-label="Like response"
+                                    title="Like response"
+                                    onClick={() => openFeedbackModal(message, "positive")}
+                                  >
+                                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                                      <path d="M7 10v10H4V10z" />
+                                      <path d="M7 10 12 3l1 1v5h5a2 2 0 0 1 2 2l-1 7a2 2 0 0 1-2 2H7" />
+                                    </svg>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="message-action-button"
+                                    aria-label="Dislike response"
+                                    title="Dislike response"
+                                    onClick={() => openFeedbackModal(message, "negative")}
+                                  >
+                                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                                      <path d="M7 14V4H4v10z" />
+                                      <path d="M7 14 12 21l1-1v-5h5a2 2 0 0 0 2-2l-1-7a2 2 0 0 0-2-2H7" />
+                                    </svg>
+                                  </button>
+                                </div>
                               </div>
                             ) : null}
                             {recommendedPrompts.length > 0 ? (
@@ -5499,51 +5675,7 @@ export default function App() {
                               </div>
                             ) : null}
                           </article>
-                          {turnActivities.map((activity) => (
-                            <div
-                              key={activity.id}
-                              className={`tool-activity-row status-${activity.status}${activity.isError ? " error" : ""}`}
-                            >
-                              {toolActivityHasDetails(activity) ? (
-                                <details className="tool-activity-details">
-                                  <summary className="tool-activity-summary">
-                                    <span
-                                      className={`tool-activity-label${activity.status === "running" ? " thinking-shimmer" : ""}`}
-                                    >
-                                      {formatToolActivityText(activity)}
-                                    </span>
-                                    <span className="tool-activity-summary-hint">
-                                      Command{activity.output ? " and output" : ""}
-                                    </span>
-                                  </summary>
-                                  <div className="tool-activity-content">
-                                    {activity.command ? (
-                                      <div className="tool-activity-detail-block">
-                                        <span className="tool-activity-detail-label">Command</span>
-                                        <pre className="tool-activity-detail-payload">
-                                          {activity.command}
-                                        </pre>
-                                      </div>
-                                    ) : null}
-                                    {activity.output ? (
-                                      <div className="tool-activity-detail-block">
-                                        <span className="tool-activity-detail-label">Output</span>
-                                        <pre className="tool-activity-detail-payload">
-                                          {activity.output}
-                                        </pre>
-                                      </div>
-                                    ) : null}
-                                  </div>
-                                </details>
-                              ) : (
-                                <span
-                                  className={`tool-activity-label${activity.status === "running" ? " thinking-shimmer" : ""}`}
-                                >
-                                  {formatToolActivityText(activity)}
-                                </span>
-                              )}
-                            </div>
-                          ))}
+                          {turnActivities.map(renderToolActivityRow)}
                           {showThinkingPlaceholder ? (
                             <div className="tool-activity-row status-running thinking-only">
                               <div className="tool-activity-content">

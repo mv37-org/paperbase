@@ -1878,7 +1878,7 @@ describe("App", () => {
     });
   });
 
-  it("renders assistant commentary as plain assistant text", async () => {
+  it("collapses completed assistant commentary behind a worked summary", async () => {
     const commentaryItem = threadItemResponse(
       "item_commentary",
       "assistant_message",
@@ -1936,15 +1936,20 @@ describe("App", () => {
 
     render(<App />);
 
-    const commentary = await screen.findByText(
-      "I'm checking the repo layout before I edit anything.",
-    );
+    const workSummary = await screen.findByText(/^Worked for /);
+    const workDetails = workSummary.closest("details");
     const finalAnswer = screen.getByText("Final answer");
+    expect(workDetails?.open).toBe(false);
     expect(screen.queryByText("Commentary")).toBeNull();
     expect(document.querySelector(".message-bubble.assistant.commentary")).toBeNull();
     expect(
-      commentary.compareDocumentPosition(finalAnswer) & Node.DOCUMENT_POSITION_FOLLOWING,
+      workSummary.compareDocumentPosition(finalAnswer) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+    expect(screen.getAllByRole("button", { name: "Retry response" })).toHaveLength(1);
+
+    fireEvent.click(workSummary);
+    expect(workDetails?.open).toBe(true);
+    expect(screen.getByText("I'm checking the repo layout before I edit anything.")).toBeTruthy();
   });
 
   it("creates a Python file and saves it explicitly to GitHub", async () => {
