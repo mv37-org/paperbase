@@ -103,7 +103,7 @@ class Settings(BaseSettings):
     github_oauth_redirect_url: str | None = None
     openai_api_key: str | None = None
     openai_base_url: str = Field(default="https://api.openai.com")
-    openai_model: str = Field(default="gpt-5")
+    openai_model: str = Field(default="gpt-5.5")
     anthropic_api_key: str | None = None
     anthropic_base_url: str = Field(default="https://api.anthropic.com")
     anthropic_model: str = Field(default="claude-opus-4-7")
