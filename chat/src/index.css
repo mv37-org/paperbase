@@ -334,7 +334,7 @@ textarea {
 .chat-prompt-shell .mention-editor {
   display: flex;
   align-items: stretch;
-  min-height: 89px;
+  min-height: 79px;
   max-height: 450px;
   border-bottom: 1px solid rgba(27, 22, 17, 0.08);
   border-radius: 5px 5px 0 0;
@@ -345,7 +345,7 @@ textarea {
 .chat-prompt-shell .mention-editor-input {
   width: 100%;
   height: auto;
-  min-height: 89px;
+  min-height: 79px;
   max-height: 450px;
   box-sizing: border-box;
   overflow-x: hidden;
@@ -4076,7 +4076,7 @@ textarea::placeholder,
 
 .chat-empty-state .chat-prompt-shell .mention-editor,
 .chat-empty-state .chat-prompt-shell .mention-editor-input {
-  min-height: 94px;
+  min-height: 84px;
 }
 
 .chat-empty-project-select:focus {
