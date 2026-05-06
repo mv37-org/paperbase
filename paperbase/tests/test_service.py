@@ -3183,7 +3183,7 @@ def test_project_chat_tools_are_advertised_for_coding_turns(browser_service):
     assert "Once the tool results are sufficient, stop calling tools and answer directly in the same turn." in prompt
     assert "First judge whether the user's request is within Paperbase scope" in prompt
     assert "For AI, ML, agent, evaluation, architecture, algorithm, or implementation-code requests" in prompt
-    assert "search for relevant papers or uploaded evidence before settling the implementation approach" in prompt
+    assert "search for relevant research papers before settling the implementation approach" in prompt
     assert "Operate like a coding agent." in prompt
     assert "Project workspace tools operate on the current project's repo-relative text files." in prompt
     assert "Generated runnable code should support smoke-scale validation when practical." in prompt
@@ -5334,6 +5334,10 @@ def test_chat_answer_prompt_requires_strict_markdown(browser_service):
     assert "Before tool calls on non-trivial turns, emit a concise commentary message" in with_evidence
     assert "send brief commentary progress updates before additional tool batches" in with_evidence
     assert "Once the tool results are sufficient, stop calling tools and answer directly in the same turn." in with_evidence
+    assert "Keep final answers brief." in with_evidence
+    assert "Ground final answers in research-paper evidence" in with_evidence
+    assert "Limit final answers to what research papers support." in with_evidence
+    assert "If no relevant research-paper evidence can be found" in with_evidence
     assert "strict GitHub-flavored markdown" in without_evidence
     assert "valid markdown that a standard parser can render directly" in without_evidence
     assert with_evidence == without_evidence

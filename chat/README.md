@@ -23,10 +23,10 @@ The authenticated sidebar is project-first, with a small signed-in Browse area a
 - chat rows expose delete-on-hover actions and only fetch full thread content when opened
 - `New chat` sessions are renamed after the first real user prompt to a compact 3-5 word summary and then keep that title on later turns
 - chat markdown renders inline/block LaTeX formulas, while localhost-only thread debug metadata stays out of the empty-chat landing layout
-- assistant commentary is prompted before non-trivial tool batches and renders as plain assistant text in turn order, so progress notes are not merged into the final response
+- assistant commentary is prompted before non-trivial tool batches, then collapses behind a `Worked for ...` summary once the final answer arrives so session actions stay grouped with the conclusion
 - signed-in pages can switch between light and dark mode from Settings → Appearance, and the theme covers the shell, markdown, drawers, icons, and modals without changing the public landing page
 - Python and imported notebook rows open as the single active Monaco-backed editor view with explicit `Save` and `Run` actions
-- project coding turns use the Codex-style turn loop and can mix commentary, tool calls, and final answers in a single persisted turn while grounding AI/code implementation choices in relevant paper or uploaded-document evidence when available
+- project coding turns use the Codex-style turn loop and can mix commentary, tool calls, and final answers in a single persisted turn while keeping final answers brief and grounded in cited research-paper evidence for in-scope turns; uploaded-document evidence is used only when explicitly requested
 - `.ipynb` and Colab uploads are converted through Jupytext to `py:percent` source for editing, while GitHub saves regenerate the notebook path
 - project file creation/import/save flows require a connected GitHub account, and `Run` saves to GitHub before executing through Modal
 - project sync writes only `.paperbase` managed paths, and GitHub conflicts reopen inside a Monaco diff-and-merge modal
