@@ -2537,6 +2537,7 @@ textarea::placeholder,
   width: 100%;
   max-width: 100%;
   min-width: 0;
+  scroll-margin-top: calc(var(--chat-thread-header-height) + 24px);
 }
 
 .message-row.user {

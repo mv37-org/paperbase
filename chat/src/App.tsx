@@ -173,6 +173,10 @@ import type {
   SendChatMessageResponse,
 } from "./types";
 
+function chatMessageRowId(messageId: string) {
+  return `chat-message-${messageId.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+}
+
 const RESUME_PROJECT_MODAL_KEY = "paperbase-resume-new-project";
 const LANDING_TRENDING_PAGE_SIZE = 10;
 const PROJECT_ITEM_PAGE_SIZE = 5;
@@ -441,6 +445,8 @@ export default function App() {
   const emptyStateProjectSearchInputRef = useRef<HTMLInputElement | null>(null);
   const projectMenuRef = useRef<HTMLDivElement | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
+  const pendingTurnAnchorMessageIdRef = useRef<string | null>(null);
+  const skipNextAutoBottomScrollRef = useRef(false);
   const streamAbortControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
@@ -714,6 +720,14 @@ export default function App() {
   const isWorkspaceView = workspaceView !== null;
   const isAdminWorkspaceView =
     workspaceView?.kind === "admin_jobs" || workspaceView?.kind === "admin_job_papers";
+  const activeThreadHasAssistantReply = Boolean(
+    activeThread?.messages.some(
+      (message) => message.role === "assistant" && message.kind !== "compaction",
+    ),
+  );
+  const showChatThreadHeader = Boolean(
+    activeTab?.kind === "thread" && activeThread && activeThreadHasAssistantReply,
+  );
   const showThreadStageChrome =
     !isWorkspaceView && activeTab?.kind === "thread" && threadPane === "chat" && !isChatEmpty;
   const activeThreadStreamState = activeThreadId
@@ -874,6 +888,12 @@ export default function App() {
   }, [activeThreadId]);
 
   useEffect(() => {
+    if (!showChatThreadHeader && threadPane === "papers") {
+      setThreadPane("chat");
+    }
+  }, [showChatThreadHeader, threadPane]);
+
+  useEffect(() => {
     if (!activeContextUsage) {
       setContextUsagePopoverOpen(false);
     }
@@ -885,6 +905,15 @@ export default function App() {
     }
     messageListRef.current.scrollTo({ top: messageListRef.current.scrollHeight, behavior });
     setMessageListAtBottom(true);
+  }, []);
+
+  const scrollMessageIntoView = useCallback((messageId: string) => {
+    const element = document.getElementById(chatMessageRowId(messageId));
+    if (!element) {
+      return;
+    }
+    element.scrollIntoView({ behavior: "smooth", block: "start", inline: "nearest" });
+    setMessageListAtBottom(false);
   }, []);
 
   const handleMessageListScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
@@ -982,7 +1011,27 @@ export default function App() {
   }, [activeThreadId, scrollMessageListToBottom]);
 
   useEffect(() => {
+    const pendingMessageId = pendingTurnAnchorMessageIdRef.current;
+    if (
+      !pendingMessageId ||
+      !activeThread?.messages.some((message) => message.message_id === pendingMessageId)
+    ) {
+      return;
+    }
+    requestAnimationFrame(() => {
+      scrollMessageIntoView(pendingMessageId);
+      if (pendingTurnAnchorMessageIdRef.current === pendingMessageId) {
+        pendingTurnAnchorMessageIdRef.current = null;
+      }
+    });
+  }, [activeThread, scrollMessageIntoView]);
+
+  useEffect(() => {
     if (!activeThread || !messageListAtBottom) {
+      return;
+    }
+    if (skipNextAutoBottomScrollRef.current) {
+      skipNextAutoBottomScrollRef.current = false;
       return;
     }
     requestAnimationFrame(() => {
@@ -2018,6 +2067,8 @@ export default function App() {
       let streamingMessageId: string | null = null;
       const streamAbortController = new AbortController();
       const optimisticTitle = summarizeThreadTitle(content);
+      pendingTurnAnchorMessageIdRef.current = optimisticUserMessage.message_id;
+      skipNextAutoBottomScrollRef.current = true;
 
       updateThread(threadId, (thread) => ({
         thread_id: thread?.thread_id ?? threadId,
@@ -2457,10 +2508,9 @@ export default function App() {
         return;
       }
       setThreadPane("chat");
-      scrollMessageListToBottom();
       await sendMessage(activeThread.thread_id, previousUser.content_markdown.trim());
     },
-    [activeThread, scrollMessageListToBottom, sendMessage, streamingThreadId],
+    [activeThread, sendMessage, streamingThreadId],
   );
 
   const sendRecommendedPrompt = useCallback(
@@ -2471,10 +2521,9 @@ export default function App() {
       setThreadPane("chat");
       setComposerInput("");
       setComposerTags([]);
-      scrollMessageListToBottom();
       await sendMessage(activeThread.thread_id, prompt);
     },
-    [activeThread, scrollMessageListToBottom, sendMessage, streamingThreadId],
+    [activeThread, sendMessage, streamingThreadId],
   );
 
   const bootstrapAuthenticatedUi = useCallback(
@@ -2771,7 +2820,6 @@ export default function App() {
     setComposerInput("");
     setComposerTags([]);
     setRestoredComposerMentions([]);
-    scrollMessageListToBottom();
     await sendMessage(threadId, content, undefined, paperIds);
   }, [
     activeThreadId,
@@ -2780,7 +2828,6 @@ export default function App() {
     createNewThread,
     requireInferenceAccess,
     restoredComposerMentions,
-    scrollMessageListToBottom,
     sendMessage,
     streamingThreadId,
   ]);
@@ -4717,7 +4764,7 @@ export default function App() {
                 className="sidebar-toggle-icon"
               />
             </button>
-            {activeTab?.kind === "thread" && activeThread ? (
+            {showChatThreadHeader ? (
               <ChatThreadHeader
                 threadPane={threadPane}
                 menuOpen={chatHeaderMenuOpen}
@@ -4740,7 +4787,7 @@ export default function App() {
 
             <div
               ref={messageListRef}
-              className={`chat-message-list${isChatEmpty ? " empty" : ""}${activeTab?.kind === "thread" && activeThread ? " thread-header-visible" : ""}${activeTab?.kind === "python_file" ? " python-file-view" : ""}${isWorkspaceView ? " workspace-view" : ""}${isAdminWorkspaceView ? " workspace-admin-view" : ""}`}
+              className={`chat-message-list${isChatEmpty ? " empty" : ""}${showChatThreadHeader ? " thread-header-visible" : ""}${activeTab?.kind === "python_file" ? " python-file-view" : ""}${isWorkspaceView ? " workspace-view" : ""}${isAdminWorkspaceView ? " workspace-admin-view" : ""}`}
               onScroll={handleMessageListScroll}
             >
               {workspaceView ? (
@@ -4920,7 +4967,9 @@ export default function App() {
                     Loading Python file...
                   </div>
                 )
-              ) : activeTab?.kind === "thread" && threadPane === "papers" ? (
+              ) : activeTab?.kind === "thread" &&
+                showChatThreadHeader &&
+                threadPane === "papers" ? (
                 <ThreadPapersView
                   citations={activeThreadCitations}
                   paperCitationPreviews={paperCitationPreviews}
@@ -5399,6 +5448,7 @@ export default function App() {
                             ? renderCollapsedTurnWork(activityTurnIndex, message)
                             : null}
                           <article
+                            id={chatMessageRowId(message.message_id)}
                             className={`message-row ${isCompactionMessage ? "compaction" : message.role === "assistant" ? "assistant" : "user"} status-${message.status}`}
                           >
                             {message.status !== "completed" && !isCompactionMessage ? (

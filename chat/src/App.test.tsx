@@ -628,6 +628,10 @@ describe("App", () => {
       configurable: true,
       value: vi.fn(),
     });
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: vi.fn(),
+    });
     apiMocks.getBootstrapSession.mockReturnValue(null);
     apiMocks.loadUploads.mockResolvedValue({ documents: [], available_tags: [] });
     apiMocks.loadProjects.mockResolvedValue({
@@ -1950,6 +1954,80 @@ describe("App", () => {
     fireEvent.click(workSummary);
     expect(workDetails?.open).toBe(true);
     expect(screen.getByText("I'm checking the repo layout before I edit anything.")).toBeTruthy();
+  });
+
+  it("hides the chat tabs until an assistant reply exists", async () => {
+    localStorage.setItem(ACTIVE_TAB_KEY, JSON.stringify({ kind: "thread", id: "thread_1" }));
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.getThread.mockResolvedValue(emptyThreadResponse("thread_1"));
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Start new research in")).toBeTruthy();
+    });
+    expect(screen.queryByRole("tab", { name: "Chat" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Papers" })).toBeNull();
+    expect(document.querySelector(".chat-message-list.thread-header-visible")).toBeNull();
+  });
+
+  it("keeps the chat tabs hidden while only the user prompt is visible", async () => {
+    localStorage.setItem(ACTIVE_TAB_KEY, JSON.stringify({ kind: "thread", id: "thread_1" }));
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.getThread.mockResolvedValue({
+      ...emptyThreadResponse("thread_1"),
+      title: "Pending chat",
+      messages: [
+        {
+          message_id: "user_1",
+          role: "user",
+          content_markdown: "Summarize recent planning papers",
+          citations: [],
+          created_at: "2026-04-21T00:00:00Z",
+          status: "completed",
+        },
+      ],
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Summarize recent planning papers")).toBeTruthy();
+    });
+    expect(screen.queryByRole("tab", { name: "Chat" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Papers" })).toBeNull();
+    expect(document.querySelector(".chat-message-list.thread-header-visible")).toBeNull();
+  });
+
+  it("anchors a newly submitted prompt at the top of the chat viewport", async () => {
+    localStorage.setItem(ACTIVE_TAB_KEY, JSON.stringify({ kind: "thread", id: "thread_1" }));
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.getThread.mockResolvedValue(threadResponse("thread_1", "Recovered thread"));
+    apiMocks.sendThreadMessageStream.mockImplementation(async () => undefined);
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Grounded answer")).toBeTruthy();
+    });
+    const scrollIntoView = vi.mocked(HTMLElement.prototype.scrollIntoView);
+    scrollIntoView.mockClear();
+
+    fireEvent.change(screen.getByLabelText("mention-input-chat"), {
+      target: { value: "Compare recent retrieval agents" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
+      expect(apiMocks.sendThreadMessageStream).toHaveBeenCalledTimes(1);
+    });
+    await waitFor(() => {
+      expect(scrollIntoView).toHaveBeenCalledWith({
+        behavior: "smooth",
+        block: "start",
+        inline: "nearest",
+      });
+    });
   });
 
   it("creates a Python file and saves it explicitly to GitHub", async () => {
