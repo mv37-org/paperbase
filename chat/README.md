@@ -23,7 +23,7 @@ The authenticated sidebar is project-first, with a small signed-in Browse area a
 - chat rows expose delete-on-hover actions and only fetch full thread content when opened
 - `New chat` sessions are renamed after the first real user prompt to a compact 3-5 word summary and then keep that title on later turns
 - chat markdown renders inline/block LaTeX formulas, while localhost-only thread debug metadata stays out of the empty-chat landing layout
-- assistant commentary is prompted before non-trivial tool batches, and commentary/final answers render as separate persisted chat items so progress notes are not merged into the final response
+- assistant commentary is prompted before non-trivial tool batches and renders as plain assistant text in turn order, so progress notes are not merged into the final response
 - signed-in pages can switch between light and dark mode from Settings → Appearance, and the theme covers the shell, markdown, drawers, icons, and modals without changing the public landing page
 - Python and imported notebook rows open Monaco-backed Python editor tabs with explicit `Save` and `Run` actions
 - project coding turns use the Codex-style turn loop and can mix commentary, tool calls, and final answers in a single persisted turn while grounding AI/code implementation choices in relevant paper or uploaded-document evidence when available

@@ -1813,7 +1813,7 @@ describe("App", () => {
     });
   });
 
-  it("renders assistant commentary as its own labeled message", async () => {
+  it("renders assistant commentary as plain assistant text", async () => {
     const commentaryItem = threadItemResponse(
       "item_commentary",
       "assistant_message",
@@ -1871,11 +1871,15 @@ describe("App", () => {
 
     render(<App />);
 
-    await waitFor(() => {
-      expect(screen.getByText("Commentary")).toBeTruthy();
-    });
-    expect(screen.getByText("I'm checking the repo layout before I edit anything.")).toBeTruthy();
-    expect(screen.getByText("Final answer")).toBeTruthy();
+    const commentary = await screen.findByText(
+      "I'm checking the repo layout before I edit anything.",
+    );
+    const finalAnswer = screen.getByText("Final answer");
+    expect(screen.queryByText("Commentary")).toBeNull();
+    expect(document.querySelector(".message-bubble.assistant.commentary")).toBeNull();
+    expect(
+      commentary.compareDocumentPosition(finalAnswer) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 
   it("creates a Python file and saves it explicitly to GitHub", async () => {
@@ -2591,6 +2595,31 @@ describe("App", () => {
           total_tokens: 118000,
           context_window_tokens: 258000,
         });
+        const commentaryItem = threadItemResponse(
+          "msg_commentary",
+          "assistant_message",
+          "assistant",
+          "",
+          {
+            thread_id: "thread_2",
+            turn_id: "turn_2",
+            phase: "commentary",
+            status: "in_progress",
+          },
+        );
+        onEvent("item_started", { item: commentaryItem });
+        onEvent("item_delta", {
+          item_id: "msg_commentary",
+          delta: "I will search the paper index first.",
+          delta_type: "output_text",
+        });
+        onEvent("item_completed", {
+          item: {
+            ...commentaryItem,
+            content_text: "I will search the paper index first.",
+            status: "completed",
+          },
+        });
         onEvent("item_started", {
           item: threadItemResponse("item_tool_1", "function_call", "assistant", "", {
             thread_id: "thread_2",
@@ -2654,9 +2683,12 @@ describe("App", () => {
     await waitFor(() => {
       expect(document.querySelectorAll(".chat-tab-thread-indicator")).toHaveLength(1);
     });
-    await waitFor(() => {
-      expect(screen.getByText('Did paper search for "grounding"')).toBeTruthy();
-    });
+    const commentaryText = await screen.findByText("I will search the paper index first.");
+    const toolActivityText = await screen.findByText('Did paper search for "grounding"');
+    expect(screen.queryByText("Commentary")).toBeNull();
+    expect(
+      commentaryText.compareDocumentPosition(toolActivityText) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
     const toolActivitySummary = screen
       .getByText('Did paper search for "grounding"')
       .closest("summary");

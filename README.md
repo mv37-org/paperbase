@@ -154,7 +154,7 @@ The browser chat experience is project-based:
 - project chats can invoke a project-scoped coding tool surface against repo-relative workspace text files, including list/read/grep/write/patch/move/delete/git-diff/exec/test/lint/run operations instead of raw repo-shell access
 - coding turns auto-persist dirty project Python drafts before the agent runs tools, so the backend tool view stays aligned with Monaco edits
 - duplicate Python basenames are disambiguated with repo-path context in the sidebar and tab strip
-- assistant commentary is now prompted before non-trivial tool batches and rendered as its own labeled chat item instead of being flattened into the final answer message
+- assistant commentary is now prompted before non-trivial tool batches and rendered as plain assistant text in turn order instead of being flattened into the final answer message
 - streamed and finished chat code blocks use matching light/dark editor-style themes, show line numbers, let longer snippets collapse in place with a compact chevron control, and render inline/block LaTeX formulas in chat markdown
 - project Python files written by coding-tool turns refresh back into the sidebar Code section once the turn completes
 - local `localhost` chat threads render a compact debug strip with the current user, project, thread, and latest message ids so Codex can inspect backend state from a pasted bundle without displacing the empty-chat layout

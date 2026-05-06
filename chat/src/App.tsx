@@ -6273,6 +6273,17 @@ export default function App() {
               ) : (
                 <div className="chat-message-column">
                   {(() => {
+                    const commentaryTurnIndexes = new Set<number>();
+                    let scannedTurnIndex = 0;
+                    for (const candidate of activeThread.messages) {
+                      if (candidate.role === "user" && candidate.kind !== "compaction") {
+                        scannedTurnIndex += 1;
+                      }
+                      if (candidate.role === "assistant" && candidate.phase === "commentary") {
+                        commentaryTurnIndexes.add(scannedTurnIndex);
+                      }
+                    }
+                    const renderedToolActivityTurnIndexes = new Set<number>();
                     let userTurnIndex = 0;
                     return activeThread.messages.map((message) => {
                       const isCompactionMessage = message.kind === "compaction";
@@ -6296,10 +6307,19 @@ export default function App() {
                           : isCompactionMessage
                             ? latestToolActivityTurnIndex
                             : userTurnIndex;
-                      const turnActivities =
-                        message.role === "user" || isCompactionMessage
-                          ? (activeThreadToolActivitiesByTurn.get(activityTurnIndex) ?? [])
-                          : [];
+                      const shouldRenderTurnActivities =
+                        ((message.role === "user" &&
+                          !isCompactionMessage &&
+                          !commentaryTurnIndexes.has(activityTurnIndex)) ||
+                          isCompactionMessage ||
+                          isCommentaryMessage) &&
+                        !renderedToolActivityTurnIndexes.has(activityTurnIndex);
+                      const turnActivities = shouldRenderTurnActivities
+                        ? (activeThreadToolActivitiesByTurn.get(activityTurnIndex) ?? [])
+                        : [];
+                      if (turnActivities.length > 0) {
+                        renderedToolActivityTurnIndexes.add(activityTurnIndex);
+                      }
                       const showThinkingPlaceholder =
                         message.role === "user" &&
                         !isCompactionMessage &&
@@ -6311,7 +6331,7 @@ export default function App() {
                       return (
                         <Fragment key={message.message_id}>
                           <article
-                            className={`message-row ${isCompactionMessage ? "compaction" : message.role === "assistant" ? "assistant" : "user"}${isCommentaryMessage ? " commentary" : ""} status-${message.status}`}
+                            className={`message-row ${isCompactionMessage ? "compaction" : message.role === "assistant" ? "assistant" : "user"} status-${message.status}`}
                           >
                             {message.status !== "completed" && !isCompactionMessage ? (
                               <div className="message-meta-row">
@@ -6325,7 +6345,7 @@ export default function App() {
                               </div>
                             ) : null}
                             <div
-                              className={`message-bubble ${isCompactionMessage ? "compaction" : message.role === "assistant" ? "assistant" : "user"}${isCommentaryMessage ? " commentary" : ""}${isCompactionMessage && isStreamingMessage ? " thinking-shimmer" : ""}`}
+                              className={`message-bubble ${isCompactionMessage ? "compaction" : message.role === "assistant" ? "assistant" : "user"}${isCompactionMessage && isStreamingMessage ? " thinking-shimmer" : ""}`}
                             >
                               {isCompactionMessage ? (
                                 <MarkdownRenderer
@@ -6334,9 +6354,6 @@ export default function App() {
                                 />
                               ) : message.role === "assistant" ? (
                                 <>
-                                  {isCommentaryMessage ? (
-                                    <div className="assistant-phase-label">Commentary</div>
-                                  ) : null}
                                   <MarkdownRenderer
                                     markdown={message.content_markdown}
                                     className="message-markdown"
