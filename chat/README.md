@@ -6,11 +6,11 @@ Source lives here. Generated assets are built into `paperbase/src/paperbase/stat
 
 The server-rendered HTML shell now inlines the current browser session and applies the authenticated dark-theme class before React mounts, so reloads do not block on a second `/v1/browser/session` round trip or flash a white shell for signed-in dark-theme users.
 
-The landing prompt and authenticated chat composer both support live `@` paper mentions backed by the browser suggestion endpoint, so tagged-paper search suggestions come from the indexed paper corpus instead of local mock data.
+The landing prompt and authenticated chat composer both support live `@` paper mentions backed by the browser suggestion endpoint, and the public landing page shows a top-10 `Latest`/`Hottest` paper preview from the indexed corpus.
 
 The authenticated sidebar is project-first, with a small signed-in Browse area above projects:
 
-- `Trending papers` now works for public read and signed-in interaction, with a daily published-today feed, with `Latest` and `Hottest` sort filters, full paper detail, and nested comments/replies
+- `Trending papers` now works for public read and signed-in interaction, with paginated 50-paper `Latest` and `Hottest` feeds over fully indexed and enriched papers, full paper detail, and nested comments/replies
 - allowlisted admins also get an `Admin panel` jobs workspace in that Browse section
 - the admin indexed-papers drilldown fetches paginated paper pages per job run instead of loading all tracked papers at once
 - projects expand and collapse independently and lazily fetch mixed project items
@@ -25,7 +25,7 @@ The authenticated sidebar is project-first, with a small signed-in Browse area a
 - chat markdown renders inline/block LaTeX formulas, while localhost-only thread debug metadata stays out of the empty-chat landing layout
 - assistant commentary is prompted before non-trivial tool batches and renders as plain assistant text in turn order, so progress notes are not merged into the final response
 - signed-in pages can switch between light and dark mode from Settings → Appearance, and the theme covers the shell, markdown, drawers, icons, and modals without changing the public landing page
-- Python and imported notebook rows open Monaco-backed Python editor tabs with explicit `Save` and `Run` actions
+- Python and imported notebook rows open as the single active Monaco-backed editor view with explicit `Save` and `Run` actions
 - project coding turns use the Codex-style turn loop and can mix commentary, tool calls, and final answers in a single persisted turn while grounding AI/code implementation choices in relevant paper or uploaded-document evidence when available
 - `.ipynb` and Colab uploads are converted through Jupytext to `py:percent` source for editing, while GitHub saves regenerate the notebook path
 - project file creation/import/save flows require a connected GitHub account, and `Run` saves to GitHub before executing through Modal

@@ -250,6 +250,10 @@ export interface TrendingPaperDetail {
 export interface TrendingFeedResponse {
   date: string;
   sort: "default" | "upvotes";
+  page: number;
+  page_size: number;
+  has_next: boolean;
+  has_previous: boolean;
   papers: TrendingPaperCard[];
 }
 
@@ -286,6 +290,7 @@ export interface ChatMessageResponse {
   role: string;
   content_markdown: string;
   citations: ChatCitation[];
+  recommended_prompts?: string[];
   created_at: string;
   status: string;
   kind?: "default" | "compaction" | string;
@@ -319,6 +324,7 @@ export interface ChatThreadItemResponse {
   content_text: string;
   content_json?: unknown;
   citations: ChatCitation[];
+  recommended_prompts?: string[];
   created_at: string;
   status: string;
 }

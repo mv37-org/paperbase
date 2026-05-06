@@ -3,6 +3,7 @@ import { useMemo, useState } from "react";
 export type StreamingCodePreview = {
   language: "python";
   code: string;
+  displayMarkdown: string;
 };
 
 type CodeSnippetProps = {
@@ -93,18 +94,22 @@ function highlightCodeLine(line: string, language: string) {
 }
 
 export function extractStreamingPythonPreview(markdown: string): StreamingCodePreview | null {
-  const lines = markdown.replace(/\r\n?/g, "\n").split("\n");
+  const normalizedMarkdown = markdown.replace(/\r\n?/g, "\n");
+  const lines = normalizedMarkdown.split("\n");
   let fence: string | null = null;
   let language = "";
   let buffer: string[] = [];
+  let openFenceLineIndex = -1;
 
-  for (const line of lines) {
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
     if (!fence) {
       const openMatch = line.match(PYTHON_FENCE_OPEN_RE);
       if (openMatch) {
         fence = openMatch[1];
         language = (openMatch[2] ?? "").trim();
         buffer = [];
+        openFenceLineIndex = index;
       }
       continue;
     }
@@ -113,6 +118,7 @@ export function extractStreamingPythonPreview(markdown: string): StreamingCodePr
       fence = null;
       language = "";
       buffer = [];
+      openFenceLineIndex = -1;
       continue;
     }
 
@@ -128,7 +134,15 @@ export function extractStreamingPythonPreview(markdown: string): StreamingCodePr
     return null;
   }
 
-  return normalizeCodeLanguage(language, code) === "python" ? { language: "python", code } : null;
+  if (normalizeCodeLanguage(language, code) !== "python") {
+    return null;
+  }
+
+  return {
+    language: "python",
+    code,
+    displayMarkdown: lines.slice(0, openFenceLineIndex).join("\n").replace(/\s+$/, ""),
+  };
 }
 
 export function flattenCodeChildren(children: unknown): string {

@@ -3,7 +3,6 @@ import type { CSSProperties, ChangeEvent, UIEvent } from "react";
 import Editor, { DiffEditor } from "@monaco-editor/react";
 
 import {
-  ApiError,
   api,
   createPythonFile,
   createProject,
@@ -22,7 +21,6 @@ import {
   githubLoginUrl,
   importProjectNotebook,
   getThread,
-  googleLoginUrl,
   loadGitHubRepositories,
   loadGitHubRepoImportCandidates,
   loadGitHubRepoMetadata,
@@ -31,11 +29,13 @@ import {
   loadSession,
   loadUploads,
   moveThreadToProject,
+  renameThread,
   logoutBrowserSession,
   postForm,
   runPythonFile,
   sendThreadMessage,
   sendThreadMessageStream,
+  submitChatFeedback,
   suggestBrowserPapers,
   StreamingChatAbortError,
   StreamingChatError,
@@ -45,6 +45,107 @@ import {
   uploadDocument,
 } from "./api";
 import { AdminOpsPanel } from "./AdminOpsPanel";
+import {
+  AppIcon,
+  EmptyStateActionIcon,
+  GoogleButton,
+  MaskedAssetIcon,
+  ModalFlash,
+  SettingsSectionHeading,
+} from "./app/AppChrome";
+import { ChatSessionModals } from "./app/ChatSessionModals";
+import { ChatThreadHeader } from "./app/ChatThreadHeader";
+import { ThreadPapersView } from "./app/ThreadPapersView";
+import type {
+  AppearanceTheme,
+  DeleteModalState,
+  ExportFormat,
+  ExportModalState,
+  FeedbackModalState,
+  FeedbackSentiment,
+  ModalFlashKind,
+  OpenTab,
+  PaperCitationPreviewState,
+  PaperDrawerContent,
+  PaperDrawerState,
+  ProjectItemState,
+  ProjectModalState,
+  ProjectSidebarCategoryKey,
+  PythonFileDraft,
+  PythonFileRunState,
+  SaveIntent,
+  SaveModalState,
+  SettingsTab,
+  SyncConflictState,
+  ThreadPane,
+  ThreadStreamState,
+  ToolActivityEntry,
+  WorkspaceView,
+} from "./app/appTypes";
+import {
+  ACTIVE_TAB_KEY,
+  apiKeyStateMessage,
+  buildThreadDebugBundle,
+  clearStoredActiveTab,
+  consumePendingPrompt,
+  contextUsageButtonLabel,
+  contextUsagePercent,
+  createLocalMessage,
+  displayPythonFilePathContext,
+  displayPythonFileTitle,
+  displayThreadTitle,
+  downloadTextFile,
+  drawerStateFromUrl,
+  duplicatePythonFilenameKeys,
+  formatContextUsageSummary,
+  formatContextUsageTokenSummary,
+  formatThinkingLabel,
+  formatThreadAge,
+  formatToolActivityText,
+  DISMISSED_CHAT_SETUP_KEY,
+  inferDrawerContentKind,
+  isEmptyThread,
+  isLocalDebugHost,
+  isMessageListNearBottom,
+  isStreamingMessageStatus,
+  LEGACY_OPEN_TABS_KEY,
+  localDateString,
+  mentionedPaperIdsInText,
+  mergeProjectItems,
+  messageFromThreadItem,
+  messageHasProjectCodeIntent,
+  normalizeThreadForState,
+  pickThinkingWord,
+  projectFileKindLabel,
+  projectItemFromPythonFile,
+  projectItemFromThread,
+  projectItemKindCount,
+  projectRepoConflictFromError,
+  pythonFilenameFromRepoPath,
+  pythonRepoPathForFile,
+  rememberPendingPrompt,
+  restoreActiveTab,
+  restoreDismissedChatSetupSignatures,
+  restoreSelectedProjectId,
+  restoreSidebarCollapsed,
+  SELECTED_PROJECT_KEY,
+  shouldShowThreadInSidebar,
+  SIDEBAR_COLLAPSED_KEY,
+  sourceCardId,
+  staticAssetPath,
+  summarizeCitationPreview,
+  summarizeThreadTitle,
+  threadMarkdownExport,
+  toolActivityCommandForItem,
+  toolActivityHasDetails,
+  toolActivityLabelForItem,
+  uniqueCitationsForThread,
+  uniquePaperCitationCount,
+  updateDrawerUrl,
+  updateTrendingBrowseUrl,
+  upsertProjectItem,
+  trendingBrowseStateFromUrl,
+} from "./app/appUtils";
 import { CredentialFormUsernameField } from "./CredentialFormUsernameField";
 import { CodeSnippet, extractStreamingPythonPreview } from "./CodeSnippet";
 import { LandingMentionEditor } from "./LandingMentionEditor";
@@ -60,170 +161,22 @@ import type {
   ChatThreadItemResponse,
   ChatStreamUsageEvent,
   ChatThreadResponse,
-  ChatThreadSummary,
-  FigureResponse,
-  FileContentResponse,
   GitHubRepoImportCandidate,
   GitHubRepoMetadataResponse,
   GitHubRepoSummary,
   MentionTag,
-  PaperPreviewResponse,
   PaperResponse,
-  ProjectFileKind,
   ProjectItemKind,
-  ProjectItemSummary,
-  ProjectRepoConflictDetail,
-  ProjectRepoConflictFile,
   ProjectRepoConflictResolution,
-  ProjectRepoSyncResponse,
   ProjectSummary,
   PythonFileResponse,
-  RunPythonFileResponse,
   SendChatMessageResponse,
-  TableResponse,
 } from "./types";
 
-const OPEN_TABS_KEY = "paperbase-open-tabs";
-const PENDING_PROMPT_KEY = "paperbase-pending-prompt";
 const RESUME_PROJECT_MODAL_KEY = "paperbase-resume-new-project";
-const SIDEBAR_COLLAPSED_KEY = "paperbase-sidebar-collapsed";
-const SELECTED_PROJECT_KEY = "paperbase-selected-project";
-const DISMISSED_CHAT_SETUP_KEY = "paperbase-dismissed-chat-setup";
-const MAX_OPEN_TABS = 8;
-const MESSAGE_LIST_BOTTOM_THRESHOLD = 40;
+const LANDING_TRENDING_PAGE_SIZE = 10;
 const PROJECT_ITEM_PAGE_SIZE = 5;
 const PROJECT_SIDEBAR_ITEM_KINDS: ProjectItemKind[] = ["python_file", "thread"];
-const CHAT_TITLE_STOP_WORDS = new Set([
-  "a",
-  "an",
-  "and",
-  "are",
-  "as",
-  "at",
-  "be",
-  "but",
-  "by",
-  "can",
-  "could",
-  "for",
-  "from",
-  "help",
-  "i",
-  "if",
-  "in",
-  "into",
-  "is",
-  "it",
-  "me",
-  "my",
-  "of",
-  "on",
-  "or",
-  "our",
-  "please",
-  "show",
-  "tell",
-  "that",
-  "the",
-  "this",
-  "to",
-  "us",
-  "we",
-  "with",
-  "would",
-]);
-type ModalFlashKind = "error" | "note";
-type PaperDrawerState = { paperId: string; path: string } | null;
-type PaperDrawerContent =
-  | { kind: "markdown"; path: string; file: FileContentResponse }
-  | { kind: "figure"; path: string; figure: FigureResponse }
-  | { kind: "table"; path: string; table: TableResponse };
-type PaperCitationPreviewState = {
-  paper: PaperResponse | null;
-  preview: PaperPreviewResponse | null;
-  status: "loading" | "ready" | "error";
-  error: string;
-};
-type OpenTab =
-  | { kind: "thread"; id: string }
-  | { kind: "python_file"; id: string }
-  | { kind: "project_home"; id: string };
-type WorkspaceView =
-  | { kind: "trending" }
-  | { kind: "admin_jobs" }
-  | { kind: "admin_job_papers"; rootJobId: string };
-type ProjectSidebarCategoryKey = "notes" | "sessions" | "code";
-type ProjectItemState = {
-  items: ProjectItemSummary[];
-  totalCount: number;
-  hasMore: boolean;
-  hasMoreByKind?: Partial<Record<ProjectItemKind, boolean>>;
-  loaded: boolean;
-  loading: boolean;
-  loadingMore: boolean;
-  loadingMoreByKind?: Partial<Record<ProjectItemKind, boolean>>;
-  totalCountByKind?: Partial<Record<ProjectItemKind, number>>;
-  error: string;
-};
-type PythonFileDraft = {
-  content: string;
-  dirty: boolean;
-};
-type PythonFileRunState = {
-  running: boolean;
-  result: RunPythonFileResponse | null;
-  error: string;
-};
-type SaveIntent = "save" | "run";
-type SaveModalState = {
-  fileId: string;
-  commitMessage: string;
-  saving: boolean;
-  error: string;
-  repoSync: ProjectRepoSyncResponse | null;
-  success: ProjectRepoSyncResponse | null;
-} | null;
-type SyncConflictState = {
-  fileId: string;
-  projectId: string;
-  commitMessage: string;
-  expectedRemoteHeadSha: string;
-  repoName: string;
-  repoUrl: string;
-  defaultBranch: string;
-  baseCommitSha: string;
-  conflicts: ProjectRepoConflictFile[];
-  selectedPath: string;
-  resolutions: Record<string, string>;
-  afterSaveAction: SaveIntent;
-  saving: boolean;
-  error: string;
-} | null;
-type ProjectModalState = { mode: "create" } | { mode: "edit"; projectId: string };
-type DeleteModalState =
-  | { kind: "project"; projectId: string; name: string }
-  | { kind: "thread"; projectId: string; threadId: string; title: string }
-  | { kind: "python_file"; projectId: string; fileId: string; title: string }
-  | null;
-type ToolActivityEntry = {
-  id: string;
-  turnIndex: number;
-  toolName?: string;
-  label: string;
-  command: string | null;
-  output: string | null;
-  status: "running" | "completed";
-  startedAt: string;
-  finishedAt: string | null;
-  isError: boolean;
-};
-type ThreadStreamState = {
-  turnIndex: number;
-  thinkingWord: string;
-  assistantStarted: boolean;
-  usage: ChatStreamUsageEvent | null;
-};
-
 const AUTH_VIEW_COPY: Record<AuthView, { title: string; caption: string }> = {
   login: { title: "Log in", caption: "Use your account to continue." },
   signup: { title: "Create account", caption: "Create your account." },
@@ -247,9 +200,6 @@ const DEFAULT_BROWSER_SETTINGS: NonNullable<BrowserSessionResponse["settings"]> 
   weekly_papers_review_email: false,
   appearance_theme: "light",
 };
-
-type AppearanceTheme = "light" | "dark";
-type SettingsTab = "inference" | "sandbox" | "version-control" | "appearance";
 
 const BASE_SETTINGS_TABS: Array<{
   id: SettingsTab;
@@ -309,7 +259,6 @@ const APPEARANCE_OPTIONS: Array<{
 
 const AUTHENTICATED_DARK_THEME_CLASS = "authenticated-theme-dark";
 const PROJECT_SIDEBAR_CATEGORY_KEYS: ProjectSidebarCategoryKey[] = ["notes", "sessions", "code"];
-const PUBLIC_ASSET_CACHE_KEY = `pb-${Date.now().toString(36)}`;
 const buildProjectCategoryCollapseState = (collapsed: boolean) =>
   Object.fromEntries(PROJECT_SIDEBAR_CATEGORY_KEYS.map((key) => [key, collapsed])) as Partial<
     Record<ProjectSidebarCategoryKey, boolean>
@@ -323,1058 +272,6 @@ const WORKSPACE_SIDEBAR_ITEMS = [
   asset: string;
   adminOnly?: boolean;
 }>;
-
-function SettingsSectionHeading({ title, caption }: { title: string; caption: string }) {
-  return (
-    <div className="settings-section-heading">
-      <h3 className="settings-section-title">{title}</h3>
-      <p className="settings-section-copy">{caption}</p>
-    </div>
-  );
-}
-
-function ModalFlash({
-  message,
-  kind,
-  className = "",
-}: {
-  message: string;
-  kind: ModalFlashKind;
-  className?: string;
-}) {
-  return (
-    <div
-      id="modal-flash"
-      className={`modal-flash${kind === "error" ? " warning" : " note"}${className ? ` ${className}` : ""}`}
-      role={kind === "error" ? "alert" : "status"}
-    >
-      {kind === "error" ? (
-        <span className="modal-flash-icon" aria-hidden="true">
-          <svg viewBox="0 0 24 24">
-            <path d="M12 4 3.75 18h16.5L12 4Z" />
-            <path d="M12 9v4" />
-            <path d="M12 16.5h.01" />
-          </svg>
-        </span>
-      ) : null}
-      <span className="modal-flash-text">{message}</span>
-    </div>
-  );
-}
-
-const EXAMPLES = [
-  {
-    label: "Reliable multi-step agents",
-    description:
-      "See which papers actually support planning, reflection, and recovery patterns in real agent loops.",
-    prompt:
-      "What patterns are emerging for reliable multi-step agents, and which papers actually validate them?",
-  },
-  {
-    label: "Practical agent eval stack",
-    description:
-      "Compare evaluation approaches and translate them into a lightweight stack for a product team.",
-    prompt:
-      "Compare recent approaches to agent evals and recommend a practical stack for a small product team.",
-  },
-  {
-    label: "Retrieval, memory, and tool use",
-    description:
-      "Survey how current systems combine context retrieval, memory, and tools in production settings.",
-    prompt:
-      "Summarize recent research on retrieval, memory, and tool use for production AI systems.",
-  },
-];
-
-const THINKING_WORDS = [
-  "Thinking",
-  "Pondering",
-  "Brainstorming",
-  "Reasoning",
-  "Considering",
-  "Exploring",
-  "Reflecting",
-  "Analyzing",
-  "Evaluating",
-  "Inspecting",
-  "Tracing",
-  "Mapping",
-  "Digging",
-  "Unpacking",
-  "Drafting",
-  "Refining",
-  "Weighing",
-  "Composing",
-  "Calculating",
-  "Synthesizing",
-];
-
-const PROJECT_CODE_ACTION_RE =
-  /\b(write|create|make|add|implement|edit|modify|update|refactor|fix|rename|delete|remove|read|show|open|grep|search|run)\b/i;
-const PROJECT_CODE_TARGET_RE =
-  /\b(code|python|pytorch|torch|script|module|file|files|function|class|training|train|evaluation|eval|workflow|repo|project)\b/i;
-const PROJECT_CODE_DIRECT_TOOL_RE =
-  /\b(project_(?:list_files|read_file|grep|touch|edit|delete|run))\b/i;
-const PROJECT_CODE_PATH_HINT_RE = /(?:^|[\s`'"])([A-Za-z0-9_./-]+\.py)(?:$|[\s`'",.:;!?])/i;
-const TOOL_ACTIVITY_TARGET_RE = /"([^"]+)"/;
-
-function staticAssetPath(name: string) {
-  const path = `${import.meta.env.BASE_URL}${name.replace(/^\/+/, "")}`;
-  return `${path}${path.includes("?") ? "&" : "?"}v=${PUBLIC_ASSET_CACHE_KEY}`;
-}
-
-function pythonRepoPathForFile(file: Pick<PythonFileResponse, "filename" | "repo_path">) {
-  return file.repo_path || `src/${file.filename}`;
-}
-
-function pythonFilenameFromRepoPath(path: string) {
-  return path.startsWith("src/") ? path.slice("src/".length) : null;
-}
-
-function projectRepoConflictFromError(error: unknown): ProjectRepoConflictDetail | null {
-  if (!(error instanceof ApiError)) {
-    return null;
-  }
-  const payload = error.payload;
-  if (!payload || typeof payload !== "object" || !("detail" in payload)) {
-    return null;
-  }
-  const detail = (payload as { detail?: unknown }).detail;
-  if (!detail || typeof detail !== "object") {
-    return null;
-  }
-  const conflict = detail as Partial<ProjectRepoConflictDetail>;
-  if (conflict.code !== "github_merge_conflict" || !Array.isArray(conflict.conflicts)) {
-    return null;
-  }
-  return conflict as ProjectRepoConflictDetail;
-}
-
-function createLocalMessage(
-  role: string,
-  content_markdown: string,
-  options: Partial<Pick<ChatMessageResponse, "citations" | "status" | "message_id" | "phase">> = {},
-): ChatMessageResponse {
-  return {
-    message_id: options.message_id ?? `local-${role}-${Math.random().toString(36).slice(2)}`,
-    role,
-    content_markdown,
-    citations: options.citations ?? [],
-    created_at: new Date().toISOString(),
-    status: options.status ?? "completed",
-    phase: options.phase ?? null,
-  };
-}
-
-function messageFromThreadItem(item: ChatThreadItemResponse): ChatMessageResponse | null {
-  if (!["user_message", "assistant_message", "compaction"].includes(item.item_type)) {
-    return null;
-  }
-  return {
-    message_id: item.item_id,
-    role: item.role,
-    content_markdown: item.content_text,
-    citations: item.citations,
-    created_at: item.created_at,
-    status: item.status,
-    kind: item.item_type === "compaction" ? "compaction" : "default",
-    phase: item.phase ?? null,
-  };
-}
-
-function normalizeThreadForState(thread: ChatThreadResponse): ChatThreadResponse {
-  const items = [...(thread.items ?? [])];
-  if (items.length === 0) {
-    return thread;
-  }
-  return {
-    ...thread,
-    items,
-    messages: items
-      .map(messageFromThreadItem)
-      .filter((message): message is ChatMessageResponse => Boolean(message)),
-  };
-}
-
-function drawerStateFromUrl(): PaperDrawerState {
-  const params = new URLSearchParams(window.location.search);
-  const paperId = params.get("paper");
-  const path = params.get("paperPath");
-  if (!paperId || !path) {
-    return null;
-  }
-  return { paperId, path };
-}
-
-function localDateString(date = new Date()) {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
-function trendingBrowseStateFromUrl(): TrendingBrowseState | null {
-  const params = new URLSearchParams(window.location.search);
-  if (params.get("browse") !== "trending") {
-    return null;
-  }
-  const date = params.get("trendingDate");
-  return {
-    date: date && /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : localDateString(),
-    sort: params.get("trendingSort") === "upvotes" ? "upvotes" : "default",
-    paperId: params.get("trendingPaper"),
-  };
-}
-
-function updateTrendingBrowseUrl(nextState: TrendingBrowseState | null) {
-  const params = new URLSearchParams(window.location.search);
-  if (nextState) {
-    params.set("browse", "trending");
-    params.set("trendingDate", nextState.date);
-    params.set("trendingSort", nextState.sort);
-    if (nextState.paperId) {
-      params.set("trendingPaper", nextState.paperId);
-    } else {
-      params.delete("trendingPaper");
-    }
-  } else {
-    params.delete("browse");
-    params.delete("trendingDate");
-    params.delete("trendingSort");
-    params.delete("trendingPaper");
-  }
-  const query = params.toString();
-  const nextUrl = `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`;
-  window.history.pushState({}, "", nextUrl);
-}
-
-function updateDrawerUrl(nextState: PaperDrawerState) {
-  const params = new URLSearchParams(window.location.search);
-  if (nextState) {
-    params.set("paper", nextState.paperId);
-    params.set("paperPath", nextState.path);
-  } else {
-    params.delete("paper");
-    params.delete("paperPath");
-  }
-  const query = params.toString();
-  const nextUrl = `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`;
-  window.history.pushState({}, "", nextUrl);
-}
-
-function inferDrawerContentKind(path: string) {
-  const figureMatch = path.match(/^figures\/([^/]+)\/caption\.md$/);
-  if (figureMatch) {
-    return { kind: "figure" as const, id: figureMatch[1] };
-  }
-  const tableMatch = path.match(/^tables\/([^/.]+)\.json$/);
-  if (tableMatch) {
-    return { kind: "table" as const, id: tableMatch[1] };
-  }
-  return { kind: "markdown" as const };
-}
-
-function sourceCardId(messageId: string, sourceId: string) {
-  return `source-card-${messageId}-${sourceId}`;
-}
-
-type PendingPromptState = {
-  prompt: string;
-  paperIds: string[];
-  mentions: MentionTag[];
-};
-
-function normalizePendingPromptMentions(value: unknown): MentionTag[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  const mentions: MentionTag[] = [];
-  const seen = new Set<string>();
-  for (const entry of value) {
-    if (!entry || typeof entry !== "object") {
-      continue;
-    }
-    const id = typeof entry.id === "string" ? entry.id : "";
-    if (!id || seen.has(id)) {
-      continue;
-    }
-    seen.add(id);
-    mentions.push({
-      id,
-      title: typeof entry.title === "string" ? entry.title : "",
-    });
-  }
-  return mentions;
-}
-
-function mentionedPaperIdsInText(text: string, mentions: MentionTag[]) {
-  const paperIds: string[] = [];
-  const seen = new Set<string>();
-  for (const mention of mentions) {
-    if (!mention.id || seen.has(mention.id)) {
-      continue;
-    }
-    if (mention.title.trim() && !text.includes(`@${mention.title}`)) {
-      continue;
-    }
-    seen.add(mention.id);
-    paperIds.push(mention.id);
-  }
-  return paperIds;
-}
-
-function consumePendingPrompt(): PendingPromptState {
-  const raw = sessionStorage.getItem(PENDING_PROMPT_KEY);
-  sessionStorage.removeItem(PENDING_PROMPT_KEY);
-  if (!raw) {
-    return { prompt: "", paperIds: [], mentions: [] };
-  }
-  if (raw.startsWith("{")) {
-    try {
-      const parsed = JSON.parse(raw);
-      const prompt = typeof parsed?.prompt === "string" ? parsed.prompt : "";
-      const legacyPaperIds = Array.isArray(parsed?.paperIds)
-        ? parsed.paperIds.filter((id: unknown): id is string => typeof id === "string")
-        : [];
-      const mentions = normalizePendingPromptMentions(parsed?.mentions);
-      const paperIds = [...new Set([...legacyPaperIds, ...mentions.map((mention) => mention.id)])];
-      return {
-        prompt,
-        paperIds,
-        mentions: mentions.length ? mentions : paperIds.map((id) => ({ id, title: "" })),
-      };
-    } catch {
-      return { prompt: "", paperIds: [], mentions: [] };
-    }
-  }
-  return { prompt: raw, paperIds: [], mentions: [] };
-}
-
-function rememberPendingPrompt(prompt: string, mentions: MentionTag[] = []) {
-  const trimmed = prompt.trim();
-  if (!trimmed) {
-    return;
-  }
-  const normalizedMentions = normalizePendingPromptMentions(mentions);
-  sessionStorage.setItem(
-    PENDING_PROMPT_KEY,
-    JSON.stringify({
-      prompt: trimmed,
-      paperIds: normalizedMentions.map((mention) => mention.id),
-      mentions: normalizedMentions,
-    }),
-  );
-}
-
-function restoreTabs() {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(OPEN_TABS_KEY) ?? "[]");
-    if (!Array.isArray(parsed)) {
-      return [];
-    }
-    const restored: OpenTab[] = [];
-    for (const value of parsed) {
-      if (typeof value === "string") {
-        restored.push({ kind: "thread", id: value });
-        continue;
-      }
-      if (
-        value &&
-        typeof value === "object" &&
-        "kind" in value &&
-        "id" in value &&
-        typeof value.id === "string"
-      ) {
-        if (
-          value.kind === "thread" ||
-          value.kind === "python_file" ||
-          value.kind === "project_home"
-        ) {
-          restored.push({ kind: value.kind, id: value.id });
-        }
-      }
-    }
-    return restored.slice(-MAX_OPEN_TABS);
-  } catch {
-    return [];
-  }
-}
-
-function appendOpenTab(current: OpenTab[], tab: OpenTab) {
-  if (current.some((item) => item.kind === tab.kind && item.id === tab.id)) {
-    return current;
-  }
-  return [...current, tab].slice(-MAX_OPEN_TABS);
-}
-
-function isMessageListNearBottom(
-  element: HTMLDivElement,
-  threshold = MESSAGE_LIST_BOTTOM_THRESHOLD,
-) {
-  return element.scrollHeight - element.scrollTop - element.clientHeight <= threshold;
-}
-
-function restoreSidebarCollapsed() {
-  return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "true";
-}
-
-function restoreSelectedProjectId() {
-  const value = localStorage.getItem(SELECTED_PROJECT_KEY)?.trim();
-  return value ? value : null;
-}
-
-function restoreDismissedChatSetupSignatures() {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(DISMISSED_CHAT_SETUP_KEY) ?? "{}");
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return {};
-    }
-    return Object.fromEntries(
-      Object.entries(parsed).filter(
-        ([key, value]) => typeof key === "string" && typeof value === "string",
-      ),
-    ) as Record<string, string>;
-  } catch {
-    return {};
-  }
-}
-
-function formatChatTitleWord(word: string) {
-  if (!word) {
-    return word;
-  }
-  if (word === word.toUpperCase()) {
-    return word;
-  }
-  if (/[A-Z]/.test(word.slice(1))) {
-    return word;
-  }
-  return `${word[0]?.toUpperCase() ?? ""}${word.slice(1).toLowerCase()}`;
-}
-
-function summarizeThreadTitle(content: string) {
-  const tokens = content.match(/[A-Za-z0-9]+(?:['-][A-Za-z0-9]+)*/g) ?? [];
-  if (tokens.length === 0) {
-    return "New chat";
-  }
-  const informativeTokens = tokens.filter(
-    (token) => !CHAT_TITLE_STOP_WORDS.has(token.toLowerCase()),
-  );
-  const sourceTokens = informativeTokens.length >= 3 ? informativeTokens : tokens;
-  const desiredCount = Math.min(5, Math.max(3, sourceTokens.length));
-  let selectedTokens = sourceTokens.slice(0, desiredCount);
-  if (selectedTokens.length < 3 && tokens.length >= 3) {
-    selectedTokens = tokens.slice(0, 3);
-  }
-  return (
-    selectedTokens
-      .map((token) => formatChatTitleWord(token))
-      .join(" ")
-      .trim() || "New chat"
-  );
-}
-
-function displayThreadTitle(title: string) {
-  return title.trim() || "New chat";
-}
-
-function truncateTabTitle(title: string) {
-  const words = displayThreadTitle(title).split(/\s+/).filter(Boolean);
-  if (words.length <= 4) {
-    return words.join(" ");
-  }
-  return `${words.slice(0, 4).join(" ")}…`;
-}
-
-function pickThinkingWord(previous?: string | null) {
-  if (THINKING_WORDS.length === 0) {
-    return "Thinking";
-  }
-  if (THINKING_WORDS.length === 1) {
-    return THINKING_WORDS[0]!;
-  }
-  let next = THINKING_WORDS[Math.floor(Math.random() * THINKING_WORDS.length)] ?? "Thinking";
-  if (previous && next === previous) {
-    const currentIndex = THINKING_WORDS.indexOf(next);
-    next = THINKING_WORDS[(currentIndex + 1) % THINKING_WORDS.length] ?? next;
-  }
-  return next;
-}
-
-function formatThinkingLabel(word?: string | null) {
-  const trimmed = word?.trim();
-  const label = trimmed ? trimmed.replace(/\.+$/, "") : "Thinking";
-  return `${label}...`;
-}
-
-function formatTokenCount(value: number) {
-  return new Intl.NumberFormat("en-US").format(Math.max(0, Math.round(value)));
-}
-
-function formatCompactTokenCount(value: number) {
-  const rounded = Math.max(0, Math.round(value));
-  if (rounded < 1000) {
-    return formatTokenCount(rounded);
-  }
-  return new Intl.NumberFormat("en-US", {
-    notation: "compact",
-    maximumFractionDigits: rounded < 100_000 ? 1 : 0,
-  })
-    .format(rounded)
-    .replace(/[A-Z]/g, (match) => match.toLowerCase());
-}
-
-function contextUsagePercent(usage: ChatStreamUsageEvent) {
-  if (usage.context_window_tokens <= 0) {
-    return 0;
-  }
-  return Math.min(100, (usage.total_tokens / usage.context_window_tokens) * 100);
-}
-
-function formatContextUsagePercentValue(usage: ChatStreamUsageEvent) {
-  const usagePercent = contextUsagePercent(usage);
-  if (usagePercent > 0 && usagePercent < 1) {
-    return "<1";
-  }
-  return String(Math.round(usagePercent));
-}
-
-function formatContextUsageRemainingPercentValue(usage: ChatStreamUsageEvent) {
-  const usagePercent = contextUsagePercent(usage);
-  const roundedUsed = Math.round(usagePercent);
-  const remaining = Math.max(0, 100 - roundedUsed);
-  if (remaining === 0 && usagePercent < 100) {
-    return "<1";
-  }
-  return String(remaining);
-}
-
-function formatContextUsageSummary(usage: ChatStreamUsageEvent) {
-  return `${formatContextUsagePercentValue(usage)}% used (${formatContextUsageRemainingPercentValue(usage)}% left)`;
-}
-
-function formatContextUsageTokenSummary(usage: ChatStreamUsageEvent) {
-  return `${formatCompactTokenCount(usage.total_tokens)} / ${formatCompactTokenCount(usage.context_window_tokens)} tokens used`;
-}
-
-function contextUsageButtonLabel(usage: ChatStreamUsageEvent) {
-  return `Context window: ${formatContextUsageSummary(usage)}, ${formatTokenCount(usage.total_tokens)} of ${formatTokenCount(usage.context_window_tokens)} tokens used`;
-}
-
-function apiKeyStateMessage(state: string) {
-  if (state === "api_key_invalid") {
-    return "Your saved OpenAI API key could not be decrypted. Add it again in Settings.";
-  }
-  return "Add an OpenAI API key in Settings before starting a chat.";
-}
-
-function shouldShowThreadInSidebar(thread: ChatThreadSummary) {
-  return thread.title.trim().length > 0 || thread.last_message_preview.trim().length > 0;
-}
-
-function isEmptyThread(thread: ChatThreadResponse | null | undefined) {
-  return Boolean(thread) && thread.messages.length === 0;
-}
-
-function formatThreadAge(value: string) {
-  const timestamp = Date.parse(value);
-  if (Number.isNaN(timestamp)) {
-    return "";
-  }
-  const deltaMs = Math.max(0, Date.now() - timestamp);
-  const minute = 60 * 1000;
-  const hour = 60 * minute;
-  const day = 24 * hour;
-  const week = 7 * day;
-  const month = 30 * day;
-  const year = 365 * day;
-
-  if (deltaMs < hour) {
-    return `${Math.max(1, Math.floor(deltaMs / minute))}m`;
-  }
-  if (deltaMs < day) {
-    return `${Math.floor(deltaMs / hour)}h`;
-  }
-  if (deltaMs < 14 * day) {
-    return `${Math.floor(deltaMs / day)}d`;
-  }
-  if (deltaMs < 8 * week) {
-    return `${Math.floor(deltaMs / week)}w`;
-  }
-  if (deltaMs < year) {
-    return `${Math.floor(deltaMs / month)}mo`;
-  }
-  return `${Math.floor(deltaMs / year)}y`;
-}
-
-function threadSummaryFromThread(thread: ChatThreadResponse): ChatThreadSummary {
-  const lastMessage = thread.messages[thread.messages.length - 1];
-  return {
-    thread_id: thread.thread_id,
-    project_id: thread.project_id,
-    title: thread.title,
-    created_at: thread.created_at,
-    updated_at: thread.updated_at,
-    last_message_preview: lastMessage?.content_markdown.slice(0, 120) ?? "",
-  };
-}
-
-function projectItemFromThread(thread: ChatThreadResponse): ProjectItemSummary {
-  const summary = threadSummaryFromThread(thread);
-  return {
-    item_id: summary.thread_id,
-    item_kind: "thread",
-    project_id: summary.project_id,
-    title: summary.title,
-    created_at: summary.created_at,
-    updated_at: summary.updated_at,
-    thread_id: summary.thread_id,
-    file_id: null,
-    last_message_preview: summary.last_message_preview,
-    filename: "",
-    file_kind: "python",
-    repo_path: "",
-  };
-}
-
-function projectItemFromPythonFile(file: PythonFileResponse): ProjectItemSummary {
-  return {
-    item_id: file.file_id,
-    item_kind: "python_file",
-    project_id: file.project_id,
-    title: file.filename,
-    created_at: file.created_at,
-    updated_at: file.updated_at,
-    thread_id: null,
-    file_id: file.file_id,
-    last_message_preview: "",
-    filename: file.filename,
-    file_kind: file.file_kind ?? "python",
-    repo_path: file.repo_path ?? `src/${file.filename}`,
-  };
-}
-
-function upsertProjectItem(
-  current: ProjectItemSummary[],
-  item: ProjectItemSummary,
-): ProjectItemSummary[] {
-  return [item, ...current.filter((entry) => entry.item_id !== item.item_id)].sort(
-    (left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at),
-  );
-}
-
-function mergeProjectItems(
-  current: ProjectItemSummary[],
-  incoming: ProjectItemSummary[],
-): ProjectItemSummary[] {
-  const itemsById = new Map(current.map((item) => [item.item_id, item]));
-  for (const item of incoming) {
-    itemsById.set(item.item_id, item);
-  }
-  return [...itemsById.values()].sort(
-    (left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at),
-  );
-}
-
-function projectItemKindCount(items: ProjectItemSummary[], itemKind: ProjectItemKind) {
-  return items.filter((item) => item.item_kind === itemKind).length;
-}
-
-function displayPythonFilename(filename: string) {
-  return filename.trim() || "something.py";
-}
-
-function pythonFilenameKey(filename: string) {
-  return displayPythonFilename(filename);
-}
-
-function duplicatePythonFilenameKeys(
-  files: Array<
-    Pick<ProjectItemSummary, "filename" | "title"> | Pick<PythonFileResponse, "filename">
-  >,
-) {
-  const counts = new Map<string, number>();
-  for (const file of files) {
-    const key = pythonFilenameKey("filename" in file ? file.filename : file.title);
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
-  return new Set([...counts.entries()].filter(([, count]) => count > 1).map(([key]) => key));
-}
-
-function displayPythonFileTitle(
-  file: Pick<PythonFileResponse, "filename" | "repo_path">,
-  _duplicateKeys: Set<string>,
-) {
-  return displayPythonFilename(file.filename);
-}
-
-function displayPythonFilePathContext(
-  file: Pick<PythonFileResponse, "filename" | "repo_path">,
-  duplicateKeys: Set<string>,
-) {
-  const filename = displayPythonFilename(file.filename);
-  return duplicateKeys.has(filename) ? pythonRepoPathForFile(file) : "";
-}
-
-function displayPythonTabTitle(
-  file: Pick<PythonFileResponse, "filename" | "repo_path">,
-  duplicateKeys: Set<string>,
-) {
-  const filename = displayPythonFilename(file.filename);
-  return duplicateKeys.has(filename) ? pythonRepoPathForFile(file) : filename;
-}
-
-function messageHasProjectCodeIntent(content: string) {
-  if (!content.trim()) {
-    return false;
-  }
-  if (PROJECT_CODE_DIRECT_TOOL_RE.test(content)) {
-    return true;
-  }
-  if (PROJECT_CODE_PATH_HINT_RE.test(content) && /(read|edit|run)/i.test(content)) {
-    return true;
-  }
-  return PROJECT_CODE_ACTION_RE.test(content) && PROJECT_CODE_TARGET_RE.test(content);
-}
-
-function isLocalDebugHost() {
-  try {
-    const { hostname } = new URL(window.location.href);
-    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
-  } catch {
-    return false;
-  }
-}
-
-function latestThreadMessageId(
-  thread: ChatThreadResponse,
-  predicate: (message: ChatMessageResponse) => boolean,
-) {
-  for (let index = thread.messages.length - 1; index >= 0; index -= 1) {
-    const message = thread.messages[index];
-    if (message && predicate(message)) {
-      return message.message_id;
-    }
-  }
-  return null;
-}
-
-function summarizeCitationPreview(paper: PaperResponse | null) {
-  if (!paper) {
-    return "";
-  }
-  const source = paper.summary_short || paper.summary_eli5 || paper.abstract || "";
-  const trimmed = source.trim();
-  if (trimmed.length <= 220) {
-    return trimmed;
-  }
-  return `${trimmed.slice(0, 217).trimEnd()}...`;
-}
-
-function buildThreadDebugBundle(thread: ChatThreadResponse, userId: string | null) {
-  const latestMessage = thread.messages[thread.messages.length - 1] ?? null;
-  return {
-    user_id: userId,
-    project_id: thread.project_id,
-    project_name: thread.project_name,
-    thread_id: thread.thread_id,
-    thread_title: thread.title,
-    message_count: thread.messages.length,
-    latest_message_id: latestMessage?.message_id ?? null,
-    latest_user_message_id: latestThreadMessageId(thread, (message) => message.role === "user"),
-    latest_assistant_message_id: latestThreadMessageId(
-      thread,
-      (message) => message.role === "assistant" && message.kind !== "compaction",
-    ),
-    latest_compaction_message_id: latestThreadMessageId(
-      thread,
-      (message) => message.kind === "compaction",
-    ),
-  };
-}
-
-function quotedToolActivityTarget(label: string) {
-  return label.match(TOOL_ACTIVITY_TARGET_RE)?.[1] ?? "";
-}
-
-function toolActivityInputForItem(
-  item: Pick<ChatThreadItemResponse, "content_json" | "content_text">,
-) {
-  if (
-    item.content_json &&
-    typeof item.content_json === "object" &&
-    !Array.isArray(item.content_json)
-  ) {
-    return item.content_json as Record<string, unknown>;
-  }
-  if (item.content_text.trim()) {
-    try {
-      const parsed = JSON.parse(item.content_text);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        return parsed as Record<string, unknown>;
-      }
-    } catch {
-      return null;
-    }
-  }
-  return null;
-}
-
-function toolActivityLabelForItem(
-  item: Pick<ChatThreadItemResponse, "name" | "content_json" | "content_text">,
-) {
-  const toolName = item.name ?? "";
-  const toolInput = toolActivityInputForItem(item);
-  const detail = (value: unknown, limit = 56) => {
-    const text = String(value ?? "").trim();
-    if (!text) {
-      return null;
-    }
-    if (text.length > limit) {
-      return `${text.slice(0, limit - 1).trimEnd()}…`;
-    }
-    return text;
-  };
-
-  const query = detail(toolInput?.query);
-  const path = detail(toolInput?.path) ?? detail(toolInput?.repo_path);
-  const newPath = detail(toolInput?.new_repo_path);
-  const pattern = detail(toolInput?.pattern);
-  const figureId = detail(toolInput?.figure_id);
-  const tableId = detail(toolInput?.table_id);
-  const execId = detail(toolInput?.exec_id);
-
-  if (toolName === "paperbase_search") {
-    return query ? `paper search for "${query}"` : "paper search";
-  }
-  if (toolName === "paperbase_search_sections") {
-    return query ? `section search for "${query}"` : "section search";
-  }
-  if (toolName === "paperbase_get_results") {
-    return "result lookup";
-  }
-  if (toolName === "paperbase_grep_results") {
-    return pattern ? `result filtering for "${pattern}"` : "result filtering";
-  }
-  if (toolName === "paperbase_get_paper") {
-    return "paper lookup";
-  }
-  if (toolName === "paperbase_list_files") {
-    return "file listing";
-  }
-  if (toolName === "paperbase_read_file") {
-    return path ? `file read for "${path}"` : "file read";
-  }
-  if (toolName === "paperbase_get_figure") {
-    return figureId ? `figure lookup for "${figureId}"` : "figure lookup";
-  }
-  if (toolName === "paperbase_get_table") {
-    return tableId ? `table lookup for "${tableId}"` : "table lookup";
-  }
-  if (toolName === "paperbase_get_related_papers") {
-    return "related-paper lookup";
-  }
-  if (toolName === "paperbase_get_references") {
-    return "reference lookup";
-  }
-  if (toolName === "paperbase_list_uploaded_documents") {
-    return "upload listing";
-  }
-  if (toolName === "paperbase_search_uploaded_sections") {
-    return query ? `uploaded-note search for "${query}"` : "uploaded-note search";
-  }
-  if (toolName === "project_list_files") {
-    return "project file listing";
-  }
-  if (toolName === "project_read_file") {
-    return path ? `project file read for "${path}"` : "project file read";
-  }
-  if (toolName === "project_grep") {
-    return pattern ? `project grep for "${pattern}"` : "project grep";
-  }
-  if (toolName === "project_write_file" || toolName === "project_touch") {
-    return path ? `project file write for "${path}"` : "project file write";
-  }
-  if (toolName === "project_apply_patch" || toolName === "project_edit") {
-    return path ? `project file patch for "${path}"` : "project file patch";
-  }
-  if (toolName === "project_move") {
-    if (path && newPath) {
-      return `project file move from "${path}" to "${newPath}"`;
-    }
-    return "project file move";
-  }
-  if (toolName === "project_delete") {
-    return path ? `project file delete for "${path}"` : "project file delete";
-  }
-  if (toolName === "project_git_status") {
-    return "project git status";
-  }
-  if (toolName === "project_git_diff") {
-    return "project git diff";
-  }
-  if (toolName === "project_exec") {
-    return "project exec";
-  }
-  if (toolName === "project_wait") {
-    return execId ? `project exec wait for "${execId}"` : "project exec wait";
-  }
-  if (toolName === "project_cancel") {
-    return execId ? `project exec cancel for "${execId}"` : "project exec cancel";
-  }
-  if (toolName === "project_logs") {
-    return execId ? `project exec logs for "${execId}"` : "project exec logs";
-  }
-  if (toolName === "project_test") {
-    return "project test";
-  }
-  if (toolName === "project_lint") {
-    return "project lint";
-  }
-  if (toolName === "project_run") {
-    return path ? `project run for "${path}"` : "project run";
-  }
-  return toolName || "tool call";
-}
-
-function toolActivityCommandForItem(
-  item: Pick<ChatThreadItemResponse, "name" | "content_json" | "content_text">,
-) {
-  const toolName = item.name ?? "";
-  const toolInput = toolActivityInputForItem(item);
-  if (!toolName) {
-    return item.content_text || null;
-  }
-  if (!toolInput) {
-    return item.content_text || null;
-  }
-  return `${toolName}(${JSON.stringify(toolInput, null, 2)})`;
-}
-
-function formatToolActivityText(
-  activity: Pick<ToolActivityEntry, "label" | "status" | "toolName">,
-) {
-  const running = activity.status === "running";
-  const target = quotedToolActivityTarget(activity.label);
-  switch (activity.toolName) {
-    case "project_list_files":
-      return running ? "Listing files..." : "Listed files";
-    case "project_read_file":
-      return running ? `Reading ${target || "file"}...` : `Read ${target || "file"}`;
-    case "project_grep":
-      return running
-        ? `Searching files${target ? ` for ${target}` : ""}...`
-        : `Searched files${target ? ` for ${target}` : ""}`;
-    case "project_write_file":
-    case "project_touch":
-      return running ? `Writing ${target || "file"}...` : `Wrote ${target || "file"}`;
-    case "project_apply_patch":
-    case "project_edit":
-      return running ? `Patching ${target || "file"}...` : `Patched ${target || "file"}`;
-    case "project_move":
-      return running ? "Moving file..." : "Moved file";
-    case "project_delete":
-      return running ? `Deleting ${target || "file"}...` : `Deleted ${target || "file"}`;
-    case "project_git_status":
-      return running ? "Checking project status..." : "Checked project status";
-    case "project_git_diff":
-      return running ? "Diffing project files..." : "Diffed project files";
-    case "project_exec":
-      return running ? "Starting project command..." : "Started project command";
-    case "project_wait":
-      return running ? "Waiting on project command..." : "Updated project command status";
-    case "project_cancel":
-      return running ? "Canceling project command..." : "Canceled project command";
-    case "project_logs":
-      return running ? "Reading project logs..." : "Read project logs";
-    case "project_test":
-      return running ? "Running project tests..." : "Ran project tests";
-    case "project_lint":
-      return running ? "Running project lint..." : "Ran project lint";
-    case "project_run":
-      return running ? `Running ${target || "file"}...` : `Ran ${target || "file"}`;
-    default:
-      return running ? `Doing ${activity.label}...` : `Did ${activity.label}`;
-  }
-}
-
-function toolActivityHasDetails(activity: Pick<ToolActivityEntry, "command" | "output">) {
-  return Boolean(activity.command || activity.output);
-}
-
-function isStreamingMessageStatus(status: string) {
-  return status === "streaming" || status === "in_progress";
-}
-
-function projectFileKindLabel(fileKind: ProjectFileKind | undefined) {
-  if (fileKind === "notebook") {
-    return "Notebook";
-  }
-  if (fileKind === "text") {
-    return "Text";
-  }
-  return "Python";
-}
-
-function GoogleButton() {
-  return (
-    <button
-      className="oauth-button"
-      data-google-login="true"
-      type="button"
-      onClick={() => (window.location.href = googleLoginUrl())}
-    >
-      <svg viewBox="0 0 18 18" aria-hidden="true">
-        <path
-          fill="#4285F4"
-          d="M17.64 9.2c0-.63-.06-1.24-.16-1.82H9v3.44h4.84a4.14 4.14 0 0 1-1.8 2.71v2.25h2.9c1.7-1.57 2.7-3.88 2.7-6.58Z"
-        />
-        <path
-          fill="#34A853"
-          d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.9-2.25c-.8.54-1.84.86-3.06.86-2.35 0-4.34-1.59-5.05-3.72H.96v2.32A9 9 0 0 0 9 18Z"
-        />
-        <path
-          fill="#FBBC05"
-          d="M3.95 10.71A5.4 5.4 0 0 1 3.67 9c0-.6.1-1.19.28-1.71V4.97H.96A9 9 0 0 0 0 9c0 1.45.35 2.82.96 4.03l2.99-2.32Z"
-        />
-        <path
-          fill="#EA4335"
-          d="M9 3.58c1.32 0 2.5.45 3.43 1.33l2.57-2.57C13.46.9 11.42 0 9 0A9 9 0 0 0 .96 4.97l2.99 2.32C4.66 5.17 6.65 3.58 9 3.58Z"
-        />
-      </svg>
-      <span>Continue with Google</span>
-    </button>
-  );
-}
-
-function AppIcon({ src, className = "" }: { src: string; className?: string }) {
-  return (
-    <img
-      src={src}
-      alt=""
-      aria-hidden="true"
-      className={className ? `icon-image ${className}` : "icon-image"}
-    />
-  );
-}
-
-function MaskedAssetIcon({ asset, className }: { asset: string; className: string }) {
-  return (
-    <span
-      className={className}
-      aria-hidden="true"
-      style={
-        {
-          "--icon-url": `url("${staticAssetPath(asset)}")`,
-        } as CSSProperties
-      }
-    />
-  );
-}
-
-function EmptyStateActionIcon({ asset }: { asset: string }) {
-  return <MaskedAssetIcon asset={asset} className="chat-empty-action-icon-glyph" />;
-}
 
 export default function App() {
   const bootstrapSession = useMemo(() => getBootstrapSession(), []);
@@ -1395,7 +292,6 @@ export default function App() {
   const [pythonFileMap, setPythonFileMap] = useState<Record<string, PythonFileResponse>>({});
   const [pythonFileDrafts, setPythonFileDrafts] = useState<Record<string, PythonFileDraft>>({});
   const [pythonFileRuns, setPythonFileRuns] = useState<Record<string, PythonFileRunState>>({});
-  const [openTabs, setOpenTabs] = useState<OpenTab[]>([]);
   const [activeTab, setActiveTab] = useState<OpenTab | null>(null);
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView | null>(null);
   const [projectMenuProjectId, setProjectMenuProjectId] = useState<string | null>(null);
@@ -1434,6 +330,13 @@ export default function App() {
   const [deleteModalState, setDeleteModalState] = useState<DeleteModalState>(null);
   const [saveModalState, setSaveModalState] = useState<SaveModalState>(null);
   const [threadDebugModalOpen, setThreadDebugModalOpen] = useState(false);
+  const [threadPane, setThreadPane] = useState<ThreadPane>("chat");
+  const [chatHeaderMenuOpen, setChatHeaderMenuOpen] = useState(false);
+  const [exportModalState, setExportModalState] = useState<ExportModalState>(null);
+  const [feedbackModalState, setFeedbackModalState] = useState<FeedbackModalState>(null);
+  const [feedbackReasons, setFeedbackReasons] = useState<string[]>([]);
+  const [feedbackNote, setFeedbackNote] = useState("");
+  const [feedbackSubmitting, setFeedbackSubmitting] = useState(false);
   const [syncConflictState, setSyncConflictState] = useState<SyncConflictState>(null);
   const [authView, setAuthView] = useState<AuthView>("login");
   const [authModalOpen, setAuthModalOpen] = useState(false);
@@ -1472,6 +375,14 @@ export default function App() {
   const [trendingBrowseState, setTrendingBrowseState] = useState<TrendingBrowseState | null>(() =>
     trendingBrowseStateFromUrl(),
   );
+  const [landingTrendingBrowseState, setLandingTrendingBrowseState] = useState<TrendingBrowseState>(
+    () => ({
+      date: localDateString(),
+      sort: "default",
+      page: 1,
+      paperId: null,
+    }),
+  );
   const [paperDrawerPaper, setPaperDrawerPaper] = useState<PaperResponse | null>(null);
   const [paperDrawerContent, setPaperDrawerContent] = useState<PaperDrawerContent | null>(null);
   const [paperDrawerStatus, setPaperDrawerStatus] = useState<
@@ -1492,7 +403,7 @@ export default function App() {
   const threadMapRef = useRef<Record<string, ChatThreadResponse>>({});
   const pythonFileMapRef = useRef<Record<string, PythonFileResponse>>({});
   const pythonFileDraftsRef = useRef<Record<string, PythonFileDraft>>({});
-  const tabsStorageHydratedRef = useRef(false);
+  const activeTabStorageHydratedRef = useRef(false);
   const appUploadRef = useRef<HTMLInputElement | null>(null);
   const accountMenuRef = useRef<HTMLDivElement | null>(null);
   const contextUsageMenuRef = useRef<HTMLDivElement | null>(null);
@@ -1551,14 +462,16 @@ export default function App() {
   );
 
   useEffect(() => {
-    if (!tabsStorageHydratedRef.current) {
-      tabsStorageHydratedRef.current = true;
-      if (openTabs.length === 0) {
-        return;
-      }
+    if (!activeTabStorageHydratedRef.current) {
+      return;
     }
-    localStorage.setItem(OPEN_TABS_KEY, JSON.stringify(openTabs));
-  }, [openTabs]);
+    if (activeTab) {
+      localStorage.setItem(ACTIVE_TAB_KEY, JSON.stringify(activeTab));
+    } else {
+      localStorage.removeItem(ACTIVE_TAB_KEY);
+    }
+    localStorage.removeItem(LEGACY_OPEN_TABS_KEY);
+  }, [activeTab]);
 
   useEffect(() => {
     if (activeTab !== null) {
@@ -1709,6 +622,10 @@ export default function App() {
       ),
     ];
   }, [activeThread]);
+  const activeThreadCitations = useMemo(
+    () => uniqueCitationsForThread(activeThread),
+    [activeThread],
+  );
   const activeThreadDebugBundle = useMemo(
     () =>
       activeThread && localThreadDebugEnabled
@@ -1764,68 +681,11 @@ export default function App() {
       projects.every((project) => expandedProjectIds.includes(project.project_id)),
     [expandedProjectIds, projects],
   );
-  const openTabItems = useMemo(() => {
-    const openPythonFiles = openTabs
-      .filter((tab): tab is Extract<OpenTab, { kind: "python_file" }> => tab.kind === "python_file")
-      .map(
-        (tab) =>
-          pythonFileMap[tab.id] ?? { filename: "something.py", repo_path: `src/${tab.id}.py` },
-      );
-    const duplicateKeys = duplicatePythonFilenameKeys(openPythonFiles);
-    return openTabs.map((tab) => {
-      if (tab.kind === "thread") {
-        const loadedThread = threadMap[tab.id];
-        const title = loadedThread?.title ?? "New chat";
-        return {
-          key: `thread:${tab.id}`,
-          kind: tab.kind,
-          id: tab.id,
-          isStreaming: streamingThreadId === tab.id,
-          title: displayThreadTitle(title),
-          tabTitle: truncateTabTitle(title),
-        };
-      }
-      if (tab.kind === "project_home") {
-        const project = projects.find((item) => item.project_id === tab.id);
-        const title = project ? `${project.name} Home` : "Project Home";
-        return {
-          key: `project_home:${tab.id}`,
-          kind: tab.kind,
-          id: tab.id,
-          isStreaming: false,
-          title,
-          tabTitle: truncateTabTitle(title),
-        };
-      }
-      const loadedFile = pythonFileMap[tab.id];
-      const file = loadedFile ?? {
-        filename: "something.py",
-        repo_path: `src/${tab.id}.py`,
-      };
-      const title = displayPythonTabTitle(file, duplicateKeys);
-      return {
-        key: `python_file:${tab.id}`,
-        kind: tab.kind,
-        id: tab.id,
-        isStreaming: false,
-        title,
-        tabTitle: truncateTabTitle(title),
-      };
-    });
-  }, [openTabs, projects, pythonFileMap, streamingThreadId, threadMap]);
-  const hasOpenTabs = openTabItems.length > 0;
   const isWorkspaceView = workspaceView !== null;
   const isAdminWorkspaceView =
     workspaceView?.kind === "admin_jobs" || workspaceView?.kind === "admin_job_papers";
-  const showOpenTabHeader = hasOpenTabs && !isWorkspaceView;
-  const showThreadStageChrome = !isWorkspaceView && activeTab?.kind === "thread" && !isChatEmpty;
-  const tabStripStyle = useMemo(
-    () =>
-      ({
-        "--chat-tab-count": Math.max(1, openTabItems.length),
-      }) as CSSProperties,
-    [openTabItems.length],
-  );
+  const showThreadStageChrome =
+    !isWorkspaceView && activeTab?.kind === "thread" && threadPane === "chat" && !isChatEmpty;
   const activeThreadStreamState = activeThreadId
     ? (threadStreamStates[activeThreadId] ?? null)
     : null;
@@ -1859,7 +719,6 @@ export default function App() {
   const activeContextUsagePercent = activeContextUsage
     ? contextUsagePercent(activeContextUsage)
     : 0;
-
   useEffect(() => {
     if (!showThreadDebugButton) {
       setThreadDebugModalOpen(false);
@@ -1980,6 +839,8 @@ export default function App() {
 
   useEffect(() => {
     setContextUsagePopoverOpen(false);
+    setChatHeaderMenuOpen(false);
+    setThreadPane("chat");
   }, [activeThreadId]);
 
   useEffect(() => {
@@ -2476,15 +1337,11 @@ export default function App() {
         }
         return next;
       });
-      setOpenTabs((current) => {
-        const nextTabs = current.filter((value) => value.kind !== "thread" || !ids.has(value.id));
-        setActiveTab((currentActive) => {
-          if (!currentActive || currentActive.kind !== "thread" || !ids.has(currentActive.id)) {
-            return currentActive;
-          }
-          return nextTabs[nextTabs.length - 1] ?? null;
-        });
-        return nextTabs;
+      setActiveTab((currentActive) => {
+        if (!currentActive || currentActive.kind !== "thread" || !ids.has(currentActive.id)) {
+          return currentActive;
+        }
+        return null;
       });
       if (projectId) {
         updateProjectItemCache(projectId, (current) => {
@@ -2549,21 +1406,11 @@ export default function App() {
         }
         return next;
       });
-      setOpenTabs((current) => {
-        const nextTabs = current.filter(
-          (value) => value.kind !== "python_file" || !ids.has(value.id),
-        );
-        setActiveTab((currentActive) => {
-          if (
-            !currentActive ||
-            currentActive.kind !== "python_file" ||
-            !ids.has(currentActive.id)
-          ) {
-            return currentActive;
-          }
-          return nextTabs[nextTabs.length - 1] ?? null;
-        });
-        return nextTabs;
+      setActiveTab((currentActive) => {
+        if (!currentActive || currentActive.kind !== "python_file" || !ids.has(currentActive.id)) {
+          return currentActive;
+        }
+        return null;
       });
       if (projectId) {
         updateProjectItemCache(projectId, (current) => {
@@ -2834,7 +1681,6 @@ export default function App() {
   const openThread = useCallback(
     async (threadId: string) => {
       const thread = threadMapRef.current[threadId] ?? (await fetchAndStoreThread(threadId));
-      setOpenTabs((current) => appendOpenTab(current, { kind: "thread", id: threadId }));
       setActiveTab({ kind: "thread", id: threadId });
       setSelectedProjectId(thread.project_id);
     },
@@ -2894,7 +1740,6 @@ export default function App() {
   const openPythonFile = useCallback(
     async (fileId: string) => {
       const file = pythonFileMapRef.current[fileId] ?? (await fetchAndStorePythonFile(fileId));
-      setOpenTabs((current) => appendOpenTab(current, { kind: "python_file", id: fileId }));
       setActiveTab({ kind: "python_file", id: fileId });
       setSelectedProjectId(file.project_id);
     },
@@ -2905,7 +1750,6 @@ export default function App() {
     if (!projectsRef.current.some((project) => project.project_id === projectId)) {
       return;
     }
-    setOpenTabs((current) => appendOpenTab(current, { kind: "project_home", id: projectId }));
     setActiveTab({ kind: "project_home", id: projectId });
     setSelectedProjectId(projectId);
   }, []);
@@ -2916,6 +1760,7 @@ export default function App() {
         updateTrendingBrowseState({
           date: trendingBrowseState?.date ?? localDateString(),
           sort: trendingBrowseState?.sort ?? "default",
+          page: trendingBrowseState?.page ?? 1,
           paperId: trendingBrowseState?.paperId ?? null,
         });
         setWorkspaceView({ kind: "trending" });
@@ -2923,6 +1768,7 @@ export default function App() {
         updateTrendingBrowseState(null);
         setWorkspaceView({ kind: "admin_jobs" });
       }
+      setActiveTab(null);
       setMobileSidebarOpen(false);
       setAccountMenuOpen(false);
       setProjectMenuProjectId(null);
@@ -2934,6 +1780,7 @@ export default function App() {
     (rootJobId: string) => {
       updateTrendingBrowseState(null);
       setWorkspaceView({ kind: "admin_job_papers", rootJobId });
+      setActiveTab(null);
       setMobileSidebarOpen(false);
       setAccountMenuOpen(false);
       setProjectMenuProjectId(null);
@@ -2950,7 +1797,6 @@ export default function App() {
       }
       const thread = await createThread(title, projectId);
       setThreadMap((current) => ({ ...current, [thread.thread_id]: thread }));
-      setOpenTabs((current) => appendOpenTab(current, { kind: "thread", id: thread.thread_id }));
       setActiveTab({ kind: "thread", id: thread.thread_id });
       setSelectedProjectId(thread.project_id);
       upsertThreadIntoProjectItems(thread);
@@ -2959,22 +1805,6 @@ export default function App() {
     },
     [refreshProjects, upsertThreadIntoProjectItems],
   );
-
-  const closeTab = useCallback((tab: OpenTab) => {
-    setOpenTabs((current) => {
-      const nextTabs = current.filter((value) => value.kind !== tab.kind || value.id !== tab.id);
-      setActiveTab((currentActive) => {
-        if (!currentActive || currentActive.kind !== tab.kind || currentActive.id !== tab.id) {
-          return currentActive;
-        }
-        const closingIndex = current.findIndex(
-          (value) => value.kind === tab.kind && value.id === tab.id,
-        );
-        return nextTabs[Math.max(0, closingIndex - 1)] ?? nextTabs[closingIndex] ?? null;
-      });
-      return nextTabs;
-    });
-  }, []);
 
   const copyMessage = useCallback(async (content: string) => {
     try {
@@ -2995,6 +1825,96 @@ export default function App() {
     },
     [showNoteFlash],
   );
+
+  const exportActiveThread = useCallback(
+    (format: ExportFormat) => {
+      if (!activeThread) {
+        return;
+      }
+      const title = displayThreadTitle(activeThread.title)
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-|-$/g, "");
+      const basename = title || "paperbase-chat";
+      const markdown = threadMarkdownExport(activeThread);
+      if (format === "markdown") {
+        downloadTextFile(`${basename}.md`, markdown, "text/markdown;charset=utf-8");
+        return;
+      }
+      if (format === "docx") {
+        const html = `<!doctype html><html><head><meta charset="utf-8"><title>${displayThreadTitle(activeThread.title)}</title></head><body><pre>${markdown.replace(/[&<>]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[char] ?? char)}</pre></body></html>`;
+        downloadTextFile(
+          `${basename}.docx`,
+          html,
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        );
+        return;
+      }
+      showNoteFlash("Use the print dialog to save this session as PDF.");
+      window.print();
+    },
+    [activeThread, showNoteFlash],
+  );
+
+  const handleHeaderRenameThread = useCallback(async () => {
+    if (!activeThread) {
+      return;
+    }
+    const nextTitle = window.prompt("Rename chat", displayThreadTitle(activeThread.title));
+    if (!nextTitle || !nextTitle.trim()) {
+      return;
+    }
+    const renamed = await renameThread(activeThread.thread_id, nextTitle.trim());
+    setThreadMap((current) => ({ ...current, [renamed.thread_id]: renamed }));
+    upsertThreadIntoProjectItems(renamed);
+    setChatHeaderMenuOpen(false);
+  }, [activeThread, upsertThreadIntoProjectItems]);
+
+  const openFeedbackModal = useCallback(
+    (message: ChatMessageResponse, sentiment: FeedbackSentiment) => {
+      setFeedbackModalState({ message, sentiment });
+      setFeedbackReasons([]);
+      setFeedbackNote("");
+    },
+    [],
+  );
+
+  const closeFeedbackModal = useCallback(() => {
+    setFeedbackModalState(null);
+    setFeedbackReasons([]);
+    setFeedbackNote("");
+    setFeedbackSubmitting(false);
+  }, []);
+
+  const submitFeedbackModal = useCallback(async () => {
+    if (!activeThread || !feedbackModalState) {
+      return;
+    }
+    setFeedbackSubmitting(true);
+    try {
+      await submitChatFeedback(activeThread.thread_id, {
+        message_id: feedbackModalState.message.message_id,
+        sentiment: feedbackModalState.sentiment,
+        reasons: feedbackReasons,
+        note: feedbackNote,
+        debug_bundle: activeThreadDebugBundle,
+      });
+      showNoteFlash("Feedback sent.");
+      closeFeedbackModal();
+    } catch (error) {
+      setFeedbackSubmitting(false);
+      showErrorFlash(error instanceof Error ? error.message : "Feedback could not be sent.");
+    }
+  }, [
+    activeThread,
+    activeThreadDebugBundle,
+    closeFeedbackModal,
+    feedbackModalState,
+    feedbackNote,
+    feedbackReasons,
+    showErrorFlash,
+    showNoteFlash,
+  ]);
 
   const requireInferenceAccess = useCallback(
     (currentSession?: BrowserSessionResponse | null) => {
@@ -3488,6 +2408,45 @@ export default function App() {
     ],
   );
 
+  const retryAssistantResponse = useCallback(
+    async (messageId: string) => {
+      if (!activeThread || streamingThreadId) {
+        return;
+      }
+      const messageIndex = activeThread.messages.findIndex(
+        (message) => message.message_id === messageId,
+      );
+      if (messageIndex < 0) {
+        return;
+      }
+      const previousUser = activeThread.messages
+        .slice(0, messageIndex)
+        .reverse()
+        .find((message) => message.role === "user" && message.kind !== "compaction");
+      if (!previousUser?.content_markdown.trim()) {
+        return;
+      }
+      setThreadPane("chat");
+      scrollMessageListToBottom();
+      await sendMessage(activeThread.thread_id, previousUser.content_markdown.trim());
+    },
+    [activeThread, scrollMessageListToBottom, sendMessage, streamingThreadId],
+  );
+
+  const sendRecommendedPrompt = useCallback(
+    async (prompt: string) => {
+      if (!activeThread || streamingThreadId) {
+        return;
+      }
+      setThreadPane("chat");
+      setComposerInput("");
+      setComposerTags([]);
+      scrollMessageListToBottom();
+      await sendMessage(activeThread.thread_id, prompt);
+    },
+    [activeThread, scrollMessageListToBottom, sendMessage, streamingThreadId],
+  );
+
   const bootstrapAuthenticatedUi = useCallback(
     async (currentSession?: BrowserSessionResponse | null) => {
       await refreshUploads();
@@ -3509,32 +2468,17 @@ export default function App() {
       ) {
         await fetchProjectItems(restoredSelectedProjectId);
       }
-      const restoredTabs = restoreTabs();
-      const validRestoredTabs: OpenTab[] = [];
-      for (const tab of restoredTabs) {
-        try {
-          if (tab.kind === "thread") {
-            await fetchAndStoreThread(tab.id, false);
-          } else if (tab.kind === "python_file") {
-            await fetchAndStorePythonFile(tab.id, false);
-          } else if (!loadedProjects.some((project) => project.project_id === tab.id)) {
-            continue;
-          }
-          validRestoredTabs.push(tab);
-        } catch (error) {
-          console.error(error);
-        }
-      }
-      setOpenTabs(validRestoredTabs);
-
       const {
         prompt: pendingPrompt,
         paperIds: pendingPaperIds,
         mentions: pendingMentions,
       } = consumePendingPrompt();
       const trimmedPendingPrompt = pendingPrompt.trim();
+      activeTabStorageHydratedRef.current = true;
       if (trimmedPendingPrompt) {
         if (!requireInferenceAccess(currentSession)) {
+          setActiveTab(null);
+          clearStoredActiveTab();
           setComposerInput(trimmedPendingPrompt);
           setRestoredComposerMentions(pendingMentions);
           return;
@@ -3552,14 +2496,34 @@ export default function App() {
 
       const initialTrendingBrowseState = trendingBrowseStateFromUrl();
       if (initialTrendingBrowseState) {
+        setActiveTab(null);
+        clearStoredActiveTab();
         setTrendingBrowseState(initialTrendingBrowseState);
         setWorkspaceView({ kind: "trending" });
         return;
       }
 
-      const firstOpen = validRestoredTabs[0];
-      if (firstOpen) {
-        setActiveTab(firstOpen);
+      const restoredActiveTab = restoreActiveTab();
+      let validRestoredActiveTab: OpenTab | null = null;
+      if (restoredActiveTab) {
+        try {
+          if (restoredActiveTab.kind === "thread") {
+            await fetchAndStoreThread(restoredActiveTab.id, false);
+          } else if (restoredActiveTab.kind === "python_file") {
+            await fetchAndStorePythonFile(restoredActiveTab.id, false);
+          } else if (
+            !loadedProjects.some((project) => project.project_id === restoredActiveTab.id)
+          ) {
+            throw new Error("Stored project no longer exists.");
+          }
+          validRestoredActiveTab = restoredActiveTab;
+        } catch (error) {
+          console.error(error);
+        }
+      }
+      setActiveTab(validRestoredActiveTab);
+      if (!validRestoredActiveTab) {
+        clearStoredActiveTab();
       }
     },
     [
@@ -3726,25 +2690,6 @@ export default function App() {
     sendMessage,
   ]);
 
-  const handleExample = useCallback(
-    async (prompt: string) => {
-      setLandingPrompt(prompt);
-      rememberPendingPrompt(prompt);
-      if (!sessionRef.current?.authenticated) {
-        openAuthModal("login");
-      }
-    },
-    [openAuthModal],
-  );
-
-  const openTrendingFromLanding = useCallback(() => {
-    updateTrendingBrowseState({
-      date: trendingBrowseState?.date ?? localDateString(),
-      sort: trendingBrowseState?.sort ?? "default",
-      paperId: trendingBrowseState?.paperId ?? null,
-    });
-  }, [trendingBrowseState, updateTrendingBrowseState]);
-
   const handleUpload = useCallback(
     async (file: File) => {
       await uploadDocument(file);
@@ -3820,8 +2765,8 @@ export default function App() {
     setPythonFileMap({});
     setPythonFileDrafts({});
     setPythonFileRuns({});
-    setOpenTabs([]);
     setActiveTab(null);
+    clearStoredActiveTab();
     setProjectMenuProjectId(null);
     setProjectModalState(null);
     setProjectFormName("");
@@ -4349,21 +3294,15 @@ export default function App() {
         await deleteProject(projectId);
         removeThreadIdsLocally([...new Set([...deletedThreadIds, ...cachedThreadIds])], projectId);
         removePythonFileIdsLocally([...new Set([...deletedFileIds, ...cachedFileIds])], projectId);
-        setOpenTabs((current) => {
-          const nextTabs = current.filter(
-            (tab) => tab.kind !== "project_home" || tab.id !== projectId,
-          );
-          setActiveTab((currentActive) => {
-            if (
-              !currentActive ||
-              currentActive.kind !== "project_home" ||
-              currentActive.id !== projectId
-            ) {
-              return currentActive;
-            }
-            return nextTabs[nextTabs.length - 1] ?? null;
-          });
-          return nextTabs;
+        setActiveTab((currentActive) => {
+          if (
+            !currentActive ||
+            currentActive.kind !== "project_home" ||
+            currentActive.id !== projectId
+          ) {
+            return currentActive;
+          }
+          return null;
         });
         setProjectItems((current) => {
           const next = { ...current };
@@ -4399,14 +3338,6 @@ export default function App() {
       setMobileSidebarOpen(false);
       setAccountMenuOpen(false);
       setProjectMenuProjectId(null);
-      const existingEmptyThread = openTabs
-        .filter((tab) => tab.kind === "thread")
-        .map((tab) => threadMap[tab.id] ?? null)
-        .find((thread) => isEmptyThread(thread) && thread.project_id === projectId);
-      if (existingEmptyThread) {
-        setActiveTab({ kind: "thread", id: existingEmptyThread.thread_id });
-        return;
-      }
       if (isEmptyThread(activeThread)) {
         if (activeThread.project_id === projectId) {
           return;
@@ -4420,14 +3351,7 @@ export default function App() {
       }
       await createNewThread("", projectId);
     },
-    [
-      activeThread,
-      createNewThread,
-      moveThreadBetweenProjectItems,
-      openTabs,
-      refreshProjects,
-      threadMap,
-    ],
+    [activeThread, createNewThread, moveThreadBetweenProjectItems, refreshProjects],
   );
 
   const handleLoadMoreItems = useCallback(
@@ -4460,9 +3384,6 @@ export default function App() {
         [pythonFile.file_id]: { running: false, result: null, error: "" },
       }));
       upsertPythonFileIntoProjectItems(pythonFile);
-      setOpenTabs((current) =>
-        appendOpenTab(current, { kind: "python_file", id: pythonFile.file_id }),
-      );
       setActiveTab({ kind: "python_file", id: pythonFile.file_id });
       setSelectedProjectId(pythonFile.project_id);
       await refreshProjects();
@@ -4512,9 +3433,6 @@ export default function App() {
           [imported.file_id]: { running: false, result: null, error: "" },
         }));
         upsertPythonFileIntoProjectItems(imported);
-        setOpenTabs((current) =>
-          appendOpenTab(current, { kind: "python_file", id: imported.file_id }),
-        );
         setActiveTab({ kind: "python_file", id: imported.file_id });
         setSelectedProjectId(imported.project_id);
         await refreshProjects();
@@ -4613,7 +3531,7 @@ export default function App() {
         if (conflictResolutions.length > 0) {
           applyConflictResolutionsLocally(projectId, conflictResolutions);
         }
-        return { sync, conflict: null as ProjectRepoConflictDetail | null };
+        return { sync, conflict: null as ReturnType<typeof projectRepoConflictFromError> };
       } catch (error) {
         const conflict = projectRepoConflictFromError(error);
         if (!conflict) {
@@ -5067,62 +3985,52 @@ export default function App() {
               <span className="landing-login-label">Log in</span>
             </button>
             <div className="landing-column">
-              <a
-                className="brandline brandline-link"
-                href="https://mv37.org"
-                target="_blank"
-                rel="noreferrer"
-              >
-                MV37
-              </a>
-              <h1 className="landing-title">Paperbase</h1>
-              <p className="landing-subtitle">
-                Research patterns for building better AI agents and systems.
-              </p>
-              <div className="landing-copy">
-                <p>
-                  Paperbase helps AI researchers and agent builders keep up with fast-moving work
-                  without losing track of the original sources, so they can ask broad questions,
-                  compare ideas across papers, and pull out the design patterns that matter when
-                  building agents and AI systems.
-                </p>
-              </div>
-              <div className="landing-browse-row">
-                <button
-                  type="button"
-                  className="landing-browse-button"
-                  onClick={openTrendingFromLanding}
+              <div className="landing-intro">
+                <a
+                  className="brandline brandline-link"
+                  href="https://mv37.org"
+                  target="_blank"
+                  rel="noreferrer"
                 >
-                  Browse trending papers
-                </button>
-              </div>
-              <LandingMentionEditor
-                attachButtonId="landing-upload-trigger"
-                onAttach={() => openAuthModal("login")}
-                onChange={setLandingPrompt}
-                onSubmit={() => void handleLandingSubmit()}
-                onTagsChange={setLandingTags}
-                searchPapers={suggestBrowserPapers}
-                submitButtonId="landing-start-button"
-                submitLabel="Start"
-                value={landingPrompt}
-              />
-
-              <section className="examples">
-                <div className="section-label">Examples</div>
-                <div className="example-list">
-                  {EXAMPLES.map((example) => (
-                    <button
-                      key={example.label}
-                      type="button"
-                      className="example-pill"
-                      onClick={() => void handleExample(example.prompt)}
-                    >
-                      <span className="example-title">{example.label}</span>
-                      <span className="example-description">{example.description}</span>
-                    </button>
-                  ))}
+                  MV37
+                </a>
+                <h1 className="landing-title">Paperbase</h1>
+                <p className="landing-subtitle">
+                  Research patterns for building better AI agents and systems.
+                </p>
+                <div className="landing-copy">
+                  <p>
+                    Paperbase helps AI researchers and agent builders keep up with fast-moving work
+                    without losing track of the original sources, so they can ask broad questions,
+                    compare ideas across papers, and pull out the design patterns that matter when
+                    building agents and AI systems.
+                  </p>
                 </div>
+                <LandingMentionEditor
+                  attachButtonId="landing-upload-trigger"
+                  onAttach={() => openAuthModal("login")}
+                  onChange={setLandingPrompt}
+                  onSubmit={() => void handleLandingSubmit()}
+                  onTagsChange={setLandingTags}
+                  searchPapers={suggestBrowserPapers}
+                  submitButtonId="landing-start-button"
+                  submitLabel="Start"
+                  value={landingPrompt}
+                />
+              </div>
+
+              <section className="landing-paper-section">
+                <TrendingPapersPage
+                  variant="landing"
+                  authenticated={false}
+                  browseState={landingTrendingBrowseState}
+                  onChangeBrowseState={setLandingTrendingBrowseState}
+                  onRequireAuth={() => openAuthModal("login")}
+                  feedTitle="Trending papers"
+                  feedDescription=""
+                  pageSize={LANDING_TRENDING_PAGE_SIZE}
+                  showPagination={false}
+                />
               </section>
             </div>
           </main>
@@ -5767,91 +4675,42 @@ export default function App() {
             ) : null}
           </aside>
 
-          <section className={`chat-stage${showOpenTabHeader ? "" : " no-tabs"}`}>
-            {showOpenTabHeader ? (
-              <header className="chat-stage-header">
-                <div className="chat-stage-header-inner">
-                  <button
-                    type="button"
-                    className="sidebar-icon-button chat-sidebar-toggle"
-                    aria-label={mobileSidebarOpen ? "Close sidebar" : "Open sidebar"}
-                    onClick={handleSidebarToggle}
-                  >
-                    <AppIcon
-                      src={staticAssetPath(
-                        mobileSidebarOpen ? "hide-sidebar.svg" : "show-sidebar.svg",
-                      )}
-                      className="sidebar-toggle-icon"
-                    />
-                  </button>
-                  <div
-                    className="chat-tab-strip"
-                    role="tablist"
-                    aria-label="Open tabs"
-                    style={tabStripStyle}
-                  >
-                    {openTabItems.map((tab) => (
-                      <div
-                        key={tab.key}
-                        role="tab"
-                        tabIndex={0}
-                        aria-selected={activeTab?.kind === tab.kind && activeTab.id === tab.id}
-                        className={`chat-tab${activeTab?.kind === tab.kind && activeTab.id === tab.id ? " active" : ""}`}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter" || event.key === " ") {
-                            event.preventDefault();
-                            if (tab.kind === "thread") {
-                              void handleThreadSelection(tab.id);
-                            } else if (tab.kind === "python_file") {
-                              void handlePythonFileSelection(tab.id);
-                            } else {
-                              openProjectHome(tab.id);
-                            }
-                          }
-                        }}
-                      >
-                        <button
-                          type="button"
-                          className="chat-tab-trigger"
-                          title={tab.title}
-                          onClick={() => {
-                            if (tab.kind === "thread") {
-                              void handleThreadSelection(tab.id);
-                            } else if (tab.kind === "python_file") {
-                              void handlePythonFileSelection(tab.id);
-                            } else {
-                              openProjectHome(tab.id);
-                            }
-                          }}
-                        >
-                          <span className="chat-tab-label">
-                            {tab.kind === "thread" && tab.isStreaming ? (
-                              <span className="chat-tab-thread-indicator" aria-hidden="true" />
-                            ) : null}
-                            <span className="chat-tab-title">{tab.tabTitle}</span>
-                          </span>
-                        </button>
-                        <button
-                          type="button"
-                          aria-label={`Close ${tab.title}`}
-                          className="chat-tab-close"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            closeTab({ kind: tab.kind, id: tab.id });
-                          }}
-                        >
-                          ×
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </header>
+          <section className="chat-stage">
+            <button
+              type="button"
+              className="sidebar-icon-button chat-sidebar-toggle"
+              aria-label={mobileSidebarOpen ? "Close sidebar" : "Open sidebar"}
+              onClick={handleSidebarToggle}
+            >
+              <AppIcon
+                src={staticAssetPath(mobileSidebarOpen ? "hide-sidebar.svg" : "show-sidebar.svg")}
+                className="sidebar-toggle-icon"
+              />
+            </button>
+            {activeTab?.kind === "thread" && activeThread ? (
+              <ChatThreadHeader
+                threadPane={threadPane}
+                menuOpen={chatHeaderMenuOpen}
+                onSelectPane={setThreadPane}
+                onToggleMenu={() => setChatHeaderMenuOpen((current) => !current)}
+                onOpenExportSummary={() => setExportModalState({ source: "header" })}
+                onExportMarkdown={() => exportActiveThread("markdown")}
+                onExportPdf={() => exportActiveThread("pdf")}
+                onRename={() => void handleHeaderRenameThread()}
+                onDelete={() => {
+                  setChatHeaderMenuOpen(false);
+                  openDeleteThreadModal(
+                    activeThread.project_id,
+                    activeThread.thread_id,
+                    displayThreadTitle(activeThread.title),
+                  );
+                }}
+              />
             ) : null}
 
             <div
               ref={messageListRef}
-              className={`chat-message-list${isChatEmpty ? " empty" : ""}${activeTab?.kind === "python_file" ? " python-file-view" : ""}${isWorkspaceView ? " workspace-view" : ""}${isAdminWorkspaceView ? " workspace-admin-view" : ""}`}
+              className={`chat-message-list${isChatEmpty ? " empty" : ""}${activeTab?.kind === "thread" && activeThread ? " thread-header-visible" : ""}${activeTab?.kind === "python_file" ? " python-file-view" : ""}${isWorkspaceView ? " workspace-view" : ""}${isAdminWorkspaceView ? " workspace-admin-view" : ""}`}
               onScroll={handleMessageListScroll}
             >
               {workspaceView ? (
@@ -5864,6 +4723,7 @@ export default function App() {
                         trendingBrowseState ?? {
                           date: localDateString(),
                           sort: "default",
+                          page: 1,
                           paperId: null,
                         }
                       }
@@ -6030,23 +4890,14 @@ export default function App() {
                     Loading Python file...
                   </div>
                 )
+              ) : activeTab?.kind === "thread" && threadPane === "papers" ? (
+                <ThreadPapersView
+                  citations={activeThreadCitations}
+                  paperCitationPreviews={paperCitationPreviews}
+                  openPaperDrawer={openPaperDrawer}
+                />
               ) : isChatEmpty ? (
                 <div className="chat-stage-spacer">
-                  {!hasOpenTabs ? (
-                    <button
-                      type="button"
-                      className="sidebar-icon-button chat-sidebar-toggle empty-state-sidebar-toggle"
-                      aria-label={mobileSidebarOpen ? "Close sidebar" : "Open sidebar"}
-                      onClick={handleSidebarToggle}
-                    >
-                      <AppIcon
-                        src={staticAssetPath(
-                          mobileSidebarOpen ? "hide-sidebar.svg" : "show-sidebar.svg",
-                        )}
-                        className="sidebar-toggle-icon"
-                      />
-                    </button>
-                  ) : null}
                   {hasProjects ? (
                     <div className="chat-empty-state">
                       <a
@@ -6283,6 +5134,18 @@ export default function App() {
                         commentaryTurnIndexes.add(scannedTurnIndex);
                       }
                     }
+                    const latestRecommendedMessageId =
+                      activeThread.messages
+                        .slice()
+                        .reverse()
+                        .find(
+                          (candidate) =>
+                            candidate.role === "assistant" &&
+                            candidate.kind !== "compaction" &&
+                            candidate.status === "completed" &&
+                            candidate.phase !== "commentary" &&
+                            (candidate.recommended_prompts?.length ?? 0) > 0,
+                        )?.message_id ?? null;
                     const renderedToolActivityTurnIndexes = new Set<number>();
                     let userTurnIndex = 0;
                     return activeThread.messages.map((message) => {
@@ -6294,6 +5157,14 @@ export default function App() {
                         message.role === "assistant" && isStreamingMessage && !isCompactionMessage
                           ? extractStreamingPythonPreview(message.content_markdown)
                           : null;
+                      const messageDisplayMarkdown =
+                        streamingCodePreview?.displayMarkdown ?? message.content_markdown;
+                      const shouldRenderMessageBubble = !(
+                        message.role === "assistant" &&
+                        !isCompactionMessage &&
+                        streamingCodePreview &&
+                        messageDisplayMarkdown.trim() === ""
+                      );
                       if (message.role === "user" && !isCompactionMessage) {
                         userTurnIndex += 1;
                       }
@@ -6328,6 +5199,11 @@ export default function App() {
                         !activeThreadStreamState.assistantStarted &&
                         turnActivities.length === 0;
                       const hoverTime = formatLocalTimestamp(message.created_at, "");
+                      const messagePaperCount = uniquePaperCitationCount(message.citations);
+                      const recommendedPrompts =
+                        message.message_id === latestRecommendedMessageId
+                          ? (message.recommended_prompts ?? [])
+                          : [];
                       return (
                         <Fragment key={message.message_id}>
                           <article
@@ -6344,34 +5220,38 @@ export default function App() {
                                 </span>
                               </div>
                             ) : null}
-                            <div
-                              className={`message-bubble ${isCompactionMessage ? "compaction" : message.role === "assistant" ? "assistant" : "user"}${isCompactionMessage && isStreamingMessage ? " thinking-shimmer" : ""}`}
-                            >
-                              {isCompactionMessage ? (
-                                <MarkdownRenderer
-                                  markdown={message.content_markdown}
-                                  className="message-markdown compaction-markdown"
-                                />
-                              ) : message.role === "assistant" ? (
-                                <>
+                            {shouldRenderMessageBubble ? (
+                              <div
+                                className={`message-bubble ${isCompactionMessage ? "compaction" : message.role === "assistant" ? "assistant" : "user"}${isCompactionMessage && isStreamingMessage ? " thinking-shimmer" : ""}`}
+                              >
+                                {isCompactionMessage ? (
                                   <MarkdownRenderer
-                                    markdown={message.content_markdown}
-                                    className="message-markdown"
-                                    interactiveCitations
-                                    onCitationClick={(sourceId) => {
-                                      const citation = message.citations.find(
-                                        (item) => item.source_id === sourceId,
-                                      );
-                                      if (citation) {
-                                        handleCitationClick(message, citation);
-                                      }
-                                    }}
+                                    markdown={messageDisplayMarkdown}
+                                    className="message-markdown compaction-markdown"
                                   />
-                                </>
-                              ) : (
-                                <div className="message-plain-text">{message.content_markdown}</div>
-                              )}
-                            </div>
+                                ) : message.role === "assistant" ? (
+                                  <>
+                                    <MarkdownRenderer
+                                      markdown={messageDisplayMarkdown}
+                                      className="message-markdown"
+                                      interactiveCitations
+                                      onCitationClick={(sourceId) => {
+                                        const citation = message.citations.find(
+                                          (item) => item.source_id === sourceId,
+                                        );
+                                        if (citation) {
+                                          handleCitationClick(message, citation);
+                                        }
+                                      }}
+                                    />
+                                  </>
+                                ) : (
+                                  <div className="message-plain-text">
+                                    {message.content_markdown}
+                                  </div>
+                                )}
+                              </div>
+                            ) : null}
                             {streamingCodePreview ? (
                               <CodeSnippet
                                 code={streamingCodePreview.code}
@@ -6382,23 +5262,124 @@ export default function App() {
                                 dataTestId="streaming-code-preview"
                               />
                             ) : null}
-                            {message.role === "assistant" && !isCompactionMessage ? (
-                              <div className="assistant-hover-actions">
-                                {hoverTime ? (
-                                  <span className="assistant-hover-time">{hoverTime}</span>
+                            {!isCompactionMessage ? (
+                              <div className="message-actions">
+                                <div className="message-actions-left">
+                                  <button
+                                    type="button"
+                                    className="message-action-button"
+                                    aria-label={
+                                      message.role === "assistant"
+                                        ? "Copy response"
+                                        : "Copy message"
+                                    }
+                                    title={
+                                      message.role === "assistant"
+                                        ? "Copy response"
+                                        : "Copy message"
+                                    }
+                                    onClick={() => void copyMessage(message.content_markdown)}
+                                  >
+                                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                                      <path d="M9 9h9v11H9z" />
+                                      <path d="M6 15H5V4h9v1" />
+                                    </svg>
+                                  </button>
+                                  {message.role === "assistant" ? (
+                                    <button
+                                      type="button"
+                                      className="message-action-button"
+                                      aria-label="Retry response"
+                                      title="Retry response"
+                                      disabled={Boolean(streamingThreadId)}
+                                      onClick={() =>
+                                        void retryAssistantResponse(message.message_id)
+                                      }
+                                    >
+                                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                                        <path d="M7 7h7a5 5 0 1 1-4.35 7.48" />
+                                        <path d="M7 7V3" />
+                                        <path d="M7 7H3" />
+                                      </svg>
+                                    </button>
+                                  ) : null}
+                                  {message.role === "assistant" ? (
+                                    <button
+                                      type="button"
+                                      className="message-action-button"
+                                      aria-label="Download reply"
+                                      title="Download reply"
+                                      onClick={() =>
+                                        setExportModalState({
+                                          source: "message",
+                                          messageId: message.message_id,
+                                        })
+                                      }
+                                    >
+                                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                                        <path d="M12 4v11" />
+                                        <path d="m7 10 5 5 5-5" />
+                                        <path d="M5 20h14" />
+                                      </svg>
+                                    </button>
+                                  ) : null}
+                                  {messagePaperCount > 0 ? (
+                                    <button
+                                      type="button"
+                                      className="message-sources-button"
+                                      onClick={() => setThreadPane("papers")}
+                                    >
+                                      {messagePaperCount} sources
+                                    </button>
+                                  ) : null}
+                                  {hoverTime ? (
+                                    <span className="message-action-time">{hoverTime}</span>
+                                  ) : null}
+                                </div>
+                                {message.role === "assistant" ? (
+                                  <div className="message-actions-right">
+                                    <button
+                                      type="button"
+                                      className="message-action-button"
+                                      aria-label="Like response"
+                                      title="Like response"
+                                      onClick={() => openFeedbackModal(message, "positive")}
+                                    >
+                                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                                        <path d="M7 10v10H4V10z" />
+                                        <path d="M7 10 12 3l1 1v5h5a2 2 0 0 1 2 2l-1 7a2 2 0 0 1-2 2H7" />
+                                      </svg>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="message-action-button"
+                                      aria-label="Dislike response"
+                                      title="Dislike response"
+                                      onClick={() => openFeedbackModal(message, "negative")}
+                                    >
+                                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                                        <path d="M7 14V4H4v10z" />
+                                        <path d="M7 14 12 21l1-1v-5h5a2 2 0 0 0 2-2l-1-7a2 2 0 0 0-2-2H7" />
+                                      </svg>
+                                    </button>
+                                  </div>
                                 ) : null}
-                                <button
-                                  type="button"
-                                  className="assistant-copy-button"
-                                  aria-label="Copy response"
-                                  title="Copy response"
-                                  onClick={() => void copyMessage(message.content_markdown)}
-                                >
-                                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                                    <path d="M9 9h9v11H9z" />
-                                    <path d="M6 15H5V4h9v1" />
-                                  </svg>
-                                </button>
+                              </div>
+                            ) : null}
+                            {recommendedPrompts.length > 0 ? (
+                              <div className="recommended-reading">
+                                <div className="recommended-reading-title">Recommended reading</div>
+                                {recommendedPrompts.map((prompt) => (
+                                  <button
+                                    key={prompt}
+                                    type="button"
+                                    className="recommended-reading-prompt"
+                                    disabled={Boolean(streamingThreadId)}
+                                    onClick={() => void sendRecommendedPrompt(prompt)}
+                                  >
+                                    {prompt}
+                                  </button>
+                                ))}
                               </div>
                             ) : null}
                             {message.role === "assistant" && message.citations.length > 0 ? (
@@ -6768,6 +5749,20 @@ export default function App() {
           ) : null}
         </div>
       </div>
+
+      <ChatSessionModals
+        exportModalState={exportModalState}
+        onCloseExportModal={() => setExportModalState(null)}
+        exportActiveThread={exportActiveThread}
+        feedbackModalState={feedbackModalState}
+        closeFeedbackModal={closeFeedbackModal}
+        feedbackReasons={feedbackReasons}
+        setFeedbackReasons={setFeedbackReasons}
+        feedbackNote={feedbackNote}
+        setFeedbackNote={setFeedbackNote}
+        feedbackSubmitting={feedbackSubmitting}
+        submitFeedbackModal={() => void submitFeedbackModal()}
+      />
 
       <div
         id="python-save-modal"

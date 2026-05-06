@@ -68,6 +68,14 @@ export type SendThreadMessagePayload = {
   paper_ids?: string[];
 };
 
+export type ChatFeedbackPayload = {
+  message_id: string;
+  sentiment: "positive" | "negative";
+  reasons: string[];
+  note?: string;
+  debug_bundle?: Record<string, unknown> | null;
+};
+
 type StreamEventHandler = <T extends keyof ChatStreamEventMap>(
   eventName: T,
   payload: ChatStreamEventMap[T],
@@ -185,7 +193,8 @@ function messageFromItem(item: ChatThreadItemResponse): ChatMessageResponse | nu
   if (!["user_message", "assistant_message", "compaction"].includes(item.item_type)) {
     return null;
   }
-  return {
+  const recommendedPrompts = recommendedPromptsFromItem(item);
+  const message: ChatMessageResponse = {
     message_id: item.item_id,
     role: item.role,
     content_markdown: item.content_text,
@@ -195,6 +204,26 @@ function messageFromItem(item: ChatThreadItemResponse): ChatMessageResponse | nu
     kind: item.item_type === "compaction" ? "compaction" : "default",
     phase: item.phase ?? null,
   };
+  if (recommendedPrompts.length > 0) {
+    message.recommended_prompts = recommendedPrompts;
+  }
+  return message;
+}
+
+function recommendedPromptsFromItem(item: ChatThreadItemResponse) {
+  const contentJson = item.content_json;
+  const rawPrompts =
+    item.recommended_prompts ??
+    (contentJson && typeof contentJson === "object" && !Array.isArray(contentJson)
+      ? (contentJson as { recommended_prompts?: unknown }).recommended_prompts
+      : null);
+  if (!Array.isArray(rawPrompts)) {
+    return [];
+  }
+  return rawPrompts
+    .map((prompt) => String(prompt).trim())
+    .filter(Boolean)
+    .slice(0, 5);
 }
 
 function itemFromLegacyMessage(
@@ -203,7 +232,8 @@ function itemFromLegacyMessage(
 ): ChatThreadItemResponse {
   const { threadId, index } = options;
   const role = String(message.role || "assistant");
-  return {
+  const recommendedPrompts = [...(message.recommended_prompts ?? [])];
+  const item: ChatThreadItemResponse = {
     item_id: message.message_id || `legacy_msg_${index + 1}`,
     thread_id: threadId,
     turn_id: `legacy_turn_${index + 1}`,
@@ -218,11 +248,16 @@ function itemFromLegacyMessage(
     call_id: null,
     name: null,
     content_text: message.content_markdown ?? "",
-    content_json: null,
+    content_json:
+      recommendedPrompts.length > 0 ? { recommended_prompts: recommendedPrompts } : null,
     citations: [...(message.citations ?? [])],
     created_at: message.created_at,
     status: message.status ?? "completed",
   };
+  if (recommendedPrompts.length > 0) {
+    item.recommended_prompts = recommendedPrompts;
+  }
+  return item;
 }
 
 function turnsFromItems(items: ChatThreadItemResponse[]): ChatTurnResponse[] {
@@ -634,6 +669,20 @@ export function deleteThread(threadId: string) {
   return api<{ status: string }>(`/v1/browser/chats/${threadId}`, { method: "DELETE" });
 }
 
+export function renameThread(threadId: string, title: string) {
+  return api<ChatThreadResponse>(`/v1/browser/chats/${threadId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ title }),
+  }).then(hydrateThread);
+}
+
+export function submitChatFeedback(threadId: string, payload: ChatFeedbackPayload) {
+  return api<{ feedback_id: string; status: string }>(`/v1/browser/chats/${threadId}/feedback`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 export function sendThreadMessage(threadId: string, payload: SendThreadMessagePayload) {
   return api<SendChatMessageResponse>(`/v1/browser/chats/${threadId}/messages`, {
     method: "POST",
@@ -759,8 +808,16 @@ export function getBrowserPaper(paperId: string) {
   return api<PaperResponse>(`/v1/browser/papers/${paperId}`, { method: "GET" });
 }
 
-export function loadBrowserTrendingPapers(date: string, sort: "default" | "upvotes" = "default") {
-  const params = new URLSearchParams({ date, sort });
+export function loadBrowserTrendingPapers(
+  date: string,
+  sort: "default" | "upvotes" = "default",
+  page = 1,
+  pageSize?: number,
+) {
+  const params = new URLSearchParams({ date, sort, page: String(page) });
+  if (pageSize !== undefined) {
+    params.set("page_size", String(pageSize));
+  }
   return api<TrendingFeedResponse>(`/v1/browser/trending?${params.toString()}`, { method: "GET" });
 }
 

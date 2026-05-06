@@ -71,6 +71,7 @@ from .models import (
     BrowserUser,
     BrowserUserSettingsResponse,
     ChatCitation,
+    ChatFeedbackResponse,
     ChatMessageResponse,
     ChatThreadItemResponse,
     ChatThreadListResponse,
@@ -84,6 +85,7 @@ from .models import (
     CodeSearchHit,
     CodeSearchResponse,
     CreatePaperCommentRequest,
+    CreateChatFeedbackRequest,
     CreateChatThreadRequest,
     MoveChatThreadProjectRequest,
     FileContentResponse,
@@ -139,6 +141,7 @@ from .models import (
     TrendingFeedResponse,
     TrendingPaperDetailResponse,
     UpdateAppearanceRequest,
+    UpdateChatThreadRequest,
     UpdateNotificationsRequest,
     UpdateProjectRequest,
     CreateProjectRequest,
@@ -318,6 +321,7 @@ _FORCE_TOOL_QUERY_RE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+_RECOMMENDED_READING_WORD_RE = re.compile(r"[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)?")
 
 
 def _admin_display_status(status: str) -> str:
@@ -3508,6 +3512,39 @@ class PaperbaseService:
             raise HTTPException(status_code=404, detail="Chat thread not found")
         return thread
 
+    def update_chat_thread(
+        self,
+        user: BrowserUser,
+        thread_id: str,
+        request: UpdateChatThreadRequest,
+    ) -> ChatThreadResponse:
+        thread = self.get_chat_thread(user, thread_id)
+        title = request.title.strip()
+        if not title:
+            raise HTTPException(status_code=400, detail="Chat title is required")
+        self.repository.rename_chat_thread(thread_id=thread.thread_id, title=title)  # type: ignore[attr-defined]
+        return self.get_chat_thread(user, thread_id)
+
+    def create_chat_feedback(
+        self,
+        user: BrowserUser,
+        thread_id: str,
+        request: CreateChatFeedbackRequest,
+    ) -> ChatFeedbackResponse:
+        reasons = [reason.strip() for reason in request.reasons if reason.strip()]
+        feedback = self.repository.add_chat_feedback(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            thread_id=thread_id,
+            message_id=request.message_id,
+            sentiment=request.sentiment,
+            reasons=reasons[:12],
+            note=request.note.strip()[:4000],
+            debug_bundle=request.debug_bundle,
+        )
+        if feedback is None:
+            raise HTTPException(status_code=404, detail="Chat message not found")
+        return feedback
+
     def move_chat_thread_to_project(
         self,
         user: BrowserUser,
@@ -5461,6 +5498,15 @@ class PaperbaseService:
                         final_item = updated_last_item
 
             if not pending_tool_calls:
+                if final_item is not None:
+                    updated_final_item = self._attach_recommended_reading_prompts(
+                        api_key=prepared.api_key_value or "",
+                        prepared=prepared,
+                        final_item=final_item,
+                    )
+                    if updated_final_item != final_item:
+                        final_item = updated_final_item
+                        yield ("item_completed", {"item": final_item.model_dump(mode="json")})
                 final_turn = self.repository.update_chat_turn(  # type: ignore[attr-defined]
                     prepared.turn.turn_id,
                     status="completed",
@@ -5594,6 +5640,123 @@ class PaperbaseService:
             has_openai_api_key=self.repository.get_openai_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
             state=state,
         )
+
+    def _recommended_reading_relevant(
+        self,
+        *,
+        user_prompt: str,
+        final_item: ChatThreadItemResponse,
+    ) -> bool:
+        if final_item.citations:
+            return True
+        return bool(_GROUNDING_INTENT_RE.search(user_prompt))
+
+    def _parse_recommended_reading_payload(self, text: str) -> list[str]:
+        payload_text = text.strip()
+        if payload_text.startswith("```"):
+            payload_text = re.sub(r"^```(?:json)?\s*", "", payload_text, flags=re.IGNORECASE)
+            payload_text = re.sub(r"\s*```$", "", payload_text).strip()
+        try:
+            payload = json.loads(payload_text)
+        except json.JSONDecodeError:
+            start = payload_text.find("[")
+            end = payload_text.rfind("]")
+            if start < 0 or end <= start:
+                return []
+            try:
+                payload = json.loads(payload_text[start : end + 1])
+            except json.JSONDecodeError:
+                return []
+        if isinstance(payload, dict):
+            payload = payload.get("prompts")
+        if not isinstance(payload, list):
+            return []
+
+        prompts: list[str] = []
+        seen: set[str] = set()
+        for item in payload:
+            prompt = " ".join(str(item or "").split()).strip()
+            if not prompt:
+                continue
+            word_count = len(_RECOMMENDED_READING_WORD_RE.findall(prompt))
+            key = prompt.casefold()
+            if 8 <= word_count <= 10 and key not in seen:
+                prompts.append(prompt[:240])
+                seen.add(key)
+            if len(prompts) >= 5:
+                break
+        return prompts
+
+    def _generate_recommended_reading_prompts(
+        self,
+        *,
+        api_key: str,
+        user_prompt: str,
+        final_item: ChatThreadItemResponse,
+    ) -> list[str]:
+        if not self._recommended_reading_relevant(user_prompt=user_prompt, final_item=final_item):
+            return []
+        citation_titles = [citation.title for citation in final_item.citations[:8] if citation.title]
+        prompt = Prompt(
+            input=[
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "user_prompt": user_prompt[:4000],
+                            "assistant_reply": final_item.content_text[:6000],
+                            "cited_papers": citation_titles,
+                        },
+                        ensure_ascii=False,
+                    ),
+                }
+            ],
+            base_instructions=(
+                "Generate five concise follow-up research prompts for recommended reading. "
+                "Only use the supplied user prompt, assistant reply, and cited paper titles. "
+                "Each prompt must be 8 to 10 words. Return only a JSON array of strings."
+            ),
+            tools=[],
+            tool_choice=None,
+            parallel_tool_calls=False,
+        )
+        try:
+            response = self._chat_model_create_response(api_key=api_key, prompt=prompt)
+        except Exception:
+            logger.exception(
+                "Recommended reading prompt generation failed",
+                extra={"event": "chat.recommended_reading.failed"},
+            )
+            return []
+        response_text = "\n".join(
+            item.content_text
+            for item in response.items
+            if item.item_type == "assistant_message" and item.content_text
+        )
+        return self._parse_recommended_reading_payload(response_text)
+
+    def _attach_recommended_reading_prompts(
+        self,
+        *,
+        api_key: str,
+        prepared: PreparedChatGeneration,
+        final_item: ChatThreadItemResponse,
+    ) -> ChatThreadItemResponse:
+        prompts = self._generate_recommended_reading_prompts(
+            api_key=api_key,
+            user_prompt=prepared.user_item.content_text,
+            final_item=final_item,
+        )
+        if not prompts:
+            return final_item
+        content_json = dict(final_item.content_json) if isinstance(final_item.content_json, dict) else {}
+        content_json["recommended_prompts"] = prompts
+        updated_item = self.repository.update_chat_thread_item(  # type: ignore[attr-defined]
+            final_item.item_id,
+            content_json=content_json,
+        )
+        return updated_item or final_item
 
     def _chat_usage_payload(self, usage: ChatModelUsage) -> dict[str, Any]:
         return {
@@ -8775,25 +8938,37 @@ class PaperbaseService:
     def list_browser_trending_papers(
         self,
         *,
-        date: str,
+        date: str | None = None,
         sort: str,
+        page: int = 1,
+        page_size: int = 50,
         viewer: BrowserUser | None = None,
     ) -> TrendingFeedResponse:
-        _validate_date(date, name="date")
+        if date is not None:
+            _validate_date(date, name="date")
         if sort not in {"default", "upvotes"}:
             raise HTTPException(status_code=400, detail=f"Unsupported trending sort {sort!r}")
+        if page < 1:
+            raise HTTPException(status_code=400, detail="Trending page must be at least 1")
+        if page_size < 1 or page_size > 50:
+            raise HTTPException(status_code=400, detail="Trending page size must be between 1 and 50")
         papers = self.repository.list_trending_papers(
-            published_date=date,
             sort=sort,
             viewer_user_id=viewer.user_id if viewer else None,
-            limit=50,
+            limit=page_size + 1,
+            offset=(page - 1) * page_size,
         )
+        visible_papers = papers[:page_size]
         return TrendingFeedResponse(
-            date=date,
+            date=date or utcnow().date().isoformat(),
             sort=sort,  # type: ignore[arg-type]
+            page=page,
+            page_size=page_size,
+            has_next=len(papers) > page_size,
+            has_previous=page > 1,
             papers=[
                 paper.model_copy(update={"image_url": self._trending_preview_image_url(paper.paper_id)})
-                for paper in papers
+                for paper in visible_papers
             ],
         )
 

@@ -108,6 +108,7 @@ const apiMocks = vi.hoisted(() => {
       </div>
     )),
     moveThreadToProject: vi.fn(),
+    renameThread: vi.fn(),
     logoutBrowserSession: vi.fn(),
     postForm: vi.fn(),
     queueBrowserAdminEnrichMissingMetadata: vi.fn(),
@@ -120,6 +121,7 @@ const apiMocks = vi.hoisted(() => {
     runPythonFile: vi.fn(),
     sendThreadMessage: vi.fn(),
     sendThreadMessageStream: vi.fn(),
+    submitChatFeedback: vi.fn(),
     suggestBrowserPapers: vi.fn(),
     StreamingChatAbortError: MockStreamingChatAbortError,
     StreamingChatError: MockStreamingChatError,
@@ -173,6 +175,7 @@ vi.mock("./api", () => ({
   loadSession: apiMocks.loadSession,
   loadUploads: apiMocks.loadUploads,
   moveThreadToProject: apiMocks.moveThreadToProject,
+  renameThread: apiMocks.renameThread,
   logoutBrowserSession: apiMocks.logoutBrowserSession,
   postForm: apiMocks.postForm,
   queueBrowserAdminEnrichMissingMetadata: apiMocks.queueBrowserAdminEnrichMissingMetadata,
@@ -185,6 +188,7 @@ vi.mock("./api", () => ({
   runPythonFile: apiMocks.runPythonFile,
   sendThreadMessage: apiMocks.sendThreadMessage,
   sendThreadMessageStream: apiMocks.sendThreadMessageStream,
+  submitChatFeedback: apiMocks.submitChatFeedback,
   suggestBrowserPapers: apiMocks.suggestBrowserPapers,
   StreamingChatAbortError: apiMocks.StreamingChatAbortError,
   StreamingChatError: apiMocks.StreamingChatError,
@@ -301,7 +305,8 @@ vi.mock("echarts-for-react", () => ({
 
 import App from "./App";
 
-const OPEN_TABS_KEY = "paperbase-open-tabs";
+const ACTIVE_TAB_KEY = "paperbase-active-tab";
+const LEGACY_OPEN_TABS_KEY = "paperbase-open-tabs";
 const PENDING_PROMPT_KEY = "paperbase-pending-prompt";
 const SELECTED_PROJECT_KEY = "paperbase-selected-project";
 
@@ -735,6 +740,10 @@ describe("App", () => {
     apiMocks.loadBrowserTrendingPapers.mockResolvedValue({
       date: "2026-04-21",
       sort: "default",
+      page: 1,
+      page_size: 50,
+      has_next: false,
+      has_previous: false,
       papers: [
         {
           paper_id: "arxiv:2401.12345",
@@ -876,6 +885,20 @@ describe("App", () => {
       updated_at: "2026-04-21T00:00:00Z",
     });
     apiMocks.syncProjectRepo.mockResolvedValue(repoSyncResponse("proj_1", true));
+    apiMocks.renameThread.mockImplementation(async (threadId: string, title: string) => ({
+      ...threadResponse(threadId, title),
+      title,
+    }));
+    apiMocks.submitChatFeedback.mockResolvedValue({
+      feedback_id: "feedback_1",
+      thread_id: "thread_1",
+      message_id: "msg_1",
+      sentiment: "positive",
+      reasons: ["Accurate"],
+      note: "",
+      debug_bundle: {},
+      created_at: "2026-04-21T00:00:00Z",
+    });
     apiMocks.updatePythonFile.mockImplementation(
       async (fileId: string, payload: { filename?: string | null; content?: string | null }) =>
         pythonFileResponse(fileId, payload.filename ?? "something.py", payload.content ?? ""),
@@ -905,7 +928,7 @@ describe("App", () => {
     expect(apiMocks.landingMentionEditor).toHaveBeenCalled();
   });
 
-  it("opens the public trending page from landing and routes unauthenticated upvotes to login", async () => {
+  it("shows top landing papers and routes unauthenticated upvotes to login", async () => {
     apiMocks.loadSession.mockResolvedValue({
       authenticated: false,
       user: null,
@@ -916,16 +939,33 @@ describe("App", () => {
     render(<App />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Browse trending papers" })).toBeTruthy();
+      expect(screen.getByRole("heading", { name: "Trending papers" })).toBeTruthy();
     });
+    await waitFor(() => {
+      expect(apiMocks.loadBrowserTrendingPapers).toHaveBeenCalledWith(
+        expect.any(String),
+        "default",
+        1,
+        10,
+      );
+    });
+    expect(screen.queryByRole("button", { name: "Browse trending papers" })).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "Browse trending papers" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Hottest" }));
 
     await waitFor(() => {
-      expect(screen.getByTestId("trending-papers-page")).toBeTruthy();
+      expect(apiMocks.loadBrowserTrendingPapers).toHaveBeenLastCalledWith(
+        expect.any(String),
+        "upvotes",
+        1,
+        10,
+      );
     });
-    expect(apiMocks.loadBrowserTrendingPapers).toHaveBeenCalledWith(expect.any(String), "default");
+    expect(screen.getByRole("heading", { name: "Trending papers" })).toBeTruthy();
 
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Upvote 12" })).toBeTruthy();
+    });
     fireEvent.click(screen.getByRole("button", { name: "Upvote 12" }));
 
     await waitFor(() => {
@@ -933,16 +973,27 @@ describe("App", () => {
     });
   });
 
-  it("boots from the server session payload without refetching the browser session", async () => {
-    apiMocks.getBootstrapSession.mockReturnValue(authenticatedSession());
+  it("opens the public trending page from a shared browse URL", async () => {
+    window.history.replaceState({}, "", "/?browse=trending");
+    apiMocks.loadSession.mockResolvedValue({
+      authenticated: false,
+      user: null,
+      has_anthropic_api_key: false,
+      csrf_token: null,
+    });
 
     render(<App />);
 
     await waitFor(() => {
-      expect(document.querySelector("#account-menu-button")).toBeTruthy();
+      expect(screen.getByTestId("trending-papers-page")).toBeTruthy();
     });
-
-    expect(apiMocks.loadSession).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(apiMocks.loadBrowserTrendingPapers).toHaveBeenCalledWith(
+        expect.any(String),
+        "default",
+        1,
+      );
+    });
   });
 
   it("boots from the server session payload without refetching the browser session", async () => {
@@ -957,24 +1008,37 @@ describe("App", () => {
     expect(apiMocks.loadSession).not.toHaveBeenCalled();
   });
 
-  it("restores previously open tabs for an authenticated session", async () => {
-    localStorage.setItem(OPEN_TABS_KEY, JSON.stringify(["thread_1"]));
+  it("boots from the server session payload without refetching the browser session", async () => {
+    apiMocks.getBootstrapSession.mockReturnValue(authenticatedSession());
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(document.querySelector("#account-menu-button")).toBeTruthy();
+    });
+
+    expect(apiMocks.loadSession).not.toHaveBeenCalled();
+  });
+
+  it("restores the active resource for an authenticated session", async () => {
+    localStorage.setItem(LEGACY_OPEN_TABS_KEY, JSON.stringify(["thread_1"]));
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());
     apiMocks.getThread.mockResolvedValue(threadResponse("thread_1", "Restored research thread"));
 
     render(<App />);
 
     await waitFor(() => {
-      expect(screen.getAllByText("Restored research thread").length).toBeGreaterThan(0);
+      expect(apiMocks.getThread).toHaveBeenCalledWith("thread_1");
     });
-    expect(apiMocks.getThread).toHaveBeenCalledWith("thread_1");
     expect(apiMocks.loadProjects).toHaveBeenCalledTimes(1);
-    const tabElements = [...document.querySelectorAll<HTMLElement>(".chat-tab")];
-    const restoredTab = tabElements.find((element) =>
-      element.textContent?.includes("Restored research thread"),
+    expect(screen.queryByRole("tablist", { name: "Open tabs" })).toBeNull();
+    expect(document.querySelector(".chat-stage-header")).toBeNull();
+    await waitFor(() => {
+      expect(localStorage.getItem(LEGACY_OPEN_TABS_KEY)).toBeNull();
+    });
+    expect(localStorage.getItem(ACTIVE_TAB_KEY)).toBe(
+      JSON.stringify({ kind: "thread", id: "thread_1" }),
     );
-    expect(restoredTab?.querySelector(".chat-tab-thread-indicator")).toBeNull();
-    expect(document.querySelectorAll(".chat-tab-thread-indicator")).toHaveLength(0);
     expect(screen.queryByTestId("thread-debug-strip")).toBeNull();
     const debugButton = screen.getByRole("button", { name: "Open chat debug info" });
     expect(debugButton).toBeTruthy();
@@ -991,7 +1055,7 @@ describe("App", () => {
 
   it("restores the previously selected project and keeps only that tree expanded", async () => {
     localStorage.setItem(SELECTED_PROJECT_KEY, "proj_2");
-    localStorage.setItem(OPEN_TABS_KEY, JSON.stringify(["thread_1"]));
+    localStorage.setItem(ACTIVE_TAB_KEY, JSON.stringify({ kind: "thread", id: "thread_1" }));
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());
     apiMocks.loadProjects.mockResolvedValue({
       projects: [projectSummary("proj_1", "General"), projectSummary("proj_2", "Agents", 0)],
@@ -1151,14 +1215,8 @@ describe("App", () => {
     expect(await screen.findByText("analysis-6.py")).toBeTruthy();
   });
 
-  it("shows repo path context for duplicate Python basenames in the sidebar and tabs", async () => {
-    localStorage.setItem(
-      OPEN_TABS_KEY,
-      JSON.stringify([
-        { kind: "python_file", id: "file_1" },
-        { kind: "python_file", id: "file_2" },
-      ]),
-    );
+  it("shows repo path context for duplicate Python basenames in the sidebar", async () => {
+    localStorage.setItem(ACTIVE_TAB_KEY, JSON.stringify({ kind: "python_file", id: "file_2" }));
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());
     apiMocks.loadProjectItems.mockImplementation(
       async (projectId: string, limit = 25, offset = 0, itemKind?: "thread" | "python_file") => {
@@ -1201,14 +1259,16 @@ describe("App", () => {
     render(<App />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Close src/models/train.py" })).toBeTruthy();
+      expect(apiMocks.getPythonFile).toHaveBeenCalledWith("file_2");
     });
-    expect(screen.getByRole("button", { name: "Close experiments/models/train.py" })).toBeTruthy();
+    expect(apiMocks.getPythonFile).not.toHaveBeenCalledWith("file_1");
+    expect(screen.queryByRole("tablist", { name: "Open tabs" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Close .*train\.py/ })).toBeNull();
 
     fireEvent.click(screen.getAllByText("General")[0]!);
 
     await waitFor(() => {
-      expect(screen.getAllByText("train.py")).toHaveLength(2);
+      expect(document.querySelectorAll(".python-file-card .thread-card-title")).toHaveLength(2);
     });
     expect(screen.getAllByText("src/models/train.py").length).toBeGreaterThan(0);
     expect(screen.getAllByText("experiments/models/train.py").length).toBeGreaterThan(0);
@@ -1677,7 +1737,12 @@ describe("App", () => {
     await waitFor(() => {
       expect(apiMocks.importProjectNotebook).toHaveBeenCalledWith("proj_1", file);
     });
-    expect(screen.getByText("colab_export.ipynb")).toBeTruthy();
+    await waitFor(() => {
+      expect(localStorage.getItem(ACTIVE_TAB_KEY)).toBe(
+        JSON.stringify({ kind: "python_file", id: "file_2" }),
+      );
+    });
+    expect(screen.getByRole("button", { name: "Save" })).toBeTruthy();
   });
 
   it("does not create a duplicate empty chat for the same project", async () => {
@@ -1867,7 +1932,7 @@ describe("App", () => {
         },
       ],
     });
-    localStorage.setItem(OPEN_TABS_KEY, JSON.stringify(["thread_1"]));
+    localStorage.setItem(ACTIVE_TAB_KEY, JSON.stringify({ kind: "thread", id: "thread_1" }));
 
     render(<App />);
 
@@ -2326,7 +2391,7 @@ describe("App", () => {
   });
 
   it("shows inline paper previews for cited research papers", async () => {
-    localStorage.setItem(OPEN_TABS_KEY, JSON.stringify(["thread_1"]));
+    localStorage.setItem(ACTIVE_TAB_KEY, JSON.stringify({ kind: "thread", id: "thread_1" }));
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());
     apiMocks.getThread.mockResolvedValue({
       thread_id: "thread_1",
@@ -2390,6 +2455,7 @@ describe("App", () => {
               tags: [],
             },
           ],
+          recommended_prompts: ["Compare tool use benchmarks across recent planning agents"],
           created_at: "2026-04-21T00:00:00Z",
           status: "completed",
         },
@@ -2433,6 +2499,46 @@ describe("App", () => {
     expect(screen.getByRole("link", { name: "PDF" }).getAttribute("href")).toBe(
       "https://example.test/2401.12345.pdf",
     );
+    expect(screen.getByRole("tab", { name: "Chat" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Papers" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Retry response" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Download reply" })).toBeTruthy();
+    expect(screen.getByText("Recommended reading")).toBeTruthy();
+    expect(
+      screen.getByRole("button", {
+        name: "Compare tool use benchmarks across recent planning agents",
+      }),
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "1 sources" }));
+    expect(await screen.findByText("Benchmark Paper")).toBeTruthy();
+    expect(screen.queryByText("Read this paper [S1].")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("tab", { name: "Chat" }));
+    fireEvent.click(screen.getByRole("button", { name: "Like response" }));
+    expect(
+      await screen.findByRole("heading", {
+        name: "What did you like about this response? (optional)",
+      }),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Accurate" }));
+    fireEvent.change(screen.getByLabelText("Feedback details"), {
+      target: { value: "Looks right" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send feedback" }));
+    await waitFor(() => {
+      expect(apiMocks.submitChatFeedback).toHaveBeenCalledWith(
+        "thread_1",
+        expect.objectContaining({
+          message_id: "msg_1",
+          sentiment: "positive",
+          reasons: ["Accurate"],
+          note: "Looks right",
+          debug_bundle: expect.objectContaining({ thread_id: "thread_1" }),
+        }),
+      );
+    });
   });
 
   it("falls back to the non-streaming send path when the stream fails before any events", async () => {
@@ -2680,9 +2786,7 @@ describe("App", () => {
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
     });
-    await waitFor(() => {
-      expect(document.querySelectorAll(".chat-tab-thread-indicator")).toHaveLength(1);
-    });
+    expect(screen.queryByRole("tablist", { name: "Open tabs" })).toBeNull();
     const commentaryText = await screen.findByText("I will search the paper index first.");
     const toolActivityText = await screen.findByText('Did paper search for "grounding"');
     expect(screen.queryByText("Commentary")).toBeNull();
@@ -2730,18 +2834,15 @@ describe("App", () => {
       await streamDone;
     });
 
-    await waitFor(() => {
-      expect(document.querySelectorAll(".chat-tab-thread-indicator")).toHaveLength(0);
-    });
     randomSpy.mockRestore();
   });
 
   it("shows project coding activity copy and a live Python preview while code streams", async () => {
+    const streamingMarkdown = "Here is the script:\n\n```python\ndef train():\n    return 1\n";
+    const completedMarkdown = `${streamingMarkdown}\`\`\``;
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());
     apiMocks.createThread.mockResolvedValue(emptyThreadResponse("thread_2"));
-    apiMocks.getThread.mockResolvedValue(
-      threadResponse("thread_2", "New chat", "```python\ndef train():\n    return 1\n```"),
-    );
+    apiMocks.getThread.mockResolvedValue(threadResponse("thread_2", "New chat", completedMarkdown));
 
     let releaseStream: (() => void) | null = null;
     const streamDone = new Promise<void>((resolve) => {
@@ -2781,7 +2882,7 @@ describe("App", () => {
         onEvent("item_started", { item: assistantItem });
         onEvent("item_delta", {
           item_id: "msg_2",
-          delta: "```python\ndef train():\n    return 1\n",
+          delta: streamingMarkdown,
           delta_type: "output_text",
         });
         await streamDone;
@@ -2816,7 +2917,7 @@ describe("App", () => {
           "msg_2",
           "assistant_message",
           "assistant",
-          "```python\ndef train():\n    return 1\n```",
+          completedMarkdown,
           {
             thread_id: "thread_2",
             turn_id: "turn_project_preview",
@@ -2827,7 +2928,7 @@ describe("App", () => {
           item: completedAssistantItem,
         });
         const completedThread = {
-          ...threadResponse("thread_2", "New chat", "```python\ndef train():\n    return 1\n```"),
+          ...threadResponse("thread_2", "New chat", completedMarkdown),
           items: [completedAssistantItem],
           turns: [turnResponse("turn_project_preview", "thread_2", [completedAssistantItem])],
         };
@@ -2856,11 +2957,15 @@ describe("App", () => {
       expect(screen.getByText("Patching src/train.py...")).toBeTruthy();
     });
     const preview = await screen.findByTestId("streaming-code-preview");
+    expect(screen.getByText("Here is the script:")).toBeTruthy();
     expect(within(preview).getByText("Writing code")).toBeTruthy();
     expect(preview.textContent).toContain("python");
     expect(preview.textContent).toContain("1");
     expect(preview.textContent).toContain("2");
     expect(preview.textContent).toContain("def train():");
+    expect(document.querySelectorAll(".code-snippet-shell")).toHaveLength(1);
+    expect(document.querySelector(".message-code-snippet")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Collapse code block" })).toBeNull();
     expect(document.querySelector(".code-snippet-token.keyword")?.textContent).toBe("def");
 
     await act(async () => {
@@ -3459,16 +3564,14 @@ describe("App", () => {
         },
       ],
     });
-    localStorage.setItem(OPEN_TABS_KEY, JSON.stringify(["thread_1"]));
+    localStorage.setItem(ACTIVE_TAB_KEY, JSON.stringify({ kind: "thread", id: "thread_1" }));
     try {
       render(<App />);
 
       await waitFor(() => {
         expect(screen.getByRole("button", { name: "Control panel" })).toBeTruthy();
       });
-      await waitFor(() => {
-        expect(screen.getByRole("tablist", { name: "Open tabs" })).toBeTruthy();
-      });
+      expect(screen.queryByRole("tablist", { name: "Open tabs" })).toBeNull();
       expect(screen.getByRole("button", { name: "Send" })).toBeTruthy();
       expect(screen.getByText("Grounded answer")).toBeTruthy();
 

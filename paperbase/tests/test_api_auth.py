@@ -27,6 +27,7 @@ from paperbase.models import (
     AdminJobsOverviewResponse,
     BrowserSessionResponse,
     BrowserUser,
+    ChatFeedbackResponse,
     ChatMessageResponse,
     ChatThreadListResponse,
     ChatThreadResponse,
@@ -271,15 +272,26 @@ class StubApiService:
     def list_browser_trending_papers(
         self,
         *,
-        date: str,
+        date: str | None = None,
         sort: str,
+        page: int = 1,
+        page_size: int = 50,
         viewer: BrowserUser | None = None,
     ) -> TrendingFeedResponse:
-        self.calls.append(("list_browser_trending_papers", (date, sort, viewer.user_id if viewer else None)))
+        self.calls.append(
+            (
+                "list_browser_trending_papers",
+                (date, sort, page, page_size, viewer.user_id if viewer else None),
+            )
+        )
         paper = _paper("2401.54321")
         return TrendingFeedResponse(
-            date=date,
+            date=date or "2026-04-01",
             sort=sort,  # type: ignore[arg-type]
+            page=page,
+            page_size=page_size,
+            has_next=False,
+            has_previous=page > 1,
             papers=[
                 {
                     "paper_id": paper.paper_id,
@@ -948,6 +960,19 @@ class StubApiService:
             messages=[],
         )
 
+    def update_chat_thread(self, user: BrowserUser, thread_id: str, request) -> ChatThreadResponse:
+        self.calls.append(("update_chat_thread", (user.user_id, thread_id, request.title)))
+        return ChatThreadResponse(
+            thread_id=thread_id,
+            project_id="proj_1",
+            project_name="General",
+            project_instructions="",
+            title=request.title,
+            created_at=NOW,
+            updated_at=NOW,
+            messages=[],
+        )
+
     def get_chat_thread(self, user: BrowserUser, thread_id: str) -> ChatThreadResponse:
         self.calls.append(("get_chat_thread", (user.user_id, thread_id)))
         return ChatThreadResponse(
@@ -970,6 +995,24 @@ class StubApiService:
 
     def delete_chat_thread(self, user: BrowserUser, thread_id: str) -> None:
         self.calls.append(("delete_chat_thread", (user.user_id, thread_id)))
+
+    def create_chat_feedback(self, user: BrowserUser, thread_id: str, request) -> ChatFeedbackResponse:
+        self.calls.append(
+            (
+                "create_chat_feedback",
+                (user.user_id, thread_id, request.message_id, request.sentiment, request.reasons, request.note),
+            )
+        )
+        return ChatFeedbackResponse(
+            feedback_id="feedback_1",
+            thread_id=thread_id,
+            message_id=request.message_id,
+            sentiment=request.sentiment,
+            reasons=request.reasons,
+            note=request.note,
+            debug_bundle=request.debug_bundle,
+            created_at=NOW,
+        )
 
     def upsert_google_browser_user(
         self,
@@ -1495,6 +1538,22 @@ def test_browser_project_and_chat_write_routes_delegate_with_valid_csrf(api_clie
         json={"project_id": "proj_2"},
         headers=headers,
     )
+    updated_chat = client.patch(
+        "/v1/browser/chats/thread_2",
+        json={"title": "Renamed chat"},
+        headers=headers,
+    )
+    chat_feedback = client.post(
+        "/v1/browser/chats/thread_2/feedback",
+        json={
+            "message_id": "msg_1",
+            "sentiment": "positive",
+            "reasons": ["Accurate"],
+            "note": "Good answer",
+            "debug_bundle": {"thread_id": "thread_2"},
+        },
+        headers=headers,
+    )
     created_python_file = client.post(
         "/v1/browser/projects/proj_2/python-files",
         headers=headers,
@@ -1534,6 +1593,10 @@ def test_browser_project_and_chat_write_routes_delegate_with_valid_csrf(api_clie
     assert created_chat.json()["project_id"] == "proj_2"
     assert moved_chat.status_code == 200
     assert moved_chat.json()["project_id"] == "proj_2"
+    assert updated_chat.status_code == 200
+    assert updated_chat.json()["title"] == "Renamed chat"
+    assert chat_feedback.status_code == 200
+    assert chat_feedback.json()["reasons"] == ["Accurate"]
     assert created_python_file.status_code == 200
     assert created_python_file.json()["filename"] == "something.py"
     assert imported_notebook.status_code == 200
@@ -1552,6 +1615,11 @@ def test_browser_project_and_chat_write_routes_delegate_with_valid_csrf(api_clie
     assert ("update_project", ("user_1", "proj_2", "Agents v2", "Updated instructions")) in service.calls
     assert ("create_chat_thread", ("user_1", "Project chat", "proj_2")) in service.calls
     assert ("move_chat_thread_to_project", ("user_1", "thread_2", "proj_2")) in service.calls
+    assert ("update_chat_thread", ("user_1", "thread_2", "Renamed chat")) in service.calls
+    assert (
+        "create_chat_feedback",
+        ("user_1", "thread_2", "msg_1", "positive", ["Accurate"], "Good answer"),
+    ) in service.calls
     assert ("create_python_file", ("user_1", "proj_2")) in service.calls
     assert (
         "import_project_notebook_upload",
@@ -1783,14 +1851,16 @@ def test_home_route_returns_no_store_cache_headers(api_client, monkeypatch, tmp_
 def test_browser_trending_feed_is_public(api_client):
     client, service, _ = api_client
 
-    response = client.get("/v1/browser/trending?date=2026-04-21&sort=upvotes")
+    response = client.get("/v1/browser/trending?date=2026-04-21&sort=upvotes&page=2&page_size=10")
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["date"] == "2026-04-21"
     assert payload["sort"] == "upvotes"
+    assert payload["page"] == 2
+    assert payload["page_size"] == 10
     assert payload["papers"][0]["paper_id"] == "arxiv:2401.54321"
-    assert ("list_browser_trending_papers", ("2026-04-21", "upvotes", None)) in service.calls
+    assert ("list_browser_trending_papers", ("2026-04-21", "upvotes", 2, 10, None)) in service.calls
 
 
 def test_browser_trending_detail_is_public(api_client):

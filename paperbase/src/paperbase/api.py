@@ -34,6 +34,7 @@ from .models import (
     AdminJobPapersResponse,
     AdminJobsOverviewResponse,
     BrowserSessionResponse,
+    ChatFeedbackResponse,
     ChatThreadListResponse,
     ChatThreadResponse,
     CodeContextResponse,
@@ -41,6 +42,7 @@ from .models import (
     CodeReadResponse,
     CodeSearchResponse,
     CreatePaperCommentRequest,
+    CreateChatFeedbackRequest,
     CreateProjectRequest,
     CreateChatThreadRequest,
     FileContentResponse,
@@ -87,6 +89,7 @@ from .models import (
     TrendingFeedResponse,
     TrendingPaperDetailResponse,
     UpdateAppearanceRequest,
+    UpdateChatThreadRequest,
     UpdatePythonFileRequest,
     UpdateNotificationsRequest,
     UpdateProjectRequest,
@@ -126,7 +129,7 @@ def _api_reload_dirs() -> list[str]:
 
 def _api_reload_excludes() -> list[str]:
     return [
-        str(_STATIC_DIR / "*"),
+        str(_STATIC_DIR),
     ]
 
 
@@ -812,12 +815,20 @@ def browser_suggest_papers(
 
 @app.get("/v1/browser/trending", response_model=TrendingFeedResponse)
 def browser_list_trending_papers(
-    date: str = Query(..., min_length=10, max_length=10),
+    date: str | None = Query(default=None, min_length=10, max_length=10),
     sort: str = Query(default="default"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=50),
     user=Depends(get_optional_browser_user),
     service: PaperbaseService = Depends(get_service),
 ) -> TrendingFeedResponse:
-    return service.list_browser_trending_papers(date=date, sort=sort, viewer=user)
+    return service.list_browser_trending_papers(
+        date=date,
+        sort=sort,
+        page=page,
+        page_size=page_size,
+        viewer=user,
+    )
 
 
 @app.get("/v1/browser/trending/papers/{paper_id}", response_model=TrendingPaperDetailResponse)
@@ -1676,6 +1687,16 @@ def browser_get_chat(
     return service.get_chat_thread(user, thread_id)
 
 
+@app.patch("/v1/browser/chats/{thread_id}", response_model=ChatThreadResponse)
+def browser_update_chat(
+    thread_id: str,
+    request: UpdateChatThreadRequest,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> ChatThreadResponse:
+    return service.update_chat_thread(user, thread_id, request)
+
+
 @app.patch("/v1/browser/chats/{thread_id}/project", response_model=ChatThreadResponse)
 def browser_move_chat_to_project(
     thread_id: str,
@@ -1694,6 +1715,16 @@ def browser_delete_chat(
 ) -> dict[str, str]:
     service.delete_chat_thread(user, thread_id)
     return {"status": "deleted"}
+
+
+@app.post("/v1/browser/chats/{thread_id}/feedback", response_model=ChatFeedbackResponse)
+def browser_create_chat_feedback(
+    thread_id: str,
+    request: CreateChatFeedbackRequest,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> ChatFeedbackResponse:
+    return service.create_chat_feedback(user, thread_id, request)
 
 
 @app.post("/v1/browser/chats/{thread_id}/messages", response_model=SendChatMessageResponse)

@@ -25,6 +25,7 @@ function Harness({
   initialState = {
     date: "2026-04-21",
     sort: "default",
+    page: 1,
     paperId: null,
   } satisfies TrendingBrowseState,
   onRequireAuth = vi.fn(),
@@ -50,6 +51,10 @@ describe("TrendingPapersPage", () => {
     apiMocks.loadBrowserTrendingPapers.mockResolvedValue({
       date: "2026-04-21",
       sort: "default",
+      page: 1,
+      page_size: 50,
+      has_next: true,
+      has_previous: false,
       papers: [
         {
           paper_id: "arxiv:2401.12345",
@@ -129,12 +134,16 @@ describe("TrendingPapersPage", () => {
     await waitFor(() => {
       expect(screen.getByText("Trending Paper")).toBeTruthy();
     });
-    expect(apiMocks.loadBrowserTrendingPapers).toHaveBeenCalledWith("2026-04-21", "default");
+    expect(apiMocks.loadBrowserTrendingPapers).toHaveBeenCalledWith("2026-04-21", "default", 1);
 
     fireEvent.click(screen.getByRole("tab", { name: "Hottest" }));
 
     await waitFor(() => {
-      expect(apiMocks.loadBrowserTrendingPapers).toHaveBeenLastCalledWith("2026-04-21", "upvotes");
+      expect(apiMocks.loadBrowserTrendingPapers).toHaveBeenLastCalledWith(
+        "2026-04-21",
+        "upvotes",
+        1,
+      );
     });
 
     fireEvent.click(screen.getByText("Trending Paper"));
@@ -157,13 +166,35 @@ describe("TrendingPapersPage", () => {
     apiMocks.loadBrowserTrendingPapers.mockResolvedValueOnce({
       date: "2026-04-21",
       sort: "default",
+      page: 1,
+      page_size: 50,
+      has_next: false,
+      has_previous: false,
       papers: [],
     });
 
     render(<Harness />);
 
     await waitFor(() => {
-      expect(screen.getByText(/No indexed papers were published on/)).toBeTruthy();
+      expect(screen.getByText(/No fully indexed and enriched papers are ready yet/)).toBeTruthy();
+    });
+  });
+
+  it("loads the next page of 50 papers from the feed controls", async () => {
+    render(<Harness />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Next 50" })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Next 50" }));
+
+    await waitFor(() => {
+      expect(apiMocks.loadBrowserTrendingPapers).toHaveBeenLastCalledWith(
+        "2026-04-21",
+        "default",
+        2,
+      );
     });
   });
 

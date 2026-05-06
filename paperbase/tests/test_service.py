@@ -231,6 +231,27 @@ class FakeChatModel:
         return items
 
     def create_response(self, *, api_key: str, prompt: Prompt) -> ResponseEnvelope:
+        if "Generate five concise follow-up research prompts" in prompt.base_instructions:
+            return ResponseEnvelope(
+                response_id="resp_fake_recommended_reading",
+                items=[
+                    ResponseItem(
+                        item_id="msg_recommended_reading",
+                        item_type="assistant_message",
+                        role="assistant",
+                        status="completed",
+                        content_text=json.dumps(
+                            [
+                                "Compare evaluation methods for tool using research agents",
+                                "Trace how cited systems recover from planning failures",
+                                "Map benchmark gaps across current agent reliability studies",
+                                "Review datasets measuring long horizon agent tool use",
+                                "Explore safety tradeoffs in autonomous research workflow design",
+                            ]
+                        ),
+                    )
+                ],
+            )
         response = self._call_legacy(
             "create_message",
             **self._legacy_kwargs_from_prompt(api_key=api_key, prompt=prompt),
@@ -1594,7 +1615,7 @@ def test_api_main_respects_reload_env(monkeypatch):
     assert captured["port"] == 8080
     assert captured["reload"] is True
     assert captured["reload_dirs"] == [str(api_module._PACKAGE_DIR)]
-    assert str(api_module._STATIC_DIR / "*") in captured["reload_excludes"]
+    assert str(api_module._STATIC_DIR) in captured["reload_excludes"]
     assert captured["log_level"] == "warning"
 
 
@@ -2436,7 +2457,7 @@ def test_admin_paper_listing_filters_and_sorts(service):
     assert [paper.paper_id for paper in default_results] == ["arxiv:2401.11111"]
 
 
-def test_trending_feed_filters_caps_sorts_and_handles_missing_preview(browser_service):
+def test_trending_feed_pages_ready_papers_and_sorts_by_latest_or_upvotes(browser_service):
     service, _, _ = browser_service
     session_a, _ = service.register_browser_user(
         SignupRequest(email="alice@example.com", password="secret12345", display_name="Alice")
@@ -2455,15 +2476,31 @@ def test_trending_feed_filters_caps_sorts_and_handles_missing_preview(browser_se
         arxiv_id = f"2402.{index:05d}"
         paper = _sample_paper(arxiv_id, title=f"Trending Paper {index}", abstract="Daily paper")
         paper.index_status = "indexed"
+        paper.summary_eli5 = f"Simple summary {index}"
+        paper.semantic_scholar_id = f"s2-{index}"
         paper.published = "2024-02-01"
         paper.indexed_at = datetime(2026, 4, 1, 0, index % 60, tzinfo=timezone.utc)
         service.repository.upsert_paper(paper)  # type: ignore[attr-defined]
 
     off_day = _sample_paper("2403.99999", title="Wrong Day", abstract="Ignore me")
     off_day.index_status = "indexed"
+    off_day.summary_eli5 = "Newer ready summary"
+    off_day.semantic_scholar_id = "s2-newer"
     off_day.published = "2024-02-02"
     off_day.indexed_at = datetime(2026, 4, 2, tzinfo=timezone.utc)
     service.repository.upsert_paper(off_day)  # type: ignore[attr-defined]
+
+    missing_summary = _sample_paper("2403.88888", title="Missing Summary", abstract="Not ready")
+    missing_summary.index_status = "indexed"
+    missing_summary.semantic_scholar_id = "s2-missing-summary"
+    missing_summary.published = "2024-02-03"
+    service.repository.upsert_paper(missing_summary)  # type: ignore[attr-defined]
+
+    missing_enrichment = _sample_paper("2403.77777", title="Missing Enrichment", abstract="Not ready")
+    missing_enrichment.index_status = "indexed"
+    missing_enrichment.summary_eli5 = "Summary without S2 enrichment"
+    missing_enrichment.published = "2024-02-03"
+    service.repository.upsert_paper(missing_enrichment)  # type: ignore[attr-defined]
 
     service.object_store.put_bytes(  # type: ignore[attr-defined]
         "papers/arxiv:2402.00051/preview/first-page-top.webp",
@@ -2479,19 +2516,47 @@ def test_trending_feed_filters_caps_sorts_and_handles_missing_preview(browser_se
     default_feed = service.list_browser_trending_papers(
         date="2024-02-01",
         sort="default",
+        page=1,
+        viewer=session_a.user,
+    )
+    second_page = service.list_browser_trending_papers(
+        date="2024-02-01",
+        sort="default",
+        page=2,
+        viewer=session_a.user,
+    )
+    landing_feed = service.list_browser_trending_papers(
+        date="2024-02-01",
+        sort="default",
+        page=1,
+        page_size=10,
         viewer=session_a.user,
     )
     upvote_feed = service.list_browser_trending_papers(
         date="2024-02-01",
         sort="upvotes",
+        page=1,
         viewer=session_a.user,
     )
 
     assert len(default_feed.papers) == 50
-    assert default_feed.papers[0].paper_id == "arxiv:2402.00051"
-    assert default_feed.papers[0].image_url is not None
-    assert default_feed.papers[1].image_url is None
-    assert all(paper.published == "2024-02-01" for paper in default_feed.papers)
+    assert default_feed.page == 1
+    assert default_feed.has_next is True
+    assert default_feed.has_previous is False
+    assert default_feed.papers[0].paper_id == "arxiv:2403.99999"
+    assert default_feed.papers[1].paper_id == "arxiv:2402.00051"
+    assert default_feed.papers[1].image_url is not None
+    assert default_feed.papers[2].image_url is None
+    assert {paper.published for paper in default_feed.papers} == {"2024-02-01", "2024-02-02"}
+    assert len(second_page.papers) == 3
+    assert second_page.has_next is False
+    assert second_page.has_previous is True
+    assert landing_feed.page_size == 10
+    assert len(landing_feed.papers) == 10
+    assert landing_feed.has_next is True
+    assert landing_feed.papers[0].paper_id == default_feed.papers[0].paper_id
+    assert "arxiv:2403.88888" not in {paper.paper_id for paper in default_feed.papers + second_page.papers}
+    assert "arxiv:2403.77777" not in {paper.paper_id for paper in default_feed.papers + second_page.papers}
     assert upvote_feed.papers[0].paper_id == "arxiv:2402.00000"
     assert upvote_feed.papers[0].upvote_count == 3
     assert upvote_feed.papers[0].viewer_has_upvoted is True
@@ -4471,6 +4536,9 @@ def test_browser_uploads_and_chat_require_api_key_before_first_turn(monkeypatch,
     assert resumed.status_code == 200
     assert resumed.json()["state"] == "completed"
     assert resumed.json()["assistant_message"]["citations"]
+    recommended_prompts = resumed.json()["assistant_message"]["recommended_prompts"]
+    assert len(recommended_prompts) == 5
+    assert all(8 <= len(prompt.split()) <= 10 for prompt in recommended_prompts)
     assert chat_model.create_calls
     assert chat_model.create_calls[0]["tool_choice"] == {"type": "auto"}
     assert chat_model.create_calls[0]["tools"]
@@ -4495,6 +4563,7 @@ def test_off_topic_chat_prompt_redirects_without_forcing_research_posture(browse
 
     assert response.assistant_message is not None
     assert response.assistant_message.citations == []
+    assert response.assistant_message.recommended_prompts == []
     assert "[S" not in response.assistant_message.content_markdown
     assert len(chat_model.create_calls) == 2
     first_call = chat_model.create_calls[0]

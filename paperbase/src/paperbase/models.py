@@ -130,6 +130,10 @@ class TrendingPaperDetailResponse(BaseModel):
 class TrendingFeedResponse(BaseModel):
     date: str
     sort: Literal["default", "upvotes"] = "default"
+    page: int = 1
+    page_size: int = 50
+    has_next: bool = False
+    has_previous: bool = False
     papers: list[TrendingPaperCardResponse] = Field(default_factory=list)
 
 
@@ -535,11 +539,35 @@ class ChatCitation(BaseModel):
     tags: list[str] = Field(default_factory=list)
 
 
+def _coerce_recommended_prompts(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    prompts: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        text = " ".join(str(item or "").split()).strip()
+        key = text.casefold()
+        if not text or key in seen:
+            continue
+        seen.add(key)
+        prompts.append(text[:240])
+        if len(prompts) >= 5:
+            break
+    return prompts
+
+
+def _recommended_prompts_from_content_json(content_json: Any) -> list[str]:
+    if not isinstance(content_json, dict):
+        return []
+    return _coerce_recommended_prompts(content_json.get("recommended_prompts"))
+
+
 class ChatMessageResponse(BaseModel):
     message_id: str
     role: str
     content_markdown: str
     citations: list[ChatCitation] = Field(default_factory=list)
+    recommended_prompts: list[str] = Field(default_factory=list)
     created_at: datetime
     status: str = "completed"
     kind: str = "default"
@@ -565,6 +593,9 @@ class ChatThreadItemResponse(BaseModel):
     def _coerce_legacy_message_fields(cls, value: Any):
         if not isinstance(value, dict) or "item_id" in value or "message_id" not in value:
             return value
+        content_json = value.get("content_json")
+        if content_json is None and value.get("recommended_prompts"):
+            content_json = {"recommended_prompts": _coerce_recommended_prompts(value.get("recommended_prompts"))}
         kind = str(value.get("kind") or "default")
         role = str(value.get("role") or "assistant")
         return {
@@ -577,7 +608,7 @@ class ChatThreadItemResponse(BaseModel):
             "call_id": value.get("call_id"),
             "name": value.get("name"),
             "content_text": value.get("content_markdown") or value.get("content_text") or "",
-            "content_json": value.get("content_json"),
+            "content_json": content_json,
             "citations": value.get("citations") or [],
             "created_at": value.get("created_at"),
             "status": value.get("status") or "completed",
@@ -596,6 +627,10 @@ class ChatThreadItemResponse(BaseModel):
         if self.item_type == "compaction":
             return "compaction"
         return "default"
+
+    @computed_field
+    def recommended_prompts(self) -> list[str]:
+        return _recommended_prompts_from_content_json(self.content_json)
 
 
 class ChatTurnResponse(BaseModel):
@@ -649,6 +684,11 @@ class ChatThreadResponse(BaseModel):
                 continue
             kind = str(message.get("kind") or "default")
             role = str(message.get("role") or "assistant")
+            content_json = message.get("content_json")
+            if content_json is None and message.get("recommended_prompts"):
+                content_json = {
+                    "recommended_prompts": _coerce_recommended_prompts(message.get("recommended_prompts"))
+                }
             coerced_items.append(
                 {
                     "item_id": message.get("message_id") or f"legacy_msg_{index + 1}",
@@ -657,6 +697,7 @@ class ChatThreadResponse(BaseModel):
                     "item_type": "compaction" if kind == "compaction" else "assistant_message" if role == "assistant" else "user_message",
                     "role": role,
                     "content_text": message.get("content_markdown") or "",
+                    "content_json": content_json,
                     "citations": message.get("citations") or [],
                     "created_at": message.get("created_at"),
                     "status": message.get("status") or "completed",
@@ -678,6 +719,7 @@ class ChatThreadResponse(BaseModel):
                     role=item.role,
                     content_markdown=item.content_text,
                     citations=item.citations,
+                    recommended_prompts=item.recommended_prompts,
                     created_at=item.created_at,
                     status=item.status,
                     kind="compaction" if item.item_type == "compaction" else "default",
@@ -927,6 +969,12 @@ class SendChatMessageResponse(BaseModel):
                 "item_type": "compaction" if kind == "compaction" else "assistant_message" if role == "assistant" else "user_message",
                 "role": role,
                 "content_text": assistant_message.get("content_markdown") or "",
+                "content_json": assistant_message.get("content_json")
+                or (
+                    {"recommended_prompts": _coerce_recommended_prompts(assistant_message.get("recommended_prompts"))}
+                    if assistant_message.get("recommended_prompts")
+                    else None
+                ),
                 "citations": assistant_message.get("citations") or [],
                 "created_at": assistant_message.get("created_at"),
                 "status": assistant_message.get("status") or "completed",
@@ -941,6 +989,7 @@ class SendChatMessageResponse(BaseModel):
                 role=self.final_item.role,
                 content_markdown=self.final_item.content_text,
                 citations=self.final_item.citations,
+                recommended_prompts=self.final_item.recommended_prompts,
                 created_at=self.final_item.created_at,
                 status=self.final_item.status,
                 kind="compaction" if self.final_item.item_type == "compaction" else "default",
@@ -959,6 +1008,29 @@ class SendChatMessageResponse(BaseModel):
 
 class ChatThreadListResponse(BaseModel):
     threads: list[ChatThreadSummary] = Field(default_factory=list)
+
+
+class UpdateChatThreadRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=240)
+
+
+class CreateChatFeedbackRequest(BaseModel):
+    message_id: str = Field(min_length=1)
+    sentiment: Literal["positive", "negative"]
+    reasons: list[str] = Field(default_factory=list)
+    note: str = ""
+    debug_bundle: dict[str, Any] | None = None
+
+
+class ChatFeedbackResponse(BaseModel):
+    feedback_id: str
+    thread_id: str
+    message_id: str
+    sentiment: str
+    reasons: list[str] = Field(default_factory=list)
+    note: str = ""
+    debug_bundle: dict[str, Any] | None = None
+    created_at: datetime
 
 
 # --------------------------------------------------------------------------- #

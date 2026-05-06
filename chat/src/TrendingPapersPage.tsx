@@ -1,4 +1,4 @@
-import { CSSProperties, FormEvent, useEffect, useMemo, useState } from "react";
+import { CSSProperties, FormEvent, useEffect, useState } from "react";
 
 import {
   createBrowserTrendingPaperComment,
@@ -20,28 +20,21 @@ export type TrendingSort = "default" | "upvotes";
 export type TrendingBrowseState = {
   date: string;
   sort: TrendingSort;
+  page: number;
   paperId: string | null;
 };
 
 type TrendingPapersPageProps = {
-  variant: "public" | "workspace";
+  variant: "landing" | "public" | "workspace";
   authenticated: boolean;
   browseState: TrendingBrowseState;
   onChangeBrowseState: (nextState: TrendingBrowseState) => void;
   onRequireAuth: () => void;
+  feedDescription?: string | null;
+  feedTitle?: string;
+  pageSize?: number;
+  showPagination?: boolean;
 };
-
-function formatTrendingDate(value: string) {
-  const parsed = new Date(`${value}T12:00:00`);
-  if (Number.isNaN(parsed.getTime())) {
-    return value;
-  }
-  return new Intl.DateTimeFormat(undefined, {
-    month: "long",
-    day: "numeric",
-    year: "numeric",
-  }).format(parsed);
-}
 
 function sortLabel(sort: TrendingSort) {
   return sort === "upvotes" ? "Hottest" : "Latest";
@@ -184,6 +177,10 @@ export function TrendingPapersPage({
   browseState,
   onChangeBrowseState,
   onRequireAuth,
+  feedDescription,
+  feedTitle = "Trending papers",
+  pageSize,
+  showPagination = true,
 }: TrendingPapersPageProps) {
   const [feed, setFeed] = useState<TrendingFeedResponse | null>(null);
   const [feedStatus, setFeedStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
@@ -205,7 +202,15 @@ export function TrendingPapersPage({
     setFeedError("");
     void (async () => {
       try {
-        const nextFeed = await loadBrowserTrendingPapers(browseState.date, browseState.sort);
+        const nextFeed =
+          pageSize === undefined
+            ? await loadBrowserTrendingPapers(browseState.date, browseState.sort, browseState.page)
+            : await loadBrowserTrendingPapers(
+                browseState.date,
+                browseState.sort,
+                browseState.page,
+                pageSize,
+              );
         if (cancelled) {
           return;
         }
@@ -224,7 +229,7 @@ export function TrendingPapersPage({
     return () => {
       cancelled = true;
     };
-  }, [browseState.date, browseState.sort]);
+  }, [browseState.date, browseState.page, browseState.sort, pageSize]);
 
   useEffect(() => {
     if (!browseState.paperId) {
@@ -259,13 +264,13 @@ export function TrendingPapersPage({
     };
   }, [browseState.paperId]);
 
-  const pageTitle = useMemo(() => formatTrendingDate(browseState.date), [browseState.date]);
   const pageDescription = browseState.paperId
     ? `Published ${detail?.published ?? browseState.date}. Read the paper, skim the ELI5, and join the discussion.`
-    : `Fresh papers people are opening today. Start with the newest releases, or switch to Hottest to see what is catching on.`;
+    : (feedDescription ??
+      `Browse the newest fully indexed and enriched papers, or switch to Hottest to rank the same ready corpus by reader upvotes.`);
 
   const handleSortChange = (sort: TrendingSort) => {
-    onChangeBrowseState({ ...browseState, sort });
+    onChangeBrowseState({ ...browseState, sort, page: 1, paperId: null });
   };
 
   const handleOpenDetail = (paperId: string) => {
@@ -274,6 +279,10 @@ export function TrendingPapersPage({
 
   const handleBackToFeed = () => {
     onChangeBrowseState({ ...browseState, paperId: null });
+  };
+
+  const handlePageChange = (page: number) => {
+    onChangeBrowseState({ ...browseState, page: Math.max(1, page), paperId: null });
   };
 
   const handleVote = async (paperId: string, hasUpvoted: boolean) => {
@@ -337,6 +346,12 @@ export function TrendingPapersPage({
   };
 
   const emptyState = feedStatus === "ready" && (feed?.papers.length ?? 0) === 0;
+  const currentPage = feed?.page ?? browseState.page;
+  const currentPageSize = feed?.page_size ?? pageSize ?? 50;
+  const hasPreviousPage = feed?.has_previous ?? browseState.page > 1;
+  const hasNextPage = feed?.has_next ?? false;
+  const showPager = showPagination && (hasPreviousPage || hasNextPage);
+  const headingText = browseState.paperId ? (detail?.title ?? "Loading paper") : feedTitle;
 
   return (
     <section
@@ -345,10 +360,8 @@ export function TrendingPapersPage({
     >
       <header className="workspace-page-header trending-page-header">
         <div className="trending-page-header-copy">
-          <h1>{browseState.paperId ? (detail?.title ?? "Loading paper") : "Trending papers"}</h1>
-          <p>
-            {browseState.paperId ? pageDescription : `${pageDescription} Published ${pageTitle}.`}
-          </p>
+          {variant === "landing" ? <h2>{headingText}</h2> : <h1>{headingText}</h1>}
+          {pageDescription.trim() ? <p>{pageDescription}</p> : null}
         </div>
         <div className="trending-page-header-actions">
           {browseState.paperId ? (
@@ -388,64 +401,94 @@ export function TrendingPapersPage({
           ) : null}
           {emptyState ? (
             <div className="trending-empty-state">
-              No indexed papers were published on {pageTitle} yet.
+              {browseState.page > 1
+                ? "No more fully indexed and enriched papers are ready on this page."
+                : "No fully indexed and enriched papers are ready yet."}
             </div>
           ) : null}
           {feed?.papers.length ? (
-            <div className="trending-card-grid">
-              {feed.papers.map((paper) => {
-                const votePending = votePendingPaperId === paper.paper_id;
-                return (
-                  <article key={paper.paper_id} className="trending-card">
-                    <button
-                      type="button"
-                      className="trending-card-hero"
-                      onClick={() => handleOpenDetail(paper.paper_id)}
-                    >
-                      {paper.image_url ? (
-                        <img
-                          src={paper.image_url}
-                          alt={paper.title}
-                          className="trending-card-image"
-                        />
-                      ) : (
-                        <div className="trending-card-image trending-card-image-fallback">
-                          Preview unavailable
-                        </div>
-                      )}
-                    </button>
-                    <div className="trending-card-footer">
+            <>
+              <div className="trending-card-grid">
+                {feed.papers.map((paper) => {
+                  const votePending = votePendingPaperId === paper.paper_id;
+                  return (
+                    <article key={paper.paper_id} className="trending-card">
                       <button
                         type="button"
-                        className="trending-card-copy"
+                        className="trending-card-hero"
                         onClick={() => handleOpenDetail(paper.paper_id)}
                       >
-                        <strong>{paper.title}</strong>
-                        <span>{paper.authors}</span>
+                        {paper.image_url ? (
+                          <img
+                            src={paper.image_url}
+                            alt={paper.title}
+                            className="trending-card-image"
+                          />
+                        ) : (
+                          <div className="trending-card-image trending-card-image-fallback">
+                            Preview unavailable
+                          </div>
+                        )}
                       </button>
-                      <div className="trending-card-actions">
-                        <a
-                          href={paper.html_url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="trending-card-link"
-                        >
-                          Paper
-                        </a>
+                      <div className="trending-card-footer">
                         <button
                           type="button"
-                          className={`trending-vote-button${paper.viewer_has_upvoted ? " active" : ""}`}
-                          onClick={() => void handleVote(paper.paper_id, paper.viewer_has_upvoted)}
-                          disabled={votePending}
+                          className="trending-card-copy"
+                          onClick={() => handleOpenDetail(paper.paper_id)}
                         >
-                          {votePending ? "..." : `Upvote ${paper.upvote_count}`}
+                          <strong>{paper.title}</strong>
+                          <span>
+                            {paper.authors}
+                            {paper.published ? ` · ${paper.published}` : ""}
+                          </span>
                         </button>
+                        <div className="trending-card-actions">
+                          <a
+                            href={paper.html_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="trending-card-link"
+                          >
+                            Paper
+                          </a>
+                          <button
+                            type="button"
+                            className={`trending-vote-button${paper.viewer_has_upvoted ? " active" : ""}`}
+                            onClick={() =>
+                              void handleVote(paper.paper_id, paper.viewer_has_upvoted)
+                            }
+                            disabled={votePending}
+                          >
+                            {votePending ? "..." : `Upvote ${paper.upvote_count}`}
+                          </button>
+                        </div>
                       </div>
-                    </div>
-                  </article>
-                );
-              })}
-            </div>
+                    </article>
+                  );
+                })}
+              </div>
+              {showPager ? (
+                <nav className="trending-pagination" aria-label="Trending pagination">
+                  <button
+                    type="button"
+                    className="trending-card-link"
+                    disabled={!hasPreviousPage || feedStatus === "loading"}
+                    onClick={() => handlePageChange(currentPage - 1)}
+                  >
+                    Previous {currentPageSize}
+                  </button>
+                  <span>Page {currentPage}</span>
+                  <button
+                    type="button"
+                    className="trending-card-link"
+                    disabled={!hasNextPage || feedStatus === "loading"}
+                    onClick={() => handlePageChange(currentPage + 1)}
+                  >
+                    Next {currentPageSize}
+                  </button>
+                </nav>
+              ) : null}
+            </>
           ) : null}
         </div>
       ) : (

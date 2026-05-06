@@ -42,6 +42,7 @@ from .models import (
     BrowserUser,
     BrowserUserSettingsResponse,
     ChatCitation,
+    ChatFeedbackResponse,
     ChatMessageResponse,
     ChatThreadItemResponse,
     ChatThreadResponse,
@@ -852,6 +853,20 @@ class ChatMessageORM(Base):
     archived_by_message_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
+class ChatFeedbackORM(Base):
+    __tablename__ = "chat_feedback"
+
+    feedback_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("browser_users.user_id", ondelete="CASCADE"), index=True)
+    thread_id: Mapped[str] = mapped_column(ForeignKey("chat_threads.thread_id", ondelete="CASCADE"), index=True)
+    message_id: Mapped[str] = mapped_column(String(64), index=True)
+    sentiment: Mapped[str] = mapped_column(String(16), index=True)
+    reasons: Mapped[list[str]] = mapped_column(JSON, default=list)
+    note: Mapped[str] = mapped_column(Text, default="")
+    debug_bundle: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class ChatTurnORM(Base):
     __tablename__ = "chat_turns"
 
@@ -1100,6 +1115,19 @@ def _chat_message_from_orm(row: ChatMessageORM) -> ChatMessageResponse:
     )
 
 
+def _chat_feedback_from_orm(row: ChatFeedbackORM) -> ChatFeedbackResponse:
+    return ChatFeedbackResponse(
+        feedback_id=row.feedback_id,
+        thread_id=row.thread_id,
+        message_id=row.message_id,
+        sentiment=row.sentiment,
+        reasons=list(row.reasons or []),
+        note=row.note or "",
+        debug_bundle=row.debug_bundle,
+        created_at=row.created_at,
+    )
+
+
 def _legacy_chat_messages_for_thread(session: Session, thread_id: str) -> list[ChatMessageResponse]:
     rows = session.scalars(
         select(ChatMessageORM)
@@ -1212,10 +1240,10 @@ class PaperRepository(ABC):
     def list_trending_papers(
         self,
         *,
-        published_date: str,
         sort: str,
         viewer_user_id: str | None = None,
         limit: int = 50,
+        offset: int = 0,
     ) -> list[TrendingPaperCardResponse]:
         raise NotImplementedError
 
@@ -2356,10 +2384,10 @@ class SqlAlchemyPaperRepository(PaperRepository):
     def list_trending_papers(
         self,
         *,
-        published_date: str,
         sort: str,
         viewer_user_id: str | None = None,
         limit: int = 50,
+        offset: int = 0,
     ) -> list[TrendingPaperCardResponse]:
         upvote_counts = (
             select(
@@ -2387,17 +2415,29 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 viewer_has_upvoted.label("viewer_has_upvoted"),
             )
             .outerjoin(upvote_counts, upvote_counts.c.paper_id == PaperORM.paper_id)
-            .where(PaperORM.index_status == "indexed", PaperORM.published == published_date)
+            .where(
+                PaperORM.index_status == "indexed",
+                func.coalesce(PaperORM.summary_eli5, "") != "",
+                or_(
+                    func.coalesce(PaperORM.semantic_scholar_id, "") != "",
+                    PaperORM.citation_count > 0,
+                ),
+            )
         )
         if sort == "upvotes":
             statement = statement.order_by(
                 text("upvote_count DESC"),
+                PaperORM.published.desc(),
                 PaperORM.indexed_at.desc().nullslast(),
                 PaperORM.paper_id.asc(),
             )
         else:
-            statement = statement.order_by(PaperORM.indexed_at.desc().nullslast(), PaperORM.paper_id.asc())
-        statement = statement.limit(min(max(limit, 1), 50))
+            statement = statement.order_by(
+                PaperORM.published.desc(),
+                PaperORM.indexed_at.desc().nullslast(),
+                PaperORM.paper_id.asc(),
+            )
+        statement = statement.limit(min(max(limit, 1), 51)).offset(max(offset, 0))
         with self._session() as session:
             rows = session.execute(statement).all()
         return [
@@ -5079,6 +5119,49 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     project.updated_at = utcnow()
         return True
 
+    def add_chat_feedback(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+        message_id: str,
+        sentiment: str,
+        reasons: list[str],
+        note: str,
+        debug_bundle: dict[str, Any] | None,
+    ) -> ChatFeedbackResponse | None:
+        with self._session() as session:
+            thread = session.scalar(
+                select(ChatThreadORM).where(ChatThreadORM.thread_id == thread_id, ChatThreadORM.user_id == user_id)
+            )
+            if thread is None:
+                return None
+            item_exists = session.scalar(
+                select(ChatThreadItemORM.item_id)
+                .where(ChatThreadItemORM.thread_id == thread_id, ChatThreadItemORM.item_id == message_id)
+                .limit(1)
+            )
+            legacy_exists = session.scalar(
+                select(ChatMessageORM.message_id)
+                .where(ChatMessageORM.thread_id == thread_id, ChatMessageORM.message_id == message_id)
+                .limit(1)
+            )
+            if item_exists is None and legacy_exists is None:
+                return None
+            row = ChatFeedbackORM(
+                feedback_id=new_id("feedback"),
+                user_id=user_id,
+                thread_id=thread_id,
+                message_id=message_id,
+                sentiment=sentiment,
+                reasons=list(reasons),
+                note=note,
+                debug_bundle=debug_bundle,
+            )
+            session.add(row)
+            session.flush()
+            return _chat_feedback_from_orm(row)
+
     def save_result_set(
         self,
         *,
@@ -5700,6 +5783,7 @@ class MemoryPaperRepository(PaperRepository):
         self.default_projects_by_user: dict[str, str] = {}
         self.chat_threads: dict[str, ChatThreadResponse] = {}
         self.chat_thread_users: dict[str, str] = {}
+        self.chat_feedback: dict[str, ChatFeedbackResponse] = {}
         self.python_files: dict[str, PythonFileResponse] = {}
         self.python_file_users: dict[str, str] = {}
         self.project_repo_syncs: dict[str, ProjectRepoSyncResponse] = {}
@@ -5842,21 +5926,26 @@ class MemoryPaperRepository(PaperRepository):
     def list_trending_papers(
         self,
         *,
-        published_date: str,
         sort: str,
         viewer_user_id: str | None = None,
         limit: int = 50,
+        offset: int = 0,
     ) -> list[TrendingPaperCardResponse]:
         candidates = [
             paper
             for paper in self.papers.values()
-            if paper.index_status == "indexed" and paper.published == published_date
+            if paper.index_status == "indexed"
+            and bool((paper.summary_eli5 or "").strip())
+            and bool((paper.semantic_scholar_id or "").strip() or (paper.citation_count and paper.citation_count > 0))
         ]
         floor = datetime.min.replace(tzinfo=timezone.utc)
         candidates.sort(key=lambda paper: paper.paper_id)
         candidates.sort(key=lambda paper: paper.indexed_at or floor, reverse=True)
+        candidates.sort(key=lambda paper: paper.published or "", reverse=True)
         if sort == "upvotes":
             candidates.sort(key=lambda paper: self._paper_upvote_count(paper.paper_id), reverse=True)
+        safe_offset = max(offset, 0)
+        page = candidates[safe_offset : safe_offset + min(max(limit, 1), 51)]
         return [
             TrendingPaperCardResponse(
                 paper_id=paper.paper_id,
@@ -5870,7 +5959,7 @@ class MemoryPaperRepository(PaperRepository):
                 upvote_count=self._paper_upvote_count(paper.paper_id),
                 viewer_has_upvoted=self._viewer_has_upvoted(paper.paper_id, viewer_user_id),
             )
-            for paper in candidates[: min(max(limit, 1), 50)]
+            for paper in page
         ]
 
     def get_trending_paper(
@@ -7539,6 +7628,7 @@ class MemoryPaperRepository(PaperRepository):
             role=item.role,
             content_markdown=item.content_text,
             citations=item.citations,
+            recommended_prompts=item.recommended_prompts,
             created_at=item.created_at,
             status=item.status,
             kind=kind,
@@ -7567,6 +7657,7 @@ class MemoryPaperRepository(PaperRepository):
             role=updated_item.role,
             content_markdown=updated_item.content_text,
             citations=updated_item.citations,
+            recommended_prompts=updated_item.recommended_prompts,
             created_at=updated_item.created_at,
             status=updated_item.status,
             kind=kind or updated_item.kind,
@@ -7611,6 +7702,35 @@ class MemoryPaperRepository(PaperRepository):
         if project is not None:
             self.projects[thread.project_id] = project.model_copy(update={"updated_at": utcnow()})
         return True
+
+    def add_chat_feedback(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+        message_id: str,
+        sentiment: str,
+        reasons: list[str],
+        note: str,
+        debug_bundle: dict[str, Any] | None,
+    ) -> ChatFeedbackResponse | None:
+        if self.chat_thread_users.get(thread_id) != user_id:
+            return None
+        thread = self.chat_threads.get(thread_id)
+        if thread is None or not any(item.item_id == message_id for item in thread.items):
+            return None
+        feedback = ChatFeedbackResponse(
+            feedback_id=new_id("feedback"),
+            thread_id=thread_id,
+            message_id=message_id,
+            sentiment=sentiment,
+            reasons=list(reasons),
+            note=note,
+            debug_bundle=debug_bundle,
+            created_at=utcnow(),
+        )
+        self.chat_feedback[feedback.feedback_id] = feedback
+        return feedback
 
     def create_job(
         self,

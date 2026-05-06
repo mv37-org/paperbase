@@ -273,6 +273,10 @@ describe("chat api", () => {
         jsonResponse({
           date: "2026-04-21",
           sort: "upvotes",
+          page: 3,
+          page_size: 10,
+          has_next: true,
+          has_previous: true,
           papers: [
             {
               paper_id: "arxiv:2401.12345",
@@ -310,19 +314,20 @@ describe("chat api", () => {
     vi.stubGlobal("fetch", fetchMock);
     const api = await loadApiModule();
 
-    const feed = await api.loadBrowserTrendingPapers("2026-04-21", "upvotes");
+    const feed = await api.loadBrowserTrendingPapers("2026-04-21", "upvotes", 3, 10);
     const detail = await api.getBrowserTrendingPaper("arxiv:2401.12345");
 
     const [feedPath, feedInit] = fetchMock.mock.calls[0] as FetchCall;
     const feedUrl = new URL(String(feedPath), "http://localhost");
     expect(`${feedUrl.pathname}${feedUrl.search}`).toBe(
-      "/v1/browser/trending?date=2026-04-21&sort=upvotes",
+      "/v1/browser/trending?date=2026-04-21&sort=upvotes&page=3&page_size=10",
     );
     expect(feedInit?.method).toBe("GET");
     const [detailPath, detailInit] = fetchMock.mock.calls[1] as FetchCall;
     expect(requestPath(detailPath)).toBe("/v1/browser/trending/papers/arxiv%3A2401.12345");
     expect(detailInit?.method).toBe("GET");
     expect(feed.papers[0]?.upvote_count).toBe(12);
+    expect(feed.has_next).toBe(true);
     expect(detail.summary_eli5).toBe("Simple summary");
   });
 
