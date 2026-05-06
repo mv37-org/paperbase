@@ -45,6 +45,7 @@ from paperbase.models import (
     SaveAnthropicKeyRequest,
     SaveModalCredentialsRequest,
     SaveOpenAIKeyRequest,
+    SearchPaperResult,
     SearchRequest,
     SearchSectionRequest,
     SendChatMessageRequest,
@@ -1108,6 +1109,9 @@ def test_get_figure_serves_eps_and_pdf_raw_fallbacks(service: PaperbaseService):
     those extensions and return their proper MIME so the UI renders
     something instead of ``image_url=None``."""
     paper_id = "arxiv:2401.42420"
+    paper = _sample_paper("2401.42420", title="Figure Fallback Paper", abstract="figure artifacts")
+    paper.index_status = "indexed"
+    service.repository.upsert_paper(paper)
     eps_caption = f"papers/{paper_id}/figures/figure-eps/caption.md"
     pdf_caption = f"papers/{paper_id}/figures/figure-pdf/caption.md"
     service.object_store.put_text(eps_caption, "EPS figure caption", content_type="text/markdown")
@@ -1135,8 +1139,11 @@ def test_get_figure_serves_eps_and_pdf_raw_fallbacks(service: PaperbaseService):
 def test_get_figure_prefers_rasterized_png_over_raw_pdf(service: PaperbaseService):
     """When both a browser-renderable raster and a raw vector copy exist
     (e.g. a re-index produced both representations), the probe must pick
-    the raster so the UI doesn't fall through to a non-renderable MIME."""
+        the raster so the UI doesn't fall through to a non-renderable MIME."""
     paper_id = "arxiv:2401.42421"
+    paper = _sample_paper("2401.42421", title="Raster Figure Paper", abstract="figure artifacts")
+    paper.index_status = "indexed"
+    service.repository.upsert_paper(paper)
     service.object_store.put_text(
         f"papers/{paper_id}/figures/figure-1/caption.md",
         "caption",
@@ -1248,6 +1255,130 @@ def test_search_can_shortlist_from_generated_summaries(monkeypatch, service: Pap
     assert results.papers
     assert results.papers[0].paper_id == "arxiv:2401.20001"
     assert "AI agents" in results.papers[0].summary_short
+
+
+def test_search_and_sections_only_return_indexed_papers(monkeypatch, service: PaperbaseService):
+    calls = {"arxiv": 0, "s2": 0}
+
+    def fake_arxiv(*args, **kwargs):
+        calls["arxiv"] += 1
+        return [_sample_paper("2401.29998", title="Agent Harness Live", abstract="agent harness live")]
+
+    def fake_s2(*args, **kwargs):
+        calls["s2"] += 1
+        return [_sample_paper("2401.29997", title="Agent Harness S2", abstract="agent harness s2")]
+
+    monkeypatch.setattr("paperbase.service.sources.search_arxiv", fake_arxiv)
+    monkeypatch.setattr("paperbase.service.sources.search_semantic_scholar", fake_s2)
+
+    indexed = _sample_paper("2401.29999", title="Agent Harness Indexed", abstract="agent harness indexed")
+    indexed.index_status = "indexed"
+    indexed_response = service.repository.upsert_paper(indexed, search_document="agent harness indexed")
+    service.repository.replace_text_chunks(
+        indexed_response.paper_id,
+        [
+            {
+                "path": "sections/methods.md",
+                "chunk_kind": "section",
+                "content": "agent harness indexed section",
+                "embedding": None,
+                "chunk_index": 0,
+                "section_depth": 1,
+                "section_order": 0,
+            }
+        ],
+    )
+
+    discovered = _sample_paper("2401.29996", title="Agent Harness Discovered", abstract="agent harness discovered")
+    discovered_response = service.repository.upsert_paper_shallow(discovered)
+    service.repository.replace_text_chunks(
+        discovered_response.paper_id,
+        [
+            {
+                "path": "sections/discovered.md",
+                "chunk_kind": "section",
+                "content": "agent harness discovered section",
+                "embedding": None,
+                "chunk_index": 0,
+                "section_depth": 1,
+                "section_order": 0,
+            }
+        ],
+    )
+
+    results = service.search(SearchRequest(query="agent harness", limit=10, include_live_sources=True))
+    sections = service.search_sections(
+        SearchSectionRequest(
+            query="agent harness",
+            limit=10,
+            paper_ids=[indexed_response.paper_id, discovered_response.paper_id],
+        )
+    )
+
+    assert calls == {"arxiv": 0, "s2": 0}
+    assert [paper.paper_id for paper in results.papers] == [indexed_response.paper_id]
+    assert [section.paper_id for section in sections.sections] == [indexed_response.paper_id]
+    assert service.repository.get_paper("arxiv:2401.29998") is None
+
+
+def test_suggestions_and_detail_reads_only_return_indexed_papers(service: PaperbaseService):
+    indexed = _sample_paper("2401.29995", title="Indexed Benchmark Agent", abstract="agent benchmark")
+    indexed.index_status = "indexed"
+    indexed_response = service.repository.upsert_paper(indexed, search_document=indexed.abstract)
+
+    discovered = _sample_paper("2401.29994", title="Discovered Benchmark Agent", abstract="agent benchmark")
+    discovered_response = service.repository.upsert_paper_shallow(discovered)
+
+    hits = service.suggest_papers("benchmark agent", limit=10)
+
+    assert [hit["paper_id"] for hit in hits] == [indexed_response.paper_id]
+    assert service.get_indexed_paper(indexed_response.paper_id).paper_id == indexed_response.paper_id
+    with pytest.raises(HTTPException) as exc_info:
+        service.get_indexed_paper(discovered_response.paper_id)
+    assert exc_info.value.status_code == 404
+
+
+def test_related_papers_only_return_existing_indexed_rows(monkeypatch, service: PaperbaseService):
+    base = _sample_paper("2401.29993", title="Base Indexed Paper", abstract="base")
+    base.index_status = "indexed"
+    base_response = service.repository.upsert_paper(base, search_document=base.abstract)
+
+    indexed_related = _sample_paper("2401.29992", title="Indexed Related Paper", abstract="related")
+    indexed_related.index_status = "indexed"
+    indexed_related_response = service.repository.upsert_paper(indexed_related, search_document=indexed_related.abstract)
+    discovered_related = _sample_paper("2401.29991", title="Discovered Related Paper", abstract="related")
+    service.repository.upsert_paper_shallow(discovered_related)
+    live_related = _sample_paper("2401.29990", title="Live Related Paper", abstract="related")
+
+    monkeypatch.setattr(
+        "paperbase.service.sources.get_related_papers",
+        lambda arxiv_id, semantic_scholar_id: [indexed_related, discovered_related, live_related],
+    )
+
+    related = service.get_related_papers(base_response.paper_id)
+
+    assert [paper.paper_id for paper in related] == [indexed_related_response.paper_id]
+    assert service.repository.get_paper("arxiv:2401.29990") is None
+
+
+def test_result_set_reads_only_return_indexed_papers(service: PaperbaseService):
+    indexed = _sample_paper("2401.29989", title="Indexed Result Paper", abstract="result")
+    indexed.index_status = "indexed"
+    indexed_response = service.repository.upsert_paper(indexed, search_document=indexed.abstract)
+    discovered = _sample_paper("2401.29988", title="Discovered Result Paper", abstract="result")
+    discovered_response = service.repository.upsert_paper_shallow(discovered)
+    saved = service.repository.save_result_set(
+        query="result",
+        papers=[
+            SearchPaperResult(**indexed_response.model_dump(), source="local", score=1.0),
+            SearchPaperResult(**discovered_response.model_dump(), source="live-arxiv", score=0.9),
+        ],
+        ttl_days=1,
+    )
+
+    loaded = service.get_results(saved.result_set_id)
+
+    assert [paper.paper_id for paper in loaded.papers] == [indexed_response.paper_id]
 
 
 def test_summarize_top_cited_uses_stable_paging(monkeypatch):
@@ -2299,8 +2430,10 @@ def test_admin_paper_listing_filters_and_sorts(service):
     service.repository.upsert_paper(second)  # type: ignore[attr-defined]
 
     results = service.list_papers(query="benchmark", index_status="indexed", limit=10)
+    default_results = service.list_papers(query="benchmark", limit=10)
 
     assert [paper.paper_id for paper in results] == ["arxiv:2401.11111"]
+    assert [paper.paper_id for paper in default_results] == ["arxiv:2401.11111"]
 
 
 def test_trending_feed_filters_caps_sorts_and_handles_missing_preview(browser_service):

@@ -3987,7 +3987,7 @@ class PaperbaseService:
         return [
             {
                 "name": "paperbase_search",
-                "description": "Search Paperbase papers by topic, title, abstract, or author. Use this to find candidate papers and result-set ids before narrowing to sections or specific files. Set rerank=true for a slower, higher-recall deep-search pass that also surfaces body-content matches.",
+                "description": "Search fully indexed Paperbase papers by topic, title, abstract, or author. Use this to find candidate papers and result-set ids before narrowing to sections or specific files. Set rerank=true for a slower, higher-recall deep-search pass that also surfaces body-content matches.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -3995,7 +3995,6 @@ class PaperbaseService:
                         "limit": {"type": "integer", "minimum": 1, "maximum": 20},
                         "category": {"type": "string"},
                         "year": {"type": "string"},
-                        "include_live_sources": {"type": "boolean"},
                         "rerank": {"type": "boolean"},
                     },
                     "required": ["query"],
@@ -4521,7 +4520,7 @@ class PaperbaseService:
 
         if tool_name == "paperbase_get_paper":
             paper_id = str(tool_input.get("paper_id") or "").strip()
-            paper = self.get_paper(paper_id)
+            paper = self.get_indexed_paper(paper_id)
             return {
                 "paper": paper.model_dump(mode="json"),
             }
@@ -5147,13 +5146,26 @@ class PaperbaseService:
         return {
             "item_type": self._thread_item_type_from_response_item(item),
             "role": self._thread_item_role_from_response_item(item),
-            "phase": None,
+            "phase": item.phase or None,
             "call_id": item.call_id or item.item_id,
             "name": item.name or None,
             "content_text": item.content_text,
             "content_json": item.content_json,
             "status": item.status or "completed",
         }
+
+    def _assistant_message_phase(
+        self,
+        item: ChatThreadItemResponse,
+        *,
+        is_last_assistant_item: bool,
+        pending_tool_calls: bool,
+    ) -> str:
+        if item.phase in {"commentary", "final_answer"}:
+            return item.phase
+        if not is_last_assistant_item:
+            return "commentary"
+        return "commentary" if pending_tool_calls else "final_answer"
 
     def _chat_runtime_mode(self) -> str:
         mode = str(getattr(self.settings, "chat_runtime_mode", "codex_kernel") or "codex_kernel").strip().lower()
@@ -5359,6 +5371,7 @@ class PaperbaseService:
                         persisted_item = self.repository.update_chat_thread_item(  # type: ignore[attr-defined]
                             persisted_item.item_id,
                             item_type=self._thread_item_type_from_response_item(event.item),
+                            phase=event.item.phase or persisted_item.phase,
                             name=event.item.name or persisted_item.name,
                             call_id=event.item.call_id or persisted_item.call_id,
                             content_text=event.item.content_text or persisted_item.content_text,
@@ -5411,9 +5424,14 @@ class PaperbaseService:
             final_item: ChatThreadItemResponse | None = None
             if completed_assistant_items:
                 for provider_item_id, item in zip(completed_assistant_item_ids[:-1], completed_assistant_items[:-1], strict=False):
+                    phase = self._assistant_message_phase(
+                        item,
+                        is_last_assistant_item=False,
+                        pending_tool_calls=bool(pending_tool_calls),
+                    )
                     updated_item = self.repository.update_chat_thread_item(  # type: ignore[attr-defined]
                         item.item_id,
-                        phase="commentary",
+                        phase=phase,
                         content_text=_sanitize_inline_citations(item.content_text, citation_registry.citations),
                         status="completed",
                     )
@@ -5422,7 +5440,11 @@ class PaperbaseService:
                         yield ("item_completed", {"item": updated_item.model_dump(mode="json")})
                 last_provider_item_id = completed_assistant_item_ids[-1]
                 last_item = completed_assistant_items[-1]
-                last_phase = "commentary" if pending_tool_calls else "final_answer"
+                last_phase = self._assistant_message_phase(
+                    last_item,
+                    is_last_assistant_item=True,
+                    pending_tool_calls=bool(pending_tool_calls),
+                )
                 updated_last_item = self.repository.update_chat_thread_item(  # type: ignore[attr-defined]
                     last_item.item_id,
                     phase=last_phase,
@@ -6326,7 +6348,7 @@ class PaperbaseService:
         populated-list.
         """
         paper = self.repository.get_paper(paper_id)
-        if paper is None:
+        if paper is None or paper.index_status != "indexed":
             return None
         eligibility = self._code_eligibility(paper)
         manifest = paper.code_manifest or {}
@@ -6368,7 +6390,7 @@ class PaperbaseService:
         that were not fully indexed").
         """
         paper = self.repository.get_paper(paper_id)
-        if paper is None:
+        if paper is None or paper.index_status != "indexed":
             return None
         eligibility = self._code_eligibility(paper)
         safe_path = self._normalize_code_path(repo_path)
@@ -6425,7 +6447,7 @@ class PaperbaseService:
         entrypoint / signature chunks. Non-Python papers return ineligible
         (empty ``hits``) without hitting the chunk table."""
         paper = self.repository.get_paper(paper_id)
-        if paper is None:
+        if paper is None or paper.index_status != "indexed":
             return None
         eligibility = self._code_eligibility(paper)
         base = CodeSearchResponse(paper_id=paper_id, eligibility=eligibility, query=query, hits=[])
@@ -6457,7 +6479,7 @@ class PaperbaseService:
         ineligible for non-Python papers.
         """
         paper = self.repository.get_paper(paper_id)
-        if paper is None:
+        if paper is None or paper.index_status != "indexed":
             return None
         eligibility = self._code_eligibility(paper)
         base = CodeContextResponse(paper_id=paper_id, eligibility=eligibility, query=query)
@@ -8139,7 +8161,7 @@ class PaperbaseService:
         index_status: str | None = None,
         limit: int = 50,
     ) -> list[PaperResponse]:
-        return self.repository.list_papers(query=query, index_status=index_status, limit=limit)
+        return self.repository.list_papers(query=query, index_status=index_status or "indexed", limit=limit)
 
     def sync_latest_papers(
         self,
@@ -8573,23 +8595,6 @@ class PaperbaseService:
             recency_half_life_years=self.settings.recency_half_life_years,
         )
 
-        arxiv_results: list[PaperMetadata] = []
-        s2_results: list[PaperMetadata] = []
-        if request.include_live_sources:
-            try:
-                arxiv_results = sources.search_arxiv(
-                    request.query, max_results=request.limit, category=request.category
-                )
-            except Exception as exc:
-                logger.warning("arxiv live search failed", extra={"event": "search.arxiv_failed", "error": str(exc)})
-            try:
-                s2_results = sources.search_semantic_scholar(request.query, limit=request.limit, year=request.year)
-            except Exception as exc:
-                logger.warning("s2 live search failed", extra={"event": "search.s2_failed", "error": str(exc)})
-            live_papers = arxiv_results + s2_results
-            if live_papers:
-                sources.enrich_with_semantic_scholar(live_papers)
-
         candidates: dict[str, SearchPaperResult] = {}
         rrf: dict[str, float] = {}
 
@@ -8598,36 +8603,7 @@ class PaperbaseService:
             candidates[pid] = result
             rrf[pid] = rrf.get(pid, 0.0) + 1.0 / (k + rank)
 
-        live_weight = (
-            self.settings.live_source_weight_recent
-            if _query_signals_recency(request.query)
-            else self.settings.live_source_weight
-        )
-
-        for rank, paper in enumerate(arxiv_results):
-            stored = self.repository.upsert_paper_shallow(paper)
-            pid = stored.paper_id
-            candidates.setdefault(pid, SearchPaperResult(**stored.model_dump(), source="live-arxiv"))
-            rrf[pid] = rrf.get(pid, 0.0) + live_weight / (k + rank)
-
-        for rank, paper in enumerate(s2_results):
-            stored = self.repository.upsert_paper_shallow(paper)
-            pid = stored.paper_id
-            candidates.setdefault(
-                pid, SearchPaperResult(**stored.model_dump(), source="live-s2", tldr=paper.tldr or None)
-            )
-            rrf[pid] = rrf.get(pid, 0.0) + live_weight / (k + rank)
-
         from math import log10
-
-        for pid, paper in candidates.items():
-            if paper.source == "local":
-                continue
-            citation_boost = min(
-                self.settings.citation_boost_scale * log10(1 + (paper.citation_count or 0)),
-                self.settings.citation_boost_max,
-            )
-            rrf[pid] = rrf.get(pid, 0.0) + citation_boost
 
         fused = sorted(rrf.items(), key=lambda item: item[1], reverse=True)
         fused_papers = [candidates[pid] for pid, _ in fused if pid in candidates]
@@ -8720,7 +8696,13 @@ class PaperbaseService:
         result_set = self.repository.get_result_set(result_set_id)
         if result_set is None:
             raise HTTPException(status_code=404, detail=f"Result set {result_set_id} not found")
-        return result_set
+        indexed_papers: list[SearchPaperResult] = []
+        for result in result_set.papers:
+            stored = self.repository.get_paper(result.paper_id)
+            if stored is None or stored.index_status != "indexed":
+                continue
+            indexed_papers.append(result.model_copy(update={"index_status": "indexed"}))
+        return result_set.model_copy(update={"papers": indexed_papers})
 
     def search_sections(self, request: SearchSectionRequest) -> SearchSectionResponse:
         if request.result_set_id:
@@ -8891,6 +8873,12 @@ class PaperbaseService:
                 return upgraded
         return paper
 
+    def get_indexed_paper(self, paper_id: str) -> PaperResponse:
+        paper = self.get_paper(paper_id)
+        if paper.index_status != "indexed":
+            raise HTTPException(status_code=404, detail=f"Paper {paper_id} is not indexed")
+        return paper
+
     def _should_lazy_summarize(self, paper: PaperResponse) -> bool:
         if not self.settings.lazy_summary_on_read:
             return False
@@ -8925,7 +8913,7 @@ class PaperbaseService:
         return f"{base}{path}"
 
     def _paper_artifact_location(self, paper_id: str, path: str) -> tuple[str, str]:
-        self.get_paper(paper_id)
+        self.get_indexed_paper(paper_id)
         safe_path = _normalize_paper_artifact_path(path)
         full_path = f"papers/{paper_id}/{safe_path}"
         if not self.object_store.exists(full_path):
@@ -8940,14 +8928,14 @@ class PaperbaseService:
         return mimetypes.guess_type(safe_path)[0]
 
     def _preview_object_path(self, paper_id: str) -> str:
-        self.get_paper(paper_id)
+        self.get_indexed_paper(paper_id)
         preview_path = f"papers/{paper_id}/preview/first-page-top.webp"
         if not self.object_store.exists(preview_path):
             raise HTTPException(status_code=404, detail=f"Preview not found for {paper_id}")
         return preview_path
 
     def list_files(self, paper_id: str) -> FileListResponse:
-        self.get_paper(paper_id)
+        self.get_indexed_paper(paper_id)
         prefix = f"papers/{paper_id}/"
         objects = self.object_store.list_prefix(prefix)
         files = [
@@ -9032,6 +9020,7 @@ class PaperbaseService:
     )
 
     def get_figure(self, paper_id: str, figure_id: str) -> FigureResponse:
+        self.get_indexed_paper(paper_id)
         caption_path = f"papers/{paper_id}/figures/{figure_id}/caption.md"
         if not self.object_store.exists(caption_path):
             raise HTTPException(status_code=404, detail=f"Figure {figure_id} not found for {paper_id}")
@@ -9052,6 +9041,7 @@ class PaperbaseService:
         )
 
     def get_table(self, paper_id: str, table_id: str) -> TableResponse:
+        self.get_indexed_paper(paper_id)
         json_path = f"papers/{paper_id}/tables/{table_id}.json"
         csv_path = f"papers/{paper_id}/tables/{table_id}.csv"
         if not self.object_store.exists(json_path):
@@ -9078,7 +9068,7 @@ class PaperbaseService:
         )
 
     def get_paper_references(self, paper_id: str, *, refresh: bool = False) -> list[dict[str, Any]]:
-        paper = self.get_paper(paper_id)
+        paper = self.get_indexed_paper(paper_id)
         refs = self.repository.get_paper_refs(paper_id)
         if refs and not refresh:
             return refs
@@ -9089,11 +9079,13 @@ class PaperbaseService:
         return refs
 
     def get_related_papers(self, paper_id: str) -> list[SearchPaperResult]:
-        paper = self.get_paper(paper_id)
+        paper = self.get_indexed_paper(paper_id)
         related = sources.get_related_papers(paper.arxiv_id, paper.semantic_scholar_id)
         papers: list[SearchPaperResult] = []
         for item in related:
-            stored = self.repository.upsert_paper_shallow(item)
+            stored = self.repository.get_paper_by_arxiv_id(item.arxiv_id)
+            if stored is None or stored.index_status != "indexed":
+                continue
             papers.append(SearchPaperResult(**stored.model_dump(), source="related"))
         return papers
 

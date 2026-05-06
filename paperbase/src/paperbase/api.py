@@ -599,7 +599,7 @@ def stats(service: PaperbaseService = Depends(get_service)) -> dict:
 
 @app.get("/v1/papers/{paper_id}", response_model=PaperResponse, dependencies=[Depends(require_bearer_token)])
 def get_paper(paper_id: str, service: PaperbaseService = Depends(get_service)) -> PaperResponse:
-    return service.get_paper(paper_id)
+    return service.get_indexed_paper(paper_id)
 
 
 class _CodeUrlPatchRequest(_BaseModel):
@@ -874,7 +874,7 @@ def browser_get_paper(
     user=Depends(require_browser_user),
     service: PaperbaseService = Depends(get_service),
 ) -> PaperResponse:
-    return service.get_paper(paper_id)
+    return service.get_indexed_paper(paper_id)
 
 
 @app.get("/v1/browser/papers/{paper_id}/files/{path:path}", response_model=FileContentResponse)
@@ -1029,7 +1029,7 @@ def browser_admin_enrich_missing_metadata(
 @app.get("/v1/browser/admin/papers", response_model=list[PaperResponse])
 def browser_admin_list_papers(
     q: str = Query(default="", max_length=200),
-    index_status: str = Query(default="all"),
+    index_status: str = Query(default="indexed"),
     limit: int = Query(default=50, ge=1, le=200),
     user=Depends(require_browser_admin_user),
     service: PaperbaseService = Depends(get_service),

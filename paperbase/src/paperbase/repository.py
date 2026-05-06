@@ -3352,14 +3352,17 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     (summary_short ILIKE :contains_like OR tldr ILIKE :contains_like) AS summary_contains
                 FROM papers
                 WHERE
-                    title ILIKE :contains_like
-                    OR authors ILIKE :contains_like
-                    OR summary_short ILIKE :contains_like
-                    OR tldr ILIKE :contains_like
-                    OR title % :q
-                    OR authors % :q
-                    OR summary_short % :q
-                    OR tldr % :q
+                    index_status = 'indexed'
+                    AND (
+                        title ILIKE :contains_like
+                        OR authors ILIKE :contains_like
+                        OR summary_short ILIKE :contains_like
+                        OR tldr ILIKE :contains_like
+                        OR title % :q
+                        OR authors % :q
+                        OR summary_short % :q
+                        OR tldr % :q
+                    )
             )
             SELECT
                 paper_id, arxiv_id, title, authors, summary_short, tldr,
@@ -3557,8 +3560,11 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     similarity(coalesce(title, '') || ' ' || coalesce(tldr, ''), :query) AS title_sim
                 FROM papers
                 WHERE
-                    search_tsv @@ websearch_to_tsquery('english', :query)
-                    OR similarity(coalesce(title, '') || ' ' || coalesce(tldr, ''), :query) > 0.15
+                    index_status = 'indexed'
+                    AND (
+                        search_tsv @@ websearch_to_tsquery('english', :query)
+                        OR similarity(coalesce(title, '') || ' ' || coalesce(tldr, ''), :query) > 0.15
+                    )
             ) scored
             ORDER BY GREATEST(lexical_score * 5, title_sim) DESC,
                      lexical_score DESC,
@@ -3591,6 +3597,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 LIMIT :candidate_pool
             ) scored
             JOIN papers ON papers.paper_id = scored.pid
+            WHERE papers.index_status = 'indexed'
             """
         )
 
@@ -3604,7 +3611,8 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     {self._SELECT_PAPER_COLUMNS},
                     1 - (embedding <=> CAST(:query_embedding AS vector)) AS vector_score
                 FROM papers
-                WHERE embedding IS NOT NULL
+                WHERE index_status = 'indexed'
+                  AND embedding IS NOT NULL
                 ORDER BY embedding <=> CAST(:query_embedding AS vector)
                 LIMIT :candidate_pool
                 """
@@ -3630,6 +3638,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     GROUP BY nearest.pid
                 ) scored
                 JOIN papers ON papers.paper_id = scored.pid
+                WHERE papers.index_status = 'indexed'
                 ORDER BY scored.chunk_vector_score DESC
                 """
             )
@@ -3718,6 +3727,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
         # same ``text_chunks`` table but are reachable only through the
         # paper-scoped code retrieval primitives.
         filters = [
+            "p.index_status = 'indexed'",
             "tc.chunk_kind = ANY(CAST(:section_kinds AS text[]))",
             "(to_tsvector('english', coalesce(tc.content, '')) @@ websearch_to_tsquery('english', :query) "
             "OR similarity(coalesce(tc.content, ''), :query) > 0.1)",
@@ -3775,6 +3785,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
             embedding_literal = "[" + ",".join(f"{value:.6f}" for value in query_embedding) + "]"
             vector_joins = ["JOIN papers p ON p.paper_id = tc.paper_id"]
             vector_filters = [
+                "p.index_status = 'indexed'",
                 "tc.embedding IS NOT NULL",
                 "tc.chunk_kind = ANY(CAST(:section_kinds AS text[]))",
             ]
@@ -6365,6 +6376,8 @@ class MemoryPaperRepository(PaperRepository):
         q_lower = q.lower()
         hits: list[dict[str, Any]] = []
         for paper in self.papers.values():
+            if paper.index_status != "indexed":
+                continue
             title = paper.title or ""
             authors = paper.authors or ""
             summary_text = paper.summary_short or paper.tldr or ""
@@ -6470,6 +6483,8 @@ class MemoryPaperRepository(PaperRepository):
         current_year = utcnow().year
         results: list[SearchPaperResult] = []
         for paper_id, paper in self.papers.items():
+            if paper.index_status != "indexed":
+                continue
             score = 0.0
             if query_lower in paper.title.lower():
                 score += 4.0
@@ -6531,6 +6546,8 @@ class MemoryPaperRepository(PaperRepository):
                 continue
             paper = self.papers.get(paper_id)
             if paper is None:
+                continue
+            if paper.index_status != "indexed":
                 continue
             for chunk in chunks:
                 # Paper search must skip code chunks (#5 PR 2); those are

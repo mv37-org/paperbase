@@ -146,7 +146,9 @@ class SearchRequest(BaseModel):
     limit: int = Field(default=20, ge=1, le=100)
     category: str | None = None
     year: str | None = None
-    include_live_sources: bool = True
+    # Deprecated compatibility flag: user-facing search now returns only
+    # fully indexed local papers. Discovery belongs to harvest/index jobs.
+    include_live_sources: bool = False
     # Opt-in CrossEncoder rerank pass on top-k local candidates. Slower (~1.5s
     # CPU vs ~150ms without), but recovers body-content matches that paper-level
     # search misses. Off by default to keep type-as-you-search snappy.

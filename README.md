@@ -168,6 +168,7 @@ The browser chat experience is project-based:
 - project sync writes only Paperbase-managed paths tracked in `.paperbase`, preserving unrelated files in existing repositories
 - if GitHub has moved ahead since the last project save, Paperbase opens a Monaco conflict-resolution flow before creating the next commit
 - @-mentioning a paper in the chat composer sends the paper's id with the request; if the row is not yet at `index_status='indexed'` the send path synchronously fetches and indexes it from arXiv before the chat turn runs, with `mention_indexing_*` SSE events surfacing fetch progress on the streaming endpoint
+- user-facing paper surfaces only expose fully indexed rows: search, mention suggestions, related-paper lookups, paper detail reads, and artifact reads all require `index_status='indexed'`; discovered rows remain ingestion/job bookkeeping until they are indexed
 
 `make dev` runs all of these locally:
 

@@ -512,7 +512,8 @@ describe("chat api", () => {
           has_more: false,
           papers: [],
         }),
-      );
+      )
+      .mockResolvedValueOnce(jsonResponse([]));
     vi.stubGlobal("fetch", fetchMock);
     const api = await loadApiModule();
 
@@ -521,6 +522,7 @@ describe("chat api", () => {
     await api.loadBrowserAdminJobs("all", 75);
     await api.loadBrowserAdminJobsOverview(75);
     await api.loadBrowserAdminJobPapers("job_admin_1");
+    await api.loadBrowserAdminPapers("benchmark");
 
     const [queuePath, queueInit] = fetchMock.mock.calls[1] as FetchCall;
     const queueUrl = new URL(String(queuePath), "http://localhost");
@@ -550,6 +552,13 @@ describe("chat api", () => {
       "/v1/browser/admin/jobs/job_admin_1/papers?offset=0&limit=100",
     );
     expect(papersInit?.method).toBe("GET");
+
+    const [adminPapersPath, adminPapersInit] = fetchMock.mock.calls[5] as FetchCall;
+    const adminPapersUrl = new URL(String(adminPapersPath), "http://localhost");
+    expect(`${adminPapersUrl.pathname}${adminPapersUrl.search}`).toBe(
+      "/v1/browser/admin/papers?q=benchmark&index_status=indexed&limit=50",
+    );
+    expect(adminPapersInit?.method).toBe("GET");
   });
 
   it("loads and mutates projects through the browser endpoints", async () => {

@@ -254,6 +254,10 @@ class StubApiService:
         self.calls.append(("get_paper", paper_id))
         return _paper("2401.54321")
 
+    def get_indexed_paper(self, paper_id: str) -> PaperResponse:
+        self.calls.append(("get_indexed_paper", paper_id))
+        return _paper("2401.54321")
+
     def list_papers(
         self,
         *,
@@ -1284,6 +1288,7 @@ def test_browser_admin_routes_delegate_for_admin_users(api_client):
     overview = client.get("/v1/browser/admin/jobs/overview?limit=7")
     job_papers = client.get("/v1/browser/admin/jobs/job_root_1/papers?offset=20&limit=10")
     papers = client.get("/v1/browser/admin/papers?q=benchmark&index_status=indexed&limit=3")
+    default_papers = client.get("/v1/browser/admin/papers?q=benchmark&limit=2")
     files = client.get("/v1/browser/admin/papers/arxiv:2401.54321/files")
     file_contents = client.get("/v1/browser/admin/papers/arxiv:2401.54321/files/text/full.md")
     asset = client.get("/v1/browser/admin/papers/arxiv:2401.54321/assets/bundle.pdf")
@@ -1323,6 +1328,8 @@ def test_browser_admin_routes_delegate_for_admin_users(api_client):
     assert job_papers.json()["papers"][0]["paper_id"] == "arxiv:2401.54321"
     assert papers.status_code == 200
     assert papers.json()[0]["paper_id"] == "arxiv:2401.54321"
+    assert default_papers.status_code == 200
+    assert default_papers.json()[0]["paper_id"] == "arxiv:2401.54321"
     assert files.status_code == 200
     assert files.json()["files"][0]["path"] == "text/full.md"
     assert file_contents.status_code == 200
@@ -1342,6 +1349,7 @@ def test_browser_admin_routes_delegate_for_admin_users(api_client):
     assert ("get_admin_jobs_overview", 7) in service.calls
     assert ("get_admin_job_papers", ("job_root_1", 20, 10)) in service.calls
     assert ("list_papers", ("benchmark", "indexed", 3)) in service.calls
+    assert ("list_papers", ("benchmark", "indexed", 2)) in service.calls
     assert ("list_files", "arxiv:2401.54321") in service.calls
     assert ("read_file", ("arxiv:2401.54321", "text/full.md")) in service.calls
     assert ("get_paper_asset", ("arxiv:2401.54321", "bundle.pdf")) in service.calls

@@ -89,6 +89,23 @@ def test_sql_repository_search_and_result_set_flow(integration_context):
         search_document=f"{query} search document",
         embedding=None,
     )
+    discovered = PaperMetadata(
+        arxiv_id=f"{namespace}/search/0002",
+        title=f"{namespace} discovered benchmark paper",
+        authors="Integration Tester",
+        abstract=f"{query} discovered abstract",
+        tldr=f"{query} discovered tl;dr",
+        summary_short=f"{query} discovered short summary",
+        categories="cs.AI",
+        primary_category="cs.AI",
+        published="2026-04-21",
+        updated="2026-04-21",
+        pdf_url=f"https://example.test/{namespace}/search/0002.pdf",
+        html_url=f"https://example.test/{namespace}/search/0002",
+        citation_count=999,
+        influential_citation_count=99,
+    )
+    discovered_response = repository.upsert_paper_shallow(discovered)
     repository.replace_text_chunks(
         paper_response.paper_id,
         [
@@ -103,12 +120,26 @@ def test_sql_repository_search_and_result_set_flow(integration_context):
             }
         ],
     )
+    repository.replace_text_chunks(
+        discovered_response.paper_id,
+        [
+            {
+                "path": "sections/discovered.md",
+                "chunk_kind": "section",
+                "content": f"{query} discovered section",
+                "embedding": None,
+                "chunk_index": 0,
+                "section_depth": 1,
+                "section_order": 0,
+            }
+        ],
+    )
 
     results = repository.search_local(query, limit=5, query_embedding=None)
     sections = repository.search_sections(
         query,
         limit=5,
-        paper_ids=[paper_response.paper_id],
+        paper_ids=[paper_response.paper_id, discovered_response.paper_id],
         query_embedding=None,
     )
     result_set = repository.save_result_set(query=query, papers=results, ttl_days=1)
@@ -117,8 +148,10 @@ def test_sql_repository_search_and_result_set_flow(integration_context):
 
     assert results
     assert results[0].paper_id == paper_response.paper_id
+    assert discovered_response.paper_id not in {result.paper_id for result in results}
     assert sections
     assert sections[0].paper_id == paper_response.paper_id
+    assert discovered_response.paper_id not in {section.paper_id for section in sections}
     assert loaded is not None
     assert loaded.result_set_id == result_set.result_set_id
     assert grep

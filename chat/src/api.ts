@@ -942,7 +942,7 @@ export function queueBrowserAdminEnrichMissingMetadata(limit = 50000, minAgeSeco
   });
 }
 
-export function loadBrowserAdminPapers(query = "", indexStatus = "all", limit = 50) {
+export function loadBrowserAdminPapers(query = "", indexStatus = "indexed", limit = 50) {
   const params = new URLSearchParams({
     q: query,
     index_status: indexStatus,
