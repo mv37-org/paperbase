@@ -56,6 +56,7 @@ class ResponseItem:
     item_id: str
     item_type: str
     role: str = ""
+    phase: str = ""
     status: str = "completed"
     call_id: str = ""
     name: str = ""
@@ -300,12 +301,18 @@ def _response_item_json(item: dict[str, Any]) -> Any | None:
     return item.get("content")
 
 
+def _response_item_phase(item: dict[str, Any]) -> str:
+    phase = str(item.get("phase") or "").strip().lower().replace("-", "_")
+    return phase if phase in {"commentary", "final_answer"} else ""
+
+
 def _normalize_response_item(item: dict[str, Any]) -> ResponseItem:
     item_type = str(item.get("type") or "other")
     return ResponseItem(
         item_id=str(item.get("id") or item.get("item_id") or ""),
         item_type=item_type,
         role=str(item.get("role") or ""),
+        phase=_response_item_phase(item),
         status=str(item.get("status") or "completed"),
         call_id=str(item.get("call_id") or item.get("id") or ""),
         name=str(item.get("name") or ""),

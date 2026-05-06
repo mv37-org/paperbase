@@ -4641,6 +4641,178 @@ def test_chat_input_function_calls_omit_internal_item_ids(browser_service):
     }
 
 
+def test_stream_chat_preserves_provider_commentary_phase():
+    class ProviderPhaseChatModel(FakeChatModel):
+        def stream_response(self, *, api_key: str, prompt: Prompt):
+            self.stream_calls.append(
+                {
+                    "api_key": api_key,
+                    "input": prompt.input,
+                    "system_prompt": prompt.base_instructions,
+                    "tools": prompt.tools,
+                    "tool_choice": prompt.tool_choice,
+                    "parallel_tool_calls": prompt.parallel_tool_calls,
+                }
+            )
+            has_tool_output = any(
+                isinstance(item, dict) and item.get("type") == "function_call_output"
+                for item in prompt.input
+            )
+            response_id = "resp_provider_phase"
+            if has_tool_output:
+                final_text = "Done after searching."
+                yield ResponseEvent(
+                    type="response.output_item.added",
+                    response_id=response_id,
+                    item=ResponseItem(
+                        item_id="msg_final",
+                        item_type="message",
+                        role="assistant",
+                        phase="final_answer",
+                        status="in_progress",
+                    ),
+                )
+                yield ResponseEvent(
+                    type="response.output_text.delta",
+                    response_id=response_id,
+                    item_id="msg_final",
+                    delta=final_text,
+                )
+                yield ResponseEvent(
+                    type="response.output_item.done",
+                    response_id=response_id,
+                    item=ResponseItem(
+                        item_id="msg_final",
+                        item_type="message",
+                        role="assistant",
+                        phase="final_answer",
+                        status="completed",
+                        content_text=final_text,
+                    ),
+                )
+                yield ResponseEvent(
+                    type="response.completed",
+                    response_id=response_id,
+                    usage=ChatModelUsage(input_tokens=10, output_tokens=5, total_tokens=15),
+                )
+                return
+
+            commentary_text = "I will search the local paper index first."
+            yield ResponseEvent(
+                type="response.output_item.added",
+                response_id=response_id,
+                item=ResponseItem(
+                    item_id="msg_commentary",
+                    item_type="message",
+                    role="assistant",
+                    phase="commentary",
+                    status="in_progress",
+                ),
+            )
+            yield ResponseEvent(
+                type="response.output_text.delta",
+                response_id=response_id,
+                item_id="msg_commentary",
+                delta=commentary_text,
+            )
+            yield ResponseEvent(
+                type="response.output_item.done",
+                response_id=response_id,
+                item=ResponseItem(
+                    item_id="msg_commentary",
+                    item_type="message",
+                    role="assistant",
+                    phase="commentary",
+                    status="completed",
+                    content_text=commentary_text,
+                ),
+            )
+            yield ResponseEvent(
+                type="response.output_item.added",
+                response_id=response_id,
+                item=ResponseItem(
+                    item_id="tool_search",
+                    item_type="function_call",
+                    role="assistant",
+                    status="in_progress",
+                    call_id="tool_search",
+                    name="paperbase_search",
+                    content_text='{"query": "grounding"}',
+                    content_json={"query": "grounding"},
+                ),
+            )
+            yield ResponseEvent(
+                type="response.output_item.done",
+                response_id=response_id,
+                item=ResponseItem(
+                    item_id="tool_search",
+                    item_type="function_call",
+                    role="assistant",
+                    status="completed",
+                    call_id="tool_search",
+                    name="paperbase_search",
+                    content_text='{"query": "grounding"}',
+                    content_json={"query": "grounding"},
+                ),
+            )
+            yield ResponseEvent(
+                type="response.completed",
+                response_id=response_id,
+                usage=ChatModelUsage(input_tokens=10, output_tokens=4, total_tokens=14),
+            )
+
+    chat_model = ProviderPhaseChatModel()
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=chat_model,
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="phase@example.com", password="topsecret123", display_name="Phase User")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
+
+    events = list(
+        service.stream_chat_message(
+            session.user,
+            thread.thread_id,
+            SendChatMessageRequest(content="Search for grounding papers", tag_filters=[]),
+        )
+    )
+
+    commentary_started = _event_items(
+        events,
+        event_name="item_started",
+        item_type="assistant_message",
+        phase="commentary",
+    )
+    commentary_completed = _event_items(
+        events,
+        event_name="item_completed",
+        item_type="assistant_message",
+        phase="commentary",
+    )
+    final_items = _event_items(
+        events,
+        event_name="item_completed",
+        item_type="assistant_message",
+        phase="final_answer",
+    )
+
+    assert commentary_started
+    assert commentary_completed[0]["content_text"] == "I will search the local paper index first."
+    assert final_items[-1]["content_text"] == "Done after searching."
+
+
 def test_stream_chat_compacts_mid_turn_after_tool_results(monkeypatch, browser_service):
     service, _, chat_model = browser_service
     chat_model.token_counts = [1, 950_000, 1]
@@ -5090,7 +5262,8 @@ def test_chat_answer_prompt_requires_strict_markdown(browser_service):
 
     assert "strict GitHub-flavored markdown" in with_evidence
     assert "valid markdown that a standard parser can render directly" in with_evidence
-    assert "When tools are still needed, emit tool calls only" in with_evidence
+    assert "Before tool calls on non-trivial turns, emit a concise commentary message" in with_evidence
+    assert "send brief commentary progress updates before additional tool batches" in with_evidence
     assert "Once the tool results are sufficient, stop calling tools and answer directly in the same turn." in with_evidence
     assert "strict GitHub-flavored markdown" in without_evidence
     assert "valid markdown that a standard parser can render directly" in without_evidence
