@@ -4733,6 +4733,8 @@ def test_first_prompt_renames_new_chat_to_short_summary(browser_service):
     )
 
     assert first_response.thread.title == "Grounded Research Question Patterns"
+    assert first_response.turn is not None
+    assert first_response.turn.title == "Grounded Research Question Patterns"
 
     second_response = service.send_chat_message(
         session.user,
@@ -4741,6 +4743,8 @@ def test_first_prompt_renames_new_chat_to_short_summary(browser_service):
     )
 
     assert second_response.thread.title == "Grounded Research Question Patterns"
+    assert second_response.turn is not None
+    assert second_response.turn.title == "Grounded Research Question Patterns"
 
 
 def test_chat_context_uses_full_active_thread_history(browser_service):
@@ -5596,8 +5600,15 @@ def test_browser_chat_stream_emits_citations_and_completion(monkeypatch, browser
         events = _parse_sse_events("".join(response.iter_text()))
 
     event_names = [event_name for event_name, _ in events]
-    assert event_names[:4] == ["thread_title", "turn_started", "item_started", "item_completed"]
+    assert event_names[:5] == [
+        "reply_title",
+        "thread_title",
+        "turn_started",
+        "item_started",
+        "item_completed",
+    ]
     assert events[0][1]["title"] == "Grounded Research Question Patterns"
+    assert events[0][1]["turn_id"] == events[2][1]["turn"]["turn_id"]
     function_call_items = _event_items(events, event_name="item_completed", item_type="function_call")
     function_output_items = _event_items(events, event_name="item_completed", item_type="function_call_output")
     assistant_final_items = _event_items(
@@ -5629,6 +5640,7 @@ def test_browser_chat_stream_emits_citations_and_completion(monkeypatch, browser
     assert service.chat_model.create_calls
 
     refreshed = client.get(f"/v1/browser/chats/{thread_id}").json()
+    assert refreshed["turns"][0]["title"] == "Grounded Research Question Patterns"
     assert refreshed["messages"][-1]["status"] == "completed"
     assert refreshed["messages"][-1]["citations"]
 

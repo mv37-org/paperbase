@@ -390,6 +390,7 @@ export interface ChatThreadItemResponse {
 export interface ChatTurnResponse {
   turn_id: string;
   thread_id: string;
+  title?: string;
   status: string;
   provider_response_id: string;
   started_at: string;
@@ -614,6 +615,12 @@ export interface ChatStreamThreadTitleEvent {
   title: string;
 }
 
+export interface ChatStreamReplyTitleEvent {
+  thread_id: string;
+  turn_id: string;
+  title: string;
+}
+
 export interface ChatStreamItemStartedEvent {
   item: ChatThreadItemResponse;
 }
@@ -666,6 +673,7 @@ export interface ChatStreamMentionIndexingEvent {
 }
 
 export type ChatStreamEventMap = {
+  reply_title: ChatStreamReplyTitleEvent;
   thread_title: ChatStreamThreadTitleEvent;
   turn_started: ChatStreamTurnStartedEvent;
   item_started: ChatStreamItemStartedEvent;

@@ -2607,6 +2607,34 @@ textarea::placeholder,
   letter-spacing: 0;
 }
 
+.chat-turn-reply-title {
+  width: 100%;
+  max-width: 680px;
+  margin: -4px 0 0;
+  color: var(--text);
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 25px;
+  font-weight: 700;
+  line-height: 1.16;
+  letter-spacing: 0;
+  animation: chat-turn-title-in 180ms ease-out both;
+}
+
+.chat-turn-reply-title.streaming {
+  animation-duration: 220ms;
+}
+
+@keyframes chat-turn-title-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 .message-row {
   display: grid;
   gap: 6px;

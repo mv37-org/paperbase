@@ -1675,6 +1675,7 @@ class PreparedChatGeneration:
     user_item: ChatThreadItemResponse
     resolved_user: BrowserUser
     api_key_value: str
+    updated_thread_title: str | None = None
 
 
 @dataclass
@@ -3722,8 +3723,10 @@ class PaperbaseService:
     ) -> PreparedChatGeneration:
         thread = self.get_chat_thread(user, thread_id)
         content = request.content.strip()
+        reply_title = self._generate_chat_title(api_key=api_key_value, content=content)
         turn = self.repository.create_chat_turn(  # type: ignore[attr-defined]
             thread_id=thread_id,
+            title=reply_title,
             status="running",
         )
         user_item = self.repository.add_chat_thread_item(  # type: ignore[attr-defined]
@@ -3733,10 +3736,11 @@ class PaperbaseService:
             role="user",
             content_text=content,
         )
-        if thread.title == "New chat":
+        updated_thread_title = reply_title if thread.title == "New chat" else None
+        if updated_thread_title:
             self.repository.rename_chat_thread(  # type: ignore[attr-defined]
                 thread_id=thread_id,
-                title=self._generate_chat_title(api_key=api_key_value, content=content),
+                title=updated_thread_title,
             )
         refreshed = self.get_chat_thread(user, thread_id)
         return PreparedChatGeneration(
@@ -3745,6 +3749,7 @@ class PaperbaseService:
             user_item=user_item,
             resolved_user=resolved_user,
             api_key_value=api_key_value,
+            updated_thread_title=updated_thread_title,
         )
 
     def _generate_chat_title(self, *, api_key: str, content: str) -> str:
@@ -5912,10 +5917,19 @@ class PaperbaseService:
         )
 
         _ = self._chat_runtime_mode()
-        if prepared.thread.title.strip():
+        if prepared.turn.title.strip():
+            yield (
+                "reply_title",
+                {
+                    "thread_id": prepared.thread.thread_id,
+                    "turn_id": prepared.turn.turn_id,
+                    "title": prepared.turn.title,
+                },
+            )
+        if prepared.updated_thread_title:
             yield (
                 "thread_title",
-                {"thread_id": prepared.thread.thread_id, "title": prepared.thread.title},
+                {"thread_id": prepared.thread.thread_id, "title": prepared.updated_thread_title},
             )
         yield ("turn_started", {"turn": prepared.turn.model_dump(mode="json")})
         turn_engine = self._run_chat_turn_engine(

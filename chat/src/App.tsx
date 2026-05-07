@@ -170,6 +170,7 @@ import type {
   ChatThreadItemResponse,
   ChatStreamUsageEvent,
   ChatThreadResponse,
+  ChatTurnResponse,
   GitHubRepoImportCandidate,
   GitHubRepoMetadataResponse,
   GitHubRepoSummary,
@@ -1836,6 +1837,7 @@ export default function App() {
       [threadId]: {
         turnIndex,
         thinkingWord: pickThinkingWord(current[threadId]?.thinkingWord ?? null),
+        replyTitle: null,
         assistantStarted: false,
         usage: null,
       },
@@ -2678,6 +2680,63 @@ export default function App() {
     [updateThread],
   );
 
+  const upsertStreamingTurn = useCallback(
+    (turn: ChatTurnResponse, fallback: ChatThreadResponse) => {
+      updateThread(turn.thread_id, (thread) => {
+        const nextThread = thread ?? fallback;
+        const existingTurns = nextThread.turns ?? [];
+        const nextTurns = existingTurns.some((existing) => existing.turn_id === turn.turn_id)
+          ? existingTurns.map((existing) =>
+              existing.turn_id === turn.turn_id ? { ...existing, ...turn } : existing,
+            )
+          : [...existingTurns, turn];
+        return {
+          ...nextThread,
+          turns: nextTurns,
+          updated_at: new Date().toISOString(),
+        };
+      });
+    },
+    [updateThread],
+  );
+
+  const updateStreamingReplyTitle = useCallback(
+    (threadId: string, turnId: string, title: string, fallback: ChatThreadResponse) => {
+      const nextTitle = title.trim();
+      if (!nextTitle) {
+        return;
+      }
+      setThreadStreamStates((current) => {
+        const existing = current[threadId];
+        if (!existing) {
+          return current;
+        }
+        return {
+          ...current,
+          [threadId]: {
+            ...existing,
+            replyTitle: nextTitle,
+          },
+        };
+      });
+      updateThread(threadId, (thread) => {
+        const nextThread = thread ?? fallback;
+        const existingTurns = nextThread.turns ?? [];
+        if (existingTurns.length === 0) {
+          return nextThread;
+        }
+        return {
+          ...nextThread,
+          turns: existingTurns.map((turn) =>
+            turn.turn_id === turnId ? { ...turn, title: nextTitle } : turn,
+          ),
+          updated_at: new Date().toISOString(),
+        };
+      });
+    },
+    [updateThread],
+  );
+
   const closeFeedbackModal = useCallback(() => {
     setFeedbackModalState(null);
     setFeedbackReasons([]);
@@ -2897,6 +2956,18 @@ export default function App() {
       setContextUsagePopoverOpen(false);
       startThreadStreamState(threadId, turnIndex);
       setComposerStatus("");
+      const streamFallbackThread: ChatThreadResponse = {
+        thread_id: threadId,
+        project_id: fallbackProjectId,
+        project_name: fallbackProjectName,
+        project_instructions: fallbackProjectInstructions,
+        title: optimisticTitle,
+        created_at: now,
+        updated_at: now,
+        items: [],
+        turns: [],
+        messages: [optimisticUserMessage],
+      };
 
       try {
         await sendThreadMessageStream(
@@ -2908,23 +2979,23 @@ export default function App() {
             paper_ids: paperIds,
           },
           (eventName, payload) => {
+            if (eventName === "reply_title") {
+              updateStreamingReplyTitle(
+                payload.thread_id,
+                payload.turn_id,
+                payload.title,
+                streamFallbackThread,
+              );
+              return;
+            }
+
             if (eventName === "thread_title") {
-              updateStreamingThreadTitle(payload.thread_id, payload.title, {
-                thread_id: threadId,
-                project_id: fallbackProjectId,
-                project_name: fallbackProjectName,
-                project_instructions: fallbackProjectInstructions,
-                title: optimisticTitle,
-                created_at: now,
-                updated_at: now,
-                items: [],
-                turns: [],
-                messages: [optimisticUserMessage],
-              });
+              updateStreamingThreadTitle(payload.thread_id, payload.title, streamFallbackThread);
               return;
             }
 
             if (eventName === "turn_started") {
+              upsertStreamingTurn(payload.turn, streamFallbackThread);
               return;
             }
 
@@ -3228,7 +3299,9 @@ export default function App() {
       showErrorFlash,
       startThreadStreamState,
       updateThreadStreamUsage,
+      updateStreamingReplyTitle,
       updateStreamingThreadTitle,
+      upsertStreamingTurn,
       upsertToolActivity,
       upsertThreadIntoProjectItems,
       updateThread,
@@ -6164,11 +6237,6 @@ export default function App() {
                 </div>
               ) : (
                 <div className="chat-message-column">
-                  {displayThreadTitle(activeThread.title) !== "New chat" ? (
-                    <h1 className="chat-thread-inline-title">
-                      {displayThreadTitle(activeThread.title)}
-                    </h1>
-                  ) : null}
                   {(() => {
                     const commentaryTurnIndexes = new Set<number>();
                     const itemByMessageId = new Map(
@@ -6184,6 +6252,14 @@ export default function App() {
                     for (const [index, turn] of (activeThread.turns ?? []).entries()) {
                       turnIndexById.set(turn.turn_id, index + 1);
                     }
+                    const turnTitleByIndex = new Map<number, string>();
+                    for (const turn of activeThread.turns ?? []) {
+                      const turnIndex = turnIndexById.get(turn.turn_id);
+                      const title = (turn.title ?? "").trim();
+                      if (turnIndex && title) {
+                        turnTitleByIndex.set(turnIndex, title);
+                      }
+                    }
                     for (const item of activeThread.items ?? []) {
                       if (item.turn_id && !turnIndexById.has(item.turn_id)) {
                         turnIndexById.set(item.turn_id, turnIndexById.size + 1);
@@ -6191,6 +6267,7 @@ export default function App() {
                     }
                     const messageTurnIndexes = new Map<string, number>();
                     const userMessagesByTurn = new Map<number, ChatMessageResponse[]>();
+                    const assistantTurnIndexes = new Set<number>();
                     const commentaryMessagesByTurn = new Map<number, ChatMessageResponse[]>();
                     const completedFinalMessagesByTurn = new Map<number, ChatMessageResponse>();
                     let scannedTurnIndex = 0;
@@ -6212,6 +6289,9 @@ export default function App() {
                         const existing = userMessagesByTurn.get(candidateTurnIndex) ?? [];
                         existing.push(candidate);
                         userMessagesByTurn.set(candidateTurnIndex, existing);
+                      }
+                      if (candidate.role === "assistant" && candidate.kind !== "compaction") {
+                        assistantTurnIndexes.add(candidateTurnIndex);
                       }
                       if (candidate.role === "assistant" && candidate.phase === "commentary") {
                         commentaryTurnIndexes.add(candidateTurnIndex);
@@ -6284,6 +6364,24 @@ export default function App() {
                         )}
                       </div>
                     );
+                    const replyTitleForTurn = (turnIndex: number) => {
+                      const streamedTitle =
+                        activeStreamInView && activeThreadStreamState?.turnIndex === turnIndex
+                          ? activeThreadStreamState.replyTitle?.trim()
+                          : "";
+                      if (streamedTitle) {
+                        return streamedTitle;
+                      }
+                      const turnTitle = turnTitleByIndex.get(turnIndex)?.trim();
+                      if (turnTitle) {
+                        return turnTitle;
+                      }
+                      if (turnIndex === 1 && assistantTurnIndexes.has(turnIndex)) {
+                        const threadTitle = displayThreadTitle(activeThread.title);
+                        return threadTitle === "New chat" ? "" : threadTitle;
+                      }
+                      return "";
+                    };
                     const renderCollapsedTurnWork = (
                       turnIndex: number,
                       finalMessage: ChatMessageResponse,
@@ -6413,6 +6511,14 @@ export default function App() {
                         message.message_id === latestRecommendedMessageId
                           ? (message.recommended_prompts ?? [])
                           : [];
+                      const replyTitle =
+                        message.role === "user" && !isCompactionMessage
+                          ? replyTitleForTurn(messageTurnIndex)
+                          : "";
+                      const titleIsStreaming =
+                        Boolean(replyTitle) &&
+                        activeStreamInView &&
+                        activeThreadStreamState?.turnIndex === messageTurnIndex;
                       return (
                         <Fragment key={message.message_id}>
                           {isSessionFinalMessage
@@ -6691,6 +6797,13 @@ export default function App() {
                               </div>
                             ) : null}
                           </article>
+                          {replyTitle ? (
+                            <h2
+                              className={`chat-turn-reply-title${titleIsStreaming ? " streaming" : ""}`}
+                            >
+                              {replyTitle}
+                            </h2>
+                          ) : null}
                           {turnActivities.map(renderToolActivityRow)}
                           {showThinkingPlaceholder ? (
                             <div className="tool-activity-row status-running thinking-only">

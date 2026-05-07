@@ -658,6 +658,7 @@ class ChatThreadItemResponse(BaseModel):
 class ChatTurnResponse(BaseModel):
     turn_id: str
     thread_id: str
+    title: str = ""
     status: str = "completed"
     provider_response_id: str = ""
     started_at: datetime

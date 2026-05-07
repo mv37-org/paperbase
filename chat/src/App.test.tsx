@@ -444,6 +444,7 @@ function turnResponse(
     provider_response_id: string;
     started_at: string;
     completed_at: string | null;
+    title: string;
     usage: Record<string, unknown> | null;
     diff_summary: string;
     changed_paths: string[];
@@ -453,6 +454,7 @@ function turnResponse(
   return {
     turn_id: turnId,
     thread_id: threadId,
+    title: overrides.title ?? "",
     status: overrides.status ?? "completed",
     provider_response_id: overrides.provider_response_id ?? "resp_1",
     started_at: overrides.started_at ?? "2026-04-21T00:00:00Z",
@@ -2133,6 +2135,120 @@ describe("App", () => {
     expect(document.querySelector(".chat-message-list.thread-header-visible")).toBeNull();
   });
 
+  it("renders each reply title after its matching user prompt", async () => {
+    localStorage.setItem(ACTIVE_TAB_KEY, JSON.stringify({ kind: "thread", id: "thread_1" }));
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    const userOne = threadItemResponse(
+      "user_1",
+      "user_message",
+      "user",
+      "Compare planning agents",
+      {
+        turn_id: "turn_1",
+      },
+    );
+    const assistantOne = threadItemResponse(
+      "assistant_1",
+      "assistant_message",
+      "assistant",
+      "First answer",
+      {
+        turn_id: "turn_1",
+        phase: "final_answer",
+      },
+    );
+    const userTwo = threadItemResponse("user_2", "user_message", "user", "Now focus on memory", {
+      turn_id: "turn_2",
+    });
+    const assistantTwo = threadItemResponse(
+      "assistant_2",
+      "assistant_message",
+      "assistant",
+      "Second answer",
+      {
+        turn_id: "turn_2",
+        phase: "final_answer",
+      },
+    );
+    apiMocks.getThread.mockResolvedValue({
+      ...emptyThreadResponse("thread_1"),
+      title: "Planning Agent Comparisons",
+      items: [userOne, assistantOne, userTwo, assistantTwo],
+      turns: [
+        turnResponse("turn_1", "thread_1", [userOne, assistantOne], {
+          title: "Planning Agents Compared",
+        }),
+        turnResponse("turn_2", "thread_1", [userTwo, assistantTwo], {
+          title: "Memory Shapes Agent Behavior",
+        }),
+      ],
+      messages: [
+        {
+          message_id: "user_1",
+          role: "user",
+          content_markdown: "Compare planning agents",
+          citations: [],
+          created_at: "2026-04-21T00:00:00Z",
+          status: "completed",
+        },
+        {
+          message_id: "assistant_1",
+          role: "assistant",
+          content_markdown: "First answer",
+          citations: [],
+          created_at: "2026-04-21T00:00:01Z",
+          status: "completed",
+          phase: "final_answer",
+        },
+        {
+          message_id: "user_2",
+          role: "user",
+          content_markdown: "Now focus on memory",
+          citations: [],
+          created_at: "2026-04-21T00:01:00Z",
+          status: "completed",
+        },
+        {
+          message_id: "assistant_2",
+          role: "assistant",
+          content_markdown: "Second answer",
+          citations: [],
+          created_at: "2026-04-21T00:01:01Z",
+          status: "completed",
+          phase: "final_answer",
+        },
+      ],
+    });
+
+    render(<App />);
+
+    const firstUser = await screen.findByText("Compare planning agents");
+    const firstTitle = screen.getByRole("heading", {
+      name: "Planning Agents Compared",
+      level: 2,
+    });
+    const firstAnswer = screen.getByText("First answer");
+    const secondUser = screen.getByText("Now focus on memory");
+    const secondTitle = screen.getByRole("heading", {
+      name: "Memory Shapes Agent Behavior",
+      level: 2,
+    });
+    const secondAnswer = screen.getByText("Second answer");
+
+    expect(
+      firstUser.compareDocumentPosition(firstTitle) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      firstTitle.compareDocumentPosition(firstAnswer) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      secondUser.compareDocumentPosition(secondTitle) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      secondTitle.compareDocumentPosition(secondAnswer) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
   it("anchors a newly submitted prompt at the top of the chat viewport", async () => {
     localStorage.setItem(ACTIVE_TAB_KEY, JSON.stringify({ kind: "thread", id: "thread_1" }));
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());
@@ -2980,12 +3096,18 @@ describe("App", () => {
         options?: { signal?: AbortSignal },
       ) => {
         streamSignal = options?.signal;
+        onEvent("reply_title", {
+          thread_id: "thread_2",
+          turn_id: "turn_2",
+          title: "Grounding Methods Under Review",
+        });
         onEvent("thread_title", {
           thread_id: "thread_2",
           title: "Grounding Methods Under Review",
         });
         onEvent("turn_started", {
           turn: turnResponse("turn_2", "thread_2", [], {
+            title: "Grounding Methods Under Review",
             status: "running",
             completed_at: null,
           }),
@@ -3083,8 +3205,18 @@ describe("App", () => {
       expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
     });
     expect(screen.queryByRole("tablist", { name: "Open tabs" })).toBeNull();
+    const userText = screen.getByText("Find the grounding methods");
     const commentaryText = await screen.findByText("I will search the paper index first.");
-    expect(screen.getByRole("heading", { name: "Grounding Methods Under Review" })).toBeTruthy();
+    const replyTitle = screen.getByRole("heading", {
+      name: "Grounding Methods Under Review",
+      level: 2,
+    });
+    expect(
+      userText.compareDocumentPosition(replyTitle) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      replyTitle.compareDocumentPosition(commentaryText) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
     const toolActivityText = await screen.findByText('Did paper search for "grounding"');
     expect(screen.queryByText("Commentary")).toBeNull();
     expect(

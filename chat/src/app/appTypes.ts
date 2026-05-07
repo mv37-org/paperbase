@@ -168,6 +168,7 @@ export type ToolActivityEntry = {
 export type ThreadStreamState = {
   turnIndex: number;
   thinkingWord: string;
+  replyTitle: string | null;
   assistantStarted: boolean;
   usage: ChatStreamUsageEvent | null;
 };
