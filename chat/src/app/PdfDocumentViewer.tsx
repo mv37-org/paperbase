@@ -1,11 +1,20 @@
-import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
+import {
+  forwardRef,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 import {
   getDocument,
   GlobalWorkerOptions,
+  TextLayer,
   type PDFDocumentLoadingTask,
   type RenderTask,
 } from "pdfjs-dist/legacy/build/pdf.mjs";
 import pdfWorkerUrl from "pdfjs-dist/legacy/build/pdf.worker.mjs?url";
+import type { PaperSelectionAction, PaperSelectionPayload } from "../types";
 
 GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
@@ -20,16 +29,49 @@ export type PdfDocumentViewerHandle = {
   scrollToSection: (sectionId: string) => void;
 };
 
+type PdfDocumentToolMode = "select" | "pen";
+
 type PdfDocumentViewerProps = {
   url: string;
   title: string;
+  paperId?: string;
   className?: string;
+  toolMode?: PdfDocumentToolMode;
   onSectionsChange?: (sections: PdfDocumentSection[]) => void;
+  onSelectionAction?: (selection: PaperSelectionPayload) => void;
 };
 
 type PdfViewerStatus = "loading" | "ready" | "error";
 
+type NormalizedPoint = { x: number; y: number };
+
+type PenStroke = {
+  pageNumber: number;
+  points: NormalizedPoint[];
+  pageBox: { left: number; top: number; width: number; height: number };
+};
+
+type SelectionPopoverState = {
+  left: number;
+  top: number;
+  payload: Omit<PaperSelectionPayload, "action">;
+};
+
+const SELECTION_ACTIONS: Array<{ action: PaperSelectionAction; label: string }> = [
+  { action: "explain", label: "Explain" },
+  { action: "trace", label: "Trace" },
+  { action: "challenge", label: "Challenge" },
+  { action: "reproduce", label: "Reproduce" },
+];
+
 function clampPageYOffsetRatio(value: number) {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.max(0, Math.min(1, value));
+}
+
+function clampUnit(value: number) {
   if (!Number.isFinite(value)) {
     return 0;
   }
@@ -223,15 +265,108 @@ function attachSectionAnchors(
   }
 }
 
+function bboxForPoints(points: NormalizedPoint[]) {
+  const xs = points.map((point) => point.x);
+  const ys = points.map((point) => point.y);
+  const x = clampUnit(Math.min(...xs));
+  const y = clampUnit(Math.min(...ys));
+  const right = clampUnit(Math.max(...xs));
+  const bottom = clampUnit(Math.max(...ys));
+  return {
+    x,
+    y,
+    width: clampUnit(right - x),
+    height: clampUnit(bottom - y),
+  };
+}
+
+function pageNumberFromElement(element: Element | null) {
+  const page = element?.closest<HTMLElement>(".pdf-document-page");
+  const pageNumber = Number(page?.dataset.pageNumber);
+  return Number.isFinite(pageNumber) && pageNumber > 0 ? Math.floor(pageNumber) : 1;
+}
+
+function textForPage(linesByPage: Map<number, string[]>, pageNumber: number) {
+  return (linesByPage.get(pageNumber) ?? []).join(" ").replace(/\s+/g, " ").trim();
+}
+
+function cropCanvasRegion(
+  canvas: HTMLCanvasElement | undefined,
+  bbox: ReturnType<typeof bboxForPoints>,
+) {
+  if (!canvas || bbox.width <= 0 || bbox.height <= 0) {
+    return null;
+  }
+  try {
+    const sourceX = Math.floor(bbox.x * canvas.width);
+    const sourceY = Math.floor(bbox.y * canvas.height);
+    const sourceWidth = Math.max(1, Math.floor(bbox.width * canvas.width));
+    const sourceHeight = Math.max(1, Math.floor(bbox.height * canvas.height));
+    const maxSide = 640;
+    const scale = Math.min(1, maxSide / Math.max(sourceWidth, sourceHeight));
+    const targetWidth = Math.max(1, Math.floor(sourceWidth * scale));
+    const targetHeight = Math.max(1, Math.floor(sourceHeight * scale));
+    const crop = document.createElement("canvas");
+    crop.width = targetWidth;
+    crop.height = targetHeight;
+    const context = crop.getContext("2d");
+    if (!context) {
+      return null;
+    }
+    context.drawImage(
+      canvas,
+      sourceX,
+      sourceY,
+      sourceWidth,
+      sourceHeight,
+      0,
+      0,
+      targetWidth,
+      targetHeight,
+    );
+    const dataUrl = crop.toDataURL("image/png");
+    const marker = "base64,";
+    const markerIndex = dataUrl.indexOf(marker);
+    return markerIndex >= 0 ? dataUrl.slice(markerIndex + marker.length) : null;
+  } catch {
+    return null;
+  }
+}
+
+function pointerIdForEvent(event: PointerEvent) {
+  return Number.isFinite(event.pointerId) ? event.pointerId : 1;
+}
+
 export const PdfDocumentViewer = forwardRef<PdfDocumentViewerHandle, PdfDocumentViewerProps>(
-  function PdfDocumentViewer({ url, title, className = "", onSectionsChange }, ref) {
+  function PdfDocumentViewer(
+    {
+      url,
+      title,
+      paperId,
+      className = "",
+      toolMode = "select",
+      onSectionsChange,
+      onSelectionAction,
+    },
+    ref,
+  ) {
     const scrollRef = useRef<HTMLDivElement | null>(null);
     const pagesRef = useRef<HTMLDivElement | null>(null);
     const onSectionsChangeRef = useRef(onSectionsChange);
+    const onSelectionActionRef = useRef(onSelectionAction);
     const sectionAnchorsRef = useRef(new Map<string, HTMLElement>());
+    const pageTextRef = useRef(new Map<number, string[]>());
+    const pageCanvasesRef = useRef(new Map<number, HTMLCanvasElement>());
+    const latestTextSelectionRef = useRef<Omit<PaperSelectionPayload, "action"> | null>(null);
+    const drawingPointerIdRef = useRef<number | null>(null);
+    const drawingPageElementRef = useRef<HTMLElement | null>(null);
+    const activeStrokeRef = useRef<PenStroke | null>(null);
     const [viewerWidth, setViewerWidth] = useState(0);
     const [status, setStatus] = useState<PdfViewerStatus>("loading");
     const [error, setError] = useState("");
+    const [selectionPopover, setSelectionPopover] = useState<SelectionPopoverState | null>(null);
+    const [activeStroke, setActiveStroke] = useState<PenStroke | null>(null);
+    const [completedStroke, setCompletedStroke] = useState<PenStroke | null>(null);
 
     useImperativeHandle(
       ref,
@@ -249,6 +384,10 @@ export const PdfDocumentViewer = forwardRef<PdfDocumentViewerHandle, PdfDocument
     useEffect(() => {
       onSectionsChangeRef.current = onSectionsChange;
     }, [onSectionsChange]);
+
+    useEffect(() => {
+      onSelectionActionRef.current = onSelectionAction;
+    }, [onSelectionAction]);
 
     useEffect(() => {
       const element = scrollRef.current;
@@ -280,6 +419,15 @@ export const PdfDocumentViewer = forwardRef<PdfDocumentViewerHandle, PdfDocument
 
       container.replaceChildren();
       sectionAnchorsRef.current.clear();
+      pageTextRef.current.clear();
+      pageCanvasesRef.current.clear();
+      latestTextSelectionRef.current = null;
+      drawingPointerIdRef.current = null;
+      drawingPageElementRef.current = null;
+      activeStrokeRef.current = null;
+      setSelectionPopover(null);
+      setActiveStroke(null);
+      setCompletedStroke(null);
       setError("");
 
       if (!url) {
@@ -330,17 +478,31 @@ export const PdfDocumentViewer = forwardRef<PdfDocumentViewerHandle, PdfDocument
             if (outlineSections.length === 0) {
               const textContent = await page.getTextContent().catch(() => null);
               if (textContent) {
-                for (const line of textItemsToLines(textContent.items)) {
+                const lines = textItemsToLines(textContent.items);
+                pageTextRef.current.set(
+                  pageNumber,
+                  lines.map((line) => line.text),
+                );
+                for (const line of lines) {
                   const section = sectionFromLine(line, pageNumber, baseViewport.height);
                   if (section) {
                     textSections.push(section);
                   }
                 }
               }
+            } else {
+              const textContent = await page.getTextContent().catch(() => null);
+              if (textContent) {
+                pageTextRef.current.set(
+                  pageNumber,
+                  textItemsToLines(textContent.items).map((line) => line.text),
+                );
+              }
             }
 
             const pageElement = document.createElement("div");
             pageElement.className = "pdf-document-page";
+            pageElement.dataset.pageNumber = String(pageNumber);
             pageElements.set(pageNumber, pageElement);
             pageHeights.set(pageNumber, Math.floor(viewport.height));
 
@@ -351,6 +513,7 @@ export const PdfDocumentViewer = forwardRef<PdfDocumentViewerHandle, PdfDocument
             canvas.height = Math.floor(viewport.height * outputScale);
             canvas.style.width = `${Math.floor(viewport.width)}px`;
             canvas.style.height = `${Math.floor(viewport.height)}px`;
+            pageCanvasesRef.current.set(pageNumber, canvas);
 
             const context = canvas.getContext("2d");
             if (!context) {
@@ -358,6 +521,11 @@ export const PdfDocumentViewer = forwardRef<PdfDocumentViewerHandle, PdfDocument
             }
 
             pageElement.appendChild(canvas);
+            const textLayer = document.createElement("div");
+            textLayer.className = "pdf-document-text-layer";
+            textLayer.style.width = `${Math.floor(viewport.width)}px`;
+            textLayer.style.height = `${Math.floor(viewport.height)}px`;
+            pageElement.appendChild(textLayer);
             container.appendChild(pageElement);
 
             const renderTask = page.render({
@@ -369,6 +537,14 @@ export const PdfDocumentViewer = forwardRef<PdfDocumentViewerHandle, PdfDocument
             });
             renderTasks.push(renderTask);
             await renderTask.promise;
+            const textContent = await page.getTextContent().catch(() => null);
+            if (textContent) {
+              await new TextLayer({
+                textContentSource: textContent,
+                container: textLayer,
+                viewport,
+              }).render();
+            }
             page.cleanup();
           }
           if (!cancelled) {
@@ -396,11 +572,248 @@ export const PdfDocumentViewer = forwardRef<PdfDocumentViewerHandle, PdfDocument
       };
     }, [title, url, viewerWidth]);
 
-    const viewerClassName = `pdf-document-viewer${className ? ` ${className}` : ""}`;
+    const buildTextSelectionPayload = (selection: Selection) => {
+      if (!paperId || selection.isCollapsed) {
+        return null;
+      }
+      const selectedText = selection.toString().replace(/\s+/g, " ").trim();
+      if (!selectedText) {
+        return null;
+      }
+      const range = selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
+      const anchorElement =
+        selection.anchorNode instanceof Element
+          ? selection.anchorNode
+          : (selection.anchorNode?.parentElement ?? null);
+      const pageNumber = pageNumberFromElement(anchorElement);
+      const rect = range?.getBoundingClientRect();
+      if (!rect || rect.width <= 0 || rect.height <= 0) {
+        return null;
+      }
+      const root = scrollRef.current;
+      const rootRect = root?.getBoundingClientRect();
+      return {
+        left: rect.left + rect.width / 2 - (rootRect?.left ?? 0) + (root?.scrollLeft ?? 0),
+        top: Math.max(8, rect.top - 48 - (rootRect?.top ?? 0) + (root?.scrollTop ?? 0)),
+        payload: {
+          paper_id: paperId,
+          page_number: pageNumber,
+          selected_text: selectedText,
+          nearby_text: textForPage(pageTextRef.current, pageNumber),
+        },
+      } satisfies SelectionPopoverState;
+    };
+
+    const handleMouseUp = (_event: ReactMouseEvent<HTMLDivElement>) => {
+      if (toolMode !== "select") {
+        return;
+      }
+      const selection = window.getSelection();
+      if (!selection) {
+        return;
+      }
+      const payload = buildTextSelectionPayload(selection);
+      if (!payload) {
+        return;
+      }
+      latestTextSelectionRef.current = payload.payload;
+      setCompletedStroke(null);
+      setSelectionPopover(payload);
+    };
+
+    const pointFromPointerEvent = (
+      event: PointerEvent,
+      pageElement: HTMLElement,
+    ): NormalizedPoint => {
+      const pageRect = pageElement.getBoundingClientRect();
+      return {
+        x: clampUnit((event.clientX - pageRect.left) / pageRect.width),
+        y: clampUnit((event.clientY - pageRect.top) / pageRect.height),
+      };
+    };
+
+    const strokePageBox = (pageElement: HTMLElement) => {
+      const pageRect = pageElement.getBoundingClientRect();
+      const rootRect = scrollRef.current?.getBoundingClientRect();
+      const root = scrollRef.current;
+      return {
+        left: pageRect.left - (rootRect?.left ?? 0) + (root?.scrollLeft ?? 0),
+        top: pageRect.top - (rootRect?.top ?? 0) + (root?.scrollTop ?? 0),
+        width: pageRect.width,
+        height: pageRect.height,
+      };
+    };
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (toolMode !== "pen" || !paperId) {
+        return;
+      }
+      const target = event.target instanceof Element ? event.target : null;
+      const pageElement = target?.closest<HTMLElement>(".pdf-document-page");
+      if (!pageElement) {
+        return;
+      }
+      event.preventDefault();
+      const pointerId = pointerIdForEvent(event);
+      scrollRef.current?.setPointerCapture?.(pointerId);
+      drawingPointerIdRef.current = pointerId;
+      drawingPageElementRef.current = pageElement;
+      const pageNumber = pageNumberFromElement(pageElement);
+      const stroke: PenStroke = {
+        pageNumber,
+        points: [pointFromPointerEvent(event, pageElement)],
+        pageBox: strokePageBox(pageElement),
+      };
+      setCompletedStroke(null);
+      setSelectionPopover(null);
+      activeStrokeRef.current = stroke;
+      setActiveStroke(stroke);
+    };
+
+    const handlePointerMove = (event: PointerEvent) => {
+      if (toolMode !== "pen" || drawingPointerIdRef.current !== pointerIdForEvent(event)) {
+        return;
+      }
+      const pageElement = drawingPageElementRef.current;
+      if (!pageElement) {
+        return;
+      }
+      event.preventDefault();
+      const current = activeStrokeRef.current;
+      if (!current) {
+        return;
+      }
+      const nextStroke = {
+        ...current,
+        points: [...current.points, pointFromPointerEvent(event, pageElement)],
+      };
+      activeStrokeRef.current = nextStroke;
+      setActiveStroke(nextStroke);
+    };
+
+    const finishPenSelection = (event: PointerEvent) => {
+      const pointerId = pointerIdForEvent(event);
+      if (toolMode !== "pen" || drawingPointerIdRef.current !== pointerId) {
+        return;
+      }
+      drawingPointerIdRef.current = null;
+      drawingPageElementRef.current = null;
+      scrollRef.current?.releasePointerCapture?.(pointerId);
+      const current = activeStrokeRef.current;
+      activeStrokeRef.current = null;
+      setActiveStroke(null);
+      if (!current || current.points.length < 2 || !paperId) {
+        return;
+      }
+      const bbox = bboxForPoints(current.points);
+      if (bbox.width < 0.01 || bbox.height < 0.01) {
+        return;
+      }
+      const canvas = pageCanvasesRef.current.get(current.pageNumber);
+      const imageBase64 = cropCanvasRegion(canvas, bbox);
+      const linkedText = latestTextSelectionRef.current;
+      const payload: Omit<PaperSelectionPayload, "action"> = {
+        paper_id: paperId,
+        page_number: current.pageNumber,
+        selected_text: linkedText?.selected_text ?? null,
+        nearby_text:
+          linkedText?.page_number === current.pageNumber
+            ? linkedText.nearby_text
+            : textForPage(pageTextRef.current, current.pageNumber),
+        section_title: linkedText?.section_title ?? null,
+        region: {
+          points: current.points,
+          bbox,
+          image_base64: imageBase64,
+          content_type: imageBase64 ? "image/png" : null,
+        },
+      };
+      setCompletedStroke(current);
+      setSelectionPopover({
+        left: current.pageBox.left + (bbox.x + bbox.width / 2) * current.pageBox.width,
+        top: Math.max(8, current.pageBox.top + bbox.y * current.pageBox.height - 44),
+        payload,
+      });
+    };
+
+    useEffect(() => {
+      const element = scrollRef.current;
+      if (!element) {
+        return;
+      }
+      element.addEventListener("pointerdown", handlePointerDown);
+      element.addEventListener("pointermove", handlePointerMove);
+      element.addEventListener("pointerup", finishPenSelection);
+      element.addEventListener("pointercancel", finishPenSelection);
+      return () => {
+        element.removeEventListener("pointerdown", handlePointerDown);
+        element.removeEventListener("pointermove", handlePointerMove);
+        element.removeEventListener("pointerup", finishPenSelection);
+        element.removeEventListener("pointercancel", finishPenSelection);
+      };
+    });
+
+    const handleSelectionAction = (action: PaperSelectionAction) => {
+      if (!selectionPopover) {
+        return;
+      }
+      onSelectionActionRef.current?.({
+        ...selectionPopover.payload,
+        action,
+      });
+      setSelectionPopover(null);
+      setCompletedStroke(null);
+      window.getSelection()?.removeAllRanges();
+    };
+
+    const renderStroke = (stroke: PenStroke, className: string) => {
+      if (stroke.points.length < 2) {
+        return null;
+      }
+      const polylinePoints = stroke.points
+        .map((point) => `${point.x * stroke.pageBox.width},${point.y * stroke.pageBox.height}`)
+        .join(" ");
+      return (
+        <svg
+          className={`pdf-document-pen-overlay ${className}`}
+          aria-hidden="true"
+          style={{
+            left: stroke.pageBox.left,
+            top: stroke.pageBox.top,
+            width: stroke.pageBox.width,
+            height: stroke.pageBox.height,
+          }}
+        >
+          <polyline points={polylinePoints} />
+        </svg>
+      );
+    };
+
+    const viewerClassName = `pdf-document-viewer${toolMode === "pen" ? " pen-mode" : ""}${
+      className ? ` ${className}` : ""
+    }`;
 
     return (
-      <div ref={scrollRef} className={viewerClassName} aria-label={title}>
+      <div ref={scrollRef} className={viewerClassName} aria-label={title} onMouseUp={handleMouseUp}>
         <div ref={pagesRef} className="pdf-document-pages" />
+        {completedStroke ? renderStroke(completedStroke, "completed") : null}
+        {activeStroke ? renderStroke(activeStroke, "active") : null}
+        {selectionPopover ? (
+          <div
+            className="pdf-document-selection-popover"
+            style={{ left: selectionPopover.left, top: selectionPopover.top }}
+          >
+            {SELECTION_ACTIONS.map((item) => (
+              <button
+                key={item.action}
+                type="button"
+                onClick={() => handleSelectionAction(item.action)}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+        ) : null}
         {status === "loading" ? <div className="paper-pdf-modal-state">Loading PDF...</div> : null}
         {status === "error" ? <div className="paper-pdf-modal-state error">{error}</div> : null}
       </div>

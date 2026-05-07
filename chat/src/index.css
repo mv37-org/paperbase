@@ -5502,6 +5502,27 @@ textarea {
   background: rgba(27, 22, 17, 0.07);
 }
 
+.paper-pdf-utility-button {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid rgba(27, 22, 17, 0.12);
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.paper-pdf-utility-button:hover,
+.paper-pdf-utility-button:focus-visible,
+.paper-pdf-utility-button.active {
+  border-color: rgba(37, 99, 235, 0.32);
+  background: rgba(37, 99, 235, 0.1);
+  color: #1d4ed8;
+}
+
 .paper-pdf-modal-close {
   width: 30px;
   height: 30px;
@@ -5557,6 +5578,85 @@ textarea {
   line-height: 0;
 }
 
+.pdf-document-text-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  line-height: 1;
+  opacity: 0.01;
+  text-align: initial;
+  user-select: text;
+}
+
+.pdf-document-text-layer span,
+.pdf-document-text-layer br {
+  position: absolute;
+  color: transparent;
+  transform-origin: 0 0;
+  white-space: pre;
+  cursor: text;
+}
+
+.pdf-document-viewer.pen-mode {
+  cursor: crosshair;
+}
+
+.pdf-document-viewer.pen-mode .pdf-document-text-layer {
+  pointer-events: none;
+  user-select: none;
+}
+
+.pdf-document-pen-overlay {
+  position: absolute;
+  z-index: 4;
+  pointer-events: none;
+  overflow: visible;
+}
+
+.pdf-document-pen-overlay polyline {
+  fill: none;
+  stroke: #2563eb;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.pdf-document-pen-overlay.completed polyline {
+  stroke: #0f766e;
+}
+
+.pdf-document-selection-popover {
+  position: absolute;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid rgba(27, 22, 17, 0.14);
+  border-radius: 8px;
+  background: #fffdfa;
+  box-shadow: 0 12px 30px rgba(16, 24, 40, 0.18);
+  transform: translateX(-50%);
+}
+
+.pdf-document-selection-popover button {
+  min-height: 28px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.pdf-document-selection-popover button:hover,
+.pdf-document-selection-popover button:focus-visible {
+  background: rgba(37, 99, 235, 0.1);
+  color: #1d4ed8;
+}
+
 .pdf-document-section-anchor {
   position: absolute;
   left: 0;
@@ -5585,6 +5685,103 @@ textarea {
 
 .paper-pdf-modal-state.error {
   color: #8f2d1f;
+}
+
+.paper-eli5-modal-shell {
+  position: fixed;
+  inset: 0;
+  z-index: 36;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.paper-eli5-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  background: rgba(18, 16, 12, 0.5);
+  cursor: pointer;
+}
+
+.paper-eli5-modal {
+  position: relative;
+  z-index: 1;
+  width: min(760px, calc(100vw - 48px));
+  max-height: min(780px, calc(100dvh - 48px));
+  border: 1px solid rgba(27, 22, 17, 0.12);
+  border-radius: 10px;
+  background: #fffdfa;
+  box-shadow: 0 24px 80px rgba(16, 24, 40, 0.24);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.paper-eli5-modal-header {
+  padding: 14px 16px;
+  border-bottom: 1px solid rgba(27, 22, 17, 0.1);
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.paper-eli5-modal-title {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.paper-eli5-modal-title span {
+  color: #2563eb;
+  font-size: 12px;
+  font-weight: 750;
+  line-height: 1.2;
+}
+
+.paper-eli5-modal-title h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: 17px;
+  line-height: 1.25;
+}
+
+.paper-eli5-modal-close {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 22px;
+  line-height: 1;
+}
+
+.paper-eli5-modal-body {
+  min-height: 220px;
+  overflow: auto;
+  padding: 18px 20px 22px;
+}
+
+.paper-eli5-modal-state {
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.paper-eli5-modal-state.error {
+  color: #8f2d1f;
+}
+
+.paper-eli5-markdown {
+  max-width: none;
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1.65;
 }
 
 .history-section,
@@ -7848,6 +8045,19 @@ button.admin-compact-action.admin-compact-action-with-icon .admin-compact-action
   font-family: "JetBrains Mono", "SFMono-Regular", monospace;
 }
 
+.admin-jobs-child-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.admin-jobs-child-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(140px, 1.2fr) auto minmax(130px, auto);
+  gap: 8px;
+  align-items: center;
+}
+
 .admin-jobs-debug-block {
   display: block;
   max-width: min(100%, 960px);
@@ -9527,10 +9737,9 @@ body.authenticated-theme-dark .sidebar-settings-footer {
   border-top-color: var(--line);
 }
 
-body.authenticated-theme-dark .sidebar .icon-image,
-body.authenticated-theme-dark .paper-drawer .icon-image,
-body.authenticated-theme-dark .chat-stage .icon-image,
-body.authenticated-theme-dark .modal .icon-image {
+body.authenticated-theme-dark .icon-image,
+body.authenticated-theme-dark .chat-thread-tab-icon,
+body.authenticated-theme-dark .chat-thread-menu-icon {
   filter: brightness(0) saturate(100%) invert(92%) sepia(7%) saturate(424%) hue-rotate(182deg)
     brightness(104%) contrast(96%);
 }
@@ -9753,7 +9962,14 @@ body.authenticated-theme-dark .feedback-note-input {
 }
 
 body.authenticated-theme-dark .chat-thread-header {
-  background: #101720;
+  background: #0b1016;
+}
+
+body.authenticated-theme-dark .chat-thread-tab-lottie svg,
+body.authenticated-theme-dark .chat-thread-tab-lottie svg * {
+  color: currentColor;
+  fill: currentColor;
+  stroke: currentColor;
 }
 
 body.authenticated-theme-dark .chat-thread-menu-divider {
@@ -9947,6 +10163,50 @@ body.authenticated-theme-dark .paper-exploration-icon-button.danger:focus-visibl
 
 body.authenticated-theme-dark .paper-exploration-header-vote-button {
   border-color: rgba(223, 232, 244, 0.12);
+  color: var(--text);
+}
+
+body.authenticated-theme-dark .paper-pdf-utility-button,
+body.authenticated-theme-dark .pdf-document-selection-popover {
+  border-color: rgba(223, 232, 244, 0.12);
+  background: #111923;
+  color: var(--text);
+}
+
+body.authenticated-theme-dark .paper-pdf-utility-button:hover,
+body.authenticated-theme-dark .paper-pdf-utility-button:focus-visible,
+body.authenticated-theme-dark .paper-pdf-utility-button.active,
+body.authenticated-theme-dark .pdf-document-selection-popover button:hover,
+body.authenticated-theme-dark .pdf-document-selection-popover button:focus-visible {
+  border-color: rgba(221, 161, 112, 0.34);
+  background: rgba(221, 161, 112, 0.12);
+  color: #dda170;
+}
+
+body.authenticated-theme-dark .paper-eli5-modal {
+  border-color: var(--line);
+  background: var(--paper);
+}
+
+body.authenticated-theme-dark .paper-eli5-modal-header {
+  border-bottom-color: var(--line);
+}
+
+body.authenticated-theme-dark .paper-eli5-modal-title h2,
+body.authenticated-theme-dark .paper-eli5-modal-close,
+body.authenticated-theme-dark .paper-eli5-markdown {
+  color: var(--text);
+}
+
+body.authenticated-theme-dark .paper-eli5-modal-state {
+  color: var(--muted);
+}
+
+body.authenticated-theme-dark .paper-eli5-modal-title span {
+  color: #dda170;
+}
+
+body.authenticated-theme-dark .pdf-document-selection-popover button {
   color: var(--text);
 }
 
@@ -10238,12 +10498,31 @@ body.authenticated-theme-dark .modal-flash.warning {
 }
 
 body.authenticated-theme-dark .message-bubble.user {
-  background: rgba(255, 230, 167, 0.2);
+  background: #182536;
+  color: var(--text);
+  box-shadow: inset 0 0 0 1px rgba(223, 232, 244, 0.08);
 }
 
 body.authenticated-theme-dark .message-bubble.compaction {
   border-color: rgba(223, 232, 244, 0.12);
   background: rgba(255, 255, 255, 0.05);
+}
+
+body.authenticated-theme-dark .message-action-button:hover,
+body.authenticated-theme-dark .message-action-button:focus-visible {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+}
+
+body.authenticated-theme-dark .message-action-button img {
+  filter: brightness(0) saturate(100%) invert(92%) sepia(7%) saturate(424%) hue-rotate(182deg)
+    brightness(104%) contrast(96%);
+  opacity: 0.66;
+}
+
+body.authenticated-theme-dark .message-action-button:hover img,
+body.authenticated-theme-dark .message-action-button:focus-visible img {
+  opacity: 0.94;
 }
 
 body.authenticated-theme-dark .message-markdown blockquote,
@@ -10523,8 +10802,53 @@ body.authenticated-theme-dark .admin-compact-action-secondary:hover:not(:disable
   border-color: rgba(223, 232, 244, 0.2);
 }
 
+body.authenticated-theme-dark .admin-jobs-header {
+  border-bottom: 1px solid rgba(223, 232, 244, 0.12);
+  background: #0b1016;
+}
+
+body.authenticated-theme-dark .admin-jobs-header-title h1,
+body.authenticated-theme-dark .admin-jobs-paper-heading {
+  color: var(--text);
+}
+
+body.authenticated-theme-dark .admin-jobs-header-title p,
+body.authenticated-theme-dark .admin-jobs-paper-meta,
+body.authenticated-theme-dark .admin-jobs-timeline-meta {
+  color: var(--muted);
+}
+
+body.authenticated-theme-dark .admin-jobs-surface,
+body.authenticated-theme-dark .admin-jobs-table-shell {
+  background: #0b1016;
+}
+
+body.authenticated-theme-dark .admin-jobs-timeline-panel {
+  border-top-color: rgba(223, 232, 244, 0.12);
+}
+
 body.authenticated-theme-dark .admin-jobs-chart-shell {
-  background: linear-gradient(180deg, rgba(142, 166, 221, 0.12) 0%, rgba(142, 166, 221, 0) 72%);
+  border-bottom-color: rgba(223, 232, 244, 0.12);
+  background:
+    linear-gradient(180deg, rgba(79, 140, 255, 0.12) 0%, rgba(79, 140, 255, 0) 72%), #0b1016;
+}
+
+body.authenticated-theme-dark .admin-jobs-table {
+  color: var(--text);
+}
+
+body.authenticated-theme-dark .admin-jobs-table th,
+body.authenticated-theme-dark .admin-jobs-table td {
+  border-bottom-color: rgba(223, 232, 244, 0.12);
+}
+
+body.authenticated-theme-dark .admin-jobs-table th {
+  background: #111923;
+  color: rgba(223, 232, 244, 0.72);
+}
+
+body.authenticated-theme-dark .admin-jobs-inline-error {
+  color: #fca5a5;
 }
 
 body.authenticated-theme-dark .admin-jobs-skeleton-chart {
@@ -10578,6 +10902,76 @@ body.authenticated-theme-dark .admin-jobs-row:hover {
 body.authenticated-theme-dark .admin-jobs-row.expanded,
 body.authenticated-theme-dark .admin-jobs-expanded-row td {
   background: rgba(255, 255, 255, 0.04);
+}
+
+body.authenticated-theme-dark .admin-jobs-expanded,
+body.authenticated-theme-dark .admin-jobs-empty {
+  color: var(--muted);
+}
+
+body.authenticated-theme-dark .admin-jobs-debug-block {
+  border-color: rgba(223, 232, 244, 0.12);
+  background: #111923;
+  color: var(--text);
+}
+
+body.authenticated-theme-dark .admin-jobs-trigger-tag {
+  border-color: rgba(223, 232, 244, 0.14);
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(223, 232, 244, 0.84);
+}
+
+body.authenticated-theme-dark .admin-jobs-trigger-tag.trigger-scheduled {
+  border-color: rgba(249, 214, 131, 0.28);
+  background: rgba(249, 214, 131, 0.12);
+  color: #f9d683;
+}
+
+body.authenticated-theme-dark .admin-jobs-trigger-tag.trigger-requested {
+  border-color: rgba(138, 180, 255, 0.28);
+  background: rgba(79, 140, 255, 0.14);
+  color: #8ab4ff;
+}
+
+body.authenticated-theme-dark .admin-jobs-trigger-tag.trigger-internal {
+  border-color: rgba(221, 161, 112, 0.28);
+  background: rgba(221, 161, 112, 0.12);
+  color: #dda170;
+}
+
+body.authenticated-theme-dark .admin-jobs-status {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+}
+
+body.authenticated-theme-dark .admin-jobs-status.status-running,
+body.authenticated-theme-dark .admin-jobs-status.status-updated {
+  background: rgba(79, 140, 255, 0.16);
+  color: #8ab4ff;
+}
+
+body.authenticated-theme-dark .admin-jobs-status.status-pending,
+body.authenticated-theme-dark .admin-jobs-status.status-scheduled {
+  background: rgba(249, 214, 131, 0.14);
+  color: #f9d683;
+}
+
+body.authenticated-theme-dark .admin-jobs-status.status-completed,
+body.authenticated-theme-dark .admin-jobs-status.status-indexed {
+  background: rgba(221, 161, 112, 0.14);
+  color: #dda170;
+}
+
+body.authenticated-theme-dark .admin-jobs-status.status-skipped {
+  background: rgba(251, 191, 36, 0.14);
+  color: #fbbf24;
+}
+
+body.authenticated-theme-dark .admin-jobs-status.status-error,
+body.authenticated-theme-dark .admin-jobs-status.status-stalled,
+body.authenticated-theme-dark .admin-jobs-status.status-failed {
+  background: rgba(248, 113, 113, 0.14);
+  color: #f87171;
 }
 
 body.authenticated-theme-dark .admin-paper-status-summary {

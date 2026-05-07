@@ -4,8 +4,13 @@ from __future__ import annotations
 
 from urllib.parse import urlsplit
 
+from typing import Any
+
 from fastapi import Depends, HTTPException, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from google.auth import exceptions as google_auth_exceptions
+from google.auth.transport import requests as google_auth_requests
+from google.oauth2 import id_token as google_id_token
 
 from .config import Settings, get_settings
 from .models import BrowserUser
@@ -31,6 +36,47 @@ def require_bearer_token(
             detail="Invalid bearer token",
         )
     return credentials.credentials
+
+
+def require_scheduler_oidc(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    expected_email = (settings.scheduler_service_account_email or "").strip()
+    expected_audience = (settings.scheduler_audience or "").strip()
+    if not expected_email or not expected_audience:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Scheduler OIDC auth is not configured",
+        )
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing scheduler OIDC token",
+        )
+
+    try:
+        claims = google_id_token.verify_oauth2_token(
+            credentials.credentials,
+            google_auth_requests.Request(),
+            audience=expected_audience,
+        )
+    except (ValueError, google_auth_exceptions.GoogleAuthError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid scheduler OIDC token",
+        ) from exc
+
+    issuer = claims.get("iss")
+    if issuer not in {"accounts.google.com", "https://accounts.google.com"}:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid scheduler token issuer")
+    if claims.get("aud") != expected_audience:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid scheduler token audience")
+    if claims.get("email") != expected_email:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid scheduler service account")
+    if claims.get("email_verified") is False:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Unverified scheduler service account")
+    return claims
 
 
 def set_browser_session_cookie(response: Response, raw_token: str, settings: Settings) -> None:

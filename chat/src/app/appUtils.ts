@@ -743,7 +743,7 @@ export function summarizeCitationPreview(paper: PaperResponse | null) {
   if (!paper) {
     return "";
   }
-  const source = paper.summary_short || paper.summary_eli5 || paper.abstract || "";
+  const source = paper.summary_short || paper.abstract || "";
   const trimmed = source.trim();
   if (trimmed.length <= 220) {
     return trimmed;

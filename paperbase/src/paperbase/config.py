@@ -119,6 +119,8 @@ class Settings(BaseSettings):
     worker_poll_interval_seconds: int = 10
     worker_auto_sync_latest: bool = Field(default=True)
     worker_initial_sync_latest: bool = Field(default=True)
+    scheduler_service_account_email: str | None = None
+    scheduler_audience: str | None = None
     arxiv_categories: list[str] = Field(default_factory=lambda: list(DEFAULT_AI_CATEGORIES))
     latest_sync_days: int = 7
     latest_sync_limit_per_category: int = 100
@@ -140,14 +142,12 @@ class Settings(BaseSettings):
     # paper wins ties against a zero-cite recent variant when rerank scores are
     # close. Kept small so it can only break near-ties, not flip clear winners.
     rerank_citation_nudge: float = 0.02
-    # Summaries at ingest: "none" (tldr-or-first-sentence, empty ELI5 — intended for mass indexing),
-    # "heuristic" (local text wrangling), or "vertex" (Gemini on Vertex AI, expensive at scale).
-    summary_provider: str = Field(default="none")
-    summary_model: str = "gemini-2.5-flash-lite"
+    # Optional Gemini query expansion for search. Paper indexing never calls an
+    # LLM for summaries; summary_short is derived locally from paper metadata.
+    query_expansion_provider: str = Field(default="none")
+    query_expansion_model: str = "gemini-2.5-flash-lite"
     vertex_project: str | None = None
     vertex_location: str = "us-central1"
-    lazy_summary_on_read: bool = Field(default=True)
-    featured_tier_concurrency: int = 16
     rrf_k: int = 60
     # Citation boost: log10(1+cites) * scale, capped at max. Defaults keep
     # boost <= one RRF rank unit (1/60 ≈ 0.017) so it never dominates relevance.

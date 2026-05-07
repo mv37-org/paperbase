@@ -34,6 +34,7 @@ import type {
   CodeFileListResponse,
   FileContentResponse,
   FileObject,
+  JobResponse,
   PaperAssetResponse,
   PaperPreviewResponse,
   PaperResponse,
@@ -114,7 +115,6 @@ const JOB_TYPE_LABELS: Record<string, string> = {
   latest_sync_schedule: "Latest sync",
   reindex_embeddings: "Reindex embeddings",
   reindex_missing_embeddings: "Reindex missing embeddings",
-  summarize_top_cited: "Summarize top cited",
   sync_latest: "Latest sync",
 };
 
@@ -137,7 +137,6 @@ const JOB_TYPE_DESCRIPTIONS: Record<string, string> = {
   latest_sync_schedule: "Scheduled latest-paper sync from configured arXiv categories.",
   reindex_embeddings: "Rewrite paper and chunk embeddings for indexed papers.",
   reindex_missing_embeddings: "Fill only missing paper and chunk embeddings.",
-  summarize_top_cited: "Summarize already-indexed high-citation papers.",
   sync_latest: "Scheduled latest-paper sync from configured arXiv categories.",
 };
 
@@ -183,6 +182,8 @@ const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 const ADMIN_JOBS_OVERVIEW_LIMIT = 200;
 const ADMIN_JOB_PAPERS_PAGE_SIZE = 100;
+const ADMIN_JOBS_PREFERENCES_STORAGE_KEY = "paperbase.adminJobs.preferences.v1";
+const ADMIN_JOBS_OPTIMISTIC_TTL_MS = 10 * 60 * 1000;
 const CUSTOM_TIME_RANGE_ID = "custom";
 const TARGET_TIMELINE_BUCKET_COUNT = 96;
 const TIMELINE_BUCKETS = [
@@ -254,12 +255,19 @@ type JobsTimeWindow = {
   startMs: number;
 };
 
+type AdminJobsPreferences = {
+  customRange: CustomTimeRangeState;
+  selectedRangeId: JobsTimeRangeId;
+  selectedRefreshId: JobsRefreshIntervalId;
+};
+
 type AdminJobsTheme = {
   accent: string;
   areaFill: string;
   axisText: string;
   barFill: string;
   line: string;
+  outcomeColors: Record<string, string>;
   text: string;
   tooltipBackground: string;
 };
@@ -494,6 +502,55 @@ function customTimeWindow(range: CustomTimeRangeState, nowMs = Date.now()): Jobs
   };
 }
 
+function isJobsTimeRangeId(value: unknown): value is JobsTimeRangeId {
+  return (
+    value === CUSTOM_TIME_RANGE_ID || JOBS_TIME_RANGE_PRESETS.some((preset) => preset.id === value)
+  );
+}
+
+function isJobsRefreshIntervalId(value: unknown): value is JobsRefreshIntervalId {
+  return JOBS_REFRESH_INTERVAL_OPTIONS.some((option) => option.id === value);
+}
+
+function readAdminJobsPreferences(): AdminJobsPreferences {
+  const fallback: AdminJobsPreferences = {
+    customRange: defaultCustomTimeRange(),
+    selectedRangeId: "7d",
+    selectedRefreshId: "30s",
+  };
+  try {
+    const raw = window.localStorage.getItem(ADMIN_JOBS_PREFERENCES_STORAGE_KEY);
+    if (!raw) {
+      return fallback;
+    }
+    const parsed = JSON.parse(raw) as Partial<AdminJobsPreferences>;
+    return {
+      customRange:
+        parsed.customRange &&
+        typeof parsed.customRange.start === "string" &&
+        typeof parsed.customRange.end === "string"
+          ? parsed.customRange
+          : fallback.customRange,
+      selectedRangeId: isJobsTimeRangeId(parsed.selectedRangeId)
+        ? parsed.selectedRangeId
+        : fallback.selectedRangeId,
+      selectedRefreshId: isJobsRefreshIntervalId(parsed.selectedRefreshId)
+        ? parsed.selectedRefreshId
+        : fallback.selectedRefreshId,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function writeAdminJobsPreferences(preferences: AdminJobsPreferences) {
+  try {
+    window.localStorage.setItem(ADMIN_JOBS_PREFERENCES_STORAGE_KEY, JSON.stringify(preferences));
+  } catch {
+    // Ignore storage failures; the controls still work for the current view.
+  }
+}
+
 function parseCsvList(value: string) {
   return value
     .split(/[\n,]/)
@@ -639,7 +696,7 @@ const REQUESTED_JOB_TYPES = new Set([
   "index_paper",
 ]);
 
-const INTERNAL_JOB_TYPES = new Set(["ingest_repo", "reindex_embeddings", "summarize_top_cited"]);
+const INTERNAL_JOB_TYPES = new Set(["ingest_repo", "reindex_embeddings"]);
 
 function adminJobTrigger(job: AdminJobOverviewRow): AdminJobTrigger {
   if (
@@ -825,7 +882,10 @@ function jobsInTimeWindow(jobs: AdminJobOverviewRow[], timeWindow: JobsTimeWindo
     if (job.is_synthetic || job.job_type === "latest_sync_schedule") {
       return true;
     }
-    const timestamp = new Date(job.updated_at).getTime();
+    if (["pending", "running", "stalled", "canceling"].includes(job.display_status)) {
+      return true;
+    }
+    const timestamp = new Date(job.created_at || job.updated_at).getTime();
     return (
       !Number.isNaN(timestamp) && timestamp >= timeWindow.startMs && timestamp <= timeWindow.endMs
     );
@@ -866,6 +926,88 @@ function trackedPaperCountForJob(job: AdminJobOverviewRow) {
     return Math.max(job.indexed_paper_count, 0);
   }
   return null;
+}
+
+function jobTracksPapers(jobType: string) {
+  return [
+    "enrich_missing_metadata",
+    "harvest_author",
+    "harvest_chunk",
+    "harvest_range",
+    "harvest_top_cited",
+    "harvest_venue",
+    "index_paper",
+    "ingest_repo",
+    "reindex_embeddings",
+    "reindex_missing_embeddings",
+    "sync_latest",
+  ].includes(jobType);
+}
+
+function adminJobRowKey(job: Pick<AdminJobOverviewRow, "job_id" | "root_job_id">) {
+  return job.root_job_id || job.job_id;
+}
+
+function isOptimisticAdminJob(job: AdminJobOverviewRow) {
+  return job.details?.optimistic === true;
+}
+
+function optimisticJobStillFresh(job: AdminJobOverviewRow, nowMs = Date.now()) {
+  const timestamp = Date.parse(job.created_at);
+  return Number.isNaN(timestamp) || nowMs - timestamp <= ADMIN_JOBS_OPTIMISTIC_TTL_MS;
+}
+
+function mergeAdminJobRows(serverJobs: AdminJobOverviewRow[], currentJobs: AdminJobOverviewRow[]) {
+  const merged = new Map<string, AdminJobOverviewRow>();
+  for (const job of serverJobs) {
+    merged.set(adminJobRowKey(job), job);
+  }
+  for (const job of currentJobs) {
+    if (!isOptimisticAdminJob(job) || !optimisticJobStillFresh(job)) {
+      continue;
+    }
+    const key = adminJobRowKey(job);
+    if (!merged.has(key)) {
+      merged.set(key, job);
+    }
+  }
+  return Array.from(merged.values()).sort(
+    (left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at),
+  );
+}
+
+function queuedJobOverviewRow(job: JobResponse): AdminJobOverviewRow {
+  const trackingAvailable = jobTracksPapers(job.job_type);
+  return {
+    job_id: job.job_id,
+    root_job_id: job.root_job_id ?? job.job_id,
+    job_type: job.job_type,
+    status: job.status,
+    display_status: job.status,
+    payload: job.payload,
+    error: job.error ?? null,
+    attempts: job.attempts,
+    max_attempts: job.max_attempts,
+    priority: job.priority,
+    created_at: job.created_at,
+    updated_at: job.updated_at,
+    started_at: job.started_at ?? null,
+    finished_at: job.finished_at ?? null,
+    is_synthetic: false,
+    tracking_available: trackingAvailable,
+    indexed_paper_count: trackingAvailable ? 0 : null,
+    tracked_paper_count: trackingAvailable ? 0 : null,
+    paper_outcome_counts: {},
+    latest_status_summary: job.error ? `${job.status}: ${job.error}` : job.status,
+    child_job_count: 0,
+    child_jobs: [],
+    details: {
+      optimistic: true,
+      payload_json: JSON.stringify(job.payload ?? {}, null, 2),
+      root_job_id: job.root_job_id ?? job.job_id,
+      job_ids: [job.job_id],
+    },
+  };
 }
 
 function timelineOutcomeCountsForJob(job: AdminJobOverviewRow): TimelineOutcomeCounts {
@@ -1042,6 +1184,7 @@ function readAdminJobsTheme(): AdminJobsTheme {
       axisText: "#6b6259",
       barFill: "#9fb2e8",
       line: "rgba(27, 22, 17, 0.12)",
+      outcomeColors: {},
       text: "#1b1611",
       tooltipBackground: "#ffffff",
     };
@@ -1057,6 +1200,14 @@ function readAdminJobsTheme(): AdminJobsTheme {
     axisText,
     barFill: isDark ? "#aab9e8" : "#9fb2e8",
     line,
+    outcomeColors: isDark
+      ? {
+          indexed: "#dda170",
+          updated: "#8ab4ff",
+          skipped: "#f9d683",
+          failed: "#f87171",
+        }
+      : {},
     text,
     tooltipBackground: isDark ? "#0f151d" : "#ffffff",
   };
@@ -1197,7 +1348,6 @@ function metadataRows(paper: PaperResponse | null, entry: AdminJobPaperResponse 
     ["Authors", paper?.authors ?? "—"],
     ["Status", paper?.index_status ?? entry?.outcome ?? "—"],
     ["Summary", paper?.summary_short || "—"],
-    ["Simple summary", paper?.summary_eli5 || "—"],
     ["Abstract", paper?.abstract || "—"],
     ["Categories", paper?.categories ?? "—"],
     ["Primary category", paper?.primary_category ?? "—"],
@@ -1235,7 +1385,6 @@ function paperSummaryBlocks(paper: PaperResponse | null) {
   }
   return [
     ["Summary", paper.summary_short],
-    ["Simple summary", paper.summary_eli5],
     ["Abstract", paper.abstract],
   ].filter(([, value]) => Boolean(String(value ?? "").trim()));
 }
@@ -1777,12 +1926,12 @@ function JobsTimeline({
         data: timeline.buckets.map((bucket) => bucket.outcomes[outcome.key]),
         barMaxWidth: 10,
         itemStyle: {
-          color: outcome.color,
+          color: theme.outcomeColors[outcome.key] ?? outcome.color,
           borderRadius: index === TIMELINE_OUTCOMES.length - 1 ? [4, 4, 0, 0] : 0,
         },
         emphasis: {
           itemStyle: {
-            color: outcome.color,
+            color: theme.outcomeColors[outcome.key] ?? outcome.color,
           },
         },
       })),
@@ -1826,10 +1975,15 @@ export function AdminOpsPanel({
   const [jobsLoading, setJobsLoading] = useState(false);
   const [jobsError, setJobsError] = useState("");
   const [expandedJobIds, setExpandedJobIds] = useState<Record<string, boolean>>({});
-  const [selectedRangeId, setSelectedRangeId] = useState<JobsTimeRangeId>("7d");
-  const [selectedRefreshId, setSelectedRefreshId] = useState<JobsRefreshIntervalId>("30s");
-  const [customRange, setCustomRange] = useState<CustomTimeRangeState>(() =>
-    defaultCustomTimeRange(),
+  const [initialJobsPreferences] = useState(() => readAdminJobsPreferences());
+  const [selectedRangeId, setSelectedRangeId] = useState<JobsTimeRangeId>(
+    initialJobsPreferences.selectedRangeId,
+  );
+  const [selectedRefreshId, setSelectedRefreshId] = useState<JobsRefreshIntervalId>(
+    initialJobsPreferences.selectedRefreshId,
+  );
+  const [customRange, setCustomRange] = useState<CustomTimeRangeState>(
+    initialJobsPreferences.customRange,
   );
   const jobsRefreshInFlightRef = useRef(false);
 
@@ -1905,6 +2059,10 @@ export function AdminOpsPanel({
     [selectedRefreshId],
   );
 
+  useEffect(() => {
+    writeAdminJobsPreferences({ customRange, selectedRangeId, selectedRefreshId });
+  }, [customRange, selectedRangeId, selectedRefreshId]);
+
   const refreshJobs = useCallback(
     async ({ showLoading = true }: { showLoading?: boolean } = {}) => {
       if (jobsRefreshInFlightRef.current) {
@@ -1917,7 +2075,7 @@ export function AdminOpsPanel({
       setJobsError("");
       try {
         const response = await loadBrowserAdminJobsOverview(ADMIN_JOBS_OVERVIEW_LIMIT);
-        setJobs(response.jobs);
+        setJobs((current) => mergeAdminJobRows(response.jobs, current));
       } catch (error) {
         setJobsError(panelErrorMessage(error, "Jobs could not be loaded."));
       } finally {
@@ -2128,14 +2286,15 @@ export function AdminOpsPanel({
     createSubmittingRef.current = true;
     setCreateSubmitting(true);
     try {
+      let queuedJob: JobResponse;
       if (createJobKind === "index_paper") {
         const arxivId = String(formData.get("arxiv_id") ?? "").trim();
         if (!arxivId) {
           throw new Error("Enter an arXiv id.");
         }
-        await queueBrowserAdminPaperIndex(arxivId, formData.get("force") === "on");
+        queuedJob = await queueBrowserAdminPaperIndex(arxivId, formData.get("force") === "on");
       } else if (createJobKind === "harvest_range") {
-        await queueBrowserAdminHarvestRange({
+        queuedJob = await queueBrowserAdminHarvestRange({
           categories: parseCsvList(String(formData.get("categories") ?? "")),
           start_date: String(formData.get("start_date") ?? "").trim(),
           end_date: String(formData.get("end_date") ?? "").trim(),
@@ -2144,24 +2303,26 @@ export function AdminOpsPanel({
           source: "arxiv",
         });
       } else if (createJobKind === "harvest_top_cited") {
-        await queueBrowserAdminHarvestTopCited({
+        queuedJob = await queueBrowserAdminHarvestTopCited({
           min_citations: parseIntegerWithDefault(formData.get("min_citations"), 100),
           max_papers: parseOptionalInteger(formData.get("max_papers")),
           chunk_size: parseIntegerWithDefault(formData.get("chunk_size"), 50),
         });
       } else if (createJobKind === "harvest_venue") {
-        await queueBrowserAdminHarvestVenue({
+        queuedJob = await queueBrowserAdminHarvestVenue({
           venue: String(formData.get("venue") ?? "").trim(),
           year: parseIntegerWithDefault(formData.get("year"), 2024),
           max_papers: parseOptionalInteger(formData.get("max_papers")),
           chunk_size: parseIntegerWithDefault(formData.get("chunk_size"), 50),
         });
       } else {
-        await queueBrowserAdminEnrichMissingMetadata(
+        queuedJob = await queueBrowserAdminEnrichMissingMetadata(
           parseIntegerWithDefault(formData.get("limit"), 50000),
           parseIntegerWithDefault(formData.get("min_age_seconds"), 3600),
         );
       }
+      setJobs((current) => mergeAdminJobRows([queuedJobOverviewRow(queuedJob)], current));
+      setJobsLoading(false);
       onNote(`Queued ${activeCreateJob?.label ?? "job"}.`);
       setCreateModalOpen(false);
       setCreateJobKind(null);
@@ -2365,7 +2526,7 @@ export function AdminOpsPanel({
                                   {trackedPaperCount ?? 0}
                                 </button>
                               ) : (
-                                <span>{trackedPaperCount ?? 0}</span>
+                                <span>{trackedPaperCount ?? "-"}</span>
                               )}
                             </td>
                             <td>{formatTimestamp(job.updated_at)}</td>
@@ -2383,6 +2544,22 @@ export function AdminOpsPanel({
                                   ))}
                                   {job.child_job_count > 0 ? (
                                     <div>Sub-jobs: {job.child_job_count}</div>
+                                  ) : null}
+                                  {job.child_jobs && job.child_jobs.length > 0 ? (
+                                    <div className="admin-jobs-child-list">
+                                      {job.child_jobs.map((child) => (
+                                        <div key={child.job_id} className="admin-jobs-child-row">
+                                          <span>{jobTypeLabel(child.job_type)}</span>
+                                          <code>{child.job_id}</code>
+                                          <span
+                                            className={`admin-jobs-status status-${child.display_status}`}
+                                          >
+                                            {statusLabel(child.display_status)}
+                                          </span>
+                                          <span>{formatTimestamp(child.updated_at)}</span>
+                                        </div>
+                                      ))}
+                                    </div>
                                   ) : null}
                                 </div>
                               </td>

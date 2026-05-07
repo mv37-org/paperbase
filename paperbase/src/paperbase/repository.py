@@ -173,7 +173,10 @@ class PaperORM(Base):
     authors: Mapped[str] = mapped_column(Text, default="")
     abstract: Mapped[str] = mapped_column(Text, default="")
     summary_short: Mapped[str] = mapped_column(Text, default="")
+    # Legacy column kept for existing deployments; indexing no longer populates it.
     summary_eli5: Mapped[str] = mapped_column(Text, default="")
+    eli5_markdown: Mapped[str] = mapped_column(Text, default="")
+    eli5_markdown_generated_at: Mapped[Any | None] = mapped_column(DateTime(timezone=True), nullable=True)
     categories: Mapped[str] = mapped_column(Text, default="")
     primary_category: Mapped[str] = mapped_column(String(64), default="")
     published: Mapped[str] = mapped_column(String(32), default="")
@@ -321,7 +324,6 @@ _JOB_TYPE_MAX_ATTEMPTS: dict[str, int] = {
     "enrich_missing_metadata": 5,
     "reindex_missing_embeddings": 2,
     "reindex_embeddings": 2,
-    "summarize_top_cited": 2,
     "harvest_range": 3,
     "harvest_chunk": 5,
     "harvest_top_cited": 3,  # planner — paginates S2, enqueues harvest_chunk per batch
@@ -343,7 +345,6 @@ _JOB_TYPE_PRIORITY: dict[str, int] = {
     "enrich_missing_metadata": 0,
     "reindex_missing_embeddings": 0,
     "reindex_embeddings": 0,
-    "summarize_top_cited": 0,
     "harvest_range": 5,
     "harvest_chunk": 10,
     "harvest_top_cited": 5,  # planner; same priority tier as harvest_range
@@ -1225,6 +1226,14 @@ class PaperRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def get_paper_eli5_markdown(self, paper_id: str) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def update_paper_eli5_markdown(self, paper_id: str, *, markdown: str) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    @abstractmethod
     def get_paper_by_arxiv_id(self, arxiv_id: str) -> PaperResponse | None:
         raise NotImplementedError
 
@@ -1292,10 +1301,6 @@ class PaperRepository(ABC):
 
     @abstractmethod
     def replace_text_chunks(self, paper_id: str, chunks: list[dict[str, Any]]) -> None:
-        raise NotImplementedError
-
-    @abstractmethod
-    def update_summaries(self, paper_id: str, *, summary_short: str, summary_eli5: str) -> PaperResponse | None:
         raise NotImplementedError
 
     @abstractmethod
@@ -1457,15 +1462,6 @@ class PaperRepository(ABC):
         manifest from outliving the repo that produced it. Service
         callers re-enqueue ``ingest_repo`` for non-null new URLs.
         """
-        raise NotImplementedError
-
-    @abstractmethod
-    def list_papers_needing_summary(
-        self,
-        *,
-        limit: int,
-        after: PaperResponse | None = None,
-    ) -> list[PaperResponse]:
         raise NotImplementedError
 
     @abstractmethod
@@ -1855,6 +1851,15 @@ class SqlAlchemyPaperRepository(PaperRepository):
             connection.execute(
                 text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS summary_eli5 TEXT DEFAULT ''")
             )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS eli5_markdown TEXT DEFAULT ''")
+            )
+            connection.execute(
+                text(
+                    "ALTER TABLE IF EXISTS papers "
+                    "ADD COLUMN IF NOT EXISTS eli5_markdown_generated_at TIMESTAMPTZ"
+                )
+            )
             connection.execute(text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS tldr TEXT DEFAULT ''"))
             connection.execute(text(f"ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS embedding {vector_type}"))
             connection.execute(
@@ -2020,7 +2025,6 @@ class SqlAlchemyPaperRepository(PaperRepository):
                         setweight(to_tsvector('english', coalesce(tldr, '')), 'A') ||
                         setweight(to_tsvector('english', coalesce(summary_short, '')), 'A') ||
                         setweight(to_tsvector('english', coalesce(abstract, '')), 'B') ||
-                        setweight(to_tsvector('english', coalesce(summary_eli5, '')), 'B') ||
                         setweight(to_tsvector('simple', coalesce(authors, '')), 'C') ||
                         setweight(to_tsvector('english', coalesce(search_document, '')), 'C')
                     ) STORED
@@ -2359,6 +2363,36 @@ class SqlAlchemyPaperRepository(PaperRepository):
             row = session.get(PaperORM, paper_id)
             return _paper_from_orm(row) if row else None
 
+    def get_paper_eli5_markdown(self, paper_id: str) -> dict[str, Any] | None:
+        with self._session() as session:
+            row = session.get(PaperORM, paper_id)
+            if row is None:
+                return None
+            markdown = row.eli5_markdown or ""
+            return {
+                "paper_id": row.paper_id,
+                "markdown": markdown,
+                "generated_at": row.eli5_markdown_generated_at,
+                "cached": bool(markdown.strip()),
+            }
+
+    def update_paper_eli5_markdown(self, paper_id: str, *, markdown: str) -> dict[str, Any] | None:
+        with self._session() as session:
+            row = session.get(PaperORM, paper_id)
+            if row is None:
+                return None
+            now = utcnow()
+            row.eli5_markdown = markdown
+            row.eli5_markdown_generated_at = now
+            row.updated_at = now
+            session.flush()
+            return {
+                "paper_id": row.paper_id,
+                "markdown": row.eli5_markdown or "",
+                "generated_at": row.eli5_markdown_generated_at,
+                "cached": True,
+            }
+
     def get_paper_by_arxiv_id(self, arxiv_id: str) -> PaperResponse | None:
         with self._session() as session:
             row = session.scalar(select(PaperORM).where(PaperORM.arxiv_id == arxiv_id))
@@ -2428,7 +2462,6 @@ class SqlAlchemyPaperRepository(PaperRepository):
             .outerjoin(upvote_counts, upvote_counts.c.paper_id == PaperORM.paper_id)
             .where(
                 PaperORM.index_status == "indexed",
-                func.coalesce(PaperORM.summary_eli5, "") != "",
                 or_(
                     func.coalesce(PaperORM.semantic_scholar_id, "") != "",
                     PaperORM.citation_count > 0,
@@ -2507,7 +2540,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
             published=paper.published,
             primary_category=paper.primary_category,
             categories=paper.categories,
-            summary_eli5=paper.summary_eli5 or "",
+            summary_short=paper.summary_short or paper.tldr or paper.abstract or "",
             html_url=paper.html_url,
             pdf_url=paper.pdf_url,
             image_url=None,
@@ -2691,17 +2724,6 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     )
 
         _retry_on_deadlock(_do, label="replace_text_chunks")
-
-    def update_summaries(self, paper_id: str, *, summary_short: str, summary_eli5: str) -> PaperResponse | None:
-        with self._session() as session:
-            row = session.get(PaperORM, paper_id)
-            if row is None:
-                return None
-            row.summary_short = summary_short
-            row.summary_eli5 = summary_eli5
-            row.updated_at = utcnow()
-            session.flush()
-            return _paper_from_orm(row)
 
     def update_code_ingest_state(
         self,
@@ -3017,46 +3039,6 @@ class SqlAlchemyPaperRepository(PaperRepository):
             session.flush()
             return _paper_from_orm(row)
 
-    def list_papers_needing_summary(
-        self,
-        *,
-        limit: int,
-        after: PaperResponse | None = None,
-    ) -> list[PaperResponse]:
-        query = (
-            select(PaperORM)
-            .where((PaperORM.summary_eli5 == "") | (PaperORM.summary_eli5.is_(None)))
-            .where(PaperORM.index_status == "indexed")
-        )
-        if after is not None:
-            query = query.where(
-                (PaperORM.influential_citation_count < after.influential_citation_count)
-                | (
-                    (PaperORM.influential_citation_count == after.influential_citation_count)
-                    & (PaperORM.citation_count < after.citation_count)
-                )
-                | (
-                    (PaperORM.influential_citation_count == after.influential_citation_count)
-                    & (PaperORM.citation_count == after.citation_count)
-                    & (PaperORM.published < after.published)
-                )
-                | (
-                    (PaperORM.influential_citation_count == after.influential_citation_count)
-                    & (PaperORM.citation_count == after.citation_count)
-                    & (PaperORM.published == after.published)
-                    & (PaperORM.paper_id > after.paper_id)
-                )
-            )
-        query = query.order_by(
-            PaperORM.influential_citation_count.desc(),
-            PaperORM.citation_count.desc(),
-            PaperORM.published.desc(),
-            PaperORM.paper_id.asc(),
-        ).limit(limit)
-        with self._session() as session:
-            rows = session.scalars(query).all()
-        return [_paper_from_orm(row) for row in rows]
-
     def list_papers_needing_embedding_backfill(
         self,
         *,
@@ -3065,12 +3047,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
         rewrite_existing: bool = False,
         after: PaperResponse | None = None,
     ) -> list[PaperResponse]:
-        """Keyset-paginated backfill frontier. Use the same ordering as
-        ``list_papers_needing_summary`` so both backfill loops share a single
-        advancement story — passing the last returned paper as ``after`` on the
-        next call skips past it regardless of whether its embedding actually
-        got written.
-        """
+        """Keyset-paginated embedding backfill frontier."""
         base_sql = """
             SELECT papers.*
             FROM papers
@@ -3492,7 +3469,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 COUNT(*) AS total_papers,
                 COUNT(*) FILTER (WHERE index_status = 'indexed') AS indexed_papers,
                 COUNT(*) FILTER (WHERE embedding IS NOT NULL) AS papers_with_embedding,
-                COUNT(*) FILTER (WHERE summary_eli5 IS NOT NULL AND summary_eli5 <> '') AS papers_with_summary,
+                COUNT(*) FILTER (WHERE summary_short IS NOT NULL AND summary_short <> '') AS papers_with_summary,
                 MAX(indexed_at) AS last_indexed_at
             FROM papers
             """
@@ -5846,6 +5823,7 @@ class MemoryPaperRepository(PaperRepository):
         self.job_papers: dict[tuple[str, str], JobPaperRecord] = {}
         self.paper_upvotes: dict[tuple[str, str], datetime] = {}
         self.paper_comments: dict[str, PaperCommentRecord] = {}
+        self.paper_eli5_markdown: dict[str, dict[str, Any]] = {}
 
     def init(self) -> None:
         return None
@@ -5948,6 +5926,26 @@ class MemoryPaperRepository(PaperRepository):
     def get_paper(self, paper_id: str) -> PaperResponse | None:
         return self.papers.get(paper_id)
 
+    def get_paper_eli5_markdown(self, paper_id: str) -> dict[str, Any] | None:
+        if paper_id not in self.papers:
+            return None
+        cached = self.paper_eli5_markdown.get(paper_id)
+        if cached is None:
+            return {"paper_id": paper_id, "markdown": "", "generated_at": None, "cached": False}
+        return {**cached, "cached": bool(str(cached.get("markdown") or "").strip())}
+
+    def update_paper_eli5_markdown(self, paper_id: str, *, markdown: str) -> dict[str, Any] | None:
+        if paper_id not in self.papers:
+            return None
+        response = {
+            "paper_id": paper_id,
+            "markdown": markdown,
+            "generated_at": utcnow(),
+            "cached": True,
+        }
+        self.paper_eli5_markdown[paper_id] = response
+        return response
+
     def get_paper_by_arxiv_id(self, arxiv_id: str) -> PaperResponse | None:
         return self.papers.get(canonical_paper_id(arxiv_id))
 
@@ -5990,7 +5988,6 @@ class MemoryPaperRepository(PaperRepository):
             paper
             for paper in self.papers.values()
             if paper.index_status == "indexed"
-            and bool((paper.summary_eli5 or "").strip())
             and bool((paper.semantic_scholar_id or "").strip() or (paper.citation_count and paper.citation_count > 0))
         ]
         floor = datetime.min.replace(tzinfo=timezone.utc)
@@ -6034,7 +6031,7 @@ class MemoryPaperRepository(PaperRepository):
             published=paper.published,
             primary_category=paper.primary_category,
             categories=paper.categories,
-            summary_eli5=paper.summary_eli5 or "",
+            summary_short=paper.summary_short or paper.tldr or paper.abstract or "",
             html_url=paper.html_url,
             pdf_url=paper.pdf_url,
             image_url=None,
@@ -6109,14 +6106,6 @@ class MemoryPaperRepository(PaperRepository):
         for chunk in chunks:
             stamped.append({**chunk, "chunk_id": chunk.get("chunk_id") or new_id("chunk")})
         self.text_chunks[paper_id] = stamped
-
-    def update_summaries(self, paper_id: str, *, summary_short: str, summary_eli5: str) -> PaperResponse | None:
-        existing = self.papers.get(paper_id)
-        if existing is None:
-            return None
-        updated = existing.model_copy(update={"summary_short": summary_short, "summary_eli5": summary_eli5})
-        self.papers[paper_id] = updated
-        return updated
 
     def update_code_ingest_state(
         self,
@@ -6307,27 +6296,6 @@ class MemoryPaperRepository(PaperRepository):
         updated = existing.model_copy(update=updates)
         self.papers[paper_id] = updated
         return updated
-
-    def list_papers_needing_summary(
-        self,
-        *,
-        limit: int,
-        after: PaperResponse | None = None,
-    ) -> list[PaperResponse]:
-        candidates = [
-            paper for paper in self.papers.values() if not paper.summary_eli5 and paper.index_status == "indexed"
-        ]
-        candidates.sort(
-            key=lambda p: (
-                -p.influential_citation_count,
-                -p.citation_count,
-                -int((p.published or "").replace("-", "") or 0),
-                p.paper_id,
-            ),
-        )
-        if after is not None:
-            candidates = [paper for paper in candidates if _paper_needs_summary_after(paper, after)]
-        return candidates[:limit]
 
     def list_papers_needing_embedding_backfill(
         self,
@@ -6589,7 +6557,7 @@ class MemoryPaperRepository(PaperRepository):
     def stats(self) -> dict[str, Any]:
         total = len(self.papers)
         indexed = sum(1 for p in self.papers.values() if p.index_status == "indexed")
-        with_summary = sum(1 for p in self.papers.values() if p.summary_eli5)
+        with_summary = sum(1 for p in self.papers.values() if p.summary_short)
         with_embedding = sum(1 for v in self.paper_embeddings.values() if v is not None)
         total_chunks = sum(len(chunks) for chunks in self.text_chunks.values())
         chunks_with_embedding = sum(
@@ -6638,8 +6606,6 @@ class MemoryPaperRepository(PaperRepository):
                 score += 3.5
             if query_lower in paper.abstract.lower():
                 score += 2.5
-            if query_lower in paper.summary_eli5.lower():
-                score += 2.0
             if query_lower in self.search_documents.get(paper_id, "").lower():
                 score += 1.0
             if score == 0:

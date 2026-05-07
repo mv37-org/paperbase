@@ -27,6 +27,12 @@ const apiMocks = vi.hoisted(() => ({
   queueBrowserAdminPaperIndex: vi.fn(),
 }));
 
+const echartsMocks = vi.hoisted(() => ({
+  render: vi.fn(({ option }: { option?: unknown }) => (
+    <div data-testid="admin-jobs-chart-inner" data-option={JSON.stringify(option)} />
+  )),
+}));
+
 vi.mock("./api", () => ({
   browserAdminPaperAssetContentUrl: apiMocks.browserAdminPaperAssetContentUrl,
   browserPaperPreviewContentUrl: apiMocks.browserPaperPreviewContentUrl,
@@ -47,16 +53,16 @@ vi.mock("./api", () => ({
 }));
 
 vi.mock("echarts-for-react", () => ({
-  default: () => <div data-testid="admin-jobs-chart-inner" />,
+  default: echartsMocks.render,
 }));
 
 import { AdminOpsPanel } from "./AdminOpsPanel";
 
 function adminJob(overrides: Partial<AdminJobOverviewRow> = {}): AdminJobOverviewRow {
   return {
-    job_id: "job_summary_1",
-    root_job_id: "job_summary_1",
-    job_type: "summarize_top_cited",
+    job_id: "job_reindex_1",
+    root_job_id: "job_reindex_1",
+    job_type: "reindex_embeddings",
     status: "completed",
     display_status: "completed",
     payload: {},
@@ -91,6 +97,9 @@ function renderAdminOpsPanel() {
 
 afterEach(() => {
   cleanup();
+  document.body.className = "";
+  document.body.removeAttribute("style");
+  window.localStorage.clear();
   vi.clearAllMocks();
   vi.restoreAllMocks();
 });
@@ -106,14 +115,14 @@ describe("AdminOpsPanel", () => {
     renderAdminOpsPanel();
 
     const describeButton = await screen.findByRole("button", {
-      name: "Describe Summarize top cited",
+      name: "Describe Reindex embeddings",
     });
     expect(describeButton.textContent).toBe("i");
     expect(describeButton.getAttribute("title")).toBe(
-      "Summarize already-indexed high-citation papers.",
+      "Rewrite paper and chunk embeddings for indexed papers.",
     );
     expect(screen.getByRole("tooltip").textContent).toBe(
-      "Summarize already-indexed high-citation papers.",
+      "Rewrite paper and chunk embeddings for indexed papers.",
     );
 
     fireEvent.click(describeButton);
@@ -143,8 +152,9 @@ describe("AdminOpsPanel", () => {
           indexed_paper_count: null,
           tracked_paper_count: null,
           paper_outcome_counts: {},
-          latest_status_summary: "Runs on the worker schedule.",
+          latest_status_summary: "No latest sync run has been queued yet.",
           details: {
+            latest_run_job_id: null,
             next_expected_run_at: "2026-05-06T23:05:28.903908Z",
           },
         }),
@@ -155,9 +165,172 @@ describe("AdminOpsPanel", () => {
     renderAdminOpsPanel();
 
     expect(await screen.findByText("env:latest_sync")).toBeTruthy();
+    const latestSyncRow = screen.getByText("env:latest_sync").closest("tr");
+    expect(latestSyncRow?.textContent).toContain("-");
     expect(screen.getByRole("button", { name: "Describe Latest sync" })).toBeTruthy();
     expect(screen.queryByTestId("admin-jobs-table-skeleton")).toBeNull();
     expect(screen.queryByText("No jobs in this window.")).toBeNull();
+  });
+
+  it("shows grouped child jobs when a root job expands", async () => {
+    apiMocks.loadBrowserAdminJobsOverview.mockResolvedValue({
+      jobs: [
+        adminJob({
+          job_id: "job_harvest_1",
+          root_job_id: "job_harvest_1",
+          job_type: "harvest_range",
+          child_job_count: 2,
+          child_jobs: [
+            {
+              job_id: "job_child_pending",
+              root_job_id: "job_harvest_1",
+              job_type: "harvest_chunk",
+              status: "pending",
+              display_status: "pending",
+              payload: { category: "cs.AI" },
+              attempts: 0,
+              max_attempts: 5,
+              priority: 10,
+              created_at: "2026-05-06T08:01:00Z",
+              updated_at: "2026-05-06T08:01:00Z",
+            },
+            {
+              job_id: "job_child_running",
+              root_job_id: "job_harvest_1",
+              job_type: "harvest_chunk",
+              status: "running",
+              display_status: "running",
+              payload: { category: "cs.LG" },
+              attempts: 1,
+              max_attempts: 5,
+              priority: 10,
+              created_at: "2026-05-06T08:02:00Z",
+              updated_at: "2026-05-06T08:03:00Z",
+            },
+          ],
+        }),
+      ],
+      worker: null,
+    });
+
+    renderAdminOpsPanel();
+
+    fireEvent.click(await screen.findByText("job_harvest_1"));
+
+    expect(await screen.findByText("Sub-jobs: 2")).toBeTruthy();
+    expect(screen.getByText("job_child_pending")).toBeTruthy();
+    expect(screen.getByText("job_child_running")).toBeTruthy();
+  });
+
+  it("uses dark chart colors when the authenticated theme is dark", async () => {
+    document.body.classList.add("authenticated-theme-dark");
+    document.body.style.setProperty("--text", "#edf3fb");
+    document.body.style.setProperty("--muted", "#9aa6b5");
+    document.body.style.setProperty("--line", "rgba(223, 232, 244, 0.12)");
+    vi.spyOn(Date, "now").mockReturnValue(new Date("2026-05-06T12:00:00Z").getTime());
+    apiMocks.loadBrowserAdminJobsOverview.mockResolvedValue({
+      jobs: [
+        adminJob({
+          paper_outcome_counts: { indexed: 1, updated: 1, skipped: 1, failed: 1 },
+          tracked_paper_count: 4,
+        }),
+      ],
+      worker: null,
+    });
+
+    renderAdminOpsPanel();
+
+    await screen.findByText("job_reindex_1");
+    const chart = await screen.findByTestId("admin-jobs-chart-inner");
+    const option = JSON.parse(chart.getAttribute("data-option") ?? "{}") as {
+      series?: Array<{ itemStyle?: { color?: string } }>;
+      tooltip?: { backgroundColor?: string };
+    };
+
+    expect(option.tooltip?.backgroundColor).toBe("#0f151d");
+    expect(option.series?.map((series) => series.itemStyle?.color)).toEqual([
+      "#dda170",
+      "#8ab4ff",
+      "#f9d683",
+      "#f87171",
+    ]);
+  });
+
+  it("keeps queued jobs visible until the overview includes them", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(new Date("2026-05-06T08:05:00Z").getTime());
+    apiMocks.loadBrowserAdminJobsOverview.mockResolvedValue({
+      jobs: [],
+      worker: null,
+    });
+    apiMocks.queueBrowserAdminPaperIndex.mockResolvedValue({
+      job_id: "job_queued_1",
+      root_job_id: "job_queued_1",
+      job_type: "index_paper",
+      status: "pending",
+      payload: { arxiv_id: "2401.12345", force: false },
+      error: null,
+      attempts: 0,
+      max_attempts: 3,
+      priority: -10,
+      created_at: "2026-05-06T08:00:00Z",
+      updated_at: "2026-05-06T08:00:00Z",
+    });
+
+    renderAdminOpsPanel();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Create job" }));
+    fireEvent.click(screen.getByRole("button", { name: /Single paper/i }));
+    fireEvent.change(screen.getByLabelText("arXiv ID"), {
+      target: { value: "2401.12345" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Queue job" }));
+
+    expect(await screen.findByText("job_queued_1")).toBeTruthy();
+    expect(apiMocks.queueBrowserAdminPaperIndex).toHaveBeenCalledWith("2401.12345", false);
+  });
+
+  it("persists the custom jobs window across remounts", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(new Date("2026-05-06T12:00:00Z").getTime());
+    apiMocks.loadBrowserAdminJobsOverview.mockResolvedValue({
+      jobs: [
+        adminJob({
+          job_id: "job_recent",
+          root_job_id: "job_recent",
+          created_at: "2026-05-06T11:00:00Z",
+          updated_at: "2026-05-06T11:30:00Z",
+        }),
+        adminJob({
+          job_id: "job_old",
+          root_job_id: "job_old",
+          created_at: "2026-05-01T11:00:00Z",
+          updated_at: "2026-05-01T11:30:00Z",
+        }),
+      ],
+      worker: null,
+    });
+
+    const rendered = renderAdminOpsPanel();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Jobs window" }));
+    fireEvent.click(screen.getByRole("option", { name: "Custom range" }));
+    fireEvent.change(screen.getByLabelText("Custom range start"), {
+      target: { value: "2026-05-01T00:00" },
+    });
+    fireEvent.change(screen.getByLabelText("Custom range end"), {
+      target: { value: "2026-05-01T23:59" },
+    });
+
+    expect(await screen.findByText("job_old")).toBeTruthy();
+    expect(screen.queryByText("job_recent")).toBeNull();
+
+    rendered.unmount();
+    renderAdminOpsPanel();
+
+    expect(await screen.findByText("job_old")).toBeTruthy();
+    expect(screen.queryByText("job_recent")).toBeNull();
+    expect(screen.getByRole("button", { name: "Jobs window" }).textContent).toContain(
+      "Custom range",
+    );
   });
 
   it("searches papers from the admin header and opens full paper details", async () => {

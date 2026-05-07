@@ -13,10 +13,11 @@ The authenticated sidebar is project-first, with a small signed-in Browse area a
 - `Trending papers` now works for public read and signed-in interaction, with paginated 50-paper `Latest` and `Hottest` feeds over fully indexed and enriched papers, full paper detail, and nested comments/replies
 - allowlisted admins also get an `Admin panel` jobs workspace in that Browse section
 - the admin jobs header includes paper search by paper id, arXiv id, title, or author, and the paper detail modal shows summaries, metadata, code state, stored artifacts, and every tracked job touch
-- the admin tracked-papers drilldown fetches paginated paper pages per job run, including summarized top-cited papers, and expanded job rows expose payloads, Cloud Run log filters, and stored failure traces for debugging
+- the admin tracked-papers drilldown fetches paginated paper pages per job run, and expanded job rows expose payloads, Cloud Run log filters, and stored failure traces for debugging
 - projects expand and collapse independently and lazily fetch mixed project items
 - each project can start new chats, be renamed, or be deleted from the sidebar, but new projects require a connected GitHub repo
 - each project can also start paper explorations from a command-palette style search over paper title or arXiv id
+- paper PDF views expose text-highlight actions, a pen tool for freeform region selection, and an ELI5 modal that streams markdown once, then reuses the backend cache for later opens
 - the new-project modal lists accessible GitHub repos in a custom dropdown, with "Create new repo" as the first option and `main` fixed for newly created repos
 - existing repo selection includes a branch picker, repo/branch refresh, a GitHub access-management link, and optional `.py`/`.ipynb` imports
 - the modal's advanced section exposes inference and Modal sandbox credential entry points for users who have not configured them yet

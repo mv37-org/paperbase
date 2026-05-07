@@ -21,6 +21,7 @@ spec:
       annotations:
         autoscaling.knative.dev/minScale: "1"
         autoscaling.knative.dev/maxScale: "1"
+        run.googleapis.com/cpu-throttling: "false"
     spec:
       containerConcurrency: 1
       timeoutSeconds: 3600
@@ -48,7 +49,7 @@ spec:
             - name: PAPERBASE_WORKER_POLL_INTERVAL_SECONDS
               value: "10"
             - name: PAPERBASE_WORKER_AUTO_SYNC_LATEST
-              value: "true"
+              value: "false"
             - name: PAPERBASE_WORKER_INITIAL_SYNC_LATEST
               value: "false"
             - name: PAPERBASE_LATEST_SYNC_DAYS
@@ -63,21 +64,17 @@ spec:
             # Reranker is not loaded on the worker — only search() uses it.
             - name: PAPERBASE_RERANK_MODEL
               value: ""
-            # Summaries: "none" keeps mass ingest cheap; flip to "vertex" once
-            # PAPERBASE_VERTEX_PROJECT is populated if you want lazy summaries.
-            - name: PAPERBASE_SUMMARY_PROVIDER
+            # Optional Gemini query expansion for search; worker indexing does not call an LLM.
+            - name: PAPERBASE_QUERY_EXPANSION_PROVIDER
               value: none
-            - name: PAPERBASE_SUMMARY_MODEL
+            - name: PAPERBASE_QUERY_EXPANSION_MODEL
               value: gemini-2.5-flash-lite
             - name: PAPERBASE_VERTEX_PROJECT
               value: YOUR_PROJECT_ID
             - name: PAPERBASE_VERTEX_LOCATION
               value: us-central1
-            - name: PAPERBASE_FEATURED_TIER_CONCURRENCY
-              value: "16"
             # Matches the API — BGE-base + docling live in memory, and the
-            # summarize_top_cited / reindex_embeddings paths are the worker's
-            # heaviest users.
+            # reindex_embeddings path is the worker's heaviest user.
           resources:
             limits:
               cpu: "2"

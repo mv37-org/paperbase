@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import difflib
+import base64
 import inspect
 import json
 import logging
@@ -63,6 +64,7 @@ from .llm import (
     ChatModelUsage,
 )
 from .models import (
+    AdminJobChildRow,
     AdminJobOverviewRow,
     AdminJobPaperResponse,
     AdminJobPapersResponse,
@@ -112,6 +114,7 @@ from .models import (
     PaperCommentResponse,
     PaperPreviewResponse,
     PaperResponse,
+    PaperSelectionPayload,
     PaperVoteSummary,
     GitHubRepoBranchSummary,
     GitHubRepoImportCandidate,
@@ -162,7 +165,7 @@ from .security import (
     token_hash,
     verify_password,
 )
-from .summaries import build_paper_summaries
+from .summaries import build_paper_summary
 from .storage import ObjectStore, build_object_store
 from . import sources
 from .errors import JobCanceled, PermanentError, RetryableError
@@ -305,9 +308,12 @@ _ADMIN_TRACKED_PAPER_JOB_TYPES = frozenset(
         "harvest_range",
         "harvest_top_cited",
         "harvest_venue",
-        "summarize_top_cited",
     }
 )
+
+
+def _scheduler_latest_sync_configured(settings: Settings) -> bool:
+    return bool((settings.scheduler_service_account_email or "").strip() and (settings.scheduler_audience or "").strip())
 
 _RECENCY_SIGNAL_RE = re.compile(
     r"\b(recent(?:ly)?|latest|newest|new|this\s+year|202[4-9]|203[0-9])\b",
@@ -365,6 +371,25 @@ def _job_public_payload(payload: dict[str, Any]) -> dict[str, Any]:
     public_payload = dict(payload or {})
     public_payload.pop("__debug", None)
     return public_payload
+
+
+def _admin_child_row(job: JobResponse) -> AdminJobChildRow:
+    return AdminJobChildRow(
+        job_id=job.job_id,
+        root_job_id=job.root_job_id or job.job_id,
+        job_type=job.job_type,
+        status=job.status,
+        display_status=_admin_display_status(job.status),
+        payload=_job_public_payload(job.payload),
+        error=job.error,
+        attempts=job.attempts,
+        max_attempts=job.max_attempts,
+        priority=job.priority,
+        created_at=job.created_at,
+        updated_at=job.updated_at,
+        started_at=job.started_at,
+        finished_at=job.finished_at,
+    )
 
 
 def _job_debug_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1770,6 +1795,8 @@ class PaperbaseService:
         self._project_exec_sessions: dict[str, ProjectExecSession] = {}
         self._project_exec_index: dict[tuple[str, str], set[str]] = {}
         self._project_exec_lock = threading.Lock()
+        self._eli5_locks: dict[str, threading.Lock] = {}
+        self._eli5_locks_lock = threading.Lock()
         self._worker_id = f"{os.environ.get('HOSTNAME') or 'local'}:{os.getpid()}:{new_id('worker')}"
 
     def _call_index_arxiv_paper(
@@ -3736,6 +3763,9 @@ class PaperbaseService:
             item_type="user_message",
             role="user",
             content_text=content,
+            content_json={
+                "paper_selection": request.paper_selection.model_dump()
+            } if request.paper_selection is not None else None,
         )
         updated_thread_title = reply_title if thread.title == "New chat" else None
         if updated_thread_title:
@@ -3852,6 +3882,57 @@ class PaperbaseService:
             parts.extend(["", "## Persisted Source IDs", "", *citation_lines])
         return "\n".join(parts).strip()
 
+    def _paper_selection_prompt_text(self, user_text: str, selection: PaperSelectionPayload) -> str:
+        payload: dict[str, Any] = {
+            "paper_id": selection.paper_id,
+            "page_number": selection.page_number,
+            "action": selection.action,
+            "section_title": selection.section_title or "",
+            "selected_text": (selection.selected_text or "")[:6000],
+            "nearby_text": (selection.nearby_text or "")[:8000],
+        }
+        if selection.region is not None:
+            payload["region"] = {
+                "bbox": selection.region.bbox.model_dump(),
+                "point_count": len(selection.region.points),
+                "has_image": bool(selection.region.image_base64),
+            }
+        return (
+            f"{user_text.strip()}\n\n"
+            "PDF selection context:\n"
+            f"{json.dumps(payload, ensure_ascii=False, indent=2)}"
+        ).strip()
+
+    def _selection_image_block(self, selection: PaperSelectionPayload) -> dict[str, Any] | None:
+        region = selection.region
+        if region is None or not region.image_base64:
+            return None
+        content_type = region.content_type or "image/png"
+        return {
+            "type": "input_image",
+            "image_url": f"data:{content_type};base64,{region.image_base64}",
+        }
+
+    def _chat_content_for_user_item(self, item: ChatThreadItemResponse) -> str | list[dict[str, Any]]:
+        content_json = item.content_json if isinstance(item.content_json, dict) else {}
+        raw_selection = content_json.get("paper_selection")
+        if not isinstance(raw_selection, dict):
+            return item.content_text
+        try:
+            selection = PaperSelectionPayload.model_validate(raw_selection)
+        except Exception:
+            return item.content_text
+        blocks: list[dict[str, Any]] = [
+            {
+                "type": "input_text",
+                "text": self._paper_selection_prompt_text(item.content_text, selection),
+            }
+        ]
+        image_block = self._selection_image_block(selection)
+        if image_block is not None:
+            blocks.append(image_block)
+        return blocks
+
     def _chat_input_item_from_thread_item(self, item: ChatThreadItemResponse) -> dict[str, Any] | None:
         if item.item_type == "compaction":
             return {
@@ -3889,7 +3970,7 @@ class PaperbaseService:
         return {
             "type": "message",
             "role": item.role or "assistant",
-            "content": item.content_text,
+            "content": self._chat_content_for_user_item(item) if item.item_type == "user_message" else item.content_text,
         }
 
     def _chat_turn_context(self, prepared: PreparedChatGeneration) -> ChatTurnContext:
@@ -5841,6 +5922,211 @@ class PaperbaseService:
             "context_window_tokens": _openai_context_window_tokens(self.settings.openai_model),
         }
 
+    def _validate_paper_selection(self, selection: PaperSelectionPayload | None) -> PaperSelectionPayload | None:
+        if selection is None:
+            return None
+        self.get_indexed_paper(selection.paper_id)
+        if not (selection.selected_text or "").strip() and selection.region is None:
+            raise HTTPException(status_code=400, detail="Paper selection must include text or a region")
+        if selection.region is not None and selection.region.image_base64:
+            try:
+                decoded = base64.b64decode(selection.region.image_base64, validate=True)
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail="Paper selection image is not valid base64") from exc
+            if len(decoded) > 750_000:
+                raise HTTPException(status_code=400, detail="Paper selection image is too large")
+        return selection
+
+    def _normalize_chat_request_papers(self, request: SendChatMessageRequest) -> None:
+        selection = self._validate_paper_selection(request.paper_selection)
+        if selection is None:
+            return
+        request.paper_ids = list(dict.fromkeys([*request.paper_ids, selection.paper_id]))
+
+    def _eli5_lock_for(self, paper_id: str) -> threading.Lock:
+        with self._eli5_locks_lock:
+            lock = self._eli5_locks.get(paper_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._eli5_locks[paper_id] = lock
+            return lock
+
+    def _paper_eli5_context_text(self, paper: PaperResponse) -> str:
+        full_text_path = f"papers/{paper.paper_id}/text/full.md"
+        full_text = ""
+        if self.object_store.exists(full_text_path):
+            try:
+                full_text = self.object_store.get_text(full_text_path).strip()
+            except Exception:
+                full_text = ""
+        parts = [
+            f"Title: {paper.title}",
+            f"Authors: {paper.authors}",
+            f"Abstract: {paper.abstract}",
+            f"Short summary: {paper.summary_short or paper.tldr}",
+            "Paper text:",
+            full_text[:24_000],
+        ]
+        return "\n\n".join(part for part in parts if part).strip()
+
+    def _paper_eli5_figure_context(self, paper_id: str) -> tuple[str, list[dict[str, Any]]]:
+        index_path = f"papers/{paper_id}/figures/index.json"
+        if not self.object_store.exists(index_path):
+            return "", []
+        try:
+            figure_index = json.loads(self.object_store.get_text(index_path))
+        except Exception:
+            return "", []
+        if not isinstance(figure_index, list):
+            return "", []
+        figure_lines: list[str] = []
+        image_blocks: list[dict[str, Any]] = []
+        image_content_types = {
+            "png": "image/png",
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "webp": "image/webp",
+        }
+        for raw_figure in figure_index[:8]:
+            if not isinstance(raw_figure, dict):
+                continue
+            figure_id = str(raw_figure.get("figure_id") or "").strip()
+            if not figure_id:
+                continue
+            caption = str(raw_figure.get("caption") or "").strip()
+            caption_path = f"papers/{paper_id}/figures/{figure_id}/caption.md"
+            if self.object_store.exists(caption_path):
+                try:
+                    caption = self.object_store.get_text(caption_path).strip() or caption
+                except Exception:
+                    pass
+            if caption:
+                figure_lines.append(f"- {figure_id}: {caption[:1200]}")
+            if len(image_blocks) >= 4:
+                continue
+            for extension, content_type in image_content_types.items():
+                image_path = f"papers/{paper_id}/figures/{figure_id}/image.{extension}"
+                if not self.object_store.exists(image_path):
+                    continue
+                image_bytes = self.object_store.get_bytes(image_path)
+                if len(image_bytes) > 750_000:
+                    break
+                image_blocks.append(
+                    {
+                        "type": "input_image",
+                        "image_url": f"data:{content_type};base64,{base64.b64encode(image_bytes).decode('ascii')}",
+                    }
+                )
+                break
+        if not figure_lines and not image_blocks:
+            return "", []
+        figure_text = "Indexed figure context:\n" + "\n".join(figure_lines)
+        return figure_text.strip(), image_blocks
+
+    def _paper_eli5_prompt(self, paper: PaperResponse) -> Prompt:
+        figure_text, image_blocks = self._paper_eli5_figure_context(paper.paper_id)
+        text_blocks = [
+            self._paper_eli5_context_text(paper),
+            figure_text,
+            (
+                "Write an explanation of the whole paper like the reader is five. "
+                "Use the indexed figure images as visual evidence when they are provided."
+            ),
+        ]
+        content: list[dict[str, Any]] = [
+            {
+                "type": "input_text",
+                "text": "\n\n".join(part for part in text_blocks if part).strip(),
+            }
+        ]
+        content.extend(image_blocks)
+        return Prompt(
+            input=[{"type": "message", "role": "user", "content": content}],
+            base_instructions=(
+                "You generate an ELI5 explanation for an AI/ML research paper. "
+                "Return Markdown only. Write 3 to 5 short paragraphs, each 2 to 4 sentences. "
+                "Use simple concrete analogies, explain the main idea, why it matters, how the method works, "
+                "and what the results mean. Do not invent facts that are not in the provided paper context. "
+                "Do not output JSON, tables, or a bullet list."
+            ),
+            tools=[],
+            tool_choice=None,
+            parallel_tool_calls=False,
+        )
+
+    def _cached_paper_eli5_markdown(self, paper_id: str) -> dict[str, Any]:
+        cached = self.repository.get_paper_eli5_markdown(paper_id)
+        if cached is None:
+            raise HTTPException(status_code=404, detail=f"Paper {paper_id} not found")
+        return cached
+
+    def _store_paper_eli5_markdown(self, paper_id: str, markdown: str) -> dict[str, Any]:
+        stored = self.repository.update_paper_eli5_markdown(paper_id, markdown=markdown)
+        if stored is None:
+            raise HTTPException(status_code=404, detail=f"Paper {paper_id} not found")
+        return stored
+
+    def stream_paper_eli5_markdown(
+        self,
+        user: BrowserUser,
+        paper_id: str,
+    ) -> Iterator[tuple[str, dict[str, Any]]]:
+        paper = self.get_indexed_paper(paper_id)
+        cached = self._cached_paper_eli5_markdown(paper.paper_id)
+        if str(cached.get("markdown") or "").strip():
+            payload = {**cached, "cached": True}
+            yield "cached", payload
+            yield "done", payload
+            return
+
+        api_key, api_key_state = self._choose_openai_api_key(user)
+        if not api_key:
+            yield "api_key_required", {
+                "state": api_key_state,
+                "has_openai_api_key": self.repository.get_openai_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
+            }
+            return
+
+        lock = self._eli5_lock_for(paper.paper_id)
+        with lock:
+            cached = self._cached_paper_eli5_markdown(paper.paper_id)
+            if str(cached.get("markdown") or "").strip():
+                payload = {**cached, "cached": True}
+                yield "cached", payload
+                yield "done", payload
+                return
+
+            prompt = self._paper_eli5_prompt(paper)
+            chunks: list[str] = []
+            final_item_text = ""
+            yield "started", {"paper_id": paper.paper_id}
+            try:
+                for event in self._chat_model_stream_response(api_key=api_key, prompt=prompt):
+                    if event.type == "response.output_text.delta" and event.delta:
+                        chunks.append(event.delta)
+                        yield "delta", {"paper_id": paper.paper_id, "delta": event.delta}
+                    elif (
+                        event.type == "response.output_item.done"
+                        and event.item is not None
+                        and event.item.item_type == "assistant_message"
+                        and event.item.content_text
+                    ):
+                        final_item_text = event.item.content_text
+            except Exception as exc:
+                logger.warning(
+                    "Paper ELI5 generation failed",
+                    extra={"event": "paper.eli5.failed", "paper_id": paper.paper_id, "error": str(exc)},
+                )
+                yield "error", {"paper_id": paper.paper_id, "detail": "ELI5 generation failed."}
+                return
+
+            markdown = ("".join(chunks) or final_item_text).strip()
+            if not markdown:
+                yield "error", {"paper_id": paper.paper_id, "detail": "ELI5 generation returned no text."}
+                return
+            stored = self._store_paper_eli5_markdown(paper.paper_id, markdown)
+            yield "done", {**stored, "cached": False}
+
     def send_chat_message(
         self, user: BrowserUser, thread_id: str, request: SendChatMessageRequest
     ) -> SendChatMessageResponse:
@@ -5852,6 +6138,7 @@ class PaperbaseService:
                 thread_id=thread_id,
                 state=api_key_state,
             )
+        self._normalize_chat_request_papers(request)
         # Drain mention-resolution events. The non-streaming path can't
         # surface them to the UI, so just run the side effect (fetch + index)
         # and discard the per-paper events.
@@ -5906,6 +6193,7 @@ class PaperbaseService:
                 ).model_dump(mode="json"),
             )
             return
+        self._normalize_chat_request_papers(request)
         # Forward per-paper resolve-and-index events to the SSE stream so the
         # UI can show a "Fetching paper…" state for any unindexed mention.
         yield from self._ensure_mentioned_papers_indexed(request.paper_ids)
@@ -6854,149 +7142,6 @@ class PaperbaseService:
             context="\n\n".join(blocks),
             hits=hits,
         )
-
-    def enqueue_summarize_top_cited_job(self, *, limit: int = 500_000) -> JobResponse:
-        job = self.repository.create_job("summarize_top_cited", {"limit": limit})
-        logger.info(
-            "Created summarize_top_cited job",
-            extra={
-                "event": "jobs.summarize_top_cited.created",
-                "job_id": job.job_id,
-                "limit": limit,
-            },
-        )
-        return job
-
-    def summarize_top_cited(self, *, limit: int, tracking_job: JobResponse | None = None) -> dict[str, int]:
-        from concurrent.futures import ThreadPoolExecutor, FIRST_COMPLETED, wait
-
-        from .summaries import generate_summary_on_demand
-
-        if self.settings.summary_provider != "vertex":
-            logger.warning(
-                "summarize_top_cited invoked but summary_provider is not 'vertex'; nothing to do",
-                extra={"event": "summarize_top_cited.noop", "provider": self.settings.summary_provider},
-            )
-            return {"processed": 0, "updated": 0, "failed": 0}
-
-        concurrency = max(1, self.settings.featured_tier_concurrency)
-        # Sliding window of in-flight futures so we never buffer all of `limit`
-        # papers and their futures in memory at once. Page size matches the
-        # window so each DB read matches what the pool is about to process.
-        window = max(concurrency * 4, 64)
-
-        logger.info(
-            "Starting summarize_top_cited",
-            extra={
-                "event": "summarize_top_cited.start",
-                "limit": limit,
-                "concurrency": concurrency,
-                "in_flight_window": window,
-            },
-        )
-
-        def _summarize_one(paper: PaperResponse) -> tuple[PaperResponse, tuple[str, str] | None]:
-            try:
-                return paper, generate_summary_on_demand(paper, self.settings)
-            except Exception as exc:
-                logger.warning(
-                    "featured-tier paper summary failed",
-                    extra={
-                        "event": "summarize_top_cited.paper_failed",
-                        "paper_id": paper.paper_id,
-                        "error": str(exc),
-                    },
-                )
-                return paper, None
-
-        processed = 0
-        updated = 0
-        failed = 0
-        in_flight: set = set()
-        remaining = limit
-        # Keyset cursor over the same ordering list_papers_needing_summary
-        # uses. Advances past every fetched paper regardless of whether its
-        # summarization succeeded, so the loop cannot stall on a failed
-        # frontier (rows that failed to summarize still match the predicate).
-        after: PaperResponse | None = None
-
-        def _drain(wait_all: bool) -> None:
-            nonlocal processed, updated, failed
-            if not in_flight:
-                return
-            mode = None if wait_all else FIRST_COMPLETED
-            done, still_in_flight = wait(in_flight, return_when=mode) if mode else (set(in_flight), set())
-            for future in done:
-                paper, result = future.result()
-                processed += 1
-                if result is None:
-                    failed += 1
-                    if tracking_job is not None:
-                        self.repository.record_job_paper(
-                            tracking_job.job_id,
-                            paper.paper_id,
-                            outcome="failed",
-                            arxiv_id=paper.arxiv_id,
-                            title=paper.title,
-                        )
-                else:
-                    short, eli5 = result
-                    updated_paper = self.repository.update_summaries(
-                        paper.paper_id,
-                        summary_short=short,
-                        summary_eli5=eli5,
-                    )
-                    if updated_paper is not None:
-                        updated += 1
-                        if tracking_job is not None:
-                            self.repository.record_job_paper(
-                                tracking_job.job_id,
-                                updated_paper.paper_id,
-                                outcome="updated",
-                                arxiv_id=updated_paper.arxiv_id,
-                                title=updated_paper.title,
-                            )
-                if processed % 500 == 0:
-                    logger.info(
-                        "summarize_top_cited progress",
-                        extra={
-                            "event": "summarize_top_cited.progress",
-                            "processed": processed,
-                            "updated": updated,
-                            "failed": failed,
-                        },
-                    )
-            in_flight.difference_update(done)
-
-        with ThreadPoolExecutor(max_workers=concurrency) as pool:
-            while remaining > 0:
-                self._raise_if_current_job_canceled()
-                page_size = min(window, remaining)
-                batch = self.repository.list_papers_needing_summary(limit=page_size, after=after)
-                if not batch:
-                    break
-                for paper in batch:
-                    self._raise_if_current_job_canceled()
-                    if len(in_flight) >= window:
-                        _drain(wait_all=False)
-                    in_flight.add(pool.submit(_summarize_one, paper))
-                # Advance the keyset cursor even if some submissions failed;
-                # failed papers still match the predicate, so without advancing
-                # the next fetch would return the same frontier forever.
-                after = batch[-1]
-                remaining -= len(batch)
-            _drain(wait_all=True)
-
-        logger.info(
-            "Completed summarize_top_cited",
-            extra={
-                "event": "summarize_top_cited.completed",
-                "processed": processed,
-                "updated": updated,
-                "failed": failed,
-            },
-        )
-        return {"processed": processed, "updated": updated, "failed": failed}
 
     def enqueue_harvest_range_job(
         self,
@@ -8012,8 +8157,6 @@ class PaperbaseService:
                     ),
                     tracking_job=job,
                 )
-            elif job.job_type == "summarize_top_cited":
-                self.summarize_top_cited(limit=int(job.payload.get("limit", 500_000)), tracking_job=job)
             elif job.job_type == "harvest_range":
                 # Accept legacy ``limit_per_category`` payloads written
                 # before the rename so in-flight planner jobs still run
@@ -8312,6 +8455,7 @@ class PaperbaseService:
             indexed_paper_count = paper_outcome_counts.get("indexed", 0)
             tracked_paper_count = sum(paper_outcome_counts.values())
 
+        child_jobs = [_admin_child_row(job) for job in jobs if job.job_id != representative.job_id]
         child_job_ids = [job.job_id for job in jobs if job.job_id != representative.job_id]
         latest_error_debug = _job_debug_payload(latest_error_job.payload) if latest_error_job is not None else {}
         details: dict[str, Any] = {
@@ -8415,7 +8559,8 @@ class PaperbaseService:
             tracked_paper_count=tracked_paper_count,
             paper_outcome_counts=paper_outcome_counts,
             latest_status_summary=_latest_status_summary(status_counts, total=len(jobs)),
-            child_job_count=max(0, len(jobs) - 1),
+            child_job_count=len(child_jobs),
+            child_jobs=child_jobs,
             details=details,
         )
 
@@ -8426,7 +8571,7 @@ class PaperbaseService:
         sync_jobs: list[JobResponse] = []
 
         for job in recent_jobs:
-            if self.settings.worker_auto_sync_latest and job.job_type == "sync_latest":
+            if job.job_type == "sync_latest":
                 sync_jobs.append(job)
                 continue
             if job.job_type == "harvest_chunk" and job.root_job_id is None:
@@ -8437,7 +8582,8 @@ class PaperbaseService:
         now = utcnow()
         rows = [self._admin_row_from_jobs(jobs, worker_summary=worker_summary, now=now) for jobs in grouped.values()]
 
-        if self.settings.worker_auto_sync_latest:
+        scheduler_configured = _scheduler_latest_sync_configured(self.settings)
+        if scheduler_configured or sync_jobs:
             latest_sync = sync_jobs[0] if sync_jobs else None
             sync_status_counts: dict[str, int] = {}
             for job in sync_jobs:
@@ -8471,7 +8617,7 @@ class PaperbaseService:
                 latest_run_updated_at = latest_sync.updated_at
                 latest_run_job_id = latest_sync.job_id
             else:
-                next_expected_run_at = now
+                next_expected_run_at = None
                 latest_run_status = None
                 latest_run_updated_at = None
                 latest_run_job_id = None
@@ -8499,10 +8645,14 @@ class PaperbaseService:
                     latest_status_summary=(
                         _latest_status_summary(sync_status_counts, total=len(sync_jobs))
                         if sync_jobs
-                        else "Runs on the worker schedule."
+                        else "No latest sync run has been queued yet."
                     ),
                     child_job_count=0,
+                    child_jobs=[],
                     details={
+                        "scheduler_configured": scheduler_configured,
+                        "scheduler_audience": self.settings.scheduler_audience,
+                        "scheduler_service_account_email": self.settings.scheduler_service_account_email,
                         "sync_interval_seconds": self.settings.sync_interval_seconds,
                         "categories": self.settings.arxiv_categories,
                         "days": self.settings.latest_sync_days,
@@ -8762,9 +8912,9 @@ class PaperbaseService:
             metadata.source_type = extraction.source_type
             metadata.index_status = "indexed"
             metadata.indexed_at = utcnow()
-            metadata.summary_short, metadata.summary_eli5 = build_paper_summaries(
-                metadata, extraction, self.settings
-            )
+            metadata.summary_short = build_paper_summary(metadata, extraction, self.settings)
+            # Keep the legacy response/DB field empty; Paperbase no longer generates ELI5 summaries.
+            metadata.summary_eli5 = ""
 
             # Populate ``code_url`` + ``code_url_source`` with the 3-layer
             # decision from #46. Priority order:
@@ -9409,10 +9559,6 @@ class PaperbaseService:
         paper = self.repository.get_paper(paper_id)
         if paper is None:
             raise HTTPException(status_code=404, detail=f"Paper {paper_id} not found")
-        if self._should_lazy_summarize(paper):
-            upgraded = self._lazy_summarize(paper)
-            if upgraded is not None:
-                return upgraded
         return paper
 
     def get_indexed_paper(self, paper_id: str) -> PaperResponse:
@@ -9420,27 +9566,6 @@ class PaperbaseService:
         if paper.index_status != "indexed":
             raise HTTPException(status_code=404, detail=f"Paper {paper_id} is not indexed")
         return paper
-
-    def _should_lazy_summarize(self, paper: PaperResponse) -> bool:
-        if not self.settings.lazy_summary_on_read:
-            return False
-        if self.settings.summary_provider != "vertex":
-            return False
-        return not paper.summary_eli5
-
-    def _lazy_summarize(self, paper: PaperResponse) -> PaperResponse | None:
-        from .summaries import generate_summary_on_demand
-
-        result = generate_summary_on_demand(paper, self.settings)
-        if result is None:
-            return None
-        short, eli5 = result
-        updated = self.repository.update_summaries(paper.paper_id, summary_short=short, summary_eli5=eli5)
-        logger.info(
-            "Lazy summary generated",
-            extra={"event": "summary.lazy", "paper_id": paper.paper_id},
-        )
-        return updated or paper
 
     def get_manifest(self, paper_id: str) -> ManifestResponse:
         path = f"papers/{paper_id}/manifest.json"

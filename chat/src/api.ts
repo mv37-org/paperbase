@@ -22,8 +22,10 @@ import type {
   PaperAssetResponse,
   PaperCommentsResponse,
   PaperDiscussionResponse,
+  PaperEli5Response,
   PaperPreviewResponse,
   PaperResponse,
+  PaperSelectionPayload,
   PaperVoteSummary,
   ProjectItemKind,
   ProjectItemPageResponse,
@@ -68,6 +70,7 @@ export type SendThreadMessagePayload = {
   include_uploads: boolean;
   include_papers: boolean;
   paper_ids?: string[];
+  paper_selection?: PaperSelectionPayload | null;
 };
 
 export type ChatFeedbackPayload = {
@@ -81,6 +84,20 @@ export type ChatFeedbackPayload = {
 type StreamEventHandler = <T extends keyof ChatStreamEventMap>(
   eventName: T,
   payload: ChatStreamEventMap[T],
+) => void;
+
+export type PaperEli5StreamEventMap = {
+  started: { paper_id: string };
+  delta: { paper_id: string; delta: string };
+  done: PaperEli5Response;
+  cached: PaperEli5Response;
+  api_key_required: { state: string; has_openai_api_key: boolean };
+  error: { paper_id: string; detail: string };
+};
+
+type PaperEli5StreamEventHandler = (
+  eventName: keyof PaperEli5StreamEventMap,
+  payload: PaperEli5StreamEventMap[keyof PaperEli5StreamEventMap],
 ) => void;
 
 export class StreamingChatError extends Error {
@@ -372,6 +389,7 @@ function chatRequestBody(payload: SendThreadMessagePayload) {
     include_uploads: payload.include_uploads,
     include_papers: payload.include_papers,
     paper_ids: payload.paper_ids ?? [],
+    paper_selection: payload.paper_selection ?? null,
   });
 }
 
@@ -792,6 +810,94 @@ export async function sendThreadMessageStream(
   }
 }
 
+export async function streamBrowserPaperEli5(
+  paperId: string,
+  onEvent: PaperEli5StreamEventHandler,
+  options: { signal?: AbortSignal } = {},
+) {
+  let response: Response;
+  try {
+    response = await fetch(
+      `${API_BASE}/v1/browser/papers/${encodeURIComponent(paperId)}/eli5/stream`,
+      {
+        method: "POST",
+        credentials: "include",
+        cache: "no-store",
+        headers: buildHeaders({ method: "POST" }),
+        signal: options.signal,
+      },
+    );
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new StreamingChatAbortError();
+    }
+    throw error;
+  }
+
+  if (!response.ok) {
+    handleUnauthorized(response);
+    const body = await parsePayload(response);
+    throw new StreamingChatError(normalizeErrorMessage(body, "ELI5 request failed"), true);
+  }
+
+  if (!response.body) {
+    throw new StreamingChatError("ELI5 response body was empty.", true);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let sawEvent = false;
+
+  const emitBlock = (block: string) => {
+    const parsed = parseSseEvent(block);
+    if (!parsed) {
+      return;
+    }
+    sawEvent = true;
+    onEvent(
+      parsed.eventName as keyof PaperEli5StreamEventMap,
+      parsed.payload as PaperEli5StreamEventMap[keyof PaperEli5StreamEventMap],
+    );
+  };
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done }).replace(/\r\n/g, "\n");
+
+      let boundary = buffer.indexOf("\n\n");
+      while (boundary >= 0) {
+        const block = buffer.slice(0, boundary).trim();
+        buffer = buffer.slice(boundary + 2);
+        if (block) {
+          emitBlock(block);
+        }
+        boundary = buffer.indexOf("\n\n");
+      }
+
+      if (done) {
+        break;
+      }
+    }
+
+    const trailing = buffer.trim();
+    if (trailing) {
+      emitBlock(trailing);
+    }
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new StreamingChatAbortError();
+    }
+    throw new StreamingChatError(
+      error instanceof Error ? error.message : "ELI5 request failed",
+      !sawEvent,
+    );
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 export async function uploadDocument(file: File) {
   const body = new FormData();
   body.append("file", file);
@@ -934,8 +1040,11 @@ function legacyAdminOverviewRow(job: JobResponse): AdminJobOverviewRow {
     is_synthetic: false,
     tracking_available: false,
     indexed_paper_count: null,
+    tracked_paper_count: null,
+    paper_outcome_counts: {},
     latest_status_summary: job.error ? `${job.status}: ${job.error}` : job.status,
     child_job_count: 0,
+    child_jobs: [],
     details: job.payload ?? {},
   };
 }

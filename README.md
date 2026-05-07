@@ -146,6 +146,7 @@ The browser chat experience is project-based:
 - existing repos expose a branch picker and optional import selection for `.py` and `.ipynb` files; new repos start on a fixed `main` branch
 - the sidebar lazily loads mixed project items per project, persists the last selected project across reloads, and reopens with only that project tree expanded by default
 - each project can start paper explorations from a command-palette style search over paper title or arXiv id
+- paper explorations and PDF modals support text highlights, pen-drawn region selections with cropped image context, and an on-demand ELI5 button that streams a 3-5 paragraph markdown explanation generated from the signed-in user's OpenAI key and caches it on the paper row
 - the product exposes a public-readable `Trending papers` feed of fully indexed and enriched papers, with a landing-page top-10 `Latest`/`Hottest` preview and 50-paper signed-in feed pages by publication date or upvotes; signed-in users can upvote, comment, and reply, and allowlisted admins also get a non-tabbed `Admin panel` jobs workspace
 - the empty first-chat state now shows a dismissible setup checklist for GitHub, inference, and sandbox access so users can connect required services before the coding agent hits save/run failures
 - project descriptions are snapped onto new sessions as per-session prompt context, so later project edits do not rewrite existing chats
@@ -196,5 +197,45 @@ Cloud Run stays split by service, even though the codebase is shared:
 
 - `paperbase-api` deploys the API entrypoint
 - `paperbase-worker` deploys the worker entrypoint
+
+Daily latest-paper sync is triggered by Cloud Scheduler calling the existing API service:
+
+- target: `POST /v1/internal/scheduler/sync/latest`
+- schedule: `0 3 * * *` in `America/Los_Angeles`
+- auth: Cloud Scheduler OIDC token from `PAPERBASE_SCHEDULER_SERVICE_ACCOUNT_EMAIL`
+- audience: `PAPERBASE_SCHEDULER_AUDIENCE`
+
+Keep `PAPERBASE_WORKER_AUTO_SYNC_LATEST=false` and `PAPERBASE_WORKER_INITIAL_SYNC_LATEST=false`
+on both API and worker in deployed environments. The scheduler endpoint is the automatic
+enqueue source; `paperbase-worker` only consumes queued jobs. The worker should deploy with
+Cloud Run CPU always allocated (`--no-cpu-throttling`) so queued work continues outside HTTP
+request handling.
+
+Example production scheduler setup:
+
+```bash
+PROJECT_ID="sudo-476714"
+REGION="us-central1"
+SCHEDULER_SA="paperbase-scheduler@${PROJECT_ID}.iam.gserviceaccount.com"
+SCHEDULER_AUDIENCE="https://paperbase.mv37.org"
+SCHEDULER_URI="https://paperbase.mv37.org/v1/internal/scheduler/sync/latest"
+
+gcloud iam service-accounts create paperbase-scheduler --project="${PROJECT_ID}"
+gcloud run services update paperbase-api \
+  --region="${REGION}" \
+  --update-env-vars="PAPERBASE_WORKER_AUTO_SYNC_LATEST=false,PAPERBASE_WORKER_INITIAL_SYNC_LATEST=false,PAPERBASE_SCHEDULER_SERVICE_ACCOUNT_EMAIL=${SCHEDULER_SA},PAPERBASE_SCHEDULER_AUDIENCE=${SCHEDULER_AUDIENCE}"
+gcloud run services update paperbase-worker \
+  --region="${REGION}" \
+  --no-cpu-throttling \
+  --update-env-vars="PAPERBASE_WORKER_AUTO_SYNC_LATEST=false,PAPERBASE_WORKER_INITIAL_SYNC_LATEST=false"
+gcloud scheduler jobs create http paperbase-sync-latest-daily \
+  --location="${REGION}" \
+  --schedule="0 3 * * *" \
+  --time-zone="America/Los_Angeles" \
+  --uri="${SCHEDULER_URI}" \
+  --http-method=POST \
+  --oidc-service-account-email="${SCHEDULER_SA}" \
+  --oidc-token-audience="${SCHEDULER_AUDIENCE}"
+```
 
 Use the single repo-root env template as the source of truth, then apply the relevant sections to each Cloud Run service instead of maintaining separate tracked env-example files.

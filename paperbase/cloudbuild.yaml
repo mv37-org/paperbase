@@ -133,6 +133,7 @@ steps:
           --concurrency="${_WORKER_CONCURRENCY}"
           --min-instances="${_WORKER_MIN_INSTANCES}"
           --max-instances="${_WORKER_MAX_INSTANCES}"
+          --no-cpu-throttling
           --no-allow-unauthenticated
           --quiet
         )

@@ -1475,7 +1475,6 @@ def _collect_sql_explains(
             setweight(to_tsvector('english', coalesce(tldr, '')), 'A') ||
             setweight(to_tsvector('english', coalesce(summary_short, '')), 'A') ||
             setweight(to_tsvector('english', coalesce(abstract, '')), 'B') ||
-            setweight(to_tsvector('english', coalesce(summary_eli5, '')), 'B') ||
             setweight(to_tsvector('simple', coalesce(authors, '')), 'C') ||
             setweight(to_tsvector('english', coalesce(search_document, '')), 'C')
         """

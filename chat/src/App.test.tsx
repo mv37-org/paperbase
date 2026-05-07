@@ -126,6 +126,7 @@ const apiMocks = vi.hoisted(() => {
     runPythonFile: vi.fn(),
     sendThreadMessage: vi.fn(),
     sendThreadMessageStream: vi.fn(),
+    streamBrowserPaperEli5: vi.fn(),
     submitChatFeedback: vi.fn(),
     suggestBrowserPapers: vi.fn(),
     StreamingChatAbortError: MockStreamingChatAbortError,
@@ -202,6 +203,7 @@ vi.mock("./api", () => ({
   runPythonFile: apiMocks.runPythonFile,
   sendThreadMessage: apiMocks.sendThreadMessage,
   sendThreadMessageStream: apiMocks.sendThreadMessageStream,
+  streamBrowserPaperEli5: apiMocks.streamBrowserPaperEli5,
   submitChatFeedback: apiMocks.submitChatFeedback,
   suggestBrowserPapers: apiMocks.suggestBrowserPapers,
   StreamingChatAbortError: apiMocks.StreamingChatAbortError,
@@ -376,6 +378,13 @@ vi.mock("./app/PdfDocumentViewer", async () => {
         ) => void;
         title: string;
         url: string;
+        paperId?: string;
+        onSelectionAction?: (selection: {
+          paper_id: string;
+          page_number: number;
+          action: "explain";
+          selected_text: string;
+        }) => void;
       },
       ref: ForwardedRef<{ scrollToSection: (sectionId: string) => void }>,
     ) => {
@@ -391,11 +400,30 @@ vi.mock("./app/PdfDocumentViewer", async () => {
           { id: "introduction-1", title: "Introduction", pageNumber: 1, pageYOffsetRatio: 0.2 },
         ]);
       }, [props.className, props.onSectionsChange]);
-      return React.createElement("div", {
-        "aria-label": props.title,
-        className: `pdf-document-viewer${props.className ? ` ${props.className}` : ""}`,
-        "data-url": props.url,
-      });
+      return React.createElement(
+        "div",
+        {
+          "aria-label": props.title,
+          className: `pdf-document-viewer${props.className ? ` ${props.className}` : ""}`,
+          "data-url": props.url,
+        },
+        props.onSelectionAction && props.paperId
+          ? React.createElement(
+              "button",
+              {
+                type: "button",
+                onClick: () =>
+                  props.onSelectionAction?.({
+                    paper_id: props.paperId!,
+                    page_number: 1,
+                    action: "explain",
+                    selected_text: "Selected benchmark text",
+                  }),
+              },
+              "Mock PDF explain selection",
+            )
+          : null,
+      );
     },
   );
   PdfDocumentViewer.displayName = "MockPdfDocumentViewer";
@@ -791,6 +819,24 @@ describe("App", () => {
     apiMocks.getProjectRepoSync.mockResolvedValue(repoSyncResponse());
     apiMocks.getPythonFile.mockResolvedValue(pythonFileResponse("file_1"));
     apiMocks.getThread.mockResolvedValue(threadResponse("thread_1", "Recovered thread"));
+    apiMocks.streamBrowserPaperEli5.mockImplementation(
+      async (
+        paperId: string,
+        onEvent: (eventName: string, payload: Record<string, unknown>) => void,
+      ) => {
+        onEvent("started", { paper_id: paperId });
+        onEvent("delta", {
+          paper_id: paperId,
+          delta: "## ELI5\n\nThis paper makes research easier.",
+        });
+        onEvent("done", {
+          paper_id: paperId,
+          markdown: "## ELI5\n\nThis paper makes research easier.",
+          generated_at: "2026-04-21T00:00:00Z",
+          cached: false,
+        });
+      },
+    );
     apiMocks.moveThreadToProject.mockResolvedValue(
       emptyThreadResponse("thread_2", "proj_2", "Agents"),
     );
@@ -1091,6 +1137,7 @@ describe("App", () => {
   afterEach(() => {
     document.documentElement.classList.remove("authenticated-theme-dark");
     document.body.classList.remove("authenticated-theme-dark");
+    window.localStorage.clear();
     vi.unstubAllGlobals();
   });
 
@@ -3089,6 +3136,12 @@ describe("App", () => {
     expect(pdfDialog).toBeTruthy();
     expect(pdfDialog.querySelector(".pdf-document-viewer.paper-pdf-frame")).toBeTruthy();
     expect(pdfDialog.querySelector("iframe")).toBeNull();
+    fireEvent.click(within(pdfDialog).getByRole("button", { name: "ELI5" }));
+    expect(
+      await screen.findByText((content) => content.includes("This paper makes research easier.")),
+    ).toBeTruthy();
+    expect(apiMocks.streamBrowserPaperEli5).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getAllByLabelText("Close ELI5")[0]!);
     fireEvent.click(screen.getAllByLabelText("Close paper PDF")[0]!);
 
     const sourceButton = screen.getByRole("button", { name: "1 source" });
@@ -3144,7 +3197,14 @@ describe("App", () => {
     expect(screen.queryByRole("link", { name: "HTML" })).toBeNull();
     expect(screen.queryByRole("link", { name: "PDF" })).toBeNull();
     fireEvent.click(screen.getByRole("heading", { name: "Benchmark Paper" }));
-    expect(await screen.findByRole("dialog", { name: "Benchmark Paper PDF" })).toBeTruthy();
+    const secondPdfDialog = await screen.findByRole("dialog", { name: "Benchmark Paper PDF" });
+    expect(secondPdfDialog).toBeTruthy();
+    fireEvent.click(within(secondPdfDialog).getByRole("button", { name: "ELI5" }));
+    expect(apiMocks.streamBrowserPaperEli5).toHaveBeenCalledTimes(1);
+    expect(
+      await screen.findByText((content) => content.includes("This paper makes research easier.")),
+    ).toBeTruthy();
+    fireEvent.click(screen.getAllByLabelText("Close ELI5")[0]!);
     expect(screen.getByRole("button", { name: "Explore now" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Explore options" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "Explore later" }));
@@ -4415,7 +4475,7 @@ describe("App", () => {
     }
   });
 
-  it("opens summarized-paper admin drilldowns from summary jobs", async () => {
+  it("opens tracked-paper admin drilldowns from internal jobs", async () => {
     const dateNowSpy = vi
       .spyOn(Date, "now")
       .mockReturnValue(new Date("2026-04-21T12:00:00Z").getTime());
@@ -4423,9 +4483,9 @@ describe("App", () => {
     apiMocks.loadBrowserAdminJobsOverview.mockResolvedValue({
       jobs: [
         {
-          job_id: "job_summary_1",
-          root_job_id: "job_summary_1",
-          job_type: "summarize_top_cited",
+          job_id: "job_reindex_1",
+          root_job_id: "job_reindex_1",
+          job_type: "reindex_embeddings",
           status: "completed",
           display_status: "completed",
           payload: {},
@@ -4447,7 +4507,7 @@ describe("App", () => {
       worker: null,
     });
     apiMocks.loadBrowserAdminJobPapers.mockResolvedValue({
-      root_job_id: "job_summary_1",
+      root_job_id: "job_reindex_1",
       total_count: 1,
       offset: 0,
       limit: 100,
@@ -4456,11 +4516,11 @@ describe("App", () => {
       skipped_reason_counts: {},
       papers: [
         {
-          root_job_id: "job_summary_1",
-          job_id: "job_summary_1",
+          root_job_id: "job_reindex_1",
+          job_id: "job_reindex_1",
           paper_id: "arxiv:2401.22222",
           arxiv_id: "2401.22222",
-          title: "Summarized Paper",
+          title: "Reindexed Paper",
           outcome: "updated",
           created_at: "2026-04-21T00:00:00Z",
           updated_at: "2026-04-21T01:10:00Z",
@@ -4478,19 +4538,23 @@ describe("App", () => {
 
       fireEvent.click(screen.getByRole("button", { name: "Control panel" }));
 
-      const trackedPapersButton = await within(screen.getByRole("table")).findByRole("button", {
+      const jobRow = (await within(screen.getByRole("table")).findByText("job_reindex_1")).closest(
+        "tr",
+      );
+      expect(jobRow).toBeTruthy();
+      const trackedPapersButton = within(jobRow as HTMLElement).getByRole("button", {
         name: "1",
       });
       fireEvent.click(trackedPapersButton);
 
       await waitFor(() => {
-        expect(screen.getByRole("heading", { name: "Papers in job_summary_1" })).toBeTruthy();
+        expect(screen.getByRole("heading", { name: "Papers in job_reindex_1" })).toBeTruthy();
       });
       const statusSummary = screen.getByRole("group", { name: "Tracked paper outcomes" });
       expect(within(statusSummary).getByText("Updated")).toBeTruthy();
-      expect(screen.getByText("Summarized Paper")).toBeTruthy();
+      expect(screen.getByText("Reindexed Paper")).toBeTruthy();
       expect(screen.getAllByText("Updated").length).toBeGreaterThan(0);
-      expect(apiMocks.loadBrowserAdminJobPapers).toHaveBeenCalledWith("job_summary_1", 0, 100);
+      expect(apiMocks.loadBrowserAdminJobPapers).toHaveBeenCalledWith("job_reindex_1", 0, 100);
     } finally {
       dateNowSpy.mockRestore();
     }
@@ -4568,9 +4632,9 @@ describe("App", () => {
           details: {},
         },
         {
-          job_id: "job_summary_1",
-          root_job_id: "job_summary_1",
-          job_type: "summarize_top_cited",
+          job_id: "job_reindex_1",
+          root_job_id: "job_reindex_1",
+          job_type: "reindex_embeddings",
           status: "completed",
           display_status: "completed",
           payload: {},
@@ -4606,7 +4670,7 @@ describe("App", () => {
         within(screen.getByRole("table")).getByRole("columnheader", { name: "Trigger" }),
       ).toBeTruthy();
       expect(screen.getByTitle("On-demand request · date range")).toBeTruthy();
-      expect(screen.getByTitle("System generated · summarize top cited")).toBeTruthy();
+      expect(screen.getByTitle("System generated · reindex embeddings")).toBeTruthy();
     } finally {
       dateNowSpy.mockRestore();
     }

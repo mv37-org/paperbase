@@ -302,7 +302,7 @@ describe("chat api", () => {
           published: "2026-04-21",
           primary_category: "cs.AI",
           categories: "cs.AI",
-          summary_eli5: "Simple summary",
+          summary_short: "Technical summary",
           html_url: "https://arxiv.org/abs/2401.12345",
           pdf_url: "https://arxiv.org/pdf/2401.12345.pdf",
           image_url: "/v1/browser/trending/papers/arxiv%3A2401.12345/preview/content",
@@ -328,7 +328,7 @@ describe("chat api", () => {
     expect(detailInit?.method).toBe("GET");
     expect(feed.papers[0]?.upvote_count).toBe(12);
     expect(feed.has_next).toBe(true);
-    expect(detail.summary_eli5).toBe("Simple summary");
+    expect(detail.summary_short).toBe("Technical summary");
   });
 
   it("loads generic paper discussion and attaches CSRF headers to paper write operations", async () => {
@@ -1115,6 +1115,68 @@ describe("chat api", () => {
             total_tokens: 11261,
             context_window_tokens: 1000000,
           },
+        },
+      ],
+    ]);
+  });
+
+  it("parses streamed paper ELI5 markdown events", async () => {
+    const encoder = new TextEncoder();
+    const fetchMock = vi
+      .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()
+      .mockResolvedValue(
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(
+                encoder.encode(
+                  'event: started\ndata: {"paper_id":"arxiv:2401.12345"}\n\n' +
+                    'event: delta\ndata: {"paper_id":"arxiv:2401.12345","delta":"## Explain',
+                ),
+              );
+              controller.enqueue(
+                encoder.encode(
+                  'ed\\n\\n"}\n\nevent: done\ndata: {"paper_id":"arxiv:2401.12345","markdown":"## Explained\\n\\nThis paper makes research easier.","generated_at":"2026-04-21T00:00:00Z","cached":false}\n\n',
+                ),
+              );
+              controller.close();
+            },
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await loadApiModule({
+      bootstrapSession: {
+        authenticated: true,
+        user: { user_id: "user_1", email: "user@example.com", display_name: "User" },
+        has_openai_api_key: true,
+        csrf_token: "csrf-123",
+      },
+    });
+    const events: Array<[string, unknown]> = [];
+
+    await api.streamBrowserPaperEli5("arxiv:2401.12345", (eventName, payload) => {
+      events.push([eventName, payload]);
+    });
+
+    const [path, init] = fetchMock.mock.calls[0] as FetchCall;
+    expect(requestPath(path)).toBe("/v1/browser/papers/arxiv%3A2401.12345/eli5/stream");
+    expect(init?.method).toBe("POST");
+    expect(new Headers(init?.headers).get("X-Paperbase-CSRF")).toBe("csrf-123");
+    expect(events).toEqual([
+      ["started", { paper_id: "arxiv:2401.12345" }],
+      ["delta", { paper_id: "arxiv:2401.12345", delta: "## Explained\n\n" }],
+      [
+        "done",
+        {
+          paper_id: "arxiv:2401.12345",
+          markdown: "## Explained\n\nThis paper makes research easier.",
+          generated_at: "2026-04-21T00:00:00Z",
+          cached: false,
         },
       ],
     ]);
