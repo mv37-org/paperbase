@@ -52,11 +52,13 @@ describe("PdfDocumentViewer", () => {
   const originalResizeObserver = globalThis.ResizeObserver;
   const originalScrollIntoView = HTMLElement.prototype.scrollIntoView;
   const scrollIntoView = vi.fn();
+  let elementWidth = 640;
 
   beforeEach(() => {
     vi.clearAllMocks();
     scrollIntoView.mockClear();
     resizeCallbacks.length = 0;
+    elementWidth = 640;
     Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
       configurable: true,
       value: scrollIntoView,
@@ -79,9 +81,9 @@ describe("PdfDocumentViewer", () => {
         bottom: 480,
         height: 480,
         left: 0,
-        right: 640,
+        right: elementWidth,
         top: 0,
-        width: 640,
+        width: elementWidth,
         x: 0,
         y: 0,
         toJSON: () => ({}),
@@ -153,6 +155,42 @@ describe("PdfDocumentViewer", () => {
       expect(pdfMocks.getDocument).toHaveBeenCalledTimes(1);
     });
     expect(pdfMocks.loadingDestroy).not.toHaveBeenCalled();
+  });
+
+  it("does not restart rendering when scrollbar layout changes the measured width", async () => {
+    render(<PdfDocumentViewer url="https://example.test/paper.pdf" title="Paper PDF" />);
+
+    await waitFor(() => {
+      expect(pdfMocks.getDocument).toHaveBeenCalledTimes(1);
+    });
+
+    act(() => {
+      elementWidth = 627;
+      resizeCallbacks[0]?.([] as unknown as ResizeObserverEntry[], {} as ResizeObserver);
+    });
+
+    await waitFor(() => {
+      expect(pdfMocks.getDocument).toHaveBeenCalledTimes(1);
+    });
+    expect(pdfMocks.loadingDestroy).not.toHaveBeenCalled();
+  });
+
+  it("restarts rendering when the viewer has a material layout resize", async () => {
+    render(<PdfDocumentViewer url="https://example.test/paper.pdf" title="Paper PDF" />);
+
+    await waitFor(() => {
+      expect(pdfMocks.getDocument).toHaveBeenCalledTimes(1);
+    });
+
+    act(() => {
+      elementWidth = 560;
+      resizeCallbacks[0]?.([] as unknown as ResizeObserverEntry[], {} as ResizeObserver);
+    });
+
+    await waitFor(() => {
+      expect(pdfMocks.getDocument).toHaveBeenCalledTimes(2);
+    });
+    expect(pdfMocks.loadingDestroy).toHaveBeenCalled();
   });
 
   it("reports detected paper sections from text headings", async () => {

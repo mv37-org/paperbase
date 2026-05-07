@@ -43,6 +43,8 @@ type PdfDocumentViewerProps = {
 
 type PdfViewerStatus = "loading" | "ready" | "error";
 
+const VIEWER_RELAYOUT_WIDTH_THRESHOLD = 24;
+
 type NormalizedPoint = { x: number; y: number };
 
 type PenStroke = {
@@ -397,7 +399,13 @@ export const PdfDocumentViewer = forwardRef<PdfDocumentViewerHandle, PdfDocument
 
       const updateWidth = () => {
         const nextWidth = Math.floor(element.getBoundingClientRect().width);
-        setViewerWidth((currentWidth) => (currentWidth === nextWidth ? currentWidth : nextWidth));
+        setViewerWidth((currentWidth) =>
+          currentWidth === nextWidth ||
+          (currentWidth > 0 &&
+            Math.abs(currentWidth - nextWidth) <= VIEWER_RELAYOUT_WIDTH_THRESHOLD)
+            ? currentWidth
+            : nextWidth,
+        );
       };
 
       updateWidth();
