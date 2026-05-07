@@ -31,7 +31,8 @@ export function PdfDocumentViewer({ url, title, className = "" }: PdfDocumentVie
     }
 
     const updateWidth = () => {
-      setViewerWidth(Math.floor(element.clientWidth));
+      const nextWidth = Math.floor(element.getBoundingClientRect().width);
+      setViewerWidth((currentWidth) => (currentWidth === nextWidth ? currentWidth : nextWidth));
     };
 
     updateWidth();
