@@ -1324,8 +1324,16 @@ describe("App", () => {
     fireEvent.click(screen.getAllByText("General")[0]!);
     fireEvent.click(await screen.findByLabelText("Start exploration in General"));
 
-    expect(screen.getByRole("dialog", { name: "General" })).toBeTruthy();
-    fireEvent.change(screen.getByLabelText("Search papers for exploration"), {
+    const dialog = screen.getByRole("dialog", { name: "New exploration" });
+    expect(within(dialog).queryByText("New exploration")).toBeNull();
+    expect(
+      within(dialog).queryByText("Type at least two characters to search indexed papers."),
+    ).toBeNull();
+    const searchInput = within(dialog).getByLabelText("Search papers for exploration");
+    await waitFor(() => {
+      expect(document.activeElement).toBe(searchInput);
+    });
+    fireEvent.change(searchInput, {
       target: { value: "benchmark" },
     });
 
@@ -1337,10 +1345,49 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Explore" }));
 
     await waitFor(() => {
-      expect(screen.queryByRole("dialog", { name: "General" })).toBeNull();
+      expect(screen.queryByRole("dialog", { name: "New exploration" })).toBeNull();
     });
     expect(await screen.findByRole("heading", { name: "Benchmark Paper" })).toBeTruthy();
     expect(screen.getByText("No PDF URL is available for this paper.")).toBeTruthy();
+  });
+
+  it("clears exploration search before closing from the inline close button", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.suggestBrowserPapers.mockResolvedValue({
+      fallback: false,
+      suggestions: [],
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+    fireEvent.click(screen.getAllByText("General")[0]!);
+    fireEvent.click(await screen.findByLabelText("Start exploration in General"));
+
+    const dialog = screen.getByRole("dialog", { name: "New exploration" });
+    const searchInput = within(dialog).getByLabelText(
+      "Search papers for exploration",
+    ) as HTMLInputElement;
+    fireEvent.change(searchInput, { target: { value: "bench" } });
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Clear exploration search" }));
+
+    await waitFor(() => {
+      expect(searchInput.value).toBe("");
+    });
+    expect(screen.getByRole("dialog", { name: "New exploration" })).toBeTruthy();
+
+    const closeButton = screen
+      .getAllByRole("button", { name: "Close exploration picker" })
+      .find((button) => button.classList.contains("exploration-picker-close"));
+    expect(closeButton).toBeTruthy();
+    fireEvent.click(closeButton!);
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "New exploration" })).toBeNull();
+    });
   });
 
   it("paginates project sidebar code inside the code section and links to GitHub", async () => {

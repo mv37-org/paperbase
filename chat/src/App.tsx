@@ -1435,6 +1435,22 @@ export default function App() {
     setExplorationStartingPaperId("");
   }, []);
 
+  const handleExplorationPickerCloseButton = useCallback(() => {
+    if (explorationSearch.length > 0) {
+      setExplorationSearch("");
+      setExplorationSuggestions([]);
+      setExplorationSearchStatus("idle");
+      setExplorationSearchFallback(false);
+      setExplorationSearchError("");
+      setExplorationSelectedIndex(0);
+      window.requestAnimationFrame(() => {
+        explorationSearchInputRef.current?.focus();
+      });
+      return;
+    }
+    closeExplorationPicker();
+  }, [closeExplorationPicker, explorationSearch]);
+
   const openExplorationPicker = useCallback(
     (projectId: string) => {
       const project = projectsRef.current.find((entry) => entry.project_id === projectId);
@@ -4935,6 +4951,12 @@ export default function App() {
       : projectRepoMode === "existing" && projectRepoMetadata?.branches.length
         ? projectRepoMetadata.branches
         : [{ name: "", commit_sha: "", is_default: false }];
+  const explorationPickerSearchQuery = explorationSearch.trim();
+  const explorationPickerShouldShowList =
+    explorationSearchFallback ||
+    explorationSuggestions.length > 0 ||
+    explorationSearchStatus === "error" ||
+    (explorationSearchStatus === "ready" && explorationPickerSearchQuery.length >= 2);
 
   return (
     <>
@@ -7166,7 +7188,7 @@ export default function App() {
           className="exploration-picker-shell"
           role="dialog"
           aria-modal="true"
-          aria-labelledby="exploration-picker-title"
+          aria-label="New exploration"
         >
           <button
             type="button"
@@ -7174,21 +7196,10 @@ export default function App() {
             aria-label="Close exploration picker"
             onClick={closeExplorationPicker}
           />
-          <div className="exploration-picker-panel" onKeyDown={handleExplorationPickerKeyDown}>
-            <header className="exploration-picker-header">
-              <div>
-                <span>New exploration</span>
-                <h2 id="exploration-picker-title">{explorationPicker.projectName}</h2>
-              </div>
-              <button
-                type="button"
-                className="exploration-picker-close"
-                aria-label="Close exploration picker"
-                onClick={closeExplorationPicker}
-              >
-                ×
-              </button>
-            </header>
+          <div
+            className={`exploration-picker-panel${explorationPickerShouldShowList ? " has-results" : ""}`}
+            onKeyDown={handleExplorationPickerKeyDown}
+          >
             <div className="exploration-picker-search">
               <svg viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M10.5 18a7.5 7.5 0 1 1 5.3-12.8 7.5 7.5 0 0 1-5.3 12.8Z" />
@@ -7205,56 +7216,65 @@ export default function App() {
               {explorationSearchStatus === "loading" ? (
                 <span className="exploration-picker-spinner" aria-hidden="true" />
               ) : null}
+              <button
+                type="button"
+                className="exploration-picker-close"
+                aria-label={
+                  explorationSearch.length > 0
+                    ? "Clear exploration search"
+                    : "Close exploration picker"
+                }
+                onClick={handleExplorationPickerCloseButton}
+              >
+                ×
+              </button>
             </div>
-            <div className="exploration-picker-list" role="listbox" aria-label="Paper results">
-              {explorationSearchFallback ? (
-                <div className="exploration-picker-banner">
-                  No exact matches found. Showing nearby papers.
-                </div>
-              ) : null}
-              {explorationSuggestions.map((paper, index) => {
-                const selected = index === explorationSelectedIndex;
-                const starting = explorationStartingPaperId === paper.paper_id;
-                return (
-                  <div
-                    key={paper.paper_id}
-                    role="option"
-                    aria-selected={selected}
-                    className={`exploration-picker-item${selected ? " selected" : ""}`}
-                    onMouseEnter={() => setExplorationSelectedIndex(index)}
-                  >
-                    <div className="exploration-picker-item-copy">
-                      <strong>{paper.title}</strong>
-                      <span>{paper.authors || "Author unavailable"}</span>
-                      {paperSuggestionMeta(paper) ? (
-                        <small>{paperSuggestionMeta(paper)}</small>
-                      ) : null}
-                    </div>
-                    <button
-                      type="button"
-                      className="exploration-picker-item-action"
-                      disabled={Boolean(explorationStartingPaperId)}
-                      onClick={() => void startExplorationFromSuggestion(paper)}
-                    >
-                      {starting ? "Starting..." : "Explore"}
-                    </button>
+            {explorationPickerShouldShowList ? (
+              <div className="exploration-picker-list" role="listbox" aria-label="Paper results">
+                {explorationSearchFallback ? (
+                  <div className="exploration-picker-banner">
+                    No exact matches found. Showing nearby papers.
                   </div>
-                );
-              })}
-              {explorationSearch.trim().length < 2 ? (
-                <div className="exploration-picker-empty">
-                  Type at least two characters to search indexed papers.
-                </div>
-              ) : null}
-              {explorationSearchStatus === "ready" &&
-              explorationSearch.trim().length >= 2 &&
-              explorationSuggestions.length === 0 ? (
-                <div className="exploration-picker-empty">No papers match this search.</div>
-              ) : null}
-              {explorationSearchStatus === "error" ? (
-                <div className="exploration-picker-empty error">{explorationSearchError}</div>
-              ) : null}
-            </div>
+                ) : null}
+                {explorationSuggestions.map((paper, index) => {
+                  const selected = index === explorationSelectedIndex;
+                  const starting = explorationStartingPaperId === paper.paper_id;
+                  return (
+                    <div
+                      key={paper.paper_id}
+                      role="option"
+                      aria-selected={selected}
+                      className={`exploration-picker-item${selected ? " selected" : ""}`}
+                      onMouseEnter={() => setExplorationSelectedIndex(index)}
+                    >
+                      <div className="exploration-picker-item-copy">
+                        <strong>{paper.title}</strong>
+                        <span>{paper.authors || "Author unavailable"}</span>
+                        {paperSuggestionMeta(paper) ? (
+                          <small>{paperSuggestionMeta(paper)}</small>
+                        ) : null}
+                      </div>
+                      <button
+                        type="button"
+                        className="exploration-picker-item-action"
+                        disabled={Boolean(explorationStartingPaperId)}
+                        onClick={() => void startExplorationFromSuggestion(paper)}
+                      >
+                        {starting ? "Starting..." : "Explore"}
+                      </button>
+                    </div>
+                  );
+                })}
+                {explorationSearchStatus === "ready" &&
+                explorationPickerSearchQuery.length >= 2 &&
+                explorationSuggestions.length === 0 ? (
+                  <div className="exploration-picker-empty">No papers match this search.</div>
+                ) : null}
+                {explorationSearchStatus === "error" ? (
+                  <div className="exploration-picker-empty error">{explorationSearchError}</div>
+                ) : null}
+              </div>
+            ) : null}
           </div>
         </div>
       ) : null}
