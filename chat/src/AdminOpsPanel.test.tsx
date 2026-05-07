@@ -345,7 +345,6 @@ describe("AdminOpsPanel", () => {
       authors: "Ada, Grace",
       abstract: "A full abstract.",
       summary_short: "A technical summary.",
-      summary_eli5: "A simple summary.",
       categories: "cs.AI",
       primary_category: "cs.AI",
       published: "2026-04-21",

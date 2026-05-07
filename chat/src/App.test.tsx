@@ -126,7 +126,6 @@ const apiMocks = vi.hoisted(() => {
     runPythonFile: vi.fn(),
     sendThreadMessage: vi.fn(),
     sendThreadMessageStream: vi.fn(),
-    streamBrowserPaperEli5: vi.fn(),
     submitChatFeedback: vi.fn(),
     suggestBrowserPapers: vi.fn(),
     StreamingChatAbortError: MockStreamingChatAbortError,
@@ -203,7 +202,6 @@ vi.mock("./api", () => ({
   runPythonFile: apiMocks.runPythonFile,
   sendThreadMessage: apiMocks.sendThreadMessage,
   sendThreadMessageStream: apiMocks.sendThreadMessageStream,
-  streamBrowserPaperEli5: apiMocks.streamBrowserPaperEli5,
   submitChatFeedback: apiMocks.submitChatFeedback,
   suggestBrowserPapers: apiMocks.suggestBrowserPapers,
   StreamingChatAbortError: apiMocks.StreamingChatAbortError,
@@ -819,24 +817,6 @@ describe("App", () => {
     apiMocks.getProjectRepoSync.mockResolvedValue(repoSyncResponse());
     apiMocks.getPythonFile.mockResolvedValue(pythonFileResponse("file_1"));
     apiMocks.getThread.mockResolvedValue(threadResponse("thread_1", "Recovered thread"));
-    apiMocks.streamBrowserPaperEli5.mockImplementation(
-      async (
-        paperId: string,
-        onEvent: (eventName: string, payload: Record<string, unknown>) => void,
-      ) => {
-        onEvent("started", { paper_id: paperId });
-        onEvent("delta", {
-          paper_id: paperId,
-          delta: "## ELI5\n\nThis paper makes research easier.",
-        });
-        onEvent("done", {
-          paper_id: paperId,
-          markdown: "## ELI5\n\nThis paper makes research easier.",
-          generated_at: "2026-04-21T00:00:00Z",
-          cached: false,
-        });
-      },
-    );
     apiMocks.moveThreadToProject.mockResolvedValue(
       emptyThreadResponse("thread_2", "proj_2", "Agents"),
     );
@@ -856,7 +836,6 @@ describe("App", () => {
       authors: "Drawer Author",
       abstract: "Drawer abstract",
       summary_short: "Drawer summary",
-      summary_eli5: "Drawer simple summary",
       categories: "cs.AI",
       primary_category: "cs.AI",
       published: "2026-04-21",
@@ -973,7 +952,6 @@ describe("App", () => {
       published: "2026-04-21",
       primary_category: "cs.AI",
       categories: "cs.AI",
-      summary_eli5: "Simple summary",
       html_url: "https://example.test/2401.12345",
       pdf_url: "https://example.test/2401.12345.pdf",
       image_url: "https://example.test/trending-preview.webp",
@@ -1017,7 +995,6 @@ describe("App", () => {
         authors: "Drawer Author",
         abstract: "Drawer abstract",
         summary_short: "Drawer summary",
-        summary_eli5: "Drawer simple summary",
         categories: "cs.AI",
         primary_category: "cs.AI",
         published: "2026-04-21",
@@ -1412,7 +1389,6 @@ describe("App", () => {
       authors: "Ada Lovelace",
       abstract: "Benchmark abstract",
       summary_short: "Benchmark summary",
-      summary_eli5: "Simple benchmark summary",
       categories: "cs.AI",
       primary_category: "cs.AI",
       published: "2026-02-02",
@@ -3109,7 +3085,6 @@ describe("App", () => {
       authors: "Ada Lovelace",
       abstract: "Grounded benchmark paper.",
       summary_short: "Short grounded benchmark summary.",
-      summary_eli5: "Simple benchmark summary.",
       categories: "cs.AI",
       primary_category: "cs.AI",
       published: "2026-04-01",
@@ -3136,12 +3111,6 @@ describe("App", () => {
     expect(pdfDialog).toBeTruthy();
     expect(pdfDialog.querySelector(".pdf-document-viewer.paper-pdf-frame")).toBeTruthy();
     expect(pdfDialog.querySelector("iframe")).toBeNull();
-    fireEvent.click(within(pdfDialog).getByRole("button", { name: "ELI5" }));
-    expect(
-      await screen.findByText((content) => content.includes("This paper makes research easier.")),
-    ).toBeTruthy();
-    expect(apiMocks.streamBrowserPaperEli5).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getAllByLabelText("Close ELI5")[0]!);
     fireEvent.click(screen.getAllByLabelText("Close paper PDF")[0]!);
 
     const sourceButton = screen.getByRole("button", { name: "1 source" });
@@ -3199,12 +3168,6 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("heading", { name: "Benchmark Paper" }));
     const secondPdfDialog = await screen.findByRole("dialog", { name: "Benchmark Paper PDF" });
     expect(secondPdfDialog).toBeTruthy();
-    fireEvent.click(within(secondPdfDialog).getByRole("button", { name: "ELI5" }));
-    expect(apiMocks.streamBrowserPaperEli5).toHaveBeenCalledTimes(1);
-    expect(
-      await screen.findByText((content) => content.includes("This paper makes research easier.")),
-    ).toBeTruthy();
-    fireEvent.click(screen.getAllByLabelText("Close ELI5")[0]!);
     expect(screen.getByRole("button", { name: "Explore now" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Explore options" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "Explore later" }));
@@ -5032,7 +4995,6 @@ describe("App", () => {
       authors: "Modal Author",
       abstract: "Modal abstract",
       summary_short: "Modal summary",
-      summary_eli5: "Modal simple summary",
       categories: "cs.AI",
       primary_category: "cs.AI",
       published: "2026-05-01",

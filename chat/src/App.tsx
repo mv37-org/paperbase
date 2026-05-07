@@ -44,7 +44,6 @@ import {
   runPythonFile,
   sendThreadMessage,
   sendThreadMessageStream,
-  streamBrowserPaperEli5,
   submitChatFeedback,
   suggestBrowserPapers,
   StreamingChatAbortError,
@@ -188,7 +187,6 @@ import type {
   PaperComment,
   PaperCommentsResponse,
   PaperDiscussionResponse,
-  PaperEli5Response,
   PaperResponse,
   PaperSelectionPayload,
   PaperVoteSummary,
@@ -209,15 +207,6 @@ type ThreadRenameModalState = {
   draft: string;
   saving: boolean;
   error: string;
-};
-
-type PaperEli5ModalState = {
-  paperId: string;
-  title: string;
-  markdown: string;
-  status: "loading" | "streaming" | "ready" | "error";
-  error: string;
-  cached: boolean;
 };
 
 const RESUME_PROJECT_MODAL_KEY = "paperbase-resume-new-project";
@@ -771,7 +760,6 @@ export default function App() {
   const [contextUsagePopoverOpen, setContextUsagePopoverOpen] = useState(false);
   const [paperDrawer, setPaperDrawer] = useState<PaperDrawerState>(() => drawerStateFromUrl());
   const [paperPdfModal, setPaperPdfModal] = useState<PaperPdfModalState | null>(null);
-  const [paperEli5Modal, setPaperEli5Modal] = useState<PaperEli5ModalState | null>(null);
   const [paperPdfToolMode, setPaperPdfToolMode] = useState<"select" | "pen">("select");
   const [paperExploreMenuOpen, setPaperExploreMenuOpen] = useState(false);
   const [paperExplorations, setPaperExplorations] = useState<PaperExploration[]>(() =>
@@ -836,8 +824,6 @@ export default function App() {
   const pendingTurnAnchorMessageIdRef = useRef<string | null>(null);
   const skipNextAutoBottomScrollRef = useRef(false);
   const streamAbortControllerRef = useRef<AbortController | null>(null);
-  const paperEli5AbortControllerRef = useRef<AbortController | null>(null);
-  const paperEli5CacheRef = useRef<Record<string, PaperEli5Response>>({});
 
   useEffect(() => {
     sessionRef.current = session;
@@ -1801,123 +1787,6 @@ export default function App() {
     setPaperPdfModal(null);
   }, []);
 
-  const closePaperEli5Modal = useCallback(() => {
-    paperEli5AbortControllerRef.current?.abort();
-    paperEli5AbortControllerRef.current = null;
-    setPaperEli5Modal(null);
-  }, []);
-
-  const openPaperEli5Modal = useCallback((paperId: string, title: string) => {
-    setPaperExploreMenuOpen(false);
-    const cached = paperEli5CacheRef.current[paperId];
-    if (cached?.markdown?.trim()) {
-      setPaperEli5Modal({
-        paperId,
-        title,
-        markdown: cached.markdown,
-        status: "ready",
-        error: "",
-        cached: true,
-      });
-      return;
-    }
-
-    paperEli5AbortControllerRef.current?.abort();
-    const controller = new AbortController();
-    paperEli5AbortControllerRef.current = controller;
-    let streamedMarkdown = "";
-    setPaperEli5Modal({
-      paperId,
-      title,
-      markdown: "",
-      status: "loading",
-      error: "",
-      cached: false,
-    });
-
-    void streamBrowserPaperEli5(
-      paperId,
-      (eventName, payload) => {
-        if (controller.signal.aborted) return;
-        if (eventName === "started") {
-          setPaperEli5Modal((current) =>
-            current?.paperId === paperId ? { ...current, status: "streaming" } : current,
-          );
-          return;
-        }
-        if (eventName === "delta") {
-          const delta = "delta" in payload ? payload.delta : "";
-          streamedMarkdown += delta;
-          setPaperEli5Modal((current) =>
-            current?.paperId === paperId
-              ? { ...current, markdown: streamedMarkdown, status: "streaming" }
-              : current,
-          );
-          return;
-        }
-        if (eventName === "cached" || eventName === "done") {
-          const response = payload as PaperEli5Response;
-          if (response.markdown.trim()) paperEli5CacheRef.current[paperId] = response;
-          streamedMarkdown = response.markdown || streamedMarkdown;
-          setPaperEli5Modal((current) =>
-            current?.paperId === paperId
-              ? {
-                  ...current,
-                  markdown: streamedMarkdown,
-                  status: "ready",
-                  error: "",
-                  cached: eventName === "cached" || response.cached,
-                }
-              : current,
-          );
-          paperEli5AbortControllerRef.current = null;
-          return;
-        }
-        if (eventName === "api_key_required") {
-          setPaperEli5Modal((current) =>
-            current?.paperId === paperId
-              ? {
-                  ...current,
-                  status: "error",
-                  error: "Add your OpenAI API key to generate this ELI5.",
-                }
-              : current,
-          );
-          setActiveSettingsTab("inference");
-          setAuthView("settings");
-          setAuthModalOpen(true);
-          paperEli5AbortControllerRef.current = null;
-          return;
-        }
-        if (eventName === "error") {
-          setPaperEli5Modal((current) =>
-            current?.paperId === paperId
-              ? {
-                  ...current,
-                  status: "error",
-                  error: "detail" in payload ? payload.detail : "ELI5 generation failed.",
-                }
-              : current,
-          );
-          paperEli5AbortControllerRef.current = null;
-        }
-      },
-      { signal: controller.signal },
-    ).catch((error: unknown) => {
-      if (error instanceof StreamingChatAbortError || controller.signal.aborted) return;
-      setPaperEli5Modal((current) =>
-        current?.paperId === paperId
-          ? {
-              ...current,
-              status: "error",
-              error: error instanceof Error ? error.message : "ELI5 generation failed.",
-            }
-          : current,
-      );
-      paperEli5AbortControllerRef.current = null;
-    });
-  }, []);
-
   const openPaperPdfModal = useCallback((target: PaperActionTarget) => {
     setPaperExploreMenuOpen(false);
     const cachedPreview = paperCitationPreviewsRef.current[target.paperId];
@@ -2270,19 +2139,6 @@ export default function App() {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [closePaperPdfModal, paperPdfModal]);
-
-  useEffect(() => {
-    if (!paperEli5Modal) {
-      return;
-    }
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        closePaperEli5Modal();
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [closePaperEli5Modal, paperEli5Modal]);
 
   const updateThread = useCallback(
     (threadId: string, updater: (thread: ChatThreadResponse | null) => ChatThreadResponse) => {
@@ -4481,12 +4337,8 @@ export default function App() {
     setPaperDrawerStatus("idle");
     setPaperDrawerError("");
     setPaperPdfModal(null);
-    setPaperEli5Modal(null);
     setPaperPdfToolMode("select");
     setPaperExploreMenuOpen(false);
-    paperEli5AbortControllerRef.current?.abort();
-    paperEli5AbortControllerRef.current = null;
-    paperEli5CacheRef.current = {};
     updateDrawerUrl(null);
   }, []);
 
@@ -6612,22 +6464,6 @@ export default function App() {
                         />
                         <button
                           type="button"
-                          className="paper-pdf-utility-button"
-                          onClick={() =>
-                            openPaperEli5Modal(
-                              activePaperExploration.paperId,
-                              activePaperExploration.title,
-                            )
-                          }
-                        >
-                          ELI5
-                        </button>
-                        <span
-                          className="paper-exploration-header-action-divider"
-                          aria-hidden="true"
-                        />
-                        <button
-                          type="button"
                           className={`paper-pdf-utility-button${paperPdfToolMode === "pen" ? " active" : ""}`}
                           aria-pressed={paperPdfToolMode === "pen"}
                           onClick={() =>
@@ -8175,13 +8011,6 @@ export default function App() {
               <div className="paper-pdf-modal-actions">
                 <button
                   type="button"
-                  className="paper-pdf-utility-button"
-                  onClick={() => openPaperEli5Modal(paperPdfModal.paperId, paperPdfModal.title)}
-                >
-                  ELI5
-                </button>
-                <button
-                  type="button"
                   className={`paper-pdf-utility-button${paperPdfToolMode === "pen" ? " active" : ""}`}
                   aria-pressed={paperPdfToolMode === "pen"}
                   onClick={() =>
@@ -8273,53 +8102,6 @@ export default function App() {
               ) : (
                 <div className="paper-pdf-modal-state">No PDF URL is available.</div>
               )}
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      {paperEli5Modal ? (
-        <div
-          className="paper-eli5-modal-shell"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="paper-eli5-modal-title"
-        >
-          <button
-            type="button"
-            className="paper-eli5-modal-backdrop"
-            aria-label="Close ELI5"
-            onClick={closePaperEli5Modal}
-          />
-          <div className="paper-eli5-modal">
-            <header className="paper-eli5-modal-header">
-              <div className="paper-eli5-modal-title">
-                <span>ELI5</span>
-                <h2 id="paper-eli5-modal-title">{paperEli5Modal.title}</h2>
-              </div>
-              <button
-                type="button"
-                className="paper-eli5-modal-close"
-                aria-label="Close ELI5"
-                onClick={closePaperEli5Modal}
-              >
-                ×
-              </button>
-            </header>
-            <div className="paper-eli5-modal-body">
-              {paperEli5Modal.status === "loading" ? (
-                <div className="paper-eli5-modal-state">Preparing ELI5...</div>
-              ) : null}
-              {paperEli5Modal.status === "error" ? (
-                <div className="paper-eli5-modal-state error">{paperEli5Modal.error}</div>
-              ) : null}
-              {paperEli5Modal.markdown ? (
-                <div className="paper-eli5-markdown paper-drawer-markdown">
-                  <MarkdownRenderer markdown={paperEli5Modal.markdown} />
-                </div>
-              ) : paperEli5Modal.status === "streaming" ? (
-                <div className="paper-eli5-modal-state">Writing ELI5...</div>
-              ) : null}
             </div>
           </div>
         </div>

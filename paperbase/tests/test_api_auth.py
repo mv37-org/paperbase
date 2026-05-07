@@ -93,7 +93,6 @@ def _paper(arxiv_id: str = "2401.12345") -> PaperResponse:
         abstract="Grounded benchmark paper.",
         tldr="Benchmark tldr",
         summary_short="Short summary",
-        summary_eli5="Simple summary",
         categories="cs.AI",
         primary_category="cs.AI",
         published="2026-04-01",
@@ -463,20 +462,6 @@ class StubApiService:
             paper_id=paper_id,
             path=path,
             content=f"Contents for {path}",
-        )
-
-    def stream_paper_eli5_markdown(self, user: BrowserUser, paper_id: str):
-        self.calls.append(("stream_paper_eli5_markdown", (user.user_id, paper_id)))
-        yield "started", {"paper_id": paper_id}
-        yield "delta", {"paper_id": paper_id, "delta": "## Tiny explanation\n\n"}
-        yield (
-            "done",
-            {
-                "paper_id": paper_id,
-                "markdown": "## Tiny explanation\n\nThis paper makes research easier.",
-                "generated_at": NOW,
-                "cached": False,
-            },
         )
 
     def get_paper_asset(self, paper_id: str, path: str) -> PaperAssetResponse:
@@ -2165,31 +2150,6 @@ def test_browser_paper_upvote_and_comment_write_routes_use_authenticated_browser
         "create_browser_paper_comment",
         ("arxiv:2401.54321", "user_1", "Useful paper", None),
     ) in service.calls
-
-
-def test_browser_paper_eli5_stream_requires_session_and_uses_authenticated_browser_user(api_client):
-    client, service, settings = api_client
-
-    unauthenticated = client.post("/v1/browser/papers/arxiv:2401.54321/eli5/stream")
-    assert unauthenticated.status_code == 401
-
-    client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
-    missing_csrf = client.post("/v1/browser/papers/arxiv:2401.54321/eli5/stream")
-    assert missing_csrf.status_code == 403
-
-    csrf = csrf_token_for_session("browser-session-token", settings)
-    response = client.post(
-        "/v1/browser/papers/arxiv:2401.54321/eli5/stream",
-        headers={"Origin": settings.browser_origin, "X-Paperbase-CSRF": csrf},
-    )
-
-    assert response.status_code == 200
-    assert response.headers["content-type"].startswith("text/event-stream")
-    assert "event: started" in response.text
-    assert "event: delta" in response.text
-    assert "event: done" in response.text
-    assert "Tiny explanation" in response.text
-    assert ("stream_paper_eli5_markdown", ("user_1", "arxiv:2401.54321")) in service.calls
 
 
 def test_cancel_job_endpoint_delegates_to_service(api_client):

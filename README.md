@@ -146,7 +146,7 @@ The browser chat experience is project-based:
 - existing repos expose a branch picker and optional import selection for `.py` and `.ipynb` files; new repos start on a fixed `main` branch
 - the sidebar lazily loads mixed project items per project, persists the last selected project across reloads, and reopens with only that project tree expanded by default
 - each project can start paper explorations from a command-palette style search over paper title or arXiv id
-- paper explorations and PDF modals support text highlights, pen-drawn region selections with cropped image context, and an on-demand ELI5 button that streams a 3-5 paragraph markdown explanation generated from the signed-in user's OpenAI key and caches it on the paper row
+- paper explorations and PDF modals support text highlights and pen-drawn region selections with cropped image context for grounded chat follow-ups
 - the product exposes a public-readable `Trending papers` feed of fully indexed and enriched papers, with a landing-page top-10 `Latest`/`Hottest` preview and 50-paper signed-in feed pages by publication date or upvotes; signed-in users can upvote, comment, and reply, and allowlisted admins also get a non-tabbed `Admin panel` jobs workspace
 - the empty first-chat state now shows a dismissible setup checklist for GitHub, inference, and sandbox access so users can connect required services before the coding agent hits save/run failures
 - project descriptions are snapped onto new sessions as per-session prompt context, so later project edits do not rewrite existing chats

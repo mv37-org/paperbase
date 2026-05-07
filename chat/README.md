@@ -17,7 +17,7 @@ The authenticated sidebar is project-first, with a small signed-in Browse area a
 - projects expand and collapse independently and lazily fetch mixed project items
 - each project can start new chats, be renamed, or be deleted from the sidebar, but new projects require a connected GitHub repo
 - each project can also start paper explorations from a command-palette style search over paper title or arXiv id
-- paper PDF views expose text-highlight actions, a pen tool for freeform region selection, and an ELI5 modal that streams markdown once, then reuses the backend cache for later opens
+- paper PDF views expose text-highlight actions and a pen tool for freeform region selection
 - the new-project modal lists accessible GitHub repos in a custom dropdown, with "Create new repo" as the first option and `main` fixed for newly created repos
 - existing repo selection includes a branch picker, repo/branch refresh, a GitHub access-management link, and optional `.py`/`.ipynb` imports
 - the modal's advanced section exposes inference and Modal sandbox credential entry points for users who have not configured them yet

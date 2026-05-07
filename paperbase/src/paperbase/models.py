@@ -15,8 +15,6 @@ class PaperMetadata(BaseModel):
     abstract: str = ""
     tldr: str = ""
     summary_short: str = ""
-    # Legacy compatibility field. New indexing does not generate ELI5 summaries.
-    summary_eli5: str = ""
     categories: str = ""
     primary_category: str = ""
     published: str = ""

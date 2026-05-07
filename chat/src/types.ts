@@ -36,7 +36,6 @@ export interface PaperResponse {
   authors: string;
   abstract: string;
   summary_short: string;
-  summary_eli5: string;
   categories: string;
   primary_category: string;
   published: string;
@@ -63,13 +62,6 @@ export interface PaperResponse {
   source_type?: string | null;
   index_status: string;
   indexed_at?: string | null;
-}
-
-export interface PaperEli5Response {
-  paper_id: string;
-  markdown: string;
-  generated_at?: string | null;
-  cached: boolean;
 }
 
 export type PaperSelectionAction = "explain" | "trace" | "challenge" | "reproduce";

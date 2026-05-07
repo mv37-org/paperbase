@@ -1795,8 +1795,6 @@ class PaperbaseService:
         self._project_exec_sessions: dict[str, ProjectExecSession] = {}
         self._project_exec_index: dict[tuple[str, str], set[str]] = {}
         self._project_exec_lock = threading.Lock()
-        self._eli5_locks: dict[str, threading.Lock] = {}
-        self._eli5_locks_lock = threading.Lock()
         self._worker_id = f"{os.environ.get('HOSTNAME') or 'local'}:{os.getpid()}:{new_id('worker')}"
 
     def _call_index_arxiv_paper(
@@ -5943,190 +5941,6 @@ class PaperbaseService:
             return
         request.paper_ids = list(dict.fromkeys([*request.paper_ids, selection.paper_id]))
 
-    def _eli5_lock_for(self, paper_id: str) -> threading.Lock:
-        with self._eli5_locks_lock:
-            lock = self._eli5_locks.get(paper_id)
-            if lock is None:
-                lock = threading.Lock()
-                self._eli5_locks[paper_id] = lock
-            return lock
-
-    def _paper_eli5_context_text(self, paper: PaperResponse) -> str:
-        full_text_path = f"papers/{paper.paper_id}/text/full.md"
-        full_text = ""
-        if self.object_store.exists(full_text_path):
-            try:
-                full_text = self.object_store.get_text(full_text_path).strip()
-            except Exception:
-                full_text = ""
-        parts = [
-            f"Title: {paper.title}",
-            f"Authors: {paper.authors}",
-            f"Abstract: {paper.abstract}",
-            f"Short summary: {paper.summary_short or paper.tldr}",
-            "Paper text:",
-            full_text[:24_000],
-        ]
-        return "\n\n".join(part for part in parts if part).strip()
-
-    def _paper_eli5_figure_context(self, paper_id: str) -> tuple[str, list[dict[str, Any]]]:
-        index_path = f"papers/{paper_id}/figures/index.json"
-        if not self.object_store.exists(index_path):
-            return "", []
-        try:
-            figure_index = json.loads(self.object_store.get_text(index_path))
-        except Exception:
-            return "", []
-        if not isinstance(figure_index, list):
-            return "", []
-        figure_lines: list[str] = []
-        image_blocks: list[dict[str, Any]] = []
-        image_content_types = {
-            "png": "image/png",
-            "jpg": "image/jpeg",
-            "jpeg": "image/jpeg",
-            "webp": "image/webp",
-        }
-        for raw_figure in figure_index[:8]:
-            if not isinstance(raw_figure, dict):
-                continue
-            figure_id = str(raw_figure.get("figure_id") or "").strip()
-            if not figure_id:
-                continue
-            caption = str(raw_figure.get("caption") or "").strip()
-            caption_path = f"papers/{paper_id}/figures/{figure_id}/caption.md"
-            if self.object_store.exists(caption_path):
-                try:
-                    caption = self.object_store.get_text(caption_path).strip() or caption
-                except Exception:
-                    pass
-            if caption:
-                figure_lines.append(f"- {figure_id}: {caption[:1200]}")
-            if len(image_blocks) >= 4:
-                continue
-            for extension, content_type in image_content_types.items():
-                image_path = f"papers/{paper_id}/figures/{figure_id}/image.{extension}"
-                if not self.object_store.exists(image_path):
-                    continue
-                image_bytes = self.object_store.get_bytes(image_path)
-                if len(image_bytes) > 750_000:
-                    break
-                image_blocks.append(
-                    {
-                        "type": "input_image",
-                        "image_url": f"data:{content_type};base64,{base64.b64encode(image_bytes).decode('ascii')}",
-                    }
-                )
-                break
-        if not figure_lines and not image_blocks:
-            return "", []
-        figure_text = "Indexed figure context:\n" + "\n".join(figure_lines)
-        return figure_text.strip(), image_blocks
-
-    def _paper_eli5_prompt(self, paper: PaperResponse) -> Prompt:
-        figure_text, image_blocks = self._paper_eli5_figure_context(paper.paper_id)
-        text_blocks = [
-            self._paper_eli5_context_text(paper),
-            figure_text,
-            (
-                "Write an explanation of the whole paper like the reader is five. "
-                "Use the indexed figure images as visual evidence when they are provided."
-            ),
-        ]
-        content: list[dict[str, Any]] = [
-            {
-                "type": "input_text",
-                "text": "\n\n".join(part for part in text_blocks if part).strip(),
-            }
-        ]
-        content.extend(image_blocks)
-        return Prompt(
-            input=[{"type": "message", "role": "user", "content": content}],
-            base_instructions=(
-                "You generate an ELI5 explanation for an AI/ML research paper. "
-                "Return Markdown only. Write 3 to 5 short paragraphs, each 2 to 4 sentences. "
-                "Use simple concrete analogies, explain the main idea, why it matters, how the method works, "
-                "and what the results mean. Do not invent facts that are not in the provided paper context. "
-                "Do not output JSON, tables, or a bullet list."
-            ),
-            tools=[],
-            tool_choice=None,
-            parallel_tool_calls=False,
-        )
-
-    def _cached_paper_eli5_markdown(self, paper_id: str) -> dict[str, Any]:
-        cached = self.repository.get_paper_eli5_markdown(paper_id)
-        if cached is None:
-            raise HTTPException(status_code=404, detail=f"Paper {paper_id} not found")
-        return cached
-
-    def _store_paper_eli5_markdown(self, paper_id: str, markdown: str) -> dict[str, Any]:
-        stored = self.repository.update_paper_eli5_markdown(paper_id, markdown=markdown)
-        if stored is None:
-            raise HTTPException(status_code=404, detail=f"Paper {paper_id} not found")
-        return stored
-
-    def stream_paper_eli5_markdown(
-        self,
-        user: BrowserUser,
-        paper_id: str,
-    ) -> Iterator[tuple[str, dict[str, Any]]]:
-        paper = self.get_indexed_paper(paper_id)
-        cached = self._cached_paper_eli5_markdown(paper.paper_id)
-        if str(cached.get("markdown") or "").strip():
-            payload = {**cached, "cached": True}
-            yield "cached", payload
-            yield "done", payload
-            return
-
-        api_key, api_key_state = self._choose_openai_api_key(user)
-        if not api_key:
-            yield "api_key_required", {
-                "state": api_key_state,
-                "has_openai_api_key": self.repository.get_openai_api_key_record(user.user_id) is not None,  # type: ignore[attr-defined]
-            }
-            return
-
-        lock = self._eli5_lock_for(paper.paper_id)
-        with lock:
-            cached = self._cached_paper_eli5_markdown(paper.paper_id)
-            if str(cached.get("markdown") or "").strip():
-                payload = {**cached, "cached": True}
-                yield "cached", payload
-                yield "done", payload
-                return
-
-            prompt = self._paper_eli5_prompt(paper)
-            chunks: list[str] = []
-            final_item_text = ""
-            yield "started", {"paper_id": paper.paper_id}
-            try:
-                for event in self._chat_model_stream_response(api_key=api_key, prompt=prompt):
-                    if event.type == "response.output_text.delta" and event.delta:
-                        chunks.append(event.delta)
-                        yield "delta", {"paper_id": paper.paper_id, "delta": event.delta}
-                    elif (
-                        event.type == "response.output_item.done"
-                        and event.item is not None
-                        and event.item.item_type == "assistant_message"
-                        and event.item.content_text
-                    ):
-                        final_item_text = event.item.content_text
-            except Exception as exc:
-                logger.warning(
-                    "Paper ELI5 generation failed",
-                    extra={"event": "paper.eli5.failed", "paper_id": paper.paper_id, "error": str(exc)},
-                )
-                yield "error", {"paper_id": paper.paper_id, "detail": "ELI5 generation failed."}
-                return
-
-            markdown = ("".join(chunks) or final_item_text).strip()
-            if not markdown:
-                yield "error", {"paper_id": paper.paper_id, "detail": "ELI5 generation returned no text."}
-                return
-            stored = self._store_paper_eli5_markdown(paper.paper_id, markdown)
-            yield "done", {**stored, "cached": False}
-
     def send_chat_message(
         self, user: BrowserUser, thread_id: str, request: SendChatMessageRequest
     ) -> SendChatMessageResponse:
@@ -8913,8 +8727,6 @@ class PaperbaseService:
             metadata.index_status = "indexed"
             metadata.indexed_at = utcnow()
             metadata.summary_short = build_paper_summary(metadata, extraction, self.settings)
-            # Keep the legacy response/DB field empty; Paperbase no longer generates ELI5 summaries.
-            metadata.summary_eli5 = ""
 
             # Populate ``code_url`` + ``code_url_source`` with the 3-layer
             # decision from #46. Priority order:

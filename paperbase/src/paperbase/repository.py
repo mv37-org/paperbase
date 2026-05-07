@@ -173,10 +173,6 @@ class PaperORM(Base):
     authors: Mapped[str] = mapped_column(Text, default="")
     abstract: Mapped[str] = mapped_column(Text, default="")
     summary_short: Mapped[str] = mapped_column(Text, default="")
-    # Legacy column kept for existing deployments; indexing no longer populates it.
-    summary_eli5: Mapped[str] = mapped_column(Text, default="")
-    eli5_markdown: Mapped[str] = mapped_column(Text, default="")
-    eli5_markdown_generated_at: Mapped[Any | None] = mapped_column(DateTime(timezone=True), nullable=True)
     categories: Mapped[str] = mapped_column(Text, default="")
     primary_category: Mapped[str] = mapped_column(String(64), default="")
     published: Mapped[str] = mapped_column(String(32), default="")
@@ -912,7 +908,6 @@ def _paper_from_orm(row: PaperORM) -> PaperResponse:
         abstract=row.abstract,
         tldr=row.tldr,
         summary_short=row.summary_short,
-        summary_eli5=row.summary_eli5,
         categories=row.categories,
         primary_category=row.primary_category,
         published=row.published,
@@ -1223,14 +1218,6 @@ class PaperRepository(ABC):
 
     @abstractmethod
     def get_paper(self, paper_id: str) -> PaperResponse | None:
-        raise NotImplementedError
-
-    @abstractmethod
-    def get_paper_eli5_markdown(self, paper_id: str) -> dict[str, Any] | None:
-        raise NotImplementedError
-
-    @abstractmethod
-    def update_paper_eli5_markdown(self, paper_id: str, *, markdown: str) -> dict[str, Any] | None:
         raise NotImplementedError
 
     @abstractmethod
@@ -1846,19 +1833,30 @@ class SqlAlchemyPaperRepository(PaperRepository):
             connection.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
             connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
             connection.execute(
-                text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS summary_short TEXT DEFAULT ''")
-            )
-            connection.execute(
-                text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS summary_eli5 TEXT DEFAULT ''")
-            )
-            connection.execute(
-                text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS eli5_markdown TEXT DEFAULT ''")
-            )
-            connection.execute(
                 text(
-                    "ALTER TABLE IF EXISTS papers "
-                    "ADD COLUMN IF NOT EXISTS eli5_markdown_generated_at TIMESTAMPTZ"
+                    """
+                    DO $$
+                    BEGIN
+                        IF to_regclass('papers') IS NOT NULL THEN
+                            IF EXISTS (
+                                SELECT 1
+                                FROM information_schema.columns
+                                WHERE table_schema = current_schema()
+                                  AND table_name = 'papers'
+                                  AND column_name = 'summary_eli5'
+                            ) THEN
+                                ALTER TABLE papers DROP COLUMN IF EXISTS search_tsv;
+                                ALTER TABLE papers DROP COLUMN IF EXISTS summary_eli5;
+                            END IF;
+                            ALTER TABLE papers DROP COLUMN IF EXISTS eli5_markdown;
+                            ALTER TABLE papers DROP COLUMN IF EXISTS eli5_markdown_generated_at;
+                        END IF;
+                    END $$;
+                    """
                 )
+            )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS summary_short TEXT DEFAULT ''")
             )
             connection.execute(text("ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS tldr TEXT DEFAULT ''"))
             connection.execute(text(f"ALTER TABLE IF EXISTS papers ADD COLUMN IF NOT EXISTS embedding {vector_type}"))
@@ -2244,7 +2242,6 @@ class SqlAlchemyPaperRepository(PaperRepository):
             abstract=paper.abstract,
             tldr=paper.tldr,
             summary_short=paper.summary_short,
-            summary_eli5=paper.summary_eli5,
             categories=paper.categories,
             primary_category=paper.primary_category,
             published=paper.published,
@@ -2272,7 +2269,6 @@ class SqlAlchemyPaperRepository(PaperRepository):
             "abstract": paper.abstract,
             "tldr": paper.tldr,
             "summary_short": paper.summary_short,
-            "summary_eli5": paper.summary_eli5,
             "categories": paper.categories,
             "primary_category": paper.primary_category,
             "published": paper.published,
@@ -2362,36 +2358,6 @@ class SqlAlchemyPaperRepository(PaperRepository):
         with self._session() as session:
             row = session.get(PaperORM, paper_id)
             return _paper_from_orm(row) if row else None
-
-    def get_paper_eli5_markdown(self, paper_id: str) -> dict[str, Any] | None:
-        with self._session() as session:
-            row = session.get(PaperORM, paper_id)
-            if row is None:
-                return None
-            markdown = row.eli5_markdown or ""
-            return {
-                "paper_id": row.paper_id,
-                "markdown": markdown,
-                "generated_at": row.eli5_markdown_generated_at,
-                "cached": bool(markdown.strip()),
-            }
-
-    def update_paper_eli5_markdown(self, paper_id: str, *, markdown: str) -> dict[str, Any] | None:
-        with self._session() as session:
-            row = session.get(PaperORM, paper_id)
-            if row is None:
-                return None
-            now = utcnow()
-            row.eli5_markdown = markdown
-            row.eli5_markdown_generated_at = now
-            row.updated_at = now
-            session.flush()
-            return {
-                "paper_id": row.paper_id,
-                "markdown": row.eli5_markdown or "",
-                "generated_at": row.eli5_markdown_generated_at,
-                "cached": True,
-            }
 
     def get_paper_by_arxiv_id(self, arxiv_id: str) -> PaperResponse | None:
         with self._session() as session:
@@ -3503,7 +3469,6 @@ class SqlAlchemyPaperRepository(PaperRepository):
         abstract,
         tldr,
         summary_short,
-        summary_eli5,
         categories,
         primary_category,
         published,
@@ -3536,7 +3501,6 @@ class SqlAlchemyPaperRepository(PaperRepository):
             abstract=row["abstract"],
             tldr=row["tldr"] or "",
             summary_short=row["summary_short"],
-            summary_eli5=row["summary_eli5"],
             categories=row["categories"],
             primary_category=row["primary_category"],
             published=row["published"],
@@ -5823,7 +5787,6 @@ class MemoryPaperRepository(PaperRepository):
         self.job_papers: dict[tuple[str, str], JobPaperRecord] = {}
         self.paper_upvotes: dict[tuple[str, str], datetime] = {}
         self.paper_comments: dict[str, PaperCommentRecord] = {}
-        self.paper_eli5_markdown: dict[str, dict[str, Any]] = {}
 
     def init(self) -> None:
         return None
@@ -5925,26 +5888,6 @@ class MemoryPaperRepository(PaperRepository):
 
     def get_paper(self, paper_id: str) -> PaperResponse | None:
         return self.papers.get(paper_id)
-
-    def get_paper_eli5_markdown(self, paper_id: str) -> dict[str, Any] | None:
-        if paper_id not in self.papers:
-            return None
-        cached = self.paper_eli5_markdown.get(paper_id)
-        if cached is None:
-            return {"paper_id": paper_id, "markdown": "", "generated_at": None, "cached": False}
-        return {**cached, "cached": bool(str(cached.get("markdown") or "").strip())}
-
-    def update_paper_eli5_markdown(self, paper_id: str, *, markdown: str) -> dict[str, Any] | None:
-        if paper_id not in self.papers:
-            return None
-        response = {
-            "paper_id": paper_id,
-            "markdown": markdown,
-            "generated_at": utcnow(),
-            "cached": True,
-        }
-        self.paper_eli5_markdown[paper_id] = response
-        return response
 
     def get_paper_by_arxiv_id(self, arxiv_id: str) -> PaperResponse | None:
         return self.papers.get(canonical_paper_id(arxiv_id))

@@ -5687,103 +5687,6 @@ textarea {
   color: #8f2d1f;
 }
 
-.paper-eli5-modal-shell {
-  position: fixed;
-  inset: 0;
-  z-index: 36;
-  display: grid;
-  place-items: center;
-  padding: 24px;
-}
-
-.paper-eli5-modal-backdrop {
-  position: absolute;
-  inset: 0;
-  border: 0;
-  background: rgba(18, 16, 12, 0.5);
-  cursor: pointer;
-}
-
-.paper-eli5-modal {
-  position: relative;
-  z-index: 1;
-  width: min(760px, calc(100vw - 48px));
-  max-height: min(780px, calc(100dvh - 48px));
-  border: 1px solid rgba(27, 22, 17, 0.12);
-  border-radius: 10px;
-  background: #fffdfa;
-  box-shadow: 0 24px 80px rgba(16, 24, 40, 0.24);
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  overflow: hidden;
-}
-
-.paper-eli5-modal-header {
-  padding: 14px 16px;
-  border-bottom: 1px solid rgba(27, 22, 17, 0.1);
-  display: flex;
-  align-items: start;
-  justify-content: space-between;
-  gap: 14px;
-}
-
-.paper-eli5-modal-title {
-  min-width: 0;
-  display: grid;
-  gap: 4px;
-}
-
-.paper-eli5-modal-title span {
-  color: #2563eb;
-  font-size: 12px;
-  font-weight: 750;
-  line-height: 1.2;
-}
-
-.paper-eli5-modal-title h2 {
-  margin: 0;
-  color: var(--text);
-  font-size: 17px;
-  line-height: 1.25;
-}
-
-.paper-eli5-modal-close {
-  flex: 0 0 auto;
-  width: 30px;
-  height: 30px;
-  padding: 0;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text);
-  cursor: pointer;
-  font-size: 22px;
-  line-height: 1;
-}
-
-.paper-eli5-modal-body {
-  min-height: 220px;
-  overflow: auto;
-  padding: 18px 20px 22px;
-}
-
-.paper-eli5-modal-state {
-  color: var(--muted);
-  font-size: 14px;
-  line-height: 1.5;
-}
-
-.paper-eli5-modal-state.error {
-  color: #8f2d1f;
-}
-
-.paper-eli5-markdown {
-  max-width: none;
-  color: var(--text);
-  font-size: 15px;
-  line-height: 1.65;
-}
-
 .history-section,
 .project-list,
 .thread-list,
@@ -10180,29 +10083,6 @@ body.authenticated-theme-dark .pdf-document-selection-popover button:hover,
 body.authenticated-theme-dark .pdf-document-selection-popover button:focus-visible {
   border-color: rgba(221, 161, 112, 0.34);
   background: rgba(221, 161, 112, 0.12);
-  color: #dda170;
-}
-
-body.authenticated-theme-dark .paper-eli5-modal {
-  border-color: var(--line);
-  background: var(--paper);
-}
-
-body.authenticated-theme-dark .paper-eli5-modal-header {
-  border-bottom-color: var(--line);
-}
-
-body.authenticated-theme-dark .paper-eli5-modal-title h2,
-body.authenticated-theme-dark .paper-eli5-modal-close,
-body.authenticated-theme-dark .paper-eli5-markdown {
-  color: var(--text);
-}
-
-body.authenticated-theme-dark .paper-eli5-modal-state {
-  color: var(--muted);
-}
-
-body.authenticated-theme-dark .paper-eli5-modal-title span {
   color: #dda170;
 }
 

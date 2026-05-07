@@ -929,23 +929,6 @@ def browser_get_paper(
     return service.get_indexed_paper(paper_id)
 
 
-@app.post("/v1/browser/papers/{paper_id}/eli5/stream")
-def browser_stream_paper_eli5(
-    paper_id: str,
-    user=Depends(require_browser_write_user),
-    service: PaperbaseService = Depends(get_service),
-) -> StreamingResponse:
-    def event_stream():
-        for event_name, payload in service.stream_paper_eli5_markdown(user, paper_id):
-            yield _sse_event(event_name, payload)
-
-    return StreamingResponse(
-        event_stream(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
-    )
-
-
 @app.get("/v1/browser/papers/{paper_id}/files/{path:path}", response_model=FileContentResponse)
 def browser_read_paper_file(
     paper_id: str,

@@ -57,7 +57,7 @@ BENCHMARK_USER_EMAIL = "bench+profile@paperbase.local"
 class BenchmarkDefinition:
     benchmark_id: str
     title: str
-    eli5: str
+    overview: str
     tier: str
     outputs: tuple[str, ...]
 
@@ -82,14 +82,14 @@ class _BenchmarkUi:
         if self.rich_enabled and self.console and Panel:
             self.console.print(
                 Panel.fit(
-                    self.definition.eli5,
+                    self.definition.overview,
                     title=f"{self.definition.benchmark_id.upper()} · {self.definition.title}",
                     border_style="cyan",
                 )
             )
             return
         print(f"{self.definition.benchmark_id}: {self.definition.title}")
-        print(f"ELI5: {self.definition.eli5}")
+        print(f"Overview: {self.definition.overview}")
 
     def announce(self, message: str) -> None:
         if self.rich_enabled and self.console:
@@ -146,14 +146,14 @@ class _BenchmarkUi:
             table.add_column("ID", style="bold cyan")
             table.add_column("Title")
             table.add_column("Tier")
-            table.add_column("ELI5")
+            table.add_column("Overview")
             table.add_column("Outputs")
             for definition in definitions:
                 table.add_row(
                     definition.benchmark_id,
                     definition.title,
                     definition.tier,
-                    definition.eli5,
+                    definition.overview,
                     "\n".join(definition.outputs),
                 )
             self.console.print(table)
@@ -162,7 +162,7 @@ class _BenchmarkUi:
         for definition in definitions:
             print(
                 f"  {definition.benchmark_id}: {definition.title} [{definition.tier}] "
-                f"- {definition.eli5}"
+                f"- {definition.overview}"
             )
             print(f"    outputs: {', '.join(definition.outputs)}")
 
@@ -256,7 +256,7 @@ def benchmark_definitions() -> list[BenchmarkDefinition]:
         BenchmarkDefinition(
             benchmark_id="iq-1",
             title="Indexing census",
-            eli5=(
+            overview=(
                 "Count how many papers are really indexed, how rich those artifacts are, "
                 "and how much of the corpus is embedding-searchable."
             ),
@@ -750,7 +750,7 @@ def _render_iq1_markdown(report: dict[str, Any]) -> str:
         f"- Git SHA: `{report['metadata'].get('git_sha') or 'unknown'}`",
         f"- Storage backend: `{report['fixture']['storage_backend']}`",
         "",
-        "## ELI5",
+        "## Plain-Language Overview",
         "",
         "IQ-1 is a census of the current library. It asks: how many papers are really indexed, how rich are those indexed artifacts, how much of the corpus is searchable by embeddings, and how healthy is the indexing pipeline overall?",
         "",
@@ -857,7 +857,7 @@ def list_benchmarks_cli(*, use_rich: bool = True) -> int:
         definition=BenchmarkDefinition(
             benchmark_id="catalog",
             title="Benchmark catalog",
-            eli5="Show the repo-native benchmarks you can run from paperbase-dev.",
+            overview="Show the repo-native benchmarks you can run from paperbase-dev.",
             tier="info",
             outputs=(),
         ),
