@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import {
   getDocument,
   GlobalWorkerOptions,
@@ -12,7 +12,12 @@ GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 export type PdfDocumentSection = {
   id: string;
   title: string;
-  pageNumber: number | null;
+  pageNumber: number;
+  pageYOffsetRatio: number;
+};
+
+export type PdfDocumentViewerHandle = {
+  scrollToSection: (sectionId: string) => void;
 };
 
 type PdfDocumentViewerProps = {
@@ -23,6 +28,13 @@ type PdfDocumentViewerProps = {
 };
 
 type PdfViewerStatus = "loading" | "ready" | "error";
+
+function clampPageYOffsetRatio(value: number) {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.max(0, Math.min(1, value));
+}
 
 function normalizeSectionTitle(title: string) {
   return title
@@ -48,10 +60,15 @@ function finalizeSections(sections: PdfDocumentSection[]) {
       continue;
     }
     seen.add(key);
+    const pageNumber = Number.isFinite(section.pageNumber) ? Math.floor(section.pageNumber) : 0;
+    if (pageNumber < 1 || !Number.isFinite(section.pageYOffsetRatio)) {
+      continue;
+    }
     nextSections.push({
-      id: `${key.replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "section"}-${section.pageNumber ?? "x"}`,
+      id: `${key.replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "section"}-${pageNumber}`,
       title,
-      pageNumber: section.pageNumber,
+      pageNumber,
+      pageYOffsetRatio: clampPageYOffsetRatio(section.pageYOffsetRatio),
     });
     if (nextSections.length >= 16) {
       break;
@@ -60,7 +77,7 @@ function finalizeSections(sections: PdfDocumentSection[]) {
   return nextSections;
 }
 
-async function pageNumberForDestination(
+async function sectionTargetForDestination(
   pdf: Awaited<PDFDocumentLoadingTask["promise"]>,
   dest: unknown,
 ) {
@@ -68,10 +85,22 @@ async function pageNumberForDestination(
     const explicitDest =
       typeof dest === "string" ? await pdf.getDestination(dest) : Array.isArray(dest) ? dest : null;
     const pageRef = explicitDest?.[0];
-    if (!pageRef) {
+    if (pageRef === null || pageRef === undefined) {
       return null;
     }
-    return (await pdf.getPageIndex(pageRef)) + 1;
+    const pageNumber =
+      typeof pageRef === "number" ? pageRef + 1 : (await pdf.getPageIndex(pageRef)) + 1;
+    const page = await pdf.getPage(pageNumber);
+    const viewport = page.getViewport({ scale: 1 });
+    page.cleanup();
+    const destinationTop = typeof explicitDest?.[3] === "number" ? explicitDest[3] : null;
+    return {
+      pageNumber,
+      pageYOffsetRatio:
+        destinationTop === null
+          ? 0
+          : clampPageYOffsetRatio((viewport.height - destinationTop) / viewport.height),
+    };
   } catch {
     return null;
   }
@@ -89,11 +118,13 @@ async function extractOutlineSections(pdf: Awaited<PDFDocumentLoadingTask["promi
   const visit = async (items: typeof outline) => {
     for (const item of items) {
       const title = normalizeSectionTitle(item.title ?? "");
-      if (title) {
+      const target = await sectionTargetForDestination(pdf, item.dest);
+      if (title && target) {
         sections.push({
           id: title,
           title,
-          pageNumber: await pageNumberForDestination(pdf, item.dest),
+          pageNumber: target.pageNumber,
+          pageYOffsetRatio: target.pageYOffsetRatio,
         });
       }
       if (item.items?.length) {
@@ -125,19 +156,24 @@ function textItemsToLines(items: unknown[]) {
   }
   return lines
     .sort((a, b) => b.y - a.y)
-    .map((line) =>
-      line.chunks
+    .map((line) => ({
+      y: line.y,
+      text: line.chunks
         .sort((a, b) => a.x - b.x)
         .map((chunk) => chunk.text)
         .join(" ")
         .replace(/\s+/g, " ")
         .trim(),
-    )
-    .filter(Boolean);
+    }))
+    .filter((line) => line.text);
 }
 
-function sectionFromLine(line: string, pageNumber: number): PdfDocumentSection | null {
-  const text = line.replace(/\s+/g, " ").trim();
+function sectionFromLine(
+  line: { text: string; y: number },
+  pageNumber: number,
+  pageHeight: number,
+): PdfDocumentSection | null {
+  const text = line.text.replace(/\s+/g, " ").trim();
   if (text.length < 3 || text.length > 110 || /https?:\/\//i.test(text)) {
     return null;
   }
@@ -157,174 +193,217 @@ function sectionFromLine(line: string, pageNumber: number): PdfDocumentSection |
   if (!title || title.split(/\s+/).length > 12) {
     return null;
   }
-  return { id: `${title}-${pageNumber}`, title, pageNumber };
+  return {
+    id: `${title}-${pageNumber}`,
+    title,
+    pageNumber,
+    pageYOffsetRatio: clampPageYOffsetRatio((pageHeight - line.y) / pageHeight),
+  };
 }
 
-export function PdfDocumentViewer({
-  url,
-  title,
-  className = "",
-  onSectionsChange,
-}: PdfDocumentViewerProps) {
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  const pagesRef = useRef<HTMLDivElement | null>(null);
-  const onSectionsChangeRef = useRef(onSectionsChange);
-  const [viewerWidth, setViewerWidth] = useState(0);
-  const [status, setStatus] = useState<PdfViewerStatus>("loading");
-  const [error, setError] = useState("");
-
-  useEffect(() => {
-    onSectionsChangeRef.current = onSectionsChange;
-  }, [onSectionsChange]);
-
-  useEffect(() => {
-    const element = scrollRef.current;
-    if (!element) {
-      return;
+function attachSectionAnchors(
+  sections: PdfDocumentSection[],
+  pageElements: Map<number, HTMLDivElement>,
+  pageHeights: Map<number, number>,
+  anchors: Map<string, HTMLElement>,
+) {
+  anchors.clear();
+  for (const section of sections) {
+    const pageElement = pageElements.get(section.pageNumber);
+    const pageHeight = pageHeights.get(section.pageNumber);
+    if (!pageElement || !pageHeight) {
+      continue;
     }
+    const anchor = document.createElement("span");
+    anchor.className = "pdf-document-section-anchor";
+    anchor.setAttribute("aria-hidden", "true");
+    anchor.style.top = `${Math.floor(clampPageYOffsetRatio(section.pageYOffsetRatio) * pageHeight)}px`;
+    pageElement.appendChild(anchor);
+    anchors.set(section.id, anchor);
+  }
+}
 
-    const updateWidth = () => {
-      const nextWidth = Math.floor(element.getBoundingClientRect().width);
-      setViewerWidth((currentWidth) => (currentWidth === nextWidth ? currentWidth : nextWidth));
-    };
+export const PdfDocumentViewer = forwardRef<PdfDocumentViewerHandle, PdfDocumentViewerProps>(
+  function PdfDocumentViewer({ url, title, className = "", onSectionsChange }, ref) {
+    const scrollRef = useRef<HTMLDivElement | null>(null);
+    const pagesRef = useRef<HTMLDivElement | null>(null);
+    const onSectionsChangeRef = useRef(onSectionsChange);
+    const sectionAnchorsRef = useRef(new Map<string, HTMLElement>());
+    const [viewerWidth, setViewerWidth] = useState(0);
+    const [status, setStatus] = useState<PdfViewerStatus>("loading");
+    const [error, setError] = useState("");
 
-    updateWidth();
-    if (typeof ResizeObserver === "undefined") {
-      window.addEventListener("resize", updateWidth);
-      return () => window.removeEventListener("resize", updateWidth);
-    }
+    useImperativeHandle(
+      ref,
+      () => ({
+        scrollToSection: (sectionId: string) => {
+          sectionAnchorsRef.current.get(sectionId)?.scrollIntoView({
+            behavior: "smooth",
+            block: "start",
+          });
+        },
+      }),
+      [],
+    );
 
-    const resizeObserver = new ResizeObserver(updateWidth);
-    resizeObserver.observe(element);
-    return () => resizeObserver.disconnect();
-  }, []);
+    useEffect(() => {
+      onSectionsChangeRef.current = onSectionsChange;
+    }, [onSectionsChange]);
 
-  useEffect(() => {
-    const container = pagesRef.current;
-    if (!container) {
-      return;
-    }
+    useEffect(() => {
+      const element = scrollRef.current;
+      if (!element) {
+        return;
+      }
 
-    container.replaceChildren();
-    setError("");
+      const updateWidth = () => {
+        const nextWidth = Math.floor(element.getBoundingClientRect().width);
+        setViewerWidth((currentWidth) => (currentWidth === nextWidth ? currentWidth : nextWidth));
+      };
 
-    if (!url) {
-      setStatus("error");
-      setError("No PDF URL is available.");
-      onSectionsChangeRef.current?.([]);
-      return;
-    }
+      updateWidth();
+      if (typeof ResizeObserver === "undefined") {
+        window.addEventListener("resize", updateWidth);
+        return () => window.removeEventListener("resize", updateWidth);
+      }
 
-    if (viewerWidth <= 0) {
+      const resizeObserver = new ResizeObserver(updateWidth);
+      resizeObserver.observe(element);
+      return () => resizeObserver.disconnect();
+    }, []);
+
+    useEffect(() => {
+      const container = pagesRef.current;
+      if (!container) {
+        return;
+      }
+
+      container.replaceChildren();
+      sectionAnchorsRef.current.clear();
+      setError("");
+
+      if (!url) {
+        setStatus("error");
+        setError("No PDF URL is available.");
+        onSectionsChangeRef.current?.([]);
+        return;
+      }
+
+      if (viewerWidth <= 0) {
+        setStatus("loading");
+        return;
+      }
+
+      let cancelled = false;
+      const renderTasks: RenderTask[] = [];
+      const loadingTask: PDFDocumentLoadingTask = getDocument({ url, withCredentials: false });
       setStatus("loading");
-      return;
-    }
 
-    let cancelled = false;
-    const renderTasks: RenderTask[] = [];
-    const loadingTask: PDFDocumentLoadingTask = getDocument({ url, withCredentials: false });
-    setStatus("loading");
-
-    void (async () => {
-      try {
-        const pdf = await loadingTask.promise;
-        if (cancelled) {
-          return;
-        }
-        setStatus("ready");
-        const outlineSections = await extractOutlineSections(pdf);
-        if (outlineSections.length > 0) {
-          onSectionsChangeRef.current?.(outlineSections);
-        }
-        const textSections: PdfDocumentSection[] = [];
-
-        for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      void (async () => {
+        try {
+          const pdf = await loadingTask.promise;
           if (cancelled) {
-            break;
+            return;
           }
+          setStatus("ready");
+          const outlineSections = await extractOutlineSections(pdf);
+          const textSections: PdfDocumentSection[] = [];
+          const pageElements = new Map<number, HTMLDivElement>();
+          const pageHeights = new Map<number, number>();
 
-          const page = await pdf.getPage(pageNumber);
-          if (cancelled) {
-            page.cleanup();
-            break;
-          }
+          for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+            if (cancelled) {
+              break;
+            }
 
-          const baseViewport = page.getViewport({ scale: 1 });
-          const availableWidth = Math.max(viewerWidth - 40, 280);
-          const scale = availableWidth / baseViewport.width;
-          const viewport = page.getViewport({ scale });
-          const outputScale = Math.max(window.devicePixelRatio || 1, 1);
-          if (outlineSections.length === 0) {
-            const textContent = await page.getTextContent().catch(() => null);
-            if (textContent) {
-              for (const line of textItemsToLines(textContent.items)) {
-                const section = sectionFromLine(line, pageNumber);
-                if (section) {
-                  textSections.push(section);
+            const page = await pdf.getPage(pageNumber);
+            if (cancelled) {
+              page.cleanup();
+              break;
+            }
+
+            const baseViewport = page.getViewport({ scale: 1 });
+            const availableWidth = Math.max(viewerWidth - 40, 280);
+            const scale = availableWidth / baseViewport.width;
+            const viewport = page.getViewport({ scale });
+            const outputScale = Math.max(window.devicePixelRatio || 1, 1);
+            if (outlineSections.length === 0) {
+              const textContent = await page.getTextContent().catch(() => null);
+              if (textContent) {
+                for (const line of textItemsToLines(textContent.items)) {
+                  const section = sectionFromLine(line, pageNumber, baseViewport.height);
+                  if (section) {
+                    textSections.push(section);
+                  }
                 }
               }
             }
+
+            const pageElement = document.createElement("div");
+            pageElement.className = "pdf-document-page";
+            pageElements.set(pageNumber, pageElement);
+            pageHeights.set(pageNumber, Math.floor(viewport.height));
+
+            const canvas = document.createElement("canvas");
+            canvas.className = "pdf-document-canvas";
+            canvas.setAttribute("aria-label", `${title} page ${pageNumber}`);
+            canvas.width = Math.floor(viewport.width * outputScale);
+            canvas.height = Math.floor(viewport.height * outputScale);
+            canvas.style.width = `${Math.floor(viewport.width)}px`;
+            canvas.style.height = `${Math.floor(viewport.height)}px`;
+
+            const context = canvas.getContext("2d");
+            if (!context) {
+              throw new Error("Canvas rendering is unavailable in this browser.");
+            }
+
+            pageElement.appendChild(canvas);
+            container.appendChild(pageElement);
+
+            const renderTask = page.render({
+              canvas,
+              canvasContext: context,
+              viewport,
+              transform: outputScale !== 1 ? [outputScale, 0, 0, outputScale, 0, 0] : undefined,
+              background: "#ffffff",
+            });
+            renderTasks.push(renderTask);
+            await renderTask.promise;
+            page.cleanup();
           }
-
-          const pageElement = document.createElement("div");
-          pageElement.className = "pdf-document-page";
-
-          const canvas = document.createElement("canvas");
-          canvas.className = "pdf-document-canvas";
-          canvas.setAttribute("aria-label", `${title} page ${pageNumber}`);
-          canvas.width = Math.floor(viewport.width * outputScale);
-          canvas.height = Math.floor(viewport.height * outputScale);
-          canvas.style.width = `${Math.floor(viewport.width)}px`;
-          canvas.style.height = `${Math.floor(viewport.height)}px`;
-
-          const context = canvas.getContext("2d");
-          if (!context) {
-            throw new Error("Canvas rendering is unavailable in this browser.");
+          if (!cancelled) {
+            const sections =
+              outlineSections.length > 0 ? outlineSections : finalizeSections(textSections);
+            attachSectionAnchors(sections, pageElements, pageHeights, sectionAnchorsRef.current);
+            onSectionsChangeRef.current?.(sections);
           }
-
-          pageElement.appendChild(canvas);
-          container.appendChild(pageElement);
-
-          const renderTask = page.render({
-            canvas,
-            canvasContext: context,
-            viewport,
-            transform: outputScale !== 1 ? [outputScale, 0, 0, outputScale, 0, 0] : undefined,
-            background: "#ffffff",
-          });
-          renderTasks.push(renderTask);
-          await renderTask.promise;
-          page.cleanup();
+        } catch (renderError) {
+          if (cancelled) {
+            return;
+          }
+          setStatus("error");
+          setError(renderError instanceof Error ? renderError.message : "PDF could not be loaded.");
+          onSectionsChangeRef.current?.([]);
         }
-        if (!cancelled && outlineSections.length === 0) {
-          onSectionsChangeRef.current?.(finalizeSections(textSections));
+      })();
+
+      return () => {
+        cancelled = true;
+        for (const task of renderTasks) {
+          task.cancel();
         }
-      } catch (renderError) {
-        if (cancelled) {
-          return;
-        }
-        setStatus("error");
-        setError(renderError instanceof Error ? renderError.message : "PDF could not be loaded.");
-        onSectionsChangeRef.current?.([]);
-      }
-    })();
+        void loadingTask.destroy();
+      };
+    }, [title, url, viewerWidth]);
 
-    return () => {
-      cancelled = true;
-      for (const task of renderTasks) {
-        task.cancel();
-      }
-      void loadingTask.destroy();
-    };
-  }, [title, url, viewerWidth]);
+    const viewerClassName = `pdf-document-viewer${className ? ` ${className}` : ""}`;
 
-  const viewerClassName = `pdf-document-viewer${className ? ` ${className}` : ""}`;
-
-  return (
-    <div ref={scrollRef} className={viewerClassName} aria-label={title}>
-      <div ref={pagesRef} className="pdf-document-pages" />
-      {status === "loading" ? <div className="paper-pdf-modal-state">Loading PDF...</div> : null}
-      {status === "error" ? <div className="paper-pdf-modal-state error">{error}</div> : null}
-    </div>
-  );
-}
+    return (
+      <div ref={scrollRef} className={viewerClassName} aria-label={title}>
+        <div ref={pagesRef} className="pdf-document-pages" />
+        {status === "loading" ? <div className="paper-pdf-modal-state">Loading PDF...</div> : null}
+        {status === "error" ? <div className="paper-pdf-modal-state error">{error}</div> : null}
+      </div>
+    );
+  },
+);

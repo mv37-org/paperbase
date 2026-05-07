@@ -3858,16 +3858,26 @@ textarea::placeholder,
   gap: 4px;
 }
 
-.paper-exploration-outline-list span {
+.paper-exploration-outline-button {
   display: block;
+  width: 100%;
   padding: 4px 0;
+  border: 0;
+  background: transparent;
   color: #554d45;
+  cursor: pointer;
   font-size: 12px;
   line-height: 1.25;
+  text-align: left;
 }
 
-.paper-exploration-outline-list span.active {
+.paper-exploration-outline-button:hover,
+.paper-exploration-outline-button:focus-visible,
+.paper-exploration-outline-button.active {
   color: #99582a;
+}
+
+.paper-exploration-outline-button.active {
   font-weight: 700;
 }
 
@@ -5320,9 +5330,19 @@ textarea {
 }
 
 .pdf-document-page {
+  position: relative;
   max-width: 100%;
   background: #ffffff;
   line-height: 0;
+}
+
+.pdf-document-section-anchor {
+  position: absolute;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
+  opacity: 0;
 }
 
 .pdf-document-canvas {
@@ -9752,13 +9772,15 @@ body.authenticated-theme-dark .paper-exploration-outline-list {
   border-left-color: rgba(221, 161, 112, 0.28);
 }
 
-body.authenticated-theme-dark .paper-exploration-outline-list span,
+body.authenticated-theme-dark .paper-exploration-outline-button,
 body.authenticated-theme-dark .paper-exploration-sidebar-note,
 body.authenticated-theme-dark .paper-exploration-outline-note {
   color: var(--muted);
 }
 
-body.authenticated-theme-dark .paper-exploration-outline-list span.active {
+body.authenticated-theme-dark .paper-exploration-outline-button:hover,
+body.authenticated-theme-dark .paper-exploration-outline-button:focus-visible,
+body.authenticated-theme-dark .paper-exploration-outline-button.active {
   color: #dda170;
 }
 

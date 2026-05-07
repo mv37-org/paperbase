@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import type { ForwardedRef } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const apiMocks = vi.hoisted(() => {
@@ -133,6 +134,10 @@ const apiMocks = vi.hoisted(() => {
     uploadDocument: vi.fn(),
   };
 });
+
+const pdfViewerMocks = vi.hoisted(() => ({
+  scrollToSection: vi.fn(),
+}));
 
 vi.mock("./api", () => ({
   ApiError: apiMocks.ApiError,
@@ -346,6 +351,48 @@ vi.mock("lottie-web/build/player/lottie_light", () => ({
     })),
   },
 }));
+
+vi.mock("./app/PdfDocumentViewer", async () => {
+  const React = await import("react");
+  const PdfDocumentViewer = React.forwardRef(
+    (
+      props: {
+        className?: string;
+        onSectionsChange?: (
+          sections: Array<{
+            id: string;
+            title: string;
+            pageNumber: number;
+            pageYOffsetRatio: number;
+          }>,
+        ) => void;
+        title: string;
+        url: string;
+      },
+      ref: ForwardedRef<{ scrollToSection: (sectionId: string) => void }>,
+    ) => {
+      React.useImperativeHandle(ref, () => ({
+        scrollToSection: pdfViewerMocks.scrollToSection,
+      }));
+      React.useEffect(() => {
+        if (!props.className?.includes("paper-exploration-frame")) {
+          return;
+        }
+        props.onSectionsChange?.([
+          { id: "abstract-1", title: "Abstract", pageNumber: 1, pageYOffsetRatio: 0 },
+          { id: "introduction-1", title: "Introduction", pageNumber: 1, pageYOffsetRatio: 0.2 },
+        ]);
+      }, [props.className, props.onSectionsChange]);
+      return React.createElement("div", {
+        "aria-label": props.title,
+        className: `pdf-document-viewer${props.className ? ` ${props.className}` : ""}`,
+        "data-url": props.url,
+      });
+    },
+  );
+  PdfDocumentViewer.displayName = "MockPdfDocumentViewer";
+  return { PdfDocumentViewer };
+});
 
 import App from "./App";
 
@@ -2935,6 +2982,13 @@ describe("App", () => {
     expect(document.querySelector("iframe")).toBeNull();
     expect(screen.getByText("Explorations")).toBeTruthy();
     expect(screen.queryByText("Details")).toBeNull();
+    const abstractSection = await screen.findByRole("button", { name: "Abstract" });
+    const introductionSection = screen.getByRole("button", { name: "Introduction" });
+    expect(abstractSection.classList.contains("active")).toBe(false);
+    expect(introductionSection.classList.contains("active")).toBe(false);
+    fireEvent.click(introductionSection);
+    expect(pdfViewerMocks.scrollToSection).toHaveBeenCalledWith("introduction-1");
+    expect(introductionSection.classList.contains("active")).toBe(true);
     expect(document.querySelector(".paper-exploration-card-image")).toBeNull();
     fireEvent.click(screen.getByLabelText("Delete exploration Benchmark Paper"));
     const deleteExplorationDialog = await screen.findByRole("dialog", {

@@ -61,7 +61,11 @@ import {
 } from "./app/AppChrome";
 import { ChatSessionModals } from "./app/ChatSessionModals";
 import { ChatThreadHeader } from "./app/ChatThreadHeader";
-import { PdfDocumentViewer, type PdfDocumentSection } from "./app/PdfDocumentViewer";
+import {
+  PdfDocumentViewer,
+  type PdfDocumentSection,
+  type PdfDocumentViewerHandle,
+} from "./app/PdfDocumentViewer";
 import { ThreadPapersView } from "./app/ThreadPapersView";
 import type {
   AppearanceTheme,
@@ -351,7 +355,9 @@ function samePaperSections(left: PdfDocumentSection[], right: PdfDocumentSection
     left.length === right.length &&
     left.every(
       (section, index) =>
-        section.title === right[index]?.title && section.pageNumber === right[index]?.pageNumber,
+        section.title === right[index]?.title &&
+        section.pageNumber === right[index]?.pageNumber &&
+        section.pageYOffsetRatio === right[index]?.pageYOffsetRatio,
     )
   );
 }
@@ -517,6 +523,9 @@ export default function App() {
   const [paperExplorationSections, setPaperExplorationSections] = useState<
     Record<string, PdfDocumentSection[]>
   >({});
+  const [activePaperExplorationSectionId, setActivePaperExplorationSectionId] = useState<
+    string | null
+  >(null);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [emptyStateProjectPickerOpen, setEmptyStateProjectPickerOpen] = useState(false);
@@ -584,6 +593,7 @@ export default function App() {
   const projectItemsRef = useRef<Record<string, ProjectItemState>>({});
   const paperCitationPreviewsRef = useRef<Record<string, PaperCitationPreviewState>>({});
   const paperExplorationsRef = useRef<PaperExploration[]>(paperExplorations);
+  const paperExplorationViewerRef = useRef<PdfDocumentViewerHandle | null>(null);
   const paperCitationPreviewFetchesRef = useRef(new Set<string>());
   const threadMapRef = useRef<Record<string, ChatThreadResponse>>({});
   const pythonFileMapRef = useRef<Record<string, PythonFileResponse>>({});
@@ -873,6 +883,10 @@ export default function App() {
         (exploration) => exploration.explorationId === activePaperExplorationId,
       ) ?? null)
     : null;
+
+  useEffect(() => {
+    setActivePaperExplorationSectionId(null);
+  }, [activePaperExplorationId]);
   const activePythonDraft = activePythonFileId
     ? (pythonFileDrafts[activePythonFileId] ?? null)
     : null;
@@ -1807,6 +1821,11 @@ export default function App() {
     },
     [activePaperExplorationId],
   );
+
+  const handlePaperExplorationSectionClick = useCallback((sectionId: string) => {
+    setActivePaperExplorationSectionId(sectionId);
+    paperExplorationViewerRef.current?.scrollToSection(sectionId);
+  }, []);
 
   useEffect(() => {
     if (!paperPdfModal) {
@@ -3715,6 +3734,7 @@ export default function App() {
     setPaperExplorationSidebarPane("details");
     setPaperExplorationNotes({});
     setPaperExplorationSections({});
+    setActivePaperExplorationSectionId(null);
     setAccountMenuOpen(false);
     setStreamingThreadId(null);
     setThreadStreamStates({});
@@ -5850,6 +5870,7 @@ export default function App() {
                     </header>
                     {activePaperExploration.pdfUrl ? (
                       <PdfDocumentViewer
+                        ref={paperExplorationViewerRef}
                         className="paper-exploration-frame"
                         title={`${activePaperExploration.title} PDF`}
                         url={activePaperExploration.pdfUrl}
@@ -6913,9 +6934,17 @@ export default function App() {
                             Scanning paper sections...
                           </li>
                         ) : activePaperExplorationSections.length > 0 ? (
-                          activePaperExplorationSections.map((section, index) => (
+                          activePaperExplorationSections.map((section) => (
                             <li key={section.id}>
-                              <span className={index === 0 ? "active" : ""}>{section.title}</span>
+                              <button
+                                type="button"
+                                className={`paper-exploration-outline-button${
+                                  section.id === activePaperExplorationSectionId ? " active" : ""
+                                }`}
+                                onClick={() => handlePaperExplorationSectionClick(section.id)}
+                              >
+                                {section.title}
+                              </button>
                             </li>
                           ))
                         ) : (

@@ -1,7 +1,8 @@
+import { createRef } from "react";
 import { act, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { PdfDocumentViewer } from "./PdfDocumentViewer";
+import { PdfDocumentViewer, type PdfDocumentViewerHandle } from "./PdfDocumentViewer";
 
 const pdfMocks = vi.hoisted(() => ({
   getDocument: vi.fn(),
@@ -22,10 +23,17 @@ vi.mock("pdfjs-dist/legacy/build/pdf.worker.mjs?url", () => ({
 describe("PdfDocumentViewer", () => {
   const resizeCallbacks: ResizeObserverCallback[] = [];
   const originalResizeObserver = globalThis.ResizeObserver;
+  const originalScrollIntoView = HTMLElement.prototype.scrollIntoView;
+  const scrollIntoView = vi.fn();
 
   beforeEach(() => {
     vi.clearAllMocks();
+    scrollIntoView.mockClear();
     resizeCallbacks.length = 0;
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
     globalThis.ResizeObserver = class {
       callback: ResizeObserverCallback;
 
@@ -88,6 +96,14 @@ describe("PdfDocumentViewer", () => {
 
   afterEach(() => {
     globalThis.ResizeObserver = originalResizeObserver;
+    if (originalScrollIntoView) {
+      Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+        configurable: true,
+        value: originalScrollIntoView,
+      });
+    } else {
+      delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+    }
   });
 
   it("does not restart rendering when scrollbar layout triggers a same-width resize", async () => {
@@ -121,10 +137,58 @@ describe("PdfDocumentViewer", () => {
 
     await waitFor(() => {
       expect(onSectionsChange).toHaveBeenCalledWith([
-        expect.objectContaining({ title: "Abstract", pageNumber: 1 }),
-        expect.objectContaining({ title: "Introduction", pageNumber: 1 }),
-        expect.objectContaining({ title: "Method", pageNumber: 1 }),
+        expect.objectContaining({
+          id: "abstract-1",
+          title: "Abstract",
+          pageNumber: 1,
+          pageYOffsetRatio: 0.05,
+        }),
+        expect.objectContaining({
+          id: "introduction-1",
+          title: "Introduction",
+          pageNumber: 1,
+          pageYOffsetRatio: 0.125,
+        }),
+        expect.objectContaining({
+          id: "method-1",
+          title: "Method",
+          pageNumber: 1,
+          pageYOffsetRatio: 0.1875,
+        }),
       ]);
     });
+  });
+
+  it("scrolls to known section anchors and ignores unknown sections", async () => {
+    const viewerRef = createRef<PdfDocumentViewerHandle>();
+    const onSectionsChange = vi.fn();
+
+    render(
+      <PdfDocumentViewer
+        ref={viewerRef}
+        url="https://example.test/paper.pdf"
+        title="Paper PDF"
+        onSectionsChange={onSectionsChange}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(onSectionsChange).toHaveBeenCalled();
+    });
+
+    const anchors = document.querySelectorAll<HTMLElement>(".pdf-document-section-anchor");
+    expect(anchors).toHaveLength(3);
+    expect(anchors[1]?.style.top).toBe("100px");
+
+    act(() => {
+      viewerRef.current?.scrollToSection("introduction-1");
+    });
+    expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "start" });
+
+    const callCount = scrollIntoView.mock.calls.length;
+    act(() => {
+      viewerRef.current?.scrollToSection("missing-section");
+    });
+    expect(scrollIntoView).toHaveBeenCalledTimes(callCount);
   });
 });
