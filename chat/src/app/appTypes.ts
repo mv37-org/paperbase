@@ -56,6 +56,7 @@ export type PaperExploration = {
   explorationId: string;
   projectId: string;
   paperId: string;
+  chatThreadId?: string;
   path: string;
   title: string;
   authors: string;

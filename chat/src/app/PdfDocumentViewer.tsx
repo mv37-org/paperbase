@@ -781,10 +781,15 @@ export const PdfDocumentViewer = forwardRef<PdfDocumentViewerHandle, PdfDocument
       const polylinePoints = stroke.points
         .map((point) => `${point.x * stroke.pageBox.width},${point.y * stroke.pageBox.height}`)
         .join(" ");
+      const isCompleted = className === "completed" && stroke.points.length >= 3;
+      const gradientId = `pdf-document-pen-gradient-${className}-${stroke.pageNumber}`;
+      const fillId = `pdf-document-pen-fill-${className}-${stroke.pageNumber}`;
       return (
         <svg
           className={`pdf-document-pen-overlay ${className}`}
           aria-hidden="true"
+          viewBox={`0 0 ${stroke.pageBox.width} ${stroke.pageBox.height}`}
+          preserveAspectRatio="none"
           style={{
             left: stroke.pageBox.left,
             top: stroke.pageBox.top,
@@ -792,7 +797,26 @@ export const PdfDocumentViewer = forwardRef<PdfDocumentViewerHandle, PdfDocument
             height: stroke.pageBox.height,
           }}
         >
-          <polyline points={polylinePoints} />
+          <defs>
+            <linearGradient id={gradientId} x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stopColor="#06b6d4" />
+              <stop offset="52%" stopColor="#8b5cf6" />
+              <stop offset="100%" stopColor="#f59e0b" />
+            </linearGradient>
+            <linearGradient id={fillId} x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stopColor="#22d3ee" />
+              <stop offset="58%" stopColor="#a78bfa" />
+              <stop offset="100%" stopColor="#fbbf24" />
+            </linearGradient>
+          </defs>
+          {isCompleted ? (
+            <polygon
+              points={polylinePoints}
+              className="pdf-document-pen-fill"
+              fill={`url(#${fillId})`}
+            />
+          ) : null}
+          <polyline points={polylinePoints} stroke={`url(#${gradientId})`} />
         </svg>
       );
     };

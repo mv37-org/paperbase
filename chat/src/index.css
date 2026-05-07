@@ -3814,9 +3814,9 @@ textarea::placeholder,
 
 .paper-exploration-sidebar-tabs {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+  grid-template-columns: repeat(4, minmax(0, 1fr)) auto;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   padding: 14px 14px 10px;
   border-bottom: 1px solid rgba(27, 22, 17, 0.1);
 }
@@ -4006,6 +4006,173 @@ textarea::placeholder,
 
 .paper-exploration-sidebar-note.warning {
   color: #8f2d1f;
+}
+
+.paper-exploration-chat-pane {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.paper-exploration-chat-focus {
+  flex: 0 0 auto;
+  margin: 12px 14px 0;
+  padding: 9px 10px;
+  border: 1px solid rgba(37, 99, 235, 0.16);
+  border-radius: 7px;
+  background: rgba(37, 99, 235, 0.07);
+  color: #334155;
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.35;
+}
+
+.paper-exploration-chat-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 14px;
+  overflow: auto;
+  scrollbar-gutter: stable;
+  display: grid;
+  align-content: start;
+  gap: 10px;
+}
+
+.paper-exploration-chat-list .paper-exploration-sidebar-note {
+  padding: 0;
+}
+
+.paper-exploration-chat-message {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.paper-exploration-chat-message.user {
+  justify-items: end;
+}
+
+.paper-exploration-chat-message.assistant {
+  justify-items: start;
+}
+
+.paper-exploration-chat-status {
+  color: #70675e;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.paper-exploration-chat-bubble {
+  max-width: 100%;
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  overflow-wrap: anywhere;
+}
+
+.paper-exploration-chat-bubble.user {
+  max-width: min(100%, 250px);
+  background: #1f6feb;
+  color: #ffffff;
+}
+
+.paper-exploration-chat-bubble.assistant {
+  width: 100%;
+  padding: 0;
+  background: transparent;
+  color: #27211b;
+}
+
+.paper-exploration-chat-markdown {
+  font-size: 12.5px;
+  line-height: 1.48;
+}
+
+.paper-exploration-chat-markdown p,
+.paper-exploration-chat-markdown ul,
+.paper-exploration-chat-markdown ol,
+.paper-exploration-chat-markdown pre,
+.paper-exploration-chat-markdown blockquote {
+  margin-top: 0;
+  margin-bottom: 8px;
+}
+
+.paper-exploration-chat-markdown p:last-child,
+.paper-exploration-chat-markdown ul:last-child,
+.paper-exploration-chat-markdown ol:last-child,
+.paper-exploration-chat-markdown pre:last-child,
+.paper-exploration-chat-markdown blockquote:last-child {
+  margin-bottom: 0;
+}
+
+.paper-exploration-chat-markdown code {
+  font-size: 11.5px;
+}
+
+.paper-exploration-chat-text {
+  white-space: pre-wrap;
+  font-size: 12px;
+  line-height: 1.42;
+}
+
+.paper-exploration-chat-status-line {
+  flex: 0 0 auto;
+  padding: 0 14px 8px;
+  color: #70675e;
+  font-size: 11.5px;
+  line-height: 1.35;
+}
+
+.paper-exploration-chat-composer {
+  flex: 0 0 auto;
+  padding: 10px 14px 14px;
+  border-top: 1px solid rgba(27, 22, 17, 0.1);
+  background: #f7f2ea;
+  display: grid;
+  gap: 8px;
+}
+
+.paper-exploration-chat-composer textarea {
+  width: 100%;
+  min-height: 68px;
+  padding: 9px;
+  resize: vertical;
+  border: 1px solid rgba(27, 22, 17, 0.12);
+  border-radius: 6px;
+  background: #ffffff;
+  color: #1b1611;
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.paper-exploration-chat-composer textarea::placeholder {
+  color: #91877c;
+}
+
+.paper-exploration-chat-composer textarea:focus {
+  border-color: rgba(37, 99, 235, 0.34);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+  outline: none;
+}
+
+.paper-exploration-chat-submit {
+  justify-self: end;
+  min-height: 30px;
+  padding: 0 12px;
+  border: 1px solid rgba(37, 99, 235, 0.2);
+  border-radius: 6px;
+  background: #1f6feb;
+  color: #ffffff;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.paper-exploration-chat-submit:disabled {
+  cursor: default;
+  opacity: 0.58;
 }
 
 .paper-exploration-social-pane {
@@ -5583,7 +5750,7 @@ textarea {
   inset: 0;
   overflow: hidden;
   line-height: 1;
-  opacity: 0.01;
+  opacity: 1;
   text-align: initial;
   user-select: text;
 }
@@ -5592,9 +5759,15 @@ textarea {
 .pdf-document-text-layer br {
   position: absolute;
   color: transparent;
+  text-shadow: none;
   transform-origin: 0 0;
   white-space: pre;
   cursor: text;
+}
+
+.pdf-document-text-layer ::selection {
+  background: rgba(37, 99, 235, 0.3);
+  color: transparent;
 }
 
 .pdf-document-viewer.pen-mode {
@@ -5611,18 +5784,24 @@ textarea {
   z-index: 4;
   pointer-events: none;
   overflow: visible;
+  filter: drop-shadow(0 0 5px rgba(14, 165, 233, 0.75))
+    drop-shadow(0 0 14px rgba(139, 92, 246, 0.44));
 }
 
 .pdf-document-pen-overlay polyline {
   fill: none;
-  stroke: #2563eb;
-  stroke-width: 2.5;
+  stroke: #06b6d4;
+  stroke-width: 3;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
 
 .pdf-document-pen-overlay.completed polyline {
-  stroke: #0f766e;
+  stroke-width: 3.25;
+}
+
+.pdf-document-pen-fill {
+  opacity: 0.13;
 }
 
 .pdf-document-selection-popover {
@@ -10166,6 +10345,46 @@ body.authenticated-theme-dark .paper-exploration-author-avatar {
 
 body.authenticated-theme-dark .paper-exploration-sidebar-note.warning {
   color: #f0a08f;
+}
+
+body.authenticated-theme-dark .paper-exploration-chat-focus {
+  border-color: rgba(111, 164, 255, 0.2);
+  background: rgba(79, 140, 255, 0.12);
+  color: #dce8ff;
+}
+
+body.authenticated-theme-dark .paper-exploration-chat-status,
+body.authenticated-theme-dark .paper-exploration-chat-status-line {
+  color: var(--muted);
+}
+
+body.authenticated-theme-dark .paper-exploration-chat-bubble.user {
+  background: #4f8cff;
+  color: #ffffff;
+}
+
+body.authenticated-theme-dark .paper-exploration-chat-bubble.assistant {
+  color: var(--text);
+}
+
+body.authenticated-theme-dark .paper-exploration-chat-composer {
+  border-top-color: rgba(223, 232, 244, 0.12);
+  background: #0f151d;
+}
+
+body.authenticated-theme-dark .paper-exploration-chat-composer textarea {
+  border-color: rgba(223, 232, 244, 0.14);
+  background: #0d141c;
+  color: var(--text);
+}
+
+body.authenticated-theme-dark .paper-exploration-chat-composer textarea::placeholder {
+  color: var(--muted);
+}
+
+body.authenticated-theme-dark .paper-exploration-chat-composer textarea:focus {
+  border-color: rgba(111, 164, 255, 0.44);
+  box-shadow: 0 0 0 3px rgba(79, 140, 255, 0.12);
 }
 
 body.authenticated-theme-dark .paper-exploration-social-composer {

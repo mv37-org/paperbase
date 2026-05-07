@@ -433,6 +433,7 @@ import App from "./App";
 const ACTIVE_TAB_KEY = "paperbase-active-tab";
 const LEGACY_OPEN_TABS_KEY = "paperbase-open-tabs";
 const PENDING_PROMPT_KEY = "paperbase-pending-prompt";
+const PAPER_EXPLORATIONS_KEY = "paperbase-paper-explorations";
 const SELECTED_PROJECT_KEY = "paperbase-selected-project";
 
 function authenticatedSession(
@@ -1433,6 +1434,97 @@ describe("App", () => {
     });
     expect(await screen.findByRole("heading", { name: "Benchmark Paper" })).toBeTruthy();
     expect(screen.getByText("No PDF URL is available for this paper.")).toBeTruthy();
+  });
+
+  it("keeps PDF selections inside the paper exploration sidebar chat", async () => {
+    const explorationId = "paper-exploration:proj_1:arxiv:2401.12345";
+    localStorage.setItem(
+      ACTIVE_TAB_KEY,
+      JSON.stringify({ kind: "paper_exploration", id: explorationId }),
+    );
+    localStorage.setItem(
+      PAPER_EXPLORATIONS_KEY,
+      JSON.stringify([
+        {
+          explorationId,
+          projectId: "proj_1",
+          paperId: "arxiv:2401.12345",
+          path: "sections/introduction.md",
+          title: "Benchmark Paper",
+          authors: "Ada Lovelace",
+          previewImageUrl: "",
+          pdfUrl: "https://example.test/2401.12345.pdf",
+          createdAt: "2026-04-21T00:00:00Z",
+          updatedAt: "2026-04-21T00:00:00Z",
+        },
+      ]),
+    );
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.createThread.mockResolvedValue(emptyThreadResponse("thread_paper_chat"));
+    apiMocks.sendThreadMessageStream.mockImplementation(
+      async (
+        threadId: string,
+        _payload: unknown,
+        onEvent: (eventName: string, payload: unknown) => void,
+      ) => {
+        const assistantItem = threadItemResponse(
+          "msg_paper_assistant",
+          "assistant_message",
+          "assistant",
+          "",
+          {
+            thread_id: threadId,
+            turn_id: "turn_paper",
+            phase: "final_answer",
+            status: "in_progress",
+          },
+        );
+        onEvent("item_started", { item: assistantItem });
+        onEvent("item_delta", {
+          item_id: "msg_paper_assistant",
+          delta: "Paper streamed answer",
+          delta_type: "output_text",
+        });
+        onEvent("item_completed", {
+          item: {
+            ...assistantItem,
+            content_text: "Paper streamed answer",
+            status: "completed",
+          },
+        });
+      },
+    );
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Benchmark Paper" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Chat" })).toBeTruthy();
+    fireEvent.click(await screen.findByRole("button", { name: "Mock PDF explain selection" }));
+
+    await waitFor(() => {
+      expect(apiMocks.createThread).toHaveBeenCalledWith("Paper chat: Benchmark Paper", "proj_1");
+    });
+    await waitFor(() => {
+      expect(apiMocks.sendThreadMessageStream).toHaveBeenCalledTimes(1);
+    });
+    expect(apiMocks.sendThreadMessageStream.mock.calls[0]?.[0]).toBe("thread_paper_chat");
+    expect(apiMocks.sendThreadMessageStream.mock.calls[0]?.[1]).toEqual(
+      expect.objectContaining({
+        content: "Explain this PDF selection in context.",
+        paper_ids: ["arxiv:2401.12345"],
+        paper_selection: expect.objectContaining({
+          action: "explain",
+          paper_id: "arxiv:2401.12345",
+          selected_text: "Selected benchmark text",
+        }),
+      }),
+    );
+    expect(screen.getByRole("tab", { name: "Chat" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByText("You are now focused on this paper.")).toBeTruthy();
+    expect(screen.getByText("Explain this PDF selection in context.")).toBeTruthy();
+    expect(await screen.findByText("Paper streamed answer")).toBeTruthy();
+    expect(document.querySelector(".pdf-document-viewer.paper-exploration-frame")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Benchmark Paper" })).toBeTruthy();
   });
 
   it("clears exploration search before closing from the inline close button", async () => {
@@ -3212,6 +3304,7 @@ describe("App", () => {
     expect(screen.getByText("Explorations")).toBeTruthy();
     expect(screen.queryByText("Details")).toBeNull();
     expect(screen.getByRole("tab", { name: "Info" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Chat" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "Notes" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "Social" })).toBeTruthy();
     const abstractSection = await screen.findByRole("button", { name: "Abstract" });

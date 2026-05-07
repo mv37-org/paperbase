@@ -348,7 +348,17 @@ describe("PdfDocumentViewer", () => {
     const page = document.querySelector(".pdf-document-page")!;
     firePdfPointer(page, "pointerdown", { clientX: 80, clientY: 120, pointerId: 1 });
     firePdfPointer(viewer, "pointermove", { clientX: 240, clientY: 260, pointerId: 1 });
+    firePdfPointer(viewer, "pointermove", { clientX: 180, clientY: 320, pointerId: 1 });
     firePdfPointer(viewer, "pointerup", { clientX: 240, clientY: 260, pointerId: 1 });
+
+    await waitFor(() => {
+      expect(document.querySelector(".pdf-document-pen-overlay.completed")).toBeTruthy();
+    });
+    const completedOverlay = document.querySelector(".pdf-document-pen-overlay.completed")!;
+    expect(completedOverlay.querySelector(".pdf-document-pen-fill")).toBeTruthy();
+    expect(completedOverlay.querySelector("polyline")?.getAttribute("stroke")).toContain(
+      "pdf-document-pen-gradient-completed-1",
+    );
 
     const trace = await screen.findByRole("button", { name: "Trace" });
     fireEvent.click(trace);

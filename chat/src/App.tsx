@@ -588,6 +588,7 @@ function normalizePaperExploration(value: unknown): PaperExploration | null {
     explorationId,
     projectId,
     paperId,
+    chatThreadId: typeof entry.chatThreadId === "string" ? entry.chatThreadId : undefined,
     path,
     title,
     authors: typeof entry.authors === "string" ? entry.authors : "",
@@ -726,9 +727,12 @@ export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [paperExplorationSidebarCollapsed, setPaperExplorationSidebarCollapsed] = useState(true);
   const [paperExplorationSidebarPane, setPaperExplorationSidebarPane] = useState<
-    "info" | "notes" | "social"
+    "info" | "chat" | "notes" | "social"
   >("info");
   const [paperExplorationNotes, setPaperExplorationNotes] = useState<Record<string, string>>({});
+  const [paperExplorationChatDrafts, setPaperExplorationChatDrafts] = useState<
+    Record<string, string>
+  >({});
   const [paperExplorationSections, setPaperExplorationSections] = useState<
     Record<string, PdfDocumentSection[]>
   >({});
@@ -807,6 +811,7 @@ export default function App() {
   const paperCitationPreviewsRef = useRef<Record<string, PaperCitationPreviewState>>({});
   const paperExplorationsRef = useRef<PaperExploration[]>(paperExplorations);
   const paperExplorationViewerRef = useRef<PdfDocumentViewerHandle | null>(null);
+  const paperExplorationChatListRef = useRef<HTMLDivElement | null>(null);
   const paperCitationPreviewFetchesRef = useRef(new Set<string>());
   const threadMapRef = useRef<Record<string, ChatThreadResponse>>({});
   const pythonFileMapRef = useRef<Record<string, PythonFileResponse>>({});
@@ -1170,6 +1175,22 @@ export default function App() {
     ? (paperDiscussionStates[activePaperExploration.paperId] ?? emptyPaperDiscussionState())
     : emptyPaperDiscussionState();
   const activePaperCommentCount = paperCommentCount(activePaperDiscussion.comments);
+  const activePaperExplorationChatThreadId = activePaperExploration?.chatThreadId ?? null;
+  const activePaperExplorationChatThread = activePaperExplorationChatThreadId
+    ? (threadMap[activePaperExplorationChatThreadId] ?? null)
+    : null;
+  const activePaperExplorationChatMessages = activePaperExplorationChatThread?.messages ?? [];
+  const activePaperExplorationChatDraft = activePaperExploration
+    ? (paperExplorationChatDrafts[activePaperExploration.explorationId] ?? "")
+    : "";
+  const activePaperExplorationChatRunning = Boolean(
+    activePaperExplorationChatThreadId && streamingThreadId === activePaperExplorationChatThreadId,
+  );
+  const activePaperExplorationChatMessageCount =
+    activePaperExplorationChatThread?.messages.length ?? 0;
+  const activePaperExplorationChatLastMessageMarkdown =
+    activePaperExplorationChatThread?.messages[activePaperExplorationChatMessageCount - 1]
+      ?.content_markdown ?? "";
   const activePaperExplorationAuthors = useMemo(
     () => splitPaperAuthors(activePaperExploration?.authors ?? ""),
     [activePaperExploration?.authors],
@@ -2750,6 +2771,34 @@ export default function App() {
     [upsertThreadIntoProjectItems],
   );
 
+  useEffect(() => {
+    if (
+      !activePaperExplorationChatThreadId ||
+      threadMapRef.current[activePaperExplorationChatThreadId]
+    ) {
+      return;
+    }
+    void fetchAndStoreThread(activePaperExplorationChatThreadId, false).catch((error) => {
+      console.error(error);
+    });
+  }, [activePaperExplorationChatThreadId, fetchAndStoreThread]);
+
+  useEffect(() => {
+    if (paperExplorationSidebarPane !== "chat") {
+      return;
+    }
+    const element = paperExplorationChatListRef.current;
+    if (!element) {
+      return;
+    }
+    element.scrollTop = element.scrollHeight;
+  }, [
+    activePaperExplorationChatLastMessageMarkdown,
+    activePaperExplorationChatMessageCount,
+    activePaperExplorationChatThreadId,
+    paperExplorationSidebarPane,
+  ]);
+
   const openThread = useCallback(
     async (threadId: string) => {
       const thread = threadMapRef.current[threadId] ?? (await fetchAndStoreThread(threadId));
@@ -2861,16 +2910,19 @@ export default function App() {
   );
 
   const createNewThread = useCallback(
-    async (title = "", explicitProjectId?: string) => {
+    async (title = "", explicitProjectId?: string, options: { select?: boolean } = {}) => {
       const projectId =
         explicitProjectId ?? selectedProjectIdRef.current ?? projectsRef.current[0]?.project_id;
       if (!projectId) {
         throw new Error("Create a project before starting a chat.");
       }
+      const shouldSelect = options.select !== false;
       const thread = await createThread(title, projectId);
       setThreadMap((current) => ({ ...current, [thread.thread_id]: thread }));
-      setActiveTab({ kind: "thread", id: thread.thread_id });
-      setSelectedProjectId(thread.project_id);
+      if (shouldSelect) {
+        setActiveTab({ kind: "thread", id: thread.thread_id });
+        setSelectedProjectId(thread.project_id);
+      }
       upsertThreadIntoProjectItems(thread);
       await refreshProjects();
       return thread;
@@ -4262,14 +4314,91 @@ export default function App() {
     streamingThreadId,
   ]);
 
-  const handlePaperSelectionAction = useCallback(
-    async (selection: PaperSelectionPayload) => {
+  const assignPaperExplorationChatThread = useCallback(
+    (explorationId: string, threadId: string) => {
+      setPaperExplorations((current) => {
+        const next = current.map((exploration) =>
+          exploration.explorationId === explorationId
+            ? { ...exploration, chatThreadId: threadId, updatedAt: new Date().toISOString() }
+            : exploration,
+        );
+        paperExplorationsRef.current = next;
+        return next;
+      });
+    },
+    [],
+  );
+
+  const ensurePaperExplorationChatThread = useCallback(
+    async (exploration: PaperExploration) => {
+      if (exploration.chatThreadId) {
+        try {
+          if (!threadMapRef.current[exploration.chatThreadId]) {
+            await fetchAndStoreThread(exploration.chatThreadId, false);
+          }
+          return exploration.chatThreadId;
+        } catch (error) {
+          console.error(error);
+        }
+      }
+      const thread = await createNewThread(
+        `Paper chat: ${exploration.title}`,
+        exploration.projectId,
+        { select: false },
+      );
+      assignPaperExplorationChatThread(exploration.explorationId, thread.thread_id);
+      return thread.thread_id;
+    },
+    [assignPaperExplorationChatThread, createNewThread, fetchAndStoreThread],
+  );
+
+  const sendPaperExplorationChatMessage = useCallback(
+    async (
+      exploration: PaperExploration,
+      content: string,
+      paperSelection?: PaperSelectionPayload | null,
+    ) => {
       if (streamingThreadId) {
         return;
       }
       if (!requireInferenceAccess()) {
         return;
       }
+      setPaperExplorationSidebarCollapsed(false);
+      setPaperExplorationSidebarPane("chat");
+      const threadId = await ensurePaperExplorationChatThread(exploration);
+      await sendMessage(
+        threadId,
+        content,
+        undefined,
+        [exploration.paperId],
+        paperSelection ?? null,
+      );
+    },
+    [ensurePaperExplorationChatThread, requireInferenceAccess, sendMessage, streamingThreadId],
+  );
+
+  const handlePaperExplorationChatSubmit = useCallback(
+    async (event?: FormEvent<HTMLFormElement>) => {
+      event?.preventDefault();
+      if (!activePaperExploration) {
+        return;
+      }
+      const content = activePaperExplorationChatDraft.trim();
+      if (!content) {
+        return;
+      }
+      setPaperExplorationChatDrafts((current) => ({
+        ...current,
+        [activePaperExploration.explorationId]: "",
+      }));
+      await sendPaperExplorationChatMessage(activePaperExploration, content);
+    },
+    [activePaperExploration, activePaperExplorationChatDraft, sendPaperExplorationChatMessage],
+  );
+
+  const handlePaperSelectionAction = useCallback(
+    async (selection: PaperSelectionPayload) => {
       const actionLabel =
         selection.action === "trace"
           ? "Trace the evidence for this PDF selection."
@@ -4278,16 +4407,28 @@ export default function App() {
             : selection.action === "reproduce"
               ? "Turn this PDF selection into reproducible steps or pseudocode."
               : "Explain this PDF selection in context.";
+      if (activePaperExploration && activePaperExploration.paperId === selection.paper_id) {
+        await sendPaperExplorationChatMessage(activePaperExploration, actionLabel, selection);
+        return;
+      }
+      if (streamingThreadId) {
+        return;
+      }
+      if (!requireInferenceAccess()) {
+        return;
+      }
       const threadId = activeThreadId ?? (await createNewThread()).thread_id;
       closePaperPdfModal();
       await sendMessage(threadId, actionLabel, undefined, [selection.paper_id], selection);
     },
     [
       activeThreadId,
+      activePaperExploration,
       closePaperPdfModal,
       createNewThread,
       requireInferenceAccess,
       sendMessage,
+      sendPaperExplorationChatMessage,
       streamingThreadId,
     ],
   );
@@ -4320,6 +4461,7 @@ export default function App() {
     setPaperExplorationSidebarCollapsed(true);
     setPaperExplorationSidebarPane("info");
     setPaperExplorationNotes({});
+    setPaperExplorationChatDrafts({});
     setPaperExplorationSections({});
     setPaperDiscussionStates({});
     setActivePaperExplorationSectionId(null);
@@ -7558,6 +7700,15 @@ export default function App() {
                 <button
                   type="button"
                   role="tab"
+                  aria-selected={paperExplorationSidebarPane === "chat"}
+                  className={`paper-exploration-sidebar-tab${paperExplorationSidebarPane === "chat" ? " active" : ""}`}
+                  onClick={() => setPaperExplorationSidebarPane("chat")}
+                >
+                  Chat
+                </button>
+                <button
+                  type="button"
+                  role="tab"
                   aria-selected={paperExplorationSidebarPane === "notes"}
                   className={`paper-exploration-sidebar-tab${paperExplorationSidebarPane === "notes" ? " active" : ""}`}
                   onClick={() => setPaperExplorationSidebarPane("notes")}
@@ -7653,6 +7804,106 @@ export default function App() {
                       )}
                     </details>
                   </>
+                ) : paperExplorationSidebarPane === "chat" ? (
+                  <div className="paper-exploration-chat-pane">
+                    <div className="paper-exploration-chat-focus">
+                      You are now focused on this paper.
+                    </div>
+                    <div
+                      ref={paperExplorationChatListRef}
+                      className="paper-exploration-chat-list"
+                      aria-label="Paper chat messages"
+                    >
+                      {activePaperExplorationChatMessages.length > 0 ? (
+                        activePaperExplorationChatMessages
+                          .filter((message) => message.kind !== "compaction")
+                          .map((message) => {
+                            const isAssistant = message.role === "assistant";
+                            const isStreaming = isStreamingMessageStatus(message.status);
+                            return (
+                              <article
+                                key={message.message_id}
+                                className={`paper-exploration-chat-message ${isAssistant ? "assistant" : "user"} status-${message.status}`}
+                              >
+                                {message.status !== "completed" ? (
+                                  <div
+                                    className={`paper-exploration-chat-status${isStreaming ? " thinking-shimmer" : ""}`}
+                                  >
+                                    {isStreaming ? "Thinking" : "Failed"}
+                                  </div>
+                                ) : null}
+                                <div
+                                  className={`paper-exploration-chat-bubble ${isAssistant ? "assistant" : "user"}`}
+                                >
+                                  {isAssistant ? (
+                                    <MarkdownRenderer
+                                      markdown={message.content_markdown}
+                                      className="paper-exploration-chat-markdown"
+                                      interactiveCitations
+                                      onCitationClick={(sourceId) => {
+                                        const citation = message.citations.find(
+                                          (item) => item.source_id === sourceId,
+                                        );
+                                        if (citation) {
+                                          handleCitationClick(message, citation);
+                                        }
+                                      }}
+                                    />
+                                  ) : (
+                                    <div className="paper-exploration-chat-text">
+                                      {message.content_markdown}
+                                    </div>
+                                  )}
+                                </div>
+                              </article>
+                            );
+                          })
+                      ) : (
+                        <p className="paper-exploration-sidebar-note">
+                          Ask a focused question about this paper.
+                        </p>
+                      )}
+                    </div>
+                    {composerStatus && activePaperExplorationChatRunning ? (
+                      <div className="paper-exploration-chat-status-line">{composerStatus}</div>
+                    ) : null}
+                    <form
+                      className="paper-exploration-chat-composer"
+                      onSubmit={handlePaperExplorationChatSubmit}
+                    >
+                      <textarea
+                        aria-label="Paper chat message"
+                        value={activePaperExplorationChatDraft}
+                        onChange={(event) =>
+                          setPaperExplorationChatDrafts((current) => ({
+                            ...current,
+                            [activePaperExploration.explorationId]: event.target.value,
+                          }))
+                        }
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" && !event.shiftKey) {
+                            event.preventDefault();
+                            void handlePaperExplorationChatSubmit();
+                          }
+                        }}
+                        placeholder="Ask about this paper"
+                        rows={3}
+                      />
+                      <button
+                        type={activePaperExplorationChatRunning ? "button" : "submit"}
+                        className="paper-exploration-chat-submit"
+                        disabled={
+                          !activePaperExplorationChatRunning &&
+                          activePaperExplorationChatDraft.trim().length === 0
+                        }
+                        onClick={
+                          activePaperExplorationChatRunning ? handleStopStreaming : undefined
+                        }
+                      >
+                        {activePaperExplorationChatRunning ? "Stop" : "Send"}
+                      </button>
+                    </form>
+                  </div>
                 ) : paperExplorationSidebarPane === "social" ? (
                   <div className="paper-exploration-social-pane">
                     <div className="paper-exploration-social-thread">
