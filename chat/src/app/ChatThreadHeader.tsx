@@ -1,7 +1,13 @@
+import { useEffect, useRef } from "react";
+import lottie from "lottie-web/build/player/lottie_light";
+import type { AnimationItem } from "lottie-web";
+
 import type { ThreadPane } from "./appTypes";
+import { staticAssetPath } from "./appUtils";
 
 type ChatThreadHeaderProps = {
   threadPane: ThreadPane;
+  chatRunning: boolean;
   menuOpen: boolean;
   onSelectPane: (pane: ThreadPane) => void;
   onToggleMenu: () => void;
@@ -14,6 +20,7 @@ type ChatThreadHeaderProps = {
 
 export function ChatThreadHeader({
   threadPane,
+  chatRunning,
   menuOpen,
   onSelectPane,
   onToggleMenu,
@@ -23,6 +30,47 @@ export function ChatThreadHeader({
   onRename,
   onDelete,
 }: ChatThreadHeaderProps) {
+  const conversationIconRef = useRef<HTMLSpanElement | null>(null);
+  const conversationAnimationRef = useRef<AnimationItem | null>(null);
+
+  useEffect(() => {
+    if (!conversationIconRef.current) {
+      return;
+    }
+
+    const animation = lottie.loadAnimation({
+      container: conversationIconRef.current,
+      renderer: "svg",
+      loop: true,
+      autoplay: false,
+      path: staticAssetPath("icons8-conversation.json"),
+      rendererSettings: {
+        preserveAspectRatio: "xMidYMid meet",
+      },
+    });
+    conversationAnimationRef.current = animation;
+    animation.goToAndStop(0, true);
+
+    return () => {
+      animation.destroy();
+      if (conversationAnimationRef.current === animation) {
+        conversationAnimationRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const animation = conversationAnimationRef.current;
+    if (!animation) {
+      return;
+    }
+    if (chatRunning) {
+      animation.play();
+      return;
+    }
+    animation.goToAndStop(0, true);
+  }, [chatRunning]);
+
   return (
     <header className="chat-thread-header">
       <div className="chat-thread-header-inner">
@@ -34,7 +82,12 @@ export function ChatThreadHeader({
             className={`chat-thread-tab${threadPane === "chat" ? " active" : ""}`}
             onClick={() => onSelectPane("chat")}
           >
-            Chat
+            <span
+              ref={conversationIconRef}
+              className={`chat-thread-tab-lottie${chatRunning ? " running" : ""}`}
+              aria-hidden="true"
+            />
+            <span>Conversation</span>
           </button>
           <button
             type="button"
@@ -43,7 +96,13 @@ export function ChatThreadHeader({
             className={`chat-thread-tab${threadPane === "papers" ? " active" : ""}`}
             onClick={() => onSelectPane("papers")}
           >
-            Papers
+            <img
+              src={staticAssetPath("icons8-research.svg")}
+              className="chat-thread-tab-icon"
+              alt=""
+              aria-hidden="true"
+            />
+            <span>Research papers</span>
           </button>
         </div>
         <div className="chat-thread-menu-wrap">

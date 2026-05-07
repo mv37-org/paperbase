@@ -1,5 +1,10 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, ChangeEvent, UIEvent } from "react";
+import type {
+  CSSProperties,
+  ChangeEvent,
+  KeyboardEvent as ReactKeyboardEvent,
+  UIEvent,
+} from "react";
 import Editor, { DiffEditor } from "@monaco-editor/react";
 
 import {
@@ -167,6 +172,7 @@ import type {
   GitHubRepoImportCandidate,
   GitHubRepoMetadataResponse,
   GitHubRepoSummary,
+  MentionSuggestion,
   MentionTag,
   PaperResponse,
   ProjectItemKind,
@@ -372,6 +378,20 @@ function sourceCountLabel(count: number) {
   return `${count} ${count === 1 ? "source" : "sources"}`;
 }
 
+function paperSuggestionMeta(paper: MentionSuggestion) {
+  const parts = [];
+  if (paper.arxiv_id.trim()) {
+    parts.push(`arXiv ${paper.arxiv_id}`);
+  }
+  if (paper.published) {
+    parts.push(paper.published.slice(0, 4));
+  }
+  if (paper.citation_count > 0) {
+    parts.push(`${paper.citation_count} cites`);
+  }
+  return parts.join(" · ");
+}
+
 export default function App() {
   const bootstrapSession = useMemo(() => getBootstrapSession(), []);
   const [session, setSession] = useState<BrowserSessionResponse | null>(bootstrapSession);
@@ -479,6 +499,19 @@ export default function App() {
   const [paperExplorations, setPaperExplorations] = useState<PaperExploration[]>(() =>
     restorePaperExplorations(),
   );
+  const [explorationPicker, setExplorationPicker] = useState<{
+    projectId: string;
+    projectName: string;
+  } | null>(null);
+  const [explorationSearch, setExplorationSearch] = useState("");
+  const [explorationSuggestions, setExplorationSuggestions] = useState<MentionSuggestion[]>([]);
+  const [explorationSearchStatus, setExplorationSearchStatus] = useState<
+    "idle" | "loading" | "ready" | "error"
+  >("idle");
+  const [explorationSearchFallback, setExplorationSearchFallback] = useState(false);
+  const [explorationSearchError, setExplorationSearchError] = useState("");
+  const [explorationSelectedIndex, setExplorationSelectedIndex] = useState(0);
+  const [explorationStartingPaperId, setExplorationStartingPaperId] = useState("");
   const [trendingBrowseState, setTrendingBrowseState] = useState<TrendingBrowseState | null>(() =>
     trendingBrowseStateFromUrl(),
   );
@@ -517,6 +550,7 @@ export default function App() {
   const contextUsageMenuRef = useRef<HTMLDivElement | null>(null);
   const emptyStateProjectPickerRef = useRef<HTMLDivElement | null>(null);
   const emptyStateProjectSearchInputRef = useRef<HTMLInputElement | null>(null);
+  const explorationSearchInputRef = useRef<HTMLInputElement | null>(null);
   const projectMenuRef = useRef<HTMLDivElement | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const pendingTurnAnchorMessageIdRef = useRef<string | null>(null);
@@ -559,6 +593,71 @@ export default function App() {
     paperExplorationsRef.current = paperExplorations;
     persistPaperExplorations(paperExplorations);
   }, [paperExplorations]);
+
+  useEffect(() => {
+    if (!explorationPicker) {
+      return;
+    }
+    window.requestAnimationFrame(() => {
+      explorationSearchInputRef.current?.focus();
+    });
+  }, [explorationPicker]);
+
+  useEffect(() => {
+    if (!explorationPicker) {
+      return;
+    }
+
+    const query = explorationSearch.trim();
+    if (query.length < 2) {
+      setExplorationSuggestions([]);
+      setExplorationSearchStatus("idle");
+      setExplorationSearchFallback(false);
+      setExplorationSearchError("");
+      setExplorationSelectedIndex(0);
+      return;
+    }
+
+    let stale = false;
+    setExplorationSearchStatus("loading");
+    setExplorationSearchError("");
+    const timeoutId = window.setTimeout(() => {
+      suggestBrowserPapers(query, 8)
+        .then((result) => {
+          if (stale) {
+            return;
+          }
+          setExplorationSuggestions(result.suggestions);
+          setExplorationSearchFallback(result.fallback);
+          setExplorationSearchStatus("ready");
+          setExplorationSelectedIndex(0);
+        })
+        .catch((error) => {
+          if (stale) {
+            return;
+          }
+          setExplorationSuggestions([]);
+          setExplorationSearchFallback(false);
+          setExplorationSearchStatus("error");
+          setExplorationSearchError(
+            error instanceof Error ? error.message : "Paper search failed.",
+          );
+        });
+    }, 140);
+
+    return () => {
+      stale = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [explorationPicker, explorationSearch]);
+
+  useEffect(() => {
+    setExplorationSelectedIndex((current) =>
+      explorationSuggestions.length === 0
+        ? 0
+        : Math.min(current, explorationSuggestions.length - 1),
+    );
+  }, [explorationSuggestions.length]);
 
   useEffect(() => {
     pythonFileMapRef.current = pythonFileMap;
@@ -1247,6 +1346,49 @@ export default function App() {
     setFlashKind("note");
   }, []);
 
+  const closeExplorationPicker = useCallback(() => {
+    setExplorationPicker(null);
+    setExplorationSearch("");
+    setExplorationSuggestions([]);
+    setExplorationSearchStatus("idle");
+    setExplorationSearchFallback(false);
+    setExplorationSearchError("");
+    setExplorationSelectedIndex(0);
+    setExplorationStartingPaperId("");
+  }, []);
+
+  const openExplorationPicker = useCallback(
+    (projectId: string) => {
+      const project = projectsRef.current.find((entry) => entry.project_id === projectId);
+      if (!project) {
+        showErrorFlash("Select a project before starting an exploration.");
+        return;
+      }
+      selectedProjectIdRef.current = projectId;
+      setSelectedProjectId(projectId);
+      setExpandedProjectIds((current) =>
+        current.includes(projectId) ? current : [...current, projectId],
+      );
+      setCollapsedProjectCategories((current) => ({
+        ...current,
+        [projectId]: {
+          ...current[projectId],
+          notes: false,
+        },
+      }));
+      setProjectMenuProjectId(null);
+      setExplorationSearch("");
+      setExplorationSuggestions([]);
+      setExplorationSearchStatus("idle");
+      setExplorationSearchFallback(false);
+      setExplorationSearchError("");
+      setExplorationSelectedIndex(0);
+      setExplorationStartingPaperId("");
+      setExplorationPicker({ projectId, projectName: project.name });
+    },
+    [showErrorFlash],
+  );
+
   const closeAuthModal = useCallback(() => {
     setAuthModalOpen(false);
     clearFlash();
@@ -1464,6 +1606,80 @@ export default function App() {
       return true;
     },
     [activeProjectHomeId, activeThread?.project_id, openPaperExploration, showErrorFlash],
+  );
+
+  const startExplorationFromSuggestion = useCallback(
+    async (paper: MentionSuggestion) => {
+      if (!explorationPicker || explorationStartingPaperId) {
+        return;
+      }
+      setExplorationStartingPaperId(paper.paper_id);
+      try {
+        const didStart = await startPaperExploration({
+          paperId: paper.paper_id,
+          path: paper.arxiv_id || paper.paper_id,
+          title: paper.title,
+          authors: paper.authors,
+          projectId: explorationPicker.projectId,
+        });
+        if (didStart) {
+          closeExplorationPicker();
+        }
+      } catch (error) {
+        showErrorFlash(
+          error instanceof Error ? error.message : "Exploration could not be started.",
+        );
+      } finally {
+        setExplorationStartingPaperId((current) => (current === paper.paper_id ? "" : current));
+      }
+    },
+    [
+      closeExplorationPicker,
+      explorationPicker,
+      explorationStartingPaperId,
+      showErrorFlash,
+      startPaperExploration,
+    ],
+  );
+
+  const handleExplorationPickerKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeExplorationPicker();
+        return;
+      }
+      if (explorationSuggestions.length === 0) {
+        return;
+      }
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        setExplorationSelectedIndex((current) =>
+          current >= explorationSuggestions.length - 1 ? 0 : current + 1,
+        );
+        return;
+      }
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        setExplorationSelectedIndex((current) =>
+          current <= 0 ? explorationSuggestions.length - 1 : current - 1,
+        );
+        return;
+      }
+      if (event.key === "Enter") {
+        event.preventDefault();
+        const selectedPaper = explorationSuggestions[explorationSelectedIndex];
+        if (selectedPaper) {
+          void startExplorationFromSuggestion(selectedPaper);
+        }
+      }
+    },
+    [
+      closeExplorationPicker,
+      explorationSelectedIndex,
+      explorationSuggestions,
+      startExplorationFromSuggestion,
+    ],
   );
 
   const deletePaperExploration = useCallback((explorationId: string) => {
@@ -4785,6 +5001,19 @@ export default function App() {
                                         />
                                         <span>Explorations</span>
                                       </button>
+                                      <div className="project-tree-category-actions">
+                                        <button
+                                          type="button"
+                                          className="sidebar-icon-button project-action-button"
+                                          aria-label={`Start exploration in ${project.name}`}
+                                          onClick={() => openExplorationPicker(project.project_id)}
+                                        >
+                                          <AppIcon
+                                            src={staticAssetPath("new-project.svg")}
+                                            className="project-action-icon"
+                                          />
+                                        </button>
+                                      </div>
                                     </div>
                                     {!collapsedCategories.notes &&
                                     projectExplorations.length > 0 ? (
@@ -4807,13 +5036,6 @@ export default function App() {
                                             }}
                                           >
                                             <div className="thread-card-copy paper-exploration-card-copy">
-                                              {exploration.previewImageUrl ? (
-                                                <img
-                                                  className="paper-exploration-card-image"
-                                                  src={exploration.previewImageUrl}
-                                                  alt=""
-                                                />
-                                              ) : null}
                                               <strong className="thread-card-title">
                                                 {exploration.title}
                                               </strong>
@@ -4860,13 +5082,13 @@ export default function App() {
                                           asset="sessions.svg"
                                           className="project-tree-category-icon"
                                         />
-                                        <span>Sessions</span>
+                                        <span>Conversations</span>
                                       </button>
                                       <div className="project-tree-category-actions">
                                         <button
                                           type="button"
                                           className="sidebar-icon-button project-action-button"
-                                          aria-label={`Start chat in ${project.name}`}
+                                          aria-label={`Start conversation in ${project.name}`}
                                           onClick={() =>
                                             void handleProjectStartChat(project.project_id)
                                           }
@@ -4930,7 +5152,9 @@ export default function App() {
                                         })}
                                       </div>
                                     ) : !collapsedCategories.sessions && itemState?.loaded ? (
-                                      <div className="project-tree-empty">No sessions yet.</div>
+                                      <div className="project-tree-empty">
+                                        No conversations yet.
+                                      </div>
                                     ) : null}
                                     {!collapsedCategories.sessions &&
                                     itemState?.loaded &&
@@ -5205,6 +5429,7 @@ export default function App() {
             {showChatThreadHeader ? (
               <ChatThreadHeader
                 threadPane={threadPane}
+                chatRunning={activeStreamInView}
                 menuOpen={chatHeaderMenuOpen}
                 onSelectPane={setThreadPane}
                 onToggleMenu={() => setChatHeaderMenuOpen((current) => !current)}
@@ -6386,6 +6611,104 @@ export default function App() {
               </div>
             </aside>
           ) : null}
+        </div>
+      ) : null}
+
+      {explorationPicker ? (
+        <div
+          className="exploration-picker-shell"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="exploration-picker-title"
+        >
+          <button
+            type="button"
+            className="exploration-picker-backdrop"
+            aria-label="Close exploration picker"
+            onClick={closeExplorationPicker}
+          />
+          <div className="exploration-picker-panel" onKeyDown={handleExplorationPickerKeyDown}>
+            <header className="exploration-picker-header">
+              <div>
+                <span>New exploration</span>
+                <h2 id="exploration-picker-title">{explorationPicker.projectName}</h2>
+              </div>
+              <button
+                type="button"
+                className="exploration-picker-close"
+                aria-label="Close exploration picker"
+                onClick={closeExplorationPicker}
+              >
+                ×
+              </button>
+            </header>
+            <div className="exploration-picker-search">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M10.5 18a7.5 7.5 0 1 1 5.3-12.8 7.5 7.5 0 0 1-5.3 12.8Z" />
+                <path d="m16 16 4.5 4.5" />
+              </svg>
+              <input
+                ref={explorationSearchInputRef}
+                type="search"
+                value={explorationSearch}
+                onChange={(event) => setExplorationSearch(event.target.value)}
+                placeholder="Search by paper title or arXiv ID"
+                aria-label="Search papers for exploration"
+              />
+              {explorationSearchStatus === "loading" ? (
+                <span className="exploration-picker-spinner" aria-hidden="true" />
+              ) : null}
+            </div>
+            <div className="exploration-picker-list" role="listbox" aria-label="Paper results">
+              {explorationSearchFallback ? (
+                <div className="exploration-picker-banner">
+                  No exact matches found. Showing nearby papers.
+                </div>
+              ) : null}
+              {explorationSuggestions.map((paper, index) => {
+                const selected = index === explorationSelectedIndex;
+                const starting = explorationStartingPaperId === paper.paper_id;
+                return (
+                  <div
+                    key={paper.paper_id}
+                    role="option"
+                    aria-selected={selected}
+                    className={`exploration-picker-item${selected ? " selected" : ""}`}
+                    onMouseEnter={() => setExplorationSelectedIndex(index)}
+                  >
+                    <div className="exploration-picker-item-copy">
+                      <strong>{paper.title}</strong>
+                      <span>{paper.authors || "Author unavailable"}</span>
+                      {paperSuggestionMeta(paper) ? (
+                        <small>{paperSuggestionMeta(paper)}</small>
+                      ) : null}
+                    </div>
+                    <button
+                      type="button"
+                      className="exploration-picker-item-action"
+                      disabled={Boolean(explorationStartingPaperId)}
+                      onClick={() => void startExplorationFromSuggestion(paper)}
+                    >
+                      {starting ? "Starting..." : "Explore"}
+                    </button>
+                  </div>
+                );
+              })}
+              {explorationSearch.trim().length < 2 ? (
+                <div className="exploration-picker-empty">
+                  Type at least two characters to search indexed papers.
+                </div>
+              ) : null}
+              {explorationSearchStatus === "ready" &&
+              explorationSearch.trim().length >= 2 &&
+              explorationSuggestions.length === 0 ? (
+                <div className="exploration-picker-empty">No papers match this search.</div>
+              ) : null}
+              {explorationSearchStatus === "error" ? (
+                <div className="exploration-picker-empty error">{explorationSearchError}</div>
+              ) : null}
+            </div>
+          </div>
         </div>
       ) : null}
 

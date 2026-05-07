@@ -337,6 +337,16 @@ vi.mock("echarts-for-react", () => ({
   },
 }));
 
+vi.mock("lottie-web/build/player/lottie_light", () => ({
+  default: {
+    loadAnimation: vi.fn(() => ({
+      destroy: vi.fn(),
+      goToAndStop: vi.fn(),
+      play: vi.fn(),
+    })),
+  },
+}));
+
 import App from "./App";
 
 const ACTIVE_TAB_KEY = "paperbase-active-tab";
@@ -1192,17 +1202,17 @@ describe("App", () => {
     const categoryLabels = [
       ...document.querySelectorAll<HTMLElement>(".project-tree-category-label"),
     ].map((element) => element.textContent?.trim());
-    expect(categoryLabels).toEqual(["Explorations", "Sessions", "Code"]);
+    expect(categoryLabels).toEqual(["Explorations", "Conversations", "Code"]);
     expect(document.querySelectorAll(".project-tree-category-count")).toHaveLength(0);
     expect(screen.getByText("Home")).toBeTruthy();
     expect(screen.getByText("Explorations")).toBeTruthy();
-    expect(screen.getByText("Sessions")).toBeTruthy();
+    expect(screen.getByText("Conversations")).toBeTruthy();
     expect(screen.getByText("Code")).toBeTruthy();
     expect(screen.getByLabelText("Collapse all sections in General")).toBeTruthy();
 
-    fireEvent.click(screen.getByText("Sessions"));
+    fireEvent.click(screen.getByText("Conversations"));
     expect(screen.queryByText("Recovered thread")).toBeNull();
-    fireEvent.click(screen.getByText("Sessions"));
+    fireEvent.click(screen.getByText("Conversations"));
     expect(await screen.findByText("Recovered thread")).toBeTruthy();
 
     fireEvent.click(screen.getByLabelText("Collapse all sections in General"));
@@ -1217,6 +1227,71 @@ describe("App", () => {
 
     fireEvent.click(screen.getByText("Home"));
     expect(await screen.findByText("Project Home")).toBeTruthy();
+  });
+
+  it("starts a paper exploration from the project exploration picker", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.suggestBrowserPapers.mockResolvedValue({
+      fallback: false,
+      suggestions: [
+        {
+          paper_id: "arxiv:2402.22222",
+          arxiv_id: "2402.22222",
+          title: "Benchmark Paper",
+          authors: "Ada Lovelace",
+          summary_short: "Benchmark summary",
+          citation_count: 9,
+          published: "2026-02-02",
+          score: 0.92,
+          matched_field: "title",
+          highlight_snippet: "",
+        },
+      ],
+    });
+    apiMocks.getBrowserPaper.mockResolvedValue({
+      paper_id: "arxiv:2402.22222",
+      arxiv_id: "2402.22222",
+      title: "Benchmark Paper",
+      authors: "Ada Lovelace",
+      abstract: "Benchmark abstract",
+      summary_short: "Benchmark summary",
+      summary_eli5: "Simple benchmark summary",
+      categories: "cs.AI",
+      primary_category: "cs.AI",
+      published: "2026-02-02",
+      updated: "2026-02-02",
+      pdf_url: "",
+      html_url: "https://example.test/2402.22222",
+      citation_count: 9,
+      influential_citation_count: 1,
+      index_status: "indexed",
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+    fireEvent.click(screen.getAllByText("General")[0]!);
+    fireEvent.click(await screen.findByLabelText("Start exploration in General"));
+
+    expect(screen.getByRole("dialog", { name: "General" })).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Search papers for exploration"), {
+      target: { value: "benchmark" },
+    });
+
+    await waitFor(() => {
+      expect(apiMocks.suggestBrowserPapers).toHaveBeenCalledWith("benchmark", 8);
+    });
+    expect(await screen.findByText("Benchmark Paper")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Explore" }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "General" })).toBeNull();
+    });
+    expect(await screen.findByRole("heading", { name: "Benchmark Paper" })).toBeTruthy();
+    expect(screen.getByText("No PDF URL is available for this paper.")).toBeTruthy();
   });
 
   it("paginates project sidebar code inside the code section and links to GitHub", async () => {
@@ -1448,7 +1523,7 @@ describe("App", () => {
       );
     });
     await waitFor(() => {
-      expect(screen.getByLabelText("Start chat in Agents")).toBeTruthy();
+      expect(screen.getByLabelText("Start conversation in Agents")).toBeTruthy();
     });
   });
 
@@ -1826,9 +1901,9 @@ describe("App", () => {
 
     fireEvent.click(screen.getAllByText("General")[0]!);
     await waitFor(() => {
-      expect(screen.getByLabelText("Start chat in General")).toBeTruthy();
+      expect(screen.getByLabelText("Start conversation in General")).toBeTruthy();
     });
-    fireEvent.click(screen.getByLabelText("Start chat in General"));
+    fireEvent.click(screen.getByLabelText("Start conversation in General"));
 
     expect(apiMocks.createThread).toHaveBeenCalledTimes(1);
     expect(apiMocks.moveThreadToProject).not.toHaveBeenCalled();
@@ -1858,9 +1933,9 @@ describe("App", () => {
 
     fireEvent.click(screen.getAllByText("Agents")[0]!);
     await waitFor(() => {
-      expect(screen.getByLabelText("Start chat in Agents")).toBeTruthy();
+      expect(screen.getByLabelText("Start conversation in Agents")).toBeTruthy();
     });
-    fireEvent.click(screen.getByLabelText("Start chat in Agents"));
+    fireEvent.click(screen.getByLabelText("Start conversation in Agents"));
 
     await waitFor(() => {
       expect(apiMocks.moveThreadToProject).toHaveBeenCalledWith("thread_2", "proj_2");
@@ -2025,8 +2100,8 @@ describe("App", () => {
     await waitFor(() => {
       expect(screen.getByText("Start new research in")).toBeTruthy();
     });
-    expect(screen.queryByRole("tab", { name: "Chat" })).toBeNull();
-    expect(screen.queryByRole("tab", { name: "Papers" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Conversation" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Research papers" })).toBeNull();
     expect(document.querySelector(".chat-message-list.thread-header-visible")).toBeNull();
   });
 
@@ -2053,8 +2128,8 @@ describe("App", () => {
     await waitFor(() => {
       expect(screen.getByText("Summarize recent planning papers")).toBeTruthy();
     });
-    expect(screen.queryByRole("tab", { name: "Chat" })).toBeNull();
-    expect(screen.queryByRole("tab", { name: "Papers" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Conversation" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Research papers" })).toBeNull();
     expect(document.querySelector(".chat-message-list.thread-header-visible")).toBeNull();
   });
 
@@ -2657,8 +2732,8 @@ describe("App", () => {
     expect(screen.queryByText("Short grounded benchmark summary.")).toBeNull();
     expect(screen.queryByRole("link", { name: "HTML" })).toBeNull();
     expect(screen.queryByRole("link", { name: "PDF" })).toBeNull();
-    expect(screen.getByRole("tab", { name: "Chat" })).toBeTruthy();
-    expect(screen.getByRole("tab", { name: "Papers" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Conversation" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Research papers" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Retry response" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Download reply" })).toBeTruthy();
     expect(screen.getByText("Recommended reading")).toBeTruthy();
@@ -2670,7 +2745,7 @@ describe("App", () => {
 
     fireEvent.click(sourceButton);
     expect(screen.queryByText("Ada Lovelace")).toBeNull();
-    fireEvent.click(screen.getByRole("tab", { name: "Papers" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Research papers" }));
     expect(await screen.findByText("Benchmark Paper")).toBeTruthy();
     expect(screen.queryByText("Short grounded benchmark summary.")).toBeNull();
     expect(screen.queryByRole("link", { name: "HTML" })).toBeNull();
@@ -2685,7 +2760,7 @@ describe("App", () => {
     expect(screen.queryByText("Read this paper [S1] and compare [S2].")).toBeNull();
     expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
 
-    fireEvent.click(screen.getByRole("tab", { name: "Chat" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Conversation" }));
     fireEvent.click(screen.getByRole("button", { name: "Like response" }));
     expect(
       await screen.findByRole("heading", {
@@ -2719,6 +2794,7 @@ describe("App", () => {
     expect(document.querySelector(".pdf-document-viewer.paper-exploration-frame")).toBeTruthy();
     expect(document.querySelector("iframe")).toBeNull();
     expect(screen.getByText("Explorations")).toBeTruthy();
+    expect(document.querySelector(".paper-exploration-card-image")).toBeNull();
     fireEvent.click(screen.getByLabelText("Delete exploration Benchmark Paper"));
     await waitFor(() => {
       expect(screen.getByText("Project Home")).toBeTruthy();
