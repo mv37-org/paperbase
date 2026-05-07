@@ -45,6 +45,7 @@ from paperbase.models import (
     GitHubRepoSummary,
     JobResponse,
     PaperCommentsResponse,
+    PaperDiscussionResponse,
     PaperAssetResponse,
     PaperPreviewResponse,
     PaperResponse,
@@ -339,6 +340,34 @@ class StubApiService:
         self.calls.append(("get_browser_trending_paper_preview_content", paper_id))
         return (b"trending-preview-bytes", "image/webp")
 
+    def get_browser_paper_discussion(
+        self,
+        paper_id: str,
+        *,
+        viewer: BrowserUser | None = None,
+    ) -> PaperDiscussionResponse:
+        self.calls.append(("get_browser_paper_discussion", (paper_id, viewer.user_id if viewer else None)))
+        return PaperDiscussionResponse(
+            paper_id=paper_id,
+            upvote_count=7,
+            viewer_has_upvoted=viewer is not None,
+            comments=[
+                {
+                    "comment_id": "pcmt_1",
+                    "paper_id": paper_id,
+                    "parent_comment_id": None,
+                    "author": {
+                        "user_id": viewer.user_id if viewer else "user_1",
+                        "display_name": viewer.display_name if viewer else "Reader",
+                    },
+                    "body": "Existing comment",
+                    "created_at": NOW,
+                    "updated_at": NOW,
+                    "replies": [],
+                }
+            ],
+        )
+
     def set_browser_trending_paper_upvote(
         self,
         paper_id: str,
@@ -347,6 +376,16 @@ class StubApiService:
         upvoted: bool,
     ) -> PaperVoteSummary:
         self.calls.append(("set_browser_trending_paper_upvote", (paper_id, user.user_id, upvoted)))
+        return PaperVoteSummary(paper_id=paper_id, upvote_count=8 if upvoted else 7, viewer_has_upvoted=upvoted)
+
+    def set_browser_paper_upvote(
+        self,
+        paper_id: str,
+        *,
+        user: BrowserUser,
+        upvoted: bool,
+    ) -> PaperVoteSummary:
+        self.calls.append(("set_browser_paper_upvote", (paper_id, user.user_id, upvoted)))
         return PaperVoteSummary(paper_id=paper_id, upvote_count=8 if upvoted else 7, viewer_has_upvoted=upvoted)
 
     def create_browser_trending_paper_comment(
@@ -359,6 +398,30 @@ class StubApiService:
         self.calls.append(
             ("create_browser_trending_paper_comment", (paper_id, user.user_id, request.body, request.parent_comment_id))
         )
+        return PaperCommentsResponse(
+            paper_id=paper_id,
+            comments=[
+                {
+                    "comment_id": "pcmt_1",
+                    "paper_id": paper_id,
+                    "parent_comment_id": None,
+                    "author": {"user_id": user.user_id, "display_name": user.display_name},
+                    "body": request.body,
+                    "created_at": NOW,
+                    "updated_at": NOW,
+                    "replies": [],
+                }
+            ],
+        )
+
+    def create_browser_paper_comment(
+        self,
+        paper_id: str,
+        *,
+        user: BrowserUser,
+        request,
+    ) -> PaperCommentsResponse:
+        self.calls.append(("create_browser_paper_comment", (paper_id, user.user_id, request.body, request.parent_comment_id)))
         return PaperCommentsResponse(
             paper_id=paper_id,
             comments=[
@@ -1962,6 +2025,56 @@ def test_browser_trending_upvote_and_comment_write_routes_use_authenticated_brow
         "create_browser_trending_paper_comment",
         ("arxiv:2401.54321", "user_1", "Useful paper", None),
     ) in service.calls
+
+
+def test_browser_paper_discussion_requires_session_and_uses_authenticated_browser_user(api_client):
+    client, service, settings = api_client
+
+    unauthenticated = client.get("/v1/browser/papers/arxiv:2401.54321/discussion")
+
+    client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
+    response = client.get("/v1/browser/papers/arxiv:2401.54321/discussion")
+
+    assert unauthenticated.status_code == 401
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["upvote_count"] == 7
+    assert payload["viewer_has_upvoted"] is True
+    assert payload["comments"][0]["body"] == "Existing comment"
+    assert ("get_browser_paper_discussion", ("arxiv:2401.54321", "user_1")) in service.calls
+
+
+def test_browser_paper_upvote_and_comment_write_routes_use_authenticated_browser_user(api_client):
+    client, service, settings = api_client
+    client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
+    csrf = csrf_token_for_session("browser-session-token", settings)
+    headers = {
+        "Origin": settings.browser_origin,
+        "X-Paperbase-CSRF": csrf,
+    }
+
+    upvote = client.put("/v1/browser/papers/arxiv:2401.54321/upvote", headers=headers)
+    remove_upvote = client.delete("/v1/browser/papers/arxiv:2401.54321/upvote", headers=headers)
+    comment = client.post(
+        "/v1/browser/papers/arxiv:2401.54321/comments",
+        headers=headers,
+        json={"body": "Useful paper", "parent_comment_id": None},
+    )
+
+    assert upvote.status_code == 200
+    assert upvote.json()["viewer_has_upvoted"] is True
+    assert remove_upvote.status_code == 200
+    assert remove_upvote.json()["viewer_has_upvoted"] is False
+    assert comment.status_code == 200
+    assert comment.json()["comments"][0]["body"] == "Useful paper"
+    assert ("set_browser_paper_upvote", ("arxiv:2401.54321", "user_1", True)) in service.calls
+    assert ("set_browser_paper_upvote", ("arxiv:2401.54321", "user_1", False)) in service.calls
+    assert (
+        "create_browser_paper_comment",
+        ("arxiv:2401.54321", "user_1", "Useful paper", None),
+    ) in service.calls
+
+
 def test_cancel_job_endpoint_delegates_to_service(api_client):
     client, service, settings = api_client
     headers = {"Authorization": f"Bearer {settings.api_key}"}

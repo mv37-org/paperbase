@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import type { ForwardedRef } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const apiMocks = vi.hoisted(() => {
@@ -44,6 +45,7 @@ const apiMocks = vi.hoisted(() => {
     createPythonFile: vi.fn(),
     createProject: vi.fn(),
     createThread: vi.fn(),
+    createBrowserPaperComment: vi.fn(),
     createBrowserTrendingPaperComment: vi.fn(),
     deleteProject: vi.fn(),
     deletePythonFile: vi.fn(),
@@ -53,6 +55,7 @@ const apiMocks = vi.hoisted(() => {
     getBrowserAdminPaperAsset: vi.fn(),
     getBrowserAdminPaperFile: vi.fn(),
     getBrowserPaper: vi.fn(),
+    getBrowserPaperDiscussion: vi.fn(),
     getBrowserPaperPreview: vi.fn(),
     getBrowserPaperFigure: vi.fn(),
     getBrowserPaperFile: vi.fn(),
@@ -118,6 +121,7 @@ const apiMocks = vi.hoisted(() => {
     queueBrowserAdminHarvestVenue: vi.fn(),
     queueBrowserAdminPaperIndex: vi.fn(),
     retryBrowserAdminJob: vi.fn(),
+    removeUpvoteBrowserPaper: vi.fn(),
     removeUpvoteBrowserTrendingPaper: vi.fn(),
     runPythonFile: vi.fn(),
     sendThreadMessage: vi.fn(),
@@ -127,6 +131,7 @@ const apiMocks = vi.hoisted(() => {
     StreamingChatAbortError: MockStreamingChatAbortError,
     StreamingChatError: MockStreamingChatError,
     syncProjectRepo: vi.fn(),
+    upvoteBrowserPaper: vi.fn(),
     upvoteBrowserTrendingPaper: vi.fn(),
     updateProject: vi.fn(),
     updatePythonFile: vi.fn(),
@@ -134,11 +139,16 @@ const apiMocks = vi.hoisted(() => {
   };
 });
 
+const pdfViewerMocks = vi.hoisted(() => ({
+  scrollToSection: vi.fn(),
+}));
+
 vi.mock("./api", () => ({
   ApiError: apiMocks.ApiError,
   api: apiMocks.api,
   browserAdminPaperAssetContentUrl: apiMocks.browserAdminPaperAssetContentUrl,
   browserPaperPreviewContentUrl: apiMocks.browserPaperPreviewContentUrl,
+  createBrowserPaperComment: apiMocks.createBrowserPaperComment,
   createBrowserTrendingPaperComment: apiMocks.createBrowserTrendingPaperComment,
   createPythonFile: apiMocks.createPythonFile,
   createProject: apiMocks.createProject,
@@ -150,6 +160,7 @@ vi.mock("./api", () => ({
   getBrowserAdminPaperDetail: apiMocks.getBrowserAdminPaperDetail,
   getBrowserAdminPaperFile: apiMocks.getBrowserAdminPaperFile,
   getBrowserPaper: apiMocks.getBrowserPaper,
+  getBrowserPaperDiscussion: apiMocks.getBrowserPaperDiscussion,
   getBrowserPaperPreview: apiMocks.getBrowserPaperPreview,
   getBrowserPaperFigure: apiMocks.getBrowserPaperFigure,
   getBrowserPaperFile: apiMocks.getBrowserPaperFile,
@@ -185,6 +196,7 @@ vi.mock("./api", () => ({
   queueBrowserAdminHarvestTopCited: apiMocks.queueBrowserAdminHarvestTopCited,
   queueBrowserAdminHarvestVenue: apiMocks.queueBrowserAdminHarvestVenue,
   queueBrowserAdminPaperIndex: apiMocks.queueBrowserAdminPaperIndex,
+  removeUpvoteBrowserPaper: apiMocks.removeUpvoteBrowserPaper,
   removeUpvoteBrowserTrendingPaper: apiMocks.removeUpvoteBrowserTrendingPaper,
   retryBrowserAdminJob: apiMocks.retryBrowserAdminJob,
   runPythonFile: apiMocks.runPythonFile,
@@ -195,6 +207,7 @@ vi.mock("./api", () => ({
   StreamingChatAbortError: apiMocks.StreamingChatAbortError,
   StreamingChatError: apiMocks.StreamingChatError,
   syncProjectRepo: apiMocks.syncProjectRepo,
+  upvoteBrowserPaper: apiMocks.upvoteBrowserPaper,
   upvoteBrowserTrendingPaper: apiMocks.upvoteBrowserTrendingPaper,
   updateProject: apiMocks.updateProject,
   updatePythonFile: apiMocks.updatePythonFile,
@@ -206,7 +219,39 @@ vi.mock("./LandingMentionEditor", () => ({
 }));
 
 vi.mock("./MarkdownRenderer", () => ({
-  MarkdownRenderer: ({ markdown }: { markdown: string }) => <div>{markdown}</div>,
+  MarkdownRenderer: ({
+    markdown,
+    interactiveCitations,
+    onCitationClick,
+  }: {
+    markdown: string;
+    interactiveCitations?: boolean;
+    onCitationClick?: (sourceId: string) => void;
+  }) => {
+    if (!interactiveCitations) {
+      return <div>{markdown}</div>;
+    }
+    return (
+      <div>
+        {markdown.split(/(\[S\d+\])/g).map((part, index) => {
+          const match = part.match(/^\[(S\d+)\]$/);
+          if (!match) {
+            return <span key={`${part}:${index}`}>{part}</span>;
+          }
+          const sourceId = match[1] ?? "";
+          return (
+            <button
+              key={`${part}:${index}`}
+              type="button"
+              onClick={() => onCitationClick?.(sourceId)}
+            >
+              {part}
+            </button>
+          );
+        })}
+      </div>
+    );
+  },
 }));
 
 vi.mock("@monaco-editor/react", () => ({
@@ -305,6 +350,58 @@ vi.mock("echarts-for-react", () => ({
   },
 }));
 
+vi.mock("lottie-web/build/player/lottie_light", () => ({
+  default: {
+    loadAnimation: vi.fn(() => ({
+      destroy: vi.fn(),
+      goToAndStop: vi.fn(),
+      play: vi.fn(),
+    })),
+  },
+}));
+
+vi.mock("./app/PdfDocumentViewer", async () => {
+  const React = await import("react");
+  const PdfDocumentViewer = React.forwardRef(
+    (
+      props: {
+        className?: string;
+        onSectionsChange?: (
+          sections: Array<{
+            id: string;
+            title: string;
+            pageNumber: number;
+            pageYOffsetRatio: number;
+          }>,
+        ) => void;
+        title: string;
+        url: string;
+      },
+      ref: ForwardedRef<{ scrollToSection: (sectionId: string) => void }>,
+    ) => {
+      React.useImperativeHandle(ref, () => ({
+        scrollToSection: pdfViewerMocks.scrollToSection,
+      }));
+      React.useEffect(() => {
+        if (!props.className?.includes("paper-exploration-frame")) {
+          return;
+        }
+        props.onSectionsChange?.([
+          { id: "abstract-1", title: "Abstract", pageNumber: 1, pageYOffsetRatio: 0 },
+          { id: "introduction-1", title: "Introduction", pageNumber: 1, pageYOffsetRatio: 0.2 },
+        ]);
+      }, [props.className, props.onSectionsChange]);
+      return React.createElement("div", {
+        "aria-label": props.title,
+        className: `pdf-document-viewer${props.className ? ` ${props.className}` : ""}`,
+        "data-url": props.url,
+      });
+    },
+  );
+  PdfDocumentViewer.displayName = "MockPdfDocumentViewer";
+  return { PdfDocumentViewer };
+});
+
 import App from "./App";
 
 const ACTIVE_TAB_KEY = "paperbase-active-tab";
@@ -402,6 +499,7 @@ function turnResponse(
     provider_response_id: string;
     started_at: string;
     completed_at: string | null;
+    title: string;
     usage: Record<string, unknown> | null;
     diff_summary: string;
     changed_paths: string[];
@@ -411,6 +509,7 @@ function turnResponse(
   return {
     turn_id: turnId,
     thread_id: threadId,
+    title: overrides.title ?? "",
     status: overrides.status ?? "completed",
     provider_response_id: overrides.provider_response_id ?? "resp_1",
     started_at: overrides.started_at ?? "2026-04-21T00:00:00Z",
@@ -744,6 +843,59 @@ describe("App", () => {
       paper_id: "arxiv:2401.12345",
       image_url: "https://example.test/preview.webp",
       content_type: "image/webp",
+    });
+    apiMocks.getBrowserPaperDiscussion.mockResolvedValue({
+      paper_id: "arxiv:2401.12345",
+      upvote_count: 4,
+      viewer_has_upvoted: false,
+      comments: [
+        {
+          comment_id: "pcmt_1",
+          paper_id: "arxiv:2401.12345",
+          parent_comment_id: null,
+          author: { user_id: "user_2", display_name: "Existing Reader" },
+          body: "Existing paper comment",
+          created_at: "2026-04-21T00:00:00Z",
+          updated_at: "2026-04-21T00:00:00Z",
+          replies: [
+            {
+              comment_id: "pcmt_1_reply",
+              paper_id: "arxiv:2401.12345",
+              parent_comment_id: "pcmt_1",
+              author: { user_id: "user_3", display_name: "Reply Reader" },
+              body: "Existing paper reply",
+              created_at: "2026-04-21T00:02:00Z",
+              updated_at: "2026-04-21T00:02:00Z",
+              replies: [],
+            },
+          ],
+        },
+      ],
+    });
+    apiMocks.upvoteBrowserPaper.mockResolvedValue({
+      paper_id: "arxiv:2401.12345",
+      upvote_count: 5,
+      viewer_has_upvoted: true,
+    });
+    apiMocks.removeUpvoteBrowserPaper.mockResolvedValue({
+      paper_id: "arxiv:2401.12345",
+      upvote_count: 4,
+      viewer_has_upvoted: false,
+    });
+    apiMocks.createBrowserPaperComment.mockResolvedValue({
+      paper_id: "arxiv:2401.12345",
+      comments: [
+        {
+          comment_id: "pcmt_2",
+          paper_id: "arxiv:2401.12345",
+          parent_comment_id: null,
+          author: { user_id: "user_1", display_name: "Ada Lovelace" },
+          body: "New paper comment",
+          created_at: "2026-04-21T00:01:00Z",
+          updated_at: "2026-04-21T00:01:00Z",
+          replies: [],
+        },
+      ],
     });
     apiMocks.loadBrowserTrendingPapers.mockResolvedValue({
       date: "2026-04-21",
@@ -1160,31 +1312,215 @@ describe("App", () => {
     const categoryLabels = [
       ...document.querySelectorAll<HTMLElement>(".project-tree-category-label"),
     ].map((element) => element.textContent?.trim());
-    expect(categoryLabels).toEqual(["Notes", "Sessions", "Code"]);
+    expect(categoryLabels).toEqual(["Explorations", "Conversations", "Code"]);
     expect(document.querySelectorAll(".project-tree-category-count")).toHaveLength(0);
     expect(screen.getByText("Home")).toBeTruthy();
-    expect(screen.getByText("Notes")).toBeTruthy();
-    expect(screen.getByText("Sessions")).toBeTruthy();
+    expect(screen.getByText("Explorations")).toBeTruthy();
+    expect(screen.getByText("Conversations")).toBeTruthy();
     expect(screen.getByText("Code")).toBeTruthy();
     expect(screen.getByLabelText("Collapse all sections in General")).toBeTruthy();
 
-    fireEvent.click(screen.getByText("Sessions"));
+    fireEvent.click(screen.getByText("Conversations"));
     expect(screen.queryByText("Recovered thread")).toBeNull();
-    fireEvent.click(screen.getByText("Sessions"));
+    fireEvent.click(screen.getByText("Conversations"));
     expect(await screen.findByText("Recovered thread")).toBeTruthy();
 
     fireEvent.click(screen.getByLabelText("Collapse all sections in General"));
     expect(screen.queryByText("Recovered thread")).toBeNull();
-    expect(screen.queryByText("Notes")).toBeNull();
+    expect(screen.queryByText("Explorations")).toBeNull();
     expect(screen.queryByText("Home")).toBeNull();
     expect(screen.getByLabelText("Expand all sections in General")).toBeTruthy();
 
     fireEvent.click(screen.getByLabelText("Expand all sections in General"));
-    expect(await screen.findByText("Notes")).toBeTruthy();
+    expect(await screen.findByText("Explorations")).toBeTruthy();
     expect(await screen.findByText("Recovered thread")).toBeTruthy();
 
     fireEvent.click(screen.getByText("Home"));
     expect(await screen.findByText("Project Home")).toBeTruthy();
+  });
+
+  it("starts a paper exploration from the project exploration picker", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.suggestBrowserPapers.mockResolvedValue({
+      fallback: false,
+      suggestions: [
+        {
+          paper_id: "arxiv:2402.22222",
+          arxiv_id: "2402.22222",
+          title: "Benchmark Paper",
+          authors: "Ada Lovelace",
+          summary_short: "Benchmark summary",
+          citation_count: 9,
+          published: "2026-02-02",
+          score: 0.92,
+          matched_field: "title",
+          highlight_snippet: "",
+        },
+      ],
+    });
+    apiMocks.getBrowserPaper.mockResolvedValue({
+      paper_id: "arxiv:2402.22222",
+      arxiv_id: "2402.22222",
+      title: "Benchmark Paper",
+      authors: "Ada Lovelace",
+      abstract: "Benchmark abstract",
+      summary_short: "Benchmark summary",
+      summary_eli5: "Simple benchmark summary",
+      categories: "cs.AI",
+      primary_category: "cs.AI",
+      published: "2026-02-02",
+      updated: "2026-02-02",
+      pdf_url: "",
+      html_url: "https://example.test/2402.22222",
+      citation_count: 9,
+      influential_citation_count: 1,
+      index_status: "indexed",
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+    fireEvent.click(screen.getAllByText("General")[0]!);
+    fireEvent.click(await screen.findByLabelText("Start exploration in General"));
+
+    const dialog = screen.getByRole("dialog", { name: "New exploration" });
+    expect(within(dialog).queryByText("New exploration")).toBeNull();
+    expect(
+      within(dialog).queryByText("Type at least two characters to search indexed papers."),
+    ).toBeNull();
+    const searchInput = within(dialog).getByLabelText("Search papers for exploration");
+    await waitFor(() => {
+      expect(document.activeElement).toBe(searchInput);
+    });
+    fireEvent.change(searchInput, {
+      target: { value: "benchmark" },
+    });
+
+    await waitFor(() => {
+      expect(apiMocks.suggestBrowserPapers).toHaveBeenCalledWith("benchmark", 8);
+    });
+    expect(await screen.findByText("Benchmark Paper")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Explore" }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "New exploration" })).toBeNull();
+    });
+    expect(await screen.findByRole("heading", { name: "Benchmark Paper" })).toBeTruthy();
+    expect(screen.getByText("No PDF URL is available for this paper.")).toBeTruthy();
+  });
+
+  it("clears exploration search before closing from the inline close button", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.suggestBrowserPapers.mockResolvedValue({
+      fallback: false,
+      suggestions: [],
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+    fireEvent.click(screen.getAllByText("General")[0]!);
+    fireEvent.click(await screen.findByLabelText("Start exploration in General"));
+
+    const dialog = screen.getByRole("dialog", { name: "New exploration" });
+    const searchInput = within(dialog).getByLabelText(
+      "Search papers for exploration",
+    ) as HTMLInputElement;
+    fireEvent.change(searchInput, { target: { value: "bench" } });
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Clear exploration search" }));
+
+    await waitFor(() => {
+      expect(searchInput.value).toBe("");
+    });
+    expect(screen.getByRole("dialog", { name: "New exploration" })).toBeTruthy();
+
+    const closeButton = screen
+      .getAllByRole("button", { name: "Close exploration picker" })
+      .find((button) => button.classList.contains("exploration-picker-close"));
+    expect(closeButton).toBeTruthy();
+    fireEvent.click(closeButton!);
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "New exploration" })).toBeNull();
+    });
+  });
+
+  it("scrolls selected exploration suggestions during keyboard navigation", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.suggestBrowserPapers.mockResolvedValue({
+      fallback: false,
+      suggestions: [
+        {
+          paper_id: "arxiv:2402.00001",
+          arxiv_id: "2402.00001",
+          title: "First Result",
+          authors: "Ada Lovelace",
+          summary_short: "",
+          citation_count: 1,
+          published: "2026-02-01",
+          score: 0.9,
+          matched_field: "title",
+          highlight_snippet: "",
+        },
+        {
+          paper_id: "arxiv:2402.00002",
+          arxiv_id: "2402.00002",
+          title: "Second Result",
+          authors: "Grace Hopper",
+          summary_short: "",
+          citation_count: 2,
+          published: "2026-02-02",
+          score: 0.8,
+          matched_field: "title",
+          highlight_snippet: "",
+        },
+        {
+          paper_id: "arxiv:2402.00003",
+          arxiv_id: "2402.00003",
+          title: "Third Result",
+          authors: "Katherine Johnson",
+          summary_short: "",
+          citation_count: 3,
+          published: "2026-02-03",
+          score: 0.7,
+          matched_field: "title",
+          highlight_snippet: "",
+        },
+      ],
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+    fireEvent.click(screen.getAllByText("General")[0]!);
+    fireEvent.click(await screen.findByLabelText("Start exploration in General"));
+
+    const dialog = screen.getByRole("dialog", { name: "New exploration" });
+    const searchInput = within(dialog).getByLabelText("Search papers for exploration");
+    fireEvent.change(searchInput, {
+      target: { value: "result" },
+    });
+    expect(await screen.findByText("Third Result")).toBeTruthy();
+
+    const scrollIntoView = vi.mocked(HTMLElement.prototype.scrollIntoView);
+    scrollIntoView.mockClear();
+    fireEvent.keyDown(searchInput, { key: "ArrowDown" });
+
+    await waitFor(() => {
+      expect(within(dialog).getAllByRole("option")[1]?.getAttribute("aria-selected")).toBe("true");
+      expect(scrollIntoView).toHaveBeenCalledWith({
+        block: "nearest",
+        inline: "nearest",
+      });
+    });
   });
 
   it("paginates project sidebar code inside the code section and links to GitHub", async () => {
@@ -1368,6 +1704,32 @@ describe("App", () => {
     expect(settingsIcon?.getAttribute("src")).toMatch(/\/settings\.svg\?v=pb-/);
   });
 
+  it("expands the collapsed sidebar before running clicked sidebar actions", async () => {
+    localStorage.setItem("paperbase-sidebar-collapsed", "true");
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(document.querySelector("#app-shell")?.classList.contains("sidebar-collapsed")).toBe(
+        true,
+      );
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Read docs" }));
+
+    await waitFor(() => {
+      expect(document.querySelector("#app-shell")?.classList.contains("sidebar-collapsed")).toBe(
+        false,
+      );
+    });
+    expect(window.open).toHaveBeenCalledWith(
+      new URL("/docs", window.location.origin).toString(),
+      "_blank",
+      "noopener,noreferrer",
+    );
+  });
+
   it("creates a project from the sidebar modal", async () => {
     apiMocks.loadSession.mockResolvedValue(
       authenticatedSession({ settings: { has_github_connection: true, github_login: "octocat" } }),
@@ -1416,7 +1778,7 @@ describe("App", () => {
       );
     });
     await waitFor(() => {
-      expect(screen.getByLabelText("Start chat in Agents")).toBeTruthy();
+      expect(screen.getByLabelText("Start conversation in Agents")).toBeTruthy();
     });
   });
 
@@ -1436,7 +1798,7 @@ describe("App", () => {
       expect(screen.getByText("Start new research in")).toBeTruthy();
     });
     expect(screen.getByRole("button", { name: "Add python file" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Add notes" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Add exploration" })).toBeTruthy();
     expect(screen.queryByTestId("thread-debug-strip")).toBeNull();
 
     fireEvent.click(screen.getByLabelText("Open empty state project picker"));
@@ -1794,9 +2156,9 @@ describe("App", () => {
 
     fireEvent.click(screen.getAllByText("General")[0]!);
     await waitFor(() => {
-      expect(screen.getByLabelText("Start chat in General")).toBeTruthy();
+      expect(screen.getByLabelText("Start conversation in General")).toBeTruthy();
     });
-    fireEvent.click(screen.getByLabelText("Start chat in General"));
+    fireEvent.click(screen.getByLabelText("Start conversation in General"));
 
     expect(apiMocks.createThread).toHaveBeenCalledTimes(1);
     expect(apiMocks.moveThreadToProject).not.toHaveBeenCalled();
@@ -1826,9 +2188,9 @@ describe("App", () => {
 
     fireEvent.click(screen.getAllByText("Agents")[0]!);
     await waitFor(() => {
-      expect(screen.getByLabelText("Start chat in Agents")).toBeTruthy();
+      expect(screen.getByLabelText("Start conversation in Agents")).toBeTruthy();
     });
-    fireEvent.click(screen.getByLabelText("Start chat in Agents"));
+    fireEvent.click(screen.getByLabelText("Start conversation in Agents"));
 
     await waitFor(() => {
       expect(apiMocks.moveThreadToProject).toHaveBeenCalledWith("thread_2", "proj_2");
@@ -1993,8 +2355,8 @@ describe("App", () => {
     await waitFor(() => {
       expect(screen.getByText("Start new research in")).toBeTruthy();
     });
-    expect(screen.queryByRole("tab", { name: "Chat" })).toBeNull();
-    expect(screen.queryByRole("tab", { name: "Papers" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Conversation" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Research papers" })).toBeNull();
     expect(document.querySelector(".chat-message-list.thread-header-visible")).toBeNull();
   });
 
@@ -2021,9 +2383,123 @@ describe("App", () => {
     await waitFor(() => {
       expect(screen.getByText("Summarize recent planning papers")).toBeTruthy();
     });
-    expect(screen.queryByRole("tab", { name: "Chat" })).toBeNull();
-    expect(screen.queryByRole("tab", { name: "Papers" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Conversation" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Research papers" })).toBeNull();
     expect(document.querySelector(".chat-message-list.thread-header-visible")).toBeNull();
+  });
+
+  it("renders each reply title after its matching user prompt", async () => {
+    localStorage.setItem(ACTIVE_TAB_KEY, JSON.stringify({ kind: "thread", id: "thread_1" }));
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    const userOne = threadItemResponse(
+      "user_1",
+      "user_message",
+      "user",
+      "Compare planning agents",
+      {
+        turn_id: "turn_1",
+      },
+    );
+    const assistantOne = threadItemResponse(
+      "assistant_1",
+      "assistant_message",
+      "assistant",
+      "First answer",
+      {
+        turn_id: "turn_1",
+        phase: "final_answer",
+      },
+    );
+    const userTwo = threadItemResponse("user_2", "user_message", "user", "Now focus on memory", {
+      turn_id: "turn_2",
+    });
+    const assistantTwo = threadItemResponse(
+      "assistant_2",
+      "assistant_message",
+      "assistant",
+      "Second answer",
+      {
+        turn_id: "turn_2",
+        phase: "final_answer",
+      },
+    );
+    apiMocks.getThread.mockResolvedValue({
+      ...emptyThreadResponse("thread_1"),
+      title: "Planning Agent Comparisons",
+      items: [userOne, assistantOne, userTwo, assistantTwo],
+      turns: [
+        turnResponse("turn_1", "thread_1", [userOne, assistantOne], {
+          title: "Planning Agents Compared",
+        }),
+        turnResponse("turn_2", "thread_1", [userTwo, assistantTwo], {
+          title: "Memory Shapes Agent Behavior",
+        }),
+      ],
+      messages: [
+        {
+          message_id: "user_1",
+          role: "user",
+          content_markdown: "Compare planning agents",
+          citations: [],
+          created_at: "2026-04-21T00:00:00Z",
+          status: "completed",
+        },
+        {
+          message_id: "assistant_1",
+          role: "assistant",
+          content_markdown: "First answer",
+          citations: [],
+          created_at: "2026-04-21T00:00:01Z",
+          status: "completed",
+          phase: "final_answer",
+        },
+        {
+          message_id: "user_2",
+          role: "user",
+          content_markdown: "Now focus on memory",
+          citations: [],
+          created_at: "2026-04-21T00:01:00Z",
+          status: "completed",
+        },
+        {
+          message_id: "assistant_2",
+          role: "assistant",
+          content_markdown: "Second answer",
+          citations: [],
+          created_at: "2026-04-21T00:01:01Z",
+          status: "completed",
+          phase: "final_answer",
+        },
+      ],
+    });
+
+    render(<App />);
+
+    const firstUser = await screen.findByText("Compare planning agents");
+    const firstTitle = screen.getByRole("heading", {
+      name: "Planning Agents Compared",
+      level: 2,
+    });
+    const firstAnswer = screen.getByText("First answer");
+    const secondUser = screen.getByText("Now focus on memory");
+    const secondTitle = screen.getByRole("heading", {
+      name: "Memory Shapes Agent Behavior",
+      level: 2,
+    });
+    const secondAnswer = screen.getByText("Second answer");
+
+    expect(
+      firstUser.compareDocumentPosition(firstTitle) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      firstTitle.compareDocumentPosition(firstAnswer) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      secondUser.compareDocumentPosition(secondTitle) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      secondTitle.compareDocumentPosition(secondAnswer) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 
   it("anchors a newly submitted prompt at the top of the chat viewport", async () => {
@@ -2509,6 +2985,26 @@ describe("App", () => {
   it("shows inline paper previews for cited research papers", async () => {
     localStorage.setItem(ACTIVE_TAB_KEY, JSON.stringify({ kind: "thread", id: "thread_1" }));
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    const benchmarkCitations = [
+      {
+        source_id: "S1",
+        source_kind: "paperbase_paper",
+        title: "Benchmark Paper",
+        path: "sections/introduction.md",
+        excerpt: "Agents plan and use tools.",
+        paper_id: "arxiv:2401.12345",
+        tags: [],
+      },
+      {
+        source_id: "S2",
+        source_kind: "paperbase_paper",
+        title: "Benchmark Paper",
+        path: "sections/results.md",
+        excerpt: "Agents are evaluated on benchmarks.",
+        paper_id: "arxiv:2401.12345",
+        tags: [],
+      },
+    ];
     apiMocks.getThread.mockResolvedValue({
       thread_id: "thread_1",
       project_id: "proj_1",
@@ -2518,59 +3014,41 @@ describe("App", () => {
       created_at: "2026-04-21T00:00:00Z",
       updated_at: "2026-04-21T00:00:00Z",
       items: [
-        threadItemResponse("msg_1", "assistant_message", "assistant", "Read this paper [S1].", {
-          thread_id: "thread_1",
-          turn_id: "turn_1",
-          phase: "final_answer",
-          citations: [
-            {
-              source_id: "S1",
-              source_kind: "paperbase_paper",
-              title: "Benchmark Paper",
-              path: "sections/introduction.md",
-              excerpt: "Agents plan and use tools.",
-              paper_id: "arxiv:2401.12345",
-              tags: [],
-            },
-          ],
-        }),
-      ],
-      turns: [
-        turnResponse("turn_1", "thread_1", [
-          threadItemResponse("msg_1", "assistant_message", "assistant", "Read this paper [S1].", {
+        threadItemResponse(
+          "msg_1",
+          "assistant_message",
+          "assistant",
+          "Read this paper [S1] and compare [S2].",
+          {
             thread_id: "thread_1",
             turn_id: "turn_1",
             phase: "final_answer",
-            citations: [
-              {
-                source_id: "S1",
-                source_kind: "paperbase_paper",
-                title: "Benchmark Paper",
-                path: "sections/introduction.md",
-                excerpt: "Agents plan and use tools.",
-                paper_id: "arxiv:2401.12345",
-                tags: [],
-              },
-            ],
-          }),
+            citations: benchmarkCitations,
+          },
+        ),
+      ],
+      turns: [
+        turnResponse("turn_1", "thread_1", [
+          threadItemResponse(
+            "msg_1",
+            "assistant_message",
+            "assistant",
+            "Read this paper [S1] and compare [S2].",
+            {
+              thread_id: "thread_1",
+              turn_id: "turn_1",
+              phase: "final_answer",
+              citations: benchmarkCitations,
+            },
+          ),
         ]),
       ],
       messages: [
         {
           message_id: "msg_1",
           role: "assistant",
-          content_markdown: "Read this paper [S1].",
-          citations: [
-            {
-              source_id: "S1",
-              source_kind: "paperbase_paper",
-              title: "Benchmark Paper",
-              path: "sections/introduction.md",
-              excerpt: "Agents plan and use tools.",
-              paper_id: "arxiv:2401.12345",
-              tags: [],
-            },
-          ],
+          content_markdown: "Read this paper [S1] and compare [S2].",
+          citations: benchmarkCitations,
           recommended_prompts: ["Compare tool use benchmarks across recent planning agents"],
           created_at: "2026-04-21T00:00:00Z",
           status: "completed",
@@ -2604,19 +3082,51 @@ describe("App", () => {
     render(<App />);
 
     await waitFor(() => {
-      expect(screen.getByText("Benchmark Paper")).toBeTruthy();
+      expect(screen.getByRole("button", { name: "[S1]" })).toBeTruthy();
     });
-    expect(await screen.findByText("Short grounded benchmark summary.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "[S1]" }));
+    const pdfDialog = await screen.findByRole("dialog", { name: "Benchmark Paper PDF" });
+    expect(pdfDialog).toBeTruthy();
+    expect(pdfDialog.querySelector(".pdf-document-viewer.paper-pdf-frame")).toBeTruthy();
+    expect(pdfDialog.querySelector("iframe")).toBeNull();
+    fireEvent.click(screen.getAllByLabelText("Close paper PDF")[0]!);
+
+    const sourceButton = screen.getByRole("button", { name: "1 source" });
+    fireEvent.click(sourceButton);
+    expect(await screen.findByText("Benchmark Paper")).toBeTruthy();
     expect(screen.getByText("Ada Lovelace")).toBeTruthy();
     expect(screen.getByRole("img", { name: "Benchmark Paper preview" })).toBeTruthy();
-    expect(screen.getByRole("link", { name: "HTML" }).getAttribute("href")).toBe(
-      "https://example.test/2401.12345",
+    expect(screen.getByText("2")).toBeTruthy();
+    expect(screen.queryByText("Cited papers (1)")).toBeNull();
+    expect(screen.queryByText("Short grounded benchmark summary.")).toBeNull();
+    expect(screen.queryByRole("link", { name: "HTML" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "PDF" })).toBeNull();
+    expect(screen.getByRole("tab", { name: "Conversation" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Research papers" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Open chat actions" }));
+    const headerMenu = screen.getByRole("menu");
+    expect(within(headerMenu).queryByRole("menuitem", { name: "Export summary" })).toBeNull();
+    expect(
+      within(headerMenu).getByRole("menuitem", { name: "Export summary as markdown" }),
+    ).toBeTruthy();
+    expect(
+      within(headerMenu).getByRole("menuitem", { name: "Export summary as PDF" }),
+    ).toBeTruthy();
+    fireEvent.click(within(headerMenu).getByRole("menuitem", { name: "Rename" }));
+    const renameDialog = await screen.findByRole("dialog", { name: "Rename session" });
+    expect((within(renameDialog).getByLabelText("Title") as HTMLInputElement).value).toBe(
+      "Preview thread",
     );
-    expect(screen.getByRole("link", { name: "PDF" }).getAttribute("href")).toBe(
-      "https://example.test/2401.12345.pdf",
+    fireEvent.click(within(renameDialog).getByRole("button", { name: "Cancel" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open chat actions" }));
+    fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: "Delete" }));
+    expect(await screen.findByRole("heading", { name: "Delete session" })).toBeTruthy();
+    expect(screen.getByText("Delete Preview thread?")).toBeTruthy();
+    fireEvent.click(
+      within(screen.getByRole("dialog", { name: "Delete session" })).getByRole("button", {
+        name: "Cancel",
+      }),
     );
-    expect(screen.getByRole("tab", { name: "Chat" })).toBeTruthy();
-    expect(screen.getByRole("tab", { name: "Papers" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Retry response" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Download reply" })).toBeTruthy();
     expect(screen.getByText("Recommended reading")).toBeTruthy();
@@ -2626,12 +3136,24 @@ describe("App", () => {
       }),
     ).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "1 sources" }));
+    fireEvent.click(sourceButton);
+    expect(screen.queryByText("Ada Lovelace")).toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: "Research papers" }));
     expect(await screen.findByText("Benchmark Paper")).toBeTruthy();
-    expect(screen.queryByText("Read this paper [S1].")).toBeNull();
+    expect(screen.queryByText("Short grounded benchmark summary.")).toBeNull();
+    expect(screen.queryByRole("link", { name: "HTML" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "PDF" })).toBeNull();
+    fireEvent.click(screen.getByRole("heading", { name: "Benchmark Paper" }));
+    expect(await screen.findByRole("dialog", { name: "Benchmark Paper PDF" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Explore now" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Explore options" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Explore later" }));
+    expect(screen.getByRole("dialog", { name: "Benchmark Paper PDF" })).toBeTruthy();
+    fireEvent.click(screen.getAllByLabelText("Close paper PDF")[0]!);
+    expect(screen.queryByText("Read this paper [S1] and compare [S2].")).toBeNull();
     expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
 
-    fireEvent.click(screen.getByRole("tab", { name: "Chat" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Conversation" }));
     fireEvent.click(screen.getByRole("button", { name: "Like response" }));
     expect(
       await screen.findByRole("heading", {
@@ -2654,6 +3176,116 @@ describe("App", () => {
           debug_bundle: expect.objectContaining({ thread_id: "thread_1" }),
         }),
       );
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "1 source" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open exploration" }));
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Benchmark Paper" })).toBeTruthy();
+    });
+    expect(screen.queryByText("Exploration")).toBeNull();
+    expect(document.querySelector(".pdf-document-viewer.paper-exploration-frame")).toBeTruthy();
+    expect(document.querySelector("iframe")).toBeNull();
+    expect(screen.getByText("Explorations")).toBeTruthy();
+    expect(screen.queryByText("Details")).toBeNull();
+    expect(screen.getByRole("tab", { name: "Info" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Notes" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Social" })).toBeTruthy();
+    const abstractSection = await screen.findByRole("button", { name: "Abstract" });
+    const introductionSection = screen.getByRole("button", { name: "Introduction" });
+    expect(abstractSection.classList.contains("active")).toBe(false);
+    expect(introductionSection.classList.contains("active")).toBe(false);
+    fireEvent.click(introductionSection);
+    expect(pdfViewerMocks.scrollToSection).toHaveBeenCalledWith("introduction-1");
+    expect(introductionSection.classList.contains("active")).toBe(true);
+    await waitFor(() => {
+      expect(apiMocks.getBrowserPaperDiscussion).toHaveBeenCalledWith("arxiv:2401.12345");
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Upvote 4" }));
+    await waitFor(() => {
+      expect(apiMocks.upvoteBrowserPaper).toHaveBeenCalledWith("arxiv:2401.12345");
+    });
+    expect(await screen.findByRole("button", { name: "Upvoted 5" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("tab", { name: "Social" }));
+    expect(await screen.findByText("Existing paper comment")).toBeTruthy();
+    expect(screen.queryByText("Existing paper reply")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "View 1 reply" }));
+    expect(await screen.findByText("Existing paper reply")).toBeTruthy();
+    apiMocks.createBrowserPaperComment.mockResolvedValueOnce({
+      paper_id: "arxiv:2401.12345",
+      comments: [
+        {
+          comment_id: "pcmt_1",
+          paper_id: "arxiv:2401.12345",
+          parent_comment_id: null,
+          author: { user_id: "user_2", display_name: "Existing Reader" },
+          body: "Existing paper comment",
+          created_at: "2026-04-21T00:00:00Z",
+          updated_at: "2026-04-21T00:00:00Z",
+          replies: [
+            {
+              comment_id: "pcmt_1_reply",
+              paper_id: "arxiv:2401.12345",
+              parent_comment_id: "pcmt_1",
+              author: { user_id: "user_3", display_name: "Reply Reader" },
+              body: "Existing paper reply",
+              created_at: "2026-04-21T00:02:00Z",
+              updated_at: "2026-04-21T00:02:00Z",
+              replies: [],
+            },
+            {
+              comment_id: "pcmt_1_reply_2",
+              paper_id: "arxiv:2401.12345",
+              parent_comment_id: "pcmt_1",
+              author: { user_id: "user_1", display_name: "Ada Lovelace" },
+              body: "Nested reply",
+              created_at: "2026-04-21T00:03:00Z",
+              updated_at: "2026-04-21T00:03:00Z",
+              replies: [],
+            },
+          ],
+        },
+      ],
+    });
+    fireEvent.click(screen.getAllByRole("button", { name: "Reply" })[0]);
+    const replyInput = screen.getByLabelText("Reply to Existing Reader");
+    fireEvent.change(replyInput, { target: { value: "Nested reply" } });
+    fireEvent.click(
+      within(replyInput.closest("form") as HTMLFormElement).getByRole("button", {
+        name: "Reply",
+      }),
+    );
+    await waitFor(() => {
+      expect(apiMocks.createBrowserPaperComment).toHaveBeenCalledWith("arxiv:2401.12345", {
+        body: "Nested reply",
+        parent_comment_id: "pcmt_1",
+      });
+    });
+    expect(await screen.findByText("Nested reply")).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText("Paper comment"), {
+      target: { value: "New paper comment" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Comment" }));
+    await waitFor(() => {
+      expect(apiMocks.createBrowserPaperComment).toHaveBeenCalledWith("arxiv:2401.12345", {
+        body: "New paper comment",
+        parent_comment_id: null,
+      });
+    });
+    expect(await screen.findByText("New paper comment")).toBeTruthy();
+    expect(document.querySelector(".paper-exploration-card-image")).toBeNull();
+    fireEvent.click(screen.getByLabelText("Delete exploration Benchmark Paper"));
+    const deleteExplorationDialog = await screen.findByRole("dialog", {
+      name: "Delete exploration",
+    });
+    expect(within(deleteExplorationDialog).getByText("Delete Benchmark Paper?")).toBeTruthy();
+    fireEvent.click(
+      within(deleteExplorationDialog).getByRole("button", { name: "Delete exploration" }),
+    );
+    await waitFor(() => {
+      expect(screen.getByText("Project Home")).toBeTruthy();
     });
   });
 
@@ -2804,8 +3436,18 @@ describe("App", () => {
         options?: { signal?: AbortSignal },
       ) => {
         streamSignal = options?.signal;
+        onEvent("reply_title", {
+          thread_id: "thread_2",
+          turn_id: "turn_2",
+          title: "Grounding Methods Under Review",
+        });
+        onEvent("thread_title", {
+          thread_id: "thread_2",
+          title: "Grounding Methods Under Review",
+        });
         onEvent("turn_started", {
           turn: turnResponse("turn_2", "thread_2", [], {
+            title: "Grounding Methods Under Review",
             status: "running",
             completed_at: null,
           }),
@@ -2903,7 +3545,18 @@ describe("App", () => {
       expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
     });
     expect(screen.queryByRole("tablist", { name: "Open tabs" })).toBeNull();
+    const userText = screen.getByText("Find the grounding methods");
     const commentaryText = await screen.findByText("I will search the paper index first.");
+    const replyTitle = screen.getByRole("heading", {
+      name: "Grounding Methods Under Review",
+      level: 2,
+    });
+    expect(
+      userText.compareDocumentPosition(replyTitle) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      replyTitle.compareDocumentPosition(commentaryText) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
     const toolActivityText = await screen.findByText('Did paper search for "grounding"');
     expect(screen.queryByText("Commentary")).toBeNull();
     expect(

@@ -872,6 +872,7 @@ class ChatTurnORM(Base):
 
     turn_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     thread_id: Mapped[str] = mapped_column(ForeignKey("chat_threads.thread_id", ondelete="CASCADE"), index=True)
+    title: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(32), default="completed")
     provider_response_id: Mapped[str] = mapped_column(String(128), default="")
     started_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -1178,6 +1179,7 @@ def _chat_turn_from_orm(row: ChatTurnORM, *, items: list[ChatThreadItemResponse]
     return ChatTurnResponse(
         turn_id=row.turn_id,
         thread_id=row.thread_id,
+        title=row.title or "",
         status=row.status or "completed",
         provider_response_id=row.provider_response_id or "",
         started_at=row.started_at,
@@ -1949,6 +1951,9 @@ class SqlAlchemyPaperRepository(PaperRepository):
             )
             connection.execute(
                 text("ALTER TABLE IF EXISTS chat_threads ADD COLUMN IF NOT EXISTS project_instructions TEXT DEFAULT ''")
+            )
+            connection.execute(
+                text("ALTER TABLE IF EXISTS chat_turns ADD COLUMN IF NOT EXISTS title TEXT DEFAULT ''")
             )
             connection.execute(
                 text("ALTER TABLE IF EXISTS chat_messages ADD COLUMN IF NOT EXISTS kind VARCHAR(32) DEFAULT 'default'")
@@ -4874,12 +4879,14 @@ class SqlAlchemyPaperRepository(PaperRepository):
         self,
         *,
         thread_id: str,
+        title: str = "",
         status: str = "running",
         provider_response_id: str = "",
     ) -> ChatTurnResponse:
         row = ChatTurnORM(
             turn_id=new_id("turn"),
             thread_id=thread_id,
+            title=title,
             status=status,
             provider_response_id=provider_response_id,
             started_at=utcnow(),
@@ -4895,6 +4902,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
         self,
         turn_id: str,
         *,
+        title: str | None = None,
         status: str | None = None,
         provider_response_id: str | None = None,
         completed_at: Any | None = None,
@@ -4907,6 +4915,8 @@ class SqlAlchemyPaperRepository(PaperRepository):
             row = session.get(ChatTurnORM, turn_id)
             if row is None:
                 return None
+            if title is not None:
+                row.title = title
             if status is not None:
                 row.status = status
             if provider_response_id is not None:
@@ -7494,6 +7504,7 @@ class MemoryPaperRepository(PaperRepository):
         self,
         *,
         thread_id: str,
+        title: str = "",
         status: str = "running",
         provider_response_id: str = "",
     ) -> ChatTurnResponse:
@@ -7501,6 +7512,7 @@ class MemoryPaperRepository(PaperRepository):
         turn = ChatTurnResponse(
             turn_id=new_id("turn"),
             thread_id=thread_id,
+            title=title,
             status=status,
             provider_response_id=provider_response_id,
             started_at=utcnow(),
@@ -7521,6 +7533,7 @@ class MemoryPaperRepository(PaperRepository):
         self,
         turn_id: str,
         *,
+        title: str | None = None,
         status: str | None = None,
         provider_response_id: str | None = None,
         completed_at: Any | None = None,
@@ -7536,6 +7549,7 @@ class MemoryPaperRepository(PaperRepository):
                 updated_turn = turn.model_copy(
                     update={
                         "status": turn.status if status is None else status,
+                        "title": turn.title if title is None else title,
                         "provider_response_id": turn.provider_response_id
                         if provider_response_id is None
                         else provider_response_id,

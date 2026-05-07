@@ -1,78 +1,68 @@
 import type { ChatCitation } from "../types";
-import type { PaperCitationPreviewState } from "./appTypes";
-import { summarizeCitationPreview } from "./appUtils";
+import type { PaperActionTarget, PaperCitationPreviewState } from "./appTypes";
+import { groupCitationsByPaper } from "./appUtils";
 
 type ThreadPapersViewProps = {
   citations: ChatCitation[];
   paperCitationPreviews: Record<string, PaperCitationPreviewState>;
-  openPaperDrawer: (paperId: string, path: string) => void;
+  openPaperPdfModal: (target: PaperActionTarget) => void;
 };
 
 export function ThreadPapersView({
   citations,
   paperCitationPreviews,
-  openPaperDrawer,
+  openPaperPdfModal,
 }: ThreadPapersViewProps) {
+  const paperGroups = groupCitationsByPaper(citations);
   return (
     <div className="thread-papers-view">
-      {citations.length > 0 ? (
+      {paperGroups.length > 0 ? (
         <div className="thread-paper-list">
-          {citations.map((citation) => {
+          {paperGroups.map((group) => {
+            const citation = group.citation;
             const paperPreview = citation.paper_id
               ? (paperCitationPreviews[citation.paper_id] ?? null)
               : null;
-            const paperSummary = summarizeCitationPreview(paperPreview?.paper ?? null);
+            const paper = paperPreview?.paper ?? null;
+            const actionTarget: PaperActionTarget | null = citation.paper_id
+              ? {
+                  paperId: citation.paper_id,
+                  path: citation.path,
+                  paper,
+                  title: paper?.title ?? citation.title,
+                  authors: paper?.authors ?? "",
+                  previewImageUrl: paperPreview?.preview?.image_url ?? null,
+                  pdfUrl: paper?.pdf_url ?? null,
+                }
+              : null;
+            const openPaperTarget = () => {
+              if (!actionTarget) {
+                return;
+              }
+              openPaperPdfModal(actionTarget);
+            };
             return (
               <article
-                key={`${citation.source_id}:${citation.paper_id ?? citation.path}`}
-                className="thread-paper-card"
+                key={group.key}
+                className={`thread-paper-card${actionTarget ? " clickable" : ""}`}
+                onClick={openPaperTarget}
               >
+                {group.citationCount > 1 ? (
+                  <span className="paper-citation-count-badge">{group.citationCount}</span>
+                ) : null}
                 <div className="thread-paper-card-main">
-                  <span className="thread-paper-source">{citation.source_id}</span>
-                  <h2>{paperPreview?.paper?.title ?? citation.title}</h2>
-                  {paperPreview?.paper ? (
-                    <div className="thread-paper-meta">
-                      {paperPreview.paper.authors}
-                      {paperPreview.paper.published ? ` · ${paperPreview.paper.published}` : ""}
-                    </div>
-                  ) : null}
-                  {paperSummary ? (
-                    <p className="thread-paper-summary">{paperSummary}</p>
-                  ) : (
-                    <p className="thread-paper-summary">{citation.excerpt}</p>
-                  )}
+                  <h2>{paper?.title ?? citation.title}</h2>
+                  {paper ? <div className="thread-paper-meta">{paper.authors}</div> : null}
                 </div>
-                <div className="thread-paper-actions">
-                  {citation.paper_id ? (
-                    <button
-                      type="button"
-                      className="citation-card-action"
-                      onClick={() => openPaperDrawer(citation.paper_id!, citation.path)}
-                    >
-                      Open paper
-                    </button>
-                  ) : null}
-                  {paperPreview?.paper?.html_url ? (
-                    <a
-                      className="citation-card-action"
-                      href={paperPreview.paper.html_url}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      HTML
-                    </a>
-                  ) : null}
-                  {paperPreview?.paper?.pdf_url ? (
-                    <a
-                      className="citation-card-action"
-                      href={paperPreview.paper.pdf_url}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      PDF
-                    </a>
-                  ) : null}
-                </div>
+                {paperPreview?.preview?.image_url ? (
+                  <img
+                    className="thread-paper-cover-image"
+                    src={paperPreview.preview.image_url}
+                    alt={`${paper?.title ?? citation.title} preview`}
+                  />
+                ) : (
+                  <div className="thread-paper-cover-placeholder">Paper</div>
+                )}
               </article>
             );
           })}

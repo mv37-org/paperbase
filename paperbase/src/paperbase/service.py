@@ -104,6 +104,7 @@ from .models import (
     LoginRequest,
     ManifestResponse,
     PaperCommentsResponse,
+    PaperDiscussionResponse,
     PaperMetadata,
     PaperAssetResponse,
     PaperCommentAuthor,
@@ -1176,11 +1177,25 @@ def _summarize_chat_title(content: str) -> str:
         return "New chat"
     informative_tokens = [token for token in tokens if token.lower() not in _CHAT_TITLE_STOP_WORDS]
     source_tokens = informative_tokens if len(informative_tokens) >= 3 else tokens
-    desired_count = min(5, max(3, len(source_tokens)))
+    desired_count = min(5, max(4, len(source_tokens)))
     selected_tokens = source_tokens[:desired_count]
-    if len(selected_tokens) < 3 and len(tokens) >= 3:
-        selected_tokens = tokens[:3]
+    if len(selected_tokens) < 4 and len(tokens) >= 4:
+        selected_tokens = tokens[:4]
     return " ".join(_format_chat_title_word(token) for token in selected_tokens).strip() or "New chat"
+
+
+def _clean_generated_chat_title(content: str) -> str:
+    line = next((candidate.strip() for candidate in content.splitlines() if candidate.strip()), "")
+    if not line:
+        return ""
+    line = re.sub(r"^[-*#\s]+", "", line).strip()
+    line = re.sub(r"^(?:title|headline)\s*:\s*", "", line, flags=re.IGNORECASE).strip()
+    line = line.strip("\"'`. ")
+    tokens = _CHAT_TITLE_TOKEN_RE.findall(line)
+    if len(tokens) < 4:
+        return ""
+    selected_tokens = tokens[:5]
+    return " ".join(_format_chat_title_word(token) for token in selected_tokens).strip()
 
 
 def _question_mentions_uploads(question: str) -> bool:
@@ -1661,6 +1676,7 @@ class PreparedChatGeneration:
     user_item: ChatThreadItemResponse
     resolved_user: BrowserUser
     api_key_value: str
+    updated_thread_title: str | None = None
 
 
 @dataclass
@@ -3708,8 +3724,10 @@ class PaperbaseService:
     ) -> PreparedChatGeneration:
         thread = self.get_chat_thread(user, thread_id)
         content = request.content.strip()
+        reply_title = self._generate_chat_title(api_key=api_key_value, content=content)
         turn = self.repository.create_chat_turn(  # type: ignore[attr-defined]
             thread_id=thread_id,
+            title=reply_title,
             status="running",
         )
         user_item = self.repository.add_chat_thread_item(  # type: ignore[attr-defined]
@@ -3719,10 +3737,11 @@ class PaperbaseService:
             role="user",
             content_text=content,
         )
-        if thread.title == "New chat":
+        updated_thread_title = reply_title if thread.title == "New chat" else None
+        if updated_thread_title:
             self.repository.rename_chat_thread(  # type: ignore[attr-defined]
                 thread_id=thread_id,
-                title=_summarize_chat_title(content),
+                title=updated_thread_title,
             )
         refreshed = self.get_chat_thread(user, thread_id)
         return PreparedChatGeneration(
@@ -3731,7 +3750,41 @@ class PaperbaseService:
             user_item=user_item,
             resolved_user=resolved_user,
             api_key_value=api_key_value,
+            updated_thread_title=updated_thread_title,
         )
+
+    def _generate_chat_title(self, *, api_key: str, content: str) -> str:
+        fallback = _summarize_chat_title(content)
+        prompt = Prompt(
+            input=[
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": content[:4000],
+                }
+            ],
+            base_instructions=(
+                "Write one 4 to 5 word title that reads like an article headline. "
+                "Use title case. Return only the title, with no quotes, markdown, or punctuation."
+            ),
+            tools=[],
+            tool_choice=None,
+            parallel_tool_calls=False,
+        )
+        try:
+            response = self._chat_model_create_response(api_key=api_key, prompt=prompt)
+        except Exception:
+            logger.exception(
+                "Chat title generation failed",
+                extra={"event": "chat.title_generation.failed"},
+            )
+            return fallback
+        response_text = "\n".join(
+            item.content_text
+            for item in response.items
+            if item.item_type == "assistant_message" and item.content_text
+        )
+        return _clean_generated_chat_title(response_text) or fallback
 
     def _project_prompt_suffix(self, thread: ChatThreadResponse) -> str:
         instructions = thread.project_instructions.strip()
@@ -5865,6 +5918,20 @@ class PaperbaseService:
         )
 
         _ = self._chat_runtime_mode()
+        if prepared.turn.title.strip():
+            yield (
+                "reply_title",
+                {
+                    "thread_id": prepared.thread.thread_id,
+                    "turn_id": prepared.turn.turn_id,
+                    "title": prepared.turn.title,
+                },
+            )
+        if prepared.updated_thread_title:
+            yield (
+                "thread_title",
+                {"thread_id": prepared.thread.thread_id, "title": prepared.updated_thread_title},
+            )
         yield ("turn_started", {"turn": prepared.turn.model_dump(mode="json")})
         turn_engine = self._run_chat_turn_engine(
             prepared=prepared,
@@ -9235,6 +9302,26 @@ class PaperbaseService:
             }
         )
 
+    def get_browser_paper_discussion(
+        self,
+        paper_id: str,
+        *,
+        viewer: BrowserUser | None = None,
+    ) -> PaperDiscussionResponse:
+        summary = self.repository.get_paper_vote_summary(
+            paper_id,
+            viewer_user_id=viewer.user_id if viewer else None,
+        )
+        if summary is None:
+            raise HTTPException(status_code=404, detail=f"Paper {paper_id} not found")
+        comments = self.repository.list_paper_comment_records(paper_id)
+        return PaperDiscussionResponse(
+            paper_id=paper_id,
+            upvote_count=summary.upvote_count,
+            viewer_has_upvoted=summary.viewer_has_upvoted,
+            comments=self._build_paper_comment_tree(comments),
+        )
+
     def get_browser_trending_paper_preview_content(self, paper_id: str) -> tuple[bytes, str]:
         detail = self.repository.get_trending_paper(paper_id)
         if detail is None:
@@ -9248,6 +9335,12 @@ class PaperbaseService:
         summary = self.repository.set_paper_upvote(paper_id=paper_id, user_id=user.user_id, upvoted=upvoted)
         if summary is None:
             raise HTTPException(status_code=404, detail=f"Trending paper {paper_id} not found")
+        return summary
+
+    def set_browser_paper_upvote(self, paper_id: str, *, user: BrowserUser, upvoted: bool) -> PaperVoteSummary:
+        summary = self.repository.set_paper_upvote(paper_id=paper_id, user_id=user.user_id, upvoted=upvoted)
+        if summary is None:
+            raise HTTPException(status_code=404, detail=f"Paper {paper_id} not found")
         return summary
 
     def create_browser_trending_paper_comment(
@@ -9275,6 +9368,37 @@ class PaperbaseService:
         )
         if created is None:
             raise HTTPException(status_code=404, detail=f"Trending paper {paper_id} not found")
+        comments = self.repository.list_paper_comment_records(paper_id)
+        return PaperCommentsResponse(
+            paper_id=paper_id,
+            comments=self._build_paper_comment_tree(comments),
+        )
+
+    def create_browser_paper_comment(
+        self,
+        paper_id: str,
+        *,
+        user: BrowserUser,
+        request: CreatePaperCommentRequest,
+    ) -> PaperCommentsResponse:
+        summary = self.repository.get_paper_vote_summary(paper_id, viewer_user_id=user.user_id)
+        if summary is None:
+            raise HTTPException(status_code=404, detail=f"Paper {paper_id} not found")
+        body = request.body.strip()
+        if not body:
+            raise HTTPException(status_code=400, detail="Comment body must not be empty")
+        if request.parent_comment_id:
+            parent = self.repository.get_paper_comment(request.parent_comment_id)
+            if parent is None or parent.paper_id != paper_id:
+                raise HTTPException(status_code=400, detail="Reply target is invalid for this paper")
+        created = self.repository.create_paper_comment(
+            paper_id=paper_id,
+            user_id=user.user_id,
+            body=body,
+            parent_comment_id=request.parent_comment_id,
+        )
+        if created is None:
+            raise HTTPException(status_code=404, detail=f"Paper {paper_id} not found")
         comments = self.repository.list_paper_comment_records(paper_id)
         return PaperCommentsResponse(
             paper_id=paper_id,

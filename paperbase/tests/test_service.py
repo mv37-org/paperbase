@@ -231,6 +231,19 @@ class FakeChatModel:
         return items
 
     def create_response(self, *, api_key: str, prompt: Prompt) -> ResponseEnvelope:
+        if "Write one 4 to 5 word title" in prompt.base_instructions:
+            return ResponseEnvelope(
+                response_id="resp_fake_chat_title",
+                items=[
+                    ResponseItem(
+                        item_id="msg_chat_title",
+                        item_type="assistant_message",
+                        role="assistant",
+                        status="completed",
+                        content_text="Grounded Research Question Patterns",
+                    )
+                ],
+            )
         if "Generate five concise follow-up research prompts" in prompt.base_instructions:
             return ResponseEnvelope(
                 response_id="resp_fake_recommended_reading",
@@ -2720,6 +2733,40 @@ def test_trending_detail_builds_nested_comments_and_vote_summary(browser_service
     assert detail.comments[0].replies[0].body == "Reply note"
 
 
+def test_browser_paper_discussion_builds_comments_and_vote_summary(browser_service):
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="discussion@example.com", password="secret12345", display_name="Discussant")
+    )
+    assert session.user is not None
+    paper = _sample_paper("2404.33333", title="Paper Discussion", abstract="Discussion")
+    paper.index_status = "indexed"
+    service.repository.upsert_paper(paper)  # type: ignore[attr-defined]
+
+    service.set_browser_paper_upvote("arxiv:2404.33333", user=session.user, upvoted=True)
+    created = service.create_browser_paper_comment(
+        "arxiv:2404.33333",
+        user=session.user,
+        request=CreatePaperCommentRequest(body="Root paper note"),
+    )
+    service.create_browser_paper_comment(
+        "arxiv:2404.33333",
+        user=session.user,
+        request=CreatePaperCommentRequest(
+            body="Paper reply",
+            parent_comment_id=created.comments[0].comment_id,
+        ),
+    )
+
+    discussion = service.get_browser_paper_discussion("arxiv:2404.33333", viewer=session.user)
+
+    assert discussion.upvote_count == 1
+    assert discussion.viewer_has_upvoted is True
+    assert len(discussion.comments) == 1
+    assert discussion.comments[0].body == "Root paper note"
+    assert discussion.comments[0].replies[0].body == "Paper reply"
+
+
 def test_trending_comment_rejects_reply_target_from_another_paper(browser_service):
     service, _, _ = browser_service
     session, _ = service.register_browser_user(
@@ -4719,7 +4766,9 @@ def test_first_prompt_renames_new_chat_to_short_summary(browser_service):
         SendChatMessageRequest(content="Help me brainstorm a short product name"),
     )
 
-    assert first_response.thread.title == "Brainstorm Short Product Name"
+    assert first_response.thread.title == "Grounded Research Question Patterns"
+    assert first_response.turn is not None
+    assert first_response.turn.title == "Grounded Research Question Patterns"
 
     second_response = service.send_chat_message(
         session.user,
@@ -4727,7 +4776,9 @@ def test_first_prompt_renames_new_chat_to_short_summary(browser_service):
         SendChatMessageRequest(content="Now focus on a whimsical version"),
     )
 
-    assert second_response.thread.title == "Brainstorm Short Product Name"
+    assert second_response.thread.title == "Grounded Research Question Patterns"
+    assert second_response.turn is not None
+    assert second_response.turn.title == "Grounded Research Question Patterns"
 
 
 def test_chat_context_uses_full_active_thread_history(browser_service):
@@ -5583,7 +5634,15 @@ def test_browser_chat_stream_emits_citations_and_completion(monkeypatch, browser
         events = _parse_sse_events("".join(response.iter_text()))
 
     event_names = [event_name for event_name, _ in events]
-    assert event_names[:3] == ["turn_started", "item_started", "item_completed"]
+    assert event_names[:5] == [
+        "reply_title",
+        "thread_title",
+        "turn_started",
+        "item_started",
+        "item_completed",
+    ]
+    assert events[0][1]["title"] == "Grounded Research Question Patterns"
+    assert events[0][1]["turn_id"] == events[2][1]["turn"]["turn_id"]
     function_call_items = _event_items(events, event_name="item_completed", item_type="function_call")
     function_output_items = _event_items(events, event_name="item_completed", item_type="function_call_output")
     assistant_final_items = _event_items(
@@ -5615,6 +5674,7 @@ def test_browser_chat_stream_emits_citations_and_completion(monkeypatch, browser
     assert service.chat_model.create_calls
 
     refreshed = client.get(f"/v1/browser/chats/{thread_id}").json()
+    assert refreshed["turns"][0]["title"] == "Grounded Research Question Patterns"
     assert refreshed["messages"][-1]["status"] == "completed"
     assert refreshed["messages"][-1]["citations"]
 

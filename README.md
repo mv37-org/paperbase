@@ -145,6 +145,7 @@ The browser chat experience is project-based:
 - the new-project modal can refresh the accessible repo list, link to GitHub's Paperbase access settings, and expose optional inference/sandbox credential fields
 - existing repos expose a branch picker and optional import selection for `.py` and `.ipynb` files; new repos start on a fixed `main` branch
 - the sidebar lazily loads mixed project items per project, persists the last selected project across reloads, and reopens with only that project tree expanded by default
+- each project can start paper explorations from a command-palette style search over paper title or arXiv id
 - the product exposes a public-readable `Trending papers` feed of fully indexed and enriched papers, with a landing-page top-10 `Latest`/`Hottest` preview and 50-paper signed-in feed pages by publication date or upvotes; signed-in users can upvote, comment, and reply, and allowlisted admins also get a non-tabbed `Admin panel` jobs workspace
 - the empty first-chat state now shows a dismissible setup checklist for GitHub, inference, and sandbox access so users can connect required services before the coding agent hits save/run failures
 - project descriptions are snapped onto new sessions as per-session prompt context, so later project edits do not rewrite existing chats
@@ -155,7 +156,7 @@ The browser chat experience is project-based:
 - coding turns auto-persist dirty project Python drafts before the agent runs tools, so the backend tool view stays aligned with Monaco edits
 - duplicate Python basenames are disambiguated with repo-path context in the sidebar and active-resource title
 - assistant commentary is now prompted before non-trivial tool batches, then collapsed behind a `Worked for ...` summary once the final answer arrives so session-level actions stay attached to the conclusion
-- the fixed Chat/Papers thread header stays out of the first-chat empty and pending states, then appears once an assistant reply exists; follow-up prompts anchor the new turn at the top of the viewport so earlier turns scroll upward out of focus
+- the fixed Conversation/Research papers thread header stays out of the first-chat empty and pending states, then appears once an assistant reply exists; follow-up prompts anchor the new turn at the top of the viewport so earlier turns scroll upward out of focus
 - streamed and finished chat code blocks use matching light/dark editor-style themes, show line numbers, let longer snippets collapse in place with a compact chevron control, and render inline/block LaTeX formulas in chat markdown
 - project Python files written by coding-tool turns refresh back into the sidebar Code section once the turn completes
 - local `localhost` chat threads render a compact debug strip with the current user, project, thread, and latest message ids so Codex can inspect backend state from a pasted bundle without displacing the empty-chat layout

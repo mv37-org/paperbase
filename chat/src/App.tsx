@@ -1,5 +1,11 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, ChangeEvent, UIEvent } from "react";
+import type {
+  CSSProperties,
+  ChangeEvent,
+  FormEvent,
+  KeyboardEvent as ReactKeyboardEvent,
+  UIEvent,
+} from "react";
 import Editor, { DiffEditor } from "@monaco-editor/react";
 
 import {
@@ -7,10 +13,12 @@ import {
   createPythonFile,
   createProject,
   createThread,
+  createBrowserPaperComment,
   deleteProject,
   deletePythonFile,
   deleteThread,
   getBrowserPaper,
+  getBrowserPaperDiscussion,
   getBrowserPaperPreview,
   getBrowserPaperFigure,
   getBrowserPaperFile,
@@ -32,6 +40,7 @@ import {
   renameThread,
   logoutBrowserSession,
   postForm,
+  removeUpvoteBrowserPaper,
   runPythonFile,
   sendThreadMessage,
   sendThreadMessageStream,
@@ -42,6 +51,7 @@ import {
   syncProjectRepo,
   updateProject,
   updatePythonFile,
+  upvoteBrowserPaper,
   uploadDocument,
 } from "./api";
 import { AdminOpsPanel } from "./AdminOpsPanel";
@@ -55,6 +65,11 @@ import {
 } from "./app/AppChrome";
 import { ChatSessionModals } from "./app/ChatSessionModals";
 import { ChatThreadHeader } from "./app/ChatThreadHeader";
+import {
+  PdfDocumentViewer,
+  type PdfDocumentSection,
+  type PdfDocumentViewerHandle,
+} from "./app/PdfDocumentViewer";
 import { ThreadPapersView } from "./app/ThreadPapersView";
 import type {
   AppearanceTheme,
@@ -65,9 +80,12 @@ import type {
   FeedbackSentiment,
   ModalFlashKind,
   OpenTab,
+  PaperActionTarget,
   PaperCitationPreviewState,
   PaperDrawerContent,
   PaperDrawerState,
+  PaperExploration,
+  PaperPdfModalState,
   ProjectItemState,
   ProjectModalState,
   ProjectSidebarCategoryKey,
@@ -102,6 +120,7 @@ import {
   formatThinkingLabel,
   formatThreadAge,
   formatToolActivityText,
+  groupCitationsByPaper,
   DISMISSED_CHAT_SETUP_KEY,
   inferDrawerContentKind,
   isEmptyThread,
@@ -133,14 +152,12 @@ import {
   SIDEBAR_COLLAPSED_KEY,
   sourceCardId,
   staticAssetPath,
-  summarizeCitationPreview,
   summarizeThreadTitle,
   threadMarkdownExport,
   toolActivityCommandForItem,
   toolActivityHasDetails,
   toolActivityLabelForItem,
   uniqueCitationsForThread,
-  uniquePaperCitationCount,
   updateDrawerUrl,
   updateTrendingBrowseUrl,
   upsertProjectItem,
@@ -161,11 +178,17 @@ import type {
   ChatThreadItemResponse,
   ChatStreamUsageEvent,
   ChatThreadResponse,
+  ChatTurnResponse,
   GitHubRepoImportCandidate,
   GitHubRepoMetadataResponse,
   GitHubRepoSummary,
+  MentionSuggestion,
   MentionTag,
+  PaperComment,
+  PaperCommentsResponse,
+  PaperDiscussionResponse,
   PaperResponse,
+  PaperVoteSummary,
   ProjectItemKind,
   ProjectRepoConflictResolution,
   ProjectSummary,
@@ -177,10 +200,19 @@ function chatMessageRowId(messageId: string) {
   return `chat-message-${messageId.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
 }
 
+type ThreadRenameModalState = {
+  threadId: string;
+  title: string;
+  draft: string;
+  saving: boolean;
+  error: string;
+};
+
 const RESUME_PROJECT_MODAL_KEY = "paperbase-resume-new-project";
 const LANDING_TRENDING_PAGE_SIZE = 10;
 const PROJECT_ITEM_PAGE_SIZE = 5;
 const PROJECT_SIDEBAR_ITEM_KINDS: ProjectItemKind[] = ["python_file", "thread"];
+const PAPER_EXPLORATIONS_KEY = "paperbase-paper-explorations";
 const AUTH_VIEW_COPY: Record<AuthView, { title: string; caption: string }> = {
   login: { title: "Log in", caption: "Use your account to continue." },
   signup: { title: "Create account", caption: "Create your account." },
@@ -307,6 +339,308 @@ function formatWorkedDuration(startMs: number | null, endMs: number | null) {
     : `${totalHours} ${totalHours === 1 ? "hour" : "hours"}`;
 }
 
+function paperExplorationIdFor(projectId: string, paperId: string) {
+  return `paper-exploration:${projectId}:${paperId}`;
+}
+
+function splitPaperAuthors(authors: string) {
+  return authors
+    .split(/\s*(?:,|\band\b)\s*/i)
+    .map((author) => author.trim())
+    .filter(Boolean);
+}
+
+function authorInitials(author: string) {
+  const parts = author
+    .split(/\s+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return (parts[0]?.[0] ?? "").concat(parts.length > 1 ? (parts[parts.length - 1]?.[0] ?? "") : "");
+}
+
+function samePaperSections(left: PdfDocumentSection[], right: PdfDocumentSection[]) {
+  return (
+    left.length === right.length &&
+    left.every(
+      (section, index) =>
+        section.title === right[index]?.title &&
+        section.pageNumber === right[index]?.pageNumber &&
+        section.pageYOffsetRatio === right[index]?.pageYOffsetRatio,
+    )
+  );
+}
+
+type PaperDiscussionPanelState = {
+  status: "idle" | "loading" | "ready" | "error";
+  error: string;
+  upvoteCount: number;
+  viewerHasUpvoted: boolean;
+  comments: PaperComment[];
+  draft: string;
+  replyDrafts: Record<string, string>;
+  expandedReplyIds: Record<string, boolean>;
+  replyingToCommentId: string | null;
+  votePending: boolean;
+  commentSubmitting: boolean;
+  replySubmittingCommentId: string | null;
+};
+
+function emptyPaperDiscussionState(): PaperDiscussionPanelState {
+  return {
+    status: "idle",
+    error: "",
+    upvoteCount: 0,
+    viewerHasUpvoted: false,
+    comments: [],
+    draft: "",
+    replyDrafts: {},
+    expandedReplyIds: {},
+    replyingToCommentId: null,
+    votePending: false,
+    commentSubmitting: false,
+    replySubmittingCommentId: null,
+  };
+}
+
+function paperDiscussionStateFromResponse(
+  response: PaperDiscussionResponse,
+  current?: PaperDiscussionPanelState,
+): PaperDiscussionPanelState {
+  return {
+    ...(current ?? emptyPaperDiscussionState()),
+    status: "ready",
+    error: "",
+    upvoteCount: response.upvote_count,
+    viewerHasUpvoted: response.viewer_has_upvoted,
+    comments: response.comments,
+    votePending: false,
+    commentSubmitting: false,
+    replySubmittingCommentId: null,
+  };
+}
+
+function paperDiscussionStateWithVote(
+  summary: PaperVoteSummary,
+  current?: PaperDiscussionPanelState,
+): PaperDiscussionPanelState {
+  return {
+    ...(current ?? emptyPaperDiscussionState()),
+    status: "ready",
+    error: "",
+    upvoteCount: summary.upvote_count,
+    viewerHasUpvoted: summary.viewer_has_upvoted,
+    votePending: false,
+  };
+}
+
+function paperDiscussionStateWithComments(
+  response: PaperCommentsResponse,
+  current?: PaperDiscussionPanelState,
+  overrides: Partial<PaperDiscussionPanelState> = {},
+): PaperDiscussionPanelState {
+  return {
+    ...(current ?? emptyPaperDiscussionState()),
+    status: "ready",
+    error: "",
+    comments: response.comments,
+    draft: "",
+    commentSubmitting: false,
+    replySubmittingCommentId: null,
+    ...overrides,
+  };
+}
+
+function paperCommentCount(comments: PaperComment[]): number {
+  return comments.reduce((count, comment) => count + 1 + paperCommentCount(comment.replies), 0);
+}
+
+function PaperExplorationComment({
+  comment,
+  depth = 0,
+  authenticated,
+  expandedReplyIds,
+  replyingToCommentId,
+  replyDrafts,
+  replySubmittingCommentId,
+  onReplyStart,
+  onReplyCancel,
+  onReplyDraftChange,
+  onReplySubmit,
+  onToggleReplies,
+}: {
+  comment: PaperComment;
+  depth?: number;
+  authenticated: boolean;
+  expandedReplyIds: Record<string, boolean>;
+  replyingToCommentId: string | null;
+  replyDrafts: Record<string, string>;
+  replySubmittingCommentId: string | null;
+  onReplyStart: (commentId: string) => void;
+  onReplyCancel: (commentId: string) => void;
+  onReplyDraftChange: (commentId: string, draft: string) => void;
+  onReplySubmit: (event: FormEvent<HTMLFormElement>, commentId: string) => void;
+  onToggleReplies: (commentId: string) => void;
+}) {
+  const authorName = comment.author.display_name || "Reader";
+  const replyCount = comment.replies.length;
+  const repliesExpanded = Boolean(expandedReplyIds[comment.comment_id]);
+  const isReplying = replyingToCommentId === comment.comment_id;
+  const replyDraft = replyDrafts[comment.comment_id] ?? "";
+  const replySubmitting = replySubmittingCommentId === comment.comment_id;
+
+  return (
+    <article
+      className="paper-exploration-comment"
+      style={{ "--paper-discussion-depth": String(Math.min(depth, 3)) } as CSSProperties}
+    >
+      <div className="paper-exploration-comment-main">
+        <div className="paper-exploration-comment-bubble">
+          <strong>{authorName}</strong>
+          <p>{comment.body}</p>
+        </div>
+        <div className="paper-exploration-comment-actions">
+          {authenticated ? (
+            <button type="button" onClick={() => onReplyStart(comment.comment_id)}>
+              Reply
+            </button>
+          ) : null}
+          {replyCount > 0 ? (
+            <button type="button" onClick={() => onToggleReplies(comment.comment_id)}>
+              {repliesExpanded
+                ? "Hide replies"
+                : replyCount === 1
+                  ? "View 1 reply"
+                  : `View all ${replyCount} replies`}
+            </button>
+          ) : null}
+        </div>
+        {isReplying ? (
+          <form
+            className="paper-exploration-reply-form"
+            onSubmit={(event) => onReplySubmit(event, comment.comment_id)}
+          >
+            <textarea
+              aria-label={`Reply to ${authorName}`}
+              value={replyDraft}
+              onChange={(event) => onReplyDraftChange(comment.comment_id, event.target.value)}
+              placeholder={`Reply to ${authorName}`}
+              rows={2}
+            />
+            <div className="paper-exploration-reply-form-actions">
+              <button
+                type="button"
+                className="paper-exploration-comment-cancel"
+                onClick={() => onReplyCancel(comment.comment_id)}
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="paper-exploration-comment-submit"
+                disabled={replySubmitting || replyDraft.trim().length === 0}
+              >
+                {replySubmitting ? "Posting..." : "Reply"}
+              </button>
+            </div>
+          </form>
+        ) : null}
+      </div>
+      {replyCount > 0 && repliesExpanded ? (
+        <div className="paper-exploration-comment-replies">
+          {comment.replies.map((reply) => (
+            <PaperExplorationComment
+              key={reply.comment_id}
+              comment={reply}
+              depth={depth + 1}
+              authenticated={authenticated}
+              expandedReplyIds={expandedReplyIds}
+              replyingToCommentId={replyingToCommentId}
+              replyDrafts={replyDrafts}
+              replySubmittingCommentId={replySubmittingCommentId}
+              onReplyStart={onReplyStart}
+              onReplyCancel={onReplyCancel}
+              onReplyDraftChange={onReplyDraftChange}
+              onReplySubmit={onReplySubmit}
+              onToggleReplies={onToggleReplies}
+            />
+          ))}
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
+function normalizePaperExploration(value: unknown): PaperExploration | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const entry = value as Partial<Record<keyof PaperExploration, unknown>>;
+  const explorationId = typeof entry.explorationId === "string" ? entry.explorationId : "";
+  const projectId = typeof entry.projectId === "string" ? entry.projectId : "";
+  const paperId = typeof entry.paperId === "string" ? entry.paperId : "";
+  const path = typeof entry.path === "string" ? entry.path : "";
+  const title = typeof entry.title === "string" ? entry.title : "";
+  if (!explorationId || !projectId || !paperId || !title) {
+    return null;
+  }
+  return {
+    explorationId,
+    projectId,
+    paperId,
+    path,
+    title,
+    authors: typeof entry.authors === "string" ? entry.authors : "",
+    previewImageUrl: typeof entry.previewImageUrl === "string" ? entry.previewImageUrl : "",
+    pdfUrl: typeof entry.pdfUrl === "string" ? entry.pdfUrl : "",
+    createdAt: typeof entry.createdAt === "string" ? entry.createdAt : new Date().toISOString(),
+    updatedAt: typeof entry.updatedAt === "string" ? entry.updatedAt : new Date().toISOString(),
+  };
+}
+
+function restorePaperExplorations() {
+  try {
+    const value = localStorage.getItem(PAPER_EXPLORATIONS_KEY);
+    if (!value) {
+      return [];
+    }
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed
+      .map((entry) => normalizePaperExploration(entry))
+      .filter((entry): entry is PaperExploration => Boolean(entry));
+  } catch {
+    return [];
+  }
+}
+
+function persistPaperExplorations(explorations: PaperExploration[]) {
+  if (explorations.length === 0) {
+    localStorage.removeItem(PAPER_EXPLORATIONS_KEY);
+    return;
+  }
+  localStorage.setItem(PAPER_EXPLORATIONS_KEY, JSON.stringify(explorations));
+}
+
+function sourceCountLabel(count: number) {
+  return `${count} ${count === 1 ? "source" : "sources"}`;
+}
+
+function paperSuggestionMeta(paper: MentionSuggestion) {
+  const parts = [];
+  if (paper.arxiv_id.trim()) {
+    parts.push(`arXiv ${paper.arxiv_id}`);
+  }
+  if (paper.published) {
+    parts.push(paper.published.slice(0, 4));
+  }
+  if (paper.citation_count > 0) {
+    parts.push(`${paper.citation_count} cites`);
+  }
+  return parts.join(" · ");
+}
+
 export default function App() {
   const bootstrapSession = useMemo(() => getBootstrapSession(), []);
   const [session, setSession] = useState<BrowserSessionResponse | null>(bootstrapSession);
@@ -366,6 +700,7 @@ export default function App() {
   const [threadDebugModalOpen, setThreadDebugModalOpen] = useState(false);
   const [threadPane, setThreadPane] = useState<ThreadPane>("chat");
   const [chatHeaderMenuOpen, setChatHeaderMenuOpen] = useState(false);
+  const [threadRenameModal, setThreadRenameModal] = useState<ThreadRenameModalState | null>(null);
   const [exportModalState, setExportModalState] = useState<ExportModalState>(null);
   const [feedbackModalState, setFeedbackModalState] = useState<FeedbackModalState>(null);
   const [feedbackReasons, setFeedbackReasons] = useState<string[]>([]);
@@ -388,6 +723,20 @@ export default function App() {
   const [includeUploads] = useState(true);
   const [includePapers] = useState(true);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [paperExplorationSidebarCollapsed, setPaperExplorationSidebarCollapsed] = useState(true);
+  const [paperExplorationSidebarPane, setPaperExplorationSidebarPane] = useState<
+    "info" | "notes" | "social"
+  >("info");
+  const [paperExplorationNotes, setPaperExplorationNotes] = useState<Record<string, string>>({});
+  const [paperExplorationSections, setPaperExplorationSections] = useState<
+    Record<string, PdfDocumentSection[]>
+  >({});
+  const [paperDiscussionStates, setPaperDiscussionStates] = useState<
+    Record<string, PaperDiscussionPanelState>
+  >({});
+  const [activePaperExplorationSectionId, setActivePaperExplorationSectionId] = useState<
+    string | null
+  >(null);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [emptyStateProjectPickerOpen, setEmptyStateProjectPickerOpen] = useState(false);
@@ -400,12 +749,33 @@ export default function App() {
   const [threadStreamStates, setThreadStreamStates] = useState<Record<string, ThreadStreamState>>(
     {},
   );
+  const [expandedCitationMessages, setExpandedCitationMessages] = useState<Record<string, boolean>>(
+    {},
+  );
   const [threadUsageSnapshots, setThreadUsageSnapshots] = useState<
     Record<string, ChatStreamUsageEvent>
   >({});
   const [toolActivities, setToolActivities] = useState<Record<string, ToolActivityEntry[]>>({});
   const [contextUsagePopoverOpen, setContextUsagePopoverOpen] = useState(false);
   const [paperDrawer, setPaperDrawer] = useState<PaperDrawerState>(() => drawerStateFromUrl());
+  const [paperPdfModal, setPaperPdfModal] = useState<PaperPdfModalState | null>(null);
+  const [paperExploreMenuOpen, setPaperExploreMenuOpen] = useState(false);
+  const [paperExplorations, setPaperExplorations] = useState<PaperExploration[]>(() =>
+    restorePaperExplorations(),
+  );
+  const [explorationPicker, setExplorationPicker] = useState<{
+    projectId: string;
+    projectName: string;
+  } | null>(null);
+  const [explorationSearch, setExplorationSearch] = useState("");
+  const [explorationSuggestions, setExplorationSuggestions] = useState<MentionSuggestion[]>([]);
+  const [explorationSearchStatus, setExplorationSearchStatus] = useState<
+    "idle" | "loading" | "ready" | "error"
+  >("idle");
+  const [explorationSearchFallback, setExplorationSearchFallback] = useState(false);
+  const [explorationSearchError, setExplorationSearchError] = useState("");
+  const [explorationSelectedIndex, setExplorationSelectedIndex] = useState(0);
+  const [explorationStartingPaperId, setExplorationStartingPaperId] = useState("");
   const [trendingBrowseState, setTrendingBrowseState] = useState<TrendingBrowseState | null>(() =>
     trendingBrowseStateFromUrl(),
   );
@@ -433,6 +803,8 @@ export default function App() {
   const selectedProjectIdRef = useRef<string | null>(restoreSelectedProjectId());
   const projectItemsRef = useRef<Record<string, ProjectItemState>>({});
   const paperCitationPreviewsRef = useRef<Record<string, PaperCitationPreviewState>>({});
+  const paperExplorationsRef = useRef<PaperExploration[]>(paperExplorations);
+  const paperExplorationViewerRef = useRef<PdfDocumentViewerHandle | null>(null);
   const paperCitationPreviewFetchesRef = useRef(new Set<string>());
   const threadMapRef = useRef<Record<string, ChatThreadResponse>>({});
   const pythonFileMapRef = useRef<Record<string, PythonFileResponse>>({});
@@ -443,6 +815,8 @@ export default function App() {
   const contextUsageMenuRef = useRef<HTMLDivElement | null>(null);
   const emptyStateProjectPickerRef = useRef<HTMLDivElement | null>(null);
   const emptyStateProjectSearchInputRef = useRef<HTMLInputElement | null>(null);
+  const explorationSearchInputRef = useRef<HTMLInputElement | null>(null);
+  const explorationSuggestionRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const projectMenuRef = useRef<HTMLDivElement | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const pendingTurnAnchorMessageIdRef = useRef<string | null>(null);
@@ -480,6 +854,92 @@ export default function App() {
   useEffect(() => {
     paperCitationPreviewsRef.current = paperCitationPreviews;
   }, [paperCitationPreviews]);
+
+  useEffect(() => {
+    paperExplorationsRef.current = paperExplorations;
+    persistPaperExplorations(paperExplorations);
+  }, [paperExplorations]);
+
+  useEffect(() => {
+    if (!explorationPicker) {
+      return;
+    }
+    window.requestAnimationFrame(() => {
+      explorationSearchInputRef.current?.focus();
+    });
+  }, [explorationPicker]);
+
+  useEffect(() => {
+    if (!explorationPicker) {
+      return;
+    }
+
+    const query = explorationSearch.trim();
+    if (query.length < 2) {
+      setExplorationSuggestions([]);
+      setExplorationSearchStatus("idle");
+      setExplorationSearchFallback(false);
+      setExplorationSearchError("");
+      setExplorationSelectedIndex(0);
+      return;
+    }
+
+    let stale = false;
+    setExplorationSearchStatus("loading");
+    setExplorationSearchError("");
+    const timeoutId = window.setTimeout(() => {
+      suggestBrowserPapers(query, 8)
+        .then((result) => {
+          if (stale) {
+            return;
+          }
+          setExplorationSuggestions(result.suggestions);
+          setExplorationSearchFallback(result.fallback);
+          setExplorationSearchStatus("ready");
+          setExplorationSelectedIndex(0);
+        })
+        .catch((error) => {
+          if (stale) {
+            return;
+          }
+          setExplorationSuggestions([]);
+          setExplorationSearchFallback(false);
+          setExplorationSearchStatus("error");
+          setExplorationSearchError(
+            error instanceof Error ? error.message : "Paper search failed.",
+          );
+        });
+    }, 140);
+
+    return () => {
+      stale = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [explorationPicker, explorationSearch]);
+
+  useEffect(() => {
+    setExplorationSelectedIndex((current) =>
+      explorationSuggestions.length === 0
+        ? 0
+        : Math.min(current, explorationSuggestions.length - 1),
+    );
+  }, [explorationSuggestions.length]);
+
+  useEffect(() => {
+    if (!explorationPicker || explorationSuggestions.length === 0) {
+      return;
+    }
+    const selectedPaper = explorationSuggestions[explorationSelectedIndex];
+    if (!selectedPaper) {
+      return;
+    }
+    window.requestAnimationFrame(() => {
+      explorationSuggestionRefs.current[selectedPaper.paper_id]?.scrollIntoView({
+        block: "nearest",
+        inline: "nearest",
+      });
+    });
+  }, [explorationPicker, explorationSelectedIndex, explorationSuggestions]);
 
   useEffect(() => {
     pythonFileMapRef.current = pythonFileMap;
@@ -526,6 +986,12 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(sidebarCollapsed));
   }, [sidebarCollapsed]);
+
+  useEffect(() => {
+    if (activeTab?.kind !== "paper_exploration") {
+      setPaperExplorationSidebarCollapsed(true);
+    }
+  }, [activeTab?.kind]);
 
   useEffect(() => {
     localStorage.setItem(DISMISSED_CHAT_SETUP_KEY, JSON.stringify(dismissedChatSetupSignatures));
@@ -628,6 +1094,7 @@ export default function App() {
   const activeThreadId = activeTab?.kind === "thread" ? activeTab.id : null;
   const activePythonFileId = activeTab?.kind === "python_file" ? activeTab.id : null;
   const activeProjectHomeId = activeTab?.kind === "project_home" ? activeTab.id : null;
+  const activePaperExplorationId = activeTab?.kind === "paper_exploration" ? activeTab.id : null;
   const activeWorkspacePageId =
     workspaceView?.kind === "admin_jobs" || workspaceView?.kind === "admin_job_papers"
       ? "admin_jobs"
@@ -639,6 +1106,15 @@ export default function App() {
   const activeProjectHome = activeProjectHomeId
     ? (projects.find((project) => project.project_id === activeProjectHomeId) ?? null)
     : null;
+  const activePaperExploration = activePaperExplorationId
+    ? (paperExplorations.find(
+        (exploration) => exploration.explorationId === activePaperExplorationId,
+      ) ?? null)
+    : null;
+
+  useEffect(() => {
+    setActivePaperExplorationSectionId(null);
+  }, [activePaperExplorationId]);
   const activePythonDraft = activePythonFileId
     ? (pythonFileDrafts[activePythonFileId] ?? null)
     : null;
@@ -679,6 +1155,30 @@ export default function App() {
   const activeProjectHomeSessionCount = activeProjectHomeItems.filter(
     (item) => item.item_kind === "thread",
   ).length;
+  const activeProjectHomeExplorationCount = activeProjectHomeId
+    ? paperExplorations.filter((exploration) => exploration.projectId === activeProjectHomeId)
+        .length
+    : 0;
+  const activePaperExplorationSections = activePaperExploration
+    ? activePaperExploration.pdfUrl
+      ? paperExplorationSections[activePaperExploration.explorationId]
+      : []
+    : undefined;
+  const activePaperDiscussion = activePaperExploration
+    ? (paperDiscussionStates[activePaperExploration.paperId] ?? emptyPaperDiscussionState())
+    : emptyPaperDiscussionState();
+  const activePaperCommentCount = paperCommentCount(activePaperDiscussion.comments);
+  const activePaperExplorationAuthors = useMemo(
+    () => splitPaperAuthors(activePaperExploration?.authors ?? ""),
+    [activePaperExploration?.authors],
+  );
+  const paperExplorationIdsByPaperId = useMemo(
+    () =>
+      Object.fromEntries(
+        paperExplorations.map((exploration) => [exploration.paperId, exploration.explorationId]),
+      ) as Record<string, string>,
+    [paperExplorations],
+  );
   const selectedSyncConflict = syncConflictState
     ? (syncConflictState.conflicts.find(
         (conflict) => conflict.path === syncConflictState.selectedPath,
@@ -697,7 +1197,12 @@ export default function App() {
   const showThreadDebugButton = Boolean(
     activeTab?.kind === "thread" && activeThreadDebugBundle && !isChatEmpty,
   );
-  const paperDrawerOpen = Boolean(paperDrawer);
+  const paperExplorationSidebarOpen = Boolean(
+    activeTab?.kind === "paper_exploration" &&
+    activePaperExploration &&
+    !paperExplorationSidebarCollapsed,
+  );
+  const paperDrawerOpen = Boolean(paperDrawer && !paperExplorationSidebarOpen);
   const hasProjects = projects.length > 0;
   const emptyStateProject =
     projects.find((project) => project.project_id === selectedProjectId) ?? projects[0] ?? null;
@@ -813,6 +1318,7 @@ export default function App() {
     }
     paperCitationPreviewFetchesRef.current.clear();
     setPaperCitationPreviews({});
+    setPaperDiscussionStates({});
   }, [authenticated]);
 
   useEffect(() => {
@@ -882,9 +1388,58 @@ export default function App() {
   }, [activeThreadPaperIds, authenticated]);
 
   useEffect(() => {
+    const paperId = activePaperExploration?.paperId;
+    if (!authenticated || !paperId) {
+      return;
+    }
+
+    let cancelled = false;
+    setPaperDiscussionStates((current) => ({
+      ...current,
+      [paperId]: {
+        ...(current[paperId] ?? emptyPaperDiscussionState()),
+        status: "loading",
+        error: "",
+      },
+    }));
+
+    void (async () => {
+      try {
+        const discussion = await getBrowserPaperDiscussion(paperId);
+        if (cancelled) {
+          return;
+        }
+        setPaperDiscussionStates((current) => ({
+          ...current,
+          [paperId]: paperDiscussionStateFromResponse(discussion, current[paperId]),
+        }));
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+        setPaperDiscussionStates((current) => ({
+          ...current,
+          [paperId]: {
+            ...(current[paperId] ?? emptyPaperDiscussionState()),
+            status: "error",
+            error: error instanceof Error ? error.message : "Paper discussion could not be loaded.",
+            votePending: false,
+            commentSubmitting: false,
+          },
+        }));
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activePaperExploration?.paperId, authenticated]);
+
+  useEffect(() => {
     setContextUsagePopoverOpen(false);
     setChatHeaderMenuOpen(false);
     setThreadPane("chat");
+    setExpandedCitationMessages({});
   }, [activeThreadId]);
 
   useEffect(() => {
@@ -1150,6 +1705,65 @@ export default function App() {
     setFlashKind("note");
   }, []);
 
+  const closeExplorationPicker = useCallback(() => {
+    setExplorationPicker(null);
+    setExplorationSearch("");
+    setExplorationSuggestions([]);
+    setExplorationSearchStatus("idle");
+    setExplorationSearchFallback(false);
+    setExplorationSearchError("");
+    setExplorationSelectedIndex(0);
+    setExplorationStartingPaperId("");
+  }, []);
+
+  const handleExplorationPickerCloseButton = useCallback(() => {
+    if (explorationSearch.length > 0) {
+      setExplorationSearch("");
+      setExplorationSuggestions([]);
+      setExplorationSearchStatus("idle");
+      setExplorationSearchFallback(false);
+      setExplorationSearchError("");
+      setExplorationSelectedIndex(0);
+      window.requestAnimationFrame(() => {
+        explorationSearchInputRef.current?.focus();
+      });
+      return;
+    }
+    closeExplorationPicker();
+  }, [closeExplorationPicker, explorationSearch]);
+
+  const openExplorationPicker = useCallback(
+    (projectId: string) => {
+      const project = projectsRef.current.find((entry) => entry.project_id === projectId);
+      if (!project) {
+        showErrorFlash("Select a project before starting an exploration.");
+        return;
+      }
+      selectedProjectIdRef.current = projectId;
+      setSelectedProjectId(projectId);
+      setExpandedProjectIds((current) =>
+        current.includes(projectId) ? current : [...current, projectId],
+      );
+      setCollapsedProjectCategories((current) => ({
+        ...current,
+        [projectId]: {
+          ...current[projectId],
+          notes: false,
+        },
+      }));
+      setProjectMenuProjectId(null);
+      setExplorationSearch("");
+      setExplorationSuggestions([]);
+      setExplorationSearchStatus("idle");
+      setExplorationSearchFallback(false);
+      setExplorationSearchError("");
+      setExplorationSelectedIndex(0);
+      setExplorationStartingPaperId("");
+      setExplorationPicker({ projectId, projectName: project.name });
+    },
+    [showErrorFlash],
+  );
+
   const closeAuthModal = useCallback(() => {
     setAuthModalOpen(false);
     clearFlash();
@@ -1165,11 +1779,363 @@ export default function App() {
     updateTrendingBrowseUrl(nextState);
   }, []);
 
-  const openPaperDrawer = useCallback((paperId: string, path: string) => {
-    const nextState = { paperId, path };
-    setPaperDrawer(nextState);
-    updateDrawerUrl(nextState);
+  const closePaperPdfModal = useCallback(() => {
+    setPaperExploreMenuOpen(false);
+    setPaperPdfModal(null);
   }, []);
+
+  const openPaperPdfModal = useCallback((target: PaperActionTarget) => {
+    setPaperExploreMenuOpen(false);
+    const cachedPreview = paperCitationPreviewsRef.current[target.paperId];
+    const paper = target.paper ?? cachedPreview?.paper ?? null;
+    const pdfUrl = target.pdfUrl ?? paper?.pdf_url ?? "";
+    setPaperPdfModal({
+      paperId: target.paperId,
+      path: target.path,
+      paper,
+      title: paper?.title ?? target.title ?? "Paper",
+      authors: paper?.authors ?? target.authors ?? "",
+      pdfUrl,
+      status: paper || pdfUrl ? "ready" : "loading",
+      error: "",
+    });
+
+    if (paper || pdfUrl) {
+      return;
+    }
+
+    void (async () => {
+      try {
+        const fetchedPaper = await getBrowserPaper(target.paperId);
+        setPaperPdfModal((current) =>
+          current?.paperId === target.paperId && current.path === target.path
+            ? {
+                ...current,
+                paper: fetchedPaper,
+                title: fetchedPaper.title,
+                authors: fetchedPaper.authors,
+                pdfUrl: fetchedPaper.pdf_url,
+                status: "ready",
+                error: "",
+              }
+            : current,
+        );
+      } catch (error) {
+        setPaperPdfModal((current) =>
+          current?.paperId === target.paperId && current.path === target.path
+            ? {
+                ...current,
+                status: "error",
+                error: error instanceof Error ? error.message : "Paper PDF could not be loaded.",
+              }
+            : current,
+        );
+      }
+    })();
+  }, []);
+
+  const openPaperExploration = useCallback((explorationId: string) => {
+    const exploration = paperExplorationsRef.current.find(
+      (entry) => entry.explorationId === explorationId,
+    );
+    if (!exploration) {
+      return;
+    }
+    selectedProjectIdRef.current = exploration.projectId;
+    setSelectedProjectId(exploration.projectId);
+    setExpandedProjectIds((current) =>
+      current.includes(exploration.projectId) ? current : [...current, exploration.projectId],
+    );
+    setCollapsedProjectCategories((current) => ({
+      ...current,
+      [exploration.projectId]: {
+        ...current[exploration.projectId],
+        notes: false,
+      },
+    }));
+    setWorkspaceView(null);
+    setMobileSidebarOpen(false);
+    setAccountMenuOpen(false);
+    setProjectMenuProjectId(null);
+    setSidebarCollapsed(true);
+    setPaperExplorationSidebarCollapsed(false);
+    setPaperExplorationSidebarPane("info");
+    setPaperDrawer(null);
+    setPaperDrawerPaper(null);
+    setPaperDrawerContent(null);
+    setPaperDrawerStatus("idle");
+    setPaperDrawerError("");
+    updateDrawerUrl(null);
+    setThreadPane("chat");
+    setActiveTab({ kind: "paper_exploration", id: exploration.explorationId });
+  }, []);
+
+  const startPaperExploration = useCallback(
+    async (target: PaperActionTarget, options?: { navigate?: boolean }) => {
+      const shouldNavigate = options?.navigate ?? true;
+      const preferredProjectId =
+        target.projectId ??
+        activeThread?.project_id ??
+        activeProjectHomeId ??
+        selectedProjectIdRef.current ??
+        projectsRef.current[0]?.project_id ??
+        null;
+      const existingExploration =
+        paperExplorationsRef.current.find(
+          (entry) => entry.projectId === preferredProjectId && entry.paperId === target.paperId,
+        ) ?? paperExplorationsRef.current.find((entry) => entry.paperId === target.paperId);
+      if (existingExploration) {
+        if (shouldNavigate) {
+          openPaperExploration(existingExploration.explorationId);
+        } else {
+          setExpandedProjectIds((current) =>
+            current.includes(existingExploration.projectId)
+              ? current
+              : [...current, existingExploration.projectId],
+          );
+          setCollapsedProjectCategories((current) => ({
+            ...current,
+            [existingExploration.projectId]: {
+              ...current[existingExploration.projectId],
+              notes: false,
+            },
+          }));
+        }
+        return true;
+      }
+      if (!preferredProjectId) {
+        showErrorFlash("Create a project before starting a paper exploration.");
+        return false;
+      }
+
+      const cachedPreview = paperCitationPreviewsRef.current[target.paperId];
+      let paper = target.paper ?? cachedPreview?.paper ?? null;
+      let previewImageUrl = target.previewImageUrl ?? cachedPreview?.preview?.image_url ?? "";
+
+      if (!paper) {
+        try {
+          paper = await getBrowserPaper(target.paperId);
+        } catch {
+          paper = null;
+        }
+      }
+      if (!previewImageUrl) {
+        try {
+          previewImageUrl = (await getBrowserPaperPreview(target.paperId)).image_url;
+        } catch {
+          previewImageUrl = "";
+        }
+      }
+
+      const postFetchExisting =
+        paperExplorationsRef.current.find(
+          (entry) => entry.projectId === preferredProjectId && entry.paperId === target.paperId,
+        ) ?? paperExplorationsRef.current.find((entry) => entry.paperId === target.paperId);
+      if (postFetchExisting) {
+        if (shouldNavigate) {
+          openPaperExploration(postFetchExisting.explorationId);
+        } else {
+          setExpandedProjectIds((current) =>
+            current.includes(postFetchExisting.projectId)
+              ? current
+              : [...current, postFetchExisting.projectId],
+          );
+          setCollapsedProjectCategories((current) => ({
+            ...current,
+            [postFetchExisting.projectId]: {
+              ...current[postFetchExisting.projectId],
+              notes: false,
+            },
+          }));
+        }
+        return true;
+      }
+
+      const now = new Date().toISOString();
+      const exploration: PaperExploration = {
+        explorationId: paperExplorationIdFor(preferredProjectId, target.paperId),
+        projectId: preferredProjectId,
+        paperId: target.paperId,
+        path: target.path,
+        title: paper?.title ?? target.title ?? target.paperId,
+        authors: paper?.authors ?? target.authors ?? "",
+        previewImageUrl: previewImageUrl ?? "",
+        pdfUrl: paper?.pdf_url ?? target.pdfUrl ?? "",
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      setPaperExplorations((current) => [exploration, ...current]);
+      paperExplorationsRef.current = [exploration, ...paperExplorationsRef.current];
+      setExpandedProjectIds((current) =>
+        current.includes(preferredProjectId) ? current : [...current, preferredProjectId],
+      );
+      setCollapsedProjectCategories((current) => ({
+        ...current,
+        [preferredProjectId]: {
+          ...current[preferredProjectId],
+          notes: false,
+        },
+      }));
+      if (shouldNavigate) {
+        selectedProjectIdRef.current = preferredProjectId;
+        setSelectedProjectId(preferredProjectId);
+        setWorkspaceView(null);
+        setMobileSidebarOpen(false);
+        setAccountMenuOpen(false);
+        setProjectMenuProjectId(null);
+        setSidebarCollapsed(true);
+        setPaperExplorationSidebarCollapsed(false);
+        setPaperExplorationSidebarPane("info");
+        setPaperDrawer(null);
+        setPaperDrawerPaper(null);
+        setPaperDrawerContent(null);
+        setPaperDrawerStatus("idle");
+        setPaperDrawerError("");
+        updateDrawerUrl(null);
+        setThreadPane("chat");
+        setActiveTab({ kind: "paper_exploration", id: exploration.explorationId });
+      }
+      return true;
+    },
+    [activeProjectHomeId, activeThread?.project_id, openPaperExploration, showErrorFlash],
+  );
+
+  const startExplorationFromSuggestion = useCallback(
+    async (paper: MentionSuggestion) => {
+      if (!explorationPicker || explorationStartingPaperId) {
+        return;
+      }
+      setExplorationStartingPaperId(paper.paper_id);
+      try {
+        const didStart = await startPaperExploration({
+          paperId: paper.paper_id,
+          path: paper.arxiv_id || paper.paper_id,
+          title: paper.title,
+          authors: paper.authors,
+          projectId: explorationPicker.projectId,
+        });
+        if (didStart) {
+          closeExplorationPicker();
+        }
+      } catch (error) {
+        showErrorFlash(
+          error instanceof Error ? error.message : "Exploration could not be started.",
+        );
+      } finally {
+        setExplorationStartingPaperId((current) => (current === paper.paper_id ? "" : current));
+      }
+    },
+    [
+      closeExplorationPicker,
+      explorationPicker,
+      explorationStartingPaperId,
+      showErrorFlash,
+      startPaperExploration,
+    ],
+  );
+
+  const handleExplorationPickerKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeExplorationPicker();
+        return;
+      }
+      if (explorationSuggestions.length === 0) {
+        return;
+      }
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        setExplorationSelectedIndex((current) =>
+          current >= explorationSuggestions.length - 1 ? 0 : current + 1,
+        );
+        return;
+      }
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        setExplorationSelectedIndex((current) =>
+          current <= 0 ? explorationSuggestions.length - 1 : current - 1,
+        );
+        return;
+      }
+      if (event.key === "Enter") {
+        event.preventDefault();
+        const selectedPaper = explorationSuggestions[explorationSelectedIndex];
+        if (selectedPaper) {
+          void startExplorationFromSuggestion(selectedPaper);
+        }
+      }
+    },
+    [
+      closeExplorationPicker,
+      explorationSelectedIndex,
+      explorationSuggestions,
+      startExplorationFromSuggestion,
+    ],
+  );
+
+  const deletePaperExploration = useCallback((explorationId: string) => {
+    const deletedExploration = paperExplorationsRef.current.find(
+      (entry) => entry.explorationId === explorationId,
+    );
+    setPaperExplorations((current) =>
+      current.filter((entry) => entry.explorationId !== explorationId),
+    );
+    paperExplorationsRef.current = paperExplorationsRef.current.filter(
+      (entry) => entry.explorationId !== explorationId,
+    );
+    setPaperExplorationSections((current) => {
+      if (!(explorationId in current)) {
+        return current;
+      }
+      const next = { ...current };
+      delete next[explorationId];
+      return next;
+    });
+    setActiveTab((current) => {
+      if (current?.kind !== "paper_exploration" || current.id !== explorationId) {
+        return current;
+      }
+      return deletedExploration?.projectId
+        ? { kind: "project_home", id: deletedExploration.projectId }
+        : null;
+    });
+  }, []);
+
+  const handleActivePaperExplorationSections = useCallback(
+    (sections: PdfDocumentSection[]) => {
+      if (!activePaperExplorationId) {
+        return;
+      }
+      setPaperExplorationSections((current) => {
+        const previous = current[activePaperExplorationId] ?? [];
+        if (samePaperSections(previous, sections)) {
+          return current;
+        }
+        return { ...current, [activePaperExplorationId]: sections };
+      });
+    },
+    [activePaperExplorationId],
+  );
+
+  const handlePaperExplorationSectionClick = useCallback((sectionId: string) => {
+    setActivePaperExplorationSectionId(sectionId);
+    paperExplorationViewerRef.current?.scrollToSection(sectionId);
+  }, []);
+
+  useEffect(() => {
+    if (!paperPdfModal) {
+      return;
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        closePaperPdfModal();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [closePaperPdfModal, paperPdfModal]);
 
   const updateThread = useCallback(
     (threadId: string, updater: (thread: ChatThreadResponse | null) => ChatThreadResponse) => {
@@ -1187,6 +2153,7 @@ export default function App() {
       [threadId]: {
         turnIndex,
         thinkingWord: pickThinkingWord(current[threadId]?.thinkingWord ?? null),
+        replyTitle: null,
         assistantStarted: false,
         usage: null,
       },
@@ -1330,17 +2297,40 @@ export default function App() {
 
   const handleCitationClick = useCallback(
     (message: ChatMessageResponse, citation: ChatCitation) => {
-      document
-        .getElementById(sourceCardId(message.message_id, citation.source_id))
-        ?.scrollIntoView({
-          behavior: "smooth",
-          block: "nearest",
-        });
       if (citation.paper_id) {
-        openPaperDrawer(citation.paper_id, citation.path);
+        const existingExploration = paperExplorationsRef.current.find(
+          (entry) => entry.paperId === citation.paper_id,
+        );
+        if (existingExploration) {
+          openPaperExploration(existingExploration.explorationId);
+          return;
+        }
+        const paperPreview = paperCitationPreviewsRef.current[citation.paper_id];
+        openPaperPdfModal({
+          paperId: citation.paper_id,
+          path: citation.path,
+          paper: paperPreview?.paper ?? null,
+          title: paperPreview?.paper?.title ?? citation.title,
+          authors: paperPreview?.paper?.authors ?? "",
+          previewImageUrl: paperPreview?.preview?.image_url ?? null,
+          pdfUrl: paperPreview?.paper?.pdf_url ?? null,
+          projectId: activeThread?.project_id ?? null,
+        });
+        return;
       }
+      const sourceCard = document.getElementById(
+        sourceCardId(message.message_id, citation.source_id),
+      );
+      const sourceDetails = sourceCard?.closest("details");
+      if (sourceDetails instanceof HTMLDetailsElement) {
+        sourceDetails.open = true;
+      }
+      sourceCard?.scrollIntoView({
+        behavior: "smooth",
+        block: "nearest",
+      });
     },
-    [openPaperDrawer],
+    [activeThread?.project_id, openPaperExploration, openPaperPdfModal],
   );
 
   const refreshUploads = useCallback(async () => {
@@ -1935,19 +2925,140 @@ export default function App() {
     [activeThread, showNoteFlash],
   );
 
-  const handleHeaderRenameThread = useCallback(async () => {
+  const openHeaderRenameThread = useCallback(() => {
     if (!activeThread) {
       return;
     }
-    const nextTitle = window.prompt("Rename chat", displayThreadTitle(activeThread.title));
-    if (!nextTitle || !nextTitle.trim()) {
-      return;
-    }
-    const renamed = await renameThread(activeThread.thread_id, nextTitle.trim());
-    setThreadMap((current) => ({ ...current, [renamed.thread_id]: renamed }));
-    upsertThreadIntoProjectItems(renamed);
+    const currentTitle = displayThreadTitle(activeThread.title);
+    setThreadRenameModal({
+      threadId: activeThread.thread_id,
+      title: currentTitle,
+      draft: currentTitle,
+      saving: false,
+      error: "",
+    });
     setChatHeaderMenuOpen(false);
-  }, [activeThread, upsertThreadIntoProjectItems]);
+  }, [activeThread]);
+
+  const closeThreadRenameModal = useCallback(() => {
+    setThreadRenameModal((current) => (current?.saving ? current : null));
+  }, []);
+
+  const submitThreadRenameModal = useCallback(
+    async (event?: FormEvent<HTMLFormElement>) => {
+      event?.preventDefault();
+      if (!threadRenameModal || threadRenameModal.saving) {
+        return;
+      }
+      const nextTitle = threadRenameModal.draft.trim();
+      if (!nextTitle) {
+        setThreadRenameModal((current) =>
+          current ? { ...current, error: "Enter a title for this session." } : current,
+        );
+        return;
+      }
+      setThreadRenameModal((current) =>
+        current ? { ...current, saving: true, error: "" } : current,
+      );
+      try {
+        const renamed = await renameThread(threadRenameModal.threadId, nextTitle);
+        setThreadMap((current) => ({ ...current, [renamed.thread_id]: renamed }));
+        upsertThreadIntoProjectItems(renamed);
+        setThreadRenameModal(null);
+      } catch (error) {
+        setThreadRenameModal((current) =>
+          current && current.threadId === threadRenameModal.threadId
+            ? {
+                ...current,
+                saving: false,
+                error: error instanceof Error ? error.message : "Session could not be renamed.",
+              }
+            : current,
+        );
+      }
+    },
+    [threadRenameModal, upsertThreadIntoProjectItems],
+  );
+
+  const updateStreamingThreadTitle = useCallback(
+    (threadId: string, title: string, fallback: ChatThreadResponse) => {
+      const nextTitle = title.trim();
+      if (!nextTitle) {
+        return;
+      }
+      const updatedAt = new Date().toISOString();
+      updateThread(threadId, (thread) => ({
+        ...(thread ?? fallback),
+        title: nextTitle,
+        updated_at: updatedAt,
+      }));
+    },
+    [updateThread],
+  );
+
+  const upsertStreamingTurn = useCallback(
+    (turn: ChatTurnResponse, fallback: ChatThreadResponse) => {
+      updateThread(turn.thread_id, (thread) => {
+        const nextThread = thread ?? fallback;
+        const existingTurns = nextThread.turns ?? [];
+        const nextTurns = existingTurns.some((existing) => existing.turn_id === turn.turn_id)
+          ? existingTurns.map((existing) =>
+              existing.turn_id === turn.turn_id ? { ...existing, ...turn } : existing,
+            )
+          : [...existingTurns, turn];
+        return {
+          ...nextThread,
+          turns: nextTurns,
+          updated_at: new Date().toISOString(),
+        };
+      });
+    },
+    [updateThread],
+  );
+
+  const updateStreamingReplyTitle = useCallback(
+    (threadId: string, turnId: string, title: string, fallback: ChatThreadResponse) => {
+      const nextTitle = title.trim();
+      if (!nextTitle) {
+        return;
+      }
+      setThreadStreamStates((current) => {
+        const existing = current[threadId];
+        if (!existing) {
+          return current;
+        }
+        return {
+          ...current,
+          [threadId]: {
+            ...existing,
+            replyTitle: nextTitle,
+          },
+        };
+      });
+      updateThread(threadId, (thread) => {
+        const nextThread = thread ?? fallback;
+        const existingTurns = nextThread.turns ?? [];
+        if (existingTurns.length === 0) {
+          return nextThread;
+        }
+        return {
+          ...nextThread,
+          turns: existingTurns.map((turn) =>
+            turn.turn_id === turnId ? { ...turn, title: nextTitle } : turn,
+          ),
+          updated_at: new Date().toISOString(),
+        };
+      });
+    },
+    [updateThread],
+  );
+
+  const closeFeedbackModal = useCallback(() => {
+    setFeedbackModalState(null);
+    setFeedbackReasons([]);
+    setFeedbackNote("");
+    setFeedbackSubmitting(false);
+  }, []);
 
   const openFeedbackModal = useCallback(
     (message: ChatMessageResponse, sentiment: FeedbackSentiment) => {
@@ -1957,13 +3068,6 @@ export default function App() {
     },
     [],
   );
-
-  const closeFeedbackModal = useCallback(() => {
-    setFeedbackModalState(null);
-    setFeedbackReasons([]);
-    setFeedbackNote("");
-    setFeedbackSubmitting(false);
-  }, []);
 
   const submitFeedbackModal = useCallback(async () => {
     if (!activeThread || !feedbackModalState) {
@@ -2168,6 +3272,18 @@ export default function App() {
       setContextUsagePopoverOpen(false);
       startThreadStreamState(threadId, turnIndex);
       setComposerStatus("");
+      const streamFallbackThread: ChatThreadResponse = {
+        thread_id: threadId,
+        project_id: fallbackProjectId,
+        project_name: fallbackProjectName,
+        project_instructions: fallbackProjectInstructions,
+        title: optimisticTitle,
+        created_at: now,
+        updated_at: now,
+        items: [],
+        turns: [],
+        messages: [optimisticUserMessage],
+      };
 
       try {
         await sendThreadMessageStream(
@@ -2179,7 +3295,23 @@ export default function App() {
             paper_ids: paperIds,
           },
           (eventName, payload) => {
+            if (eventName === "reply_title") {
+              updateStreamingReplyTitle(
+                payload.thread_id,
+                payload.turn_id,
+                payload.title,
+                streamFallbackThread,
+              );
+              return;
+            }
+
+            if (eventName === "thread_title") {
+              updateStreamingThreadTitle(payload.thread_id, payload.title, streamFallbackThread);
+              return;
+            }
+
             if (eventName === "turn_started") {
+              upsertStreamingTurn(payload.turn, streamFallbackThread);
               return;
             }
 
@@ -2483,6 +3615,9 @@ export default function App() {
       showErrorFlash,
       startThreadStreamState,
       updateThreadStreamUsage,
+      updateStreamingReplyTitle,
+      updateStreamingThreadTitle,
+      upsertStreamingTurn,
       upsertToolActivity,
       upsertThreadIntoProjectItems,
       updateThread,
@@ -2590,6 +3725,41 @@ export default function App() {
             await fetchAndStoreThread(restoredActiveTab.id, false);
           } else if (restoredActiveTab.kind === "python_file") {
             await fetchAndStorePythonFile(restoredActiveTab.id, false);
+          } else if (restoredActiveTab.kind === "paper_exploration") {
+            const restoredExploration = restorePaperExplorations().find(
+              (exploration) => exploration.explorationId === restoredActiveTab.id,
+            );
+            if (
+              !restoredExploration ||
+              !loadedProjects.some(
+                (project) => project.project_id === restoredExploration.projectId,
+              )
+            ) {
+              throw new Error("Stored paper exploration no longer exists.");
+            }
+            selectedProjectIdRef.current = restoredExploration.projectId;
+            setSelectedProjectId(restoredExploration.projectId);
+            setExpandedProjectIds((current) =>
+              current.includes(restoredExploration.projectId)
+                ? current
+                : [...current, restoredExploration.projectId],
+            );
+            setCollapsedProjectCategories((current) => ({
+              ...current,
+              [restoredExploration.projectId]: {
+                ...current[restoredExploration.projectId],
+                notes: false,
+              },
+            }));
+            setSidebarCollapsed(true);
+            setPaperExplorationSidebarCollapsed(false);
+            setPaperExplorationSidebarPane("info");
+            setPaperDrawer(null);
+            setPaperDrawerPaper(null);
+            setPaperDrawerContent(null);
+            setPaperDrawerStatus("idle");
+            setPaperDrawerError("");
+            updateDrawerUrl(null);
           } else if (
             !loadedProjects.some((project) => project.project_id === restoredActiveTab.id)
           ) {
@@ -2769,6 +3939,260 @@ export default function App() {
     sendMessage,
   ]);
 
+  const handlePaperDiscussionVote = useCallback(async () => {
+    if (!activePaperExploration) {
+      return;
+    }
+    if (!sessionRef.current?.authenticated) {
+      openAuthModal("login");
+      return;
+    }
+    const paperId = activePaperExploration.paperId;
+    setPaperDiscussionStates((current) => ({
+      ...current,
+      [paperId]: {
+        ...(current[paperId] ?? emptyPaperDiscussionState()),
+        votePending: true,
+      },
+    }));
+    try {
+      const summary = activePaperDiscussion.viewerHasUpvoted
+        ? await removeUpvoteBrowserPaper(paperId)
+        : await upvoteBrowserPaper(paperId);
+      setPaperDiscussionStates((current) => ({
+        ...current,
+        [paperId]: paperDiscussionStateWithVote(summary, current[paperId]),
+      }));
+    } catch (error) {
+      showErrorFlash(error instanceof Error ? error.message : "Paper vote could not be saved.");
+      setPaperDiscussionStates((current) => ({
+        ...current,
+        [paperId]: {
+          ...(current[paperId] ?? emptyPaperDiscussionState()),
+          votePending: false,
+        },
+      }));
+    }
+  }, [
+    activePaperDiscussion.viewerHasUpvoted,
+    activePaperExploration,
+    openAuthModal,
+    showErrorFlash,
+  ]);
+
+  const handlePaperDiscussionDraftChange = useCallback((paperId: string, draft: string) => {
+    setPaperDiscussionStates((current) => ({
+      ...current,
+      [paperId]: {
+        ...(current[paperId] ?? emptyPaperDiscussionState()),
+        draft,
+      },
+    }));
+  }, []);
+
+  const handlePaperDiscussionReplyDraftChange = useCallback(
+    (commentId: string, draft: string) => {
+      if (!activePaperExploration) {
+        return;
+      }
+      const paperId = activePaperExploration.paperId;
+      setPaperDiscussionStates((current) => {
+        const currentState = current[paperId] ?? emptyPaperDiscussionState();
+        return {
+          ...current,
+          [paperId]: {
+            ...currentState,
+            replyDrafts: {
+              ...currentState.replyDrafts,
+              [commentId]: draft,
+            },
+          },
+        };
+      });
+    },
+    [activePaperExploration],
+  );
+
+  const handlePaperDiscussionReplyStart = useCallback(
+    (commentId: string) => {
+      if (!activePaperExploration) {
+        return;
+      }
+      if (!sessionRef.current?.authenticated) {
+        openAuthModal("login");
+        return;
+      }
+      const paperId = activePaperExploration.paperId;
+      setPaperDiscussionStates((current) => {
+        const currentState = current[paperId] ?? emptyPaperDiscussionState();
+        return {
+          ...current,
+          [paperId]: {
+            ...currentState,
+            replyingToCommentId: commentId,
+          },
+        };
+      });
+    },
+    [activePaperExploration, openAuthModal],
+  );
+
+  const handlePaperDiscussionReplyCancel = useCallback(
+    (commentId: string) => {
+      if (!activePaperExploration) {
+        return;
+      }
+      const paperId = activePaperExploration.paperId;
+      setPaperDiscussionStates((current) => {
+        const currentState = current[paperId] ?? emptyPaperDiscussionState();
+        const nextReplyDrafts = { ...currentState.replyDrafts };
+        delete nextReplyDrafts[commentId];
+        return {
+          ...current,
+          [paperId]: {
+            ...currentState,
+            replyDrafts: nextReplyDrafts,
+            replyingToCommentId:
+              currentState.replyingToCommentId === commentId
+                ? null
+                : currentState.replyingToCommentId,
+          },
+        };
+      });
+    },
+    [activePaperExploration],
+  );
+
+  const handlePaperDiscussionRepliesToggle = useCallback(
+    (commentId: string) => {
+      if (!activePaperExploration) {
+        return;
+      }
+      const paperId = activePaperExploration.paperId;
+      setPaperDiscussionStates((current) => {
+        const currentState = current[paperId] ?? emptyPaperDiscussionState();
+        return {
+          ...current,
+          [paperId]: {
+            ...currentState,
+            expandedReplyIds: {
+              ...currentState.expandedReplyIds,
+              [commentId]: !currentState.expandedReplyIds[commentId],
+            },
+          },
+        };
+      });
+    },
+    [activePaperExploration],
+  );
+
+  const handlePaperDiscussionSubmit = useCallback(
+    async (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      if (!activePaperExploration) {
+        return;
+      }
+      if (!sessionRef.current?.authenticated) {
+        openAuthModal("login");
+        return;
+      }
+      const paperId = activePaperExploration.paperId;
+      const draft = (paperDiscussionStates[paperId]?.draft ?? "").trim();
+      if (!draft) {
+        return;
+      }
+      setPaperDiscussionStates((current) => ({
+        ...current,
+        [paperId]: {
+          ...(current[paperId] ?? emptyPaperDiscussionState()),
+          commentSubmitting: true,
+          error: "",
+        },
+      }));
+      try {
+        const response = await createBrowserPaperComment(paperId, {
+          body: draft,
+          parent_comment_id: null,
+        });
+        setPaperDiscussionStates((current) => ({
+          ...current,
+          [paperId]: paperDiscussionStateWithComments(response, current[paperId]),
+        }));
+      } catch (error) {
+        showErrorFlash(
+          error instanceof Error ? error.message : "Paper comment could not be posted.",
+        );
+        setPaperDiscussionStates((current) => ({
+          ...current,
+          [paperId]: {
+            ...(current[paperId] ?? emptyPaperDiscussionState()),
+            commentSubmitting: false,
+          },
+        }));
+      }
+    },
+    [activePaperExploration, openAuthModal, paperDiscussionStates, showErrorFlash],
+  );
+
+  const handlePaperDiscussionReplySubmit = useCallback(
+    async (event: FormEvent<HTMLFormElement>, commentId: string) => {
+      event.preventDefault();
+      if (!activePaperExploration) {
+        return;
+      }
+      if (!sessionRef.current?.authenticated) {
+        openAuthModal("login");
+        return;
+      }
+      const paperId = activePaperExploration.paperId;
+      const draft = (paperDiscussionStates[paperId]?.replyDrafts[commentId] ?? "").trim();
+      if (!draft) {
+        return;
+      }
+      setPaperDiscussionStates((current) => ({
+        ...current,
+        [paperId]: {
+          ...(current[paperId] ?? emptyPaperDiscussionState()),
+          replySubmittingCommentId: commentId,
+          error: "",
+        },
+      }));
+      try {
+        const response = await createBrowserPaperComment(paperId, {
+          body: draft,
+          parent_comment_id: commentId,
+        });
+        setPaperDiscussionStates((current) => {
+          const currentState = current[paperId] ?? emptyPaperDiscussionState();
+          const nextReplyDrafts = { ...currentState.replyDrafts };
+          delete nextReplyDrafts[commentId];
+          return {
+            ...current,
+            [paperId]: paperDiscussionStateWithComments(response, currentState, {
+              draft: currentState.draft,
+              replyDrafts: nextReplyDrafts,
+              replyingToCommentId: null,
+              expandedReplyIds: {
+                ...currentState.expandedReplyIds,
+                [commentId]: true,
+              },
+            }),
+          };
+        });
+      } catch (error) {
+        showErrorFlash(error instanceof Error ? error.message : "Paper reply could not be posted.");
+        setPaperDiscussionStates((current) => ({
+          ...current,
+          [paperId]: {
+            ...(current[paperId] ?? emptyPaperDiscussionState()),
+            replySubmittingCommentId: null,
+          },
+        }));
+      }
+    },
+    [activePaperExploration, openAuthModal, paperDiscussionStates, showErrorFlash],
+  );
+
   const handleUpload = useCallback(
     async (file: File) => {
       await uploadDocument(file);
@@ -2857,6 +4281,12 @@ export default function App() {
     setRestoredComposerMentions([]);
     setComposerStatus("");
     setMobileSidebarOpen(false);
+    setPaperExplorationSidebarCollapsed(true);
+    setPaperExplorationSidebarPane("info");
+    setPaperExplorationNotes({});
+    setPaperExplorationSections({});
+    setPaperDiscussionStates({});
+    setActivePaperExplorationSectionId(null);
     setAccountMenuOpen(false);
     setStreamingThreadId(null);
     setThreadStreamStates({});
@@ -2873,15 +4303,52 @@ export default function App() {
     updateDrawerUrl(null);
   }, []);
 
+  const openPaperExplorationSidebar = useCallback(() => {
+    setAccountMenuOpen(false);
+    setProjectMenuProjectId(null);
+    setMobileSidebarOpen(false);
+    setSidebarCollapsed(true);
+    setPaperExplorationSidebarCollapsed(false);
+  }, []);
+
+  const closePaperExplorationSidebar = useCallback(() => {
+    setPaperExplorationSidebarCollapsed(true);
+  }, []);
+
+  const expandCollapsedSidebarForAction = useCallback(() => {
+    if (!sidebarCollapsed || window.matchMedia("(max-width: 980px)").matches) {
+      return;
+    }
+    setSidebarCollapsed(false);
+    setPaperExplorationSidebarCollapsed(true);
+  }, [sidebarCollapsed]);
+
   const handleSidebarToggle = useCallback(() => {
     setAccountMenuOpen(false);
     setProjectMenuProjectId(null);
     if (window.matchMedia("(max-width: 980px)").matches) {
-      setMobileSidebarOpen((current) => !current);
+      setMobileSidebarOpen((current) => {
+        const next = !current;
+        if (next) {
+          setPaperExplorationSidebarCollapsed(true);
+        }
+        return next;
+      });
       return;
     }
-    setSidebarCollapsed((current) => !current);
-  }, []);
+    if (sidebarCollapsed) {
+      setSidebarCollapsed(false);
+      setPaperExplorationSidebarCollapsed(true);
+      return;
+    }
+    setSidebarCollapsed((current) => {
+      const next = !current;
+      if (!next) {
+        setPaperExplorationSidebarCollapsed(true);
+      }
+      return next;
+    });
+  }, [sidebarCollapsed]);
 
   const handleThreadSelection = useCallback(
     async (threadId: string) => {
@@ -3344,6 +4811,10 @@ export default function App() {
     [],
   );
 
+  const openDeletePaperExplorationModal = useCallback((explorationId: string, title: string) => {
+    setDeleteModalState({ kind: "paper_exploration", explorationId, title });
+  }, []);
+
   const closeDeleteModal = useCallback(() => {
     setDeleteModalState(null);
   }, []);
@@ -3392,10 +4863,12 @@ export default function App() {
         await deleteThread(deleteModalState.threadId);
         removeThreadIdsLocally([deleteModalState.threadId], deleteModalState.projectId);
         await refreshProjects();
-      } else {
+      } else if (deleteModalState.kind === "python_file") {
         await deletePythonFile(deleteModalState.fileId);
         removePythonFileIdsLocally([deleteModalState.fileId], deleteModalState.projectId);
         await refreshProjects();
+      } else {
+        deletePaperExploration(deleteModalState.explorationId);
       }
       closeDeleteModal();
     } catch (error) {
@@ -3403,6 +4876,7 @@ export default function App() {
     }
   }, [
     closeDeleteModal,
+    deletePaperExploration,
     deleteModalState,
     refreshProjects,
     removePythonFileIdsLocally,
@@ -4013,6 +5487,12 @@ export default function App() {
       : projectRepoMode === "existing" && projectRepoMetadata?.branches.length
         ? projectRepoMetadata.branches
         : [{ name: "", commit_sha: "", is_default: false }];
+  const explorationPickerSearchQuery = explorationSearch.trim();
+  const explorationPickerShouldShowList =
+    explorationSearchFallback ||
+    explorationSuggestions.length > 0 ||
+    explorationSearchStatus === "error" ||
+    (explorationSearchStatus === "ready" && explorationPickerSearchQuery.length >= 2);
 
   return (
     <>
@@ -4117,7 +5597,7 @@ export default function App() {
       {authenticated ? (
         <div
           id="app-shell"
-          className={`app-shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${mobileSidebarOpen ? " mobile-sidebar-open" : ""}${paperDrawerOpen ? " paper-drawer-open" : ""}`}
+          className={`app-shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${mobileSidebarOpen ? " mobile-sidebar-open" : ""}${paperDrawerOpen ? " paper-drawer-open" : ""}${paperExplorationSidebarOpen ? " paper-exploration-sidebar-open" : ""}`}
         >
           <button
             type="button"
@@ -4128,7 +5608,7 @@ export default function App() {
               setAccountMenuOpen(false);
             }}
           />
-          <aside className="sidebar">
+          <aside className="sidebar" onClickCapture={expandCollapsedSidebarForAction}>
             <div className="sidebar-top">
               <div className="sidebar-brand-row">
                 <div className="sidebar-title">Paperbase</div>
@@ -4259,6 +5739,11 @@ export default function App() {
                         last_message_preview: item.last_message_preview,
                       });
                     });
+                    const projectExplorations = paperExplorations
+                      .filter((exploration) => exploration.projectId === project.project_id)
+                      .sort(
+                        (left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt),
+                      );
                     const codeHasMore = Boolean(itemState?.hasMoreByKind?.python_file);
                     const sessionsHasMore = Boolean(itemState?.hasMoreByKind?.thread);
                     const codeLoadingMore = Boolean(itemState?.loadingMoreByKind?.python_file);
@@ -4380,7 +5865,7 @@ export default function App() {
                             {itemState?.error ? (
                               <div className="project-session-state error">{itemState.error}</div>
                             ) : null}
-                            {itemState?.loaded ? (
+                            {itemState?.loaded || projectExplorations.length > 0 ? (
                               <>
                                 <div className="project-tree">
                                   <div className="project-tree-category">
@@ -4401,11 +5886,72 @@ export default function App() {
                                           asset="notes.svg"
                                           className="project-tree-category-icon"
                                         />
-                                        <span>Notes</span>
+                                        <span>Explorations</span>
                                       </button>
+                                      <div className="project-tree-category-actions">
+                                        <button
+                                          type="button"
+                                          className="sidebar-icon-button project-action-button"
+                                          aria-label={`Start exploration in ${project.name}`}
+                                          onClick={() => openExplorationPicker(project.project_id)}
+                                        >
+                                          <AppIcon
+                                            src={staticAssetPath("new-project.svg")}
+                                            className="project-action-icon"
+                                          />
+                                        </button>
+                                      </div>
                                     </div>
-                                    {!collapsedCategories.notes ? (
-                                      <div className="project-tree-empty">No notes yet.</div>
+                                    {!collapsedCategories.notes &&
+                                    projectExplorations.length > 0 ? (
+                                      <div className="thread-list project-thread-list project-category-list">
+                                        {projectExplorations.map((exploration) => (
+                                          <div
+                                            key={exploration.explorationId}
+                                            role="button"
+                                            tabIndex={0}
+                                            className={`thread-card paper-exploration-card${activePaperExplorationId === exploration.explorationId ? " active" : ""}`}
+                                            title={exploration.title}
+                                            onClick={() =>
+                                              openPaperExploration(exploration.explorationId)
+                                            }
+                                            onKeyDown={(event) => {
+                                              if (event.key === "Enter" || event.key === " ") {
+                                                event.preventDefault();
+                                                openPaperExploration(exploration.explorationId);
+                                              }
+                                            }}
+                                          >
+                                            <div className="thread-card-copy paper-exploration-card-copy">
+                                              <strong className="thread-card-title">
+                                                {exploration.title}
+                                              </strong>
+                                            </div>
+                                            <span className="thread-card-age">
+                                              {formatThreadAge(exploration.updatedAt)}
+                                            </span>
+                                            <button
+                                              type="button"
+                                              className="thread-card-delete"
+                                              aria-label={`Delete exploration ${exploration.title}`}
+                                              onClick={(event) => {
+                                                event.stopPropagation();
+                                                openDeletePaperExplorationModal(
+                                                  exploration.explorationId,
+                                                  exploration.title,
+                                                );
+                                              }}
+                                            >
+                                              <AppIcon
+                                                src={staticAssetPath("delete-session.svg")}
+                                                className="thread-card-delete-icon"
+                                              />
+                                            </button>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    ) : !collapsedCategories.notes ? (
+                                      <div className="project-tree-empty">No explorations yet.</div>
                                     ) : null}
                                   </div>
                                   <div className="project-tree-category">
@@ -4426,13 +5972,13 @@ export default function App() {
                                           asset="sessions.svg"
                                           className="project-tree-category-icon"
                                         />
-                                        <span>Sessions</span>
+                                        <span>Conversations</span>
                                       </button>
                                       <div className="project-tree-category-actions">
                                         <button
                                           type="button"
                                           className="sidebar-icon-button project-action-button"
-                                          aria-label={`Start chat in ${project.name}`}
+                                          aria-label={`Start conversation in ${project.name}`}
                                           onClick={() =>
                                             void handleProjectStartChat(project.project_id)
                                           }
@@ -4495,10 +6041,14 @@ export default function App() {
                                           );
                                         })}
                                       </div>
-                                    ) : !collapsedCategories.sessions ? (
-                                      <div className="project-tree-empty">No sessions yet.</div>
+                                    ) : !collapsedCategories.sessions && itemState?.loaded ? (
+                                      <div className="project-tree-empty">
+                                        No conversations yet.
+                                      </div>
                                     ) : null}
-                                    {!collapsedCategories.sessions && sessionsHasMore ? (
+                                    {!collapsedCategories.sessions &&
+                                    itemState?.loaded &&
+                                    sessionsHasMore ? (
                                       <button
                                         type="button"
                                         className="project-show-more"
@@ -4647,10 +6197,12 @@ export default function App() {
                                           });
                                         })()}
                                       </div>
-                                    ) : !collapsedCategories.code ? (
+                                    ) : !collapsedCategories.code && itemState?.loaded ? (
                                       <div className="project-tree-empty">No code files yet.</div>
                                     ) : null}
-                                    {!collapsedCategories.code && codeHasMore ? (
+                                    {!collapsedCategories.code &&
+                                    itemState?.loaded &&
+                                    codeHasMore ? (
                                       <button
                                         type="button"
                                         className="project-show-more"
@@ -4752,7 +6304,9 @@ export default function App() {
             ) : null}
           </aside>
 
-          <section className="chat-stage">
+          <section
+            className={`chat-stage${activeTab?.kind === "paper_exploration" ? " paper-exploration-stage" : ""}`}
+          >
             <button
               type="button"
               className="sidebar-icon-button chat-sidebar-toggle"
@@ -4767,13 +6321,13 @@ export default function App() {
             {showChatThreadHeader ? (
               <ChatThreadHeader
                 threadPane={threadPane}
+                chatRunning={activeStreamInView}
                 menuOpen={chatHeaderMenuOpen}
                 onSelectPane={setThreadPane}
                 onToggleMenu={() => setChatHeaderMenuOpen((current) => !current)}
-                onOpenExportSummary={() => setExportModalState({ source: "header" })}
                 onExportMarkdown={() => exportActiveThread("markdown")}
                 onExportPdf={() => exportActiveThread("pdf")}
-                onRename={() => void handleHeaderRenameThread()}
+                onRename={openHeaderRenameThread}
                 onDelete={() => {
                   setChatHeaderMenuOpen(false);
                   openDeleteThreadModal(
@@ -4787,7 +6341,7 @@ export default function App() {
 
             <div
               ref={messageListRef}
-              className={`chat-message-list${isChatEmpty ? " empty" : ""}${showChatThreadHeader ? " thread-header-visible" : ""}${activeTab?.kind === "python_file" ? " python-file-view" : ""}${isWorkspaceView ? " workspace-view" : ""}${isAdminWorkspaceView ? " workspace-admin-view" : ""}`}
+              className={`chat-message-list${isChatEmpty ? " empty" : ""}${showChatThreadHeader ? " thread-header-visible" : ""}${activeTab?.kind === "python_file" ? " python-file-view" : ""}${activeTab?.kind === "paper_exploration" ? " paper-exploration-view" : ""}${isWorkspaceView ? " workspace-view" : ""}${isAdminWorkspaceView ? " workspace-admin-view" : ""}`}
               onScroll={handleMessageListScroll}
             >
               {workspaceView ? (
@@ -4831,6 +6385,109 @@ export default function App() {
                     </div>
                   </div>
                 )
+              ) : activeTab?.kind === "paper_exploration" ? (
+                activePaperExploration ? (
+                  <div className="paper-exploration-page">
+                    <header className="paper-exploration-header">
+                      <div className="paper-exploration-heading">
+                        <h1>{activePaperExploration.title}</h1>
+                      </div>
+                      <div className="paper-exploration-header-actions">
+                        <button
+                          type="button"
+                          className={`paper-exploration-header-vote-button${
+                            activePaperDiscussion.viewerHasUpvoted ? " active" : ""
+                          }`}
+                          aria-label={`${
+                            activePaperDiscussion.viewerHasUpvoted ? "Upvoted" : "Upvote"
+                          } ${activePaperDiscussion.upvoteCount}`}
+                          title={
+                            activePaperDiscussion.viewerHasUpvoted
+                              ? "Remove upvote"
+                              : "Upvote paper"
+                          }
+                          onClick={() => void handlePaperDiscussionVote()}
+                          disabled={
+                            activePaperDiscussion.votePending ||
+                            activePaperDiscussion.status === "loading"
+                          }
+                        >
+                          <span className="paper-exploration-header-vote-count">
+                            {activePaperDiscussion.votePending
+                              ? "..."
+                              : activePaperDiscussion.upvoteCount}
+                          </span>
+                          <span className="paper-exploration-header-vote-icon" aria-hidden="true" />
+                        </button>
+                        <span
+                          className="paper-exploration-header-action-divider"
+                          aria-hidden="true"
+                        />
+                        <button
+                          type="button"
+                          className="paper-exploration-icon-button"
+                          aria-label={
+                            paperExplorationSidebarOpen
+                              ? "Collapse paper details"
+                              : "Open paper details"
+                          }
+                          aria-expanded={paperExplorationSidebarOpen}
+                          title={
+                            paperExplorationSidebarOpen
+                              ? "Collapse paper details"
+                              : "Open paper details"
+                          }
+                          onClick={
+                            paperExplorationSidebarOpen
+                              ? closePaperExplorationSidebar
+                              : openPaperExplorationSidebar
+                          }
+                        >
+                          <MaskedAssetIcon
+                            asset={
+                              paperExplorationSidebarOpen ? "hide-sidebar.svg" : "show-sidebar.svg"
+                            }
+                            className="paper-exploration-icon-button-icon"
+                          />
+                        </button>
+                        <button
+                          type="button"
+                          className="paper-exploration-icon-button danger"
+                          aria-label="Delete exploration"
+                          title="Delete exploration"
+                          onClick={() =>
+                            openDeletePaperExplorationModal(
+                              activePaperExploration.explorationId,
+                              activePaperExploration.title,
+                            )
+                          }
+                        >
+                          <MaskedAssetIcon
+                            asset="delete-session.svg"
+                            className="paper-exploration-icon-button-icon"
+                          />
+                        </button>
+                      </div>
+                    </header>
+                    {activePaperExploration.pdfUrl ? (
+                      <PdfDocumentViewer
+                        ref={paperExplorationViewerRef}
+                        className="paper-exploration-frame"
+                        title={`${activePaperExploration.title} PDF`}
+                        url={activePaperExploration.pdfUrl}
+                        onSectionsChange={handleActivePaperExplorationSections}
+                      />
+                    ) : (
+                      <div className="paper-exploration-empty">
+                        No PDF URL is available for this paper.
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="paper-exploration-page missing">
+                    <div className="paper-exploration-empty">Exploration not found.</div>
+                  </div>
+                )
               ) : activeTab?.kind === "project_home" ? (
                 activeProjectHome ? (
                   <div className="project-home-page">
@@ -4851,8 +6508,8 @@ export default function App() {
                         <strong>{activeProjectHomeSessionCount}</strong>
                       </div>
                       <div className="project-home-stat">
-                        <span>Notes</span>
-                        <strong>0</strong>
+                        <span>Explorations</span>
+                        <strong>{activeProjectHomeExplorationCount}</strong>
                       </div>
                     </div>
                   </div>
@@ -4973,7 +6630,7 @@ export default function App() {
                 <ThreadPapersView
                   citations={activeThreadCitations}
                   paperCitationPreviews={paperCitationPreviews}
-                  openPaperDrawer={openPaperDrawer}
+                  openPaperPdfModal={openPaperPdfModal}
                 />
               ) : isChatEmpty ? (
                 <div className="chat-stage-spacer">
@@ -5170,7 +6827,7 @@ export default function App() {
                           <span className="chat-empty-action-icon" aria-hidden="true">
                             <EmptyStateActionIcon asset="note.svg" />
                           </span>
-                          <span className="chat-empty-action-label">Add notes</span>
+                          <span className="chat-empty-action-label">Add exploration</span>
                         </button>
                       </div>
                     </div>
@@ -5217,6 +6874,14 @@ export default function App() {
                     for (const [index, turn] of (activeThread.turns ?? []).entries()) {
                       turnIndexById.set(turn.turn_id, index + 1);
                     }
+                    const turnTitleByIndex = new Map<number, string>();
+                    for (const turn of activeThread.turns ?? []) {
+                      const turnIndex = turnIndexById.get(turn.turn_id);
+                      const title = (turn.title ?? "").trim();
+                      if (turnIndex && title) {
+                        turnTitleByIndex.set(turnIndex, title);
+                      }
+                    }
                     for (const item of activeThread.items ?? []) {
                       if (item.turn_id && !turnIndexById.has(item.turn_id)) {
                         turnIndexById.set(item.turn_id, turnIndexById.size + 1);
@@ -5224,6 +6889,7 @@ export default function App() {
                     }
                     const messageTurnIndexes = new Map<string, number>();
                     const userMessagesByTurn = new Map<number, ChatMessageResponse[]>();
+                    const assistantTurnIndexes = new Set<number>();
                     const commentaryMessagesByTurn = new Map<number, ChatMessageResponse[]>();
                     const completedFinalMessagesByTurn = new Map<number, ChatMessageResponse>();
                     let scannedTurnIndex = 0;
@@ -5245,6 +6911,9 @@ export default function App() {
                         const existing = userMessagesByTurn.get(candidateTurnIndex) ?? [];
                         existing.push(candidate);
                         userMessagesByTurn.set(candidateTurnIndex, existing);
+                      }
+                      if (candidate.role === "assistant" && candidate.kind !== "compaction") {
+                        assistantTurnIndexes.add(candidateTurnIndex);
                       }
                       if (candidate.role === "assistant" && candidate.phase === "commentary") {
                         commentaryTurnIndexes.add(candidateTurnIndex);
@@ -5317,6 +6986,24 @@ export default function App() {
                         )}
                       </div>
                     );
+                    const replyTitleForTurn = (turnIndex: number) => {
+                      const streamedTitle =
+                        activeStreamInView && activeThreadStreamState?.turnIndex === turnIndex
+                          ? activeThreadStreamState.replyTitle?.trim()
+                          : "";
+                      if (streamedTitle) {
+                        return streamedTitle;
+                      }
+                      const turnTitle = turnTitleByIndex.get(turnIndex)?.trim();
+                      if (turnTitle) {
+                        return turnTitle;
+                      }
+                      if (turnIndex === 1 && assistantTurnIndexes.has(turnIndex)) {
+                        const threadTitle = displayThreadTitle(activeThread.title);
+                        return threadTitle === "New chat" ? "" : threadTitle;
+                      }
+                      return "";
+                    };
                     const renderCollapsedTurnWork = (
                       turnIndex: number,
                       finalMessage: ChatMessageResponse,
@@ -5432,7 +7119,11 @@ export default function App() {
                         !activeThreadStreamState.assistantStarted &&
                         turnActivities.length === 0;
                       const hoverTime = formatLocalTimestamp(message.created_at, "");
-                      const messagePaperCount = uniquePaperCitationCount(message.citations);
+                      const messagePaperGroups = groupCitationsByPaper(message.citations);
+                      const messagePaperCount = messagePaperGroups.length;
+                      const messageSourcesExpanded = Boolean(
+                        expandedCitationMessages[message.message_id],
+                      );
                       const shouldRenderSessionActions =
                         message.role === "assistant" &&
                         !isCompactionMessage &&
@@ -5442,6 +7133,14 @@ export default function App() {
                         message.message_id === latestRecommendedMessageId
                           ? (message.recommended_prompts ?? [])
                           : [];
+                      const replyTitle =
+                        message.role === "user" && !isCompactionMessage
+                          ? replyTitleForTurn(messageTurnIndex)
+                          : "";
+                      const titleIsStreaming =
+                        Boolean(replyTitle) &&
+                        activeStreamInView &&
+                        activeThreadStreamState?.turnIndex === messageTurnIndex;
                       return (
                         <Fragment key={message.message_id}>
                           {isSessionFinalMessage
@@ -5514,10 +7213,11 @@ export default function App() {
                                     title="Copy response"
                                     onClick={() => void copyMessage(message.content_markdown)}
                                   >
-                                    <svg viewBox="0 0 24 24" aria-hidden="true">
-                                      <path d="M9 9h9v11H9z" />
-                                      <path d="M6 15H5V4h9v1" />
-                                    </svg>
+                                    <img
+                                      src={staticAssetPath("icons8-copy-50.svg")}
+                                      alt=""
+                                      aria-hidden="true"
+                                    />
                                   </button>
                                   <button
                                     type="button"
@@ -5527,11 +7227,11 @@ export default function App() {
                                     disabled={Boolean(streamingThreadId)}
                                     onClick={() => void retryAssistantResponse(message.message_id)}
                                   >
-                                    <svg viewBox="0 0 24 24" aria-hidden="true">
-                                      <path d="M7 7h7a5 5 0 1 1-4.35 7.48" />
-                                      <path d="M7 7V3" />
-                                      <path d="M7 7H3" />
-                                    </svg>
+                                    <img
+                                      src={staticAssetPath("icons8-restart-50.svg")}
+                                      alt=""
+                                      aria-hidden="true"
+                                    />
                                   </button>
                                   <button
                                     type="button"
@@ -5545,19 +7245,26 @@ export default function App() {
                                       })
                                     }
                                   >
-                                    <svg viewBox="0 0 24 24" aria-hidden="true">
-                                      <path d="M12 4v11" />
-                                      <path d="m7 10 5 5 5-5" />
-                                      <path d="M5 20h14" />
-                                    </svg>
+                                    <img
+                                      src={staticAssetPath("icons8-download-50.svg")}
+                                      alt=""
+                                      aria-hidden="true"
+                                    />
                                   </button>
                                   {messagePaperCount > 0 ? (
                                     <button
                                       type="button"
-                                      className="message-sources-button"
-                                      onClick={() => setThreadPane("papers")}
+                                      className={`message-sources-button${messageSourcesExpanded ? " active" : ""}`}
+                                      aria-expanded={messageSourcesExpanded}
+                                      aria-controls={`message-citations-${message.message_id}`}
+                                      onClick={() =>
+                                        setExpandedCitationMessages((current) => ({
+                                          ...current,
+                                          [message.message_id]: !current[message.message_id],
+                                        }))
+                                      }
                                     >
-                                      {messagePaperCount} sources
+                                      {sourceCountLabel(messagePaperCount)}
                                     </button>
                                   ) : null}
                                   {hoverTime ? (
@@ -5572,10 +7279,11 @@ export default function App() {
                                     title="Like response"
                                     onClick={() => openFeedbackModal(message, "positive")}
                                   >
-                                    <svg viewBox="0 0 24 24" aria-hidden="true">
-                                      <path d="M7 10v10H4V10z" />
-                                      <path d="M7 10 12 3l1 1v5h5a2 2 0 0 1 2 2l-1 7a2 2 0 0 1-2 2H7" />
-                                    </svg>
+                                    <img
+                                      src={staticAssetPath("icons8-thumbs-up-50.svg")}
+                                      alt=""
+                                      aria-hidden="true"
+                                    />
                                   </button>
                                   <button
                                     type="button"
@@ -5584,10 +7292,11 @@ export default function App() {
                                     title="Dislike response"
                                     onClick={() => openFeedbackModal(message, "negative")}
                                   >
-                                    <svg viewBox="0 0 24 24" aria-hidden="true">
-                                      <path d="M7 14V4H4v10z" />
-                                      <path d="M7 14 12 21l1-1v-5h5a2 2 0 0 0 2-2l-1-7a2 2 0 0 0-2-2H7" />
-                                    </svg>
+                                    <img
+                                      src={staticAssetPath("icons8-thumbs-down-50.svg")}
+                                      alt=""
+                                      aria-hidden="true"
+                                    />
                                   </button>
                                 </div>
                               </div>
@@ -5608,123 +7317,115 @@ export default function App() {
                                 ))}
                               </div>
                             ) : null}
-                            {message.role === "assistant" && message.citations.length > 0 ? (
-                              <div className="message-citations">
-                                {message.citations.map((citation) => {
-                                  const paperPreview = citation.paper_id
-                                    ? (paperCitationPreviews[citation.paper_id] ?? null)
-                                    : null;
-                                  const paperSummary = summarizeCitationPreview(
-                                    paperPreview?.paper ?? null,
-                                  );
-                                  return (
-                                    <div
-                                      key={citation.source_id}
-                                      id={sourceCardId(message.message_id, citation.source_id)}
-                                      className="citation-card"
-                                    >
-                                      <div className="citation-card-header">
-                                        <div>
-                                          <span className="citation-card-source-id">
-                                            {citation.source_id}
+                            {message.role === "assistant" &&
+                            messagePaperGroups.length > 0 &&
+                            messageSourcesExpanded ? (
+                              <div
+                                id={`message-citations-${message.message_id}`}
+                                className="message-citations citation-compact-list"
+                              >
+                                <div className="message-citations-items">
+                                  {messagePaperGroups.map((group) => {
+                                    const citation = group.citation;
+                                    const paperPreview = citation.paper_id
+                                      ? (paperCitationPreviews[citation.paper_id] ?? null)
+                                      : null;
+                                    const paper = paperPreview?.paper ?? null;
+                                    const actionTarget: PaperActionTarget | null = citation.paper_id
+                                      ? {
+                                          paperId: citation.paper_id,
+                                          path: citation.path,
+                                          paper,
+                                          title: paper?.title ?? citation.title,
+                                          authors: paper?.authors ?? "",
+                                          previewImageUrl: paperPreview?.preview?.image_url ?? null,
+                                          pdfUrl: paper?.pdf_url ?? null,
+                                          projectId: activeThread?.project_id ?? null,
+                                        }
+                                      : null;
+                                    const hasExploration = Boolean(
+                                      citation.paper_id &&
+                                      paperExplorationIdsByPaperId[citation.paper_id],
+                                    );
+                                    const explorationId = citation.paper_id
+                                      ? paperExplorationIdsByPaperId[citation.paper_id]
+                                      : "";
+                                    const openCitationPaper = () => {
+                                      if (!actionTarget) {
+                                        return;
+                                      }
+                                      if (explorationId) {
+                                        openPaperExploration(explorationId);
+                                        return;
+                                      }
+                                      openPaperPdfModal(actionTarget);
+                                    };
+                                    return (
+                                      <div
+                                        key={group.key}
+                                        id={sourceCardId(message.message_id, citation.source_id)}
+                                        className="citation-card citation-card-compact"
+                                      >
+                                        {group.citationCount > 1 ? (
+                                          <span className="paper-citation-count-badge">
+                                            {group.citationCount}
                                           </span>
-                                          <strong className="citation-card-title">
-                                            {citation.title}
-                                          </strong>
-                                        </div>
-                                        {citation.paper_id ? (
-                                          <button
-                                            type="button"
-                                            className="citation-card-action"
-                                            onClick={() =>
-                                              openPaperDrawer(citation.paper_id!, citation.path)
-                                            }
-                                          >
-                                            Open paper
-                                          </button>
                                         ) : null}
-                                      </div>
-                                      <div className="citation-card-path">
-                                        {citation.source_kind === "paperbase_paper"
-                                          ? "Paper"
-                                          : "Upload"}{" "}
-                                        · {citation.path}
-                                      </div>
-                                      {citation.paper_id ? (
-                                        <div className="citation-card-preview-shell">
+                                        <button
+                                          type="button"
+                                          className="citation-card-compact-main"
+                                          onClick={openCitationPaper}
+                                        >
                                           {paperPreview?.preview?.image_url ? (
                                             <img
                                               src={paperPreview.preview.image_url}
-                                              alt={`${paperPreview.paper?.title ?? citation.title} preview`}
-                                              className="citation-card-preview-image"
+                                              alt={`${paper?.title ?? citation.title} preview`}
+                                              className="citation-card-compact-image"
                                             />
                                           ) : (
-                                            <div className="citation-card-preview-placeholder">
-                                              {paperPreview?.status === "loading"
-                                                ? "Loading preview..."
-                                                : "No preview"}
-                                            </div>
+                                            <span className="citation-card-compact-placeholder">
+                                              {paperPreview?.status === "loading" ? "" : "PDF"}
+                                            </span>
                                           )}
-                                          <div className="citation-card-preview-copy">
-                                            {paperPreview?.paper ? (
-                                              <>
-                                                <div className="citation-card-preview-meta">
-                                                  {paperPreview.paper.primary_category ||
-                                                    paperPreview.paper.categories}
-                                                  {paperPreview.paper.published
-                                                    ? ` · ${paperPreview.paper.published}`
-                                                    : ""}
-                                                </div>
-                                                <div className="citation-card-preview-authors">
-                                                  {paperPreview.paper.authors}
-                                                </div>
-                                                {paperSummary ? (
-                                                  <p className="citation-card-preview-summary">
-                                                    {paperSummary}
-                                                  </p>
-                                                ) : null}
-                                                <div className="citation-card-preview-links">
-                                                  {paperPreview.paper.html_url ? (
-                                                    <a
-                                                      className="citation-card-action"
-                                                      href={paperPreview.paper.html_url}
-                                                      target="_blank"
-                                                      rel="noreferrer"
-                                                    >
-                                                      HTML
-                                                    </a>
-                                                  ) : null}
-                                                  {paperPreview.paper.pdf_url ? (
-                                                    <a
-                                                      className="citation-card-action"
-                                                      href={paperPreview.paper.pdf_url}
-                                                      target="_blank"
-                                                      rel="noreferrer"
-                                                    >
-                                                      PDF
-                                                    </a>
-                                                  ) : null}
-                                                </div>
-                                              </>
-                                            ) : paperPreview?.status === "error" ? (
-                                              <div className="citation-card-preview-error">
-                                                {paperPreview.error}
-                                              </div>
-                                            ) : (
-                                              <div className="citation-card-preview-meta">
-                                                Loading paper details...
-                                              </div>
-                                            )}
-                                          </div>
-                                        </div>
-                                      ) : null}
-                                      <p className="citation-card-excerpt">{citation.excerpt}</p>
-                                    </div>
-                                  );
-                                })}
+                                          <span className="citation-card-compact-copy">
+                                            <span className="citation-card-title-line">
+                                              <strong className="citation-card-title">
+                                                {paper?.title ?? citation.title}
+                                              </strong>
+                                            </span>
+                                            <span className="citation-card-preview-authors">
+                                              {paper?.authors || "Author unavailable"}
+                                            </span>
+                                          </span>
+                                        </button>
+                                        {actionTarget ? (
+                                          <button
+                                            type="button"
+                                            className="citation-card-action citation-card-compact-action"
+                                            onClick={(event) => {
+                                              event.stopPropagation();
+                                              void startPaperExploration(actionTarget);
+                                            }}
+                                          >
+                                            {hasExploration
+                                              ? "Open exploration"
+                                              : "Start exploration"}
+                                          </button>
+                                        ) : null}
+                                      </div>
+                                    );
+                                  })}
+                                </div>
                               </div>
                             ) : null}
                           </article>
+                          {replyTitle ? (
+                            <h2
+                              className={`chat-turn-reply-title${titleIsStreaming ? " streaming" : ""}`}
+                            >
+                              {replyTitle}
+                            </h2>
+                          ) : null}
                           {turnActivities.map(renderToolActivityRow)}
                           {showThinkingPlaceholder ? (
                             <div className="tool-activity-row status-running thinking-only">
@@ -5781,6 +7482,226 @@ export default function App() {
               onChange={handleImportNotebookUpload}
             />
           </section>
+
+          {paperExplorationSidebarOpen && activePaperExploration ? (
+            <aside className="paper-exploration-sidebar" aria-label="Paper details">
+              <div
+                className="paper-exploration-sidebar-tabs"
+                role="tablist"
+                aria-label="Paper panel"
+              >
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={paperExplorationSidebarPane === "info"}
+                  className={`paper-exploration-sidebar-tab${paperExplorationSidebarPane === "info" ? " active" : ""}`}
+                  onClick={() => setPaperExplorationSidebarPane("info")}
+                >
+                  Info
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={paperExplorationSidebarPane === "notes"}
+                  className={`paper-exploration-sidebar-tab${paperExplorationSidebarPane === "notes" ? " active" : ""}`}
+                  onClick={() => setPaperExplorationSidebarPane("notes")}
+                >
+                  Notes
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={paperExplorationSidebarPane === "social"}
+                  className={`paper-exploration-sidebar-tab${paperExplorationSidebarPane === "social" ? " active" : ""}`}
+                  onClick={() => setPaperExplorationSidebarPane("social")}
+                >
+                  Social
+                </button>
+                <button
+                  type="button"
+                  className="paper-exploration-sidebar-close"
+                  aria-label="Collapse paper details panel"
+                  onClick={closePaperExplorationSidebar}
+                >
+                  ×
+                </button>
+              </div>
+              <div
+                className={`paper-exploration-sidebar-body${
+                  paperExplorationSidebarPane === "social" ? " social" : ""
+                }`}
+              >
+                {paperExplorationSidebarPane === "info" ? (
+                  <>
+                    <details className="paper-exploration-sidebar-section" open>
+                      <summary>
+                        <MaskedAssetIcon
+                          asset="notes.svg"
+                          className="paper-exploration-sidebar-section-icon"
+                        />
+                        <span>In this paper</span>
+                        <span className="paper-exploration-sidebar-chevron" aria-hidden="true" />
+                      </summary>
+                      <ol className="paper-exploration-outline-list">
+                        {activePaperExplorationSections === undefined ? (
+                          <li className="paper-exploration-outline-note">
+                            Scanning paper sections...
+                          </li>
+                        ) : activePaperExplorationSections.length > 0 ? (
+                          activePaperExplorationSections.map((section) => (
+                            <li key={section.id}>
+                              <button
+                                type="button"
+                                className={`paper-exploration-outline-button${
+                                  section.id === activePaperExplorationSectionId ? " active" : ""
+                                }`}
+                                onClick={() => handlePaperExplorationSectionClick(section.id)}
+                              >
+                                {section.title}
+                              </button>
+                            </li>
+                          ))
+                        ) : (
+                          <li className="paper-exploration-outline-note">No sections detected.</li>
+                        )}
+                      </ol>
+                    </details>
+                    <details className="paper-exploration-sidebar-section" open>
+                      <summary>
+                        <MaskedAssetIcon
+                          asset="sessions.svg"
+                          className="paper-exploration-sidebar-section-icon"
+                        />
+                        <span>Authors</span>
+                        <span className="paper-exploration-sidebar-chevron" aria-hidden="true" />
+                      </summary>
+                      {activePaperExplorationAuthors.length > 0 ? (
+                        <div className="paper-exploration-author-list">
+                          {activePaperExplorationAuthors.slice(0, 8).map((author) => (
+                            <div className="paper-exploration-author" key={author}>
+                              <span className="paper-exploration-author-avatar" aria-hidden="true">
+                                {authorInitials(author).slice(0, 2).toUpperCase()}
+                              </span>
+                              <span>{author}</span>
+                            </div>
+                          ))}
+                          {activePaperExplorationAuthors.length > 8 ? (
+                            <span className="paper-exploration-sidebar-note">
+                              {"& "}
+                              {activePaperExplorationAuthors.length - 8} more
+                            </span>
+                          ) : null}
+                        </div>
+                      ) : (
+                        <p className="paper-exploration-sidebar-note">No authors listed.</p>
+                      )}
+                    </details>
+                  </>
+                ) : paperExplorationSidebarPane === "social" ? (
+                  <div className="paper-exploration-social-pane">
+                    <div className="paper-exploration-social-thread">
+                      {!authenticated ? (
+                        <p className="paper-exploration-sidebar-note">
+                          Log in to view and comment on this paper.
+                        </p>
+                      ) : (
+                        <>
+                          {activePaperDiscussion.status === "loading" ? (
+                            <p className="paper-exploration-sidebar-note">Loading comments...</p>
+                          ) : null}
+                          {activePaperDiscussion.status === "error" ? (
+                            <p className="paper-exploration-sidebar-note warning">
+                              {activePaperDiscussion.error}
+                            </p>
+                          ) : null}
+                          <div className="paper-exploration-comments-heading">
+                            {activePaperCommentCount}{" "}
+                            {activePaperCommentCount === 1 ? "comment" : "comments"}
+                          </div>
+                          {activePaperDiscussion.comments.length > 0 ? (
+                            activePaperDiscussion.comments.map((comment) => (
+                              <PaperExplorationComment
+                                key={comment.comment_id}
+                                comment={comment}
+                                authenticated={authenticated}
+                                expandedReplyIds={activePaperDiscussion.expandedReplyIds}
+                                replyingToCommentId={activePaperDiscussion.replyingToCommentId}
+                                replyDrafts={activePaperDiscussion.replyDrafts}
+                                replySubmittingCommentId={
+                                  activePaperDiscussion.replySubmittingCommentId
+                                }
+                                onReplyStart={handlePaperDiscussionReplyStart}
+                                onReplyCancel={handlePaperDiscussionReplyCancel}
+                                onReplyDraftChange={handlePaperDiscussionReplyDraftChange}
+                                onReplySubmit={handlePaperDiscussionReplySubmit}
+                                onToggleReplies={handlePaperDiscussionRepliesToggle}
+                              />
+                            ))
+                          ) : activePaperDiscussion.status !== "loading" ? (
+                            <p className="paper-exploration-sidebar-note">No comments yet.</p>
+                          ) : null}
+                        </>
+                      )}
+                    </div>
+                    {authenticated ? (
+                      <div className="paper-exploration-social-composer">
+                        <form
+                          className="paper-exploration-comment-form"
+                          onSubmit={handlePaperDiscussionSubmit}
+                        >
+                          <textarea
+                            aria-label="Paper comment"
+                            value={activePaperDiscussion.draft}
+                            onChange={(event) =>
+                              handlePaperDiscussionDraftChange(
+                                activePaperExploration.paperId,
+                                event.target.value,
+                              )
+                            }
+                            placeholder="Add a comment"
+                            rows={2}
+                          />
+                          <button
+                            type="submit"
+                            className="paper-exploration-comment-submit"
+                            disabled={
+                              activePaperDiscussion.commentSubmitting ||
+                              activePaperDiscussion.draft.trim().length === 0
+                            }
+                          >
+                            {activePaperDiscussion.commentSubmitting ? "Posting..." : "Comment"}
+                          </button>
+                        </form>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : (
+                  <details className="paper-exploration-sidebar-section" open>
+                    <summary>
+                      <MaskedAssetIcon
+                        asset="note.svg"
+                        className="paper-exploration-sidebar-section-icon"
+                      />
+                      <span>My notes</span>
+                      <span className="paper-exploration-sidebar-chevron" aria-hidden="true" />
+                    </summary>
+                    <textarea
+                      className="paper-exploration-notes-input"
+                      aria-label="Exploration notes"
+                      value={paperExplorationNotes[activePaperExploration.explorationId] ?? ""}
+                      onChange={(event) => {
+                        const nextValue = event.target.value;
+                        setPaperExplorationNotes((current) => ({
+                          ...current,
+                          [activePaperExploration.explorationId]: nextValue,
+                        }));
+                      }}
+                    />
+                  </details>
+                )}
+              </div>
+            </aside>
+          ) : null}
 
           {paperDrawerOpen ? (
             <aside className="paper-drawer" aria-label="Cited paper drawer">
@@ -5919,6 +7840,210 @@ export default function App() {
         </div>
       ) : null}
 
+      {explorationPicker ? (
+        <div
+          className="exploration-picker-shell"
+          role="dialog"
+          aria-modal="true"
+          aria-label="New exploration"
+        >
+          <button
+            type="button"
+            className="exploration-picker-backdrop"
+            aria-label="Close exploration picker"
+            onClick={closeExplorationPicker}
+          />
+          <div
+            className={`exploration-picker-panel${explorationPickerShouldShowList ? " has-results" : ""}`}
+            onKeyDown={handleExplorationPickerKeyDown}
+          >
+            <div className="exploration-picker-search">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M10.5 18a7.5 7.5 0 1 1 5.3-12.8 7.5 7.5 0 0 1-5.3 12.8Z" />
+                <path d="m16 16 4.5 4.5" />
+              </svg>
+              <input
+                ref={explorationSearchInputRef}
+                type="search"
+                value={explorationSearch}
+                onChange={(event) => setExplorationSearch(event.target.value)}
+                placeholder="Search by paper title or arXiv ID"
+                aria-label="Search papers for exploration"
+              />
+              {explorationSearchStatus === "loading" ? (
+                <span className="exploration-picker-spinner" aria-hidden="true" />
+              ) : null}
+              <button
+                type="button"
+                className="exploration-picker-close"
+                aria-label={
+                  explorationSearch.length > 0
+                    ? "Clear exploration search"
+                    : "Close exploration picker"
+                }
+                onClick={handleExplorationPickerCloseButton}
+              >
+                ×
+              </button>
+            </div>
+            {explorationPickerShouldShowList ? (
+              <div className="exploration-picker-list" role="listbox" aria-label="Paper results">
+                {explorationSearchFallback ? (
+                  <div className="exploration-picker-banner">
+                    No exact matches found. Showing nearby papers.
+                  </div>
+                ) : null}
+                {explorationSuggestions.map((paper, index) => {
+                  const selected = index === explorationSelectedIndex;
+                  const starting = explorationStartingPaperId === paper.paper_id;
+                  return (
+                    <div
+                      key={paper.paper_id}
+                      ref={(element) => {
+                        explorationSuggestionRefs.current[paper.paper_id] = element;
+                      }}
+                      role="option"
+                      aria-selected={selected}
+                      className={`exploration-picker-item${selected ? " selected" : ""}`}
+                      onMouseEnter={() => setExplorationSelectedIndex(index)}
+                    >
+                      <div className="exploration-picker-item-copy">
+                        <strong>{paper.title}</strong>
+                        <span>{paper.authors || "Author unavailable"}</span>
+                        {paperSuggestionMeta(paper) ? (
+                          <small>{paperSuggestionMeta(paper)}</small>
+                        ) : null}
+                      </div>
+                      <button
+                        type="button"
+                        className="exploration-picker-item-action"
+                        disabled={Boolean(explorationStartingPaperId)}
+                        onClick={() => void startExplorationFromSuggestion(paper)}
+                      >
+                        {starting ? "Starting..." : "Explore"}
+                      </button>
+                    </div>
+                  );
+                })}
+                {explorationSearchStatus === "ready" &&
+                explorationPickerSearchQuery.length >= 2 &&
+                explorationSuggestions.length === 0 ? (
+                  <div className="exploration-picker-empty">No papers match this search.</div>
+                ) : null}
+                {explorationSearchStatus === "error" ? (
+                  <div className="exploration-picker-empty error">{explorationSearchError}</div>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+
+      {paperPdfModal ? (
+        <div
+          className="paper-pdf-modal-shell"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`${paperPdfModal.title} PDF`}
+        >
+          <button
+            type="button"
+            className="paper-pdf-modal-backdrop"
+            aria-label="Close paper PDF"
+            onClick={closePaperPdfModal}
+          />
+          <div className="paper-pdf-modal">
+            <header className="paper-pdf-modal-header">
+              <div className="paper-pdf-modal-title">
+                <strong>{paperPdfModal.title}</strong>
+                {paperPdfModal.authors ? <span>{paperPdfModal.authors}</span> : null}
+              </div>
+              <div className="paper-pdf-modal-actions">
+                <div className={`paper-pdf-explore-menu${paperExploreMenuOpen ? " open" : ""}`}>
+                  <button
+                    type="button"
+                    className="paper-pdf-explore-primary"
+                    onClick={() => {
+                      setPaperExploreMenuOpen(false);
+                      void startPaperExploration({
+                        paperId: paperPdfModal.paperId,
+                        path: paperPdfModal.path,
+                        paper: paperPdfModal.paper,
+                        title: paperPdfModal.title,
+                        authors: paperPdfModal.authors,
+                        pdfUrl: paperPdfModal.pdfUrl,
+                      }).then((didStart) => {
+                        if (didStart) {
+                          closePaperPdfModal();
+                        }
+                      });
+                    }}
+                  >
+                    Explore now
+                  </button>
+                  <button
+                    type="button"
+                    className="paper-pdf-explore-toggle"
+                    aria-label="Explore options"
+                    aria-expanded={paperExploreMenuOpen}
+                    onClick={() => setPaperExploreMenuOpen((current) => !current)}
+                  >
+                    <span className="paper-pdf-explore-chevron" aria-hidden="true" />
+                  </button>
+                  {paperExploreMenuOpen ? (
+                    <div className="paper-pdf-explore-popover" role="menu">
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setPaperExploreMenuOpen(false);
+                          void startPaperExploration(
+                            {
+                              paperId: paperPdfModal.paperId,
+                              path: paperPdfModal.path,
+                              paper: paperPdfModal.paper,
+                              title: paperPdfModal.title,
+                              authors: paperPdfModal.authors,
+                              pdfUrl: paperPdfModal.pdfUrl,
+                            },
+                            { navigate: false },
+                          );
+                        }}
+                      >
+                        Explore later
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+                <button
+                  type="button"
+                  className="paper-pdf-modal-close"
+                  aria-label="Close paper PDF"
+                  onClick={closePaperPdfModal}
+                >
+                  ×
+                </button>
+              </div>
+            </header>
+            <div className="paper-pdf-modal-body">
+              {paperPdfModal.status === "loading" ? (
+                <div className="paper-pdf-modal-state">Loading PDF...</div>
+              ) : paperPdfModal.status === "error" ? (
+                <div className="paper-pdf-modal-state error">{paperPdfModal.error}</div>
+              ) : paperPdfModal.pdfUrl ? (
+                <PdfDocumentViewer
+                  className="paper-pdf-frame"
+                  title={`${paperPdfModal.title} PDF`}
+                  url={paperPdfModal.pdfUrl}
+                />
+              ) : (
+                <div className="paper-pdf-modal-state">No PDF URL is available.</div>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <div
         id="thread-debug-modal"
         className={`modal${threadDebugModalOpen && activeThreadDebugBundle ? "" : " hidden"}`}
@@ -5991,6 +8116,60 @@ export default function App() {
         feedbackSubmitting={feedbackSubmitting}
         submitFeedbackModal={() => void submitFeedbackModal()}
       />
+
+      <div
+        id="thread-rename-modal"
+        className={`modal${threadRenameModal ? "" : " hidden"}`}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="thread-rename-modal-title"
+      >
+        <div className="modal-backdrop" onClick={closeThreadRenameModal} />
+        <div className="modal-panel thread-rename-modal-panel">
+          <button
+            className="modal-close"
+            type="button"
+            aria-label="Close rename session"
+            onClick={closeThreadRenameModal}
+          >
+            ×
+          </button>
+          <div className="modal-heading modal-heading-copy">
+            <h2 id="thread-rename-modal-title" className="modal-title">
+              Rename session
+            </h2>
+            <p className="modal-caption">{threadRenameModal?.title ?? "Current session"}</p>
+          </div>
+          {threadRenameModal?.error ? (
+            <div className="modal-flash warning" role="alert">
+              <span className="modal-flash-text">{threadRenameModal.error}</span>
+            </div>
+          ) : null}
+          <div className="modal-view visible">
+            <form className="stack" onSubmit={(event) => void submitThreadRenameModal(event)}>
+              <label className="rename-session-field" htmlFor="thread-rename-input">
+                <span>Title</span>
+                <input
+                  id="thread-rename-input"
+                  type="text"
+                  value={threadRenameModal?.draft ?? ""}
+                  onChange={(event) =>
+                    setThreadRenameModal((current) =>
+                      current ? { ...current, draft: event.target.value, error: "" } : current,
+                    )
+                  }
+                />
+              </label>
+              <button className="primary-button" type="submit" disabled={threadRenameModal?.saving}>
+                {threadRenameModal?.saving ? "Renaming..." : "Rename"}
+              </button>
+              <button className="secondary-button" type="button" onClick={closeThreadRenameModal}>
+                Cancel
+              </button>
+            </form>
+          </div>
+        </div>
+      </div>
 
       <div
         id="python-save-modal"
@@ -6723,6 +8902,7 @@ export default function App() {
         className={`modal${deleteModalState ? "" : " hidden"}`}
         role="dialog"
         aria-modal="true"
+        aria-labelledby="delete-modal-title"
       >
         <div className="modal-backdrop" onClick={closeDeleteModal} />
         <div className="modal-panel">
@@ -6730,19 +8910,23 @@ export default function App() {
             ×
           </button>
           <div className="modal-heading">
-            <h2 className="modal-title">
+            <h2 id="delete-modal-title" className="modal-title">
               {deleteModalState?.kind === "project"
                 ? "Delete project"
                 : deleteModalState?.kind === "python_file"
                   ? "Delete file"
-                  : "Delete session"}
+                  : deleteModalState?.kind === "paper_exploration"
+                    ? "Delete exploration"
+                    : "Delete session"}
             </h2>
             <p className="modal-caption">
               {deleteModalState?.kind === "project"
                 ? `Delete ${deleteModalState.name} and all of its chats and code files?`
                 : deleteModalState?.kind === "python_file"
                   ? `Delete ${deleteModalState.title}?`
-                  : `Delete ${deleteModalState?.title ?? "this session"}?`}
+                  : deleteModalState?.kind === "paper_exploration"
+                    ? `Delete ${deleteModalState.title}?`
+                    : `Delete ${deleteModalState?.title ?? "this session"}?`}
             </p>
           </div>
           <div className="modal-view visible">
@@ -6756,7 +8940,9 @@ export default function App() {
                   ? "Delete project"
                   : deleteModalState?.kind === "python_file"
                     ? "Delete file"
-                    : "Delete session"}
+                    : deleteModalState?.kind === "paper_exploration"
+                      ? "Delete exploration"
+                      : "Delete session"}
               </button>
               <button className="secondary-button" type="button" onClick={closeDeleteModal}>
                 Cancel

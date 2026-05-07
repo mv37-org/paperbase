@@ -362,7 +362,10 @@ function normalizeStoredTab(value: unknown): OpenTab | null {
     "kind" in value &&
     "id" in value &&
     typeof value.id === "string" &&
-    (value.kind === "thread" || value.kind === "python_file" || value.kind === "project_home")
+    (value.kind === "thread" ||
+      value.kind === "python_file" ||
+      value.kind === "project_home" ||
+      value.kind === "paper_exploration")
   ) {
     return { kind: value.kind, id: value.id };
   }
@@ -454,10 +457,10 @@ export function summarizeThreadTitle(content: string) {
     (token) => !CHAT_TITLE_STOP_WORDS.has(token.toLowerCase()),
   );
   const sourceTokens = informativeTokens.length >= 3 ? informativeTokens : tokens;
-  const desiredCount = Math.min(5, Math.max(3, sourceTokens.length));
+  const desiredCount = Math.min(5, Math.max(4, sourceTokens.length));
   let selectedTokens = sourceTokens.slice(0, desiredCount);
-  if (selectedTokens.length < 3 && tokens.length >= 3) {
-    selectedTokens = tokens.slice(0, 3);
+  if (selectedTokens.length < 4 && tokens.length >= 4) {
+    selectedTokens = tokens.slice(0, 4);
   }
   return (
     selectedTokens
@@ -789,12 +792,57 @@ export function uniqueCitationsForThread(thread: ChatThreadResponse | null) {
   return citations;
 }
 
+export type PaperCitationGroup = {
+  key: string;
+  citation: ChatCitation;
+  citations: ChatCitation[];
+  citationCount: number;
+};
+
+function normalizeCitationPaperTitle(value: string) {
+  return value.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function paperCitationGroupKey(citation: ChatCitation) {
+  const paperId = citation.paper_id?.trim();
+  if (paperId) {
+    return `paper:${paperId}`;
+  }
+  const normalizedTitle = normalizeCitationPaperTitle(citation.title);
+  if (citation.source_kind === "paperbase_paper" && normalizedTitle) {
+    return `paper-title:${normalizedTitle}`;
+  }
+  return `${citation.source_kind}:${normalizedTitle || citation.title}:${citation.path}`;
+}
+
+export function groupCitationsByPaper(citations: ChatCitation[]) {
+  const groups: PaperCitationGroup[] = [];
+  const groupIndexes = new Map<string, number>();
+  for (const citation of citations) {
+    const key = paperCitationGroupKey(citation);
+    const existingIndex = groupIndexes.get(key);
+    if (existingIndex !== undefined) {
+      const existingGroup = groups[existingIndex];
+      groups[existingIndex] = {
+        ...existingGroup,
+        citations: [...existingGroup.citations, citation],
+        citationCount: existingGroup.citationCount + 1,
+      };
+      continue;
+    }
+    groupIndexes.set(key, groups.length);
+    groups.push({
+      key,
+      citation,
+      citations: [citation],
+      citationCount: 1,
+    });
+  }
+  return groups;
+}
+
 export function uniquePaperCitationCount(citations: ChatCitation[]) {
-  return new Set(
-    citations
-      .map((citation) => citation.paper_id || citation.title)
-      .filter((value) => value.trim().length > 0),
-  ).size;
+  return groupCitationsByPaper(citations).length;
 }
 
 export function threadMarkdownExport(thread: ChatThreadResponse) {

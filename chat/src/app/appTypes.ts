@@ -30,10 +30,46 @@ export type PaperCitationPreviewState = {
   error: string;
 };
 
+export type PaperActionTarget = {
+  paperId: string;
+  path: string;
+  paper?: PaperResponse | null;
+  title?: string;
+  authors?: string;
+  previewImageUrl?: string | null;
+  pdfUrl?: string | null;
+  projectId?: string | null;
+};
+
+export type PaperPdfModalState = {
+  paperId: string;
+  path: string;
+  paper: PaperResponse | null;
+  title: string;
+  authors: string;
+  pdfUrl: string;
+  status: "loading" | "ready" | "error";
+  error: string;
+};
+
+export type PaperExploration = {
+  explorationId: string;
+  projectId: string;
+  paperId: string;
+  path: string;
+  title: string;
+  authors: string;
+  previewImageUrl: string;
+  pdfUrl: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type OpenTab =
   | { kind: "thread"; id: string }
   | { kind: "python_file"; id: string }
-  | { kind: "project_home"; id: string };
+  | { kind: "project_home"; id: string }
+  | { kind: "paper_exploration"; id: string };
 
 export type WorkspaceView =
   | { kind: "trending" }
@@ -100,6 +136,7 @@ export type DeleteModalState =
   | { kind: "project"; projectId: string; name: string }
   | { kind: "thread"; projectId: string; threadId: string; title: string }
   | { kind: "python_file"; projectId: string; fileId: string; title: string }
+  | { kind: "paper_exploration"; explorationId: string; title: string }
   | null;
 
 export type ThreadPane = "chat" | "papers";
@@ -131,6 +168,7 @@ export type ToolActivityEntry = {
 export type ThreadStreamState = {
   turnIndex: number;
   thinkingWord: string;
+  replyTitle: string | null;
   assistantStarted: boolean;
   usage: ChatStreamUsageEvent | null;
 };

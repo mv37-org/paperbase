@@ -97,6 +97,13 @@ class PaperCommentsResponse(BaseModel):
     comments: list[PaperCommentResponse] = Field(default_factory=list)
 
 
+class PaperDiscussionResponse(BaseModel):
+    paper_id: str
+    upvote_count: int = 0
+    viewer_has_upvoted: bool = False
+    comments: list[PaperCommentResponse] = Field(default_factory=list)
+
+
 class TrendingPaperCardResponse(BaseModel):
     paper_id: str
     arxiv_id: str
@@ -658,6 +665,7 @@ class ChatThreadItemResponse(BaseModel):
 class ChatTurnResponse(BaseModel):
     turn_id: str
     thread_id: str
+    title: str = ""
     status: str = "completed"
     provider_response_id: str = ""
     started_at: datetime
