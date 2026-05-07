@@ -25,6 +25,7 @@ from .auth import (
     require_browser_user,
     require_browser_write_admin_user,
     require_browser_write_user,
+    require_scheduler_oidc,
     set_browser_session_cookie,
     set_no_store_headers,
 )
@@ -407,6 +408,15 @@ def sync_latest(service: PaperbaseService = Depends(get_service)) -> JobResponse
     return service.enqueue_latest_sync_job()
 
 
+@app.post("/v1/internal/scheduler/sync/latest", response_model=JobResponse)
+def scheduler_sync_latest(
+    claims=Depends(require_scheduler_oidc),
+    service: PaperbaseService = Depends(get_service),
+) -> JobResponse:
+    del claims
+    return service.enqueue_latest_sync_job()
+
+
 class HarvestRangeRequest(_BaseModel):
     # When omitted/empty, the API defaults to the configured AI/ML arxiv
     # categories (per the product scope — see issue #33 comment). Callers
@@ -534,14 +544,6 @@ def harvest_author(
         )
     except PermanentError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-
-
-@app.post("/v1/index/summarize-top-cited", response_model=JobResponse, dependencies=[Depends(require_bearer_token)])
-def summarize_top_cited(
-    limit: int = Query(default=500_000, ge=1, le=5_000_000),
-    service: PaperbaseService = Depends(get_service),
-) -> JobResponse:
-    return service.enqueue_summarize_top_cited_job(limit=limit)
 
 
 @app.post("/v1/index/reindex-embeddings", response_model=JobResponse, dependencies=[Depends(require_bearer_token)])

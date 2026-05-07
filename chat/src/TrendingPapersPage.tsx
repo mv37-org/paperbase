@@ -265,7 +265,7 @@ export function TrendingPapersPage({
   }, [browseState.paperId]);
 
   const pageDescription = browseState.paperId
-    ? `Published ${detail?.published ?? browseState.date}. Read the paper, skim the ELI5, and join the discussion.`
+    ? `Published ${detail?.published ?? browseState.date}. Read the paper summary and join the discussion.`
     : (feedDescription ??
       `Browse the newest fully indexed and enriched papers, or switch to Hottest to rank the same ready corpus by reader upvotes.`);
 
@@ -552,8 +552,8 @@ export function TrendingPapersPage({
                     </button>
                   </div>
                   <section className="trending-summary-section">
-                    <h2>ELI5 summary</h2>
-                    <p>{detail.summary_eli5 || "Summary is still being prepared."}</p>
+                    <h2>Summary</h2>
+                    <p>{detail.summary_short || "Summary is still being prepared."}</p>
                   </section>
                 </div>
               </section>

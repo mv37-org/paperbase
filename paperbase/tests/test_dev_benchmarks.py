@@ -127,7 +127,7 @@ def test_build_iq1_report_computes_core_census_metrics():
     assert source_keys == ["abstract-only", "html"]
 
 
-def test_render_iq1_markdown_includes_eli5_headline_and_notes():
+def test_render_iq1_markdown_includes_plain_language_overview_and_notes():
     settings = Settings(
         database_url="postgresql+psycopg:///paperbase",
         storage_backend="local",
@@ -169,7 +169,7 @@ def test_render_iq1_markdown_includes_eli5_headline_and_notes():
     rendered = _render_iq1_markdown(report)
 
     assert "# IQ-1 Indexing Census" in rendered
-    assert "## ELI5" in rendered
+    assert "## Plain-Language Overview" in rendered
     assert "current library" in rendered
     assert "Rich-source rate" in rendered
     assert "Preview coverage" in rendered

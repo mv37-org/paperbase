@@ -16,6 +16,7 @@ from paperbase.api import _chat_redirect_base, _is_safe_return_to, _parse_tags, 
 from paperbase.auth import (
     clear_browser_session_cookie,
     require_bearer_token,
+    require_scheduler_oidc,
     set_browser_session_cookie,
     set_no_store_headers,
 )
@@ -92,7 +93,6 @@ def _paper(arxiv_id: str = "2401.12345") -> PaperResponse:
         abstract="Grounded benchmark paper.",
         tldr="Benchmark tldr",
         summary_short="Short summary",
-        summary_eli5="Simple summary",
         categories="cs.AI",
         primary_category="cs.AI",
         published="2026-04-01",
@@ -185,10 +185,6 @@ class StubApiService:
     def enqueue_latest_sync_job(self):
         self.calls.append(("sync_latest", None))
         return _job("sync_latest")
-
-    def enqueue_summarize_top_cited_job(self, *, limit: int):
-        self.calls.append(("summarize_top_cited", limit))
-        return _job("summarize_top_cited", payload={"limit": limit})
 
     def enqueue_reindex_embeddings_job(self, *, limit: int, include_chunks: bool, rewrite_existing: bool):
         self.calls.append(("reindex_embeddings", (limit, include_chunks, rewrite_existing)))
@@ -327,7 +323,7 @@ class StubApiService:
             published=paper.published,
             primary_category=paper.primary_category,
             categories=paper.categories,
-            summary_eli5=paper.summary_eli5,
+            summary_short=paper.summary_short,
             html_url=paper.html_url,
             pdf_url=paper.pdf_url,
             image_url="/v1/browser/trending/papers/arxiv%3A2401.54321/preview/content",
@@ -1240,6 +1236,61 @@ def test_bearer_auth_requires_valid_token():
     )
 
 
+def test_scheduler_oidc_requires_configured_verified_service_account(monkeypatch):
+    settings = Settings(
+        scheduler_service_account_email="paperbase-scheduler@example.iam.gserviceaccount.com",
+        scheduler_audience="https://paperbase.example",
+    )
+
+    with pytest.raises(Exception) as missing_exc:
+        require_scheduler_oidc(credentials=None, settings=settings)
+    assert missing_exc.value.status_code == 401
+
+    def invalid_token(*_, **__):
+        raise ValueError("bad token")
+
+    monkeypatch.setattr(auth_module.google_id_token, "verify_oauth2_token", invalid_token)
+    with pytest.raises(Exception) as invalid_exc:
+        require_scheduler_oidc(
+            credentials=HTTPAuthorizationCredentials(scheme="Bearer", credentials="bad"),
+            settings=settings,
+        )
+    assert invalid_exc.value.status_code == 403
+
+    monkeypatch.setattr(
+        auth_module.google_id_token,
+        "verify_oauth2_token",
+        lambda *_, **__: {
+            "iss": "https://accounts.google.com",
+            "aud": "https://paperbase.example",
+            "email": "other@example.iam.gserviceaccount.com",
+            "email_verified": True,
+        },
+    )
+    with pytest.raises(Exception) as wrong_email_exc:
+        require_scheduler_oidc(
+            credentials=HTTPAuthorizationCredentials(scheme="Bearer", credentials="wrong-email"),
+            settings=settings,
+        )
+    assert wrong_email_exc.value.status_code == 403
+
+    monkeypatch.setattr(
+        auth_module.google_id_token,
+        "verify_oauth2_token",
+        lambda *_, **__: {
+            "iss": "https://accounts.google.com",
+            "aud": "https://paperbase.example",
+            "email": "paperbase-scheduler@example.iam.gserviceaccount.com",
+            "email_verified": True,
+        },
+    )
+    claims = require_scheduler_oidc(
+        credentials=HTTPAuthorizationCredentials(scheme="Bearer", credentials="valid"),
+        settings=settings,
+    )
+    assert claims["email"] == "paperbase-scheduler@example.iam.gserviceaccount.com"
+
+
 def test_browser_cookie_helpers_set_and_clear_expected_headers():
     settings = Settings(
         browser_session_cookie_name="paperbase_session",
@@ -1306,7 +1357,6 @@ def test_bearer_routes_delegate_to_service(api_client):
     headers = {"Authorization": f"Bearer {settings.api_key}"}
 
     sync = client.post("/v1/index/sync/latest", headers=headers)
-    summarize = client.post("/v1/index/summarize-top-cited?limit=42", headers=headers)
     reindex = client.post(
         "/v1/index/reindex-embeddings?limit=11&include_chunks=false&rewrite_existing=false",
         headers=headers,
@@ -1322,7 +1372,6 @@ def test_bearer_routes_delegate_to_service(api_client):
     job = client.get("/v1/jobs/job_123", headers=headers)
 
     assert sync.status_code == 200
-    assert summarize.json()["payload"]["limit"] == 42
     assert reindex.json()["payload"] == {
         "limit": 11,
         "include_chunks": False,
@@ -1519,6 +1568,34 @@ def test_browser_admin_routes_delegate_for_admin_users(api_client):
         {"venue": "ICLR", "year": 2024, "max_papers": 200, "chunk_size": 25},
     ) in service.calls
     assert ("enqueue_enrich_missing_metadata_job", (123, 7200)) in service.calls
+
+
+def test_scheduler_latest_sync_endpoint_requires_valid_oidc(api_client, monkeypatch):
+    client, service, settings = api_client
+    settings.scheduler_service_account_email = "paperbase-scheduler@example.iam.gserviceaccount.com"
+    settings.scheduler_audience = "https://paperbase.example"
+
+    missing = client.post("/v1/internal/scheduler/sync/latest")
+    assert missing.status_code == 401
+
+    monkeypatch.setattr(
+        auth_module.google_id_token,
+        "verify_oauth2_token",
+        lambda *_, **__: {
+            "iss": "https://accounts.google.com",
+            "aud": "https://paperbase.example",
+            "email": "paperbase-scheduler@example.iam.gserviceaccount.com",
+            "email_verified": True,
+        },
+    )
+    response = client.post(
+        "/v1/internal/scheduler/sync/latest",
+        headers={"Authorization": "Bearer scheduler-token"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["job_type"] == "sync_latest"
+    assert ("sync_latest", None) in service.calls
 
 
 def test_browser_admin_write_routes_reject_non_admin_users(api_client):

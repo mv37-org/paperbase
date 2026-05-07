@@ -36,7 +36,6 @@ export interface PaperResponse {
   authors: string;
   abstract: string;
   summary_short: string;
-  summary_eli5: string;
   categories: string;
   primary_category: string;
   published: string;
@@ -63,6 +62,23 @@ export interface PaperResponse {
   source_type?: string | null;
   index_status: string;
   indexed_at?: string | null;
+}
+
+export type PaperSelectionAction = "explain" | "trace" | "challenge" | "reproduce";
+
+export interface PaperSelectionPayload {
+  paper_id: string;
+  page_number: number;
+  action: PaperSelectionAction;
+  selected_text?: string | null;
+  nearby_text?: string | null;
+  section_title?: string | null;
+  region?: {
+    points: Array<{ x: number; y: number }>;
+    bbox: { x: number; y: number; width: number; height: number };
+    image_base64?: string | null;
+    content_type?: "image/png" | "image/webp" | null;
+  } | null;
 }
 
 export interface JobResponse {
@@ -95,6 +111,23 @@ export interface AdminWorkerSummary {
   last_terminal_error?: string | null;
 }
 
+export interface AdminJobChildRow {
+  job_id: string;
+  root_job_id: string;
+  job_type: string;
+  status: string;
+  display_status: string;
+  payload: Record<string, unknown>;
+  error?: string | null;
+  attempts: number;
+  max_attempts: number;
+  priority: number;
+  created_at: string;
+  updated_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+}
+
 export interface AdminJobOverviewRow {
   job_id: string;
   root_job_id: string;
@@ -117,6 +150,7 @@ export interface AdminJobOverviewRow {
   paper_outcome_counts?: Record<string, number> | null;
   latest_status_summary: string;
   child_job_count: number;
+  child_jobs?: AdminJobChildRow[];
   details: Record<string, unknown>;
 }
 
@@ -303,7 +337,7 @@ export interface TrendingPaperDetail {
   published: string;
   primary_category: string;
   categories: string;
-  summary_eli5: string;
+  summary_short: string;
   html_url: string;
   pdf_url: string;
   image_url?: string | null;

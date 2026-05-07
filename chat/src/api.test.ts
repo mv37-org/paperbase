@@ -302,7 +302,7 @@ describe("chat api", () => {
           published: "2026-04-21",
           primary_category: "cs.AI",
           categories: "cs.AI",
-          summary_eli5: "Simple summary",
+          summary_short: "Technical summary",
           html_url: "https://arxiv.org/abs/2401.12345",
           pdf_url: "https://arxiv.org/pdf/2401.12345.pdf",
           image_url: "/v1/browser/trending/papers/arxiv%3A2401.12345/preview/content",
@@ -328,7 +328,7 @@ describe("chat api", () => {
     expect(detailInit?.method).toBe("GET");
     expect(feed.papers[0]?.upvote_count).toBe(12);
     expect(feed.has_next).toBe(true);
-    expect(detail.summary_eli5).toBe("Simple summary");
+    expect(detail.summary_short).toBe("Technical summary");
   });
 
   it("loads generic paper discussion and attaches CSRF headers to paper write operations", async () => {

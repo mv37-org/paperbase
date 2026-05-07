@@ -170,7 +170,6 @@ def _aggregate_papers(
                     "arxiv_id": paper.get("arxiv_id", ""),
                     "title": paper.get("title", ""),
                     "summary_short": paper.get("summary_short", ""),
-                    "summary_eli5": paper.get("summary_eli5", ""),
                     "published": paper.get("published", ""),
                     "citation_count": int(paper.get("citation_count") or 0),
                     "matching_queries": [],

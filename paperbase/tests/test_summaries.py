@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from paperbase.extractors import ExtractionOutput, SectionArtifact
 from paperbase.models import PaperMetadata
-from paperbase.summaries import build_paper_summaries
+from paperbase.summaries import build_paper_summary
 
 
-def test_build_paper_summaries_uses_abstract_and_sections():
+def test_build_paper_summary_uses_abstract_and_sections():
     paper = PaperMetadata(
         arxiv_id="2401.12345",
         title="Agent Paper",
@@ -24,9 +24,7 @@ def test_build_paper_summaries_uses_abstract_and_sections():
         ],
     )
 
-    summary_short, summary_eli5 = build_paper_summaries(paper, extraction)
+    summary_short = build_paper_summary(paper, extraction)
 
     assert "agent framework for tool use" in summary_short
     assert "Planning" in summary_short
-    assert summary_eli5.startswith("In simple terms,")
-    assert "tool use" in summary_eli5.lower()

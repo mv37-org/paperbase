@@ -15,7 +15,6 @@ class PaperMetadata(BaseModel):
     abstract: str = ""
     tldr: str = ""
     summary_short: str = ""
-    summary_eli5: str = ""
     categories: str = ""
     primary_category: str = ""
     published: str = ""
@@ -59,9 +58,38 @@ class PaperResponse(PaperMetadata):
     paper_id: str
 
 
+class PaperSelectionPoint(BaseModel):
+    x: float = Field(ge=0, le=1)
+    y: float = Field(ge=0, le=1)
+
+
+class PaperSelectionBox(BaseModel):
+    x: float = Field(ge=0, le=1)
+    y: float = Field(ge=0, le=1)
+    width: float = Field(ge=0, le=1)
+    height: float = Field(ge=0, le=1)
+
+
+class PaperSelectionRegion(BaseModel):
+    points: list[PaperSelectionPoint] = Field(default_factory=list, max_length=200)
+    bbox: PaperSelectionBox
+    image_base64: str | None = Field(default=None, max_length=1_000_000)
+    content_type: Literal["image/png", "image/webp"] | None = None
+
+
+class PaperSelectionPayload(BaseModel):
+    paper_id: str = Field(min_length=1, max_length=128)
+    page_number: int = Field(ge=1, le=10_000)
+    action: Literal["explain", "trace", "challenge", "reproduce"]
+    selected_text: str | None = Field(default=None, max_length=6_000)
+    nearby_text: str | None = Field(default=None, max_length=8_000)
+    section_title: str | None = Field(default=None, max_length=200)
+    region: PaperSelectionRegion | None = None
+
+
 class PaperVoteSummary(BaseModel):
     paper_id: str
-    upvote_count: int = 0
+    upvote_count: int = 1
     viewer_has_upvoted: bool = False
 
 
@@ -99,7 +127,7 @@ class PaperCommentsResponse(BaseModel):
 
 class PaperDiscussionResponse(BaseModel):
     paper_id: str
-    upvote_count: int = 0
+    upvote_count: int = 1
     viewer_has_upvoted: bool = False
     comments: list[PaperCommentResponse] = Field(default_factory=list)
 
@@ -113,7 +141,7 @@ class TrendingPaperCardResponse(BaseModel):
     html_url: str
     pdf_url: str
     image_url: str | None = None
-    upvote_count: int = 0
+    upvote_count: int = 1
     viewer_has_upvoted: bool = False
 
 
@@ -125,11 +153,11 @@ class TrendingPaperDetailResponse(BaseModel):
     published: str
     primary_category: str
     categories: str
-    summary_eli5: str
+    summary_short: str
     html_url: str
     pdf_url: str
     image_url: str | None = None
-    upvote_count: int = 0
+    upvote_count: int = 1
     viewer_has_upvoted: bool = False
     comments: list[PaperCommentResponse] = Field(default_factory=list)
 
@@ -297,6 +325,23 @@ class AdminWorkerSummary(BaseModel):
     last_terminal_error: str | None = None
 
 
+class AdminJobChildRow(BaseModel):
+    job_id: str
+    root_job_id: str
+    job_type: str
+    status: str
+    display_status: str
+    payload: dict[str, Any]
+    error: str | None = None
+    attempts: int = 0
+    max_attempts: int = 3
+    priority: int = 0
+    created_at: datetime
+    updated_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
 class AdminJobOverviewRow(BaseModel):
     job_id: str
     root_job_id: str
@@ -319,6 +364,7 @@ class AdminJobOverviewRow(BaseModel):
     paper_outcome_counts: dict[str, int] = Field(default_factory=dict)
     latest_status_summary: str = ""
     child_job_count: int = 0
+    child_jobs: list[AdminJobChildRow] = Field(default_factory=list)
     details: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -968,6 +1014,7 @@ class SendChatMessageRequest(BaseModel):
     # index_status='indexed', so the chat turn always sees a fully indexed
     # paper for anything the user tagged.
     paper_ids: list[str] = Field(default_factory=list)
+    paper_selection: PaperSelectionPayload | None = None
 
 
 class SendChatMessageResponse(BaseModel):

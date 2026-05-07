@@ -78,7 +78,7 @@ describe("TrendingPapersPage", () => {
       published: "2026-04-21",
       primary_category: "cs.AI",
       categories: "cs.AI",
-      summary_eli5: "Simple summary",
+      summary_short: "Technical summary",
       html_url: "https://example.test/2401.12345",
       pdf_url: "https://example.test/2401.12345.pdf",
       image_url: "https://example.test/preview.webp",
@@ -149,9 +149,9 @@ describe("TrendingPapersPage", () => {
     fireEvent.click(screen.getByText("Trending Paper"));
 
     await waitFor(() => {
-      expect(screen.getByText("ELI5 summary")).toBeTruthy();
+      expect(screen.getByText("Summary")).toBeTruthy();
     });
-    expect(screen.getByText("Simple summary")).toBeTruthy();
+    expect(screen.getByText("Technical summary")).toBeTruthy();
     expect(screen.getByText("Root note")).toBeTruthy();
     expect(screen.getByText("Reply note")).toBeTruthy();
     expect(screen.getByRole("link", { name: "Read paper" }).getAttribute("href")).toBe(

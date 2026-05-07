@@ -41,6 +41,7 @@ from paperbase.models import (
     CreateProjectRequest,
     MoveChatThreadProjectRequest,
     PaperMetadata,
+    PaperSelectionPayload,
     ProjectRepoSyncRequest,
     SaveAnthropicKeyRequest,
     SaveModalCredentialsRequest,
@@ -814,7 +815,6 @@ def service() -> PaperbaseService:
         storage_backend="memory",
         database_url="memory://",
         api_key="test-token",
-        summary_provider="heuristic",
     )
     return PaperbaseService(
         settings=settings,
@@ -905,7 +905,6 @@ def test_index_writes_manifest_and_artifacts(monkeypatch, service: PaperbaseServ
 
     assert indexed.paper_id == "arxiv:2401.12345"
     assert indexed.summary_short
-    assert indexed.summary_eli5.startswith("In simple terms,")
     manifest = service.get_manifest(indexed.paper_id).manifest
     assert manifest["source_type"] == "html"
     assert manifest["figure_count"] == 1
@@ -1037,43 +1036,6 @@ def test_admin_jobs_overview_counts_tracked_paper_outcomes(service: PaperbaseSer
     assert job_papers.skipped_reason_counts == {"already_indexed": 1}
 
 
-def test_summarize_top_cited_job_tracks_updated_papers_for_admin(monkeypatch, service: PaperbaseService):
-    service.settings.summary_provider = "vertex"
-    service.settings.vertex_project = "stub"
-    service.settings.featured_tier_concurrency = 1
-    paper = _sample_paper("2401.77780", title="Summary Candidate", abstract="Needs a summary.")
-    paper.index_status = "indexed"
-    paper.citation_count = 100
-    paper.influential_citation_count = 50
-    stored = service.repository.upsert_paper(paper)
-    service.repository.update_summaries(stored.paper_id, summary_short="", summary_eli5="")
-    monkeypatch.setattr(
-        "paperbase.summaries.generate_summary_on_demand",
-        lambda paper, settings: ("Updated technical summary", "Updated plain summary"),
-    )
-
-    job = service.enqueue_summarize_top_cited_job(limit=25)
-    completed = service.process_next_job()
-
-    assert completed is not None
-    assert completed.status == "completed"
-
-    overview = service.get_admin_jobs_overview(limit=10)
-    row = next(row for row in overview.jobs if row.job_id == job.job_id)
-
-    assert row.job_type == "summarize_top_cited"
-    assert row.tracking_available is True
-    assert row.indexed_paper_count == 0
-    assert row.tracked_paper_count == 1
-    assert row.paper_outcome_counts == {"updated": 1}
-
-    job_papers = service.get_admin_job_papers(job.job_id)
-    assert job_papers.outcome_counts == {"updated": 1}
-    assert job_papers.papers[0].paper_id == stored.paper_id
-    assert job_papers.papers[0].outcome == "updated"
-    assert job_papers.papers[0].title == "Summary Candidate"
-
-
 def test_admin_jobs_overview_keeps_papers_column_available_without_records(service: PaperbaseService):
     job = service.repository.create_job("enrich_missing_metadata", {"limit": 1})
 
@@ -1086,13 +1048,79 @@ def test_admin_jobs_overview_keeps_papers_column_available_without_records(servi
     assert row.paper_outcome_counts == {}
 
 
-def test_latest_sync_schedule_uses_latest_run_tracking_for_legacy_rootless_jobs():
+def test_admin_jobs_overview_hides_latest_sync_without_scheduler_or_runs():
     service = PaperbaseService(
         settings=Settings(
             storage_backend="memory",
             database_url="memory://",
             api_key="test-token",
             worker_auto_sync_latest=True,
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+    )
+
+    overview = service.get_admin_jobs_overview(limit=10)
+
+    assert all(row.job_type != "latest_sync_schedule" for row in overview.jobs)
+
+
+def test_latest_sync_schedule_shows_configured_scheduler_without_fake_paper_count():
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            worker_auto_sync_latest=False,
+            scheduler_service_account_email="paperbase-scheduler@example.iam.gserviceaccount.com",
+            scheduler_audience="https://paperbase.example",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+    )
+
+    overview = service.get_admin_jobs_overview(limit=10)
+    schedule_row = next(row for row in overview.jobs if row.job_type == "latest_sync_schedule")
+
+    assert schedule_row.tracking_available is False
+    assert schedule_row.tracked_paper_count is None
+    assert schedule_row.indexed_paper_count is None
+    assert schedule_row.latest_status_summary == "No latest sync run has been queued yet."
+    assert schedule_row.details["scheduler_configured"] is True
+    assert schedule_row.details["latest_run_job_id"] is None
+
+
+def test_latest_sync_schedule_counts_zero_paper_runs():
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            worker_auto_sync_latest=False,
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+    )
+    job = service.repository.create_job("sync_latest", {"days": 7, "categories": ["cs.AI"], "limit_per_category": 100})
+    service.repository.jobs[job.job_id] = job.model_copy(update={"status": "completed"})
+
+    overview = service.get_admin_jobs_overview(limit=10)
+    schedule_row = next(row for row in overview.jobs if row.job_type == "latest_sync_schedule")
+
+    assert schedule_row.root_job_id == job.job_id
+    assert schedule_row.tracking_available is True
+    assert schedule_row.tracked_paper_count == 0
+    assert schedule_row.indexed_paper_count == 0
+    assert schedule_row.paper_outcome_counts == {}
+
+
+def test_latest_sync_schedule_uses_latest_run_tracking_for_legacy_rootless_jobs():
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            worker_auto_sync_latest=False,
         ),
         repository=MemoryPaperRepository(),
         object_store=MemoryObjectStore(),
@@ -1130,6 +1158,28 @@ def test_latest_sync_schedule_uses_latest_run_tracking_for_legacy_rootless_jobs(
 
     job_papers = service.get_admin_job_papers(schedule_row.root_job_id)
     assert [paper.paper_id for paper in job_papers.papers] == ["arxiv:2401.88888"]
+
+
+def test_admin_jobs_overview_includes_grouped_child_jobs(service: PaperbaseService):
+    root = service.repository.create_job("harvest_range", {"harvest_id": "harvest-child"})
+    child_pending = service.repository.create_job(
+        "harvest_chunk",
+        {"category": "cs.AI"},
+        root_job_id=root.job_id,
+    )
+    child_running = service.repository.create_job(
+        "harvest_chunk",
+        {"category": "cs.LG"},
+        root_job_id=root.job_id,
+    )
+    service.repository.jobs[child_running.job_id] = child_running.model_copy(update={"status": "running"})
+
+    overview = service.get_admin_jobs_overview(limit=10)
+    row = next(item for item in overview.jobs if item.job_id == root.job_id)
+
+    assert row.child_job_count == 2
+    assert {child.job_id for child in row.child_jobs} == {child_pending.job_id, child_running.job_id}
+    assert {child.display_status for child in row.child_jobs} == {"pending", "running"}
 
 
 def test_admin_job_papers_response_is_paginated(service: PaperbaseService):
@@ -1301,17 +1351,11 @@ def test_search_can_shortlist_from_generated_summaries(monkeypatch, service: Pap
     )
 
     summaries = {
-        "2401.20001": (
-            "This paper studies AI agents that use tools, plan, and act in environments.",
-            "In simple terms, this paper explains how an AI agent can plan and use tools.",
-        ),
-        "2401.20002": (
-            "This paper studies image generation systems.",
-            "In simple terms, this paper explains diffusion for image generation.",
-        ),
+        "2401.20001": "This paper studies AI agents that use tools, plan, and act in environments.",
+        "2401.20002": "This paper studies image generation systems.",
     }
     monkeypatch.setattr(
-        "paperbase.service.build_paper_summaries",
+        "paperbase.service.build_paper_summary",
         lambda paper, extraction, settings=None: summaries[paper.arxiv_id],
     )
 
@@ -1451,40 +1495,6 @@ def test_result_set_reads_only_return_indexed_papers(service: PaperbaseService):
     loaded = service.get_results(saved.result_set_id)
 
     assert [paper.paper_id for paper in loaded.papers] == [indexed_response.paper_id]
-
-
-def test_summarize_top_cited_uses_stable_paging(monkeypatch):
-    service = PaperbaseService(
-        settings=Settings(
-            storage_backend="memory",
-            database_url="memory://",
-            api_key="test-token",
-            summary_provider="vertex",
-            featured_tier_concurrency=1,
-        ),
-        repository=MemoryPaperRepository(),
-        object_store=MemoryObjectStore(),
-    )
-    monkeypatch.setattr(
-        "paperbase.summaries.generate_summary_on_demand",
-        lambda paper, settings: (f"Short {paper.arxiv_id}", f"ELI5 {paper.arxiv_id}"),
-    )
-
-    for index in range(70):
-        paper = _sample_paper(
-            f"2401.{10000 + index}",
-            title=f"Paper {index}",
-            abstract=f"Abstract {index}.",
-        )
-        paper.index_status = "indexed"
-        paper.citation_count = 70 - index
-        paper.influential_citation_count = 70 - index
-        service.repository.upsert_paper(paper)
-
-    result = service.summarize_top_cited(limit=70)
-
-    assert result == {"processed": 70, "updated": 70, "failed": 0}
-    assert all(paper.summary_eli5.startswith("ELI5 ") for paper in service.repository.papers.values())
 
 
 def test_api_flow_for_jobs_and_results(monkeypatch, service: PaperbaseService):
@@ -2005,57 +2015,6 @@ def test_reindex_continues_past_failed_frontier_page(service: PaperbaseService):
     assert resolved_ids, "reindex should advance past the failing frontier"
 
 
-def test_summarize_top_cited_continues_past_failed_frontier(service: PaperbaseService):
-    """Regression for the same starvation pattern in summarize_top_cited.
-
-    Seed 40 candidate papers. Stub summarization to fail for the first 20 and
-    succeed for the rest. The loop must still reach and update the later
-    papers.
-    """
-    service.settings.summary_provider = "vertex"
-    service.settings.vertex_project = "stub"
-    service.settings.featured_tier_concurrency = 4
-
-    paper_ids: list[str] = []
-    for i in range(40):
-        paper_ids.append(
-            _seed_indexed_paper(
-                service.repository,
-                f"2405.{i:05d}",
-                with_paper_embedding=True,
-                chunks_with_embedding=0,
-                chunks_without_embedding=0,
-            )
-        )
-        # Force needs-summary: wipe the heuristic summary the seed put there.
-        service.repository.update_summaries(paper_ids[-1], summary_short="", summary_eli5="")
-
-    failing = set(paper_ids[:20])
-
-    import paperbase.summaries as summaries_module
-
-    def fake_summary(paper, settings):
-        if paper.paper_id in failing:
-            return None
-        return ("technical summary", "plain summary")
-
-    original = summaries_module.generate_summary_on_demand
-    summaries_module.generate_summary_on_demand = fake_summary  # type: ignore[attr-defined]
-    try:
-        result = service.summarize_top_cited(limit=40)
-    finally:
-        summaries_module.generate_summary_on_demand = original
-
-    # Any later-ranked paper getting its summary proves the frontier advanced.
-    later_updated = [
-        pid
-        for pid in paper_ids[20:]
-        if (service.repository.get_paper(pid) or type("_", (), {"summary_eli5": ""})).summary_eli5
-    ]
-    assert later_updated, "summarize_top_cited should advance past failures"
-    assert result["updated"] >= 1
-
-
 def test_suggest_papers_matches_summary_text(service: PaperbaseService):
     """A paper whose term lives only in summary_short must still surface."""
     paper = PaperMetadata(
@@ -2267,7 +2226,6 @@ def test_encode_paper_drops_summary_short_from_paper_embedding_input(monkeypatch
         storage_backend="memory",
         database_url="memory://",
         api_key="test",
-        summary_provider="none",
         embedding_model="allenai/specter2_base",
         embedding_dim=768,
     )
@@ -2537,7 +2495,6 @@ def test_admin_paper_detail_includes_jobs_files_and_code(service):
     paper.index_status = "indexed"
     paper.indexed_at = datetime(2026, 4, 21, tzinfo=timezone.utc)
     paper.summary_short = "Detailed technical summary."
-    paper.summary_eli5 = "Detailed simple summary."
     paper.code_url = "https://github.com/example/repo"
     paper.code_index_status = "indexed"
     paper.code_is_python = True
@@ -2558,7 +2515,7 @@ def test_admin_paper_detail_includes_jobs_files_and_code(service):
         content_type="text/markdown",
     )
     first_job = service.repository.create_job("harvest_range", {"harvest_id": "detail-run"})
-    second_job = service.repository.create_job("summarize_top_cited", {"limit": 10})
+    second_job = service.repository.create_job("reindex_embeddings", {"limit": 10})
     service.repository.jobs[first_job.job_id] = first_job.model_copy(update={"status": "completed"})
     service.repository.jobs[second_job.job_id] = second_job.model_copy(update={"status": "completed"})
     service.repository.record_job_paper(
@@ -2609,7 +2566,6 @@ def test_trending_feed_pages_ready_papers_and_sorts_by_latest_or_upvotes(browser
         arxiv_id = f"2402.{index:05d}"
         paper = _sample_paper(arxiv_id, title=f"Trending Paper {index}", abstract="Daily paper")
         paper.index_status = "indexed"
-        paper.summary_eli5 = f"Simple summary {index}"
         paper.semantic_scholar_id = f"s2-{index}"
         paper.published = "2024-02-01"
         paper.indexed_at = datetime(2026, 4, 1, 0, index % 60, tzinfo=timezone.utc)
@@ -2617,7 +2573,6 @@ def test_trending_feed_pages_ready_papers_and_sorts_by_latest_or_upvotes(browser
 
     off_day = _sample_paper("2403.99999", title="Wrong Day", abstract="Ignore me")
     off_day.index_status = "indexed"
-    off_day.summary_eli5 = "Newer ready summary"
     off_day.semantic_scholar_id = "s2-newer"
     off_day.published = "2024-02-02"
     off_day.indexed_at = datetime(2026, 4, 2, tzinfo=timezone.utc)
@@ -2631,7 +2586,6 @@ def test_trending_feed_pages_ready_papers_and_sorts_by_latest_or_upvotes(browser
 
     missing_enrichment = _sample_paper("2403.77777", title="Missing Enrichment", abstract="Not ready")
     missing_enrichment.index_status = "indexed"
-    missing_enrichment.summary_eli5 = "Summary without S2 enrichment"
     missing_enrichment.published = "2024-02-03"
     service.repository.upsert_paper(missing_enrichment)  # type: ignore[attr-defined]
 
@@ -2676,22 +2630,23 @@ def test_trending_feed_pages_ready_papers_and_sorts_by_latest_or_upvotes(browser
     assert default_feed.page == 1
     assert default_feed.has_next is True
     assert default_feed.has_previous is False
-    assert default_feed.papers[0].paper_id == "arxiv:2403.99999"
-    assert default_feed.papers[1].paper_id == "arxiv:2402.00051"
-    assert default_feed.papers[1].image_url is not None
-    assert default_feed.papers[2].image_url is None
-    assert {paper.published for paper in default_feed.papers} == {"2024-02-01", "2024-02-02"}
-    assert len(second_page.papers) == 3
+    assert default_feed.papers[0].paper_id == "arxiv:2403.88888"
+    assert default_feed.papers[1].paper_id == "arxiv:2403.99999"
+    assert default_feed.papers[2].paper_id == "arxiv:2402.00051"
+    assert default_feed.papers[2].image_url is not None
+    assert default_feed.papers[3].image_url is None
+    assert {paper.published for paper in default_feed.papers} == {"2024-02-01", "2024-02-02", "2024-02-03"}
+    assert len(second_page.papers) == 4
     assert second_page.has_next is False
     assert second_page.has_previous is True
     assert landing_feed.page_size == 10
     assert len(landing_feed.papers) == 10
     assert landing_feed.has_next is True
     assert landing_feed.papers[0].paper_id == default_feed.papers[0].paper_id
-    assert "arxiv:2403.88888" not in {paper.paper_id for paper in default_feed.papers + second_page.papers}
+    assert "arxiv:2403.88888" in {paper.paper_id for paper in default_feed.papers + second_page.papers}
     assert "arxiv:2403.77777" not in {paper.paper_id for paper in default_feed.papers + second_page.papers}
     assert upvote_feed.papers[0].paper_id == "arxiv:2402.00000"
-    assert upvote_feed.papers[0].upvote_count == 3
+    assert upvote_feed.papers[0].upvote_count == 4
     assert upvote_feed.papers[0].viewer_has_upvoted is True
 
 
@@ -2725,7 +2680,7 @@ def test_trending_detail_builds_nested_comments_and_vote_summary(browser_service
 
     detail = service.get_browser_trending_paper("arxiv:2404.11111", viewer=session.user)
 
-    assert detail.upvote_count == 1
+    assert detail.upvote_count == 2
     assert detail.viewer_has_upvoted is True
     assert detail.image_url is not None
     assert len(detail.comments) == 1
@@ -2742,6 +2697,10 @@ def test_browser_paper_discussion_builds_comments_and_vote_summary(browser_servi
     paper = _sample_paper("2404.33333", title="Paper Discussion", abstract="Discussion")
     paper.index_status = "indexed"
     service.repository.upsert_paper(paper)  # type: ignore[attr-defined]
+
+    default_discussion = service.get_browser_paper_discussion("arxiv:2404.33333", viewer=session.user)
+    assert default_discussion.upvote_count == 1
+    assert default_discussion.viewer_has_upvoted is False
 
     service.set_browser_paper_upvote("arxiv:2404.33333", user=session.user, upvoted=True)
     created = service.create_browser_paper_comment(
@@ -2760,11 +2719,112 @@ def test_browser_paper_discussion_builds_comments_and_vote_summary(browser_servi
 
     discussion = service.get_browser_paper_discussion("arxiv:2404.33333", viewer=session.user)
 
-    assert discussion.upvote_count == 1
+    assert discussion.upvote_count == 2
     assert discussion.viewer_has_upvoted is True
     assert len(discussion.comments) == 1
     assert discussion.comments[0].body == "Root paper note"
     assert discussion.comments[0].replies[0].body == "Paper reply"
+
+
+def test_chat_paper_selection_adds_context_and_validates_image(browser_service):
+    service, _, chat_model = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="selection@example.com", password="topsecret123", display_name="Selection User")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    paper = _sample_paper(
+        "2401.88888",
+        title="Selection Paper",
+        abstract="The selected method improves benchmark grounding.",
+    ).model_copy(update={"index_status": "indexed"})
+    stored = service.repository.upsert_paper(paper)
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="New chat"))
+
+    request = SendChatMessageRequest(
+        content="Explain this PDF selection in context.",
+        paper_selection=PaperSelectionPayload(
+            paper_id=stored.paper_id,
+            page_number=2,
+            action="explain",
+            selected_text="The selected method improves benchmark grounding.",
+            nearby_text="Nearby method context.",
+            region={
+                "points": [{"x": 0.1, "y": 0.2}, {"x": 0.4, "y": 0.5}],
+                "bbox": {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.3},
+                "image_base64": "aW1n",
+                "content_type": "image/png",
+            },
+        ),
+    )
+
+    service.send_chat_message(session.user, thread.thread_id, request)
+
+    assert request.paper_ids == [stored.paper_id]
+    model_calls = [*chat_model.create_calls, *chat_model.stream_calls]
+    selection_call = next(call for call in model_calls if "PDF selection context" in str(call["messages"]))
+    user_messages = [
+        message
+        for message in selection_call["messages"]
+        if isinstance(message, dict) and message.get("role") == "user"
+    ]
+    assert "PDF selection context" in str(user_messages[-1]["content"])
+    assert stored.paper_id in str(user_messages[-1]["content"])
+    assert "The selected method improves benchmark grounding." in str(user_messages[-1]["content"])
+    refreshed = service.get_chat_thread(session.user, thread.thread_id)
+    selection_item = next(item for item in refreshed.items if item.item_type == "user_message")
+    selection_content = service._chat_content_for_user_item(selection_item)  # type: ignore[attr-defined]
+    assert isinstance(selection_content, list)
+    assert any(block.get("type") == "input_text" for block in selection_content)
+    image_blocks = [block for block in selection_content if block.get("type") == "input_image"]
+    assert image_blocks == [
+        {
+            "type": "input_image",
+            "image_url": "data:image/png;base64,aW1n",
+            "detail": "high",
+        }
+    ]
+
+    with pytest.raises(HTTPException) as excinfo:
+        service.send_chat_message(
+            session.user,
+            thread.thread_id,
+            SendChatMessageRequest(
+                content="Explain this broken crop.",
+                paper_selection=PaperSelectionPayload(
+                    paper_id=stored.paper_id,
+                    page_number=1,
+                    action="explain",
+                    region={
+                        "points": [{"x": 0.1, "y": 0.2}, {"x": 0.4, "y": 0.5}],
+                        "bbox": {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.3},
+                        "image_base64": "not base64",
+                        "content_type": "image/png",
+                    },
+                ),
+            ),
+        )
+    assert excinfo.value.status_code == 400
+
+    with pytest.raises(HTTPException) as missing_image_excinfo:
+        service.send_chat_message(
+            session.user,
+            thread.thread_id,
+            SendChatMessageRequest(
+                content="Explain this missing crop.",
+                paper_selection=PaperSelectionPayload(
+                    paper_id=stored.paper_id,
+                    page_number=1,
+                    action="challenge",
+                    region={
+                        "points": [{"x": 0.1, "y": 0.2}, {"x": 0.4, "y": 0.5}],
+                        "bbox": {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.3},
+                    },
+                ),
+            ),
+        )
+    assert missing_image_excinfo.value.status_code == 400
+    assert "must include an image" in str(missing_image_excinfo.value.detail)
 
 
 def test_trending_comment_rejects_reply_target_from_another_paper(browser_service):
@@ -6214,7 +6274,6 @@ def test_encode_prepends_query_prefix_for_bge_but_not_for_specter2(monkeypatch):
     # BGE-base -> prefix applied in encode(), not in encode_batch()
     bge_settings = Settings(
         storage_backend="memory", database_url="memory://", api_key="t",
-        summary_provider="none",
         embedding_model="BAAI/bge-base-en-v1.5", embedding_dim=768,
     )
     bge_provider = OptionalEmbeddingProvider(bge_settings)
@@ -6234,7 +6293,6 @@ def test_encode_prepends_query_prefix_for_bge_but_not_for_specter2(monkeypatch):
     # SPECTER2 -> no prefix
     specter_settings = Settings(
         storage_backend="memory", database_url="memory://", api_key="t",
-        summary_provider="none",
         embedding_model="allenai/specter2_base", embedding_dim=768,
     )
     specter_provider = OptionalEmbeddingProvider(specter_settings)
@@ -6665,7 +6723,6 @@ def test_default_max_attempts_per_job_type():
     assert default_max_attempts("sync_latest") == 5
     assert default_max_attempts("enrich_missing_metadata") == 5
     assert default_max_attempts("reindex_embeddings") == 2
-    assert default_max_attempts("summarize_top_cited") == 2
     assert default_max_attempts("brand_new_job_type") == 3
 
 

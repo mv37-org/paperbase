@@ -23,7 +23,6 @@ class StubClient:
                         "arxiv_id": "2401.00001",
                         "title": "Agent Paper",
                         "summary_short": "This paper studies agents that plan, act, and use tools.",
-                        "summary_eli5": "In simple terms, this paper explains how an AI agent can plan and use tools.",
                         "citation_count": 25,
                         "published": "2024-01-01",
                         "score": 3.0,

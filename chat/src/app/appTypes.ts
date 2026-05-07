@@ -52,10 +52,45 @@ export type PaperPdfModalState = {
   error: string;
 };
 
+export type PaperAnnotationRect = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+export type PaperAnnotationPoint = {
+  x: number;
+  y: number;
+};
+
+export type PaperAnnotationTarget = {
+  paperId: string;
+  pageNumber: number;
+  selectedText?: string | null;
+  nearbyText?: string | null;
+  sectionTitle?: string | null;
+  rects?: PaperAnnotationRect[];
+  region?: {
+    points: PaperAnnotationPoint[];
+    bbox: PaperAnnotationRect;
+  } | null;
+};
+
+export type PaperExplorationAnnotation = PaperAnnotationTarget & {
+  annotationId: string;
+  kind: "text" | "region";
+  note: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type PaperExploration = {
   explorationId: string;
   projectId: string;
   paperId: string;
+  chatThreadId?: string;
+  annotations: PaperExplorationAnnotation[];
   path: string;
   title: string;
   authors: string;
@@ -137,6 +172,7 @@ export type DeleteModalState =
   | { kind: "thread"; projectId: string; threadId: string; title: string }
   | { kind: "python_file"; projectId: string; fileId: string; title: string }
   | { kind: "paper_exploration"; explorationId: string; title: string }
+  | { kind: "paper_annotation"; explorationId: string; annotationId: string; title: string }
   | null;
 
 export type ThreadPane = "chat" | "papers";

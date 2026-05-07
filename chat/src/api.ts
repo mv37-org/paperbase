@@ -24,6 +24,7 @@ import type {
   PaperDiscussionResponse,
   PaperPreviewResponse,
   PaperResponse,
+  PaperSelectionPayload,
   PaperVoteSummary,
   ProjectItemKind,
   ProjectItemPageResponse,
@@ -68,6 +69,7 @@ export type SendThreadMessagePayload = {
   include_uploads: boolean;
   include_papers: boolean;
   paper_ids?: string[];
+  paper_selection?: PaperSelectionPayload | null;
 };
 
 export type ChatFeedbackPayload = {
@@ -372,6 +374,7 @@ function chatRequestBody(payload: SendThreadMessagePayload) {
     include_uploads: payload.include_uploads,
     include_papers: payload.include_papers,
     paper_ids: payload.paper_ids ?? [],
+    paper_selection: payload.paper_selection ?? null,
   });
 }
 
@@ -934,8 +937,11 @@ function legacyAdminOverviewRow(job: JobResponse): AdminJobOverviewRow {
     is_synthetic: false,
     tracking_available: false,
     indexed_paper_count: null,
+    tracked_paper_count: null,
+    paper_outcome_counts: {},
     latest_status_summary: job.error ? `${job.status}: ${job.error}` : job.status,
     child_job_count: 0,
+    child_jobs: [],
     details: job.payload ?? {},
   };
 }
