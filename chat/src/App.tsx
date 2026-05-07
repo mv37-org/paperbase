@@ -61,7 +61,7 @@ import {
 } from "./app/AppChrome";
 import { ChatSessionModals } from "./app/ChatSessionModals";
 import { ChatThreadHeader } from "./app/ChatThreadHeader";
-import { PdfDocumentViewer } from "./app/PdfDocumentViewer";
+import { PdfDocumentViewer, type PdfDocumentSection } from "./app/PdfDocumentViewer";
 import { ThreadPapersView } from "./app/ThreadPapersView";
 import type {
   AppearanceTheme,
@@ -200,14 +200,6 @@ const LANDING_TRENDING_PAGE_SIZE = 10;
 const PROJECT_ITEM_PAGE_SIZE = 5;
 const PROJECT_SIDEBAR_ITEM_KINDS: ProjectItemKind[] = ["python_file", "thread"];
 const PAPER_EXPLORATIONS_KEY = "paperbase-paper-explorations";
-const PAPER_EXPLORATION_OUTLINE_ITEMS = [
-  "Abstract",
-  "Introduction",
-  "Method",
-  "Experiments & results",
-  "Conclusion",
-  "References",
-];
 const AUTH_VIEW_COPY: Record<AuthView, { title: string; caption: string }> = {
   login: { title: "Log in", caption: "Use your account to continue." },
   signup: { title: "Create account", caption: "Create your account." },
@@ -351,6 +343,16 @@ function authorInitials(author: string) {
     .map((part) => part.trim())
     .filter(Boolean);
   return (parts[0]?.[0] ?? "").concat(parts.length > 1 ? (parts[parts.length - 1]?.[0] ?? "") : "");
+}
+
+function samePaperSections(left: PdfDocumentSection[], right: PdfDocumentSection[]) {
+  return (
+    left.length === right.length &&
+    left.every(
+      (section, index) =>
+        section.title === right[index]?.title && section.pageNumber === right[index]?.pageNumber,
+    )
+  );
 }
 
 function normalizePaperExploration(value: unknown): PaperExploration | null {
@@ -511,6 +513,9 @@ export default function App() {
     "details" | "notes"
   >("details");
   const [paperExplorationNotes, setPaperExplorationNotes] = useState<Record<string, string>>({});
+  const [paperExplorationSections, setPaperExplorationSections] = useState<
+    Record<string, PdfDocumentSection[]>
+  >({});
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [emptyStateProjectPickerOpen, setEmptyStateProjectPickerOpen] = useState(false);
@@ -911,9 +916,11 @@ export default function App() {
     ? paperExplorations.filter((exploration) => exploration.projectId === activeProjectHomeId)
         .length
     : 0;
-  const activePaperExplorationProject = activePaperExploration
-    ? (projects.find((project) => project.project_id === activePaperExploration.projectId) ?? null)
-    : null;
+  const activePaperExplorationSections = activePaperExploration
+    ? activePaperExploration.pdfUrl
+      ? paperExplorationSections[activePaperExploration.explorationId]
+      : []
+    : undefined;
   const activePaperExplorationAuthors = useMemo(
     () => splitPaperAuthors(activePaperExploration?.authors ?? ""),
     [activePaperExploration?.authors],
@@ -1766,6 +1773,14 @@ export default function App() {
     paperExplorationsRef.current = paperExplorationsRef.current.filter(
       (entry) => entry.explorationId !== explorationId,
     );
+    setPaperExplorationSections((current) => {
+      if (!(explorationId in current)) {
+        return current;
+      }
+      const next = { ...current };
+      delete next[explorationId];
+      return next;
+    });
     setActiveTab((current) => {
       if (current?.kind !== "paper_exploration" || current.id !== explorationId) {
         return current;
@@ -1775,6 +1790,22 @@ export default function App() {
         : null;
     });
   }, []);
+
+  const handleActivePaperExplorationSections = useCallback(
+    (sections: PdfDocumentSection[]) => {
+      if (!activePaperExplorationId) {
+        return;
+      }
+      setPaperExplorationSections((current) => {
+        const previous = current[activePaperExplorationId] ?? [];
+        if (samePaperSections(previous, sections)) {
+          return current;
+        }
+        return { ...current, [activePaperExplorationId]: sections };
+      });
+    },
+    [activePaperExplorationId],
+  );
 
   useEffect(() => {
     if (!paperPdfModal) {
@@ -3610,6 +3641,7 @@ export default function App() {
     setPaperExplorationSidebarCollapsed(true);
     setPaperExplorationSidebarPane("details");
     setPaperExplorationNotes({});
+    setPaperExplorationSections({});
     setAccountMenuOpen(false);
     setStreamingThreadId(null);
     setThreadStreamStates({});
@@ -4121,6 +4153,10 @@ export default function App() {
     [],
   );
 
+  const openDeletePaperExplorationModal = useCallback((explorationId: string, title: string) => {
+    setDeleteModalState({ kind: "paper_exploration", explorationId, title });
+  }, []);
+
   const closeDeleteModal = useCallback(() => {
     setDeleteModalState(null);
   }, []);
@@ -4169,10 +4205,12 @@ export default function App() {
         await deleteThread(deleteModalState.threadId);
         removeThreadIdsLocally([deleteModalState.threadId], deleteModalState.projectId);
         await refreshProjects();
-      } else {
+      } else if (deleteModalState.kind === "python_file") {
         await deletePythonFile(deleteModalState.fileId);
         removePythonFileIdsLocally([deleteModalState.fileId], deleteModalState.projectId);
         await refreshProjects();
+      } else {
+        deletePaperExploration(deleteModalState.explorationId);
       }
       closeDeleteModal();
     } catch (error) {
@@ -4180,6 +4218,7 @@ export default function App() {
     }
   }, [
     closeDeleteModal,
+    deletePaperExploration,
     deleteModalState,
     refreshProjects,
     removePythonFileIdsLocally,
@@ -5233,7 +5272,10 @@ export default function App() {
                                               aria-label={`Delete exploration ${exploration.title}`}
                                               onClick={(event) => {
                                                 event.stopPropagation();
-                                                deletePaperExploration(exploration.explorationId);
+                                                openDeletePaperExplorationModal(
+                                                  exploration.explorationId,
+                                                  exploration.title,
+                                                );
                                               }}
                                             >
                                               <AppIcon
@@ -5598,7 +5640,9 @@ export default function App() {
             ) : null}
           </aside>
 
-          <section className="chat-stage">
+          <section
+            className={`chat-stage${activeTab?.kind === "paper_exploration" ? " paper-exploration-stage" : ""}`}
+          >
             <button
               type="button"
               className="sidebar-icon-button chat-sidebar-toggle"
@@ -5682,22 +5726,23 @@ export default function App() {
                   <div className="paper-exploration-page">
                     <header className="paper-exploration-header">
                       <div className="paper-exploration-heading">
-                        <span>Exploration</span>
                         <h1>{activePaperExploration.title}</h1>
-                        {activePaperExploration.authors ? (
-                          <p>{activePaperExploration.authors}</p>
-                        ) : null}
                       </div>
                       <div className="paper-exploration-header-actions">
                         <button
                           type="button"
-                          className="paper-exploration-panel-toggle"
+                          className="paper-exploration-icon-button"
                           aria-label={
                             paperExplorationSidebarOpen
                               ? "Collapse paper details"
                               : "Open paper details"
                           }
                           aria-expanded={paperExplorationSidebarOpen}
+                          title={
+                            paperExplorationSidebarOpen
+                              ? "Collapse paper details"
+                              : "Open paper details"
+                          }
                           onClick={
                             paperExplorationSidebarOpen
                               ? closePaperExplorationSidebar
@@ -5705,19 +5750,28 @@ export default function App() {
                           }
                         >
                           <MaskedAssetIcon
-                            asset="info.svg"
-                            className="paper-exploration-action-icon"
+                            asset={
+                              paperExplorationSidebarOpen ? "hide-sidebar.svg" : "show-sidebar.svg"
+                            }
+                            className="paper-exploration-icon-button-icon"
                           />
-                          <span>Paper details</span>
                         </button>
                         <button
                           type="button"
-                          className="paper-exploration-delete"
+                          className="paper-exploration-icon-button danger"
+                          aria-label="Delete exploration"
+                          title="Delete exploration"
                           onClick={() =>
-                            deletePaperExploration(activePaperExploration.explorationId)
+                            openDeletePaperExplorationModal(
+                              activePaperExploration.explorationId,
+                              activePaperExploration.title,
+                            )
                           }
                         >
-                          Delete exploration
+                          <MaskedAssetIcon
+                            asset="delete-session.svg"
+                            className="paper-exploration-icon-button-icon"
+                          />
                         </button>
                       </div>
                     </header>
@@ -5726,6 +5780,7 @@ export default function App() {
                         className="paper-exploration-frame"
                         title={`${activePaperExploration.title} PDF`}
                         url={activePaperExploration.pdfUrl}
+                        onSectionsChange={handleActivePaperExplorationSections}
                       />
                     ) : (
                       <div className="paper-exploration-empty">
@@ -6740,11 +6795,19 @@ export default function App() {
                         <span className="paper-exploration-sidebar-chevron" aria-hidden="true" />
                       </summary>
                       <ol className="paper-exploration-outline-list">
-                        {PAPER_EXPLORATION_OUTLINE_ITEMS.map((item, index) => (
-                          <li key={item}>
-                            <span className={index === 0 ? "active" : ""}>{item}</span>
+                        {activePaperExplorationSections === undefined ? (
+                          <li className="paper-exploration-outline-note">
+                            Scanning paper sections...
                           </li>
-                        ))}
+                        ) : activePaperExplorationSections.length > 0 ? (
+                          activePaperExplorationSections.map((section, index) => (
+                            <li key={section.id}>
+                              <span className={index === 0 ? "active" : ""}>{section.title}</span>
+                            </li>
+                          ))
+                        ) : (
+                          <li className="paper-exploration-outline-note">No sections detected.</li>
+                        )}
                       </ol>
                     </details>
                     <details className="paper-exploration-sidebar-section" open>
@@ -6776,30 +6839,6 @@ export default function App() {
                       ) : (
                         <p className="paper-exploration-sidebar-note">No authors listed.</p>
                       )}
-                    </details>
-                    <details className="paper-exploration-sidebar-section" open>
-                      <summary>
-                        <MaskedAssetIcon
-                          asset="info.svg"
-                          className="paper-exploration-sidebar-section-icon"
-                        />
-                        <span>Details</span>
-                        <span className="paper-exploration-sidebar-chevron" aria-hidden="true" />
-                      </summary>
-                      <dl className="paper-exploration-detail-list">
-                        <div>
-                          <dt>Project</dt>
-                          <dd>{activePaperExplorationProject?.name ?? "Project"}</dd>
-                        </div>
-                        <div>
-                          <dt>Paper</dt>
-                          <dd>{activePaperExploration.path || activePaperExploration.paperId}</dd>
-                        </div>
-                        <div>
-                          <dt>Updated</dt>
-                          <dd>{formatThreadAge(activePaperExploration.updatedAt)}</dd>
-                        </div>
-                      </dl>
                     </details>
                   </>
                 ) : (
@@ -8041,14 +8080,18 @@ export default function App() {
                 ? "Delete project"
                 : deleteModalState?.kind === "python_file"
                   ? "Delete file"
-                  : "Delete session"}
+                  : deleteModalState?.kind === "paper_exploration"
+                    ? "Delete exploration"
+                    : "Delete session"}
             </h2>
             <p className="modal-caption">
               {deleteModalState?.kind === "project"
                 ? `Delete ${deleteModalState.name} and all of its chats and code files?`
                 : deleteModalState?.kind === "python_file"
                   ? `Delete ${deleteModalState.title}?`
-                  : `Delete ${deleteModalState?.title ?? "this session"}?`}
+                  : deleteModalState?.kind === "paper_exploration"
+                    ? `Delete ${deleteModalState.title}?`
+                    : `Delete ${deleteModalState?.title ?? "this session"}?`}
             </p>
           </div>
           <div className="modal-view visible">
@@ -8062,7 +8105,9 @@ export default function App() {
                   ? "Delete project"
                   : deleteModalState?.kind === "python_file"
                     ? "Delete file"
-                    : "Delete session"}
+                    : deleteModalState?.kind === "paper_exploration"
+                      ? "Delete exploration"
+                      : "Delete session"}
               </button>
               <button className="secondary-button" type="button" onClick={closeDeleteModal}>
                 Cancel

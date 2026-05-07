@@ -60,8 +60,19 @@ describe("PdfDocumentViewer", () => {
       destroy: pdfMocks.loadingDestroy,
       promise: Promise.resolve({
         numPages: 1,
+        getOutline: vi.fn().mockResolvedValue(null),
+        getDestination: vi.fn(),
+        getPageIndex: vi.fn(),
         getPage: vi.fn().mockResolvedValue({
           cleanup: pdfMocks.pageCleanup,
+          getTextContent: vi.fn().mockResolvedValue({
+            items: [
+              { str: "Abstract", transform: [1, 0, 0, 1, 40, 760] },
+              { str: "This is body copy.", transform: [1, 0, 0, 1, 40, 730] },
+              { str: "1 Introduction", transform: [1, 0, 0, 1, 40, 700] },
+              { str: "2 Method", transform: [1, 0, 0, 1, 40, 650] },
+            ],
+          }),
           getViewport: ({ scale }: { scale: number }) => ({
             width: 600 * scale,
             height: 800 * scale,
@@ -95,5 +106,25 @@ describe("PdfDocumentViewer", () => {
       expect(pdfMocks.getDocument).toHaveBeenCalledTimes(1);
     });
     expect(pdfMocks.loadingDestroy).not.toHaveBeenCalled();
+  });
+
+  it("reports detected paper sections from text headings", async () => {
+    const onSectionsChange = vi.fn();
+
+    render(
+      <PdfDocumentViewer
+        url="https://example.test/paper.pdf"
+        title="Paper PDF"
+        onSectionsChange={onSectionsChange}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(onSectionsChange).toHaveBeenCalledWith([
+        expect.objectContaining({ title: "Abstract", pageNumber: 1 }),
+        expect.objectContaining({ title: "Introduction", pageNumber: 1 }),
+        expect.objectContaining({ title: "Method", pageNumber: 1 }),
+      ]);
+    });
   });
 });

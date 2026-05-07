@@ -136,6 +136,7 @@ export type DeleteModalState =
   | { kind: "project"; projectId: string; name: string }
   | { kind: "thread"; projectId: string; threadId: string; title: string }
   | { kind: "python_file"; projectId: string; fileId: string; title: string }
+  | { kind: "paper_exploration"; explorationId: string; title: string }
   | null;
 
 export type ThreadPane = "chat" | "papers";

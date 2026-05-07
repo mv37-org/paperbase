@@ -9,20 +9,173 @@ import pdfWorkerUrl from "pdfjs-dist/legacy/build/pdf.worker.mjs?url";
 
 GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
+export type PdfDocumentSection = {
+  id: string;
+  title: string;
+  pageNumber: number | null;
+};
+
 type PdfDocumentViewerProps = {
   url: string;
   title: string;
   className?: string;
+  onSectionsChange?: (sections: PdfDocumentSection[]) => void;
 };
 
 type PdfViewerStatus = "loading" | "ready" | "error";
 
-export function PdfDocumentViewer({ url, title, className = "" }: PdfDocumentViewerProps) {
+function normalizeSectionTitle(title: string) {
+  return title
+    .replace(/\s+/g, " ")
+    .replace(/^(?:section\s+)?(?:\d+(?:\.\d+)*|[IVX]+)\.?\s+/i, "")
+    .trim();
+}
+
+function sectionKey(title: string) {
+  return normalizeSectionTitle(title).toLowerCase();
+}
+
+function finalizeSections(sections: PdfDocumentSection[]) {
+  const seen = new Set<string>();
+  const nextSections: PdfDocumentSection[] = [];
+  for (const section of sections) {
+    const title = normalizeSectionTitle(section.title);
+    if (!title) {
+      continue;
+    }
+    const key = sectionKey(title);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    nextSections.push({
+      id: `${key.replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "section"}-${section.pageNumber ?? "x"}`,
+      title,
+      pageNumber: section.pageNumber,
+    });
+    if (nextSections.length >= 16) {
+      break;
+    }
+  }
+  return nextSections;
+}
+
+async function pageNumberForDestination(
+  pdf: Awaited<PDFDocumentLoadingTask["promise"]>,
+  dest: unknown,
+) {
+  try {
+    const explicitDest =
+      typeof dest === "string" ? await pdf.getDestination(dest) : Array.isArray(dest) ? dest : null;
+    const pageRef = explicitDest?.[0];
+    if (!pageRef) {
+      return null;
+    }
+    return (await pdf.getPageIndex(pageRef)) + 1;
+  } catch {
+    return null;
+  }
+}
+
+async function extractOutlineSections(pdf: Awaited<PDFDocumentLoadingTask["promise"]>) {
+  if (typeof pdf.getOutline !== "function") {
+    return [];
+  }
+  const outline = await pdf.getOutline().catch(() => null);
+  if (!outline?.length) {
+    return [];
+  }
+  const sections: PdfDocumentSection[] = [];
+  const visit = async (items: typeof outline) => {
+    for (const item of items) {
+      const title = normalizeSectionTitle(item.title ?? "");
+      if (title) {
+        sections.push({
+          id: title,
+          title,
+          pageNumber: await pageNumberForDestination(pdf, item.dest),
+        });
+      }
+      if (item.items?.length) {
+        await visit(item.items);
+      }
+    }
+  };
+  await visit(outline);
+  return finalizeSections(sections);
+}
+
+function textItemsToLines(items: unknown[]) {
+  const lines: Array<{ y: number; chunks: Array<{ x: number; text: string }> }> = [];
+  for (const item of items) {
+    const entry = item as { str?: unknown; transform?: unknown };
+    const text = typeof entry.str === "string" ? entry.str.trim() : "";
+    if (!text) {
+      continue;
+    }
+    const transform = Array.isArray(entry.transform) ? entry.transform : [];
+    const x = typeof transform[4] === "number" ? transform[4] : 0;
+    const y = typeof transform[5] === "number" ? transform[5] : 0;
+    const line = lines.find((candidate) => Math.abs(candidate.y - y) < 3);
+    if (line) {
+      line.chunks.push({ x, text });
+    } else {
+      lines.push({ y, chunks: [{ x, text }] });
+    }
+  }
+  return lines
+    .sort((a, b) => b.y - a.y)
+    .map((line) =>
+      line.chunks
+        .sort((a, b) => a.x - b.x)
+        .map((chunk) => chunk.text)
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim(),
+    )
+    .filter(Boolean);
+}
+
+function sectionFromLine(line: string, pageNumber: number): PdfDocumentSection | null {
+  const text = line.replace(/\s+/g, " ").trim();
+  if (text.length < 3 || text.length > 110 || /https?:\/\//i.test(text)) {
+    return null;
+  }
+  if (/^(?:figure|table|algorithm)\s+\d+/i.test(text)) {
+    return null;
+  }
+  const knownHeading =
+    /^(?:abstract|introduction|related works?|background|methods?|methodology|approach|model|experiments?(?:\s*(?:&|and)\s*results?)?|results?|evaluation|analysis|discussion|limitations?|conclusions?|references|acknowledg(?:e)?ments?|appendix)\b/i.test(
+      text,
+    );
+  const numberedHeading =
+    /^(?:\d+(?:\.\d+)*|[IVX]+)\.?\s+[A-Z][A-Za-z0-9()[\]&:;,/+\-\s]{2,}$/i.test(text);
+  if (!knownHeading && !numberedHeading) {
+    return null;
+  }
+  const title = normalizeSectionTitle(text);
+  if (!title || title.split(/\s+/).length > 12) {
+    return null;
+  }
+  return { id: `${title}-${pageNumber}`, title, pageNumber };
+}
+
+export function PdfDocumentViewer({
+  url,
+  title,
+  className = "",
+  onSectionsChange,
+}: PdfDocumentViewerProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const pagesRef = useRef<HTMLDivElement | null>(null);
+  const onSectionsChangeRef = useRef(onSectionsChange);
   const [viewerWidth, setViewerWidth] = useState(0);
   const [status, setStatus] = useState<PdfViewerStatus>("loading");
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    onSectionsChangeRef.current = onSectionsChange;
+  }, [onSectionsChange]);
 
   useEffect(() => {
     const element = scrollRef.current;
@@ -58,6 +211,7 @@ export function PdfDocumentViewer({ url, title, className = "" }: PdfDocumentVie
     if (!url) {
       setStatus("error");
       setError("No PDF URL is available.");
+      onSectionsChangeRef.current?.([]);
       return;
     }
 
@@ -78,6 +232,11 @@ export function PdfDocumentViewer({ url, title, className = "" }: PdfDocumentVie
           return;
         }
         setStatus("ready");
+        const outlineSections = await extractOutlineSections(pdf);
+        if (outlineSections.length > 0) {
+          onSectionsChangeRef.current?.(outlineSections);
+        }
+        const textSections: PdfDocumentSection[] = [];
 
         for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
           if (cancelled) {
@@ -95,6 +254,17 @@ export function PdfDocumentViewer({ url, title, className = "" }: PdfDocumentVie
           const scale = availableWidth / baseViewport.width;
           const viewport = page.getViewport({ scale });
           const outputScale = Math.max(window.devicePixelRatio || 1, 1);
+          if (outlineSections.length === 0) {
+            const textContent = await page.getTextContent().catch(() => null);
+            if (textContent) {
+              for (const line of textItemsToLines(textContent.items)) {
+                const section = sectionFromLine(line, pageNumber);
+                if (section) {
+                  textSections.push(section);
+                }
+              }
+            }
+          }
 
           const pageElement = document.createElement("div");
           pageElement.className = "pdf-document-page";
@@ -126,12 +296,16 @@ export function PdfDocumentViewer({ url, title, className = "" }: PdfDocumentVie
           await renderTask.promise;
           page.cleanup();
         }
+        if (!cancelled && outlineSections.length === 0) {
+          onSectionsChangeRef.current?.(finalizeSections(textSections));
+        }
       } catch (renderError) {
         if (cancelled) {
           return;
         }
         setStatus("error");
         setError(renderError instanceof Error ? renderError.message : "PDF could not be loaded.");
+        onSectionsChangeRef.current?.([]);
       }
     })();
 

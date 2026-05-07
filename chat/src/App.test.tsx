@@ -2812,14 +2812,22 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "1 source" }));
     fireEvent.click(await screen.findByRole("button", { name: "Open exploration" }));
     await waitFor(() => {
-      expect(screen.getByText("Exploration")).toBeTruthy();
+      expect(screen.getByRole("heading", { name: "Benchmark Paper" })).toBeTruthy();
     });
-    expect(screen.getByRole("heading", { name: "Benchmark Paper" })).toBeTruthy();
+    expect(screen.queryByText("Exploration")).toBeNull();
     expect(document.querySelector(".pdf-document-viewer.paper-exploration-frame")).toBeTruthy();
     expect(document.querySelector("iframe")).toBeNull();
     expect(screen.getByText("Explorations")).toBeTruthy();
+    expect(screen.queryByText("Details")).toBeNull();
     expect(document.querySelector(".paper-exploration-card-image")).toBeNull();
     fireEvent.click(screen.getByLabelText("Delete exploration Benchmark Paper"));
+    const deleteExplorationDialog = await screen.findByRole("dialog", {
+      name: "Delete exploration",
+    });
+    expect(within(deleteExplorationDialog).getByText("Delete Benchmark Paper?")).toBeTruthy();
+    fireEvent.click(
+      within(deleteExplorationDialog).getByRole("button", { name: "Delete exploration" }),
+    );
     await waitFor(() => {
       expect(screen.getByText("Project Home")).toBeTruthy();
     });
