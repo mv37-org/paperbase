@@ -2675,7 +2675,7 @@ describe("App", () => {
     expect(screen.queryByText("Ada Lovelace")).toBeNull();
     fireEvent.click(screen.getByRole("tab", { name: "Papers" }));
     expect(await screen.findByText("Benchmark Paper")).toBeTruthy();
-    expect(screen.getByText("Short grounded benchmark summary.")).toBeTruthy();
+    expect(screen.queryByText("Short grounded benchmark summary.")).toBeNull();
     expect(screen.getByRole("link", { name: "HTML" }).getAttribute("href")).toBe(
       "https://example.test/2401.12345",
     );

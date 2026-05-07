@@ -3390,15 +3390,15 @@ textarea::placeholder,
 }
 
 .thread-papers-view {
-  width: min(900px, 100%);
+  width: min(var(--chat-content-max-width), 100%);
   margin: 0 auto;
   padding: 0 0 48px;
 }
 
 .thread-paper-list {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 18px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
 }
 
 .thread-paper-card {
@@ -3406,13 +3406,12 @@ textarea::placeholder,
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   align-content: start;
-  gap: 12px;
-  min-height: 500px;
-  padding: 14px;
+  gap: 8px;
+  min-height: 292px;
+  padding: 10px;
   border: 1px solid rgba(27, 22, 17, 0.12);
-  border-radius: 8px;
+  border-radius: 4px;
   background: #ffffff;
-  box-shadow: 0 10px 28px rgba(16, 24, 40, 0.08);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   overflow: hidden;
 }
@@ -3425,21 +3424,22 @@ textarea::placeholder,
   min-width: 0;
   display: grid;
   align-content: start;
-  gap: 8px;
+  gap: 6px;
 }
 
 .thread-paper-cover-image,
 .thread-paper-cover-placeholder {
   width: 100%;
-  aspect-ratio: 1 / 1;
+  height: clamp(108px, 15vw, 132px);
   border: 1px solid rgba(27, 22, 17, 0.1);
-  border-radius: 6px;
+  border-radius: 3px;
   background: #f3efe6;
 }
 
 .thread-paper-cover-image {
   display: block;
-  object-fit: cover;
+  object-fit: contain;
+  object-position: top center;
 }
 
 .thread-paper-cover-placeholder {
@@ -3454,8 +3454,8 @@ textarea::placeholder,
 .thread-paper-card h2 {
   margin: 0;
   color: var(--text);
-  font-size: 18px;
-  line-height: 1.18;
+  font-size: 13px;
+  line-height: 1.2;
   letter-spacing: 0;
 }
 
@@ -3463,15 +3463,22 @@ textarea::placeholder,
 .thread-paper-summary,
 .thread-papers-empty {
   color: var(--muted);
-  font-size: 13px;
-  line-height: 1.45;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.thread-paper-meta {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
 }
 
 .thread-paper-summary {
   margin: 0;
   display: -webkit-box;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 4;
+  -webkit-line-clamp: 3;
   overflow: hidden;
 }
 
@@ -3481,7 +3488,7 @@ textarea::placeholder,
   flex-wrap: wrap;
   gap: 8px;
   align-self: end;
-  padding-top: 4px;
+  padding-top: 2px;
 }
 
 .thread-papers-empty {
@@ -3754,7 +3761,7 @@ textarea::placeholder,
   }
 
   .thread-paper-card {
-    min-height: 440px;
+    min-height: 280px;
   }
 
   .citation-card-compact {
@@ -8862,10 +8869,6 @@ body.authenticated-theme-dark .modal-flash.warning,
 body.authenticated-theme-dark .python-conflict-file-tab {
   border-color: rgba(223, 232, 244, 0.12);
   background: rgba(255, 255, 255, 0.04);
-}
-
-body.authenticated-theme-dark .thread-paper-card {
-  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.32);
 }
 
 body.authenticated-theme-dark .paper-citation-count-badge {

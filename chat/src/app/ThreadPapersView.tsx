@@ -1,6 +1,6 @@
 import type { ChatCitation } from "../types";
 import type { PaperActionTarget, PaperCitationPreviewState } from "./appTypes";
-import { groupCitationsByPaper, summarizeCitationPreview } from "./appUtils";
+import { groupCitationsByPaper } from "./appUtils";
 
 type ThreadPapersViewProps = {
   citations: ChatCitation[];
@@ -30,7 +30,6 @@ export function ThreadPapersView({
               ? (paperCitationPreviews[citation.paper_id] ?? null)
               : null;
             const paper = paperPreview?.paper ?? null;
-            const paperSummary = summarizeCitationPreview(paperPreview?.paper ?? null);
             const actionTarget: PaperActionTarget | null = citation.paper_id
               ? {
                   paperId: citation.paper_id,
@@ -79,11 +78,6 @@ export function ThreadPapersView({
                 <div className="thread-paper-card-main">
                   <h2>{paper?.title ?? citation.title}</h2>
                   {paper ? <div className="thread-paper-meta">{paper.authors}</div> : null}
-                  {paperSummary ? (
-                    <p className="thread-paper-summary">{paperSummary}</p>
-                  ) : (
-                    <p className="thread-paper-summary">{citation.excerpt}</p>
-                  )}
                 </div>
                 <div className="thread-paper-actions">
                   {actionTarget ? (
