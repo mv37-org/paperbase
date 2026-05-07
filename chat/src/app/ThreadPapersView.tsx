@@ -1,6 +1,6 @@
 import type { ChatCitation } from "../types";
 import type { PaperActionTarget, PaperCitationPreviewState } from "./appTypes";
-import { summarizeCitationPreview } from "./appUtils";
+import { groupCitationsByPaper, summarizeCitationPreview } from "./appUtils";
 
 type ThreadPapersViewProps = {
   citations: ChatCitation[];
@@ -19,11 +19,13 @@ export function ThreadPapersView({
   startPaperExploration,
   paperExplorationIdsByPaperId,
 }: ThreadPapersViewProps) {
+  const paperGroups = groupCitationsByPaper(citations);
   return (
     <div className="thread-papers-view">
-      {citations.length > 0 ? (
+      {paperGroups.length > 0 ? (
         <div className="thread-paper-list">
-          {citations.map((citation) => {
+          {paperGroups.map((group) => {
+            const citation = group.citation;
             const paperPreview = citation.paper_id
               ? (paperCitationPreviews[citation.paper_id] ?? null)
               : null;
@@ -58,19 +60,25 @@ export function ThreadPapersView({
             };
             return (
               <article
-                key={`${citation.source_id}:${citation.paper_id ?? citation.path}`}
+                key={group.key}
                 className={`thread-paper-card${actionTarget ? " clickable" : ""}`}
                 onClick={openPaperTarget}
               >
+                {group.citationCount > 1 ? (
+                  <span className="paper-citation-count-badge">{group.citationCount}</span>
+                ) : null}
+                {paperPreview?.preview?.image_url ? (
+                  <img
+                    className="thread-paper-cover-image"
+                    src={paperPreview.preview.image_url}
+                    alt={`${paper?.title ?? citation.title} preview`}
+                  />
+                ) : (
+                  <div className="thread-paper-cover-placeholder">Paper</div>
+                )}
                 <div className="thread-paper-card-main">
-                  <span className="thread-paper-source">{citation.source_id}</span>
                   <h2>{paper?.title ?? citation.title}</h2>
-                  {paper ? (
-                    <div className="thread-paper-meta">
-                      {paper.authors}
-                      {paper.published ? ` · ${paper.published}` : ""}
-                    </div>
-                  ) : null}
+                  {paper ? <div className="thread-paper-meta">{paper.authors}</div> : null}
                   {paperSummary ? (
                     <p className="thread-paper-summary">{paperSummary}</p>
                   ) : (

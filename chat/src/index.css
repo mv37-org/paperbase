@@ -3266,37 +3266,8 @@ textarea::placeholder,
 .message-citations {
   display: grid;
   gap: 8px;
+  margin-top: 8px;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-}
-
-.message-citations-summary {
-  width: max-content;
-  max-width: 100%;
-  color: var(--muted);
-  cursor: pointer;
-  font-size: 12px;
-  line-height: 1.3;
-  list-style: none;
-}
-
-.message-citations-summary::-webkit-details-marker {
-  display: none;
-}
-
-.message-citations-summary::before {
-  content: "";
-  width: 6px;
-  height: 6px;
-  margin-right: 7px;
-  border-right: 1.5px solid currentColor;
-  border-bottom: 1.5px solid currentColor;
-  display: inline-block;
-  transform: translateY(-1px) rotate(-45deg);
-  transition: transform 120ms ease;
-}
-
-.message-citations[open] .message-citations-summary::before {
-  transform: translateY(-3px) rotate(45deg);
 }
 
 .message-citations-items {
@@ -3373,7 +3344,8 @@ textarea::placeholder,
 }
 
 .message-sources-button:hover,
-.message-sources-button:focus-visible {
+.message-sources-button:focus-visible,
+.message-sources-button.active {
   background: rgba(27, 22, 17, 0.1);
   color: var(--text);
 }
@@ -3418,23 +3390,31 @@ textarea::placeholder,
 }
 
 .thread-papers-view {
-  width: min(var(--chat-content-max-width), 100%);
+  width: min(900px, 100%);
   margin: 0 auto;
   padding: 0 0 48px;
 }
 
 .thread-paper-list {
   display: grid;
-  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
 }
 
 .thread-paper-card {
+  position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 14px;
-  padding: 14px 0;
-  border-bottom: 1px solid rgba(27, 22, 17, 0.1);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  align-content: start;
+  gap: 12px;
+  min-height: 500px;
+  padding: 14px;
+  border: 1px solid rgba(27, 22, 17, 0.12);
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 10px 28px rgba(16, 24, 40, 0.08);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  overflow: hidden;
 }
 
 .thread-paper-card.clickable {
@@ -3444,19 +3424,38 @@ textarea::placeholder,
 .thread-paper-card-main {
   min-width: 0;
   display: grid;
-  gap: 5px;
+  align-content: start;
+  gap: 8px;
 }
 
-.thread-paper-source {
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.2;
+.thread-paper-cover-image,
+.thread-paper-cover-placeholder {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  border: 1px solid rgba(27, 22, 17, 0.1);
+  border-radius: 6px;
+  background: #f3efe6;
+}
+
+.thread-paper-cover-image {
+  display: block;
+  object-fit: cover;
+}
+
+.thread-paper-cover-placeholder {
+  display: grid;
+  place-items: center;
+  color: rgba(27, 22, 17, 0.44);
+  font-size: 12px;
+  font-weight: 650;
+  text-transform: uppercase;
 }
 
 .thread-paper-card h2 {
   margin: 0;
-  font-size: 16px;
-  line-height: 1.25;
+  color: var(--text);
+  font-size: 18px;
+  line-height: 1.18;
   letter-spacing: 0;
 }
 
@@ -3470,12 +3469,19 @@ textarea::placeholder,
 
 .thread-paper-summary {
   margin: 0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  overflow: hidden;
 }
 
 .thread-paper-actions {
   display: inline-flex;
-  align-items: flex-start;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
+  align-self: end;
+  padding-top: 4px;
 }
 
 .thread-papers-empty {
@@ -3613,10 +3619,11 @@ textarea::placeholder,
 }
 
 .citation-card {
+  position: relative;
   padding: 7px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #fcfbf8;
+  background: #ffffff;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
@@ -3679,14 +3686,6 @@ textarea::placeholder,
   gap: 6px;
 }
 
-.citation-card-source-id {
-  flex: 0 0 auto;
-  color: #1d4ed8;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0;
-}
-
 .citation-card-title {
   min-width: 0;
   overflow: hidden;
@@ -3728,7 +3727,36 @@ textarea::placeholder,
   align-self: center;
 }
 
+.paper-citation-count-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  z-index: 1;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  border: 2px solid #ffffff;
+  border-radius: 999px;
+  background: #ef4444;
+  color: #ffffff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  box-shadow: 0 4px 10px rgba(16, 24, 40, 0.16);
+}
+
 @media (max-width: 720px) {
+  .thread-paper-list {
+    grid-template-columns: 1fr;
+  }
+
+  .thread-paper-card {
+    min-height: 440px;
+  }
+
   .citation-card-compact {
     grid-template-columns: 1fr;
   }
@@ -8564,6 +8592,8 @@ body.authenticated-theme-dark .paper-exploration-heading p,
 body.authenticated-theme-dark .paper-exploration-empty,
 body.authenticated-theme-dark .paper-pdf-modal-title span,
 body.authenticated-theme-dark .paper-pdf-modal-state,
+body.authenticated-theme-dark .thread-paper-meta,
+body.authenticated-theme-dark .thread-paper-summary,
 body.authenticated-theme-dark .project-repo-status,
 body.authenticated-theme-dark .project-repo-import-item em,
 body.authenticated-theme-dark .project-repo-option small,
@@ -8598,6 +8628,7 @@ body.authenticated-theme-dark .project-home-stat strong,
 body.authenticated-theme-dark .paper-exploration-heading h1,
 body.authenticated-theme-dark .paper-pdf-modal-title strong,
 body.authenticated-theme-dark .paper-pdf-modal-close,
+body.authenticated-theme-dark .thread-paper-card h2,
 body.authenticated-theme-dark .project-field,
 body.authenticated-theme-dark .project-github-heading,
 body.authenticated-theme-dark .project-repo-option,
@@ -8817,6 +8848,9 @@ body.authenticated-theme-dark .paper-drawer-error,
 body.authenticated-theme-dark .citation-card,
 body.authenticated-theme-dark .citation-card-compact-image,
 body.authenticated-theme-dark .citation-card-compact-placeholder,
+body.authenticated-theme-dark .thread-paper-card,
+body.authenticated-theme-dark .thread-paper-cover-image,
+body.authenticated-theme-dark .thread-paper-cover-placeholder,
 body.authenticated-theme-dark .project-home-stat,
 body.authenticated-theme-dark .paper-exploration-empty,
 body.authenticated-theme-dark .project-repo-info-button,
@@ -8828,6 +8862,14 @@ body.authenticated-theme-dark .modal-flash.warning,
 body.authenticated-theme-dark .python-conflict-file-tab {
   border-color: rgba(223, 232, 244, 0.12);
   background: rgba(255, 255, 255, 0.04);
+}
+
+body.authenticated-theme-dark .thread-paper-card {
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.32);
+}
+
+body.authenticated-theme-dark .paper-citation-count-badge {
+  border-color: #111923;
 }
 
 body.authenticated-theme-dark .project-repo-menu {
@@ -9133,7 +9175,6 @@ body.authenticated-theme-dark .paper-drawer-markdown tbody tr:nth-child(even) td
 
 body.authenticated-theme-dark .message-markdown a,
 body.authenticated-theme-dark .paper-drawer-markdown a,
-body.authenticated-theme-dark .citation-card-source-id,
 body.authenticated-theme-dark .citation-card-action,
 body.authenticated-theme-dark .citation-inline-button,
 body.authenticated-theme-dark .mention-token {

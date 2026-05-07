@@ -105,6 +105,7 @@ import {
   formatThinkingLabel,
   formatThreadAge,
   formatToolActivityText,
+  groupCitationsByPaper,
   DISMISSED_CHAT_SETUP_KEY,
   inferDrawerContentKind,
   isEmptyThread,
@@ -142,7 +143,6 @@ import {
   toolActivityHasDetails,
   toolActivityLabelForItem,
   uniqueCitationsForThread,
-  uniquePaperCitationCount,
   updateDrawerUrl,
   updateTrendingBrowseUrl,
   upsertProjectItem,
@@ -367,6 +367,10 @@ function persistPaperExplorations(explorations: PaperExploration[]) {
   localStorage.setItem(PAPER_EXPLORATIONS_KEY, JSON.stringify(explorations));
 }
 
+function sourceCountLabel(count: number) {
+  return `${count} ${count === 1 ? "source" : "sources"}`;
+}
+
 export default function App() {
   const bootstrapSession = useMemo(() => getBootstrapSession(), []);
   const [session, setSession] = useState<BrowserSessionResponse | null>(bootstrapSession);
@@ -458,6 +462,9 @@ export default function App() {
   const notebookUploadInputRef = useRef<HTMLInputElement | null>(null);
   const [streamingThreadId, setStreamingThreadId] = useState<string | null>(null);
   const [threadStreamStates, setThreadStreamStates] = useState<Record<string, ThreadStreamState>>(
+    {},
+  );
+  const [expandedCitationMessages, setExpandedCitationMessages] = useState<Record<string, boolean>>(
     {},
   );
   const [threadUsageSnapshots, setThreadUsageSnapshots] = useState<
@@ -972,6 +979,7 @@ export default function App() {
     setContextUsagePopoverOpen(false);
     setChatHeaderMenuOpen(false);
     setThreadPane("chat");
+    setExpandedCitationMessages({});
   }, [activeThreadId]);
 
   useEffect(() => {
@@ -5863,7 +5871,11 @@ export default function App() {
                         !activeThreadStreamState.assistantStarted &&
                         turnActivities.length === 0;
                       const hoverTime = formatLocalTimestamp(message.created_at, "");
-                      const messagePaperCount = uniquePaperCitationCount(message.citations);
+                      const messagePaperGroups = groupCitationsByPaper(message.citations);
+                      const messagePaperCount = messagePaperGroups.length;
+                      const messageSourcesExpanded = Boolean(
+                        expandedCitationMessages[message.message_id],
+                      );
                       const shouldRenderSessionActions =
                         message.role === "assistant" &&
                         !isCompactionMessage &&
@@ -5985,10 +5997,17 @@ export default function App() {
                                   {messagePaperCount > 0 ? (
                                     <button
                                       type="button"
-                                      className="message-sources-button"
-                                      onClick={() => setThreadPane("papers")}
+                                      className={`message-sources-button${messageSourcesExpanded ? " active" : ""}`}
+                                      aria-expanded={messageSourcesExpanded}
+                                      aria-controls={`message-citations-${message.message_id}`}
+                                      onClick={() =>
+                                        setExpandedCitationMessages((current) => ({
+                                          ...current,
+                                          [message.message_id]: !current[message.message_id],
+                                        }))
+                                      }
                                     >
-                                      {messagePaperCount} sources
+                                      {sourceCountLabel(messagePaperCount)}
                                     </button>
                                   ) : null}
                                   {hoverTime ? (
@@ -6039,15 +6058,16 @@ export default function App() {
                                 ))}
                               </div>
                             ) : null}
-                            {message.role === "assistant" && message.citations.length > 0 ? (
-                              <details className="message-citations citation-compact-list">
-                                <summary className="message-citations-summary">
-                                  {messagePaperCount > 0
-                                    ? `Cited papers (${messagePaperCount})`
-                                    : `Sources (${message.citations.length})`}
-                                </summary>
+                            {message.role === "assistant" &&
+                            messagePaperGroups.length > 0 &&
+                            messageSourcesExpanded ? (
+                              <div
+                                id={`message-citations-${message.message_id}`}
+                                className="message-citations citation-compact-list"
+                              >
                                 <div className="message-citations-items">
-                                  {message.citations.map((citation) => {
+                                  {messagePaperGroups.map((group) => {
+                                    const citation = group.citation;
                                     const paperPreview = citation.paper_id
                                       ? (paperCitationPreviews[citation.paper_id] ?? null)
                                       : null;
@@ -6083,10 +6103,15 @@ export default function App() {
                                     };
                                     return (
                                       <div
-                                        key={citation.source_id}
+                                        key={group.key}
                                         id={sourceCardId(message.message_id, citation.source_id)}
                                         className="citation-card citation-card-compact"
                                       >
+                                        {group.citationCount > 1 ? (
+                                          <span className="paper-citation-count-badge">
+                                            {group.citationCount}
+                                          </span>
+                                        ) : null}
                                         <button
                                           type="button"
                                           className="citation-card-compact-main"
@@ -6105,9 +6130,6 @@ export default function App() {
                                           )}
                                           <span className="citation-card-compact-copy">
                                             <span className="citation-card-title-line">
-                                              <span className="citation-card-source-id">
-                                                {citation.source_id}
-                                              </span>
                                               <strong className="citation-card-title">
                                                 {paper?.title ?? citation.title}
                                               </strong>
@@ -6135,7 +6157,7 @@ export default function App() {
                                     );
                                   })}
                                 </div>
-                              </details>
+                              </div>
                             ) : null}
                           </article>
                           {turnActivities.map(renderToolActivityRow)}

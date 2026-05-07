@@ -2541,6 +2541,26 @@ describe("App", () => {
   it("shows inline paper previews for cited research papers", async () => {
     localStorage.setItem(ACTIVE_TAB_KEY, JSON.stringify({ kind: "thread", id: "thread_1" }));
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    const benchmarkCitations = [
+      {
+        source_id: "S1",
+        source_kind: "paperbase_paper",
+        title: "Benchmark Paper",
+        path: "sections/introduction.md",
+        excerpt: "Agents plan and use tools.",
+        paper_id: "arxiv:2401.12345",
+        tags: [],
+      },
+      {
+        source_id: "S2",
+        source_kind: "paperbase_paper",
+        title: "Benchmark Paper",
+        path: "sections/results.md",
+        excerpt: "Agents are evaluated on benchmarks.",
+        paper_id: "arxiv:2401.12345",
+        tags: [],
+      },
+    ];
     apiMocks.getThread.mockResolvedValue({
       thread_id: "thread_1",
       project_id: "proj_1",
@@ -2550,59 +2570,41 @@ describe("App", () => {
       created_at: "2026-04-21T00:00:00Z",
       updated_at: "2026-04-21T00:00:00Z",
       items: [
-        threadItemResponse("msg_1", "assistant_message", "assistant", "Read this paper [S1].", {
-          thread_id: "thread_1",
-          turn_id: "turn_1",
-          phase: "final_answer",
-          citations: [
-            {
-              source_id: "S1",
-              source_kind: "paperbase_paper",
-              title: "Benchmark Paper",
-              path: "sections/introduction.md",
-              excerpt: "Agents plan and use tools.",
-              paper_id: "arxiv:2401.12345",
-              tags: [],
-            },
-          ],
-        }),
-      ],
-      turns: [
-        turnResponse("turn_1", "thread_1", [
-          threadItemResponse("msg_1", "assistant_message", "assistant", "Read this paper [S1].", {
+        threadItemResponse(
+          "msg_1",
+          "assistant_message",
+          "assistant",
+          "Read this paper [S1] and compare [S2].",
+          {
             thread_id: "thread_1",
             turn_id: "turn_1",
             phase: "final_answer",
-            citations: [
-              {
-                source_id: "S1",
-                source_kind: "paperbase_paper",
-                title: "Benchmark Paper",
-                path: "sections/introduction.md",
-                excerpt: "Agents plan and use tools.",
-                paper_id: "arxiv:2401.12345",
-                tags: [],
-              },
-            ],
-          }),
+            citations: benchmarkCitations,
+          },
+        ),
+      ],
+      turns: [
+        turnResponse("turn_1", "thread_1", [
+          threadItemResponse(
+            "msg_1",
+            "assistant_message",
+            "assistant",
+            "Read this paper [S1] and compare [S2].",
+            {
+              thread_id: "thread_1",
+              turn_id: "turn_1",
+              phase: "final_answer",
+              citations: benchmarkCitations,
+            },
+          ),
         ]),
       ],
       messages: [
         {
           message_id: "msg_1",
           role: "assistant",
-          content_markdown: "Read this paper [S1].",
-          citations: [
-            {
-              source_id: "S1",
-              source_kind: "paperbase_paper",
-              title: "Benchmark Paper",
-              path: "sections/introduction.md",
-              excerpt: "Agents plan and use tools.",
-              paper_id: "arxiv:2401.12345",
-              tags: [],
-            },
-          ],
+          content_markdown: "Read this paper [S1] and compare [S2].",
+          citations: benchmarkCitations,
           recommended_prompts: ["Compare tool use benchmarks across recent planning agents"],
           created_at: "2026-04-21T00:00:00Z",
           status: "completed",
@@ -2648,10 +2650,13 @@ describe("App", () => {
     });
     fireEvent.click(screen.getAllByLabelText("Close paper PDF")[0]!);
 
-    fireEvent.click(screen.getByText("Cited papers (1)"));
+    const sourceButton = screen.getByRole("button", { name: "1 source" });
+    fireEvent.click(sourceButton);
     expect(await screen.findByText("Benchmark Paper")).toBeTruthy();
     expect(screen.getByText("Ada Lovelace")).toBeTruthy();
     expect(screen.getByRole("img", { name: "Benchmark Paper preview" })).toBeTruthy();
+    expect(screen.getByText("2")).toBeTruthy();
+    expect(screen.queryByText("Cited papers (1)")).toBeNull();
     expect(screen.queryByText("Short grounded benchmark summary.")).toBeNull();
     expect(screen.queryByRole("link", { name: "HTML" })).toBeNull();
     expect(screen.queryByRole("link", { name: "PDF" })).toBeNull();
@@ -2666,7 +2671,9 @@ describe("App", () => {
       }),
     ).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "1 sources" }));
+    fireEvent.click(sourceButton);
+    expect(screen.queryByText("Ada Lovelace")).toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: "Papers" }));
     expect(await screen.findByText("Benchmark Paper")).toBeTruthy();
     expect(screen.getByText("Short grounded benchmark summary.")).toBeTruthy();
     expect(screen.getByRole("link", { name: "HTML" }).getAttribute("href")).toBe(
@@ -2675,7 +2682,7 @@ describe("App", () => {
     expect(screen.getByRole("link", { name: "PDF" }).getAttribute("href")).toBe(
       "https://example.test/2401.12345.pdf",
     );
-    expect(screen.queryByText("Read this paper [S1].")).toBeNull();
+    expect(screen.queryByText("Read this paper [S1] and compare [S2].")).toBeNull();
     expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
 
     fireEvent.click(screen.getByRole("tab", { name: "Chat" }));
@@ -2703,7 +2710,7 @@ describe("App", () => {
       );
     });
 
-    fireEvent.click(screen.getByText("Cited papers (1)"));
+    fireEvent.click(screen.getByRole("button", { name: "1 source" }));
     fireEvent.click(screen.getByRole("button", { name: "Start exploration" }));
     await waitFor(() => {
       expect(screen.getByText("Exploration")).toBeTruthy();
