@@ -6412,13 +6412,17 @@ export default function App() {
                             activePaperDiscussion.status === "loading"
                           }
                         >
-                          <span className="paper-exploration-header-vote-icon" aria-hidden="true" />
                           <span className="paper-exploration-header-vote-count">
                             {activePaperDiscussion.votePending
                               ? "..."
                               : activePaperDiscussion.upvoteCount}
                           </span>
+                          <span className="paper-exploration-header-vote-icon" aria-hidden="true" />
                         </button>
+                        <span
+                          className="paper-exploration-header-action-divider"
+                          aria-hidden="true"
+                        />
                         <button
                           type="button"
                           className="paper-exploration-icon-button"

@@ -3669,20 +3669,19 @@ textarea::placeholder,
 }
 
 .paper-exploration-header-vote-button {
-  min-width: 44px;
-  height: 44px;
-  padding: 6px 7px;
+  min-width: 52px;
+  height: 32px;
+  padding: 0 8px;
   border: 1px solid rgba(27, 22, 17, 0.1);
-  border-radius: 16px;
+  border-radius: 6px;
   background: transparent;
   color: #26374e;
   cursor: pointer;
   display: inline-flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 3px;
-  font-size: 15px;
+  gap: 7px;
+  font-size: 13px;
   font-weight: 700;
   line-height: 1;
   opacity: 0.62;
@@ -3724,6 +3723,14 @@ textarea::placeholder,
 
 .paper-exploration-header-vote-count {
   font-variant-numeric: tabular-nums;
+}
+
+.paper-exploration-header-action-divider {
+  width: 1px;
+  height: 20px;
+  margin: 0 2px;
+  background: rgba(27, 22, 17, 0.14);
+  display: inline-block;
 }
 
 .paper-exploration-icon-button {
@@ -4043,7 +4050,7 @@ textarea::placeholder,
   padding: 9px;
   resize: vertical;
   border: 1px solid rgba(27, 22, 17, 0.12);
-  border-radius: 16px;
+  border-radius: 4px;
   background: #ffffff;
   color: #1b1611;
   font-size: 12px;
@@ -9949,6 +9956,10 @@ body.authenticated-theme-dark .paper-exploration-header-vote-button.active {
   border-color: rgba(221, 161, 112, 0.34);
   background: rgba(221, 161, 112, 0.12);
   color: #dda170;
+}
+
+body.authenticated-theme-dark .paper-exploration-header-action-divider {
+  background: rgba(223, 232, 244, 0.16);
 }
 
 body.authenticated-theme-dark .paper-exploration-sidebar {
