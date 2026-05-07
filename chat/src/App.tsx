@@ -474,6 +474,7 @@ export default function App() {
   const [contextUsagePopoverOpen, setContextUsagePopoverOpen] = useState(false);
   const [paperDrawer, setPaperDrawer] = useState<PaperDrawerState>(() => drawerStateFromUrl());
   const [paperPdfModal, setPaperPdfModal] = useState<PaperPdfModalState | null>(null);
+  const [paperExploreMenuOpen, setPaperExploreMenuOpen] = useState(false);
   const [paperExplorations, setPaperExplorations] = useState<PaperExploration[]>(() =>
     restorePaperExplorations(),
   );
@@ -1261,10 +1262,12 @@ export default function App() {
   }, []);
 
   const closePaperPdfModal = useCallback(() => {
+    setPaperExploreMenuOpen(false);
     setPaperPdfModal(null);
   }, []);
 
   const openPaperPdfModal = useCallback((target: PaperActionTarget) => {
+    setPaperExploreMenuOpen(false);
     const cachedPreview = paperCitationPreviewsRef.current[target.paperId];
     const paper = target.paper ?? cachedPreview?.paper ?? null;
     const pdfUrl = target.pdfUrl ?? paper?.pdf_url ?? "";
@@ -1341,7 +1344,8 @@ export default function App() {
   }, []);
 
   const startPaperExploration = useCallback(
-    async (target: PaperActionTarget) => {
+    async (target: PaperActionTarget, options?: { navigate?: boolean }) => {
+      const shouldNavigate = options?.navigate ?? true;
       const preferredProjectId =
         target.projectId ??
         activeThread?.project_id ??
@@ -1354,12 +1358,27 @@ export default function App() {
           (entry) => entry.projectId === preferredProjectId && entry.paperId === target.paperId,
         ) ?? paperExplorationsRef.current.find((entry) => entry.paperId === target.paperId);
       if (existingExploration) {
-        openPaperExploration(existingExploration.explorationId);
-        return;
+        if (shouldNavigate) {
+          openPaperExploration(existingExploration.explorationId);
+        } else {
+          setExpandedProjectIds((current) =>
+            current.includes(existingExploration.projectId)
+              ? current
+              : [...current, existingExploration.projectId],
+          );
+          setCollapsedProjectCategories((current) => ({
+            ...current,
+            [existingExploration.projectId]: {
+              ...current[existingExploration.projectId],
+              notes: false,
+            },
+          }));
+        }
+        return true;
       }
       if (!preferredProjectId) {
         showErrorFlash("Create a project before starting a paper exploration.");
-        return;
+        return false;
       }
 
       const cachedPreview = paperCitationPreviewsRef.current[target.paperId];
@@ -1386,8 +1405,23 @@ export default function App() {
           (entry) => entry.projectId === preferredProjectId && entry.paperId === target.paperId,
         ) ?? paperExplorationsRef.current.find((entry) => entry.paperId === target.paperId);
       if (postFetchExisting) {
-        openPaperExploration(postFetchExisting.explorationId);
-        return;
+        if (shouldNavigate) {
+          openPaperExploration(postFetchExisting.explorationId);
+        } else {
+          setExpandedProjectIds((current) =>
+            current.includes(postFetchExisting.projectId)
+              ? current
+              : [...current, postFetchExisting.projectId],
+          );
+          setCollapsedProjectCategories((current) => ({
+            ...current,
+            [postFetchExisting.projectId]: {
+              ...current[postFetchExisting.projectId],
+              notes: false,
+            },
+          }));
+        }
+        return true;
       }
 
       const now = new Date().toISOString();
@@ -1406,8 +1440,6 @@ export default function App() {
 
       setPaperExplorations((current) => [exploration, ...current]);
       paperExplorationsRef.current = [exploration, ...paperExplorationsRef.current];
-      selectedProjectIdRef.current = preferredProjectId;
-      setSelectedProjectId(preferredProjectId);
       setExpandedProjectIds((current) =>
         current.includes(preferredProjectId) ? current : [...current, preferredProjectId],
       );
@@ -1418,12 +1450,17 @@ export default function App() {
           notes: false,
         },
       }));
-      setWorkspaceView(null);
-      setMobileSidebarOpen(false);
-      setAccountMenuOpen(false);
-      setProjectMenuProjectId(null);
-      setThreadPane("chat");
-      setActiveTab({ kind: "paper_exploration", id: exploration.explorationId });
+      if (shouldNavigate) {
+        selectedProjectIdRef.current = preferredProjectId;
+        setSelectedProjectId(preferredProjectId);
+        setWorkspaceView(null);
+        setMobileSidebarOpen(false);
+        setAccountMenuOpen(false);
+        setProjectMenuProjectId(null);
+        setThreadPane("chat");
+        setActiveTab({ kind: "paper_exploration", id: exploration.explorationId });
+      }
+      return true;
     },
     [activeProjectHomeId, activeThread?.project_id, openPaperExploration, showErrorFlash],
   );
@@ -5410,9 +5447,6 @@ export default function App() {
                   citations={activeThreadCitations}
                   paperCitationPreviews={paperCitationPreviews}
                   openPaperPdfModal={openPaperPdfModal}
-                  openPaperExploration={openPaperExploration}
-                  startPaperExploration={(target) => void startPaperExploration(target)}
-                  paperExplorationIdsByPaperId={paperExplorationIdsByPaperId}
                 />
               ) : isChatEmpty ? (
                 <div className="chat-stage-spacer">
@@ -6374,23 +6408,62 @@ export default function App() {
                 {paperPdfModal.authors ? <span>{paperPdfModal.authors}</span> : null}
               </div>
               <div className="paper-pdf-modal-actions">
-                <button
-                  type="button"
-                  className="paper-pdf-explore-button"
-                  onClick={() => {
-                    void startPaperExploration({
-                      paperId: paperPdfModal.paperId,
-                      path: paperPdfModal.path,
-                      paper: paperPdfModal.paper,
-                      title: paperPdfModal.title,
-                      authors: paperPdfModal.authors,
-                      pdfUrl: paperPdfModal.pdfUrl,
-                    });
-                    closePaperPdfModal();
-                  }}
-                >
-                  Explore this paper
-                </button>
+                <div className={`paper-pdf-explore-menu${paperExploreMenuOpen ? " open" : ""}`}>
+                  <button
+                    type="button"
+                    className="paper-pdf-explore-primary"
+                    onClick={() => {
+                      setPaperExploreMenuOpen(false);
+                      void startPaperExploration({
+                        paperId: paperPdfModal.paperId,
+                        path: paperPdfModal.path,
+                        paper: paperPdfModal.paper,
+                        title: paperPdfModal.title,
+                        authors: paperPdfModal.authors,
+                        pdfUrl: paperPdfModal.pdfUrl,
+                      }).then((didStart) => {
+                        if (didStart) {
+                          closePaperPdfModal();
+                        }
+                      });
+                    }}
+                  >
+                    Explore now
+                  </button>
+                  <button
+                    type="button"
+                    className="paper-pdf-explore-toggle"
+                    aria-label="Explore options"
+                    aria-expanded={paperExploreMenuOpen}
+                    onClick={() => setPaperExploreMenuOpen((current) => !current)}
+                  >
+                    <span className="paper-pdf-explore-chevron" aria-hidden="true" />
+                  </button>
+                  {paperExploreMenuOpen ? (
+                    <div className="paper-pdf-explore-popover" role="menu">
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setPaperExploreMenuOpen(false);
+                          void startPaperExploration(
+                            {
+                              paperId: paperPdfModal.paperId,
+                              path: paperPdfModal.path,
+                              paper: paperPdfModal.paper,
+                              title: paperPdfModal.title,
+                              authors: paperPdfModal.authors,
+                              pdfUrl: paperPdfModal.pdfUrl,
+                            },
+                            { navigate: false },
+                          );
+                        }}
+                      >
+                        Explore later
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
                 <button
                   type="button"
                   className="paper-pdf-modal-close"

@@ -3404,11 +3404,11 @@ textarea::placeholder,
 .thread-paper-card {
   position: relative;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr) auto;
   align-content: start;
   gap: 8px;
   min-height: 292px;
-  padding: 10px;
+  padding: 10px 10px 0;
   border: 1px solid rgba(27, 22, 17, 0.12);
   border-radius: 4px;
   background: #ffffff;
@@ -3423,7 +3423,7 @@ textarea::placeholder,
 .thread-paper-card-main {
   min-width: 0;
   display: grid;
-  align-content: start;
+  align-content: center;
   gap: 6px;
 }
 
@@ -3432,7 +3432,7 @@ textarea::placeholder,
   width: 100%;
   height: clamp(108px, 15vw, 132px);
   border: 1px solid rgba(27, 22, 17, 0.1);
-  border-radius: 3px;
+  border-radius: 3px 3px 0 0;
   background: #f3efe6;
 }
 
@@ -3460,7 +3460,6 @@ textarea::placeholder,
 }
 
 .thread-paper-meta,
-.thread-paper-summary,
 .thread-papers-empty {
   color: var(--muted);
   font-size: 11px;
@@ -3472,23 +3471,6 @@ textarea::placeholder,
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
   overflow: hidden;
-}
-
-.thread-paper-summary {
-  margin: 0;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
-  overflow: hidden;
-}
-
-.thread-paper-actions {
-  display: inline-flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-self: end;
-  padding-top: 2px;
 }
 
 .thread-papers-empty {
@@ -4587,17 +4569,88 @@ textarea {
   gap: 8px;
 }
 
-.paper-pdf-explore-button {
+.paper-pdf-explore-menu {
+  --paper-explore-blue: #2b62e4;
+  position: relative;
   min-height: 30px;
-  padding: 0 10px;
-  border: 1px solid rgba(29, 78, 216, 0.18);
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid rgba(43, 98, 228, 0.28);
   border-radius: 6px;
-  background: rgba(37, 99, 235, 0.08);
-  color: #1d4ed8;
+  background: rgba(43, 98, 228, 0.08);
+  color: var(--paper-explore-blue);
+}
+
+.paper-pdf-explore-primary,
+.paper-pdf-explore-toggle {
+  min-height: 30px;
+  border: 0;
+  background: transparent;
+  color: inherit;
   cursor: pointer;
   font-size: 12px;
   font-weight: 600;
   white-space: nowrap;
+}
+
+.paper-pdf-explore-primary {
+  padding: 0 10px;
+}
+
+.paper-pdf-explore-toggle {
+  width: 30px;
+  border-left: 1px solid currentColor;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.paper-pdf-explore-primary:hover,
+.paper-pdf-explore-toggle:hover,
+.paper-pdf-explore-primary:focus-visible,
+.paper-pdf-explore-toggle:focus-visible,
+.paper-pdf-explore-menu.open {
+  background: rgba(43, 98, 228, 0.12);
+}
+
+.paper-pdf-explore-chevron {
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: translateY(-2px) rotate(45deg);
+}
+
+.paper-pdf-explore-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 2;
+  min-width: 142px;
+  padding: 4px;
+  border: 1px solid rgba(27, 22, 17, 0.12);
+  border-radius: 6px;
+  background: #fffdfa;
+  box-shadow: 0 12px 30px rgba(16, 24, 40, 0.16);
+}
+
+.paper-pdf-explore-popover button {
+  width: 100%;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.paper-pdf-explore-popover button:hover,
+.paper-pdf-explore-popover button:focus-visible {
+  background: rgba(27, 22, 17, 0.07);
 }
 
 .paper-pdf-modal-close {
@@ -8600,7 +8653,6 @@ body.authenticated-theme-dark .paper-exploration-empty,
 body.authenticated-theme-dark .paper-pdf-modal-title span,
 body.authenticated-theme-dark .paper-pdf-modal-state,
 body.authenticated-theme-dark .thread-paper-meta,
-body.authenticated-theme-dark .thread-paper-summary,
 body.authenticated-theme-dark .project-repo-status,
 body.authenticated-theme-dark .project-repo-import-item em,
 body.authenticated-theme-dark .project-repo-option small,
@@ -8908,10 +8960,21 @@ body.authenticated-theme-dark .paper-exploration-delete {
   color: #f1998d;
 }
 
-body.authenticated-theme-dark .paper-pdf-explore-button {
+body.authenticated-theme-dark .paper-pdf-explore-menu {
   border-color: rgba(111, 164, 255, 0.26);
   background: rgba(79, 140, 255, 0.14);
   color: #8ab4ff;
+}
+
+body.authenticated-theme-dark .paper-pdf-explore-popover {
+  border-color: rgba(223, 232, 244, 0.14);
+  background: #121a24;
+  box-shadow: 0 16px 34px rgba(0, 0, 0, 0.34);
+}
+
+body.authenticated-theme-dark .paper-pdf-explore-popover button:hover,
+body.authenticated-theme-dark .paper-pdf-explore-popover button:focus-visible {
+  background: rgba(255, 255, 255, 0.07);
 }
 
 body.authenticated-theme-dark .project-repo-info-icon {

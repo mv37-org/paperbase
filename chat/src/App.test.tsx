@@ -2676,12 +2676,15 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Papers" }));
     expect(await screen.findByText("Benchmark Paper")).toBeTruthy();
     expect(screen.queryByText("Short grounded benchmark summary.")).toBeNull();
-    expect(screen.getByRole("link", { name: "HTML" }).getAttribute("href")).toBe(
-      "https://example.test/2401.12345",
-    );
-    expect(screen.getByRole("link", { name: "PDF" }).getAttribute("href")).toBe(
-      "https://example.test/2401.12345.pdf",
-    );
+    expect(screen.queryByRole("link", { name: "HTML" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "PDF" })).toBeNull();
+    fireEvent.click(screen.getByRole("heading", { name: "Benchmark Paper" }));
+    expect(await screen.findByRole("dialog", { name: "Benchmark Paper PDF" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Explore now" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Explore options" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Explore later" }));
+    expect(screen.getByRole("dialog", { name: "Benchmark Paper PDF" })).toBeTruthy();
+    fireEvent.click(screen.getAllByLabelText("Close paper PDF")[0]!);
     expect(screen.queryByText("Read this paper [S1] and compare [S2].")).toBeNull();
     expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
 
@@ -2711,7 +2714,7 @@ describe("App", () => {
     });
 
     fireEvent.click(screen.getByRole("button", { name: "1 source" }));
-    fireEvent.click(screen.getByRole("button", { name: "Start exploration" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open exploration" }));
     await waitFor(() => {
       expect(screen.getByText("Exploration")).toBeTruthy();
     });

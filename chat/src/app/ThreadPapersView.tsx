@@ -6,18 +6,12 @@ type ThreadPapersViewProps = {
   citations: ChatCitation[];
   paperCitationPreviews: Record<string, PaperCitationPreviewState>;
   openPaperPdfModal: (target: PaperActionTarget) => void;
-  openPaperExploration: (explorationId: string) => void;
-  startPaperExploration: (target: PaperActionTarget) => void;
-  paperExplorationIdsByPaperId: Record<string, string>;
 };
 
 export function ThreadPapersView({
   citations,
   paperCitationPreviews,
   openPaperPdfModal,
-  openPaperExploration,
-  startPaperExploration,
-  paperExplorationIdsByPaperId,
 }: ThreadPapersViewProps) {
   const paperGroups = groupCitationsByPaper(citations);
   return (
@@ -41,18 +35,8 @@ export function ThreadPapersView({
                   pdfUrl: paper?.pdf_url ?? null,
                 }
               : null;
-            const hasExploration = Boolean(
-              citation.paper_id && paperExplorationIdsByPaperId[citation.paper_id],
-            );
-            const explorationId = citation.paper_id
-              ? paperExplorationIdsByPaperId[citation.paper_id]
-              : "";
             const openPaperTarget = () => {
               if (!actionTarget) {
-                return;
-              }
-              if (explorationId) {
-                openPaperExploration(explorationId);
                 return;
               }
               openPaperPdfModal(actionTarget);
@@ -66,6 +50,10 @@ export function ThreadPapersView({
                 {group.citationCount > 1 ? (
                   <span className="paper-citation-count-badge">{group.citationCount}</span>
                 ) : null}
+                <div className="thread-paper-card-main">
+                  <h2>{paper?.title ?? citation.title}</h2>
+                  {paper ? <div className="thread-paper-meta">{paper.authors}</div> : null}
+                </div>
                 {paperPreview?.preview?.image_url ? (
                   <img
                     className="thread-paper-cover-image"
@@ -75,46 +63,6 @@ export function ThreadPapersView({
                 ) : (
                   <div className="thread-paper-cover-placeholder">Paper</div>
                 )}
-                <div className="thread-paper-card-main">
-                  <h2>{paper?.title ?? citation.title}</h2>
-                  {paper ? <div className="thread-paper-meta">{paper.authors}</div> : null}
-                </div>
-                <div className="thread-paper-actions">
-                  {actionTarget ? (
-                    <button
-                      type="button"
-                      className="citation-card-action"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        startPaperExploration(actionTarget);
-                      }}
-                    >
-                      {hasExploration ? "Open exploration" : "Start exploration"}
-                    </button>
-                  ) : null}
-                  {paperPreview?.paper?.html_url ? (
-                    <a
-                      className="citation-card-action"
-                      href={paperPreview.paper.html_url}
-                      target="_blank"
-                      rel="noreferrer"
-                      onClick={(event) => event.stopPropagation()}
-                    >
-                      HTML
-                    </a>
-                  ) : null}
-                  {paperPreview?.paper?.pdf_url ? (
-                    <a
-                      className="citation-card-action"
-                      href={paperPreview.paper.pdf_url}
-                      target="_blank"
-                      rel="noreferrer"
-                      onClick={(event) => event.stopPropagation()}
-                    >
-                      PDF
-                    </a>
-                  ) : null}
-                </div>
               </article>
             );
           })}
