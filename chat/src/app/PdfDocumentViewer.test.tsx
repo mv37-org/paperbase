@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { PdfDocumentViewer, type PdfDocumentViewerHandle } from "./PdfDocumentViewer";
+import type { PaperExplorationAnnotation } from "./appTypes";
 
 const pdfMocks = vi.hoisted(() => ({
   getDocument: vi.fn(),
@@ -325,6 +326,174 @@ describe("PdfDocumentViewer", () => {
         nearby_text: expect.stringContaining("Abstract"),
       }),
     );
+  });
+
+  it("opens note actions for text selections and clears transient highlights", async () => {
+    const onAddNote = vi.fn();
+
+    render(
+      <PdfDocumentViewer
+        url="https://example.test/paper.pdf"
+        title="Paper PDF"
+        paperId="arxiv:2401.12345"
+        onAddNote={onAddNote}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(document.querySelector(".pdf-document-text-layer span")).toBeTruthy();
+    });
+
+    const selectedNode = document.querySelector(".pdf-document-text-layer span")!;
+    const range = {
+      getBoundingClientRect: () => ({
+        bottom: 140,
+        height: 20,
+        left: 80,
+        right: 260,
+        top: 120,
+        width: 180,
+        x: 80,
+        y: 120,
+        toJSON: () => ({}),
+      }),
+      getClientRects: () =>
+        [
+          {
+            bottom: 140,
+            height: 20,
+            left: 80,
+            right: 260,
+            top: 120,
+            width: 180,
+            x: 80,
+            y: 120,
+            toJSON: () => ({}),
+          },
+        ] as unknown as DOMRectList,
+    } as Range;
+    const removeAllRanges = vi.fn();
+    const selection = {
+      anchorNode: selectedNode.firstChild,
+      isCollapsed: false,
+      rangeCount: 1,
+      getRangeAt: () => range,
+      removeAllRanges,
+      toString: () => "Selected method text",
+    } as unknown as Selection;
+    const originalSelection = window.getSelection;
+    Object.defineProperty(window, "getSelection", {
+      configurable: true,
+      value: () => selection,
+    });
+
+    try {
+      fireEvent.mouseUp(document.querySelector(".pdf-document-viewer")!);
+      expect(await screen.findByRole("button", { name: "Add note" })).toBeTruthy();
+      expect(document.querySelector(".pdf-document-text-highlight.active-selection")).toBeTruthy();
+      expect(removeAllRanges).toHaveBeenCalled();
+      fireEvent.keyDown(document, { key: "Escape" });
+      await waitFor(() => {
+        expect(screen.queryByRole("button", { name: "Add note" })).toBeNull();
+      });
+      expect(document.querySelector(".pdf-document-text-highlight.active-selection")).toBeNull();
+
+      fireEvent.mouseUp(document.querySelector(".pdf-document-viewer")!);
+      expect(await screen.findByRole("button", { name: "Add note" })).toBeTruthy();
+      fireEvent.pointerDown(document.body);
+      await waitFor(() => {
+        expect(screen.queryByRole("button", { name: "Add note" })).toBeNull();
+      });
+
+      fireEvent.mouseUp(document.querySelector(".pdf-document-viewer")!);
+      fireEvent.click(await screen.findByRole("button", { name: "Add note" }));
+    } finally {
+      Object.defineProperty(window, "getSelection", {
+        configurable: true,
+        value: originalSelection,
+      });
+    }
+
+    expect(onAddNote).toHaveBeenCalledWith(
+      expect.objectContaining({
+        paperId: "arxiv:2401.12345",
+        pageNumber: 1,
+        selectedText: "Selected method text",
+        rects: expect.arrayContaining([
+          expect.objectContaining({ x: expect.any(Number), y: expect.any(Number) }),
+        ]),
+      }),
+    );
+  });
+
+  it("renders persistent annotations and scrolls to them", async () => {
+    const viewerRef = createRef<PdfDocumentViewerHandle>();
+    const annotation: PaperExplorationAnnotation = {
+      annotationId: "paper-note-1",
+      paperId: "arxiv:2401.12345",
+      pageNumber: 1,
+      kind: "text",
+      note: "Important method",
+      selectedText: "Selected method text",
+      nearbyText: "Abstract body",
+      sectionTitle: null,
+      rects: [{ x: 0.1, y: 0.2, width: 0.3, height: 0.04 }],
+      region: null,
+      createdAt: "2026-04-21T00:00:00Z",
+      updatedAt: "2026-04-21T00:00:00Z",
+    };
+    const regionAnnotation: PaperExplorationAnnotation = {
+      annotationId: "paper-note-2",
+      paperId: "arxiv:2401.12345",
+      pageNumber: 1,
+      kind: "region",
+      note: "Important figure",
+      selectedText: null,
+      nearbyText: "Abstract body",
+      sectionTitle: null,
+      rects: [],
+      region: {
+        bbox: { x: 0.1, y: 0.2, width: 0.3, height: 0.2 },
+        points: [
+          { x: 0.1, y: 0.2 },
+          { x: 0.4, y: 0.2 },
+          { x: 0.4, y: 0.4 },
+        ],
+      },
+      createdAt: "2026-04-21T00:00:00Z",
+      updatedAt: "2026-04-21T00:00:00Z",
+    };
+    const { rerender } = render(
+      <PdfDocumentViewer
+        ref={viewerRef}
+        url="https://example.test/paper.pdf"
+        title="Paper PDF"
+        paperId="arxiv:2401.12345"
+        annotations={[annotation, regionAnnotation]}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(document.querySelector(".pdf-document-text-highlight.annotation")).toBeTruthy();
+    });
+    expect(document.querySelector(".pdf-document-annotation-region polygon")).toBeTruthy();
+    act(() => {
+      viewerRef.current?.scrollToAnnotation("paper-note-1");
+    });
+    expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "center" });
+
+    rerender(
+      <PdfDocumentViewer
+        ref={viewerRef}
+        url="https://example.test/paper.pdf"
+        title="Paper PDF"
+        paperId="arxiv:2401.12345"
+        annotations={[annotation, regionAnnotation]}
+        annotationsHidden
+      />,
+    );
+    expect(document.querySelector(".pdf-document-text-highlight.annotation")).toBeNull();
+    expect(document.querySelector(".pdf-document-annotation-region")).toBeNull();
   });
 
   it("emits pen region actions with normalized points", async () => {

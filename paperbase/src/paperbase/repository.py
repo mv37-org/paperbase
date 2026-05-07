@@ -2422,7 +2422,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
         statement = (
             select(
                 PaperORM,
-                func.coalesce(upvote_counts.c.upvote_count, 0).label("upvote_count"),
+                (func.coalesce(upvote_counts.c.upvote_count, 0) + 1).label("upvote_count"),
                 viewer_has_upvoted.label("viewer_has_upvoted"),
             )
             .outerjoin(upvote_counts, upvote_counts.c.paper_id == PaperORM.paper_id)
@@ -2490,7 +2490,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
             )
         statement = select(
             PaperORM,
-            func.coalesce(upvote_counts, 0).label("upvote_count"),
+            (func.coalesce(upvote_counts, 0) + 1).label("upvote_count"),
             viewer_has_upvoted.label("viewer_has_upvoted"),
         ).where(PaperORM.paper_id == paper_id, PaperORM.index_status == "indexed")
         with self._session() as session:
@@ -2549,7 +2549,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 )
         return PaperVoteSummary(
             paper_id=paper_id,
-            upvote_count=int(upvote_count),
+            upvote_count=int(upvote_count) + 1,
             viewer_has_upvoted=viewer_has_upvoted,
         )
 
@@ -5829,7 +5829,7 @@ class MemoryPaperRepository(PaperRepository):
         return settings
 
     def _paper_upvote_count(self, paper_id: str) -> int:
-        return sum(1 for voted_paper_id, _user_id in self.paper_upvotes if voted_paper_id == paper_id)
+        return 1 + sum(1 for voted_paper_id, _user_id in self.paper_upvotes if voted_paper_id == paper_id)
 
     def _viewer_has_upvoted(self, paper_id: str, user_id: str | None) -> bool:
         if not user_id:

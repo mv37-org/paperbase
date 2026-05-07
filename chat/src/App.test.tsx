@@ -140,6 +140,8 @@ const apiMocks = vi.hoisted(() => {
 });
 
 const pdfViewerMocks = vi.hoisted(() => ({
+  clearSelection: vi.fn(),
+  scrollToAnnotation: vi.fn(),
   scrollToSection: vi.fn(),
 }));
 
@@ -377,16 +379,30 @@ vi.mock("./app/PdfDocumentViewer", async () => {
         title: string;
         url: string;
         paperId?: string;
+        annotations?: Array<{ annotationId: string; note: string }>;
+        annotationsHidden?: boolean;
         onSelectionAction?: (selection: {
           paper_id: string;
           page_number: number;
           action: "explain";
           selected_text: string;
         }) => void;
+        onAddNote?: (target: {
+          paperId: string;
+          pageNumber: number;
+          selectedText: string;
+          rects: Array<{ x: number; y: number; width: number; height: number }>;
+        }) => void;
       },
-      ref: ForwardedRef<{ scrollToSection: (sectionId: string) => void }>,
+      ref: ForwardedRef<{
+        clearSelection: () => void;
+        scrollToAnnotation: (annotationId: string) => void;
+        scrollToSection: (sectionId: string) => void;
+      }>,
     ) => {
       React.useImperativeHandle(ref, () => ({
+        clearSelection: pdfViewerMocks.clearSelection,
+        scrollToAnnotation: pdfViewerMocks.scrollToAnnotation,
         scrollToSection: pdfViewerMocks.scrollToSection,
       }));
       React.useEffect(() => {
@@ -405,6 +421,30 @@ vi.mock("./app/PdfDocumentViewer", async () => {
           className: `pdf-document-viewer${props.className ? ` ${props.className}` : ""}`,
           "data-url": props.url,
         },
+        React.createElement(
+          "span",
+          { "data-testid": "mock-pdf-annotation-count" },
+          `Mock annotations ${props.annotations?.length ?? 0}`,
+        ),
+        props.annotationsHidden
+          ? React.createElement("span", null, "Mock highlights hidden")
+          : null,
+        props.onAddNote && props.paperId
+          ? React.createElement(
+              "button",
+              {
+                type: "button",
+                onClick: () =>
+                  props.onAddNote?.({
+                    paperId: props.paperId!,
+                    pageNumber: 1,
+                    selectedText: "Selected benchmark text",
+                    rects: [{ x: 0.1, y: 0.2, width: 0.3, height: 0.04 }],
+                  }),
+              },
+              "Mock PDF add note",
+            )
+          : null,
         props.onSelectionAction && props.paperId
           ? React.createElement(
               "button",
@@ -1525,6 +1565,77 @@ describe("App", () => {
     expect(await screen.findByText("Paper streamed answer")).toBeTruthy();
     expect(document.querySelector(".pdf-document-viewer.paper-exploration-frame")).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Benchmark Paper" })).toBeTruthy();
+  });
+
+  it("adds, edits, scrolls to, and deletes paper exploration notes", async () => {
+    const explorationId = "paper-exploration:proj_1:arxiv:2401.12345";
+    localStorage.setItem(
+      ACTIVE_TAB_KEY,
+      JSON.stringify({ kind: "paper_exploration", id: explorationId }),
+    );
+    localStorage.setItem(
+      PAPER_EXPLORATIONS_KEY,
+      JSON.stringify([
+        {
+          explorationId,
+          projectId: "proj_1",
+          paperId: "arxiv:2401.12345",
+          path: "sections/introduction.md",
+          title: "Benchmark Paper",
+          authors: "Ada Lovelace",
+          previewImageUrl: "",
+          pdfUrl: "https://example.test/2401.12345.pdf",
+          createdAt: "2026-04-21T00:00:00Z",
+          updatedAt: "2026-04-21T00:00:00Z",
+        },
+      ]),
+    );
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Benchmark Paper" })).toBeTruthy();
+    expect(screen.getByTestId("mock-pdf-annotation-count").textContent).toBe("Mock annotations 0");
+    fireEvent.click(screen.getByRole("button", { name: "Mock PDF add note" }));
+    const noteDialog = await screen.findByRole("dialog", { name: "Add note" });
+    fireEvent.change(within(noteDialog).getByLabelText("Paper note"), {
+      target: { value: "Important benchmark note" },
+    });
+    fireEvent.click(within(noteDialog).getByRole("button", { name: "Add note" }));
+
+    expect(await screen.findByText("Important benchmark note")).toBeTruthy();
+    expect(screen.getByTestId("mock-pdf-annotation-count").textContent).toBe("Mock annotations 1");
+    expect(pdfViewerMocks.clearSelection).toHaveBeenCalled();
+    fireEvent.click(screen.getByText("Important benchmark note"));
+    expect(pdfViewerMocks.scrollToAnnotation).toHaveBeenCalledWith(
+      expect.stringMatching(/^paper-note-/),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const editDialog = await screen.findByRole("dialog", { name: "Edit note" });
+    fireEvent.change(within(editDialog).getByLabelText("Paper note"), {
+      target: { value: "Edited benchmark note" },
+    });
+    fireEvent.click(within(editDialog).getByRole("button", { name: "Save note" }));
+    expect(await screen.findByText("Edited benchmark note")).toBeTruthy();
+    expect(screen.queryByText("Important benchmark note")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Zen" }));
+    expect(await screen.findByText("Mock highlights hidden")).toBeTruthy();
+    expect(screen.queryByLabelText("Paper details")).toBeNull();
+    expect(document.querySelector("#app-shell")?.classList.contains("sidebar-collapsed")).toBe(
+      true,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Zen" }));
+    fireEvent.click(screen.getByLabelText("Open paper details"));
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    const deleteDialog = await screen.findByRole("dialog", { name: "Delete note" });
+    fireEvent.click(within(deleteDialog).getByRole("button", { name: "Delete note" }));
+    await waitFor(() => {
+      expect(screen.queryByText("Edited benchmark note")).toBeNull();
+    });
+    expect(screen.getByTestId("mock-pdf-annotation-count").textContent).toBe("Mock annotations 0");
   });
 
   it("clears exploration search before closing from the inline close button", async () => {

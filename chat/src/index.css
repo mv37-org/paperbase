@@ -4343,24 +4343,94 @@ textarea::placeholder,
   gap: 8px;
 }
 
-.paper-exploration-notes-input {
-  display: block;
-  width: calc(100% - 28px);
-  min-height: 220px;
-  margin: 0 14px 16px;
-  padding: 10px;
-  resize: vertical;
-  border: 1px solid rgba(27, 22, 17, 0.12);
-  border-radius: 6px;
-  background: #ffffff;
-  color: #1b1611;
-  font-size: 13px;
-  line-height: 1.45;
+.paper-exploration-note-list {
+  padding: 0 14px 16px;
+  display: grid;
+  gap: 9px;
 }
 
-.paper-exploration-notes-input:focus {
-  border-color: rgba(153, 88, 42, 0.34);
-  box-shadow: 0 0 0 3px rgba(153, 88, 42, 0.1);
+.paper-exploration-note-card {
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid rgba(153, 88, 42, 0.16);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.72);
+  display: grid;
+  gap: 8px;
+}
+
+.paper-exploration-note-main {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  display: grid;
+  gap: 4px;
+  text-align: left;
+}
+
+.paper-exploration-note-location {
+  color: #99582a;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.paper-exploration-note-body {
+  color: #27211b;
+  font-size: 12.5px;
+  font-weight: 650;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.paper-exploration-note-context {
+  display: -webkit-box;
+  overflow: hidden;
+  color: #70675e;
+  font-size: 11.5px;
+  line-height: 1.35;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.paper-exploration-note-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.paper-exploration-note-actions button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #70675e;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.paper-exploration-note-actions button:hover,
+.paper-exploration-note-actions button:focus-visible,
+.paper-exploration-note-main:hover .paper-exploration-note-body,
+.paper-exploration-note-main:focus-visible .paper-exploration-note-body {
+  color: #99582a;
+}
+
+.paper-annotation-modal-context {
+  max-height: 96px;
+  overflow: auto;
+  padding: 9px 10px;
+  border: 1px solid rgba(153, 88, 42, 0.14);
+  border-radius: 6px;
+  background: rgba(255, 244, 189, 0.45);
+  color: #4d453e;
+  font-size: 12px;
+  line-height: 1.42;
 }
 
 .assistant-hover-actions {
@@ -5770,6 +5840,33 @@ textarea {
   color: transparent;
 }
 
+.pdf-document-text-highlight,
+.pdf-document-annotation-anchor {
+  position: absolute;
+  z-index: 3;
+  pointer-events: none;
+}
+
+.pdf-document-annotation-anchor {
+  width: 1px;
+  height: 1px;
+}
+
+.pdf-document-text-highlight {
+  border-radius: 2px;
+  mix-blend-mode: multiply;
+}
+
+.pdf-document-text-highlight.active-selection {
+  background: rgba(37, 99, 235, 0.2);
+  box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.14);
+}
+
+.pdf-document-text-highlight.annotation {
+  background: rgba(250, 204, 21, 0.34);
+  box-shadow: 0 0 0 1px rgba(202, 138, 4, 0.12);
+}
+
 .pdf-document-viewer.pen-mode {
   cursor: crosshair;
 }
@@ -5804,9 +5901,24 @@ textarea {
   opacity: 0.13;
 }
 
+.pdf-document-annotation-region {
+  position: absolute;
+  z-index: 3;
+  pointer-events: none;
+  overflow: visible;
+}
+
+.pdf-document-annotation-region polygon,
+.pdf-document-annotation-region rect {
+  fill: rgba(250, 204, 21, 0.18);
+  stroke: rgba(202, 138, 4, 0.34);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+}
+
 .pdf-document-selection-popover {
   position: absolute;
-  z-index: 5;
+  z-index: 6;
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -10430,9 +10542,36 @@ body.authenticated-theme-dark .paper-exploration-comment-replies {
   border-left-color: rgba(221, 161, 112, 0.22);
 }
 
-body.authenticated-theme-dark .paper-exploration-notes-input {
-  border-color: rgba(223, 232, 244, 0.14);
-  background: #0d141c;
+body.authenticated-theme-dark .paper-exploration-note-card {
+  border-color: rgba(221, 161, 112, 0.18);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+body.authenticated-theme-dark .paper-exploration-note-location {
+  color: #dda170;
+}
+
+body.authenticated-theme-dark .paper-exploration-note-body {
+  color: var(--text);
+}
+
+body.authenticated-theme-dark .paper-exploration-note-context,
+body.authenticated-theme-dark .paper-exploration-note-actions button {
+  color: var(--muted);
+}
+
+body.authenticated-theme-dark .paper-exploration-note-actions button:hover,
+body.authenticated-theme-dark .paper-exploration-note-actions button:focus-visible,
+body.authenticated-theme-dark .paper-exploration-note-main:hover .paper-exploration-note-body,
+body.authenticated-theme-dark
+  .paper-exploration-note-main:focus-visible
+  .paper-exploration-note-body {
+  color: #dda170;
+}
+
+body.authenticated-theme-dark .paper-annotation-modal-context {
+  border-color: rgba(221, 161, 112, 0.22);
+  background: rgba(221, 161, 112, 0.12);
   color: var(--text);
 }
 

@@ -2646,7 +2646,7 @@ def test_trending_feed_pages_ready_papers_and_sorts_by_latest_or_upvotes(browser
     assert "arxiv:2403.88888" in {paper.paper_id for paper in default_feed.papers + second_page.papers}
     assert "arxiv:2403.77777" not in {paper.paper_id for paper in default_feed.papers + second_page.papers}
     assert upvote_feed.papers[0].paper_id == "arxiv:2402.00000"
-    assert upvote_feed.papers[0].upvote_count == 3
+    assert upvote_feed.papers[0].upvote_count == 4
     assert upvote_feed.papers[0].viewer_has_upvoted is True
 
 
@@ -2680,7 +2680,7 @@ def test_trending_detail_builds_nested_comments_and_vote_summary(browser_service
 
     detail = service.get_browser_trending_paper("arxiv:2404.11111", viewer=session.user)
 
-    assert detail.upvote_count == 1
+    assert detail.upvote_count == 2
     assert detail.viewer_has_upvoted is True
     assert detail.image_url is not None
     assert len(detail.comments) == 1
@@ -2697,6 +2697,10 @@ def test_browser_paper_discussion_builds_comments_and_vote_summary(browser_servi
     paper = _sample_paper("2404.33333", title="Paper Discussion", abstract="Discussion")
     paper.index_status = "indexed"
     service.repository.upsert_paper(paper)  # type: ignore[attr-defined]
+
+    default_discussion = service.get_browser_paper_discussion("arxiv:2404.33333", viewer=session.user)
+    assert default_discussion.upvote_count == 1
+    assert default_discussion.viewer_has_upvoted is False
 
     service.set_browser_paper_upvote("arxiv:2404.33333", user=session.user, upvoted=True)
     created = service.create_browser_paper_comment(
@@ -2715,7 +2719,7 @@ def test_browser_paper_discussion_builds_comments_and_vote_summary(browser_servi
 
     discussion = service.get_browser_paper_discussion("arxiv:2404.33333", viewer=session.user)
 
-    assert discussion.upvote_count == 1
+    assert discussion.upvote_count == 2
     assert discussion.viewer_has_upvoted is True
     assert len(discussion.comments) == 1
     assert discussion.comments[0].body == "Root paper note"

@@ -89,7 +89,7 @@ class PaperSelectionPayload(BaseModel):
 
 class PaperVoteSummary(BaseModel):
     paper_id: str
-    upvote_count: int = 0
+    upvote_count: int = 1
     viewer_has_upvoted: bool = False
 
 
@@ -127,7 +127,7 @@ class PaperCommentsResponse(BaseModel):
 
 class PaperDiscussionResponse(BaseModel):
     paper_id: str
-    upvote_count: int = 0
+    upvote_count: int = 1
     viewer_has_upvoted: bool = False
     comments: list[PaperCommentResponse] = Field(default_factory=list)
 
@@ -141,7 +141,7 @@ class TrendingPaperCardResponse(BaseModel):
     html_url: str
     pdf_url: str
     image_url: str | None = None
-    upvote_count: int = 0
+    upvote_count: int = 1
     viewer_has_upvoted: bool = False
 
 
@@ -157,7 +157,7 @@ class TrendingPaperDetailResponse(BaseModel):
     html_url: str
     pdf_url: str
     image_url: str | None = None
-    upvote_count: int = 0
+    upvote_count: int = 1
     viewer_has_upvoted: bool = False
     comments: list[PaperCommentResponse] = Field(default_factory=list)
 

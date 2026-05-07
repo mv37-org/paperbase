@@ -80,11 +80,13 @@ import type {
   FeedbackSentiment,
   ModalFlashKind,
   OpenTab,
+  PaperAnnotationTarget,
   PaperActionTarget,
   PaperCitationPreviewState,
   PaperDrawerContent,
   PaperDrawerState,
   PaperExploration,
+  PaperExplorationAnnotation,
   PaperPdfModalState,
   ProjectItemState,
   ProjectModalState,
@@ -371,6 +373,93 @@ function samePaperSections(left: PdfDocumentSection[], right: PdfDocumentSection
   );
 }
 
+function normalizeUnitNumber(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.max(0, Math.min(1, value))
+    : null;
+}
+
+function normalizePaperAnnotationRect(value: unknown) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const entry = value as Record<string, unknown>;
+  const x = normalizeUnitNumber(entry.x);
+  const y = normalizeUnitNumber(entry.y);
+  const width = normalizeUnitNumber(entry.width);
+  const height = normalizeUnitNumber(entry.height);
+  if (x === null || y === null || width === null || height === null) {
+    return null;
+  }
+  return { x, y, width, height };
+}
+
+function normalizePaperAnnotationPoint(value: unknown) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const entry = value as Record<string, unknown>;
+  const x = normalizeUnitNumber(entry.x);
+  const y = normalizeUnitNumber(entry.y);
+  if (x === null || y === null) {
+    return null;
+  }
+  return { x, y };
+}
+
+function normalizePaperExplorationAnnotation(value: unknown): PaperExplorationAnnotation | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const entry = value as Partial<Record<keyof PaperExplorationAnnotation, unknown>>;
+  const annotationId = typeof entry.annotationId === "string" ? entry.annotationId : "";
+  const paperId = typeof entry.paperId === "string" ? entry.paperId : "";
+  const pageNumber = typeof entry.pageNumber === "number" ? Math.floor(entry.pageNumber) : 0;
+  const note = typeof entry.note === "string" ? entry.note : "";
+  const kind = entry.kind === "region" ? "region" : "text";
+  const rects = Array.isArray(entry.rects)
+    ? entry.rects
+        .map((rect) => normalizePaperAnnotationRect(rect))
+        .filter((rect): rect is NonNullable<typeof rect> => Boolean(rect))
+    : [];
+  const region =
+    entry.region && typeof entry.region === "object"
+      ? (() => {
+          const regionEntry = entry.region as Record<string, unknown>;
+          const bbox = normalizePaperAnnotationRect(regionEntry.bbox);
+          const points = Array.isArray(regionEntry.points)
+            ? regionEntry.points
+                .map((point) => normalizePaperAnnotationPoint(point))
+                .filter((point): point is NonNullable<typeof point> => Boolean(point))
+            : [];
+          return bbox && points.length > 1 ? { bbox, points } : null;
+        })()
+      : null;
+  if (!annotationId || !paperId || pageNumber < 1 || !note.trim()) {
+    return null;
+  }
+  if (kind === "text" && rects.length === 0) {
+    return null;
+  }
+  if (kind === "region" && !region) {
+    return null;
+  }
+  return {
+    annotationId,
+    paperId,
+    pageNumber,
+    kind,
+    note,
+    selectedText: typeof entry.selectedText === "string" ? entry.selectedText : null,
+    nearbyText: typeof entry.nearbyText === "string" ? entry.nearbyText : null,
+    sectionTitle: typeof entry.sectionTitle === "string" ? entry.sectionTitle : null,
+    rects,
+    region,
+    createdAt: typeof entry.createdAt === "string" ? entry.createdAt : new Date().toISOString(),
+    updatedAt: typeof entry.updatedAt === "string" ? entry.updatedAt : new Date().toISOString(),
+  };
+}
+
 type PaperDiscussionPanelState = {
   status: "idle" | "loading" | "ready" | "error";
   error: string;
@@ -390,7 +479,7 @@ function emptyPaperDiscussionState(): PaperDiscussionPanelState {
   return {
     status: "idle",
     error: "",
-    upvoteCount: 0,
+    upvoteCount: 1,
     viewerHasUpvoted: false,
     comments: [],
     draft: "",
@@ -589,6 +678,11 @@ function normalizePaperExploration(value: unknown): PaperExploration | null {
     projectId,
     paperId,
     chatThreadId: typeof entry.chatThreadId === "string" ? entry.chatThreadId : undefined,
+    annotations: Array.isArray(entry.annotations)
+      ? entry.annotations
+          .map((annotation) => normalizePaperExplorationAnnotation(annotation))
+          .filter((annotation): annotation is PaperExplorationAnnotation => Boolean(annotation))
+      : [],
     path,
     title,
     authors: typeof entry.authors === "string" ? entry.authors : "",
@@ -729,10 +823,18 @@ export default function App() {
   const [paperExplorationSidebarPane, setPaperExplorationSidebarPane] = useState<
     "info" | "chat" | "notes" | "social"
   >("info");
-  const [paperExplorationNotes, setPaperExplorationNotes] = useState<Record<string, string>>({});
   const [paperExplorationChatDrafts, setPaperExplorationChatDrafts] = useState<
     Record<string, string>
   >({});
+  const [paperAnnotationModal, setPaperAnnotationModal] = useState<{
+    mode: "create" | "edit";
+    explorationId: string;
+    annotationId?: string;
+    target?: PaperAnnotationTarget;
+    draft: string;
+    error: string;
+  } | null>(null);
+  const [paperExplorationZenMode, setPaperExplorationZenMode] = useState(false);
   const [paperExplorationSections, setPaperExplorationSections] = useState<
     Record<string, PdfDocumentSection[]>
   >({});
@@ -1195,6 +1297,7 @@ export default function App() {
     () => splitPaperAuthors(activePaperExploration?.authors ?? ""),
     [activePaperExploration?.authors],
   );
+  const activePaperExplorationAnnotations = activePaperExploration?.annotations ?? [];
   const paperExplorationIdsByPaperId = useMemo(
     () =>
       Object.fromEntries(
@@ -1884,6 +1987,7 @@ export default function App() {
     setSidebarCollapsed(true);
     setPaperExplorationSidebarCollapsed(false);
     setPaperExplorationSidebarPane("info");
+    setPaperExplorationZenMode(false);
     setPaperDrawer(null);
     setPaperDrawerPaper(null);
     setPaperDrawerContent(null);
@@ -1980,6 +2084,7 @@ export default function App() {
         explorationId: paperExplorationIdFor(preferredProjectId, target.paperId),
         projectId: preferredProjectId,
         paperId: target.paperId,
+        annotations: [],
         path: target.path,
         title: paper?.title ?? target.title ?? target.paperId,
         authors: paper?.authors ?? target.authors ?? "",
@@ -2011,6 +2116,7 @@ export default function App() {
         setSidebarCollapsed(true);
         setPaperExplorationSidebarCollapsed(false);
         setPaperExplorationSidebarPane("info");
+        setPaperExplorationZenMode(false);
         setPaperDrawer(null);
         setPaperDrawerPaper(null);
         setPaperDrawerContent(null);
@@ -3812,6 +3918,7 @@ export default function App() {
             setSidebarCollapsed(true);
             setPaperExplorationSidebarCollapsed(false);
             setPaperExplorationSidebarPane("info");
+            setPaperExplorationZenMode(false);
             setPaperDrawer(null);
             setPaperDrawerPaper(null);
             setPaperDrawerContent(null);
@@ -4397,6 +4504,141 @@ export default function App() {
     [activePaperExploration, activePaperExplorationChatDraft, sendPaperExplorationChatMessage],
   );
 
+  const updatePaperExplorationAnnotations = useCallback(
+    (
+      explorationId: string,
+      updater: (annotations: PaperExplorationAnnotation[]) => PaperExplorationAnnotation[],
+    ) => {
+      setPaperExplorations((current) => {
+        const now = new Date().toISOString();
+        const next = current.map((exploration) =>
+          exploration.explorationId === explorationId
+            ? {
+                ...exploration,
+                annotations: updater(exploration.annotations ?? []),
+                updatedAt: now,
+              }
+            : exploration,
+        );
+        paperExplorationsRef.current = next;
+        return next;
+      });
+    },
+    [],
+  );
+
+  const handlePaperAnnotationRequest = useCallback(
+    (target: PaperAnnotationTarget) => {
+      if (!activePaperExploration || activePaperExploration.paperId !== target.paperId) {
+        return;
+      }
+      setPaperAnnotationModal({
+        mode: "create",
+        explorationId: activePaperExploration.explorationId,
+        target,
+        draft: "",
+        error: "",
+      });
+    },
+    [activePaperExploration],
+  );
+
+  const closePaperAnnotationModal = useCallback(() => {
+    setPaperAnnotationModal(null);
+  }, []);
+
+  const savePaperAnnotationModal = useCallback(() => {
+    if (!paperAnnotationModal) {
+      return;
+    }
+    const note = paperAnnotationModal.draft.trim();
+    if (!note) {
+      setPaperAnnotationModal((current) =>
+        current ? { ...current, error: "Write a note before saving." } : current,
+      );
+      return;
+    }
+    const now = new Date().toISOString();
+    if (paperAnnotationModal.mode === "edit" && paperAnnotationModal.annotationId) {
+      updatePaperExplorationAnnotations(paperAnnotationModal.explorationId, (annotations) =>
+        annotations.map((annotation) =>
+          annotation.annotationId === paperAnnotationModal.annotationId
+            ? { ...annotation, note, updatedAt: now }
+            : annotation,
+        ),
+      );
+      setPaperAnnotationModal(null);
+      return;
+    }
+    const target = paperAnnotationModal.target;
+    if (!target) {
+      return;
+    }
+    const annotation: PaperExplorationAnnotation = {
+      annotationId: `paper-note-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      paperId: target.paperId,
+      pageNumber: target.pageNumber,
+      kind: target.region ? "region" : "text",
+      note,
+      selectedText: target.selectedText ?? null,
+      nearbyText: target.nearbyText ?? null,
+      sectionTitle: target.sectionTitle ?? null,
+      rects: target.rects ?? [],
+      region: target.region ?? null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    updatePaperExplorationAnnotations(paperAnnotationModal.explorationId, (annotations) => [
+      annotation,
+      ...annotations,
+    ]);
+    setPaperExplorationSidebarCollapsed(false);
+    setPaperExplorationSidebarPane("notes");
+    paperExplorationViewerRef.current?.clearSelection();
+    setPaperAnnotationModal(null);
+  }, [paperAnnotationModal, updatePaperExplorationAnnotations]);
+
+  const openEditPaperAnnotationModal = useCallback(
+    (explorationId: string, annotation: PaperExplorationAnnotation) => {
+      setPaperAnnotationModal({
+        mode: "edit",
+        explorationId,
+        annotationId: annotation.annotationId,
+        draft: annotation.note,
+        error: "",
+      });
+    },
+    [],
+  );
+
+  const openDeletePaperAnnotationModal = useCallback(
+    (explorationId: string, annotation: PaperExplorationAnnotation) => {
+      setDeleteModalState({
+        kind: "paper_annotation",
+        explorationId,
+        annotationId: annotation.annotationId,
+        title: annotation.note,
+      });
+    },
+    [],
+  );
+
+  const scrollToPaperAnnotation = useCallback((annotationId: string) => {
+    paperExplorationViewerRef.current?.scrollToAnnotation(annotationId);
+  }, []);
+
+  const togglePaperExplorationZenMode = useCallback(() => {
+    setPaperExplorationZenMode((current) => {
+      const next = !current;
+      if (next) {
+        setSidebarCollapsed(true);
+        setPaperExplorationSidebarCollapsed(true);
+        paperExplorationViewerRef.current?.clearSelection();
+      }
+      return next;
+    });
+  }, []);
+
   const handlePaperSelectionAction = useCallback(
     async (selection: PaperSelectionPayload) => {
       const actionLabel =
@@ -4460,8 +4702,9 @@ export default function App() {
     setMobileSidebarOpen(false);
     setPaperExplorationSidebarCollapsed(true);
     setPaperExplorationSidebarPane("info");
-    setPaperExplorationNotes({});
     setPaperExplorationChatDrafts({});
+    setPaperAnnotationModal(null);
+    setPaperExplorationZenMode(false);
     setPaperExplorationSections({});
     setPaperDiscussionStates({});
     setActivePaperExplorationSectionId(null);
@@ -4490,6 +4733,7 @@ export default function App() {
     setMobileSidebarOpen(false);
     setSidebarCollapsed(true);
     setPaperExplorationSidebarCollapsed(false);
+    setPaperExplorationZenMode(false);
   }, []);
 
   const closePaperExplorationSidebar = useCallback(() => {
@@ -5048,8 +5292,14 @@ export default function App() {
         await deletePythonFile(deleteModalState.fileId);
         removePythonFileIdsLocally([deleteModalState.fileId], deleteModalState.projectId);
         await refreshProjects();
-      } else {
+      } else if (deleteModalState.kind === "paper_exploration") {
         deletePaperExploration(deleteModalState.explorationId);
+      } else {
+        updatePaperExplorationAnnotations(deleteModalState.explorationId, (annotations) =>
+          annotations.filter(
+            (annotation) => annotation.annotationId !== deleteModalState.annotationId,
+          ),
+        );
       }
       closeDeleteModal();
     } catch (error) {
@@ -5062,6 +5312,7 @@ export default function App() {
     refreshProjects,
     removePythonFileIdsLocally,
     removeThreadIdsLocally,
+    updatePaperExplorationAnnotations,
   ]);
 
   const handleProjectStartChat = useCallback(
@@ -6614,6 +6865,14 @@ export default function App() {
                         >
                           Pen
                         </button>
+                        <button
+                          type="button"
+                          className={`paper-pdf-utility-button${paperExplorationZenMode ? " active" : ""}`}
+                          aria-pressed={paperExplorationZenMode}
+                          onClick={togglePaperExplorationZenMode}
+                        >
+                          Zen
+                        </button>
                         <span
                           className="paper-exploration-header-action-divider"
                           aria-hidden="true"
@@ -6672,8 +6931,11 @@ export default function App() {
                         title={`${activePaperExploration.title} PDF`}
                         url={activePaperExploration.pdfUrl}
                         toolMode={paperPdfToolMode}
+                        annotations={activePaperExplorationAnnotations}
+                        annotationsHidden={paperExplorationZenMode}
                         onSectionsChange={handleActivePaperExplorationSections}
                         onSelectionAction={handlePaperSelectionAction}
+                        onAddNote={handlePaperAnnotationRequest}
                       />
                     ) : (
                       <div className="paper-exploration-empty">
@@ -7992,18 +8254,61 @@ export default function App() {
                       <span>My notes</span>
                       <span className="paper-exploration-sidebar-chevron" aria-hidden="true" />
                     </summary>
-                    <textarea
-                      className="paper-exploration-notes-input"
-                      aria-label="Exploration notes"
-                      value={paperExplorationNotes[activePaperExploration.explorationId] ?? ""}
-                      onChange={(event) => {
-                        const nextValue = event.target.value;
-                        setPaperExplorationNotes((current) => ({
-                          ...current,
-                          [activePaperExploration.explorationId]: nextValue,
-                        }));
-                      }}
-                    />
+                    {activePaperExplorationAnnotations.length > 0 ? (
+                      <div className="paper-exploration-note-list">
+                        {activePaperExplorationAnnotations.map((annotation) => (
+                          <article
+                            key={annotation.annotationId}
+                            className="paper-exploration-note-card"
+                          >
+                            <button
+                              type="button"
+                              className="paper-exploration-note-main"
+                              onClick={() => scrollToPaperAnnotation(annotation.annotationId)}
+                            >
+                              <span className="paper-exploration-note-location">
+                                Page {annotation.pageNumber} ·{" "}
+                                {annotation.kind === "region" ? "Area" : "Text"}
+                              </span>
+                              <span className="paper-exploration-note-body">{annotation.note}</span>
+                              {annotation.selectedText ? (
+                                <span className="paper-exploration-note-context">
+                                  {annotation.selectedText}
+                                </span>
+                              ) : null}
+                            </button>
+                            <div className="paper-exploration-note-actions">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  openEditPaperAnnotationModal(
+                                    activePaperExploration.explorationId,
+                                    annotation,
+                                  )
+                                }
+                              >
+                                Edit
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  openDeletePaperAnnotationModal(
+                                    activePaperExploration.explorationId,
+                                    annotation,
+                                  )
+                                }
+                              >
+                                Delete
+                              </button>
+                            </div>
+                          </article>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="paper-exploration-sidebar-note">
+                        Select text or draw an area, then choose Add note.
+                      </p>
+                    )}
                   </details>
                 )}
               </div>
@@ -9212,6 +9517,71 @@ export default function App() {
       </div>
 
       <div
+        id="paper-annotation-modal"
+        className={`modal${paperAnnotationModal ? "" : " hidden"}`}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="paper-annotation-modal-title"
+      >
+        <div className="modal-backdrop" onClick={closePaperAnnotationModal} />
+        <div className="modal-panel">
+          <button className="modal-close" type="button" onClick={closePaperAnnotationModal}>
+            ×
+          </button>
+          <div className="modal-heading">
+            <h2 id="paper-annotation-modal-title" className="modal-title">
+              {paperAnnotationModal?.mode === "edit" ? "Edit note" : "Add note"}
+            </h2>
+            <p className="modal-caption">
+              {paperAnnotationModal?.mode === "edit"
+                ? "Update this paper note."
+                : "Save a note on the selected paper passage."}
+            </p>
+          </div>
+          <div className="modal-view visible">
+            <div className="stack">
+              {paperAnnotationModal?.target?.selectedText ? (
+                <div className="paper-annotation-modal-context">
+                  {paperAnnotationModal.target.selectedText}
+                </div>
+              ) : null}
+              <label className="project-field" htmlFor="paper-annotation-note">
+                <span>Note</span>
+                <textarea
+                  id="paper-annotation-note"
+                  aria-label="Paper note"
+                  value={paperAnnotationModal?.draft ?? ""}
+                  rows={5}
+                  onChange={(event) =>
+                    setPaperAnnotationModal((current) =>
+                      current ? { ...current, draft: event.target.value, error: "" } : current,
+                    )
+                  }
+                />
+              </label>
+              {paperAnnotationModal?.error ? (
+                <div className="project-form-error">{paperAnnotationModal.error}</div>
+              ) : null}
+              <button
+                className="primary-button project-submit-button"
+                type="button"
+                onClick={savePaperAnnotationModal}
+              >
+                {paperAnnotationModal?.mode === "edit" ? "Save note" : "Add note"}
+              </button>
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={closePaperAnnotationModal}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div
         id="delete-modal"
         className={`modal${deleteModalState ? "" : " hidden"}`}
         role="dialog"
@@ -9231,7 +9601,9 @@ export default function App() {
                   ? "Delete file"
                   : deleteModalState?.kind === "paper_exploration"
                     ? "Delete exploration"
-                    : "Delete session"}
+                    : deleteModalState?.kind === "paper_annotation"
+                      ? "Delete note"
+                      : "Delete session"}
             </h2>
             <p className="modal-caption">
               {deleteModalState?.kind === "project"
@@ -9240,7 +9612,9 @@ export default function App() {
                   ? `Delete ${deleteModalState.title}?`
                   : deleteModalState?.kind === "paper_exploration"
                     ? `Delete ${deleteModalState.title}?`
-                    : `Delete ${deleteModalState?.title ?? "this session"}?`}
+                    : deleteModalState?.kind === "paper_annotation"
+                      ? "Delete this note?"
+                      : `Delete ${deleteModalState?.title ?? "this session"}?`}
             </p>
           </div>
           <div className="modal-view visible">
@@ -9256,7 +9630,9 @@ export default function App() {
                     ? "Delete file"
                     : deleteModalState?.kind === "paper_exploration"
                       ? "Delete exploration"
-                      : "Delete session"}
+                      : deleteModalState?.kind === "paper_annotation"
+                        ? "Delete note"
+                        : "Delete session"}
               </button>
               <button className="secondary-button" type="button" onClick={closeDeleteModal}>
                 Cancel

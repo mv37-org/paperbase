@@ -1,4 +1,5 @@
 import {
+  Fragment,
   forwardRef,
   useEffect,
   useImperativeHandle,
@@ -15,6 +16,11 @@ import {
 } from "pdfjs-dist/legacy/build/pdf.mjs";
 import pdfWorkerUrl from "pdfjs-dist/legacy/build/pdf.worker.mjs?url";
 import type { PaperSelectionAction, PaperSelectionPayload } from "../types";
+import type {
+  PaperAnnotationRect,
+  PaperAnnotationTarget,
+  PaperExplorationAnnotation,
+} from "./appTypes";
 
 GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
@@ -27,6 +33,8 @@ export type PdfDocumentSection = {
 
 export type PdfDocumentViewerHandle = {
   scrollToSection: (sectionId: string) => void;
+  scrollToAnnotation: (annotationId: string) => void;
+  clearSelection: () => void;
 };
 
 type PdfDocumentToolMode = "select" | "pen";
@@ -37,8 +45,11 @@ type PdfDocumentViewerProps = {
   paperId?: string;
   className?: string;
   toolMode?: PdfDocumentToolMode;
+  annotations?: PaperExplorationAnnotation[];
+  annotationsHidden?: boolean;
   onSectionsChange?: (sections: PdfDocumentSection[]) => void;
   onSelectionAction?: (selection: PaperSelectionPayload) => void;
+  onAddNote?: (target: PaperAnnotationTarget) => void;
 };
 
 type PdfViewerStatus = "loading" | "ready" | "error";
@@ -47,16 +58,24 @@ const VIEWER_RELAYOUT_WIDTH_THRESHOLD = 24;
 
 type NormalizedPoint = { x: number; y: number };
 
+type PageBox = { left: number; top: number; width: number; height: number };
+
 type PenStroke = {
   pageNumber: number;
   points: NormalizedPoint[];
-  pageBox: { left: number; top: number; width: number; height: number };
+  pageBox: PageBox;
+};
+
+type TextSelectionHighlight = {
+  pageNumber: number;
+  rects: PaperAnnotationRect[];
 };
 
 type SelectionPopoverState = {
   left: number;
   top: number;
   payload: Omit<PaperSelectionPayload, "action">;
+  noteTarget: PaperAnnotationTarget;
 };
 
 const SELECTION_ACTIONS: Array<{ action: PaperSelectionAction; label: string }> = [
@@ -292,6 +311,22 @@ function textForPage(linesByPage: Map<number, string[]>, pageNumber: number) {
   return (linesByPage.get(pageNumber) ?? []).join(" ").replace(/\s+/g, " ").trim();
 }
 
+function normalizeRectWithinPage(
+  rect: DOMRect,
+  pageElement: HTMLElement,
+): PaperAnnotationRect | null {
+  const pageRect = pageElement.getBoundingClientRect();
+  if (pageRect.width <= 0 || pageRect.height <= 0 || rect.width <= 0 || rect.height <= 0) {
+    return null;
+  }
+  return {
+    x: clampUnit((rect.left - pageRect.left) / pageRect.width),
+    y: clampUnit((rect.top - pageRect.top) / pageRect.height),
+    width: clampUnit(rect.width / pageRect.width),
+    height: clampUnit(rect.height / pageRect.height),
+  };
+}
+
 function cropCanvasRegion(
   canvas: HTMLCanvasElement | undefined,
   bbox: ReturnType<typeof bboxForPoints>,
@@ -347,8 +382,11 @@ export const PdfDocumentViewer = forwardRef<PdfDocumentViewerHandle, PdfDocument
       paperId,
       className = "",
       toolMode = "select",
+      annotations = [],
+      annotationsHidden = false,
       onSectionsChange,
       onSelectionAction,
+      onAddNote,
     },
     ref,
   ) {
@@ -356,6 +394,7 @@ export const PdfDocumentViewer = forwardRef<PdfDocumentViewerHandle, PdfDocument
     const pagesRef = useRef<HTMLDivElement | null>(null);
     const onSectionsChangeRef = useRef(onSectionsChange);
     const onSelectionActionRef = useRef(onSelectionAction);
+    const onAddNoteRef = useRef(onAddNote);
     const sectionAnchorsRef = useRef(new Map<string, HTMLElement>());
     const pageTextRef = useRef(new Map<number, string[]>());
     const pageCanvasesRef = useRef(new Map<number, HTMLCanvasElement>());
@@ -363,12 +402,30 @@ export const PdfDocumentViewer = forwardRef<PdfDocumentViewerHandle, PdfDocument
     const drawingPointerIdRef = useRef<number | null>(null);
     const drawingPageElementRef = useRef<HTMLElement | null>(null);
     const activeStrokeRef = useRef<PenStroke | null>(null);
+    const selectionPopoverRef = useRef<SelectionPopoverState | null>(null);
     const [viewerWidth, setViewerWidth] = useState(0);
     const [status, setStatus] = useState<PdfViewerStatus>("loading");
     const [error, setError] = useState("");
     const [selectionPopover, setSelectionPopover] = useState<SelectionPopoverState | null>(null);
+    const [activeTextHighlight, setActiveTextHighlight] = useState<TextSelectionHighlight | null>(
+      null,
+    );
     const [activeStroke, setActiveStroke] = useState<PenStroke | null>(null);
     const [completedStroke, setCompletedStroke] = useState<PenStroke | null>(null);
+    const [pageBoxes, setPageBoxes] = useState<Record<number, PageBox>>({});
+
+    const clearSelection = () => {
+      latestTextSelectionRef.current = null;
+      drawingPointerIdRef.current = null;
+      drawingPageElementRef.current = null;
+      activeStrokeRef.current = null;
+      selectionPopoverRef.current = null;
+      setSelectionPopover(null);
+      setActiveTextHighlight(null);
+      setActiveStroke(null);
+      setCompletedStroke(null);
+      window.getSelection()?.removeAllRanges();
+    };
 
     useImperativeHandle(
       ref,
@@ -379,6 +436,16 @@ export const PdfDocumentViewer = forwardRef<PdfDocumentViewerHandle, PdfDocument
             block: "start",
           });
         },
+        scrollToAnnotation: (annotationId: string) => {
+          const safeAnnotationId = annotationId.replace(/"/g, '\\"');
+          scrollRef.current
+            ?.querySelector<HTMLElement>(`[data-annotation-id="${safeAnnotationId}"]`)
+            ?.scrollIntoView({
+              behavior: "smooth",
+              block: "center",
+            });
+        },
+        clearSelection,
       }),
       [],
     );
@@ -390,6 +457,14 @@ export const PdfDocumentViewer = forwardRef<PdfDocumentViewerHandle, PdfDocument
     useEffect(() => {
       onSelectionActionRef.current = onSelectionAction;
     }, [onSelectionAction]);
+
+    useEffect(() => {
+      onAddNoteRef.current = onAddNote;
+    }, [onAddNote]);
+
+    useEffect(() => {
+      selectionPopoverRef.current = selectionPopover;
+    }, [selectionPopover]);
 
     useEffect(() => {
       const element = scrollRef.current;
@@ -434,8 +509,10 @@ export const PdfDocumentViewer = forwardRef<PdfDocumentViewerHandle, PdfDocument
       drawingPageElementRef.current = null;
       activeStrokeRef.current = null;
       setSelectionPopover(null);
+      setActiveTextHighlight(null);
       setActiveStroke(null);
       setCompletedStroke(null);
+      setPageBoxes({});
       setError("");
 
       if (!url) {
@@ -466,6 +543,7 @@ export const PdfDocumentViewer = forwardRef<PdfDocumentViewerHandle, PdfDocument
           const textSections: PdfDocumentSection[] = [];
           const pageElements = new Map<number, HTMLDivElement>();
           const pageHeights = new Map<number, number>();
+          const nextPageBoxes: Record<number, PageBox> = {};
 
           for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
             if (cancelled) {
@@ -535,6 +613,7 @@ export const PdfDocumentViewer = forwardRef<PdfDocumentViewerHandle, PdfDocument
             textLayer.style.height = `${Math.floor(viewport.height)}px`;
             pageElement.appendChild(textLayer);
             container.appendChild(pageElement);
+            nextPageBoxes[pageNumber] = strokePageBox(pageElement);
 
             const renderTask = page.render({
               canvas,
@@ -559,6 +638,7 @@ export const PdfDocumentViewer = forwardRef<PdfDocumentViewerHandle, PdfDocument
             const sections =
               outlineSections.length > 0 ? outlineSections : finalizeSections(textSections);
             attachSectionAnchors(sections, pageElements, pageHeights, sectionAnchorsRef.current);
+            setPageBoxes(nextPageBoxes);
             onSectionsChangeRef.current?.(sections);
           }
         } catch (renderError) {
@@ -593,13 +673,23 @@ export const PdfDocumentViewer = forwardRef<PdfDocumentViewerHandle, PdfDocument
         selection.anchorNode instanceof Element
           ? selection.anchorNode
           : (selection.anchorNode?.parentElement ?? null);
-      const pageNumber = pageNumberFromElement(anchorElement);
+      const pageElement = anchorElement?.closest<HTMLElement>(".pdf-document-page") ?? null;
+      const pageNumber = pageNumberFromElement(pageElement);
       const rect = range?.getBoundingClientRect();
-      if (!rect || rect.width <= 0 || rect.height <= 0) {
+      if (!rect || rect.width <= 0 || rect.height <= 0 || !pageElement) {
+        return null;
+      }
+      const rangeRects =
+        typeof range.getClientRects === "function" ? Array.from(range.getClientRects()) : [];
+      const normalizedRects = (rangeRects.length > 0 ? rangeRects : [rect])
+        .map((candidate) => normalizeRectWithinPage(candidate, pageElement))
+        .filter((candidate): candidate is PaperAnnotationRect => Boolean(candidate));
+      if (normalizedRects.length === 0) {
         return null;
       }
       const root = scrollRef.current;
       const rootRect = root?.getBoundingClientRect();
+      const nearbyText = textForPage(pageTextRef.current, pageNumber);
       return {
         left: rect.left + rect.width / 2 - (rootRect?.left ?? 0) + (root?.scrollLeft ?? 0),
         top: Math.max(8, rect.top - 48 - (rootRect?.top ?? 0) + (root?.scrollTop ?? 0)),
@@ -607,7 +697,14 @@ export const PdfDocumentViewer = forwardRef<PdfDocumentViewerHandle, PdfDocument
           paper_id: paperId,
           page_number: pageNumber,
           selected_text: selectedText,
-          nearby_text: textForPage(pageTextRef.current, pageNumber),
+          nearby_text: nearbyText,
+        },
+        noteTarget: {
+          paperId,
+          pageNumber,
+          selectedText,
+          nearbyText,
+          rects: normalizedRects,
         },
       } satisfies SelectionPopoverState;
     };
@@ -626,7 +723,12 @@ export const PdfDocumentViewer = forwardRef<PdfDocumentViewerHandle, PdfDocument
       }
       latestTextSelectionRef.current = payload.payload;
       setCompletedStroke(null);
+      setActiveTextHighlight({
+        pageNumber: payload.noteTarget.pageNumber,
+        rects: payload.noteTarget.rects ?? [],
+      });
       setSelectionPopover(payload);
+      window.getSelection()?.removeAllRanges();
     };
 
     const pointFromPointerEvent = (
@@ -741,6 +843,17 @@ export const PdfDocumentViewer = forwardRef<PdfDocumentViewerHandle, PdfDocument
         left: current.pageBox.left + (bbox.x + bbox.width / 2) * current.pageBox.width,
         top: Math.max(8, current.pageBox.top + bbox.y * current.pageBox.height - 44),
         payload,
+        noteTarget: {
+          paperId,
+          pageNumber: current.pageNumber,
+          selectedText: payload.selected_text,
+          nearbyText: payload.nearby_text,
+          sectionTitle: payload.section_title,
+          region: {
+            points: current.points,
+            bbox,
+          },
+        },
       });
     };
 
@@ -761,6 +874,30 @@ export const PdfDocumentViewer = forwardRef<PdfDocumentViewerHandle, PdfDocument
       };
     });
 
+    useEffect(() => {
+      const handleKeyDown = (event: KeyboardEvent) => {
+        if (event.key === "Escape" && selectionPopoverRef.current) {
+          clearSelection();
+        }
+      };
+      const handlePointerDown = (event: PointerEvent) => {
+        if (!selectionPopoverRef.current) {
+          return;
+        }
+        const target = event.target instanceof Element ? event.target : null;
+        if (target?.closest(".pdf-document-selection-popover")) {
+          return;
+        }
+        clearSelection();
+      };
+      document.addEventListener("keydown", handleKeyDown);
+      document.addEventListener("pointerdown", handlePointerDown, true);
+      return () => {
+        document.removeEventListener("keydown", handleKeyDown);
+        document.removeEventListener("pointerdown", handlePointerDown, true);
+      };
+    }, []);
+
     const handleSelectionAction = (action: PaperSelectionAction) => {
       if (!selectionPopover) {
         return;
@@ -769,9 +906,15 @@ export const PdfDocumentViewer = forwardRef<PdfDocumentViewerHandle, PdfDocument
         ...selectionPopover.payload,
         action,
       });
-      setSelectionPopover(null);
-      setCompletedStroke(null);
-      window.getSelection()?.removeAllRanges();
+      clearSelection();
+    };
+
+    const handleAddNote = () => {
+      if (!selectionPopover) {
+        return;
+      }
+      onAddNoteRef.current?.(selectionPopover.noteTarget);
+      clearSelection();
     };
 
     const renderStroke = (stroke: PenStroke, className: string) => {
@@ -821,20 +964,125 @@ export const PdfDocumentViewer = forwardRef<PdfDocumentViewerHandle, PdfDocument
       );
     };
 
+    const renderTextHighlight = (
+      highlight: TextSelectionHighlight,
+      className: string,
+      annotationId?: string,
+    ) => {
+      const pageBox = pageBoxes[highlight.pageNumber];
+      if (!pageBox || highlight.rects.length === 0) {
+        return null;
+      }
+      const anchorTopRatio = Math.min(...highlight.rects.map((rect) => rect.y));
+      return (
+        <>
+          {annotationId ? (
+            <span
+              className="pdf-document-annotation-anchor"
+              data-annotation-id={annotationId}
+              style={{
+                left: pageBox.left,
+                top: pageBox.top + anchorTopRatio * pageBox.height,
+              }}
+            />
+          ) : null}
+          {highlight.rects.map((rect, index) => (
+            <span
+              key={`${highlight.pageNumber}-${index}-${rect.x}-${rect.y}`}
+              className={`pdf-document-text-highlight ${className}`}
+              style={{
+                left: pageBox.left + rect.x * pageBox.width,
+                top: pageBox.top + rect.y * pageBox.height,
+                width: rect.width * pageBox.width,
+                height: rect.height * pageBox.height,
+              }}
+            />
+          ))}
+        </>
+      );
+    };
+
+    const renderAnnotation = (annotation: PaperExplorationAnnotation) => {
+      const pageBox = pageBoxes[annotation.pageNumber];
+      if (!pageBox) {
+        return null;
+      }
+      if (annotation.kind === "text") {
+        return renderTextHighlight(
+          { pageNumber: annotation.pageNumber, rects: annotation.rects ?? [] },
+          "annotation",
+          annotation.annotationId,
+        );
+      }
+      const region = annotation.region;
+      if (!region) {
+        return null;
+      }
+      const anchorTop = pageBox.top + region.bbox.y * pageBox.height;
+      const polygonPoints = region.points
+        .map((point) => `${point.x * pageBox.width},${point.y * pageBox.height}`)
+        .join(" ");
+      return (
+        <>
+          <span
+            className="pdf-document-annotation-anchor"
+            data-annotation-id={annotation.annotationId}
+            style={{ left: pageBox.left, top: anchorTop }}
+          />
+          <svg
+            className="pdf-document-annotation-region"
+            aria-hidden="true"
+            viewBox={`0 0 ${pageBox.width} ${pageBox.height}`}
+            preserveAspectRatio="none"
+            style={{
+              left: pageBox.left,
+              top: pageBox.top,
+              width: pageBox.width,
+              height: pageBox.height,
+            }}
+          >
+            {region.points.length >= 3 ? (
+              <polygon points={polygonPoints} />
+            ) : (
+              <rect
+                x={region.bbox.x * pageBox.width}
+                y={region.bbox.y * pageBox.height}
+                width={region.bbox.width * pageBox.width}
+                height={region.bbox.height * pageBox.height}
+              />
+            )}
+          </svg>
+        </>
+      );
+    };
+
     const viewerClassName = `pdf-document-viewer${toolMode === "pen" ? " pen-mode" : ""}${
-      className ? ` ${className}` : ""
-    }`;
+      annotationsHidden ? " annotations-hidden" : ""
+    }${className ? ` ${className}` : ""}`;
 
     return (
       <div ref={scrollRef} className={viewerClassName} aria-label={title} onMouseUp={handleMouseUp}>
         <div ref={pagesRef} className="pdf-document-pages" />
-        {completedStroke ? renderStroke(completedStroke, "completed") : null}
-        {activeStroke ? renderStroke(activeStroke, "active") : null}
+        {!annotationsHidden && activeTextHighlight
+          ? renderTextHighlight(activeTextHighlight, "active-selection")
+          : null}
+        {!annotationsHidden
+          ? annotations.map((annotation) => (
+              <Fragment key={annotation.annotationId}>{renderAnnotation(annotation)}</Fragment>
+            ))
+          : null}
+        {!annotationsHidden && completedStroke ? renderStroke(completedStroke, "completed") : null}
+        {!annotationsHidden && activeStroke ? renderStroke(activeStroke, "active") : null}
         {selectionPopover ? (
           <div
             className="pdf-document-selection-popover"
             style={{ left: selectionPopover.left, top: selectionPopover.top }}
           >
+            {onAddNote ? (
+              <button type="button" onClick={handleAddNote}>
+                Add note
+              </button>
+            ) : null}
             {SELECTION_ACTIONS.map((item) => (
               <button
                 key={item.action}
