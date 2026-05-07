@@ -231,6 +231,19 @@ class FakeChatModel:
         return items
 
     def create_response(self, *, api_key: str, prompt: Prompt) -> ResponseEnvelope:
+        if "Write one 4 to 5 word title" in prompt.base_instructions:
+            return ResponseEnvelope(
+                response_id="resp_fake_chat_title",
+                items=[
+                    ResponseItem(
+                        item_id="msg_chat_title",
+                        item_type="assistant_message",
+                        role="assistant",
+                        status="completed",
+                        content_text="Grounded Research Question Patterns",
+                    )
+                ],
+            )
         if "Generate five concise follow-up research prompts" in prompt.base_instructions:
             return ResponseEnvelope(
                 response_id="resp_fake_recommended_reading",
@@ -4719,7 +4732,7 @@ def test_first_prompt_renames_new_chat_to_short_summary(browser_service):
         SendChatMessageRequest(content="Help me brainstorm a short product name"),
     )
 
-    assert first_response.thread.title == "Brainstorm Short Product Name"
+    assert first_response.thread.title == "Grounded Research Question Patterns"
 
     second_response = service.send_chat_message(
         session.user,
@@ -4727,7 +4740,7 @@ def test_first_prompt_renames_new_chat_to_short_summary(browser_service):
         SendChatMessageRequest(content="Now focus on a whimsical version"),
     )
 
-    assert second_response.thread.title == "Brainstorm Short Product Name"
+    assert second_response.thread.title == "Grounded Research Question Patterns"
 
 
 def test_chat_context_uses_full_active_thread_history(browser_service):
@@ -5583,7 +5596,8 @@ def test_browser_chat_stream_emits_citations_and_completion(monkeypatch, browser
         events = _parse_sse_events("".join(response.iter_text()))
 
     event_names = [event_name for event_name, _ in events]
-    assert event_names[:3] == ["turn_started", "item_started", "item_completed"]
+    assert event_names[:4] == ["thread_title", "turn_started", "item_started", "item_completed"]
+    assert events[0][1]["title"] == "Grounded Research Question Patterns"
     function_call_items = _event_items(events, event_name="item_completed", item_type="function_call")
     function_output_items = _event_items(events, event_name="item_completed", item_type="function_call_output")
     assistant_final_items = _event_items(

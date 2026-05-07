@@ -11,7 +11,6 @@ type ChatThreadHeaderProps = {
   menuOpen: boolean;
   onSelectPane: (pane: ThreadPane) => void;
   onToggleMenu: () => void;
-  onOpenExportSummary: () => void;
   onExportMarkdown: () => void;
   onExportPdf: () => void;
   onRename: () => void;
@@ -24,7 +23,6 @@ export function ChatThreadHeader({
   menuOpen,
   onSelectPane,
   onToggleMenu,
-  onOpenExportSummary,
   onExportMarkdown,
   onExportPdf,
   onRename,
@@ -114,19 +112,22 @@ export function ChatThreadHeader({
             aria-expanded={menuOpen}
             onClick={onToggleMenu}
           >
-            <span aria-hidden="true">•••</span>
+            <img
+              src={staticAssetPath("menu.svg")}
+              className="chat-thread-menu-icon"
+              alt=""
+              aria-hidden="true"
+            />
           </button>
           {menuOpen ? (
             <div className="chat-thread-menu" role="menu">
-              <button type="button" role="menuitem" onClick={onOpenExportSummary}>
-                Export summary
-              </button>
               <button type="button" role="menuitem" onClick={onExportMarkdown}>
-                Export summary as Markdown
+                Export summary as markdown
               </button>
               <button type="button" role="menuitem" onClick={onExportPdf}>
                 Export summary as PDF
               </button>
+              <div className="chat-thread-menu-divider" role="separator" />
               <button type="button" role="menuitem" onClick={onRename}>
                 Rename
               </button>

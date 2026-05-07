@@ -2,6 +2,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import type {
   CSSProperties,
   ChangeEvent,
+  FormEvent,
   KeyboardEvent as ReactKeyboardEvent,
   UIEvent,
 } from "react";
@@ -186,11 +187,27 @@ function chatMessageRowId(messageId: string) {
   return `chat-message-${messageId.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
 }
 
+type ThreadRenameModalState = {
+  threadId: string;
+  title: string;
+  draft: string;
+  saving: boolean;
+  error: string;
+};
+
 const RESUME_PROJECT_MODAL_KEY = "paperbase-resume-new-project";
 const LANDING_TRENDING_PAGE_SIZE = 10;
 const PROJECT_ITEM_PAGE_SIZE = 5;
 const PROJECT_SIDEBAR_ITEM_KINDS: ProjectItemKind[] = ["python_file", "thread"];
 const PAPER_EXPLORATIONS_KEY = "paperbase-paper-explorations";
+const PAPER_EXPLORATION_OUTLINE_ITEMS = [
+  "Abstract",
+  "Introduction",
+  "Method",
+  "Experiments & results",
+  "Conclusion",
+  "References",
+];
 const AUTH_VIEW_COPY: Record<AuthView, { title: string; caption: string }> = {
   login: { title: "Log in", caption: "Use your account to continue." },
   signup: { title: "Create account", caption: "Create your account." },
@@ -319,6 +336,21 @@ function formatWorkedDuration(startMs: number | null, endMs: number | null) {
 
 function paperExplorationIdFor(projectId: string, paperId: string) {
   return `paper-exploration:${projectId}:${paperId}`;
+}
+
+function splitPaperAuthors(authors: string) {
+  return authors
+    .split(/\s*(?:,|\band\b)\s*/i)
+    .map((author) => author.trim())
+    .filter(Boolean);
+}
+
+function authorInitials(author: string) {
+  const parts = author
+    .split(/\s+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return (parts[0]?.[0] ?? "").concat(parts.length > 1 ? (parts[parts.length - 1]?.[0] ?? "") : "");
 }
 
 function normalizePaperExploration(value: unknown): PaperExploration | null {
@@ -451,6 +483,7 @@ export default function App() {
   const [threadDebugModalOpen, setThreadDebugModalOpen] = useState(false);
   const [threadPane, setThreadPane] = useState<ThreadPane>("chat");
   const [chatHeaderMenuOpen, setChatHeaderMenuOpen] = useState(false);
+  const [threadRenameModal, setThreadRenameModal] = useState<ThreadRenameModalState | null>(null);
   const [exportModalState, setExportModalState] = useState<ExportModalState>(null);
   const [feedbackModalState, setFeedbackModalState] = useState<FeedbackModalState>(null);
   const [feedbackReasons, setFeedbackReasons] = useState<string[]>([]);
@@ -473,6 +506,11 @@ export default function App() {
   const [includeUploads] = useState(true);
   const [includePapers] = useState(true);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [paperExplorationSidebarCollapsed, setPaperExplorationSidebarCollapsed] = useState(true);
+  const [paperExplorationSidebarPane, setPaperExplorationSidebarPane] = useState<
+    "details" | "notes"
+  >("details");
+  const [paperExplorationNotes, setPaperExplorationNotes] = useState<Record<string, string>>({});
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [emptyStateProjectPickerOpen, setEmptyStateProjectPickerOpen] = useState(false);
@@ -706,6 +744,12 @@ export default function App() {
   }, [sidebarCollapsed]);
 
   useEffect(() => {
+    if (activeTab?.kind !== "paper_exploration") {
+      setPaperExplorationSidebarCollapsed(true);
+    }
+  }, [activeTab?.kind]);
+
+  useEffect(() => {
     localStorage.setItem(DISMISSED_CHAT_SETUP_KEY, JSON.stringify(dismissedChatSetupSignatures));
   }, [dismissedChatSetupSignatures]);
 
@@ -867,6 +911,13 @@ export default function App() {
     ? paperExplorations.filter((exploration) => exploration.projectId === activeProjectHomeId)
         .length
     : 0;
+  const activePaperExplorationProject = activePaperExploration
+    ? (projects.find((project) => project.project_id === activePaperExploration.projectId) ?? null)
+    : null;
+  const activePaperExplorationAuthors = useMemo(
+    () => splitPaperAuthors(activePaperExploration?.authors ?? ""),
+    [activePaperExploration?.authors],
+  );
   const paperExplorationIdsByPaperId = useMemo(
     () =>
       Object.fromEntries(
@@ -892,7 +943,12 @@ export default function App() {
   const showThreadDebugButton = Boolean(
     activeTab?.kind === "thread" && activeThreadDebugBundle && !isChatEmpty,
   );
-  const paperDrawerOpen = Boolean(paperDrawer);
+  const paperExplorationSidebarOpen = Boolean(
+    activeTab?.kind === "paper_exploration" &&
+    activePaperExploration &&
+    !paperExplorationSidebarCollapsed,
+  );
+  const paperDrawerOpen = Boolean(paperDrawer && !paperExplorationSidebarOpen);
   const hasProjects = projects.length > 0;
   const emptyStateProject =
     projects.find((project) => project.project_id === selectedProjectId) ?? projects[0] ?? null;
@@ -1482,6 +1538,15 @@ export default function App() {
     setMobileSidebarOpen(false);
     setAccountMenuOpen(false);
     setProjectMenuProjectId(null);
+    setSidebarCollapsed(true);
+    setPaperExplorationSidebarCollapsed(false);
+    setPaperExplorationSidebarPane("details");
+    setPaperDrawer(null);
+    setPaperDrawerPaper(null);
+    setPaperDrawerContent(null);
+    setPaperDrawerStatus("idle");
+    setPaperDrawerError("");
+    updateDrawerUrl(null);
     setThreadPane("chat");
     setActiveTab({ kind: "paper_exploration", id: exploration.explorationId });
   }, []);
@@ -1600,6 +1665,15 @@ export default function App() {
         setMobileSidebarOpen(false);
         setAccountMenuOpen(false);
         setProjectMenuProjectId(null);
+        setSidebarCollapsed(true);
+        setPaperExplorationSidebarCollapsed(false);
+        setPaperExplorationSidebarPane("details");
+        setPaperDrawer(null);
+        setPaperDrawerPaper(null);
+        setPaperDrawerContent(null);
+        setPaperDrawerStatus("idle");
+        setPaperDrawerError("");
+        updateDrawerUrl(null);
         setThreadPane("chat");
         setActiveTab({ kind: "paper_exploration", id: exploration.explorationId });
       }
@@ -2502,19 +2576,83 @@ export default function App() {
     [activeThread, showNoteFlash],
   );
 
-  const handleHeaderRenameThread = useCallback(async () => {
+  const openHeaderRenameThread = useCallback(() => {
     if (!activeThread) {
       return;
     }
-    const nextTitle = window.prompt("Rename chat", displayThreadTitle(activeThread.title));
-    if (!nextTitle || !nextTitle.trim()) {
-      return;
-    }
-    const renamed = await renameThread(activeThread.thread_id, nextTitle.trim());
-    setThreadMap((current) => ({ ...current, [renamed.thread_id]: renamed }));
-    upsertThreadIntoProjectItems(renamed);
+    const currentTitle = displayThreadTitle(activeThread.title);
+    setThreadRenameModal({
+      threadId: activeThread.thread_id,
+      title: currentTitle,
+      draft: currentTitle,
+      saving: false,
+      error: "",
+    });
     setChatHeaderMenuOpen(false);
-  }, [activeThread, upsertThreadIntoProjectItems]);
+  }, [activeThread]);
+
+  const closeThreadRenameModal = useCallback(() => {
+    setThreadRenameModal((current) => (current?.saving ? current : null));
+  }, []);
+
+  const submitThreadRenameModal = useCallback(
+    async (event?: FormEvent<HTMLFormElement>) => {
+      event?.preventDefault();
+      if (!threadRenameModal || threadRenameModal.saving) {
+        return;
+      }
+      const nextTitle = threadRenameModal.draft.trim();
+      if (!nextTitle) {
+        setThreadRenameModal((current) =>
+          current ? { ...current, error: "Enter a title for this session." } : current,
+        );
+        return;
+      }
+      setThreadRenameModal((current) =>
+        current ? { ...current, saving: true, error: "" } : current,
+      );
+      try {
+        const renamed = await renameThread(threadRenameModal.threadId, nextTitle);
+        setThreadMap((current) => ({ ...current, [renamed.thread_id]: renamed }));
+        upsertThreadIntoProjectItems(renamed);
+        setThreadRenameModal(null);
+      } catch (error) {
+        setThreadRenameModal((current) =>
+          current && current.threadId === threadRenameModal.threadId
+            ? {
+                ...current,
+                saving: false,
+                error: error instanceof Error ? error.message : "Session could not be renamed.",
+              }
+            : current,
+        );
+      }
+    },
+    [threadRenameModal, upsertThreadIntoProjectItems],
+  );
+
+  const updateStreamingThreadTitle = useCallback(
+    (threadId: string, title: string, fallback: ChatThreadResponse) => {
+      const nextTitle = title.trim();
+      if (!nextTitle) {
+        return;
+      }
+      const updatedAt = new Date().toISOString();
+      updateThread(threadId, (thread) => ({
+        ...(thread ?? fallback),
+        title: nextTitle,
+        updated_at: updatedAt,
+      }));
+    },
+    [updateThread],
+  );
+
+  const closeFeedbackModal = useCallback(() => {
+    setFeedbackModalState(null);
+    setFeedbackReasons([]);
+    setFeedbackNote("");
+    setFeedbackSubmitting(false);
+  }, []);
 
   const openFeedbackModal = useCallback(
     (message: ChatMessageResponse, sentiment: FeedbackSentiment) => {
@@ -2524,13 +2662,6 @@ export default function App() {
     },
     [],
   );
-
-  const closeFeedbackModal = useCallback(() => {
-    setFeedbackModalState(null);
-    setFeedbackReasons([]);
-    setFeedbackNote("");
-    setFeedbackSubmitting(false);
-  }, []);
 
   const submitFeedbackModal = useCallback(async () => {
     if (!activeThread || !feedbackModalState) {
@@ -2746,6 +2877,22 @@ export default function App() {
             paper_ids: paperIds,
           },
           (eventName, payload) => {
+            if (eventName === "thread_title") {
+              updateStreamingThreadTitle(payload.thread_id, payload.title, {
+                thread_id: threadId,
+                project_id: fallbackProjectId,
+                project_name: fallbackProjectName,
+                project_instructions: fallbackProjectInstructions,
+                title: optimisticTitle,
+                created_at: now,
+                updated_at: now,
+                items: [],
+                turns: [],
+                messages: [optimisticUserMessage],
+              });
+              return;
+            }
+
             if (eventName === "turn_started") {
               return;
             }
@@ -3050,6 +3197,7 @@ export default function App() {
       showErrorFlash,
       startThreadStreamState,
       updateThreadStreamUsage,
+      updateStreamingThreadTitle,
       upsertToolActivity,
       upsertThreadIntoProjectItems,
       updateThread,
@@ -3183,6 +3331,15 @@ export default function App() {
                 notes: false,
               },
             }));
+            setSidebarCollapsed(true);
+            setPaperExplorationSidebarCollapsed(false);
+            setPaperExplorationSidebarPane("details");
+            setPaperDrawer(null);
+            setPaperDrawerPaper(null);
+            setPaperDrawerContent(null);
+            setPaperDrawerStatus("idle");
+            setPaperDrawerError("");
+            updateDrawerUrl(null);
           } else if (
             !loadedProjects.some((project) => project.project_id === restoredActiveTab.id)
           ) {
@@ -3450,6 +3607,9 @@ export default function App() {
     setRestoredComposerMentions([]);
     setComposerStatus("");
     setMobileSidebarOpen(false);
+    setPaperExplorationSidebarCollapsed(true);
+    setPaperExplorationSidebarPane("details");
+    setPaperExplorationNotes({});
     setAccountMenuOpen(false);
     setStreamingThreadId(null);
     setThreadStreamStates({});
@@ -3466,14 +3626,38 @@ export default function App() {
     updateDrawerUrl(null);
   }, []);
 
+  const openPaperExplorationSidebar = useCallback(() => {
+    setAccountMenuOpen(false);
+    setProjectMenuProjectId(null);
+    setMobileSidebarOpen(false);
+    setSidebarCollapsed(true);
+    setPaperExplorationSidebarCollapsed(false);
+  }, []);
+
+  const closePaperExplorationSidebar = useCallback(() => {
+    setPaperExplorationSidebarCollapsed(true);
+  }, []);
+
   const handleSidebarToggle = useCallback(() => {
     setAccountMenuOpen(false);
     setProjectMenuProjectId(null);
     if (window.matchMedia("(max-width: 980px)").matches) {
-      setMobileSidebarOpen((current) => !current);
+      setMobileSidebarOpen((current) => {
+        const next = !current;
+        if (next) {
+          setPaperExplorationSidebarCollapsed(true);
+        }
+        return next;
+      });
       return;
     }
-    setSidebarCollapsed((current) => !current);
+    setSidebarCollapsed((current) => {
+      const next = !current;
+      if (!next) {
+        setPaperExplorationSidebarCollapsed(true);
+      }
+      return next;
+    });
   }, []);
 
   const handleThreadSelection = useCallback(
@@ -4710,7 +4894,7 @@ export default function App() {
       {authenticated ? (
         <div
           id="app-shell"
-          className={`app-shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${mobileSidebarOpen ? " mobile-sidebar-open" : ""}${paperDrawerOpen ? " paper-drawer-open" : ""}`}
+          className={`app-shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${mobileSidebarOpen ? " mobile-sidebar-open" : ""}${paperDrawerOpen ? " paper-drawer-open" : ""}${paperExplorationSidebarOpen ? " paper-exploration-sidebar-open" : ""}`}
         >
           <button
             type="button"
@@ -5433,10 +5617,9 @@ export default function App() {
                 menuOpen={chatHeaderMenuOpen}
                 onSelectPane={setThreadPane}
                 onToggleMenu={() => setChatHeaderMenuOpen((current) => !current)}
-                onOpenExportSummary={() => setExportModalState({ source: "header" })}
                 onExportMarkdown={() => exportActiveThread("markdown")}
                 onExportPdf={() => exportActiveThread("pdf")}
-                onRename={() => void handleHeaderRenameThread()}
+                onRename={openHeaderRenameThread}
                 onDelete={() => {
                   setChatHeaderMenuOpen(false);
                   openDeleteThreadModal(
@@ -5505,13 +5688,38 @@ export default function App() {
                           <p>{activePaperExploration.authors}</p>
                         ) : null}
                       </div>
-                      <button
-                        type="button"
-                        className="paper-exploration-delete"
-                        onClick={() => deletePaperExploration(activePaperExploration.explorationId)}
-                      >
-                        Delete exploration
-                      </button>
+                      <div className="paper-exploration-header-actions">
+                        <button
+                          type="button"
+                          className="paper-exploration-panel-toggle"
+                          aria-label={
+                            paperExplorationSidebarOpen
+                              ? "Collapse paper details"
+                              : "Open paper details"
+                          }
+                          aria-expanded={paperExplorationSidebarOpen}
+                          onClick={
+                            paperExplorationSidebarOpen
+                              ? closePaperExplorationSidebar
+                              : openPaperExplorationSidebar
+                          }
+                        >
+                          <MaskedAssetIcon
+                            asset="info.svg"
+                            className="paper-exploration-action-icon"
+                          />
+                          <span>Paper details</span>
+                        </button>
+                        <button
+                          type="button"
+                          className="paper-exploration-delete"
+                          onClick={() =>
+                            deletePaperExploration(activePaperExploration.explorationId)
+                          }
+                        >
+                          Delete exploration
+                        </button>
+                      </div>
                     </header>
                     {activePaperExploration.pdfUrl ? (
                       <PdfDocumentViewer
@@ -5901,6 +6109,11 @@ export default function App() {
                 </div>
               ) : (
                 <div className="chat-message-column">
+                  {displayThreadTitle(activeThread.title) !== "New chat" ? (
+                    <h1 className="chat-thread-inline-title">
+                      {displayThreadTitle(activeThread.title)}
+                    </h1>
+                  ) : null}
                   {(() => {
                     const commentaryTurnIndexes = new Set<number>();
                     const itemByMessageId = new Map(
@@ -6217,10 +6430,11 @@ export default function App() {
                                     title="Copy response"
                                     onClick={() => void copyMessage(message.content_markdown)}
                                   >
-                                    <svg viewBox="0 0 24 24" aria-hidden="true">
-                                      <path d="M9 9h9v11H9z" />
-                                      <path d="M6 15H5V4h9v1" />
-                                    </svg>
+                                    <img
+                                      src={staticAssetPath("icons8-copy-50.svg")}
+                                      alt=""
+                                      aria-hidden="true"
+                                    />
                                   </button>
                                   <button
                                     type="button"
@@ -6230,11 +6444,11 @@ export default function App() {
                                     disabled={Boolean(streamingThreadId)}
                                     onClick={() => void retryAssistantResponse(message.message_id)}
                                   >
-                                    <svg viewBox="0 0 24 24" aria-hidden="true">
-                                      <path d="M7 7h7a5 5 0 1 1-4.35 7.48" />
-                                      <path d="M7 7V3" />
-                                      <path d="M7 7H3" />
-                                    </svg>
+                                    <img
+                                      src={staticAssetPath("icons8-restart-50.svg")}
+                                      alt=""
+                                      aria-hidden="true"
+                                    />
                                   </button>
                                   <button
                                     type="button"
@@ -6248,11 +6462,11 @@ export default function App() {
                                       })
                                     }
                                   >
-                                    <svg viewBox="0 0 24 24" aria-hidden="true">
-                                      <path d="M12 4v11" />
-                                      <path d="m7 10 5 5 5-5" />
-                                      <path d="M5 20h14" />
-                                    </svg>
+                                    <img
+                                      src={staticAssetPath("icons8-download-50.svg")}
+                                      alt=""
+                                      aria-hidden="true"
+                                    />
                                   </button>
                                   {messagePaperCount > 0 ? (
                                     <button
@@ -6282,10 +6496,11 @@ export default function App() {
                                     title="Like response"
                                     onClick={() => openFeedbackModal(message, "positive")}
                                   >
-                                    <svg viewBox="0 0 24 24" aria-hidden="true">
-                                      <path d="M7 10v10H4V10z" />
-                                      <path d="M7 10 12 3l1 1v5h5a2 2 0 0 1 2 2l-1 7a2 2 0 0 1-2 2H7" />
-                                    </svg>
+                                    <img
+                                      src={staticAssetPath("icons8-thumbs-up-50.svg")}
+                                      alt=""
+                                      aria-hidden="true"
+                                    />
                                   </button>
                                   <button
                                     type="button"
@@ -6294,10 +6509,11 @@ export default function App() {
                                     title="Dislike response"
                                     onClick={() => openFeedbackModal(message, "negative")}
                                   >
-                                    <svg viewBox="0 0 24 24" aria-hidden="true">
-                                      <path d="M7 14V4H4v10z" />
-                                      <path d="M7 14 12 21l1-1v-5h5a2 2 0 0 0 2-2l-1-7a2 2 0 0 0-2-2H7" />
-                                    </svg>
+                                    <img
+                                      src={staticAssetPath("icons8-thumbs-down-50.svg")}
+                                      alt=""
+                                      aria-hidden="true"
+                                    />
                                   </button>
                                 </div>
                               </div>
@@ -6476,6 +6692,143 @@ export default function App() {
               onChange={handleImportNotebookUpload}
             />
           </section>
+
+          {paperExplorationSidebarOpen && activePaperExploration ? (
+            <aside className="paper-exploration-sidebar" aria-label="Paper details">
+              <div
+                className="paper-exploration-sidebar-tabs"
+                role="tablist"
+                aria-label="Paper panel"
+              >
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={paperExplorationSidebarPane === "details"}
+                  className={`paper-exploration-sidebar-tab${paperExplorationSidebarPane === "details" ? " active" : ""}`}
+                  onClick={() => setPaperExplorationSidebarPane("details")}
+                >
+                  Paper Details
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={paperExplorationSidebarPane === "notes"}
+                  className={`paper-exploration-sidebar-tab${paperExplorationSidebarPane === "notes" ? " active" : ""}`}
+                  onClick={() => setPaperExplorationSidebarPane("notes")}
+                >
+                  My Notes
+                </button>
+                <button
+                  type="button"
+                  className="paper-exploration-sidebar-close"
+                  aria-label="Collapse paper details panel"
+                  onClick={closePaperExplorationSidebar}
+                >
+                  ×
+                </button>
+              </div>
+              <div className="paper-exploration-sidebar-body">
+                {paperExplorationSidebarPane === "details" ? (
+                  <>
+                    <details className="paper-exploration-sidebar-section" open>
+                      <summary>
+                        <MaskedAssetIcon
+                          asset="notes.svg"
+                          className="paper-exploration-sidebar-section-icon"
+                        />
+                        <span>In this paper</span>
+                        <span className="paper-exploration-sidebar-chevron" aria-hidden="true" />
+                      </summary>
+                      <ol className="paper-exploration-outline-list">
+                        {PAPER_EXPLORATION_OUTLINE_ITEMS.map((item, index) => (
+                          <li key={item}>
+                            <span className={index === 0 ? "active" : ""}>{item}</span>
+                          </li>
+                        ))}
+                      </ol>
+                    </details>
+                    <details className="paper-exploration-sidebar-section" open>
+                      <summary>
+                        <MaskedAssetIcon
+                          asset="sessions.svg"
+                          className="paper-exploration-sidebar-section-icon"
+                        />
+                        <span>Authors</span>
+                        <span className="paper-exploration-sidebar-chevron" aria-hidden="true" />
+                      </summary>
+                      {activePaperExplorationAuthors.length > 0 ? (
+                        <div className="paper-exploration-author-list">
+                          {activePaperExplorationAuthors.slice(0, 8).map((author) => (
+                            <div className="paper-exploration-author" key={author}>
+                              <span className="paper-exploration-author-avatar" aria-hidden="true">
+                                {authorInitials(author).slice(0, 2).toUpperCase()}
+                              </span>
+                              <span>{author}</span>
+                            </div>
+                          ))}
+                          {activePaperExplorationAuthors.length > 8 ? (
+                            <span className="paper-exploration-sidebar-note">
+                              {"& "}
+                              {activePaperExplorationAuthors.length - 8} more
+                            </span>
+                          ) : null}
+                        </div>
+                      ) : (
+                        <p className="paper-exploration-sidebar-note">No authors listed.</p>
+                      )}
+                    </details>
+                    <details className="paper-exploration-sidebar-section" open>
+                      <summary>
+                        <MaskedAssetIcon
+                          asset="info.svg"
+                          className="paper-exploration-sidebar-section-icon"
+                        />
+                        <span>Details</span>
+                        <span className="paper-exploration-sidebar-chevron" aria-hidden="true" />
+                      </summary>
+                      <dl className="paper-exploration-detail-list">
+                        <div>
+                          <dt>Project</dt>
+                          <dd>{activePaperExplorationProject?.name ?? "Project"}</dd>
+                        </div>
+                        <div>
+                          <dt>Paper</dt>
+                          <dd>{activePaperExploration.path || activePaperExploration.paperId}</dd>
+                        </div>
+                        <div>
+                          <dt>Updated</dt>
+                          <dd>{formatThreadAge(activePaperExploration.updatedAt)}</dd>
+                        </div>
+                      </dl>
+                    </details>
+                  </>
+                ) : (
+                  <details className="paper-exploration-sidebar-section" open>
+                    <summary>
+                      <MaskedAssetIcon
+                        asset="note.svg"
+                        className="paper-exploration-sidebar-section-icon"
+                      />
+                      <span>My notes</span>
+                      <span className="paper-exploration-sidebar-chevron" aria-hidden="true" />
+                    </summary>
+                    <textarea
+                      className="paper-exploration-notes-input"
+                      aria-label="Exploration notes"
+                      value={paperExplorationNotes[activePaperExploration.explorationId] ?? ""}
+                      onChange={(event) => {
+                        const nextValue = event.target.value;
+                        setPaperExplorationNotes((current) => ({
+                          ...current,
+                          [activePaperExploration.explorationId]: nextValue,
+                        }));
+                      }}
+                    />
+                  </details>
+                )}
+              </div>
+            </aside>
+          ) : null}
 
           {paperDrawerOpen ? (
             <aside className="paper-drawer" aria-label="Cited paper drawer">
@@ -6889,6 +7242,60 @@ export default function App() {
         feedbackSubmitting={feedbackSubmitting}
         submitFeedbackModal={() => void submitFeedbackModal()}
       />
+
+      <div
+        id="thread-rename-modal"
+        className={`modal${threadRenameModal ? "" : " hidden"}`}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="thread-rename-modal-title"
+      >
+        <div className="modal-backdrop" onClick={closeThreadRenameModal} />
+        <div className="modal-panel thread-rename-modal-panel">
+          <button
+            className="modal-close"
+            type="button"
+            aria-label="Close rename session"
+            onClick={closeThreadRenameModal}
+          >
+            ×
+          </button>
+          <div className="modal-heading modal-heading-copy">
+            <h2 id="thread-rename-modal-title" className="modal-title">
+              Rename session
+            </h2>
+            <p className="modal-caption">{threadRenameModal?.title ?? "Current session"}</p>
+          </div>
+          {threadRenameModal?.error ? (
+            <div className="modal-flash warning" role="alert">
+              <span className="modal-flash-text">{threadRenameModal.error}</span>
+            </div>
+          ) : null}
+          <div className="modal-view visible">
+            <form className="stack" onSubmit={(event) => void submitThreadRenameModal(event)}>
+              <label className="rename-session-field" htmlFor="thread-rename-input">
+                <span>Title</span>
+                <input
+                  id="thread-rename-input"
+                  type="text"
+                  value={threadRenameModal?.draft ?? ""}
+                  onChange={(event) =>
+                    setThreadRenameModal((current) =>
+                      current ? { ...current, draft: event.target.value, error: "" } : current,
+                    )
+                  }
+                />
+              </label>
+              <button className="primary-button" type="submit" disabled={threadRenameModal?.saving}>
+                {threadRenameModal?.saving ? "Renaming..." : "Rename"}
+              </button>
+              <button className="secondary-button" type="button" onClick={closeThreadRenameModal}>
+                Cancel
+              </button>
+            </form>
+          </div>
+        </div>
+      </div>
 
       <div
         id="python-save-modal"
@@ -7621,6 +8028,7 @@ export default function App() {
         className={`modal${deleteModalState ? "" : " hidden"}`}
         role="dialog"
         aria-modal="true"
+        aria-labelledby="delete-modal-title"
       >
         <div className="modal-backdrop" onClick={closeDeleteModal} />
         <div className="modal-panel">
@@ -7628,7 +8036,7 @@ export default function App() {
             ×
           </button>
           <div className="modal-heading">
-            <h2 className="modal-title">
+            <h2 id="delete-modal-title" className="modal-title">
               {deleteModalState?.kind === "project"
                 ? "Delete project"
                 : deleteModalState?.kind === "python_file"

@@ -2734,6 +2734,30 @@ describe("App", () => {
     expect(screen.queryByRole("link", { name: "PDF" })).toBeNull();
     expect(screen.getByRole("tab", { name: "Conversation" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "Research papers" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Open chat actions" }));
+    const headerMenu = screen.getByRole("menu");
+    expect(within(headerMenu).queryByRole("menuitem", { name: "Export summary" })).toBeNull();
+    expect(
+      within(headerMenu).getByRole("menuitem", { name: "Export summary as markdown" }),
+    ).toBeTruthy();
+    expect(
+      within(headerMenu).getByRole("menuitem", { name: "Export summary as PDF" }),
+    ).toBeTruthy();
+    fireEvent.click(within(headerMenu).getByRole("menuitem", { name: "Rename" }));
+    const renameDialog = await screen.findByRole("dialog", { name: "Rename session" });
+    expect((within(renameDialog).getByLabelText("Title") as HTMLInputElement).value).toBe(
+      "Preview thread",
+    );
+    fireEvent.click(within(renameDialog).getByRole("button", { name: "Cancel" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open chat actions" }));
+    fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: "Delete" }));
+    expect(await screen.findByRole("heading", { name: "Delete session" })).toBeTruthy();
+    expect(screen.getByText("Delete Preview thread?")).toBeTruthy();
+    fireEvent.click(
+      within(screen.getByRole("dialog", { name: "Delete session" })).getByRole("button", {
+        name: "Cancel",
+      }),
+    );
     expect(screen.getByRole("button", { name: "Retry response" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Download reply" })).toBeTruthy();
     expect(screen.getByText("Recommended reading")).toBeTruthy();
@@ -2948,6 +2972,10 @@ describe("App", () => {
         options?: { signal?: AbortSignal },
       ) => {
         streamSignal = options?.signal;
+        onEvent("thread_title", {
+          thread_id: "thread_2",
+          title: "Grounding Methods Under Review",
+        });
         onEvent("turn_started", {
           turn: turnResponse("turn_2", "thread_2", [], {
             status: "running",
@@ -3048,6 +3076,7 @@ describe("App", () => {
     });
     expect(screen.queryByRole("tablist", { name: "Open tabs" })).toBeNull();
     const commentaryText = await screen.findByText("I will search the paper index first.");
+    expect(screen.getByRole("heading", { name: "Grounding Methods Under Review" })).toBeTruthy();
     const toolActivityText = await screen.findByText('Did paper search for "grounding"');
     expect(screen.queryByText("Commentary")).toBeNull();
     expect(

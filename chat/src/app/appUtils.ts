@@ -457,10 +457,10 @@ export function summarizeThreadTitle(content: string) {
     (token) => !CHAT_TITLE_STOP_WORDS.has(token.toLowerCase()),
   );
   const sourceTokens = informativeTokens.length >= 3 ? informativeTokens : tokens;
-  const desiredCount = Math.min(5, Math.max(3, sourceTokens.length));
+  const desiredCount = Math.min(5, Math.max(4, sourceTokens.length));
   let selectedTokens = sourceTokens.slice(0, desiredCount);
-  if (selectedTokens.length < 3 && tokens.length >= 3) {
-    selectedTokens = tokens.slice(0, 3);
+  if (selectedTokens.length < 4 && tokens.length >= 4) {
+    selectedTokens = tokens.slice(0, 4);
   }
   return (
     selectedTokens

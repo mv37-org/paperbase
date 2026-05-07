@@ -1176,11 +1176,25 @@ def _summarize_chat_title(content: str) -> str:
         return "New chat"
     informative_tokens = [token for token in tokens if token.lower() not in _CHAT_TITLE_STOP_WORDS]
     source_tokens = informative_tokens if len(informative_tokens) >= 3 else tokens
-    desired_count = min(5, max(3, len(source_tokens)))
+    desired_count = min(5, max(4, len(source_tokens)))
     selected_tokens = source_tokens[:desired_count]
-    if len(selected_tokens) < 3 and len(tokens) >= 3:
-        selected_tokens = tokens[:3]
+    if len(selected_tokens) < 4 and len(tokens) >= 4:
+        selected_tokens = tokens[:4]
     return " ".join(_format_chat_title_word(token) for token in selected_tokens).strip() or "New chat"
+
+
+def _clean_generated_chat_title(content: str) -> str:
+    line = next((candidate.strip() for candidate in content.splitlines() if candidate.strip()), "")
+    if not line:
+        return ""
+    line = re.sub(r"^[-*#\s]+", "", line).strip()
+    line = re.sub(r"^(?:title|headline)\s*:\s*", "", line, flags=re.IGNORECASE).strip()
+    line = line.strip("\"'`. ")
+    tokens = _CHAT_TITLE_TOKEN_RE.findall(line)
+    if len(tokens) < 4:
+        return ""
+    selected_tokens = tokens[:5]
+    return " ".join(_format_chat_title_word(token) for token in selected_tokens).strip()
 
 
 def _question_mentions_uploads(question: str) -> bool:
@@ -3722,7 +3736,7 @@ class PaperbaseService:
         if thread.title == "New chat":
             self.repository.rename_chat_thread(  # type: ignore[attr-defined]
                 thread_id=thread_id,
-                title=_summarize_chat_title(content),
+                title=self._generate_chat_title(api_key=api_key_value, content=content),
             )
         refreshed = self.get_chat_thread(user, thread_id)
         return PreparedChatGeneration(
@@ -3732,6 +3746,39 @@ class PaperbaseService:
             resolved_user=resolved_user,
             api_key_value=api_key_value,
         )
+
+    def _generate_chat_title(self, *, api_key: str, content: str) -> str:
+        fallback = _summarize_chat_title(content)
+        prompt = Prompt(
+            input=[
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": content[:4000],
+                }
+            ],
+            base_instructions=(
+                "Write one 4 to 5 word title that reads like an article headline. "
+                "Use title case. Return only the title, with no quotes, markdown, or punctuation."
+            ),
+            tools=[],
+            tool_choice=None,
+            parallel_tool_calls=False,
+        )
+        try:
+            response = self._chat_model_create_response(api_key=api_key, prompt=prompt)
+        except Exception:
+            logger.exception(
+                "Chat title generation failed",
+                extra={"event": "chat.title_generation.failed"},
+            )
+            return fallback
+        response_text = "\n".join(
+            item.content_text
+            for item in response.items
+            if item.item_type == "assistant_message" and item.content_text
+        )
+        return _clean_generated_chat_title(response_text) or fallback
 
     def _project_prompt_suffix(self, thread: ChatThreadResponse) -> str:
         instructions = thread.project_instructions.strip()
@@ -5865,6 +5912,11 @@ class PaperbaseService:
         )
 
         _ = self._chat_runtime_mode()
+        if prepared.thread.title.strip():
+            yield (
+                "thread_title",
+                {"thread_id": prepared.thread.thread_id, "title": prepared.thread.title},
+            )
         yield ("turn_started", {"turn": prepared.turn.model_dump(mode="json")})
         turn_engine = self._run_chat_turn_engine(
             prepared=prepared,
