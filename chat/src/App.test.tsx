@@ -857,7 +857,18 @@ describe("App", () => {
           body: "Existing paper comment",
           created_at: "2026-04-21T00:00:00Z",
           updated_at: "2026-04-21T00:00:00Z",
-          replies: [],
+          replies: [
+            {
+              comment_id: "pcmt_1_reply",
+              paper_id: "arxiv:2401.12345",
+              parent_comment_id: "pcmt_1",
+              author: { user_id: "user_3", display_name: "Reply Reader" },
+              body: "Existing paper reply",
+              created_at: "2026-04-21T00:02:00Z",
+              updated_at: "2026-04-21T00:02:00Z",
+              replies: [],
+            },
+          ],
         },
       ],
     });
@@ -3177,6 +3188,9 @@ describe("App", () => {
     expect(document.querySelector("iframe")).toBeNull();
     expect(screen.getByText("Explorations")).toBeTruthy();
     expect(screen.queryByText("Details")).toBeNull();
+    expect(screen.getByRole("tab", { name: "Info" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Notes" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Social" })).toBeTruthy();
     const abstractSection = await screen.findByRole("button", { name: "Abstract" });
     const introductionSection = screen.getByRole("button", { name: "Introduction" });
     expect(abstractSection.classList.contains("active")).toBe(false);
@@ -3187,12 +3201,69 @@ describe("App", () => {
     await waitFor(() => {
       expect(apiMocks.getBrowserPaperDiscussion).toHaveBeenCalledWith("arxiv:2401.12345");
     });
-    expect(await screen.findByText("Existing paper comment")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Upvote 4" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Upvote 4" }));
     await waitFor(() => {
       expect(apiMocks.upvoteBrowserPaper).toHaveBeenCalledWith("arxiv:2401.12345");
     });
     expect(await screen.findByRole("button", { name: "Upvoted 5" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("tab", { name: "Social" }));
+    expect(await screen.findByText("Existing paper comment")).toBeTruthy();
+    expect(screen.queryByText("Existing paper reply")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "View 1 reply" }));
+    expect(await screen.findByText("Existing paper reply")).toBeTruthy();
+    apiMocks.createBrowserPaperComment.mockResolvedValueOnce({
+      paper_id: "arxiv:2401.12345",
+      comments: [
+        {
+          comment_id: "pcmt_1",
+          paper_id: "arxiv:2401.12345",
+          parent_comment_id: null,
+          author: { user_id: "user_2", display_name: "Existing Reader" },
+          body: "Existing paper comment",
+          created_at: "2026-04-21T00:00:00Z",
+          updated_at: "2026-04-21T00:00:00Z",
+          replies: [
+            {
+              comment_id: "pcmt_1_reply",
+              paper_id: "arxiv:2401.12345",
+              parent_comment_id: "pcmt_1",
+              author: { user_id: "user_3", display_name: "Reply Reader" },
+              body: "Existing paper reply",
+              created_at: "2026-04-21T00:02:00Z",
+              updated_at: "2026-04-21T00:02:00Z",
+              replies: [],
+            },
+            {
+              comment_id: "pcmt_1_reply_2",
+              paper_id: "arxiv:2401.12345",
+              parent_comment_id: "pcmt_1",
+              author: { user_id: "user_1", display_name: "Ada Lovelace" },
+              body: "Nested reply",
+              created_at: "2026-04-21T00:03:00Z",
+              updated_at: "2026-04-21T00:03:00Z",
+              replies: [],
+            },
+          ],
+        },
+      ],
+    });
+    fireEvent.click(screen.getAllByRole("button", { name: "Reply" })[0]);
+    const replyInput = screen.getByLabelText("Reply to Existing Reader");
+    fireEvent.change(replyInput, { target: { value: "Nested reply" } });
+    fireEvent.click(
+      within(replyInput.closest("form") as HTMLFormElement).getByRole("button", {
+        name: "Reply",
+      }),
+    );
+    await waitFor(() => {
+      expect(apiMocks.createBrowserPaperComment).toHaveBeenCalledWith("arxiv:2401.12345", {
+        body: "Nested reply",
+        parent_comment_id: "pcmt_1",
+      });
+    });
+    expect(await screen.findByText("Nested reply")).toBeTruthy();
+
     fireEvent.change(screen.getByLabelText("Paper comment"), {
       target: { value: "New paper comment" },
     });

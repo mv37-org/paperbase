@@ -3668,6 +3668,64 @@ textarea::placeholder,
   justify-content: flex-end;
 }
 
+.paper-exploration-header-vote-button {
+  min-width: 44px;
+  height: 44px;
+  padding: 6px 7px;
+  border: 1px solid rgba(27, 22, 17, 0.1);
+  border-radius: 16px;
+  background: transparent;
+  color: #26374e;
+  cursor: pointer;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1;
+  opacity: 0.62;
+}
+
+.paper-exploration-header-vote-button:hover,
+.paper-exploration-header-vote-button:focus-visible,
+.paper-exploration-header-vote-button.active {
+  border-color: rgba(153, 88, 42, 0.28);
+  background: rgba(153, 88, 42, 0.06);
+  color: #99582a;
+  opacity: 1;
+}
+
+.paper-exploration-header-vote-button:disabled {
+  cursor: default;
+  opacity: 0.44;
+}
+
+.paper-exploration-header-vote-icon {
+  width: 12px;
+  height: 10px;
+  display: block;
+  position: relative;
+}
+
+.paper-exploration-header-vote-icon::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 1px;
+  width: 8px;
+  height: 8px;
+  border-top: 2px solid currentColor;
+  border-left: 2px solid currentColor;
+  border-radius: 2px;
+  transform: translateX(-50%) rotate(45deg);
+}
+
+.paper-exploration-header-vote-count {
+  font-variant-numeric: tabular-nums;
+}
+
 .paper-exploration-icon-button {
   width: 32px;
   height: 32px;
@@ -3749,7 +3807,7 @@ textarea::placeholder,
 
 .paper-exploration-sidebar-tabs {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
   align-items: center;
   gap: 6px;
   padding: 14px 14px 10px;
@@ -3798,9 +3856,15 @@ textarea::placeholder,
 }
 
 .paper-exploration-sidebar-body {
+  flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
   scrollbar-gutter: stable;
+}
+
+.paper-exploration-sidebar-body.social {
+  display: flex;
+  overflow: hidden;
 }
 
 .paper-exploration-sidebar-section {
@@ -3937,54 +4001,34 @@ textarea::placeholder,
   color: #8f2d1f;
 }
 
-.paper-exploration-discussion {
-  padding: 0 14px 16px;
+.paper-exploration-social-pane {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.paper-exploration-social-thread {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 14px;
+  overflow: auto;
+  scrollbar-gutter: stable;
   display: grid;
+  align-content: start;
   gap: 10px;
 }
 
-.paper-exploration-discussion .paper-exploration-sidebar-note {
+.paper-exploration-social-thread .paper-exploration-sidebar-note {
   padding: 0;
 }
 
-.paper-exploration-vote-button {
-  width: 100%;
-  min-height: 34px;
-  padding: 0 10px;
-  border: 1px solid rgba(153, 88, 42, 0.2);
-  border-radius: 6px;
-  background: rgba(153, 88, 42, 0.07);
-  color: #6b3a1d;
-  cursor: pointer;
-  display: grid;
-  grid-template-columns: 16px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  font-weight: 700;
-  text-align: left;
-}
-
-.paper-exploration-vote-button:hover,
-.paper-exploration-vote-button:focus-visible,
-.paper-exploration-vote-button.active {
-  border-color: rgba(153, 88, 42, 0.36);
-  background: rgba(153, 88, 42, 0.13);
-  color: #99582a;
-}
-
-.paper-exploration-vote-button:disabled {
-  cursor: default;
-  opacity: 0.65;
-}
-
-.paper-exploration-vote-icon {
-  width: 15px;
-  height: 15px;
-  display: block;
-  background: currentColor;
-  mask: var(--icon-url) center / contain no-repeat;
-  -webkit-mask: var(--icon-url) center / contain no-repeat;
+.paper-exploration-social-composer {
+  flex: 0 0 auto;
+  padding: 10px 14px 14px;
+  border-top: 1px solid rgba(27, 22, 17, 0.1);
+  background: #f7f2ea;
 }
 
 .paper-exploration-comment-form {
@@ -3992,20 +4036,22 @@ textarea::placeholder,
   gap: 8px;
 }
 
-.paper-exploration-comment-form textarea {
+.paper-exploration-comment-form textarea,
+.paper-exploration-reply-form textarea {
   width: 100%;
-  min-height: 76px;
+  min-height: 58px;
   padding: 9px;
   resize: vertical;
   border: 1px solid rgba(27, 22, 17, 0.12);
-  border-radius: 6px;
+  border-radius: 16px;
   background: #ffffff;
   color: #1b1611;
   font-size: 12px;
   line-height: 1.4;
 }
 
-.paper-exploration-comment-form textarea::placeholder {
+.paper-exploration-comment-form textarea::placeholder,
+.paper-exploration-reply-form textarea::placeholder {
   color: #91877c;
 }
 
@@ -4034,51 +4080,91 @@ textarea::placeholder,
 
 .paper-exploration-comments-heading {
   color: #70675e;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
-  text-transform: uppercase;
 }
 
 .paper-exploration-comment {
   margin-left: calc(var(--paper-discussion-depth, 0) * 10px);
-  padding-left: 10px;
-  border-left: 2px solid rgba(153, 88, 42, 0.18);
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.paper-exploration-comment-main {
+  min-width: 0;
   display: grid;
   gap: 4px;
 }
 
-.paper-exploration-comment-header {
-  min-width: 0;
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
+.paper-exploration-comment-bubble {
+  width: fit-content;
+  max-width: min(100%, 280px);
+  padding: 8px 10px;
+  border-radius: 16px;
+  background: #ebe5dc;
   color: #342d27;
-  font-size: 11px;
+  overflow-wrap: anywhere;
 }
 
-.paper-exploration-comment-header strong {
+.paper-exploration-comment-bubble strong {
+  display: block;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  margin-bottom: 2px;
+  font-size: 12px;
+  line-height: 1.2;
 }
 
-.paper-exploration-comment-header span {
-  flex: 0 0 auto;
-  color: #81776e;
-  font-size: 10px;
-}
-
-.paper-exploration-comment p {
+.paper-exploration-comment-bubble p {
   margin: 0;
   color: #4d453e;
   font-size: 12px;
   line-height: 1.4;
-  overflow-wrap: anywhere;
+}
+
+.paper-exploration-comment-actions {
+  padding-left: 10px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.paper-exploration-comment-actions button,
+.paper-exploration-comment-cancel {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #70675e;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.paper-exploration-comment-actions button:hover,
+.paper-exploration-comment-actions button:focus-visible,
+.paper-exploration-comment-cancel:hover,
+.paper-exploration-comment-cancel:focus-visible {
+  color: #99582a;
+}
+
+.paper-exploration-reply-form {
+  display: grid;
+  gap: 8px;
+  padding-left: 18px;
+}
+
+.paper-exploration-reply-form-actions {
+  display: inline-flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 10px;
 }
 
 .paper-exploration-comment-replies {
+  margin-left: 18px;
+  padding-left: 12px;
+  border-left: 2px solid rgba(153, 88, 42, 0.18);
   display: grid;
   gap: 8px;
 }
@@ -9852,6 +9938,19 @@ body.authenticated-theme-dark .paper-exploration-icon-button.danger:focus-visibl
   color: #8f2d1f;
 }
 
+body.authenticated-theme-dark .paper-exploration-header-vote-button {
+  border-color: rgba(223, 232, 244, 0.12);
+  color: var(--text);
+}
+
+body.authenticated-theme-dark .paper-exploration-header-vote-button:hover,
+body.authenticated-theme-dark .paper-exploration-header-vote-button:focus-visible,
+body.authenticated-theme-dark .paper-exploration-header-vote-button.active {
+  border-color: rgba(221, 161, 112, 0.34);
+  background: rgba(221, 161, 112, 0.12);
+  color: #dda170;
+}
+
 body.authenticated-theme-dark .paper-exploration-sidebar {
   border-left-color: var(--line);
   background: #0f151d;
@@ -9918,39 +10017,47 @@ body.authenticated-theme-dark .paper-exploration-sidebar-note.warning {
   color: #f0a08f;
 }
 
-body.authenticated-theme-dark .paper-exploration-vote-button {
-  border-color: rgba(221, 161, 112, 0.24);
-  background: rgba(221, 161, 112, 0.1);
-  color: #dda170;
+body.authenticated-theme-dark .paper-exploration-social-composer {
+  border-top-color: rgba(223, 232, 244, 0.12);
+  background: #0f151d;
 }
 
-body.authenticated-theme-dark .paper-exploration-vote-button:hover,
-body.authenticated-theme-dark .paper-exploration-vote-button:focus-visible,
-body.authenticated-theme-dark .paper-exploration-vote-button.active {
-  border-color: rgba(221, 161, 112, 0.42);
-  background: rgba(221, 161, 112, 0.17);
-  color: #f0b987;
-}
-
-body.authenticated-theme-dark .paper-exploration-comment-form textarea {
+body.authenticated-theme-dark .paper-exploration-comment-form textarea,
+body.authenticated-theme-dark .paper-exploration-reply-form textarea {
   border-color: rgba(223, 232, 244, 0.14);
   background: #0d141c;
   color: var(--text);
 }
 
 body.authenticated-theme-dark .paper-exploration-comment-form textarea::placeholder,
-body.authenticated-theme-dark .paper-exploration-comments-heading,
-body.authenticated-theme-dark .paper-exploration-comment-header span {
+body.authenticated-theme-dark .paper-exploration-reply-form textarea::placeholder,
+body.authenticated-theme-dark .paper-exploration-comments-heading {
   color: var(--muted);
 }
 
-body.authenticated-theme-dark .paper-exploration-comment {
-  border-left-color: rgba(221, 161, 112, 0.22);
+body.authenticated-theme-dark .paper-exploration-comment-bubble {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
 }
 
-body.authenticated-theme-dark .paper-exploration-comment-header,
-body.authenticated-theme-dark .paper-exploration-comment p {
+body.authenticated-theme-dark .paper-exploration-comment-bubble p {
   color: var(--text);
+}
+
+body.authenticated-theme-dark .paper-exploration-comment-actions button,
+body.authenticated-theme-dark .paper-exploration-comment-cancel {
+  color: var(--muted);
+}
+
+body.authenticated-theme-dark .paper-exploration-comment-actions button:hover,
+body.authenticated-theme-dark .paper-exploration-comment-actions button:focus-visible,
+body.authenticated-theme-dark .paper-exploration-comment-cancel:hover,
+body.authenticated-theme-dark .paper-exploration-comment-cancel:focus-visible {
+  color: #dda170;
+}
+
+body.authenticated-theme-dark .paper-exploration-comment-replies {
+  border-left-color: rgba(221, 161, 112, 0.22);
 }
 
 body.authenticated-theme-dark .paper-exploration-notes-input {

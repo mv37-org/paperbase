@@ -377,8 +377,12 @@ type PaperDiscussionPanelState = {
   viewerHasUpvoted: boolean;
   comments: PaperComment[];
   draft: string;
+  replyDrafts: Record<string, string>;
+  expandedReplyIds: Record<string, boolean>;
+  replyingToCommentId: string | null;
   votePending: boolean;
   commentSubmitting: boolean;
+  replySubmittingCommentId: string | null;
 };
 
 function emptyPaperDiscussionState(): PaperDiscussionPanelState {
@@ -389,8 +393,12 @@ function emptyPaperDiscussionState(): PaperDiscussionPanelState {
     viewerHasUpvoted: false,
     comments: [],
     draft: "",
+    replyDrafts: {},
+    expandedReplyIds: {},
+    replyingToCommentId: null,
     votePending: false,
     commentSubmitting: false,
+    replySubmittingCommentId: null,
   };
 }
 
@@ -407,6 +415,7 @@ function paperDiscussionStateFromResponse(
     comments: response.comments,
     votePending: false,
     commentSubmitting: false,
+    replySubmittingCommentId: null,
   };
 }
 
@@ -427,6 +436,7 @@ function paperDiscussionStateWithVote(
 function paperDiscussionStateWithComments(
   response: PaperCommentsResponse,
   current?: PaperDiscussionPanelState,
+  overrides: Partial<PaperDiscussionPanelState> = {},
 ): PaperDiscussionPanelState {
   return {
     ...(current ?? emptyPaperDiscussionState()),
@@ -435,6 +445,8 @@ function paperDiscussionStateWithComments(
     comments: response.comments,
     draft: "",
     commentSubmitting: false,
+    replySubmittingCommentId: null,
+    ...overrides,
   };
 }
 
@@ -445,24 +457,112 @@ function paperCommentCount(comments: PaperComment[]): number {
 function PaperExplorationComment({
   comment,
   depth = 0,
+  authenticated,
+  expandedReplyIds,
+  replyingToCommentId,
+  replyDrafts,
+  replySubmittingCommentId,
+  onReplyStart,
+  onReplyCancel,
+  onReplyDraftChange,
+  onReplySubmit,
+  onToggleReplies,
 }: {
   comment: PaperComment;
   depth?: number;
+  authenticated: boolean;
+  expandedReplyIds: Record<string, boolean>;
+  replyingToCommentId: string | null;
+  replyDrafts: Record<string, string>;
+  replySubmittingCommentId: string | null;
+  onReplyStart: (commentId: string) => void;
+  onReplyCancel: (commentId: string) => void;
+  onReplyDraftChange: (commentId: string, draft: string) => void;
+  onReplySubmit: (event: FormEvent<HTMLFormElement>, commentId: string) => void;
+  onToggleReplies: (commentId: string) => void;
 }) {
+  const authorName = comment.author.display_name || "Reader";
+  const replyCount = comment.replies.length;
+  const repliesExpanded = Boolean(expandedReplyIds[comment.comment_id]);
+  const isReplying = replyingToCommentId === comment.comment_id;
+  const replyDraft = replyDrafts[comment.comment_id] ?? "";
+  const replySubmitting = replySubmittingCommentId === comment.comment_id;
+
   return (
     <article
       className="paper-exploration-comment"
       style={{ "--paper-discussion-depth": String(Math.min(depth, 3)) } as CSSProperties}
     >
-      <header className="paper-exploration-comment-header">
-        <strong>{comment.author.display_name}</strong>
-        <span>{formatLocalTimestamp(comment.created_at)}</span>
-      </header>
-      <p>{comment.body}</p>
-      {comment.replies.length > 0 ? (
+      <div className="paper-exploration-comment-main">
+        <div className="paper-exploration-comment-bubble">
+          <strong>{authorName}</strong>
+          <p>{comment.body}</p>
+        </div>
+        <div className="paper-exploration-comment-actions">
+          {authenticated ? (
+            <button type="button" onClick={() => onReplyStart(comment.comment_id)}>
+              Reply
+            </button>
+          ) : null}
+          {replyCount > 0 ? (
+            <button type="button" onClick={() => onToggleReplies(comment.comment_id)}>
+              {repliesExpanded
+                ? "Hide replies"
+                : replyCount === 1
+                  ? "View 1 reply"
+                  : `View all ${replyCount} replies`}
+            </button>
+          ) : null}
+        </div>
+        {isReplying ? (
+          <form
+            className="paper-exploration-reply-form"
+            onSubmit={(event) => onReplySubmit(event, comment.comment_id)}
+          >
+            <textarea
+              aria-label={`Reply to ${authorName}`}
+              value={replyDraft}
+              onChange={(event) => onReplyDraftChange(comment.comment_id, event.target.value)}
+              placeholder={`Reply to ${authorName}`}
+              rows={2}
+            />
+            <div className="paper-exploration-reply-form-actions">
+              <button
+                type="button"
+                className="paper-exploration-comment-cancel"
+                onClick={() => onReplyCancel(comment.comment_id)}
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="paper-exploration-comment-submit"
+                disabled={replySubmitting || replyDraft.trim().length === 0}
+              >
+                {replySubmitting ? "Posting..." : "Reply"}
+              </button>
+            </div>
+          </form>
+        ) : null}
+      </div>
+      {replyCount > 0 && repliesExpanded ? (
         <div className="paper-exploration-comment-replies">
           {comment.replies.map((reply) => (
-            <PaperExplorationComment key={reply.comment_id} comment={reply} depth={depth + 1} />
+            <PaperExplorationComment
+              key={reply.comment_id}
+              comment={reply}
+              depth={depth + 1}
+              authenticated={authenticated}
+              expandedReplyIds={expandedReplyIds}
+              replyingToCommentId={replyingToCommentId}
+              replyDrafts={replyDrafts}
+              replySubmittingCommentId={replySubmittingCommentId}
+              onReplyStart={onReplyStart}
+              onReplyCancel={onReplyCancel}
+              onReplyDraftChange={onReplyDraftChange}
+              onReplySubmit={onReplySubmit}
+              onToggleReplies={onToggleReplies}
+            />
           ))}
         </div>
       ) : null}
@@ -625,8 +725,8 @@ export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [paperExplorationSidebarCollapsed, setPaperExplorationSidebarCollapsed] = useState(true);
   const [paperExplorationSidebarPane, setPaperExplorationSidebarPane] = useState<
-    "details" | "notes"
-  >("details");
+    "info" | "notes" | "social"
+  >("info");
   const [paperExplorationNotes, setPaperExplorationNotes] = useState<Record<string, string>>({});
   const [paperExplorationSections, setPaperExplorationSections] = useState<
     Record<string, PdfDocumentSection[]>
@@ -1759,7 +1859,7 @@ export default function App() {
     setProjectMenuProjectId(null);
     setSidebarCollapsed(true);
     setPaperExplorationSidebarCollapsed(false);
-    setPaperExplorationSidebarPane("details");
+    setPaperExplorationSidebarPane("info");
     setPaperDrawer(null);
     setPaperDrawerPaper(null);
     setPaperDrawerContent(null);
@@ -1886,7 +1986,7 @@ export default function App() {
         setProjectMenuProjectId(null);
         setSidebarCollapsed(true);
         setPaperExplorationSidebarCollapsed(false);
-        setPaperExplorationSidebarPane("details");
+        setPaperExplorationSidebarPane("info");
         setPaperDrawer(null);
         setPaperDrawerPaper(null);
         setPaperDrawerContent(null);
@@ -3653,7 +3753,7 @@ export default function App() {
             }));
             setSidebarCollapsed(true);
             setPaperExplorationSidebarCollapsed(false);
-            setPaperExplorationSidebarPane("details");
+            setPaperExplorationSidebarPane("info");
             setPaperDrawer(null);
             setPaperDrawerPaper(null);
             setPaperDrawerContent(null);
@@ -3890,6 +3990,102 @@ export default function App() {
     }));
   }, []);
 
+  const handlePaperDiscussionReplyDraftChange = useCallback(
+    (commentId: string, draft: string) => {
+      if (!activePaperExploration) {
+        return;
+      }
+      const paperId = activePaperExploration.paperId;
+      setPaperDiscussionStates((current) => {
+        const currentState = current[paperId] ?? emptyPaperDiscussionState();
+        return {
+          ...current,
+          [paperId]: {
+            ...currentState,
+            replyDrafts: {
+              ...currentState.replyDrafts,
+              [commentId]: draft,
+            },
+          },
+        };
+      });
+    },
+    [activePaperExploration],
+  );
+
+  const handlePaperDiscussionReplyStart = useCallback(
+    (commentId: string) => {
+      if (!activePaperExploration) {
+        return;
+      }
+      if (!sessionRef.current?.authenticated) {
+        openAuthModal("login");
+        return;
+      }
+      const paperId = activePaperExploration.paperId;
+      setPaperDiscussionStates((current) => {
+        const currentState = current[paperId] ?? emptyPaperDiscussionState();
+        return {
+          ...current,
+          [paperId]: {
+            ...currentState,
+            replyingToCommentId: commentId,
+          },
+        };
+      });
+    },
+    [activePaperExploration, openAuthModal],
+  );
+
+  const handlePaperDiscussionReplyCancel = useCallback(
+    (commentId: string) => {
+      if (!activePaperExploration) {
+        return;
+      }
+      const paperId = activePaperExploration.paperId;
+      setPaperDiscussionStates((current) => {
+        const currentState = current[paperId] ?? emptyPaperDiscussionState();
+        const nextReplyDrafts = { ...currentState.replyDrafts };
+        delete nextReplyDrafts[commentId];
+        return {
+          ...current,
+          [paperId]: {
+            ...currentState,
+            replyDrafts: nextReplyDrafts,
+            replyingToCommentId:
+              currentState.replyingToCommentId === commentId
+                ? null
+                : currentState.replyingToCommentId,
+          },
+        };
+      });
+    },
+    [activePaperExploration],
+  );
+
+  const handlePaperDiscussionRepliesToggle = useCallback(
+    (commentId: string) => {
+      if (!activePaperExploration) {
+        return;
+      }
+      const paperId = activePaperExploration.paperId;
+      setPaperDiscussionStates((current) => {
+        const currentState = current[paperId] ?? emptyPaperDiscussionState();
+        return {
+          ...current,
+          [paperId]: {
+            ...currentState,
+            expandedReplyIds: {
+              ...currentState.expandedReplyIds,
+              [commentId]: !currentState.expandedReplyIds[commentId],
+            },
+          },
+        };
+      });
+    },
+    [activePaperExploration],
+  );
+
   const handlePaperDiscussionSubmit = useCallback(
     async (event: FormEvent<HTMLFormElement>) => {
       event.preventDefault();
@@ -3931,6 +4127,65 @@ export default function App() {
           [paperId]: {
             ...(current[paperId] ?? emptyPaperDiscussionState()),
             commentSubmitting: false,
+          },
+        }));
+      }
+    },
+    [activePaperExploration, openAuthModal, paperDiscussionStates, showErrorFlash],
+  );
+
+  const handlePaperDiscussionReplySubmit = useCallback(
+    async (event: FormEvent<HTMLFormElement>, commentId: string) => {
+      event.preventDefault();
+      if (!activePaperExploration) {
+        return;
+      }
+      if (!sessionRef.current?.authenticated) {
+        openAuthModal("login");
+        return;
+      }
+      const paperId = activePaperExploration.paperId;
+      const draft = (paperDiscussionStates[paperId]?.replyDrafts[commentId] ?? "").trim();
+      if (!draft) {
+        return;
+      }
+      setPaperDiscussionStates((current) => ({
+        ...current,
+        [paperId]: {
+          ...(current[paperId] ?? emptyPaperDiscussionState()),
+          replySubmittingCommentId: commentId,
+          error: "",
+        },
+      }));
+      try {
+        const response = await createBrowserPaperComment(paperId, {
+          body: draft,
+          parent_comment_id: commentId,
+        });
+        setPaperDiscussionStates((current) => {
+          const currentState = current[paperId] ?? emptyPaperDiscussionState();
+          const nextReplyDrafts = { ...currentState.replyDrafts };
+          delete nextReplyDrafts[commentId];
+          return {
+            ...current,
+            [paperId]: paperDiscussionStateWithComments(response, currentState, {
+              draft: currentState.draft,
+              replyDrafts: nextReplyDrafts,
+              replyingToCommentId: null,
+              expandedReplyIds: {
+                ...currentState.expandedReplyIds,
+                [commentId]: true,
+              },
+            }),
+          };
+        });
+      } catch (error) {
+        showErrorFlash(error instanceof Error ? error.message : "Paper reply could not be posted.");
+        setPaperDiscussionStates((current) => ({
+          ...current,
+          [paperId]: {
+            ...(current[paperId] ?? emptyPaperDiscussionState()),
+            replySubmittingCommentId: null,
           },
         }));
       }
@@ -4027,7 +4282,7 @@ export default function App() {
     setComposerStatus("");
     setMobileSidebarOpen(false);
     setPaperExplorationSidebarCollapsed(true);
-    setPaperExplorationSidebarPane("details");
+    setPaperExplorationSidebarPane("info");
     setPaperExplorationNotes({});
     setPaperExplorationSections({});
     setPaperDiscussionStates({});
@@ -6140,6 +6395,32 @@ export default function App() {
                       <div className="paper-exploration-header-actions">
                         <button
                           type="button"
+                          className={`paper-exploration-header-vote-button${
+                            activePaperDiscussion.viewerHasUpvoted ? " active" : ""
+                          }`}
+                          aria-label={`${
+                            activePaperDiscussion.viewerHasUpvoted ? "Upvoted" : "Upvote"
+                          } ${activePaperDiscussion.upvoteCount}`}
+                          title={
+                            activePaperDiscussion.viewerHasUpvoted
+                              ? "Remove upvote"
+                              : "Upvote paper"
+                          }
+                          onClick={() => void handlePaperDiscussionVote()}
+                          disabled={
+                            activePaperDiscussion.votePending ||
+                            activePaperDiscussion.status === "loading"
+                          }
+                        >
+                          <span className="paper-exploration-header-vote-icon" aria-hidden="true" />
+                          <span className="paper-exploration-header-vote-count">
+                            {activePaperDiscussion.votePending
+                              ? "..."
+                              : activePaperDiscussion.upvoteCount}
+                          </span>
+                        </button>
+                        <button
+                          type="button"
                           className="paper-exploration-icon-button"
                           aria-label={
                             paperExplorationSidebarOpen
@@ -7208,11 +7489,11 @@ export default function App() {
                 <button
                   type="button"
                   role="tab"
-                  aria-selected={paperExplorationSidebarPane === "details"}
-                  className={`paper-exploration-sidebar-tab${paperExplorationSidebarPane === "details" ? " active" : ""}`}
-                  onClick={() => setPaperExplorationSidebarPane("details")}
+                  aria-selected={paperExplorationSidebarPane === "info"}
+                  className={`paper-exploration-sidebar-tab${paperExplorationSidebarPane === "info" ? " active" : ""}`}
+                  onClick={() => setPaperExplorationSidebarPane("info")}
                 >
-                  Paper Details
+                  Info
                 </button>
                 <button
                   type="button"
@@ -7221,7 +7502,16 @@ export default function App() {
                   className={`paper-exploration-sidebar-tab${paperExplorationSidebarPane === "notes" ? " active" : ""}`}
                   onClick={() => setPaperExplorationSidebarPane("notes")}
                 >
-                  My Notes
+                  Notes
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={paperExplorationSidebarPane === "social"}
+                  className={`paper-exploration-sidebar-tab${paperExplorationSidebarPane === "social" ? " active" : ""}`}
+                  onClick={() => setPaperExplorationSidebarPane("social")}
+                >
+                  Social
                 </button>
                 <button
                   type="button"
@@ -7232,8 +7522,12 @@ export default function App() {
                   ×
                 </button>
               </div>
-              <div className="paper-exploration-sidebar-body">
-                {paperExplorationSidebarPane === "details" ? (
+              <div
+                className={`paper-exploration-sidebar-body${
+                  paperExplorationSidebarPane === "social" ? " social" : ""
+                }`}
+              >
+                {paperExplorationSidebarPane === "info" ? (
                   <>
                     <details className="paper-exploration-sidebar-section" open>
                       <summary>
@@ -7298,107 +7592,85 @@ export default function App() {
                         <p className="paper-exploration-sidebar-note">No authors listed.</p>
                       )}
                     </details>
-                    <details
-                      className="paper-exploration-sidebar-section paper-exploration-discussion-section"
-                      open
-                    >
-                      <summary>
-                        <MaskedAssetIcon
-                          asset="icons8-thumbs-up-50.svg"
-                          className="paper-exploration-sidebar-section-icon"
-                        />
-                        <span>Discussion</span>
-                        <span className="paper-exploration-sidebar-chevron" aria-hidden="true" />
-                      </summary>
-                      <div className="paper-exploration-discussion">
-                        {!authenticated ? (
-                          <p className="paper-exploration-sidebar-note">
-                            Log in to vote and comment on this paper.
-                          </p>
-                        ) : (
-                          <>
-                            {activePaperDiscussion.status === "loading" ? (
-                              <p className="paper-exploration-sidebar-note">
-                                Loading discussion...
-                              </p>
-                            ) : null}
-                            {activePaperDiscussion.status === "error" ? (
-                              <p className="paper-exploration-sidebar-note warning">
-                                {activePaperDiscussion.error}
-                              </p>
-                            ) : null}
-                            <button
-                              type="button"
-                              className={`paper-exploration-vote-button${
-                                activePaperDiscussion.viewerHasUpvoted ? " active" : ""
-                              }`}
-                              onClick={() => void handlePaperDiscussionVote()}
-                              disabled={
-                                activePaperDiscussion.votePending ||
-                                activePaperDiscussion.status === "loading"
-                              }
-                            >
-                              <MaskedAssetIcon
-                                asset="icons8-thumbs-up-50.svg"
-                                className="paper-exploration-vote-icon"
-                              />
-                              <span>
-                                {activePaperDiscussion.votePending
-                                  ? "Saving..."
-                                  : activePaperDiscussion.viewerHasUpvoted
-                                    ? "Upvoted"
-                                    : "Upvote"}
-                              </span>
-                              <strong>{activePaperDiscussion.upvoteCount}</strong>
-                            </button>
-                            <form
-                              className="paper-exploration-comment-form"
-                              onSubmit={handlePaperDiscussionSubmit}
-                            >
-                              <textarea
-                                aria-label="Paper comment"
-                                value={activePaperDiscussion.draft}
-                                onChange={(event) =>
-                                  handlePaperDiscussionDraftChange(
-                                    activePaperExploration.paperId,
-                                    event.target.value,
-                                  )
-                                }
-                                placeholder="Add a comment"
-                                rows={3}
-                              />
-                              <button
-                                type="submit"
-                                className="paper-exploration-comment-submit"
-                                disabled={
-                                  activePaperDiscussion.commentSubmitting ||
-                                  activePaperDiscussion.draft.trim().length === 0
-                                }
-                              >
-                                {activePaperDiscussion.commentSubmitting ? "Posting..." : "Comment"}
-                              </button>
-                            </form>
-                            <div className="paper-exploration-comments">
-                              <div className="paper-exploration-comments-heading">
-                                {activePaperCommentCount}{" "}
-                                {activePaperCommentCount === 1 ? "comment" : "comments"}
-                              </div>
-                              {activePaperDiscussion.comments.length > 0 ? (
-                                activePaperDiscussion.comments.map((comment) => (
-                                  <PaperExplorationComment
-                                    key={comment.comment_id}
-                                    comment={comment}
-                                  />
-                                ))
-                              ) : (
-                                <p className="paper-exploration-sidebar-note">No comments yet.</p>
-                              )}
-                            </div>
-                          </>
-                        )}
-                      </div>
-                    </details>
                   </>
+                ) : paperExplorationSidebarPane === "social" ? (
+                  <div className="paper-exploration-social-pane">
+                    <div className="paper-exploration-social-thread">
+                      {!authenticated ? (
+                        <p className="paper-exploration-sidebar-note">
+                          Log in to view and comment on this paper.
+                        </p>
+                      ) : (
+                        <>
+                          {activePaperDiscussion.status === "loading" ? (
+                            <p className="paper-exploration-sidebar-note">Loading comments...</p>
+                          ) : null}
+                          {activePaperDiscussion.status === "error" ? (
+                            <p className="paper-exploration-sidebar-note warning">
+                              {activePaperDiscussion.error}
+                            </p>
+                          ) : null}
+                          <div className="paper-exploration-comments-heading">
+                            {activePaperCommentCount}{" "}
+                            {activePaperCommentCount === 1 ? "comment" : "comments"}
+                          </div>
+                          {activePaperDiscussion.comments.length > 0 ? (
+                            activePaperDiscussion.comments.map((comment) => (
+                              <PaperExplorationComment
+                                key={comment.comment_id}
+                                comment={comment}
+                                authenticated={authenticated}
+                                expandedReplyIds={activePaperDiscussion.expandedReplyIds}
+                                replyingToCommentId={activePaperDiscussion.replyingToCommentId}
+                                replyDrafts={activePaperDiscussion.replyDrafts}
+                                replySubmittingCommentId={
+                                  activePaperDiscussion.replySubmittingCommentId
+                                }
+                                onReplyStart={handlePaperDiscussionReplyStart}
+                                onReplyCancel={handlePaperDiscussionReplyCancel}
+                                onReplyDraftChange={handlePaperDiscussionReplyDraftChange}
+                                onReplySubmit={handlePaperDiscussionReplySubmit}
+                                onToggleReplies={handlePaperDiscussionRepliesToggle}
+                              />
+                            ))
+                          ) : activePaperDiscussion.status !== "loading" ? (
+                            <p className="paper-exploration-sidebar-note">No comments yet.</p>
+                          ) : null}
+                        </>
+                      )}
+                    </div>
+                    {authenticated ? (
+                      <div className="paper-exploration-social-composer">
+                        <form
+                          className="paper-exploration-comment-form"
+                          onSubmit={handlePaperDiscussionSubmit}
+                        >
+                          <textarea
+                            aria-label="Paper comment"
+                            value={activePaperDiscussion.draft}
+                            onChange={(event) =>
+                              handlePaperDiscussionDraftChange(
+                                activePaperExploration.paperId,
+                                event.target.value,
+                              )
+                            }
+                            placeholder="Add a comment"
+                            rows={2}
+                          />
+                          <button
+                            type="submit"
+                            className="paper-exploration-comment-submit"
+                            disabled={
+                              activePaperDiscussion.commentSubmitting ||
+                              activePaperDiscussion.draft.trim().length === 0
+                            }
+                          >
+                            {activePaperDiscussion.commentSubmitting ? "Posting..." : "Comment"}
+                          </button>
+                        </form>
+                      </div>
+                    ) : null}
+                  </div>
                 ) : (
                   <details className="paper-exploration-sidebar-section" open>
                     <summary>
