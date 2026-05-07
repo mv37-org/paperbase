@@ -4,6 +4,7 @@ import type {
   ChangeEvent,
   FormEvent,
   KeyboardEvent as ReactKeyboardEvent,
+  PointerEvent as ReactPointerEvent,
   UIEvent,
 } from "react";
 import Editor, { DiffEditor } from "@monaco-editor/react";
@@ -216,6 +217,8 @@ const LANDING_TRENDING_PAGE_SIZE = 10;
 const PROJECT_ITEM_PAGE_SIZE = 5;
 const PROJECT_SIDEBAR_ITEM_KINDS: ProjectItemKind[] = ["python_file", "thread"];
 const PAPER_EXPLORATIONS_KEY = "paperbase-paper-explorations";
+const PAPER_EXPLORATION_SIDEBAR_MIN_WIDTH = 310;
+const PAPER_EXPLORATION_SIDEBAR_MAX_WIDTH = PAPER_EXPLORATION_SIDEBAR_MIN_WIDTH * 2;
 const AUTH_VIEW_COPY: Record<AuthView, { title: string; caption: string }> = {
   login: { title: "Log in", caption: "Use your account to continue." },
   signup: { title: "Create account", caption: "Create your account." },
@@ -823,6 +826,9 @@ export default function App() {
   const [paperExplorationSidebarPane, setPaperExplorationSidebarPane] = useState<
     "info" | "chat" | "notes" | "social"
   >("info");
+  const [paperExplorationSidebarWidth, setPaperExplorationSidebarWidth] = useState(
+    PAPER_EXPLORATION_SIDEBAR_MIN_WIDTH,
+  );
   const [paperExplorationChatDrafts, setPaperExplorationChatDrafts] = useState<
     Record<string, string>
   >({});
@@ -1282,10 +1288,38 @@ export default function App() {
     ? (threadMap[activePaperExplorationChatThreadId] ?? null)
     : null;
   const activePaperExplorationChatMessages = activePaperExplorationChatThread?.messages ?? [];
+  const activePaperExplorationChatStreamState = activePaperExplorationChatThreadId
+    ? (threadStreamStates[activePaperExplorationChatThreadId] ?? null)
+    : null;
+  const activePaperExplorationChatToolActivities = useMemo(
+    () =>
+      activePaperExplorationChatThreadId
+        ? [...(toolActivities[activePaperExplorationChatThreadId] ?? [])].sort((left, right) =>
+            left.turnIndex === right.turnIndex
+              ? Date.parse(left.startedAt) - Date.parse(right.startedAt)
+              : left.turnIndex - right.turnIndex,
+          )
+        : [],
+    [activePaperExplorationChatThreadId, toolActivities],
+  );
+  const activePaperExplorationChatToolActivitiesByTurn = useMemo(() => {
+    const grouped = new Map<number, ToolActivityEntry[]>();
+    for (const activity of activePaperExplorationChatToolActivities) {
+      const existing = grouped.get(activity.turnIndex) ?? [];
+      existing.push(activity);
+      grouped.set(activity.turnIndex, existing);
+    }
+    return grouped;
+  }, [activePaperExplorationChatToolActivities]);
+  const activePaperExplorationChatToolActivityCount =
+    activePaperExplorationChatToolActivities.length;
   const activePaperExplorationChatDraft = activePaperExploration
     ? (paperExplorationChatDrafts[activePaperExploration.explorationId] ?? "")
     : "";
   const activePaperExplorationChatRunning = Boolean(
+    activePaperExplorationChatThreadId && streamingThreadId === activePaperExplorationChatThreadId,
+  );
+  const activePaperExplorationChatStreamInView = Boolean(
     activePaperExplorationChatThreadId && streamingThreadId === activePaperExplorationChatThreadId,
   );
   const activePaperExplorationChatMessageCount =
@@ -1394,6 +1428,50 @@ export default function App() {
   const activeContextUsagePercent = activeContextUsage
     ? contextUsagePercent(activeContextUsage)
     : 0;
+  const renderToolActivityRow = useCallback(
+    (activity: ToolActivityEntry) => (
+      <div
+        key={activity.id}
+        className={`tool-activity-row status-${activity.status}${activity.isError ? " error" : ""}`}
+      >
+        {toolActivityHasDetails(activity) ? (
+          <details className="tool-activity-details">
+            <summary className="tool-activity-summary">
+              <span
+                className={`tool-activity-label${activity.status === "running" ? " thinking-shimmer" : ""}`}
+              >
+                {formatToolActivityText(activity)}
+              </span>
+              <span className="tool-activity-summary-hint">
+                Command{activity.output ? " and output" : ""}
+              </span>
+            </summary>
+            <div className="tool-activity-content">
+              {activity.command ? (
+                <div className="tool-activity-detail-block">
+                  <span className="tool-activity-detail-label">Command</span>
+                  <pre className="tool-activity-detail-payload">{activity.command}</pre>
+                </div>
+              ) : null}
+              {activity.output ? (
+                <div className="tool-activity-detail-block">
+                  <span className="tool-activity-detail-label">Output</span>
+                  <pre className="tool-activity-detail-payload">{activity.output}</pre>
+                </div>
+              ) : null}
+            </div>
+          </details>
+        ) : (
+          <span
+            className={`tool-activity-label${activity.status === "running" ? " thinking-shimmer" : ""}`}
+          >
+            {formatToolActivityText(activity)}
+          </span>
+        )}
+      </div>
+    ),
+    [],
+  );
   useEffect(() => {
     if (!showThreadDebugButton) {
       setThreadDebugModalOpen(false);
@@ -2902,6 +2980,7 @@ export default function App() {
     activePaperExplorationChatLastMessageMarkdown,
     activePaperExplorationChatMessageCount,
     activePaperExplorationChatThreadId,
+    activePaperExplorationChatToolActivityCount,
     paperExplorationSidebarPane,
   ]);
 
@@ -4701,6 +4780,7 @@ export default function App() {
     setComposerStatus("");
     setMobileSidebarOpen(false);
     setPaperExplorationSidebarCollapsed(true);
+    setPaperExplorationSidebarWidth(PAPER_EXPLORATION_SIDEBAR_MIN_WIDTH);
     setPaperExplorationSidebarPane("info");
     setPaperExplorationChatDrafts({});
     setPaperAnnotationModal(null);
@@ -4739,6 +4819,44 @@ export default function App() {
   const closePaperExplorationSidebar = useCallback(() => {
     setPaperExplorationSidebarCollapsed(true);
   }, []);
+
+  const handlePaperExplorationSidebarResizePointerDown = useCallback(
+    (event: ReactPointerEvent<HTMLButtonElement>) => {
+      if (!paperExplorationSidebarOpen) {
+        return;
+      }
+      event.preventDefault();
+      const handle = event.currentTarget;
+      handle.setPointerCapture?.(event.pointerId);
+      const resizeToClientX = (clientX: number) => {
+        if (!Number.isFinite(clientX)) {
+          return;
+        }
+        const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+        const nextWidth = Math.min(
+          PAPER_EXPLORATION_SIDEBAR_MAX_WIDTH,
+          Math.max(PAPER_EXPLORATION_SIDEBAR_MIN_WIDTH, viewportWidth - clientX),
+        );
+        setPaperExplorationSidebarWidth(nextWidth);
+      };
+      resizeToClientX(event.clientX);
+
+      const handlePointerMove = (moveEvent: PointerEvent) => {
+        resizeToClientX(moveEvent.clientX);
+      };
+      const stopResize = (endEvent: PointerEvent) => {
+        handle.releasePointerCapture?.(endEvent.pointerId);
+        document.removeEventListener("pointermove", handlePointerMove);
+        document.removeEventListener("pointerup", stopResize);
+        document.removeEventListener("pointercancel", stopResize);
+      };
+
+      document.addEventListener("pointermove", handlePointerMove);
+      document.addEventListener("pointerup", stopResize);
+      document.addEventListener("pointercancel", stopResize);
+    },
+    [paperExplorationSidebarOpen],
+  );
 
   const expandCollapsedSidebarForAction = useCallback(() => {
     if (!sidebarCollapsed || window.matchMedia("(max-width: 980px)").matches) {
@@ -6030,6 +6148,13 @@ export default function App() {
         <div
           id="app-shell"
           className={`app-shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${mobileSidebarOpen ? " mobile-sidebar-open" : ""}${paperDrawerOpen ? " paper-drawer-open" : ""}${paperExplorationSidebarOpen ? " paper-exploration-sidebar-open" : ""}`}
+          style={
+            paperExplorationSidebarOpen
+              ? ({
+                  "--paper-exploration-sidebar-width": `${paperExplorationSidebarWidth}px`,
+                } as CSSProperties)
+              : undefined
+          }
         >
           <button
             type="button"
@@ -7401,51 +7526,6 @@ export default function App() {
                             candidate.phase !== "commentary" &&
                             (candidate.recommended_prompts?.length ?? 0) > 0,
                         )?.message_id ?? null;
-                    const renderToolActivityRow = (activity: ToolActivityEntry) => (
-                      <div
-                        key={activity.id}
-                        className={`tool-activity-row status-${activity.status}${activity.isError ? " error" : ""}`}
-                      >
-                        {toolActivityHasDetails(activity) ? (
-                          <details className="tool-activity-details">
-                            <summary className="tool-activity-summary">
-                              <span
-                                className={`tool-activity-label${activity.status === "running" ? " thinking-shimmer" : ""}`}
-                              >
-                                {formatToolActivityText(activity)}
-                              </span>
-                              <span className="tool-activity-summary-hint">
-                                Command{activity.output ? " and output" : ""}
-                              </span>
-                            </summary>
-                            <div className="tool-activity-content">
-                              {activity.command ? (
-                                <div className="tool-activity-detail-block">
-                                  <span className="tool-activity-detail-label">Command</span>
-                                  <pre className="tool-activity-detail-payload">
-                                    {activity.command}
-                                  </pre>
-                                </div>
-                              ) : null}
-                              {activity.output ? (
-                                <div className="tool-activity-detail-block">
-                                  <span className="tool-activity-detail-label">Output</span>
-                                  <pre className="tool-activity-detail-payload">
-                                    {activity.output}
-                                  </pre>
-                                </div>
-                              ) : null}
-                            </div>
-                          </details>
-                        ) : (
-                          <span
-                            className={`tool-activity-label${activity.status === "running" ? " thinking-shimmer" : ""}`}
-                          >
-                            {formatToolActivityText(activity)}
-                          </span>
-                        )}
-                      </div>
-                    );
                     const replyTitleForTurn = (turnIndex: number) => {
                       const streamedTitle =
                         activeStreamInView && activeThreadStreamState?.turnIndex === turnIndex
@@ -7945,6 +8025,14 @@ export default function App() {
 
           {paperExplorationSidebarOpen && activePaperExploration ? (
             <aside className="paper-exploration-sidebar" aria-label="Paper details">
+              <button
+                type="button"
+                className="paper-exploration-sidebar-resizer"
+                role="separator"
+                aria-orientation="vertical"
+                aria-label="Resize paper details panel"
+                onPointerDown={handlePaperExplorationSidebarResizePointerDown}
+              />
               <div
                 className="paper-exploration-sidebar-tabs"
                 role="tablist"
@@ -8068,58 +8156,154 @@ export default function App() {
                   </>
                 ) : paperExplorationSidebarPane === "chat" ? (
                   <div className="paper-exploration-chat-pane">
-                    <div className="paper-exploration-chat-focus">
-                      You are now focused on this paper.
-                    </div>
                     <div
                       ref={paperExplorationChatListRef}
                       className="paper-exploration-chat-list"
                       aria-label="Paper chat messages"
                     >
-                      {activePaperExplorationChatMessages.length > 0 ? (
-                        activePaperExplorationChatMessages
-                          .filter((message) => message.kind !== "compaction")
-                          .map((message) => {
-                            const isAssistant = message.role === "assistant";
-                            const isStreaming = isStreamingMessageStatus(message.status);
-                            return (
-                              <article
-                                key={message.message_id}
-                                className={`paper-exploration-chat-message ${isAssistant ? "assistant" : "user"} status-${message.status}`}
-                              >
-                                {message.status !== "completed" ? (
-                                  <div
-                                    className={`paper-exploration-chat-status${isStreaming ? " thinking-shimmer" : ""}`}
+                      {activePaperExplorationChatMessages.length > 0 ||
+                      activePaperExplorationChatToolActivities.length > 0 ? (
+                        (() => {
+                          const itemByMessageId = new Map(
+                            (activePaperExplorationChatThread?.items ?? [])
+                              .filter((item) =>
+                                ["user_message", "assistant_message", "compaction"].includes(
+                                  item.item_type,
+                                ),
+                              )
+                              .map((item) => [item.item_id, item]),
+                          );
+                          const turnIndexById = new Map<string, number>();
+                          for (const [index, turn] of (
+                            activePaperExplorationChatThread?.turns ?? []
+                          ).entries()) {
+                            turnIndexById.set(turn.turn_id, index + 1);
+                          }
+                          for (const item of activePaperExplorationChatThread?.items ?? []) {
+                            if (item.turn_id && !turnIndexById.has(item.turn_id)) {
+                              turnIndexById.set(item.turn_id, turnIndexById.size + 1);
+                            }
+                          }
+                          const renderedToolActivityTurnIndexes = new Set<number>();
+                          let userTurnIndex = 0;
+                          const renderedMessages = activePaperExplorationChatMessages.map(
+                            (message) => {
+                              const isCompactionMessage = message.kind === "compaction";
+                              if (message.role === "user" && !isCompactionMessage) {
+                                userTurnIndex += 1;
+                              }
+                              const itemTurnId = itemByMessageId.get(message.message_id)?.turn_id;
+                              const messageTurnIndex =
+                                ((itemTurnId ? turnIndexById.get(itemTurnId) : undefined) ??
+                                  userTurnIndex) ||
+                                1;
+                              const turnActivities =
+                                message.role === "user" &&
+                                !isCompactionMessage &&
+                                !renderedToolActivityTurnIndexes.has(messageTurnIndex)
+                                  ? (activePaperExplorationChatToolActivitiesByTurn.get(
+                                      messageTurnIndex,
+                                    ) ?? [])
+                                  : [];
+                              if (turnActivities.length > 0) {
+                                renderedToolActivityTurnIndexes.add(messageTurnIndex);
+                              }
+                              const showThinkingPlaceholder =
+                                message.role === "user" &&
+                                !isCompactionMessage &&
+                                activePaperExplorationChatStreamInView &&
+                                activePaperExplorationChatStreamState?.turnIndex ===
+                                  messageTurnIndex &&
+                                !activePaperExplorationChatStreamState.assistantStarted &&
+                                turnActivities.length === 0;
+                              const isAssistant = message.role === "assistant";
+                              const isStreaming = isStreamingMessageStatus(message.status);
+                              const messageRoleClass = isCompactionMessage
+                                ? "compaction"
+                                : isAssistant
+                                  ? "assistant"
+                                  : "user";
+                              return (
+                                <Fragment key={message.message_id}>
+                                  <article
+                                    className={`message-row paper-exploration-chat-message ${messageRoleClass} status-${message.status}`}
                                   >
-                                    {isStreaming ? "Thinking" : "Failed"}
-                                  </div>
-                                ) : null}
-                                <div
-                                  className={`paper-exploration-chat-bubble ${isAssistant ? "assistant" : "user"}`}
-                                >
-                                  {isAssistant ? (
-                                    <MarkdownRenderer
-                                      markdown={message.content_markdown}
-                                      className="paper-exploration-chat-markdown"
-                                      interactiveCitations
-                                      onCitationClick={(sourceId) => {
-                                        const citation = message.citations.find(
-                                          (item) => item.source_id === sourceId,
-                                        );
-                                        if (citation) {
-                                          handleCitationClick(message, citation);
-                                        }
-                                      }}
-                                    />
-                                  ) : (
-                                    <div className="paper-exploration-chat-text">
-                                      {message.content_markdown}
+                                    {message.status !== "completed" && !isCompactionMessage ? (
+                                      <div className="message-meta-row">
+                                        <span
+                                          className={`message-status-label${isStreaming ? " thinking-shimmer" : ""}`}
+                                        >
+                                          {isStreaming
+                                            ? formatThinkingLabel(
+                                                activePaperExplorationChatStreamState?.thinkingWord,
+                                              )
+                                            : "Failed"}
+                                        </span>
+                                      </div>
+                                    ) : null}
+                                    <div
+                                      className={`message-bubble ${messageRoleClass}${
+                                        isCompactionMessage && isStreaming
+                                          ? " thinking-shimmer"
+                                          : ""
+                                      }`}
+                                    >
+                                      {isAssistant || isCompactionMessage ? (
+                                        <MarkdownRenderer
+                                          markdown={message.content_markdown}
+                                          className={`message-markdown paper-exploration-chat-markdown${
+                                            isCompactionMessage ? " compaction-markdown" : ""
+                                          }`}
+                                          interactiveCitations={!isCompactionMessage}
+                                          onCitationClick={
+                                            isCompactionMessage
+                                              ? undefined
+                                              : (sourceId) => {
+                                                  const citation = message.citations.find(
+                                                    (item) => item.source_id === sourceId,
+                                                  );
+                                                  if (citation) {
+                                                    handleCitationClick(message, citation);
+                                                  }
+                                                }
+                                          }
+                                        />
+                                      ) : (
+                                        <div className="message-plain-text paper-exploration-chat-text">
+                                          {message.content_markdown}
+                                        </div>
+                                      )}
                                     </div>
-                                  )}
-                                </div>
-                              </article>
-                            );
-                          })
+                                  </article>
+                                  {turnActivities.map(renderToolActivityRow)}
+                                  {showThinkingPlaceholder ? (
+                                    <div className="tool-activity-row status-running thinking-only">
+                                      <div className="tool-activity-content">
+                                        <span className="tool-activity-label thinking-shimmer">
+                                          {formatThinkingLabel(
+                                            activePaperExplorationChatStreamState?.thinkingWord,
+                                          )}
+                                        </span>
+                                      </div>
+                                    </div>
+                                  ) : null}
+                                </Fragment>
+                              );
+                            },
+                          );
+                          const unrenderedActivities = activePaperExplorationChatToolActivities
+                            .filter(
+                              (activity) =>
+                                !renderedToolActivityTurnIndexes.has(activity.turnIndex),
+                            )
+                            .map(renderToolActivityRow);
+                          return (
+                            <>
+                              {renderedMessages}
+                              {unrenderedActivities}
+                            </>
+                          );
+                        })()
                       ) : (
                         <p className="paper-exploration-sidebar-note">
                           Ask a focused question about this paper.

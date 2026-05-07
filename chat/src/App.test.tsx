@@ -384,8 +384,15 @@ vi.mock("./app/PdfDocumentViewer", async () => {
         onSelectionAction?: (selection: {
           paper_id: string;
           page_number: number;
-          action: "explain";
-          selected_text: string;
+          action: "explain" | "challenge";
+          selected_text?: string | null;
+          nearby_text?: string | null;
+          region?: {
+            points: Array<{ x: number; y: number }>;
+            bbox: { x: number; y: number; width: number; height: number };
+            image_base64?: string | null;
+            content_type?: "image/png" | "image/webp" | null;
+          };
         }) => void;
         onAddNote?: (target: {
           paperId: string;
@@ -447,18 +454,47 @@ vi.mock("./app/PdfDocumentViewer", async () => {
           : null,
         props.onSelectionAction && props.paperId
           ? React.createElement(
-              "button",
-              {
-                type: "button",
-                onClick: () =>
-                  props.onSelectionAction?.({
-                    paper_id: props.paperId!,
-                    page_number: 1,
-                    action: "explain",
-                    selected_text: "Selected benchmark text",
-                  }),
-              },
-              "Mock PDF explain selection",
+              React.Fragment,
+              null,
+              React.createElement(
+                "button",
+                {
+                  type: "button",
+                  onClick: () =>
+                    props.onSelectionAction?.({
+                      paper_id: props.paperId!,
+                      page_number: 1,
+                      action: "explain",
+                      selected_text: "Selected benchmark text",
+                    }),
+                },
+                "Mock PDF explain selection",
+              ),
+              React.createElement(
+                "button",
+                {
+                  type: "button",
+                  onClick: () =>
+                    props.onSelectionAction?.({
+                      paper_id: props.paperId!,
+                      page_number: 1,
+                      action: "challenge",
+                      selected_text: null,
+                      nearby_text: "Area page context",
+                      region: {
+                        points: [
+                          { x: 0.1, y: 0.2 },
+                          { x: 0.4, y: 0.5 },
+                          { x: 0.2, y: 0.6 },
+                        ],
+                        bbox: { x: 0.1, y: 0.2, width: 0.3, height: 0.4 },
+                        image_base64: "ZmFrZS1hcmVh",
+                        content_type: "image/png",
+                      },
+                    }),
+                },
+                "Mock PDF challenge area",
+              ),
             )
           : null,
       );
@@ -1507,6 +1543,49 @@ describe("App", () => {
         _payload: unknown,
         onEvent: (eventName: string, payload: unknown) => void,
       ) => {
+        const toolItem = threadItemResponse(
+          "tool_paper_search",
+          "function_call",
+          "assistant",
+          JSON.stringify({ query: "grounding" }),
+          {
+            thread_id: threadId,
+            turn_id: "turn_paper",
+            call_id: "call_paper_search",
+            name: "paperbase_search_sections",
+            content_json: { query: "grounding" },
+          },
+        );
+        onEvent("item_started", { item: toolItem });
+        onEvent("item_completed", { item: toolItem });
+        onEvent("item_completed", {
+          item: threadItemResponse(
+            "tool_paper_search_output",
+            "function_call_output",
+            "tool",
+            "Found selected paper context.",
+            {
+              thread_id: threadId,
+              turn_id: "turn_paper",
+              call_id: "call_paper_search",
+              name: "paperbase_search_sections",
+            },
+          ),
+        });
+        const commentaryItem = threadItemResponse(
+          "msg_paper_commentary",
+          "assistant_message",
+          "assistant",
+          "Checking the selected crop.",
+          {
+            thread_id: threadId,
+            turn_id: "turn_paper",
+            phase: "commentary",
+            status: "completed",
+          },
+        );
+        onEvent("item_started", { item: commentaryItem });
+        onEvent("item_completed", { item: commentaryItem });
         const assistantItem = threadItemResponse(
           "msg_paper_assistant",
           "assistant_message",
@@ -1539,6 +1618,32 @@ describe("App", () => {
 
     expect(await screen.findByRole("heading", { name: "Benchmark Paper" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "Chat" })).toBeTruthy();
+    const appShell = document.querySelector("#app-shell") as HTMLElement;
+    const sidebarResizer = screen.getByRole("separator", {
+      name: "Resize paper details panel",
+    });
+    expect(appShell.style.getPropertyValue("--paper-exploration-sidebar-width")).toBe("310px");
+    fireEvent.pointerDown(sidebarResizer, {
+      clientX: window.innerWidth - 500,
+      pointerId: 7,
+    });
+    const growResizeEvent = new Event("pointermove", { bubbles: true, cancelable: true });
+    Object.defineProperties(growResizeEvent, {
+      clientX: { value: window.innerWidth - 900 },
+      pointerId: { value: 7 },
+    });
+    fireEvent(document, growResizeEvent);
+    expect(appShell.style.getPropertyValue("--paper-exploration-sidebar-width")).toBe("620px");
+    const shrinkResizeEvent = new Event("pointermove", { bubbles: true, cancelable: true });
+    Object.defineProperties(shrinkResizeEvent, {
+      clientX: { value: window.innerWidth - 100 },
+      pointerId: { value: 7 },
+    });
+    fireEvent(document, shrinkResizeEvent);
+    expect(appShell.style.getPropertyValue("--paper-exploration-sidebar-width")).toBe("310px");
+    const endResizeEvent = new Event("pointerup", { bubbles: true, cancelable: true });
+    Object.defineProperty(endResizeEvent, "pointerId", { value: 7 });
+    fireEvent(document, endResizeEvent);
     fireEvent.click(await screen.findByRole("button", { name: "Mock PDF explain selection" }));
 
     await waitFor(() => {
@@ -1560,11 +1665,32 @@ describe("App", () => {
       }),
     );
     expect(screen.getByRole("tab", { name: "Chat" }).getAttribute("aria-selected")).toBe("true");
-    expect(screen.getByText("You are now focused on this paper.")).toBeTruthy();
+    expect(screen.queryByText("You are now focused on this paper.")).toBeNull();
     expect(screen.getByText("Explain this PDF selection in context.")).toBeTruthy();
+    expect(await screen.findByText("Checking the selected crop.")).toBeTruthy();
+    expect(await screen.findByText(/Did section search for "grounding"/)).toBeTruthy();
     expect(await screen.findByText("Paper streamed answer")).toBeTruthy();
     expect(document.querySelector(".pdf-document-viewer.paper-exploration-frame")).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Benchmark Paper" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Mock PDF challenge area" }));
+    await waitFor(() => {
+      expect(apiMocks.sendThreadMessageStream).toHaveBeenCalledTimes(2);
+    });
+    expect(apiMocks.sendThreadMessageStream.mock.calls[1]?.[1]).toEqual(
+      expect.objectContaining({
+        content: "Challenge this PDF selection and check whether the paper supports it.",
+        paper_selection: expect.objectContaining({
+          action: "challenge",
+          paper_id: "arxiv:2401.12345",
+          selected_text: null,
+          region: expect.objectContaining({
+            image_base64: "ZmFrZS1hcmVh",
+            content_type: "image/png",
+          }),
+        }),
+      }),
+    );
   });
 
   it("adds, edits, scrolls to, and deletes paper exploration notes", async () => {

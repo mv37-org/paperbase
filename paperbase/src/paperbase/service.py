@@ -3895,6 +3895,11 @@ class PaperbaseService:
                 "point_count": len(selection.region.points),
                 "has_image": bool(selection.region.image_base64),
             }
+            if selection.region.image_base64:
+                payload["region"]["image_context"] = (
+                    "The selected freeform PDF area is attached as an image input after this text block. "
+                    "Inspect that crop directly; if selected_text is empty, use the crop and nearby_text."
+                )
         return (
             f"{user_text.strip()}\n\n"
             "PDF selection context:\n"
@@ -3909,6 +3914,7 @@ class PaperbaseService:
         return {
             "type": "input_image",
             "image_url": f"data:{content_type};base64,{region.image_base64}",
+            "detail": "high",
         }
 
     def _chat_content_for_user_item(self, item: ChatThreadItemResponse) -> str | list[dict[str, Any]]:
@@ -5926,7 +5932,9 @@ class PaperbaseService:
         self.get_indexed_paper(selection.paper_id)
         if not (selection.selected_text or "").strip() and selection.region is None:
             raise HTTPException(status_code=400, detail="Paper selection must include text or a region")
-        if selection.region is not None and selection.region.image_base64:
+        if selection.region is not None:
+            if not selection.region.image_base64:
+                raise HTTPException(status_code=400, detail="Paper region selection must include an image")
             try:
                 decoded = base64.b64decode(selection.region.image_base64, validate=True)
             except Exception as exc:

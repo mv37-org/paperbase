@@ -664,11 +664,13 @@ export const PdfDocumentViewer = forwardRef<PdfDocumentViewerHandle, PdfDocument
       if (!paperId || selection.isCollapsed) {
         return null;
       }
-      const selectedText = selection.toString().replace(/\s+/g, " ").trim();
+      const range = selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
+      const selectedText = (selection.toString() || range?.cloneContents?.().textContent || "")
+        .replace(/\s+/g, " ")
+        .trim();
       if (!selectedText) {
         return null;
       }
-      const range = selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
       const anchorElement =
         selection.anchorNode instanceof Element
           ? selection.anchorNode
@@ -821,15 +823,16 @@ export const PdfDocumentViewer = forwardRef<PdfDocumentViewerHandle, PdfDocument
       }
       const canvas = pageCanvasesRef.current.get(current.pageNumber);
       const imageBase64 = cropCanvasRegion(canvas, bbox);
-      const linkedText = latestTextSelectionRef.current;
+      const linkedText =
+        latestTextSelectionRef.current?.page_number === current.pageNumber
+          ? latestTextSelectionRef.current
+          : null;
       const payload: Omit<PaperSelectionPayload, "action"> = {
         paper_id: paperId,
         page_number: current.pageNumber,
         selected_text: linkedText?.selected_text ?? null,
         nearby_text:
-          linkedText?.page_number === current.pageNumber
-            ? linkedText.nearby_text
-            : textForPage(pageTextRef.current, current.pageNumber),
+          linkedText?.nearby_text ?? textForPage(pageTextRef.current, current.pageNumber),
         section_title: linkedText?.section_title ?? null,
         region: {
           points: current.points,

@@ -2771,6 +2771,19 @@ def test_chat_paper_selection_adds_context_and_validates_image(browser_service):
     assert "PDF selection context" in str(user_messages[-1]["content"])
     assert stored.paper_id in str(user_messages[-1]["content"])
     assert "The selected method improves benchmark grounding." in str(user_messages[-1]["content"])
+    refreshed = service.get_chat_thread(session.user, thread.thread_id)
+    selection_item = next(item for item in refreshed.items if item.item_type == "user_message")
+    selection_content = service._chat_content_for_user_item(selection_item)  # type: ignore[attr-defined]
+    assert isinstance(selection_content, list)
+    assert any(block.get("type") == "input_text" for block in selection_content)
+    image_blocks = [block for block in selection_content if block.get("type") == "input_image"]
+    assert image_blocks == [
+        {
+            "type": "input_image",
+            "image_url": "data:image/png;base64,aW1n",
+            "detail": "high",
+        }
+    ]
 
     with pytest.raises(HTTPException) as excinfo:
         service.send_chat_message(
@@ -2792,6 +2805,26 @@ def test_chat_paper_selection_adds_context_and_validates_image(browser_service):
             ),
         )
     assert excinfo.value.status_code == 400
+
+    with pytest.raises(HTTPException) as missing_image_excinfo:
+        service.send_chat_message(
+            session.user,
+            thread.thread_id,
+            SendChatMessageRequest(
+                content="Explain this missing crop.",
+                paper_selection=PaperSelectionPayload(
+                    paper_id=stored.paper_id,
+                    page_number=1,
+                    action="challenge",
+                    region={
+                        "points": [{"x": 0.1, "y": 0.2}, {"x": 0.4, "y": 0.5}],
+                        "bbox": {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.3},
+                    },
+                ),
+            ),
+        )
+    assert missing_image_excinfo.value.status_code == 400
+    assert "must include an image" in str(missing_image_excinfo.value.detail)
 
 
 def test_trending_comment_rejects_reply_target_from_another_paper(browser_service):

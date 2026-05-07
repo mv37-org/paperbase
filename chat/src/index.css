@@ -2393,7 +2393,8 @@ textarea::placeholder,
 
 .chat-message-list.paper-exploration-view {
   padding: 0;
-  overflow: auto;
+  height: 100%;
+  overflow: hidden;
   background: #ffffff;
 }
 
@@ -3603,6 +3604,7 @@ textarea::placeholder,
 .paper-exploration-page {
   width: 100%;
   height: 100%;
+  max-height: 100%;
   min-height: 0;
   margin: 0;
   padding: 22px 24px 24px;
@@ -3812,40 +3814,71 @@ textarea::placeholder,
   overflow: hidden;
 }
 
+.paper-exploration-sidebar-resizer {
+  position: absolute;
+  left: -5px;
+  top: 0;
+  bottom: 0;
+  z-index: 4;
+  width: 10px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: col-resize;
+}
+
+.paper-exploration-sidebar-resizer::after {
+  content: "";
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  left: 4px;
+  width: 2px;
+  border-radius: 999px;
+  background: transparent;
+  transition:
+    background 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.paper-exploration-sidebar-resizer:hover::after,
+.paper-exploration-sidebar-resizer:focus-visible::after {
+  background: rgba(37, 99, 235, 0.5);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
 .paper-exploration-sidebar-tabs {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr)) auto;
   align-items: center;
-  gap: 5px;
-  padding: 14px 14px 10px;
+  gap: 2px;
+  padding: 8px 10px 6px;
   border-bottom: 1px solid rgba(27, 22, 17, 0.1);
 }
 
 .paper-exploration-sidebar-tab {
   min-width: 0;
-  min-height: 30px;
-  padding: 0 10px;
-  border: 1px solid transparent;
-  border-radius: 6px;
+  min-height: 24px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 4px;
   background: transparent;
   color: #5d564f;
   cursor: pointer;
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 600;
   line-height: 1.1;
   white-space: nowrap;
 }
 
 .paper-exploration-sidebar-tab.active {
-  border-color: rgba(27, 22, 17, 0.08);
-  background: #ffffff;
   color: #1b1611;
-  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+  font-weight: 800;
 }
 
 .paper-exploration-sidebar-close {
-  width: 30px;
-  height: 30px;
+  width: 24px;
+  height: 24px;
   padding: 0;
   border: 1px solid transparent;
   border-radius: 6px;
@@ -4013,19 +4046,9 @@ textarea::placeholder,
   min-height: 0;
   display: flex;
   flex-direction: column;
-}
-
-.paper-exploration-chat-focus {
-  flex: 0 0 auto;
-  margin: 12px 14px 0;
-  padding: 9px 10px;
-  border: 1px solid rgba(37, 99, 235, 0.16);
-  border-radius: 7px;
-  background: rgba(37, 99, 235, 0.07);
-  color: #334155;
-  font-size: 12px;
-  font-weight: 650;
-  line-height: 1.35;
+  background: var(--chat-ui-bg);
+  color: var(--text);
+  font-family: "Georgia", "Iowan Old Style", serif;
 }
 
 .paper-exploration-chat-list {
@@ -4041,6 +4064,20 @@ textarea::placeholder,
 
 .paper-exploration-chat-list .paper-exploration-sidebar-note {
   padding: 0;
+}
+
+.paper-exploration-chat-list .message-row.user {
+  max-width: min(340px, 100%);
+}
+
+.paper-exploration-chat-list .message-bubble.user {
+  font-size: 12.5px;
+}
+
+.paper-exploration-chat-list .message-meta-row,
+.paper-exploration-chat-list .tool-activity-label,
+.paper-exploration-chat-list .turn-work-summary {
+  font-size: 11.5px;
 }
 
 .paper-exploration-chat-message {
@@ -4087,6 +4124,7 @@ textarea::placeholder,
 
 .paper-exploration-chat-markdown {
   font-size: 12.5px;
+  font-family: "Georgia", "Iowan Old Style", serif;
   line-height: 1.48;
 }
 
@@ -4129,7 +4167,7 @@ textarea::placeholder,
   flex: 0 0 auto;
   padding: 10px 14px 14px;
   border-top: 1px solid rgba(27, 22, 17, 0.1);
-  background: #f7f2ea;
+  background: var(--chat-ui-bg);
   display: grid;
   gap: 8px;
 }
@@ -10409,10 +10447,7 @@ body.authenticated-theme-dark .paper-exploration-sidebar-tab {
 }
 
 body.authenticated-theme-dark .paper-exploration-sidebar-tab.active {
-  border-color: rgba(223, 232, 244, 0.12);
-  background: rgba(255, 255, 255, 0.08);
   color: var(--text);
-  box-shadow: none;
 }
 
 body.authenticated-theme-dark .paper-exploration-sidebar-close {
@@ -10457,12 +10492,6 @@ body.authenticated-theme-dark .paper-exploration-author-avatar {
 
 body.authenticated-theme-dark .paper-exploration-sidebar-note.warning {
   color: #f0a08f;
-}
-
-body.authenticated-theme-dark .paper-exploration-chat-focus {
-  border-color: rgba(111, 164, 255, 0.2);
-  background: rgba(79, 140, 255, 0.12);
-  color: #dce8ff;
 }
 
 body.authenticated-theme-dark .paper-exploration-chat-status,
