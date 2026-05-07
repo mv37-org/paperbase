@@ -2643,11 +2643,8 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "[S1]" }));
     const pdfDialog = await screen.findByRole("dialog", { name: "Benchmark Paper PDF" });
     expect(pdfDialog).toBeTruthy();
-    await waitFor(() => {
-      expect(screen.getByTitle("Benchmark Paper PDF").getAttribute("src")).toBe(
-        "https://example.test/2401.12345.pdf",
-      );
-    });
+    expect(pdfDialog.querySelector(".pdf-document-viewer.paper-pdf-frame")).toBeTruthy();
+    expect(pdfDialog.querySelector("iframe")).toBeNull();
     fireEvent.click(screen.getAllByLabelText("Close paper PDF")[0]!);
 
     const sourceButton = screen.getByRole("button", { name: "1 source" });
@@ -2719,11 +2716,8 @@ describe("App", () => {
       expect(screen.getByText("Exploration")).toBeTruthy();
     });
     expect(screen.getByRole("heading", { name: "Benchmark Paper" })).toBeTruthy();
-    await waitFor(() => {
-      expect(screen.getByTitle("Benchmark Paper PDF").getAttribute("src")).toBe(
-        "https://example.test/2401.12345.pdf",
-      );
-    });
+    expect(document.querySelector(".pdf-document-viewer.paper-exploration-frame")).toBeTruthy();
+    expect(document.querySelector("iframe")).toBeNull();
     expect(screen.getByText("Explorations")).toBeTruthy();
     fireEvent.click(screen.getByLabelText("Delete exploration Benchmark Paper"));
     await waitFor(() => {

@@ -3547,9 +3547,9 @@ textarea::placeholder,
   width: 100%;
   min-height: 640px;
   height: calc(100vh - 176px);
-  border: 1px solid rgba(27, 22, 17, 0.12);
-  border-radius: 8px;
-  background: #ffffff;
+  border: 0;
+  border-radius: 0;
+  background: #f3eee7;
 }
 
 .paper-exploration-empty {
@@ -4668,13 +4668,41 @@ textarea {
 
 .paper-pdf-modal-body {
   min-height: 0;
-  background: #ffffff;
+  background: #f3eee7;
 }
 
 .paper-pdf-frame {
   width: 100%;
   height: 100%;
   border: 0;
+  background: #f3eee7;
+}
+
+.pdf-document-viewer {
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+  background: #f3eee7;
+}
+
+.pdf-document-pages {
+  min-height: 100%;
+  padding: 20px 0 28px;
+  display: grid;
+  justify-items: center;
+  gap: 18px;
+}
+
+.pdf-document-page {
+  max-width: 100%;
+  background: #ffffff;
+  line-height: 0;
+}
+
+.pdf-document-canvas {
+  display: block;
+  max-width: 100%;
+  height: auto;
   background: #ffffff;
 }
 
@@ -4683,6 +4711,7 @@ textarea {
   display: grid;
   place-items: center;
   padding: 24px;
+  background: #f3eee7;
   color: var(--muted);
   font-size: 13px;
 }
@@ -8942,12 +8971,6 @@ body.authenticated-theme-dark .project-repo-info-popover {
 body.authenticated-theme-dark .project-repo-info-button {
   border: 0;
   background: transparent;
-}
-
-body.authenticated-theme-dark .paper-pdf-modal-body,
-body.authenticated-theme-dark .paper-pdf-frame,
-body.authenticated-theme-dark .paper-exploration-frame {
-  background: #0d141c;
 }
 
 body.authenticated-theme-dark .paper-pdf-modal-backdrop {

@@ -55,6 +55,7 @@ import {
 } from "./app/AppChrome";
 import { ChatSessionModals } from "./app/ChatSessionModals";
 import { ChatThreadHeader } from "./app/ChatThreadHeader";
+import { PdfDocumentViewer } from "./app/PdfDocumentViewer";
 import { ThreadPapersView } from "./app/ThreadPapersView";
 import type {
   AppearanceTheme,
@@ -5288,10 +5289,10 @@ export default function App() {
                       </button>
                     </header>
                     {activePaperExploration.pdfUrl ? (
-                      <iframe
+                      <PdfDocumentViewer
                         className="paper-exploration-frame"
                         title={`${activePaperExploration.title} PDF`}
-                        src={activePaperExploration.pdfUrl}
+                        url={activePaperExploration.pdfUrl}
                       />
                     ) : (
                       <div className="paper-exploration-empty">
@@ -6480,10 +6481,10 @@ export default function App() {
               ) : paperPdfModal.status === "error" ? (
                 <div className="paper-pdf-modal-state error">{paperPdfModal.error}</div>
               ) : paperPdfModal.pdfUrl ? (
-                <iframe
+                <PdfDocumentViewer
                   className="paper-pdf-frame"
                   title={`${paperPdfModal.title} PDF`}
-                  src={paperPdfModal.pdfUrl}
+                  url={paperPdfModal.pdfUrl}
                 />
               ) : (
                 <div className="paper-pdf-modal-state">No PDF URL is available.</div>
