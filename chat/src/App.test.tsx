@@ -45,6 +45,7 @@ const apiMocks = vi.hoisted(() => {
     createPythonFile: vi.fn(),
     createProject: vi.fn(),
     createThread: vi.fn(),
+    createBrowserPaperComment: vi.fn(),
     createBrowserTrendingPaperComment: vi.fn(),
     deleteProject: vi.fn(),
     deletePythonFile: vi.fn(),
@@ -54,6 +55,7 @@ const apiMocks = vi.hoisted(() => {
     getBrowserAdminPaperAsset: vi.fn(),
     getBrowserAdminPaperFile: vi.fn(),
     getBrowserPaper: vi.fn(),
+    getBrowserPaperDiscussion: vi.fn(),
     getBrowserPaperPreview: vi.fn(),
     getBrowserPaperFigure: vi.fn(),
     getBrowserPaperFile: vi.fn(),
@@ -119,6 +121,7 @@ const apiMocks = vi.hoisted(() => {
     queueBrowserAdminHarvestVenue: vi.fn(),
     queueBrowserAdminPaperIndex: vi.fn(),
     retryBrowserAdminJob: vi.fn(),
+    removeUpvoteBrowserPaper: vi.fn(),
     removeUpvoteBrowserTrendingPaper: vi.fn(),
     runPythonFile: vi.fn(),
     sendThreadMessage: vi.fn(),
@@ -128,6 +131,7 @@ const apiMocks = vi.hoisted(() => {
     StreamingChatAbortError: MockStreamingChatAbortError,
     StreamingChatError: MockStreamingChatError,
     syncProjectRepo: vi.fn(),
+    upvoteBrowserPaper: vi.fn(),
     upvoteBrowserTrendingPaper: vi.fn(),
     updateProject: vi.fn(),
     updatePythonFile: vi.fn(),
@@ -144,6 +148,7 @@ vi.mock("./api", () => ({
   api: apiMocks.api,
   browserAdminPaperAssetContentUrl: apiMocks.browserAdminPaperAssetContentUrl,
   browserPaperPreviewContentUrl: apiMocks.browserPaperPreviewContentUrl,
+  createBrowserPaperComment: apiMocks.createBrowserPaperComment,
   createBrowserTrendingPaperComment: apiMocks.createBrowserTrendingPaperComment,
   createPythonFile: apiMocks.createPythonFile,
   createProject: apiMocks.createProject,
@@ -155,6 +160,7 @@ vi.mock("./api", () => ({
   getBrowserAdminPaperDetail: apiMocks.getBrowserAdminPaperDetail,
   getBrowserAdminPaperFile: apiMocks.getBrowserAdminPaperFile,
   getBrowserPaper: apiMocks.getBrowserPaper,
+  getBrowserPaperDiscussion: apiMocks.getBrowserPaperDiscussion,
   getBrowserPaperPreview: apiMocks.getBrowserPaperPreview,
   getBrowserPaperFigure: apiMocks.getBrowserPaperFigure,
   getBrowserPaperFile: apiMocks.getBrowserPaperFile,
@@ -190,6 +196,7 @@ vi.mock("./api", () => ({
   queueBrowserAdminHarvestTopCited: apiMocks.queueBrowserAdminHarvestTopCited,
   queueBrowserAdminHarvestVenue: apiMocks.queueBrowserAdminHarvestVenue,
   queueBrowserAdminPaperIndex: apiMocks.queueBrowserAdminPaperIndex,
+  removeUpvoteBrowserPaper: apiMocks.removeUpvoteBrowserPaper,
   removeUpvoteBrowserTrendingPaper: apiMocks.removeUpvoteBrowserTrendingPaper,
   retryBrowserAdminJob: apiMocks.retryBrowserAdminJob,
   runPythonFile: apiMocks.runPythonFile,
@@ -200,6 +207,7 @@ vi.mock("./api", () => ({
   StreamingChatAbortError: apiMocks.StreamingChatAbortError,
   StreamingChatError: apiMocks.StreamingChatError,
   syncProjectRepo: apiMocks.syncProjectRepo,
+  upvoteBrowserPaper: apiMocks.upvoteBrowserPaper,
   upvoteBrowserTrendingPaper: apiMocks.upvoteBrowserTrendingPaper,
   updateProject: apiMocks.updateProject,
   updatePythonFile: apiMocks.updatePythonFile,
@@ -835,6 +843,48 @@ describe("App", () => {
       paper_id: "arxiv:2401.12345",
       image_url: "https://example.test/preview.webp",
       content_type: "image/webp",
+    });
+    apiMocks.getBrowserPaperDiscussion.mockResolvedValue({
+      paper_id: "arxiv:2401.12345",
+      upvote_count: 4,
+      viewer_has_upvoted: false,
+      comments: [
+        {
+          comment_id: "pcmt_1",
+          paper_id: "arxiv:2401.12345",
+          parent_comment_id: null,
+          author: { user_id: "user_2", display_name: "Existing Reader" },
+          body: "Existing paper comment",
+          created_at: "2026-04-21T00:00:00Z",
+          updated_at: "2026-04-21T00:00:00Z",
+          replies: [],
+        },
+      ],
+    });
+    apiMocks.upvoteBrowserPaper.mockResolvedValue({
+      paper_id: "arxiv:2401.12345",
+      upvote_count: 5,
+      viewer_has_upvoted: true,
+    });
+    apiMocks.removeUpvoteBrowserPaper.mockResolvedValue({
+      paper_id: "arxiv:2401.12345",
+      upvote_count: 4,
+      viewer_has_upvoted: false,
+    });
+    apiMocks.createBrowserPaperComment.mockResolvedValue({
+      paper_id: "arxiv:2401.12345",
+      comments: [
+        {
+          comment_id: "pcmt_2",
+          paper_id: "arxiv:2401.12345",
+          parent_comment_id: null,
+          author: { user_id: "user_1", display_name: "Ada Lovelace" },
+          body: "New paper comment",
+          created_at: "2026-04-21T00:01:00Z",
+          updated_at: "2026-04-21T00:01:00Z",
+          replies: [],
+        },
+      ],
     });
     apiMocks.loadBrowserTrendingPapers.mockResolvedValue({
       date: "2026-04-21",
@@ -3062,6 +3112,26 @@ describe("App", () => {
     fireEvent.click(introductionSection);
     expect(pdfViewerMocks.scrollToSection).toHaveBeenCalledWith("introduction-1");
     expect(introductionSection.classList.contains("active")).toBe(true);
+    await waitFor(() => {
+      expect(apiMocks.getBrowserPaperDiscussion).toHaveBeenCalledWith("arxiv:2401.12345");
+    });
+    expect(await screen.findByText("Existing paper comment")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Upvote 4" }));
+    await waitFor(() => {
+      expect(apiMocks.upvoteBrowserPaper).toHaveBeenCalledWith("arxiv:2401.12345");
+    });
+    expect(await screen.findByRole("button", { name: "Upvoted 5" })).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Paper comment"), {
+      target: { value: "New paper comment" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Comment" }));
+    await waitFor(() => {
+      expect(apiMocks.createBrowserPaperComment).toHaveBeenCalledWith("arxiv:2401.12345", {
+        body: "New paper comment",
+        parent_comment_id: null,
+      });
+    });
+    expect(await screen.findByText("New paper comment")).toBeTruthy();
     expect(document.querySelector(".paper-exploration-card-image")).toBeNull();
     fireEvent.click(screen.getByLabelText("Delete exploration Benchmark Paper"));
     const deleteExplorationDialog = await screen.findByRole("dialog", {

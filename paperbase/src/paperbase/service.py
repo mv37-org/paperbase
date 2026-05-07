@@ -104,6 +104,7 @@ from .models import (
     LoginRequest,
     ManifestResponse,
     PaperCommentsResponse,
+    PaperDiscussionResponse,
     PaperMetadata,
     PaperAssetResponse,
     PaperCommentAuthor,
@@ -9301,6 +9302,26 @@ class PaperbaseService:
             }
         )
 
+    def get_browser_paper_discussion(
+        self,
+        paper_id: str,
+        *,
+        viewer: BrowserUser | None = None,
+    ) -> PaperDiscussionResponse:
+        summary = self.repository.get_paper_vote_summary(
+            paper_id,
+            viewer_user_id=viewer.user_id if viewer else None,
+        )
+        if summary is None:
+            raise HTTPException(status_code=404, detail=f"Paper {paper_id} not found")
+        comments = self.repository.list_paper_comment_records(paper_id)
+        return PaperDiscussionResponse(
+            paper_id=paper_id,
+            upvote_count=summary.upvote_count,
+            viewer_has_upvoted=summary.viewer_has_upvoted,
+            comments=self._build_paper_comment_tree(comments),
+        )
+
     def get_browser_trending_paper_preview_content(self, paper_id: str) -> tuple[bytes, str]:
         detail = self.repository.get_trending_paper(paper_id)
         if detail is None:
@@ -9314,6 +9335,12 @@ class PaperbaseService:
         summary = self.repository.set_paper_upvote(paper_id=paper_id, user_id=user.user_id, upvoted=upvoted)
         if summary is None:
             raise HTTPException(status_code=404, detail=f"Trending paper {paper_id} not found")
+        return summary
+
+    def set_browser_paper_upvote(self, paper_id: str, *, user: BrowserUser, upvoted: bool) -> PaperVoteSummary:
+        summary = self.repository.set_paper_upvote(paper_id=paper_id, user_id=user.user_id, upvoted=upvoted)
+        if summary is None:
+            raise HTTPException(status_code=404, detail=f"Paper {paper_id} not found")
         return summary
 
     def create_browser_trending_paper_comment(
@@ -9341,6 +9368,37 @@ class PaperbaseService:
         )
         if created is None:
             raise HTTPException(status_code=404, detail=f"Trending paper {paper_id} not found")
+        comments = self.repository.list_paper_comment_records(paper_id)
+        return PaperCommentsResponse(
+            paper_id=paper_id,
+            comments=self._build_paper_comment_tree(comments),
+        )
+
+    def create_browser_paper_comment(
+        self,
+        paper_id: str,
+        *,
+        user: BrowserUser,
+        request: CreatePaperCommentRequest,
+    ) -> PaperCommentsResponse:
+        summary = self.repository.get_paper_vote_summary(paper_id, viewer_user_id=user.user_id)
+        if summary is None:
+            raise HTTPException(status_code=404, detail=f"Paper {paper_id} not found")
+        body = request.body.strip()
+        if not body:
+            raise HTTPException(status_code=400, detail="Comment body must not be empty")
+        if request.parent_comment_id:
+            parent = self.repository.get_paper_comment(request.parent_comment_id)
+            if parent is None or parent.paper_id != paper_id:
+                raise HTTPException(status_code=400, detail="Reply target is invalid for this paper")
+        created = self.repository.create_paper_comment(
+            paper_id=paper_id,
+            user_id=user.user_id,
+            body=body,
+            parent_comment_id=request.parent_comment_id,
+        )
+        if created is None:
+            raise HTTPException(status_code=404, detail=f"Paper {paper_id} not found")
         comments = self.repository.list_paper_comment_records(paper_id)
         return PaperCommentsResponse(
             paper_id=paper_id,

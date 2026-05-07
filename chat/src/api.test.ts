@@ -331,6 +331,82 @@ describe("chat api", () => {
     expect(detail.summary_eli5).toBe("Simple summary");
   });
 
+  it("loads generic paper discussion and attaches CSRF headers to paper write operations", async () => {
+    const fetchMock = vi
+      .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          authenticated: true,
+          user: {
+            user_id: "user_1",
+            email: "user@example.com",
+            display_name: "User",
+          },
+          has_anthropic_api_key: false,
+          csrf_token: "csrf-123",
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          paper_id: "arxiv:2401.12345",
+          upvote_count: 8,
+          viewer_has_upvoted: false,
+          comments: [],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          paper_id: "arxiv:2401.12345",
+          upvote_count: 9,
+          viewer_has_upvoted: true,
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          paper_id: "arxiv:2401.12345",
+          upvote_count: 8,
+          viewer_has_upvoted: false,
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          paper_id: "arxiv:2401.12345",
+          comments: [],
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await loadApiModule();
+
+    await api.loadSession();
+    const discussion = await api.getBrowserPaperDiscussion("arxiv:2401.12345");
+    await api.upvoteBrowserPaper("arxiv:2401.12345");
+    await api.removeUpvoteBrowserPaper("arxiv:2401.12345");
+    await api.createBrowserPaperComment("arxiv:2401.12345", {
+      body: "Useful paper",
+      parent_comment_id: null,
+    });
+
+    const [discussionPath, discussionInit] = fetchMock.mock.calls[1] as FetchCall;
+    expect(requestPath(discussionPath)).toBe("/v1/browser/papers/arxiv%3A2401.12345/discussion");
+    expect(discussionInit?.method).toBe("GET");
+    expect(discussion.upvote_count).toBe(8);
+
+    const [votePath, voteInit] = fetchMock.mock.calls[2] as FetchCall;
+    expect(requestPath(votePath)).toBe("/v1/browser/papers/arxiv%3A2401.12345/upvote");
+    expect(new Headers(voteInit?.headers).get("X-Paperbase-CSRF")).toBe("csrf-123");
+    expect(voteInit?.method).toBe("PUT");
+
+    const [removeVotePath, removeVoteInit] = fetchMock.mock.calls[3] as FetchCall;
+    expect(requestPath(removeVotePath)).toBe("/v1/browser/papers/arxiv%3A2401.12345/upvote");
+    expect(new Headers(removeVoteInit?.headers).get("X-Paperbase-CSRF")).toBe("csrf-123");
+    expect(removeVoteInit?.method).toBe("DELETE");
+
+    const [commentPath, commentInit] = fetchMock.mock.calls[4] as FetchCall;
+    expect(requestPath(commentPath)).toBe("/v1/browser/papers/arxiv%3A2401.12345/comments");
+    expect(new Headers(commentInit?.headers).get("X-Paperbase-CSRF")).toBe("csrf-123");
+    expect(commentInit?.method).toBe("POST");
+  });
+
   it("attaches CSRF headers to trending write operations", async () => {
     const fetchMock = vi
       .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()

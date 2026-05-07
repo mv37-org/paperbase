@@ -2733,6 +2733,40 @@ def test_trending_detail_builds_nested_comments_and_vote_summary(browser_service
     assert detail.comments[0].replies[0].body == "Reply note"
 
 
+def test_browser_paper_discussion_builds_comments_and_vote_summary(browser_service):
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="discussion@example.com", password="secret12345", display_name="Discussant")
+    )
+    assert session.user is not None
+    paper = _sample_paper("2404.33333", title="Paper Discussion", abstract="Discussion")
+    paper.index_status = "indexed"
+    service.repository.upsert_paper(paper)  # type: ignore[attr-defined]
+
+    service.set_browser_paper_upvote("arxiv:2404.33333", user=session.user, upvoted=True)
+    created = service.create_browser_paper_comment(
+        "arxiv:2404.33333",
+        user=session.user,
+        request=CreatePaperCommentRequest(body="Root paper note"),
+    )
+    service.create_browser_paper_comment(
+        "arxiv:2404.33333",
+        user=session.user,
+        request=CreatePaperCommentRequest(
+            body="Paper reply",
+            parent_comment_id=created.comments[0].comment_id,
+        ),
+    )
+
+    discussion = service.get_browser_paper_discussion("arxiv:2404.33333", viewer=session.user)
+
+    assert discussion.upvote_count == 1
+    assert discussion.viewer_has_upvoted is True
+    assert len(discussion.comments) == 1
+    assert discussion.comments[0].body == "Root paper note"
+    assert discussion.comments[0].replies[0].body == "Paper reply"
+
+
 def test_trending_comment_rejects_reply_target_from_another_paper(browser_service):
     service, _, _ = browser_service
     session, _ = service.register_browser_user(

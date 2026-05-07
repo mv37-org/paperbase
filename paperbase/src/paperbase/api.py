@@ -61,6 +61,7 @@ from .models import (
     MoveChatThreadProjectRequest,
     PaperAssetResponse,
     PaperCommentsResponse,
+    PaperDiscussionResponse,
     PaperPreviewResponse,
     PaperResponse,
     PaperVoteSummary,
@@ -878,6 +879,43 @@ def browser_create_trending_paper_comment(
     service: PaperbaseService = Depends(get_service),
 ) -> PaperCommentsResponse:
     return service.create_browser_trending_paper_comment(paper_id, user=user, request=request)
+
+
+@app.get("/v1/browser/papers/{paper_id}/discussion", response_model=PaperDiscussionResponse)
+def browser_get_paper_discussion(
+    paper_id: str,
+    user=Depends(require_browser_user),
+    service: PaperbaseService = Depends(get_service),
+) -> PaperDiscussionResponse:
+    return service.get_browser_paper_discussion(paper_id, viewer=user)
+
+
+@app.put("/v1/browser/papers/{paper_id}/upvote", response_model=PaperVoteSummary)
+def browser_upvote_paper(
+    paper_id: str,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> PaperVoteSummary:
+    return service.set_browser_paper_upvote(paper_id, user=user, upvoted=True)
+
+
+@app.delete("/v1/browser/papers/{paper_id}/upvote", response_model=PaperVoteSummary)
+def browser_remove_paper_upvote(
+    paper_id: str,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> PaperVoteSummary:
+    return service.set_browser_paper_upvote(paper_id, user=user, upvoted=False)
+
+
+@app.post("/v1/browser/papers/{paper_id}/comments", response_model=PaperCommentsResponse)
+def browser_create_paper_comment(
+    paper_id: str,
+    request: CreatePaperCommentRequest,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> PaperCommentsResponse:
+    return service.create_browser_paper_comment(paper_id, user=user, request=request)
 
 
 @app.get("/v1/browser/papers/{paper_id}", response_model=PaperResponse)

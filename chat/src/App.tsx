@@ -13,10 +13,12 @@ import {
   createPythonFile,
   createProject,
   createThread,
+  createBrowserPaperComment,
   deleteProject,
   deletePythonFile,
   deleteThread,
   getBrowserPaper,
+  getBrowserPaperDiscussion,
   getBrowserPaperPreview,
   getBrowserPaperFigure,
   getBrowserPaperFile,
@@ -38,6 +40,7 @@ import {
   renameThread,
   logoutBrowserSession,
   postForm,
+  removeUpvoteBrowserPaper,
   runPythonFile,
   sendThreadMessage,
   sendThreadMessageStream,
@@ -48,6 +51,7 @@ import {
   syncProjectRepo,
   updateProject,
   updatePythonFile,
+  upvoteBrowserPaper,
   uploadDocument,
 } from "./api";
 import { AdminOpsPanel } from "./AdminOpsPanel";
@@ -180,7 +184,11 @@ import type {
   GitHubRepoSummary,
   MentionSuggestion,
   MentionTag,
+  PaperComment,
+  PaperCommentsResponse,
+  PaperDiscussionResponse,
   PaperResponse,
+  PaperVoteSummary,
   ProjectItemKind,
   ProjectRepoConflictResolution,
   ProjectSummary,
@@ -362,6 +370,106 @@ function samePaperSections(left: PdfDocumentSection[], right: PdfDocumentSection
   );
 }
 
+type PaperDiscussionPanelState = {
+  status: "idle" | "loading" | "ready" | "error";
+  error: string;
+  upvoteCount: number;
+  viewerHasUpvoted: boolean;
+  comments: PaperComment[];
+  draft: string;
+  votePending: boolean;
+  commentSubmitting: boolean;
+};
+
+function emptyPaperDiscussionState(): PaperDiscussionPanelState {
+  return {
+    status: "idle",
+    error: "",
+    upvoteCount: 0,
+    viewerHasUpvoted: false,
+    comments: [],
+    draft: "",
+    votePending: false,
+    commentSubmitting: false,
+  };
+}
+
+function paperDiscussionStateFromResponse(
+  response: PaperDiscussionResponse,
+  current?: PaperDiscussionPanelState,
+): PaperDiscussionPanelState {
+  return {
+    ...(current ?? emptyPaperDiscussionState()),
+    status: "ready",
+    error: "",
+    upvoteCount: response.upvote_count,
+    viewerHasUpvoted: response.viewer_has_upvoted,
+    comments: response.comments,
+    votePending: false,
+    commentSubmitting: false,
+  };
+}
+
+function paperDiscussionStateWithVote(
+  summary: PaperVoteSummary,
+  current?: PaperDiscussionPanelState,
+): PaperDiscussionPanelState {
+  return {
+    ...(current ?? emptyPaperDiscussionState()),
+    status: "ready",
+    error: "",
+    upvoteCount: summary.upvote_count,
+    viewerHasUpvoted: summary.viewer_has_upvoted,
+    votePending: false,
+  };
+}
+
+function paperDiscussionStateWithComments(
+  response: PaperCommentsResponse,
+  current?: PaperDiscussionPanelState,
+): PaperDiscussionPanelState {
+  return {
+    ...(current ?? emptyPaperDiscussionState()),
+    status: "ready",
+    error: "",
+    comments: response.comments,
+    draft: "",
+    commentSubmitting: false,
+  };
+}
+
+function paperCommentCount(comments: PaperComment[]): number {
+  return comments.reduce((count, comment) => count + 1 + paperCommentCount(comment.replies), 0);
+}
+
+function PaperExplorationComment({
+  comment,
+  depth = 0,
+}: {
+  comment: PaperComment;
+  depth?: number;
+}) {
+  return (
+    <article
+      className="paper-exploration-comment"
+      style={{ "--paper-discussion-depth": String(Math.min(depth, 3)) } as CSSProperties}
+    >
+      <header className="paper-exploration-comment-header">
+        <strong>{comment.author.display_name}</strong>
+        <span>{formatLocalTimestamp(comment.created_at)}</span>
+      </header>
+      <p>{comment.body}</p>
+      {comment.replies.length > 0 ? (
+        <div className="paper-exploration-comment-replies">
+          {comment.replies.map((reply) => (
+            <PaperExplorationComment key={reply.comment_id} comment={reply} depth={depth + 1} />
+          ))}
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
 function normalizePaperExploration(value: unknown): PaperExploration | null {
   if (!value || typeof value !== "object") {
     return null;
@@ -522,6 +630,9 @@ export default function App() {
   const [paperExplorationNotes, setPaperExplorationNotes] = useState<Record<string, string>>({});
   const [paperExplorationSections, setPaperExplorationSections] = useState<
     Record<string, PdfDocumentSection[]>
+  >({});
+  const [paperDiscussionStates, setPaperDiscussionStates] = useState<
+    Record<string, PaperDiscussionPanelState>
   >({});
   const [activePaperExplorationSectionId, setActivePaperExplorationSectionId] = useState<
     string | null
@@ -936,6 +1047,10 @@ export default function App() {
       ? paperExplorationSections[activePaperExploration.explorationId]
       : []
     : undefined;
+  const activePaperDiscussion = activePaperExploration
+    ? (paperDiscussionStates[activePaperExploration.paperId] ?? emptyPaperDiscussionState())
+    : emptyPaperDiscussionState();
+  const activePaperCommentCount = paperCommentCount(activePaperDiscussion.comments);
   const activePaperExplorationAuthors = useMemo(
     () => splitPaperAuthors(activePaperExploration?.authors ?? ""),
     [activePaperExploration?.authors],
@@ -1086,6 +1201,7 @@ export default function App() {
     }
     paperCitationPreviewFetchesRef.current.clear();
     setPaperCitationPreviews({});
+    setPaperDiscussionStates({});
   }, [authenticated]);
 
   useEffect(() => {
@@ -1153,6 +1269,54 @@ export default function App() {
       cancelled = true;
     };
   }, [activeThreadPaperIds, authenticated]);
+
+  useEffect(() => {
+    const paperId = activePaperExploration?.paperId;
+    if (!authenticated || !paperId) {
+      return;
+    }
+
+    let cancelled = false;
+    setPaperDiscussionStates((current) => ({
+      ...current,
+      [paperId]: {
+        ...(current[paperId] ?? emptyPaperDiscussionState()),
+        status: "loading",
+        error: "",
+      },
+    }));
+
+    void (async () => {
+      try {
+        const discussion = await getBrowserPaperDiscussion(paperId);
+        if (cancelled) {
+          return;
+        }
+        setPaperDiscussionStates((current) => ({
+          ...current,
+          [paperId]: paperDiscussionStateFromResponse(discussion, current[paperId]),
+        }));
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+        setPaperDiscussionStates((current) => ({
+          ...current,
+          [paperId]: {
+            ...(current[paperId] ?? emptyPaperDiscussionState()),
+            status: "error",
+            error: error instanceof Error ? error.message : "Paper discussion could not be loaded.",
+            votePending: false,
+            commentSubmitting: false,
+          },
+        }));
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activePaperExploration?.paperId, authenticated]);
 
   useEffect(() => {
     setContextUsagePopoverOpen(false);
@@ -3658,6 +3822,105 @@ export default function App() {
     sendMessage,
   ]);
 
+  const handlePaperDiscussionVote = useCallback(async () => {
+    if (!activePaperExploration) {
+      return;
+    }
+    if (!sessionRef.current?.authenticated) {
+      openAuthModal("login");
+      return;
+    }
+    const paperId = activePaperExploration.paperId;
+    setPaperDiscussionStates((current) => ({
+      ...current,
+      [paperId]: {
+        ...(current[paperId] ?? emptyPaperDiscussionState()),
+        votePending: true,
+      },
+    }));
+    try {
+      const summary = activePaperDiscussion.viewerHasUpvoted
+        ? await removeUpvoteBrowserPaper(paperId)
+        : await upvoteBrowserPaper(paperId);
+      setPaperDiscussionStates((current) => ({
+        ...current,
+        [paperId]: paperDiscussionStateWithVote(summary, current[paperId]),
+      }));
+    } catch (error) {
+      showErrorFlash(error instanceof Error ? error.message : "Paper vote could not be saved.");
+      setPaperDiscussionStates((current) => ({
+        ...current,
+        [paperId]: {
+          ...(current[paperId] ?? emptyPaperDiscussionState()),
+          votePending: false,
+        },
+      }));
+    }
+  }, [
+    activePaperDiscussion.viewerHasUpvoted,
+    activePaperExploration,
+    openAuthModal,
+    showErrorFlash,
+  ]);
+
+  const handlePaperDiscussionDraftChange = useCallback((paperId: string, draft: string) => {
+    setPaperDiscussionStates((current) => ({
+      ...current,
+      [paperId]: {
+        ...(current[paperId] ?? emptyPaperDiscussionState()),
+        draft,
+      },
+    }));
+  }, []);
+
+  const handlePaperDiscussionSubmit = useCallback(
+    async (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      if (!activePaperExploration) {
+        return;
+      }
+      if (!sessionRef.current?.authenticated) {
+        openAuthModal("login");
+        return;
+      }
+      const paperId = activePaperExploration.paperId;
+      const draft = (paperDiscussionStates[paperId]?.draft ?? "").trim();
+      if (!draft) {
+        return;
+      }
+      setPaperDiscussionStates((current) => ({
+        ...current,
+        [paperId]: {
+          ...(current[paperId] ?? emptyPaperDiscussionState()),
+          commentSubmitting: true,
+          error: "",
+        },
+      }));
+      try {
+        const response = await createBrowserPaperComment(paperId, {
+          body: draft,
+          parent_comment_id: null,
+        });
+        setPaperDiscussionStates((current) => ({
+          ...current,
+          [paperId]: paperDiscussionStateWithComments(response, current[paperId]),
+        }));
+      } catch (error) {
+        showErrorFlash(
+          error instanceof Error ? error.message : "Paper comment could not be posted.",
+        );
+        setPaperDiscussionStates((current) => ({
+          ...current,
+          [paperId]: {
+            ...(current[paperId] ?? emptyPaperDiscussionState()),
+            commentSubmitting: false,
+          },
+        }));
+      }
+    },
+    [activePaperExploration, openAuthModal, paperDiscussionStates, showErrorFlash],
+  );
+
   const handleUpload = useCallback(
     async (file: File) => {
       await uploadDocument(file);
@@ -3750,6 +4013,7 @@ export default function App() {
     setPaperExplorationSidebarPane("details");
     setPaperExplorationNotes({});
     setPaperExplorationSections({});
+    setPaperDiscussionStates({});
     setActivePaperExplorationSectionId(null);
     setAccountMenuOpen(false);
     setStreamingThreadId(null);
@@ -7016,6 +7280,106 @@ export default function App() {
                       ) : (
                         <p className="paper-exploration-sidebar-note">No authors listed.</p>
                       )}
+                    </details>
+                    <details
+                      className="paper-exploration-sidebar-section paper-exploration-discussion-section"
+                      open
+                    >
+                      <summary>
+                        <MaskedAssetIcon
+                          asset="icons8-thumbs-up-50.svg"
+                          className="paper-exploration-sidebar-section-icon"
+                        />
+                        <span>Discussion</span>
+                        <span className="paper-exploration-sidebar-chevron" aria-hidden="true" />
+                      </summary>
+                      <div className="paper-exploration-discussion">
+                        {!authenticated ? (
+                          <p className="paper-exploration-sidebar-note">
+                            Log in to vote and comment on this paper.
+                          </p>
+                        ) : (
+                          <>
+                            {activePaperDiscussion.status === "loading" ? (
+                              <p className="paper-exploration-sidebar-note">
+                                Loading discussion...
+                              </p>
+                            ) : null}
+                            {activePaperDiscussion.status === "error" ? (
+                              <p className="paper-exploration-sidebar-note warning">
+                                {activePaperDiscussion.error}
+                              </p>
+                            ) : null}
+                            <button
+                              type="button"
+                              className={`paper-exploration-vote-button${
+                                activePaperDiscussion.viewerHasUpvoted ? " active" : ""
+                              }`}
+                              onClick={() => void handlePaperDiscussionVote()}
+                              disabled={
+                                activePaperDiscussion.votePending ||
+                                activePaperDiscussion.status === "loading"
+                              }
+                            >
+                              <MaskedAssetIcon
+                                asset="icons8-thumbs-up-50.svg"
+                                className="paper-exploration-vote-icon"
+                              />
+                              <span>
+                                {activePaperDiscussion.votePending
+                                  ? "Saving..."
+                                  : activePaperDiscussion.viewerHasUpvoted
+                                    ? "Upvoted"
+                                    : "Upvote"}
+                              </span>
+                              <strong>{activePaperDiscussion.upvoteCount}</strong>
+                            </button>
+                            <form
+                              className="paper-exploration-comment-form"
+                              onSubmit={handlePaperDiscussionSubmit}
+                            >
+                              <textarea
+                                aria-label="Paper comment"
+                                value={activePaperDiscussion.draft}
+                                onChange={(event) =>
+                                  handlePaperDiscussionDraftChange(
+                                    activePaperExploration.paperId,
+                                    event.target.value,
+                                  )
+                                }
+                                placeholder="Add a comment"
+                                rows={3}
+                              />
+                              <button
+                                type="submit"
+                                className="paper-exploration-comment-submit"
+                                disabled={
+                                  activePaperDiscussion.commentSubmitting ||
+                                  activePaperDiscussion.draft.trim().length === 0
+                                }
+                              >
+                                {activePaperDiscussion.commentSubmitting ? "Posting..." : "Comment"}
+                              </button>
+                            </form>
+                            <div className="paper-exploration-comments">
+                              <div className="paper-exploration-comments-heading">
+                                {activePaperCommentCount}{" "}
+                                {activePaperCommentCount === 1 ? "comment" : "comments"}
+                              </div>
+                              {activePaperDiscussion.comments.length > 0 ? (
+                                activePaperDiscussion.comments.map((comment) => (
+                                  <PaperExplorationComment
+                                    key={comment.comment_id}
+                                    comment={comment}
+                                  />
+                                ))
+                              ) : (
+                                <p className="paper-exploration-sidebar-note">No comments yet.</p>
+                              )}
+                            </div>
+                          </>
+                        )}
+                      </div>
                     </details>
                   </>
                 ) : (

@@ -21,6 +21,7 @@ import type {
   MentionSuggestionResult,
   PaperAssetResponse,
   PaperCommentsResponse,
+  PaperDiscussionResponse,
   PaperPreviewResponse,
   PaperResponse,
   PaperVoteSummary,
@@ -807,6 +808,35 @@ export function postForm(path: string, form: HTMLFormElement) {
 
 export function getBrowserPaper(paperId: string) {
   return api<PaperResponse>(`/v1/browser/papers/${paperId}`, { method: "GET" });
+}
+
+export function getBrowserPaperDiscussion(paperId: string) {
+  return api<PaperDiscussionResponse>(
+    `/v1/browser/papers/${encodeURIComponent(paperId)}/discussion`,
+    { method: "GET" },
+  );
+}
+
+export function upvoteBrowserPaper(paperId: string) {
+  return api<PaperVoteSummary>(`/v1/browser/papers/${encodeURIComponent(paperId)}/upvote`, {
+    method: "PUT",
+  });
+}
+
+export function removeUpvoteBrowserPaper(paperId: string) {
+  return api<PaperVoteSummary>(`/v1/browser/papers/${encodeURIComponent(paperId)}/upvote`, {
+    method: "DELETE",
+  });
+}
+
+export function createBrowserPaperComment(
+  paperId: string,
+  payload: { body: string; parent_comment_id?: string | null },
+) {
+  return api<PaperCommentsResponse>(`/v1/browser/papers/${encodeURIComponent(paperId)}/comments`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }
 
 export function loadBrowserTrendingPapers(

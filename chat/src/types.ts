@@ -275,6 +275,13 @@ export interface PaperCommentsResponse {
   comments: PaperComment[];
 }
 
+export interface PaperDiscussionResponse {
+  paper_id: string;
+  upvote_count: number;
+  viewer_has_upvoted: boolean;
+  comments: PaperComment[];
+}
+
 export interface TrendingPaperCard {
   paper_id: string;
   arxiv_id: string;
