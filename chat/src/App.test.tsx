@@ -1440,6 +1440,78 @@ describe("App", () => {
     });
   });
 
+  it("scrolls selected exploration suggestions during keyboard navigation", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.suggestBrowserPapers.mockResolvedValue({
+      fallback: false,
+      suggestions: [
+        {
+          paper_id: "arxiv:2402.00001",
+          arxiv_id: "2402.00001",
+          title: "First Result",
+          authors: "Ada Lovelace",
+          summary_short: "",
+          citation_count: 1,
+          published: "2026-02-01",
+          score: 0.9,
+          matched_field: "title",
+          highlight_snippet: "",
+        },
+        {
+          paper_id: "arxiv:2402.00002",
+          arxiv_id: "2402.00002",
+          title: "Second Result",
+          authors: "Grace Hopper",
+          summary_short: "",
+          citation_count: 2,
+          published: "2026-02-02",
+          score: 0.8,
+          matched_field: "title",
+          highlight_snippet: "",
+        },
+        {
+          paper_id: "arxiv:2402.00003",
+          arxiv_id: "2402.00003",
+          title: "Third Result",
+          authors: "Katherine Johnson",
+          summary_short: "",
+          citation_count: 3,
+          published: "2026-02-03",
+          score: 0.7,
+          matched_field: "title",
+          highlight_snippet: "",
+        },
+      ],
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+    fireEvent.click(screen.getAllByText("General")[0]!);
+    fireEvent.click(await screen.findByLabelText("Start exploration in General"));
+
+    const dialog = screen.getByRole("dialog", { name: "New exploration" });
+    const searchInput = within(dialog).getByLabelText("Search papers for exploration");
+    fireEvent.change(searchInput, {
+      target: { value: "result" },
+    });
+    expect(await screen.findByText("Third Result")).toBeTruthy();
+
+    const scrollIntoView = vi.mocked(HTMLElement.prototype.scrollIntoView);
+    scrollIntoView.mockClear();
+    fireEvent.keyDown(searchInput, { key: "ArrowDown" });
+
+    await waitFor(() => {
+      expect(within(dialog).getAllByRole("option")[1]?.getAttribute("aria-selected")).toBe("true");
+      expect(scrollIntoView).toHaveBeenCalledWith({
+        block: "nearest",
+        inline: "nearest",
+      });
+    });
+  });
+
   it("paginates project sidebar code inside the code section and links to GitHub", async () => {
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());
     apiMocks.loadProjects.mockResolvedValue({

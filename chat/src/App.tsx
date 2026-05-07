@@ -716,6 +716,7 @@ export default function App() {
   const emptyStateProjectPickerRef = useRef<HTMLDivElement | null>(null);
   const emptyStateProjectSearchInputRef = useRef<HTMLInputElement | null>(null);
   const explorationSearchInputRef = useRef<HTMLInputElement | null>(null);
+  const explorationSuggestionRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const projectMenuRef = useRef<HTMLDivElement | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const pendingTurnAnchorMessageIdRef = useRef<string | null>(null);
@@ -823,6 +824,22 @@ export default function App() {
         : Math.min(current, explorationSuggestions.length - 1),
     );
   }, [explorationSuggestions.length]);
+
+  useEffect(() => {
+    if (!explorationPicker || explorationSuggestions.length === 0) {
+      return;
+    }
+    const selectedPaper = explorationSuggestions[explorationSelectedIndex];
+    if (!selectedPaper) {
+      return;
+    }
+    window.requestAnimationFrame(() => {
+      explorationSuggestionRefs.current[selectedPaper.paper_id]?.scrollIntoView({
+        block: "nearest",
+        inline: "nearest",
+      });
+    });
+  }, [explorationPicker, explorationSelectedIndex, explorationSuggestions]);
 
   useEffect(() => {
     pythonFileMapRef.current = pythonFileMap;
@@ -7606,6 +7623,9 @@ export default function App() {
                   return (
                     <div
                       key={paper.paper_id}
+                      ref={(element) => {
+                        explorationSuggestionRefs.current[paper.paper_id] = element;
+                      }}
                       role="option"
                       aria-selected={selected}
                       className={`exploration-picker-item${selected ? " selected" : ""}`}
