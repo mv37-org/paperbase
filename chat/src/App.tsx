@@ -3763,6 +3763,14 @@ export default function App() {
     setPaperExplorationSidebarCollapsed(true);
   }, []);
 
+  const expandCollapsedSidebarForAction = useCallback(() => {
+    if (!sidebarCollapsed || window.matchMedia("(max-width: 980px)").matches) {
+      return;
+    }
+    setSidebarCollapsed(false);
+    setPaperExplorationSidebarCollapsed(true);
+  }, [sidebarCollapsed]);
+
   const handleSidebarToggle = useCallback(() => {
     setAccountMenuOpen(false);
     setProjectMenuProjectId(null);
@@ -3776,6 +3784,11 @@ export default function App() {
       });
       return;
     }
+    if (sidebarCollapsed) {
+      setSidebarCollapsed(false);
+      setPaperExplorationSidebarCollapsed(true);
+      return;
+    }
     setSidebarCollapsed((current) => {
       const next = !current;
       if (!next) {
@@ -3783,7 +3796,7 @@ export default function App() {
       }
       return next;
     });
-  }, []);
+  }, [sidebarCollapsed]);
 
   const handleThreadSelection = useCallback(
     async (threadId: string) => {
@@ -5037,7 +5050,7 @@ export default function App() {
               setAccountMenuOpen(false);
             }}
           />
-          <aside className="sidebar">
+          <aside className="sidebar" onClickCapture={expandCollapsedSidebarForAction}>
             <div className="sidebar-top">
               <div className="sidebar-brand-row">
                 <div className="sidebar-title">Paperbase</div>

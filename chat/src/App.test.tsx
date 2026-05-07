@@ -1524,6 +1524,32 @@ describe("App", () => {
     expect(settingsIcon?.getAttribute("src")).toMatch(/\/settings\.svg\?v=pb-/);
   });
 
+  it("expands the collapsed sidebar before running clicked sidebar actions", async () => {
+    localStorage.setItem("paperbase-sidebar-collapsed", "true");
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(document.querySelector("#app-shell")?.classList.contains("sidebar-collapsed")).toBe(
+        true,
+      );
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Read docs" }));
+
+    await waitFor(() => {
+      expect(document.querySelector("#app-shell")?.classList.contains("sidebar-collapsed")).toBe(
+        false,
+      );
+    });
+    expect(window.open).toHaveBeenCalledWith(
+      new URL("/docs", window.location.origin).toString(),
+      "_blank",
+      "noopener,noreferrer",
+    );
+  });
+
   it("creates a project from the sidebar modal", async () => {
     apiMocks.loadSession.mockResolvedValue(
       authenticatedSession({ settings: { has_github_connection: true, github_login: "octocat" } }),
