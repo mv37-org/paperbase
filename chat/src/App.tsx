@@ -7209,7 +7209,7 @@ export default function App() {
             >
               {workspaceView ? (
                 workspaceView.kind === "trending" ? (
-                  <div className="workspace-page workspace-page-wide">
+                  <div className="workspace-page workspace-page-trending">
                     <TrendingPapersPage
                       variant="workspace"
                       authenticated={authenticated}

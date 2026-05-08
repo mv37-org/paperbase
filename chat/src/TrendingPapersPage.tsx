@@ -291,9 +291,9 @@ export function TrendingPapersPage({
   }, [browseState.paperId]);
 
   const pageDescription = browseState.paperId
-    ? `Published ${detail?.published ?? browseState.date}. Read the paper summary and join the discussion.`
+    ? `Published ${detail?.published ?? browseState.date}. Start with the summary, then open the paper or join the discussion when you are ready.`
     : (feedDescription ??
-      `Browse the newest fully indexed and enriched papers, or switch to Hottest to rank the same ready corpus by reader upvotes.`);
+      "Explore research papers that are ready to read in Paperbase. Latest shows the newest papers across the library, while Hottest shows the most-upvoted papers overall.");
 
   const handleSortChange = (sort: TrendingSort) => {
     onChangeBrowseState({ ...browseState, sort, page: 1, paperId: null });
@@ -428,8 +428,8 @@ export function TrendingPapersPage({
           {emptyState ? (
             <div className="trending-empty-state">
               {browseState.page > 1
-                ? "No more fully indexed and enriched papers are ready on this page."
-                : "No fully indexed and enriched papers are ready yet."}
+                ? "No more papers are ready on this page."
+                : "No papers are ready here yet. Check back soon as the library grows."}
             </div>
           ) : null}
           {feed?.papers.length ? (

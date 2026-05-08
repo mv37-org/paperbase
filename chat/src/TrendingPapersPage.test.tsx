@@ -134,6 +134,8 @@ describe("TrendingPapersPage", () => {
     await waitFor(() => {
       expect(screen.getByText("Trending Paper")).toBeTruthy();
     });
+    expect(screen.getByText(/Latest shows the newest papers across the library/)).toBeTruthy();
+    expect(screen.getByText(/Hottest shows the most-upvoted papers overall/)).toBeTruthy();
     const card = document.querySelector(".trending-card");
     expect(card?.querySelector(".trending-card-copy h2")?.textContent).toContain("Trending Paper");
     expect(card?.querySelector(".trending-card-hero")).toBeTruthy();
@@ -184,7 +186,7 @@ describe("TrendingPapersPage", () => {
     render(<Harness />);
 
     await waitFor(() => {
-      expect(screen.getByText(/No fully indexed and enriched papers are ready yet/)).toBeTruthy();
+      expect(screen.getByText(/No papers are ready here yet/)).toBeTruthy();
     });
   });
 

@@ -1822,8 +1822,10 @@ body:has(.app-shell) #root {
   letter-spacing: 0;
 }
 
-.workspace-page-wide {
-  width: min(1280px, calc(100% - 48px));
+.workspace-page-trending {
+  width: min(1080px, calc(100% - 48px));
+  margin-right: auto;
+  margin-left: auto;
 }
 
 .workspace-page-admin {
@@ -1944,6 +1946,10 @@ body:has(.app-shell) #root {
 }
 
 @media (max-width: 720px) {
+  .workspace-page-trending {
+    width: min(100%, calc(100% - 24px));
+  }
+
   .trending-page-header {
     align-items: flex-start;
     flex-direction: column;

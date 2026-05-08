@@ -2675,6 +2675,7 @@ def test_trending_feed_pages_ready_papers_and_sorts_by_latest_or_upvotes(browser
     assert len(landing_feed.papers) == 10
     assert landing_feed.has_next is True
     assert landing_feed.papers[0].paper_id == default_feed.papers[0].paper_id
+    assert "arxiv:2402.00000" not in [paper.paper_id for paper in default_feed.papers]
     default_page_paper_ids = {
         paper.paper_id for paper in default_feed.papers + second_page.papers + third_page.papers
     }
