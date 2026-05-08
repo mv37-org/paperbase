@@ -5523,6 +5523,7 @@ def test_project_presentation_job_caches_shares_and_emails():
                         "tools": prompt.tools,
                         "tool_choice": prompt.tool_choice,
                         "parallel_tool_calls": prompt.parallel_tool_calls,
+                        "text_format": prompt.text_format,
                     }
                 )
                 return ResponseEnvelope(
@@ -5530,7 +5531,7 @@ def test_project_presentation_job_caches_shares_and_emails():
                     items=[
                         ResponseItem(
                             item_id="msg_project_presentation",
-                            item_type="assistant_message",
+                            item_type="message",
                             role="assistant",
                             content_text=json.dumps(
                                 {
@@ -5611,6 +5612,26 @@ def test_project_presentation_job_caches_shares_and_emails():
     assert "Agent Benchmarks" in completed.summary_markdown
     assert "ReactDOM.createRoot" in completed.visual_code
     assert completed.audio_url == ""
+    assert chat_model.create_calls[-1]["text_format"] == {
+        "type": "json_schema",
+        "name": "project_presentation",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "summary_markdown": {
+                    "type": "string",
+                    "description": "Markdown summary of the project interactions, including tables when useful.",
+                },
+                "visual_code": {
+                    "type": "string",
+                    "description": "Plain browser JavaScript that renders the visual explanation into #root.",
+                },
+            },
+            "required": ["summary_markdown", "visual_code"],
+        },
+    }
     assert email_sender.presentation_emails == [("present@example.com", "General", "http://127.0.0.1:8080/")]
 
     shared = service.update_project_presentation_share(
@@ -5642,7 +5663,7 @@ def test_project_presentation_falls_back_when_model_returns_non_json(caplog):
                     items=[
                         ResponseItem(
                             item_id="msg_project_presentation",
-                            item_type="assistant_message",
+                            item_type="message",
                             role="assistant",
                             content_text="I can explain this project, but this is not JSON.",
                         )
@@ -5699,7 +5720,7 @@ def test_project_presentation_audio_uses_saved_elevenlabs_key(monkeypatch):
                     items=[
                         ResponseItem(
                             item_id="msg_audio_script",
-                            item_type="assistant_message",
+                            item_type="message",
                             role="assistant",
                             content_text=json.dumps(
                                 {
@@ -5721,7 +5742,7 @@ def test_project_presentation_audio_uses_saved_elevenlabs_key(monkeypatch):
                     items=[
                         ResponseItem(
                             item_id="msg_project_presentation",
-                            item_type="assistant_message",
+                            item_type="message",
                             role="assistant",
                             content_text=json.dumps(
                                 {

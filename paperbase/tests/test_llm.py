@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from paperbase.llm import _normalize_input_items, _normalize_response_item
+from paperbase.config import Settings
+from paperbase.llm import OpenAIResponsesChatModelClient, Prompt, _normalize_input_items, _normalize_response_item
 
 
 def test_normalize_input_items_uses_output_text_for_assistant_messages():
@@ -42,3 +43,32 @@ def test_normalize_response_item_preserves_assistant_message_phase():
 
     assert item.phase == "commentary"
     assert item.content_text == "I will inspect the project first."
+
+
+def test_responses_request_body_includes_structured_text_format():
+    text_format = {
+        "type": "json_schema",
+        "name": "project_presentation",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"summary_markdown": {"type": "string"}},
+            "required": ["summary_markdown"],
+        },
+    }
+    prompt = Prompt(
+        input=[{"type": "message", "role": "user", "content": "Summarize this project."}],
+        base_instructions="Return a structured project presentation.",
+        tools=[],
+        tool_choice=None,
+        text_format=text_format,
+    )
+
+    body = OpenAIResponsesChatModelClient(Settings(openai_model="gpt-5.5"))._request_body(
+        prompt=prompt,
+        stream=False,
+    )
+
+    assert body["model"] == "gpt-5.5"
+    assert body["text"] == {"format": text_format}

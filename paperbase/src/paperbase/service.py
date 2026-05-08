@@ -225,6 +225,51 @@ _TEXTUAL_MIME_TYPES = {
     "image/svg+xml",
 }
 _PROJECT_PRESENTATION_MAX_CONTEXT_CHARS = 80_000
+_PROJECT_PRESENTATION_TEXT_FORMAT: dict[str, Any] = {
+    "type": "json_schema",
+    "name": "project_presentation",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "summary_markdown": {
+                "type": "string",
+                "description": "Markdown summary of the project interactions, including tables when useful.",
+            },
+            "visual_code": {
+                "type": "string",
+                "description": "Plain browser JavaScript that renders the visual explanation into #root.",
+            },
+        },
+        "required": ["summary_markdown", "visual_code"],
+    },
+}
+_PROJECT_PRESENTATION_AUDIO_TEXT_FORMAT: dict[str, Any] = {
+    "type": "json_schema",
+    "name": "project_presentation_audio_script",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "turns": {
+                "type": "array",
+                "description": "Ordered two-person dialogue turns for text-to-speech.",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "speaker": {"type": "string", "enum": ["noob", "expert"]},
+                        "text": {"type": "string"},
+                    },
+                    "required": ["speaker", "text"],
+                },
+            }
+        },
+        "required": ["turns"],
+    },
+}
 _PROJECT_PRESENTATION_MAX_THREADS = 30
 _PROJECT_PRESENTATION_MAX_THREAD_ITEMS = 80
 _PROJECT_PRESENTATION_MAX_EXPLORATIONS = 80
@@ -3045,8 +3090,7 @@ class PaperbaseService:
             ],
             base_instructions=(
                 "Project presentation generator. Create a presentation artifact from the supplied "
-                "Paperbase project context. Return only strict JSON with keys `summary_markdown` "
-                "and `visual_code`. The summary must be Markdown with clear sections and at least "
+                "Paperbase project context. The summary must be Markdown with clear sections and at least "
                 "one table when the context supports it. The visual code must be plain JavaScript "
                 "that runs inside a browser iframe where React, ReactDOM, d3, and Tailwind are "
                 "available as globals. Do not use JSX, imports, external network calls, or markdown "
@@ -3057,13 +3101,16 @@ class PaperbaseService:
             tools=[],
             tool_choice=None,
             parallel_tool_calls=False,
+            text_format=_PROJECT_PRESENTATION_TEXT_FORMAT,
         )
 
     def _assistant_response_text(self, response: ResponseEnvelope) -> str:
         return "\n".join(
             item.content_text
             for item in response.items
-            if item.item_type == "assistant_message" and item.content_text
+            if item.item_type in {"message", "assistant_message"}
+            and item.role in {"", "assistant"}
+            and item.content_text
         ).strip()
 
     def _parse_project_presentation_payload(self, text: str) -> dict[str, Any]:
@@ -3137,18 +3184,19 @@ class PaperbaseService:
                 }
             ],
             base_instructions=(
-                "Project presentation audio script writer. Return only strict JSON with a `turns` "
-                "array. Each turn must have `speaker` equal to `noob` or `expert`, and `text` as "
+                "Project presentation audio script writer. Write a `turns` array. Each turn must "
+                "have `speaker` equal to `noob` or `expert`, and `text` as "
                 "natural spoken dialogue. Write a 5 to 10 minute two-person explainer about the "
                 "project presentation and all available research context: papers, comments, user "
                 "questions, chats, explorations, notes, and takeaways. The noob knows nothing and "
                 "asks simple questions. The industry expert explains patiently to a total beginner. "
-                "Do not include stage directions, markdown, speaker labels inside `text`, or any "
-                "characters outside the JSON. Keep each turn concise enough for text-to-speech."
+                "Do not include stage directions, markdown, or speaker labels inside `text`. Keep "
+                "each turn concise enough for text-to-speech."
             ),
             tools=[],
             tool_choice=None,
             parallel_tool_calls=False,
+            text_format=_PROJECT_PRESENTATION_AUDIO_TEXT_FORMAT,
         )
         response = self._chat_model_create_response(api_key=api_key, prompt=prompt)
         payload = self._parse_project_presentation_payload(self._assistant_response_text(response))
@@ -4725,11 +4773,7 @@ class PaperbaseService:
                 extra={"event": "chat.title_generation.failed"},
             )
             return fallback
-        response_text = "\n".join(
-            item.content_text
-            for item in response.items
-            if item.item_type == "assistant_message" and item.content_text
-        )
+        response_text = self._assistant_response_text(response)
         return _clean_generated_chat_title(response_text) or fallback
 
     def _project_prompt_suffix(self, thread: ChatThreadResponse) -> str:

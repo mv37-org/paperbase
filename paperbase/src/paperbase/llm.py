@@ -49,6 +49,7 @@ class Prompt:
     tools: list[dict[str, Any]] = field(default_factory=list)
     tool_choice: str | dict[str, Any] | None = "auto"
     parallel_tool_calls: bool = False
+    text_format: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -390,6 +391,8 @@ class OpenAIResponsesChatModelClient(ChatModelClient):
         tool_choice = _tool_choice_value(prompt.tool_choice)
         if tool_choice:
             payload["tool_choice"] = tool_choice
+        if prompt.text_format:
+            payload["text"] = {"format": prompt.text_format}
         return payload
 
     def create_response(self, *, api_key: str, prompt: Prompt) -> ResponseEnvelope:
