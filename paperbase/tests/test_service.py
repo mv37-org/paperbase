@@ -5514,7 +5514,7 @@ def test_project_defaults_and_thread_snapshots(browser_service):
 def test_project_presentation_job_caches_shares_and_emails():
     class ProjectPresentationChatModel(FakeChatModel):
         def create_response(self, *, api_key: str, prompt: Prompt) -> ResponseEnvelope:
-            if "Project presentation generator" in prompt.base_instructions:
+            if "Research presentation designer" in prompt.base_instructions:
                 self.create_calls.append(
                     {
                         "api_key": api_key,
@@ -5567,6 +5567,57 @@ def test_project_presentation_job_caches_shares_and_emails():
     assert session.user is not None
     _save_browser_openai_key(service, session.user)
     project = service.list_projects(session.user).projects[0]
+    paper = _sample_paper(
+        "2401.12345",
+        title="Calibrated Agent Benchmarks",
+        abstract=(
+            "This paper studies benchmark reliability by estimating uncertainty in evaluation "
+            "scores and showing when small changes in protocol alter conclusions."
+        ),
+    )
+    paper.index_status = "indexed"
+    paper.tldr = "Reliable agent benchmarks require calibrated uncertainty, not just leaderboard averages."
+    paper.summary_short = "Calibration separates meaningful benchmark improvements from noisy score changes."
+    stored_paper = service.repository.upsert_paper(paper)  # type: ignore[attr-defined]
+    service.object_store.put_text(  # type: ignore[attr-defined]
+        f"papers/{stored_paper.paper_id}/figures/index.json",
+        json.dumps(
+            [
+                {
+                    "figure_id": "fig-uncertainty",
+                    "caption": "Benchmark score intervals overlap when protocols are unstable.",
+                    "source_url": "",
+                    "content_type": "image/png",
+                }
+            ]
+        ),
+        content_type="application/json",
+    )
+    service.object_store.put_text(  # type: ignore[attr-defined]
+        f"papers/{stored_paper.paper_id}/figures/fig-uncertainty/caption.md",
+        "Figure shows calibrated confidence intervals around benchmark scores.",
+        content_type="text/markdown",
+    )
+    service.object_store.put_text(  # type: ignore[attr-defined]
+        f"papers/{stored_paper.paper_id}/tables/index.json",
+        json.dumps([{"table_id": "table-calibration", "caption": "Calibration error by protocol", "row_count": 2}]),
+        content_type="application/json",
+    )
+    service.object_store.put_text(  # type: ignore[attr-defined]
+        f"papers/{stored_paper.paper_id}/tables/table-calibration.json",
+        json.dumps(
+            [
+                {"Protocol": "baseline", "Error": "0.18"},
+                {"Protocol": "calibrated", "Error": "0.07"},
+            ]
+        ),
+        content_type="application/json",
+    )
+    service.create_browser_trending_paper_comment(
+        stored_paper.paper_id,
+        user=session.user,
+        request=CreatePaperCommentRequest(body="Focus on uncertainty intervals, not activity counts."),
+    )
     thread = service.create_chat_thread(
         session.user,
         CreateChatThreadRequest(title="Benchmarks", project_id=project.project_id),
@@ -5584,7 +5635,7 @@ def test_project_presentation_job_caches_shares_and_emails():
             explorations=[
                 ProjectPresentationExplorationSnapshot(
                     exploration_id="exp_1",
-                    paper_id="arxiv:2401.12345",
+                    paper_id=stored_paper.paper_id,
                     title="Benchmark Paper",
                     annotations=[
                         {
@@ -5612,6 +5663,16 @@ def test_project_presentation_job_caches_shares_and_emails():
     assert "Agent Benchmarks" in completed.summary_markdown
     assert "ReactDOM.createRoot" in completed.visual_code
     assert completed.audio_url == ""
+    assert "Research presentation designer" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "Do not write meta commentary" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "clean print/editorial research spread" in str(chat_model.create_calls[-1]["system_prompt"])
+    prompt_payload = json.loads(str(chat_model.create_calls[-1]["messages"][0]["content"]))
+    assert prompt_payload["research_materials"][0]["title"] == "Calibrated Agent Benchmarks"
+    assert "benchmark reliability" in prompt_payload["research_materials"][0]["abstract"]
+    assert prompt_payload["research_materials"][0]["selected_passages"][0]["selected_text"] == "Evaluation protocol"
+    assert prompt_payload["research_materials"][0]["paper_comments"][0]["body"].startswith("Focus on uncertainty")
+    assert prompt_payload["research_materials"][0]["figures"][0]["caption"].startswith("Figure shows calibrated")
+    assert prompt_payload["research_materials"][0]["tables"][0]["sample_rows"][0]["Protocol"] == "baseline"
     assert chat_model.create_calls[-1]["text_format"] == {
         "type": "json_schema",
         "name": "project_presentation",
@@ -5622,11 +5683,11 @@ def test_project_presentation_job_caches_shares_and_emails():
             "properties": {
                 "summary_markdown": {
                     "type": "string",
-                    "description": "Markdown summary of the project interactions, including tables when useful.",
+                    "description": "Markdown research briefing about the actual research material, including tables when useful.",
                 },
                 "visual_code": {
                     "type": "string",
-                    "description": "Plain browser JavaScript that renders the visual explanation into #root.",
+                    "description": "Plain browser JavaScript that renders a research-substance visual explanation into #root.",
                 },
             },
             "required": ["summary_markdown", "visual_code"],
@@ -5657,7 +5718,7 @@ def test_project_presentation_job_caches_shares_and_emails():
 def test_project_presentation_falls_back_when_model_returns_non_json(caplog):
     class NonJsonPresentationChatModel(FakeChatModel):
         def create_response(self, *, api_key: str, prompt: Prompt) -> ResponseEnvelope:
-            if "Project presentation generator" in prompt.base_instructions:
+            if "Research presentation designer" in prompt.base_instructions:
                 return ResponseEnvelope(
                     response_id="resp_project_presentation",
                     items=[
@@ -5699,9 +5760,11 @@ def test_project_presentation_falls_back_when_model_returns_non_json(caplog):
     assert completed_job.status == "completed"
     completed = service.get_project_presentation(session.user, project.project_id)
     assert completed.status == "completed"
-    assert "The presentation workflow completed" in completed.summary_markdown
-    assert "| Paper explorations | 0 |" in completed.summary_markdown
+    assert "## Research Thesis" in completed.summary_markdown
+    assert "The presentation workflow completed" not in completed.summary_markdown
+    assert "| Paper explorations |" not in completed.summary_markdown
     assert "ReactDOM.createRoot" in completed.visual_code
+    assert "Research brief" in completed.visual_code
     assert email_sender.presentation_emails == [
         ("fallback-present@example.com", "General", "http://127.0.0.1:8080/")
     ]
@@ -5713,8 +5776,13 @@ def test_project_presentation_falls_back_when_model_returns_non_json(caplog):
 
 def test_project_presentation_audio_uses_saved_elevenlabs_key(monkeypatch):
     class ProjectPresentationChatModel(FakeChatModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.audio_system_prompt = ""
+
         def create_response(self, *, api_key: str, prompt: Prompt) -> ResponseEnvelope:
             if "Project presentation audio script writer" in prompt.base_instructions:
+                self.audio_system_prompt = prompt.base_instructions
                 return ResponseEnvelope(
                     response_id="resp_audio_script",
                     items=[
@@ -5736,7 +5804,7 @@ def test_project_presentation_audio_uses_saved_elevenlabs_key(monkeypatch):
                         )
                     ],
                 )
-            if "Project presentation generator" in prompt.base_instructions:
+            if "Research presentation designer" in prompt.base_instructions:
                 return ResponseEnvelope(
                     response_id="resp_project_presentation",
                     items=[
@@ -5758,12 +5826,13 @@ def test_project_presentation_audio_uses_saved_elevenlabs_key(monkeypatch):
                 )
             return super().create_response(api_key=api_key, prompt=prompt)
 
+    chat_model = ProjectPresentationChatModel()
     service = PaperbaseService(
         settings=Settings(storage_backend="memory", database_url="memory://", api_key="test-token"),
         repository=MemoryPaperRepository(),
         object_store=MemoryObjectStore(),
         email_sender=FakeEmailSender(),
-        chat_model=ProjectPresentationChatModel(),
+        chat_model=chat_model,
     )
     generated_segments: list[tuple[str, str]] = []
 
@@ -5798,6 +5867,8 @@ def test_project_presentation_audio_uses_saved_elevenlabs_key(monkeypatch):
     completed = service.get_project_presentation(session.user, project.project_id)
     assert completed.status == "completed"
     assert completed.audio_url.endswith(f"/v1/browser/projects/{project.project_id}/presentation/audio")
+    assert "research substance and visual story" in chat_model.audio_system_prompt
+    assert "Do not make the app workflow" in chat_model.audio_system_prompt
     assert len(generated_segments) == 2
     assert generated_segments[0][0] != generated_segments[1][0]
     audio, content_type = service.get_project_presentation_audio(session.user, project.project_id)

@@ -225,6 +225,12 @@ _TEXTUAL_MIME_TYPES = {
     "image/svg+xml",
 }
 _PROJECT_PRESENTATION_MAX_CONTEXT_CHARS = 80_000
+_PROJECT_PRESENTATION_MAX_RESEARCH_MATERIALS = 10
+_PROJECT_PRESENTATION_MAX_PASSAGES_PER_PAPER = 4
+_PROJECT_PRESENTATION_MAX_COMMENTS_PER_PAPER = 4
+_PROJECT_PRESENTATION_MAX_FIGURES_PER_PAPER = 4
+_PROJECT_PRESENTATION_MAX_TABLES_PER_PAPER = 2
+_PROJECT_PRESENTATION_MAX_TABLE_ROWS = 4
 _PROJECT_PRESENTATION_TEXT_FORMAT: dict[str, Any] = {
     "type": "json_schema",
     "name": "project_presentation",
@@ -235,11 +241,11 @@ _PROJECT_PRESENTATION_TEXT_FORMAT: dict[str, Any] = {
         "properties": {
             "summary_markdown": {
                 "type": "string",
-                "description": "Markdown summary of the project interactions, including tables when useful.",
+                "description": "Markdown research briefing about the actual research material, including tables when useful.",
             },
             "visual_code": {
                 "type": "string",
-                "description": "Plain browser JavaScript that renders the visual explanation into #root.",
+                "description": "Plain browser JavaScript that renders a research-substance visual explanation into #root.",
             },
         },
         "required": ["summary_markdown", "visual_code"],
@@ -2830,6 +2836,15 @@ class PaperbaseService:
     ) -> dict[str, Any]:
         exploration_rows: list[dict[str, Any]] = []
         paper_ids: set[str] = set()
+        paper_order: list[str] = []
+
+        def remember_paper_id(value: str) -> None:
+            paper_id = value.strip()
+            if not paper_id or paper_id in paper_ids:
+                return
+            paper_ids.add(paper_id)
+            paper_order.append(paper_id)
+
         for exploration in list(explorations or [])[:_PROJECT_PRESENTATION_MAX_EXPLORATIONS]:
             annotations: list[dict[str, Any]] = []
             for annotation in list(exploration.annotations or [])[:_PROJECT_PRESENTATION_MAX_ANNOTATIONS]:
@@ -2856,7 +2871,7 @@ class PaperbaseService:
                 )
             paper_id = exploration.paper_id.strip()
             if paper_id:
-                paper_ids.add(paper_id)
+                remember_paper_id(paper_id)
             exploration_rows.append(
                 {
                     "exploration_id": exploration.exploration_id,
@@ -2909,7 +2924,7 @@ class PaperbaseService:
                 )
                 for citation in item.citations:
                     if citation.paper_id:
-                        paper_ids.add(citation.paper_id)
+                        remember_paper_id(citation.paper_id)
             thread_rows.append(
                 {
                     "thread_id": thread.thread_id,
@@ -2921,7 +2936,7 @@ class PaperbaseService:
             )
 
         comments: list[dict[str, Any]] = []
-        for paper_id in sorted(paper_ids)[:_PROJECT_PRESENTATION_MAX_EXPLORATIONS]:
+        for paper_id in paper_order[:_PROJECT_PRESENTATION_MAX_EXPLORATIONS]:
             for comment in self.repository.list_paper_comment_records(paper_id)[:30]:
                 comments.append(
                     {
@@ -2932,6 +2947,13 @@ class PaperbaseService:
                     }
                 )
 
+        research_materials = self._project_presentation_research_materials(
+            paper_ids=paper_order,
+            exploration_rows=exploration_rows,
+            thread_rows=thread_rows,
+            comments=comments,
+        )
+
         snapshot = {
             "project": {
                 "project_id": project.project_id,
@@ -2940,12 +2962,240 @@ class PaperbaseService:
                 "created_at": project.created_at.isoformat(),
                 "updated_at": project.updated_at.isoformat(),
             },
+            "research_materials": research_materials,
             "explorations": exploration_rows,
             "chat_threads": thread_rows,
             "paper_comments": comments,
             "generated_at": utcnow().isoformat(),
         }
         return self._truncate_project_presentation_snapshot(snapshot)
+
+    def _project_presentation_research_materials(
+        self,
+        *,
+        paper_ids: list[str],
+        exploration_rows: list[dict[str, Any]],
+        thread_rows: list[dict[str, Any]],
+        comments: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        source_by_paper: dict[str, dict[str, Any]] = {}
+        for exploration in exploration_rows:
+            paper_id = str(exploration.get("paper_id") or "").strip()
+            if not paper_id:
+                continue
+            source = source_by_paper.setdefault(
+                paper_id,
+                {"title": "", "authors": "", "path": "", "selected_passages": [], "user_notes": []},
+            )
+            source["title"] = source.get("title") or str(exploration.get("title") or "")
+            source["authors"] = source.get("authors") or str(exploration.get("authors") or "")
+            source["path"] = source.get("path") or str(exploration.get("path") or "")
+            for annotation in list(exploration.get("annotations") or [])[:_PROJECT_PRESENTATION_MAX_PASSAGES_PER_PAPER]:
+                if not isinstance(annotation, dict):
+                    continue
+                note = self._truncate_text(str(annotation.get("note") or ""), 700)
+                selected_text = self._truncate_text(str(annotation.get("selected_text") or ""), 1200)
+                nearby_text = self._truncate_text(str(annotation.get("nearby_text") or ""), 800)
+                section_title = self._truncate_text(str(annotation.get("section_title") or ""), 180)
+                if selected_text or nearby_text:
+                    source["selected_passages"].append(
+                        {
+                            "section_title": section_title,
+                            "selected_text": selected_text,
+                            "nearby_text": nearby_text,
+                            "note": note,
+                        }
+                    )
+                if note:
+                    source["user_notes"].append(note)
+
+        for thread in thread_rows:
+            for item in list(thread.get("items") or []):
+                if not isinstance(item, dict):
+                    continue
+                for citation in list(item.get("citations") or []):
+                    if not isinstance(citation, dict):
+                        continue
+                    paper_id = str(citation.get("paper_id") or "").strip()
+                    if not paper_id:
+                        continue
+                    source = source_by_paper.setdefault(
+                        paper_id,
+                        {"title": "", "authors": "", "path": "", "selected_passages": [], "user_notes": []},
+                    )
+                    source["title"] = source.get("title") or str(citation.get("title") or "")
+                    source["path"] = source.get("path") or str(citation.get("path") or "")
+
+        comments_by_paper: dict[str, list[dict[str, str]]] = {}
+        for comment in comments:
+            paper_id = str(comment.get("paper_id") or "").strip()
+            if not paper_id:
+                continue
+            bucket = comments_by_paper.setdefault(paper_id, [])
+            if len(bucket) >= _PROJECT_PRESENTATION_MAX_COMMENTS_PER_PAPER:
+                continue
+            body = self._truncate_text(str(comment.get("body") or ""), 700)
+            if body:
+                bucket.append(
+                    {
+                        "author": self._truncate_text(str(comment.get("author") or ""), 120),
+                        "body": body,
+                    }
+                )
+
+        materials: list[dict[str, Any]] = []
+        for paper_id in paper_ids[:_PROJECT_PRESENTATION_MAX_RESEARCH_MATERIALS]:
+            source = source_by_paper.get(paper_id, {})
+            paper = self._project_presentation_resolve_paper(paper_id)
+            material = {
+                "paper_id": paper_id,
+                "arxiv_id": "",
+                "title": self._truncate_text(str(source.get("title") or ""), 500),
+                "authors": self._truncate_text(str(source.get("authors") or ""), 500),
+                "published": "",
+                "updated": "",
+                "primary_category": "",
+                "categories": "",
+                "abstract": "",
+                "tldr": "",
+                "summary_short": "",
+                "citation_count": 0,
+                "influential_citation_count": 0,
+                "selected_passages": list(source.get("selected_passages") or [])[
+                    :_PROJECT_PRESENTATION_MAX_PASSAGES_PER_PAPER
+                ],
+                "user_notes": list(source.get("user_notes") or [])[:_PROJECT_PRESENTATION_MAX_PASSAGES_PER_PAPER],
+                "paper_comments": comments_by_paper.get(paper_id, []),
+                "figures": [],
+                "tables": [],
+            }
+            if paper is not None:
+                material.update(
+                    {
+                        "paper_id": paper.paper_id,
+                        "arxiv_id": paper.arxiv_id,
+                        "title": self._truncate_text(paper.title or material["title"], 500),
+                        "authors": self._truncate_text(paper.authors or material["authors"], 500),
+                        "published": paper.published,
+                        "updated": paper.updated,
+                        "primary_category": paper.primary_category,
+                        "categories": paper.categories,
+                        "abstract": self._truncate_text(paper.abstract, 1800),
+                        "tldr": self._truncate_text(paper.tldr, 1000),
+                        "summary_short": self._truncate_text(paper.summary_short, 1000),
+                        "citation_count": paper.citation_count,
+                        "influential_citation_count": paper.influential_citation_count,
+                        "figures": self._project_presentation_figure_snippets(paper.paper_id),
+                        "tables": self._project_presentation_table_snippets(paper.paper_id),
+                    }
+                )
+            if any(
+                material.get(key)
+                for key in (
+                    "title",
+                    "abstract",
+                    "tldr",
+                    "summary_short",
+                    "selected_passages",
+                    "user_notes",
+                    "paper_comments",
+                    "figures",
+                    "tables",
+                )
+            ):
+                materials.append(material)
+        return materials
+
+    def _project_presentation_resolve_paper(self, paper_id: str) -> PaperResponse | None:
+        paper = self.repository.get_paper(paper_id)  # type: ignore[attr-defined]
+        if paper is not None:
+            return paper
+        if paper_id.startswith("arxiv:"):
+            return self.repository.get_paper_by_arxiv_id(paper_id.removeprefix("arxiv:"))  # type: ignore[attr-defined]
+        paper = self.repository.get_paper(canonical_paper_id(paper_id))  # type: ignore[attr-defined]
+        if paper is not None:
+            return paper
+        return self.repository.get_paper_by_arxiv_id(paper_id)  # type: ignore[attr-defined]
+
+    def _project_presentation_figure_snippets(self, paper_id: str) -> list[dict[str, str]]:
+        index_path = f"papers/{paper_id}/figures/index.json"
+        if not self.object_store.exists(index_path):
+            return []
+        try:
+            index_payload = json.loads(self.object_store.get_text(index_path))
+        except (KeyError, json.JSONDecodeError, UnicodeDecodeError):
+            return []
+        figures: list[dict[str, str]] = []
+        if not isinstance(index_payload, list):
+            return figures
+        for item in index_payload[:_PROJECT_PRESENTATION_MAX_FIGURES_PER_PAPER]:
+            if not isinstance(item, dict):
+                continue
+            figure_id = str(item.get("figure_id") or "").strip()
+            caption = str(item.get("caption") or "").strip()
+            caption_path = f"papers/{paper_id}/figures/{figure_id}/caption.md"
+            if figure_id and self.object_store.exists(caption_path):
+                try:
+                    caption = self.object_store.get_text(caption_path)
+                except (KeyError, UnicodeDecodeError):
+                    pass
+            if figure_id or caption:
+                figures.append(
+                    {
+                        "figure_id": self._truncate_text(figure_id, 120),
+                        "caption": self._truncate_text(caption, 700),
+                    }
+                )
+        return figures
+
+    def _project_presentation_table_snippets(self, paper_id: str) -> list[dict[str, Any]]:
+        index_path = f"papers/{paper_id}/tables/index.json"
+        if not self.object_store.exists(index_path):
+            return []
+        try:
+            index_payload = json.loads(self.object_store.get_text(index_path))
+        except (KeyError, json.JSONDecodeError, UnicodeDecodeError):
+            return []
+        tables: list[dict[str, Any]] = []
+        if not isinstance(index_payload, list):
+            return tables
+        for item in index_payload[:_PROJECT_PRESENTATION_MAX_TABLES_PER_PAPER]:
+            if not isinstance(item, dict):
+                continue
+            table_id = str(item.get("table_id") or "").strip()
+            rows: list[Any] = []
+            json_path = f"papers/{paper_id}/tables/{table_id}.json"
+            if table_id and self.object_store.exists(json_path):
+                try:
+                    rows_payload = json.loads(self.object_store.get_text(json_path))
+                    if isinstance(rows_payload, list):
+                        rows = self._project_presentation_table_rows(rows_payload)
+                except (KeyError, json.JSONDecodeError, UnicodeDecodeError):
+                    rows = []
+            tables.append(
+                {
+                    "table_id": self._truncate_text(table_id, 120),
+                    "caption": self._truncate_text(str(item.get("caption") or ""), 500),
+                    "row_count": item.get("row_count") if isinstance(item.get("row_count"), int) else None,
+                    "sample_rows": rows,
+                }
+            )
+        return tables
+
+    def _project_presentation_table_rows(self, rows_payload: list[Any]) -> list[Any]:
+        rows: list[Any] = []
+        for row in rows_payload[:_PROJECT_PRESENTATION_MAX_TABLE_ROWS]:
+            if isinstance(row, dict):
+                trimmed: dict[str, str] = {}
+                for key, value in list(row.items())[:6]:
+                    trimmed[self._truncate_text(str(key), 120)] = self._truncate_text(str(value), 160)
+                if trimmed:
+                    rows.append(trimmed)
+            elif isinstance(row, list):
+                trimmed_row = [self._truncate_text(str(value), 160) for value in row[:6]]
+                if trimmed_row:
+                    rows.append(trimmed_row)
+        return rows
 
     def _truncate_text(self, value: str, max_chars: int) -> str:
         text = " ".join(str(value or "").split())
@@ -2976,6 +3226,33 @@ class PaperbaseService:
             if isinstance(exploration, dict)
         ]
         trimmed["paper_comments"] = list(trimmed.get("paper_comments", []))[:60]
+        trimmed["research_materials"] = [
+            {
+                **material,
+                "abstract": self._truncate_text(str(material.get("abstract") or ""), 1000),
+                "tldr": self._truncate_text(str(material.get("tldr") or ""), 700),
+                "summary_short": self._truncate_text(str(material.get("summary_short") or ""), 700),
+                "selected_passages": [
+                    {
+                        **passage,
+                        "selected_text": self._truncate_text(str(passage.get("selected_text") or ""), 700),
+                        "nearby_text": self._truncate_text(str(passage.get("nearby_text") or ""), 500),
+                        "note": self._truncate_text(str(passage.get("note") or ""), 400),
+                    }
+                    for passage in list(material.get("selected_passages", []))[:3]
+                    if isinstance(passage, dict)
+                ],
+                "user_notes": [
+                    self._truncate_text(str(note), 400)
+                    for note in list(material.get("user_notes", []))[:3]
+                ],
+                "paper_comments": list(material.get("paper_comments", []))[:3],
+                "figures": list(material.get("figures", []))[:3],
+                "tables": list(material.get("tables", []))[:2],
+            }
+            for material in list(trimmed.get("research_materials", []))[:8]
+            if isinstance(material, dict)
+        ]
         if len(json.dumps(trimmed, ensure_ascii=False, default=str)) <= _PROJECT_PRESENTATION_MAX_CONTEXT_CHARS:
             return trimmed
         trimmed["chat_threads"] = [
@@ -2994,6 +3271,33 @@ class PaperbaseService:
             if isinstance(thread, dict)
         ]
         trimmed["paper_comments"] = list(trimmed.get("paper_comments", []))[:30]
+        trimmed["research_materials"] = [
+            {
+                **material,
+                "abstract": self._truncate_text(str(material.get("abstract") or ""), 600),
+                "tldr": self._truncate_text(str(material.get("tldr") or ""), 450),
+                "summary_short": self._truncate_text(str(material.get("summary_short") or ""), 450),
+                "selected_passages": [
+                    {
+                        **passage,
+                        "selected_text": self._truncate_text(str(passage.get("selected_text") or ""), 500),
+                        "nearby_text": self._truncate_text(str(passage.get("nearby_text") or ""), 300),
+                        "note": self._truncate_text(str(passage.get("note") or ""), 240),
+                    }
+                    for passage in list(material.get("selected_passages", []))[:2]
+                    if isinstance(passage, dict)
+                ],
+                "user_notes": [
+                    self._truncate_text(str(note), 240)
+                    for note in list(material.get("user_notes", []))[:2]
+                ],
+                "paper_comments": list(material.get("paper_comments", []))[:2],
+                "figures": list(material.get("figures", []))[:2],
+                "tables": list(material.get("tables", []))[:1],
+            }
+            for material in list(trimmed.get("research_materials", []))[:5]
+            if isinstance(material, dict)
+        ]
         return trimmed
 
     def generate_project_presentation(
@@ -3047,7 +3351,7 @@ class PaperbaseService:
             if not summary_markdown:
                 summary_markdown = self._default_project_presentation_summary(context_snapshot)
             if not visual_code:
-                visual_code = self._default_project_presentation_visual(project_name)
+                visual_code = self._default_project_presentation_visual(context_snapshot)
             audio_storage_path = ""
             audio_content_type = "audio/mpeg"
             elevenlabs_api_key = self._get_elevenlabs_api_key_optional(user)
@@ -3089,14 +3393,25 @@ class PaperbaseService:
                 }
             ],
             base_instructions=(
-                "Project presentation generator. Create a presentation artifact from the supplied "
-                "Paperbase project context. The summary must be Markdown with clear sections and at least "
-                "one table when the context supports it. The visual code must be plain JavaScript "
-                "that runs inside a browser iframe where React, ReactDOM, d3, and Tailwind are "
-                "available as globals. Do not use JSX, imports, external network calls, or markdown "
-                "inside the visual code. Render into document.getElementById('root'). Build a rich "
-                "visual explanation of the user's explorations, notes, agent questions, takeaways, "
-                "paper comments, and chat history."
+                "Research presentation designer. Create a presentation that teaches the actual research "
+                "material to an external audience. Treat `research_materials` as the source of truth: "
+                "paper abstracts, TLDRs, selected passages, user notes, figure captions, table samples, "
+                "and comments identify the research concepts and evidence that matter. Do not write meta "
+                "commentary about the Paperbase project, chat history, number of papers, number of "
+                "comments, notes, or explorations unless a count is itself a scientific result. The "
+                "`summary_markdown` must read like a research briefing with a thesis, core concepts, "
+                "evidence, comparisons, caveats, and implications. Include a compact table only when it "
+                "clarifies the research. The `visual_code` must render a visual explanation of the "
+                "research itself: choose a concept map, mechanism diagram, comparison matrix, metric "
+                "plot, timeline, architecture diagram, or evidence map based on the material. Use the "
+                "reference direction of a clean print/editorial research spread: white canvas, restrained "
+                "accent color, dense but readable charting, thin rules, 4px radii or less, and minimal "
+                "text on the left. Avoid decorative cards, filler copy, marketing layout, and large "
+                "paragraphs inside the visual. If interaction helps, add hover or click states to reveal "
+                "details or focus evidence points. The visual code must be plain JavaScript that runs "
+                "inside a browser iframe where React, ReactDOM, d3, and Tailwind are available as "
+                "globals. Do not use JSX, imports, external network calls, or markdown inside the "
+                "visual code. Render into document.getElementById('root')."
             ),
             tools=[],
             tool_choice=None,
@@ -3185,13 +3500,15 @@ class PaperbaseService:
             ],
             base_instructions=(
                 "Project presentation audio script writer. Write a `turns` array. Each turn must "
-                "have `speaker` equal to `noob` or `expert`, and `text` as "
-                "natural spoken dialogue. Write a 5 to 10 minute two-person explainer about the "
-                "project presentation and all available research context: papers, comments, user "
-                "questions, chats, explorations, notes, and takeaways. The noob knows nothing and "
-                "asks simple questions. The industry expert explains patiently to a total beginner. "
-                "Do not include stage directions, markdown, or speaker labels inside `text`. Keep "
-                "each turn concise enough for text-to-speech."
+                "have `speaker` equal to `noob` or `expert`, and `text` as natural spoken dialogue. "
+                "Write a 5 to 10 minute two-person explainer about the research substance and visual "
+                "story in the presentation. The noob knows nothing and asks simple questions. The "
+                "industry expert explains the actual concepts, evidence, comparisons, caveats, and "
+                "implications to a total beginner. Do not make the app workflow, chat history, number "
+                "of papers, comments, notes, or explorations the topic. Mention user interactions only "
+                "when they point to a substantive research question. Do not include stage directions, "
+                "markdown, or speaker labels inside `text`. Keep each turn concise enough for "
+                "text-to-speech."
             ),
             tools=[],
             tool_choice=None,
@@ -3356,32 +3673,147 @@ class PaperbaseService:
 
     def _default_project_presentation_summary(self, context_snapshot: dict[str, Any]) -> str:
         project = context_snapshot.get("project", {}) if isinstance(context_snapshot.get("project"), dict) else {}
-        explorations = context_snapshot.get("explorations", [])
-        threads = context_snapshot.get("chat_threads", [])
-        comments = context_snapshot.get("paper_comments", [])
+        materials = [
+            material
+            for material in list(context_snapshot.get("research_materials", []))
+            if isinstance(material, dict)
+        ]
         project_name = str(project.get("name") or "Project")
+        if not materials:
+            return (
+                f"# {project_name}\n\n"
+                "## Research Thesis\n\n"
+                "The available material does not include enough paper text, selected passages, or notes "
+                "to infer a defensible research thesis yet.\n\n"
+                "## Core Material\n\n"
+                "Add explored papers with abstracts, selected passages, figure captions, table excerpts, "
+                "or research notes, then regenerate the presentation.\n"
+            )
+        primary = materials[0]
+        thesis = self._project_presentation_material_blurb(primary)
+        if not thesis:
+            thesis = "The available research material points to a focused topic, but needs a clearer extracted claim."
+        concept_lines: list[str] = []
+        evidence_lines: list[str] = []
+        for material in materials[:5]:
+            title = self._truncate_text(str(material.get("title") or material.get("paper_id") or "Research item"), 120)
+            blurb = self._project_presentation_material_blurb(material)
+            if blurb:
+                concept_lines.append(f"- **{title}:** {blurb}")
+            for passage in list(material.get("selected_passages") or [])[:2]:
+                if not isinstance(passage, dict):
+                    continue
+                selected = self._truncate_text(str(passage.get("selected_text") or passage.get("nearby_text") or ""), 220)
+                note = self._truncate_text(str(passage.get("note") or ""), 160)
+                if selected:
+                    evidence_lines.append(f"- **{title}:** {selected}" + (f" _Note: {note}_" if note else ""))
+            for figure in list(material.get("figures") or [])[:1]:
+                if isinstance(figure, dict) and figure.get("caption"):
+                    evidence_lines.append(
+                        f"- **{title} figure:** {self._truncate_text(str(figure.get('caption') or ''), 220)}"
+                    )
+            for table in list(material.get("tables") or [])[:1]:
+                if isinstance(table, dict) and table.get("caption"):
+                    evidence_lines.append(
+                        f"- **{title} table:** {self._truncate_text(str(table.get('caption') or ''), 220)}"
+                    )
+        concept_text = "\n".join(concept_lines) or "- The research material needs stronger extracted concepts."
+        evidence_text = "\n".join(evidence_lines[:8]) or "- No specific passages, figures, or tables were available."
         return (
             f"# {project_name}\n\n"
-            "## Summary\n\n"
-            "The presentation workflow completed, but the model did not provide a textual summary. "
-            "The project context is available for regeneration.\n\n"
-            "| Context | Count |\n"
-            "| --- | ---: |\n"
-            f"| Paper explorations | {len(explorations) if isinstance(explorations, list) else 0} |\n"
-            f"| Chat threads | {len(threads) if isinstance(threads, list) else 0} |\n"
-            f"| Paper comments | {len(comments) if isinstance(comments, list) else 0} |\n"
+            "## Research Thesis\n\n"
+            f"{thesis}\n\n"
+            "## Core Concepts\n\n"
+            f"{concept_text}\n\n"
+            "## Evidence To Present\n\n"
+            f"{evidence_text}\n\n"
+            "## Caveats\n\n"
+            "This fallback briefing uses only the extracted paper metadata and saved excerpts. Regenerate "
+            "with more selected passages or indexed paper artifacts for a more complete research narrative.\n"
         )
 
-    def _default_project_presentation_visual(self, project_name: str) -> str:
-        safe_name = json.dumps(project_name)
+    def _project_presentation_material_blurb(self, material: dict[str, Any]) -> str:
+        for key in ("summary_short", "tldr", "abstract"):
+            value = self._truncate_text(str(material.get(key) or ""), 360)
+            if value:
+                return value
+        for passage in list(material.get("selected_passages") or []):
+            if not isinstance(passage, dict):
+                continue
+            value = self._truncate_text(str(passage.get("selected_text") or passage.get("nearby_text") or ""), 280)
+            if value:
+                return value
+        for note in list(material.get("user_notes") or []):
+            value = self._truncate_text(str(note), 280)
+            if value:
+                return value
+        return ""
+
+    def _default_project_presentation_visual(self, context_snapshot: dict[str, Any]) -> str:
+        project = context_snapshot.get("project", {}) if isinstance(context_snapshot.get("project"), dict) else {}
+        project_name = str(project.get("name") or "Project")
+        materials = [
+            material
+            for material in list(context_snapshot.get("research_materials", []))
+            if isinstance(material, dict)
+        ]
+        visual_materials = []
+        for material in materials[:5]:
+            evidence = []
+            for passage in list(material.get("selected_passages") or [])[:2]:
+                if isinstance(passage, dict):
+                    text = self._truncate_text(str(passage.get("selected_text") or passage.get("nearby_text") or ""), 160)
+                    if text:
+                        evidence.append(text)
+            for figure in list(material.get("figures") or [])[:1]:
+                if isinstance(figure, dict) and figure.get("caption"):
+                    evidence.append(self._truncate_text(str(figure.get("caption") or ""), 160))
+            visual_materials.append(
+                {
+                    "title": self._truncate_text(
+                        str(material.get("title") or material.get("paper_id") or "Research item"),
+                        80,
+                    ),
+                    "subtitle": self._truncate_text(
+                        str(material.get("primary_category") or material.get("published") or "Research material"),
+                        80,
+                    ),
+                    "summary": self._project_presentation_material_blurb(material),
+                    "evidence": evidence[:3],
+                }
+            )
+        safe_data = json.dumps({"projectName": project_name, "materials": visual_materials})
         return (
             "const root = document.getElementById('root');"
-            f"const title = {safe_name};"
-            "function App(){return React.createElement('div',{className:'min-h-screen bg-white p-8 text-stone-900'},"
-            "React.createElement('div',{className:'mx-auto flex h-full max-w-3xl flex-col justify-center gap-4'},"
-            "React.createElement('p',{className:'text-xs font-semibold uppercase tracking-wide text-blue-600'},'Project presentation'),"
-            "React.createElement('h1',{className:'text-4xl font-semibold'},title),"
-            "React.createElement('p',{className:'text-base leading-7 text-stone-600'},'Regenerate this presentation to refresh the visual explanation from the latest notes, chats, and explored papers.')))};"
+            f"const data = {safe_data};"
+            "const {useState} = React;"
+            "function short(value,max){value=String(value||'');return value.length>max?value.slice(0,max-1)+'...':value;}"
+            "function App(){"
+            "const fallback={title:data.projectName,subtitle:'Research brief',summary:'Add paper abstracts, selected passages, figures, or table excerpts, then regenerate for a richer research visualization.',evidence:[]};"
+            "const materials=(data.materials&&data.materials.length?data.materials:[fallback]);"
+            "const [active,setActive]=useState(0);"
+            "const current=materials[Math.min(active,materials.length-1)]||fallback;"
+            "return React.createElement('div',{className:'min-h-screen bg-[#f1eee7] p-6 text-[#1b1611]'},"
+            "React.createElement('main',{className:'h-full min-h-[560px] bg-white p-8 shadow-sm'},"
+            "React.createElement('div',{className:'mb-6 flex items-start justify-between gap-6 border-b border-[#d8d1c6] pb-3'},"
+            "React.createElement('div',null,"
+            "React.createElement('p',{className:'text-[11px] font-semibold uppercase tracking-[0.12em] text-[#4fb49d]'},'Research brief'),"
+            "React.createElement('h1',{className:'mt-1 max-w-2xl text-[24px] font-semibold leading-tight'},short(data.projectName,82))),"
+            "React.createElement('div',{className:'h-px w-12 bg-[#4fb49d]'})),"
+            "React.createElement('section',{className:'grid grid-cols-[1.1fr_0.9fr] gap-8'},"
+            "React.createElement('div',{className:'relative min-h-[390px] border border-[#ddd7ce] bg-[#fbfaf7] p-5'},"
+            "React.createElement('div',{className:'absolute inset-x-5 top-1/2 h-px bg-[#d8d1c6]'}),"
+            "materials.map((material,index)=>React.createElement('button',{key:index,type:'button',onMouseEnter:()=>setActive(index),onClick:()=>setActive(index),className:'absolute text-left',style:{left:(12+index*(76/Math.max(materials.length-1,1)))+'%',top:(index%2===0?'28%':'61%'),transform:'translate(-50%,-50%)'}},"
+            "React.createElement('span',{className:'block h-5 w-5 border border-[#1b1611] '+(index===active?'bg-[#ef6f61]':'bg-[#70c7b3]')}),"
+            "React.createElement('span',{className:'mt-2 block max-w-[130px] text-[11px] font-semibold leading-tight'},short(material.title,42))))),"
+            "React.createElement('div',{className:'grid content-start gap-4'},"
+            "React.createElement('p',{className:'text-[11px] font-semibold uppercase tracking-[0.1em] text-[#9b3939]'},current.subtitle||'Research material'),"
+            "React.createElement('h2',{className:'text-[22px] font-semibold leading-tight'},short(current.title,90)),"
+            "React.createElement('p',{className:'text-[13px] leading-6 text-[#4d453d]'},short(current.summary,520)),"
+            "React.createElement('div',{className:'mt-2 border-t border-[#d8d1c6] pt-3'},"
+            "React.createElement('p',{className:'mb-2 text-[11px] font-semibold uppercase tracking-[0.1em] text-[#4fb49d]'},'Evidence'),"
+            "(current.evidence&&current.evidence.length?current.evidence:['No extracted figure, table, or passage evidence was available.']).slice(0,3).map((item,index)=>React.createElement('p',{key:index,className:'mb-2 text-[12px] leading-5 text-[#5a5248]'},short(item,180))))))));"
+            "}"
             "ReactDOM.createRoot(root).render(React.createElement(App));"
         )
 
