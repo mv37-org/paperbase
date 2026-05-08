@@ -166,7 +166,7 @@ class TrendingFeedResponse(BaseModel):
     date: str
     sort: Literal["default", "upvotes"] = "default"
     page: int = 1
-    page_size: int = 50
+    page_size: int = 20
     has_next: bool = False
     has_previous: bool = False
     papers: list[TrendingPaperCardResponse] = Field(default_factory=list)

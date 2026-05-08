@@ -1003,7 +1003,7 @@ describe("App", () => {
       date: "2026-04-21",
       sort: "default",
       page: 1,
-      page_size: 50,
+      page_size: 20,
       has_next: false,
       has_previous: false,
       papers: [
@@ -1250,7 +1250,9 @@ describe("App", () => {
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Upvote 12" })).toBeTruthy();
     });
-    fireEvent.click(screen.getByRole("button", { name: "Upvote 12" }));
+    const voteButton = screen.getByRole("button", { name: "Upvote 12" });
+    expect(voteButton.textContent).toBe("12");
+    fireEvent.click(voteButton);
 
     await waitFor(() => {
       expect(document.querySelector("#auth-modal-title")).toBeTruthy();
@@ -1276,6 +1278,7 @@ describe("App", () => {
         expect.any(String),
         "default",
         1,
+        20,
       );
     });
   });

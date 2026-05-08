@@ -274,7 +274,7 @@ class StubApiService:
         date: str | None = None,
         sort: str,
         page: int = 1,
-        page_size: int = 50,
+        page_size: int = 20,
         viewer: BrowserUser | None = None,
     ) -> TrendingFeedResponse:
         self.calls.append(
@@ -2039,6 +2039,17 @@ def test_browser_trending_feed_is_public(api_client):
     assert payload["page_size"] == 10
     assert payload["papers"][0]["paper_id"] == "arxiv:2401.54321"
     assert ("list_browser_trending_papers", ("2026-04-21", "upvotes", 2, 10, None)) in service.calls
+
+
+def test_browser_trending_feed_defaults_to_twenty_papers(api_client):
+    client, service, _ = api_client
+
+    response = client.get("/v1/browser/trending?date=2026-04-21")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["page_size"] == 20
+    assert ("list_browser_trending_papers", ("2026-04-21", "default", 1, 20, None)) in service.calls
 
 
 def test_browser_trending_detail_is_public(api_client):

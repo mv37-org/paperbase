@@ -2612,6 +2612,12 @@ def test_trending_feed_pages_ready_papers_and_sorts_by_latest_or_upvotes(browser
         page=2,
         viewer=session_a.user,
     )
+    third_page = service.list_browser_trending_papers(
+        date="2024-02-01",
+        sort="default",
+        page=3,
+        viewer=session_a.user,
+    )
     landing_feed = service.list_browser_trending_papers(
         date="2024-02-01",
         sort="default",
@@ -2626,8 +2632,9 @@ def test_trending_feed_pages_ready_papers_and_sorts_by_latest_or_upvotes(browser
         viewer=session_a.user,
     )
 
-    assert len(default_feed.papers) == 50
+    assert len(default_feed.papers) == 20
     assert default_feed.page == 1
+    assert default_feed.page_size == 20
     assert default_feed.has_next is True
     assert default_feed.has_previous is False
     assert default_feed.papers[0].paper_id == "arxiv:2403.88888"
@@ -2636,15 +2643,21 @@ def test_trending_feed_pages_ready_papers_and_sorts_by_latest_or_upvotes(browser
     assert default_feed.papers[2].image_url is not None
     assert default_feed.papers[3].image_url is None
     assert {paper.published for paper in default_feed.papers} == {"2024-02-01", "2024-02-02", "2024-02-03"}
-    assert len(second_page.papers) == 4
-    assert second_page.has_next is False
+    assert len(second_page.papers) == 20
+    assert second_page.has_next is True
     assert second_page.has_previous is True
+    assert len(third_page.papers) == 14
+    assert third_page.has_next is False
+    assert third_page.has_previous is True
     assert landing_feed.page_size == 10
     assert len(landing_feed.papers) == 10
     assert landing_feed.has_next is True
     assert landing_feed.papers[0].paper_id == default_feed.papers[0].paper_id
-    assert "arxiv:2403.88888" in {paper.paper_id for paper in default_feed.papers + second_page.papers}
-    assert "arxiv:2403.77777" not in {paper.paper_id for paper in default_feed.papers + second_page.papers}
+    default_page_paper_ids = {
+        paper.paper_id for paper in default_feed.papers + second_page.papers + third_page.papers
+    }
+    assert "arxiv:2403.88888" in default_page_paper_ids
+    assert "arxiv:2403.77777" not in default_page_paper_ids
     assert upvote_feed.papers[0].paper_id == "arxiv:2402.00000"
     assert upvote_feed.papers[0].upvote_count == 4
     assert upvote_feed.papers[0].viewer_has_upvoted is True

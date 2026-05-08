@@ -822,7 +822,7 @@ def browser_list_trending_papers(
     date: str | None = Query(default=None, min_length=10, max_length=10),
     sort: str = Query(default="default"),
     page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=50, ge=1, le=50),
+    page_size: int = Query(default=20, ge=1, le=50),
     user=Depends(get_optional_browser_user),
     service: PaperbaseService = Depends(get_service),
 ) -> TrendingFeedResponse:

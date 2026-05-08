@@ -9221,7 +9221,7 @@ class PaperbaseService:
         date: str | None = None,
         sort: str,
         page: int = 1,
-        page_size: int = 50,
+        page_size: int = 20,
         viewer: BrowserUser | None = None,
     ) -> TrendingFeedResponse:
         if date is not None:

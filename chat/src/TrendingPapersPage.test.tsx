@@ -52,7 +52,7 @@ describe("TrendingPapersPage", () => {
       date: "2026-04-21",
       sort: "default",
       page: 1,
-      page_size: 50,
+      page_size: 20,
       has_next: true,
       has_previous: false,
       papers: [
@@ -137,7 +137,11 @@ describe("TrendingPapersPage", () => {
     const card = document.querySelector(".trending-card");
     expect(card?.querySelector(".trending-card-copy h2")?.textContent).toContain("Trending Paper");
     expect(card?.querySelector(".trending-card-hero")).toBeTruthy();
-    expect(apiMocks.loadBrowserTrendingPapers).toHaveBeenCalledWith("2026-04-21", "default", 1);
+    expect(screen.queryByRole("link", { name: "Paper" })).toBeNull();
+    const voteButton = screen.getByRole("button", { name: "Upvote 12" });
+    expect(voteButton.textContent).toBe("12");
+    expect(voteButton.querySelector(".trending-vote-chevron")).toBeTruthy();
+    expect(apiMocks.loadBrowserTrendingPapers).toHaveBeenCalledWith("2026-04-21", "default", 1, 20);
 
     fireEvent.click(screen.getByRole("tab", { name: "Hottest" }));
 
@@ -146,6 +150,7 @@ describe("TrendingPapersPage", () => {
         "2026-04-21",
         "upvotes",
         1,
+        20,
       );
     });
 
@@ -170,7 +175,7 @@ describe("TrendingPapersPage", () => {
       date: "2026-04-21",
       sort: "default",
       page: 1,
-      page_size: 50,
+      page_size: 20,
       has_next: false,
       has_previous: false,
       papers: [],
@@ -183,20 +188,21 @@ describe("TrendingPapersPage", () => {
     });
   });
 
-  it("loads the next page of 50 papers from the feed controls", async () => {
+  it("loads the next page of 20 papers from the feed controls", async () => {
     render(<Harness />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Next 50" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Next 20" })).toBeTruthy();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Next 50" }));
+    fireEvent.click(screen.getByRole("button", { name: "Next 20" }));
 
     await waitFor(() => {
       expect(apiMocks.loadBrowserTrendingPapers).toHaveBeenLastCalledWith(
         "2026-04-21",
         "default",
         2,
+        20,
       );
     });
   });

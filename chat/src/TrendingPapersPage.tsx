@@ -24,6 +24,8 @@ export type TrendingBrowseState = {
   paperId: string | null;
 };
 
+const DEFAULT_TRENDING_PAGE_SIZE = 20;
+
 type TrendingPapersPageProps = {
   variant: "landing" | "public" | "workspace";
   authenticated: boolean;
@@ -38,6 +40,32 @@ type TrendingPapersPageProps = {
 
 function sortLabel(sort: TrendingSort) {
   return sort === "upvotes" ? "Hottest" : "Latest";
+}
+
+function TrendingVoteButton({
+  upvoteCount,
+  viewerHasUpvoted,
+  pending,
+  onClick,
+}: {
+  upvoteCount: number;
+  viewerHasUpvoted: boolean;
+  pending: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={`trending-vote-button${viewerHasUpvoted ? " active" : ""}`}
+      aria-label={viewerHasUpvoted ? `Remove upvote ${upvoteCount}` : `Upvote ${upvoteCount}`}
+      aria-pressed={viewerHasUpvoted}
+      onClick={onClick}
+      disabled={pending}
+    >
+      <span className="trending-vote-chevron" aria-hidden="true" />
+      <span className="trending-vote-count">{pending ? "..." : upvoteCount}</span>
+    </button>
+  );
 }
 
 function applyVoteToFeed(
@@ -195,6 +223,7 @@ export function TrendingPapersPage({
   const [commentSubmittingTarget, setCommentSubmittingTarget] = useState<string | "root" | null>(
     null,
   );
+  const effectivePageSize = pageSize ?? DEFAULT_TRENDING_PAGE_SIZE;
 
   useEffect(() => {
     let cancelled = false;
@@ -202,15 +231,12 @@ export function TrendingPapersPage({
     setFeedError("");
     void (async () => {
       try {
-        const nextFeed =
-          pageSize === undefined
-            ? await loadBrowserTrendingPapers(browseState.date, browseState.sort, browseState.page)
-            : await loadBrowserTrendingPapers(
-                browseState.date,
-                browseState.sort,
-                browseState.page,
-                pageSize,
-              );
+        const nextFeed = await loadBrowserTrendingPapers(
+          browseState.date,
+          browseState.sort,
+          browseState.page,
+          effectivePageSize,
+        );
         if (cancelled) {
           return;
         }
@@ -229,7 +255,7 @@ export function TrendingPapersPage({
     return () => {
       cancelled = true;
     };
-  }, [browseState.date, browseState.page, browseState.sort, pageSize]);
+  }, [browseState.date, browseState.page, browseState.sort, effectivePageSize]);
 
   useEffect(() => {
     if (!browseState.paperId) {
@@ -347,7 +373,7 @@ export function TrendingPapersPage({
 
   const emptyState = feedStatus === "ready" && (feed?.papers.length ?? 0) === 0;
   const currentPage = feed?.page ?? browseState.page;
-  const currentPageSize = feed?.page_size ?? pageSize ?? 50;
+  const currentPageSize = feed?.page_size ?? effectivePageSize;
   const hasPreviousPage = feed?.has_previous ?? browseState.page > 1;
   const hasNextPage = feed?.has_next ?? false;
   const showPager = showPagination && (hasPreviousPage || hasNextPage);
@@ -447,22 +473,12 @@ export function TrendingPapersPage({
                         )}
                       </button>
                       <div className="trending-card-actions">
-                        <a
-                          href={paper.html_url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="trending-card-link"
-                        >
-                          Paper
-                        </a>
-                        <button
-                          type="button"
-                          className={`trending-vote-button${paper.viewer_has_upvoted ? " active" : ""}`}
+                        <TrendingVoteButton
+                          upvoteCount={paper.upvote_count}
+                          viewerHasUpvoted={paper.viewer_has_upvoted}
+                          pending={votePending}
                           onClick={() => void handleVote(paper.paper_id, paper.viewer_has_upvoted)}
-                          disabled={votePending}
-                        >
-                          {votePending ? "..." : `Upvote ${paper.upvote_count}`}
-                        </button>
+                        />
                       </div>
                     </article>
                   );
@@ -541,16 +557,12 @@ export function TrendingPapersPage({
                     >
                       PDF
                     </a>
-                    <button
-                      type="button"
-                      className={`trending-vote-button${detail.viewer_has_upvoted ? " active" : ""}`}
+                    <TrendingVoteButton
+                      upvoteCount={detail.upvote_count}
+                      viewerHasUpvoted={detail.viewer_has_upvoted}
+                      pending={votePendingPaperId === detail.paper_id}
                       onClick={() => void handleVote(detail.paper_id, detail.viewer_has_upvoted)}
-                      disabled={votePendingPaperId === detail.paper_id}
-                    >
-                      {votePendingPaperId === detail.paper_id
-                        ? "..."
-                        : `Upvote ${detail.upvote_count}`}
-                    </button>
+                    />
                   </div>
                   <section className="trending-summary-section">
                     <h2>Summary</h2>
