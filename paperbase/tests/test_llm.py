@@ -1,7 +1,15 @@
 from __future__ import annotations
 
+import requests
+
 from paperbase.config import Settings
-from paperbase.llm import OpenAIResponsesChatModelClient, Prompt, _normalize_input_items, _normalize_response_item
+from paperbase.llm import (
+    OpenAIResponsesChatModelClient,
+    Prompt,
+    _normalize_input_items,
+    _normalize_response_item,
+    _response_error_detail,
+)
 
 
 def test_normalize_input_items_uses_output_text_for_assistant_messages():
@@ -72,3 +80,16 @@ def test_responses_request_body_includes_structured_text_format():
 
     assert body["model"] == "gpt-5.5"
     assert body["text"] == {"format": text_format}
+
+
+def test_response_error_detail_summarizes_html_errors():
+    response = requests.Response()
+    response.status_code = 502
+    response._content = b"""
+    <!doctype html>
+    <html><head><title> | 502: Bad gateway</title></head><body>long cloudflare page</body></html>
+    """
+
+    detail = _response_error_detail(response)
+
+    assert detail == "HTTP 502: | 502: Bad gateway"

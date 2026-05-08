@@ -29,6 +29,8 @@ from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+import requests
+
 from . import code_ingest
 
 from fastapi import HTTPException
@@ -9527,19 +9529,21 @@ class PaperbaseService:
         exponentially with jitter until ``max_attempts`` is reached; after
         that they too dead-letter. Uncaught defaults to retryable — safer
         to retry a bug than to silently drop work."""
-        permanent = isinstance(exc, PermanentError)
+        permanent = isinstance(exc, PermanentError) or self._job_error_is_permanent(job, exc)
         attempts = (job.attempts or 0) + 0  # claim already incremented
         max_attempts = job.max_attempts or 3
         will_retry = (not permanent) and attempts < max_attempts
         next_run_at = _retry_delay_for(attempts) if will_retry else None
+        error_message = self._job_error_message(job, exc, will_retry=will_retry)
         self.repository.mark_job_failed(
             job.job_id,
-            str(exc),
+            error_message,
             permanent=permanent,
             next_run_at=next_run_at,
             lease_token=job.lease_token,
             error_trace=traceback.format_exc(),
         )
+        self._sync_failed_job_side_effects(job, error_message=error_message, will_retry=will_retry)
         logger.exception(
             "Job failed",
             extra={
@@ -9553,6 +9557,75 @@ class PaperbaseService:
                 "next_run_at": next_run_at.isoformat() if next_run_at else None,
             },
         )
+
+    def _job_error_is_permanent(self, job: JobResponse, exc: Exception) -> bool:
+        if job.job_type != "project_presentation":
+            return False
+        status_code = self._http_status_code(exc)
+        if status_code is None:
+            return False
+        return 400 <= status_code < 500 and status_code not in {408, 409, 425, 429}
+
+    def _job_error_message(self, job: JobResponse, exc: Exception, *, will_retry: bool) -> str:
+        if job.job_type == "project_presentation":
+            message = self._project_presentation_error_message(exc, will_retry=will_retry)
+            if message:
+                return message
+        return self._sanitize_job_error_message(str(exc))
+
+    def _sync_failed_job_side_effects(self, job: JobResponse, *, error_message: str, will_retry: bool) -> None:
+        if job.job_type != "project_presentation":
+            return
+        presentation_id = str(job.payload.get("presentation_id") or "")
+        if not presentation_id:
+            return
+        if will_retry:
+            self.repository.upsert_project_presentation_pending(  # type: ignore[attr-defined]
+                user_id=str(job.payload.get("user_id") or ""),
+                project_id=str(job.payload.get("project_id") or ""),
+                context_snapshot=dict(job.payload.get("context_snapshot") or {}),
+                job_id=job.job_id,
+            )
+            return
+        self.repository.fail_project_presentation(presentation_id, error=error_message)  # type: ignore[attr-defined]
+
+    def _project_presentation_error_message(self, exc: Exception, *, will_retry: bool) -> str:
+        status_code = self._http_status_code(exc)
+        if status_code is None:
+            return self._sanitize_job_error_message(str(exc))
+        if status_code in {408, 409, 425, 429} or 500 <= status_code < 600:
+            suffix = " It will retry automatically." if will_retry else " Retry the presentation in a few minutes."
+            return f"OpenAI is temporarily unavailable for presentation generation (HTTP {status_code}).{suffix}"
+        if status_code in {401, 403}:
+            return f"OpenAI rejected the saved API key for presentation generation (HTTP {status_code}). Update the OpenAI key in Settings."
+        if status_code == 404:
+            return (
+                "OpenAI returned HTTP 404 for presentation generation. Check that "
+                f"`PAPERBASE_OPENAI_MODEL` (`{self.settings.openai_model}`) is available for this API key "
+                "and that `PAPERBASE_OPENAI_BASE_URL` points to the OpenAI API."
+            )
+        if 400 <= status_code < 500:
+            return (
+                f"OpenAI rejected the presentation request (HTTP {status_code}). Check the configured "
+                f"model `{self.settings.openai_model}` and saved OpenAI API key."
+            )
+        return self._sanitize_job_error_message(str(exc))
+
+    @staticmethod
+    def _http_status_code(exc: Exception) -> int | None:
+        if isinstance(exc, requests.HTTPError) and exc.response is not None:
+            return exc.response.status_code
+        return None
+
+    @staticmethod
+    def _sanitize_job_error_message(message: str) -> str:
+        text = str(message or "").strip()
+        if "<html" in text[:1000].lower():
+            text = re.sub(r"<script\b.*?</script>", " ", text, flags=re.IGNORECASE | re.DOTALL)
+            text = re.sub(r"<style\b.*?</style>", " ", text, flags=re.IGNORECASE | re.DOTALL)
+            text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text[:1000] if text else "Job failed"
 
     def retry_dead_job(self, job_id: str) -> JobResponse | None:
         """Promote a dead job back to pending with attempts reset. Returns

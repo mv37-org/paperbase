@@ -7,6 +7,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 import json
 import logging
+import re
 from typing import Any
 
 import requests
@@ -338,6 +339,13 @@ def _response_error_detail(response: requests.Response) -> str:
             if pieces:
                 return "; ".join(pieces)
     text = response.text.strip()
+    if "<html" in text[:500].lower():
+        title_match = re.search(r"<title[^>]*>(.*?)</title>", text, flags=re.IGNORECASE | re.DOTALL)
+        if title_match:
+            title = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", title_match.group(1))).strip()
+            if title:
+                return f"HTTP {response.status_code}: {title}"
+        return f"HTTP {response.status_code}: HTML error response"
     return text[:1000] if text else f"HTTP {response.status_code}"
 
 

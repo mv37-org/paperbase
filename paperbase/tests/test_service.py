@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+import requests
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
@@ -6832,6 +6833,74 @@ def test_uncaught_exception_defaults_to_retryable(monkeypatch):
     assert processed is not None
     assert processed.status == "pending"
     assert processed.attempts == 1
+
+
+def _requests_http_error(status_code: int, body: str = "") -> requests.HTTPError:
+    response = requests.Response()
+    response.status_code = status_code
+    response.url = "https://api.openai.com/v1/responses"
+    response._content = body.encode("utf-8")
+    return requests.HTTPError(f"{status_code} Error", response=response)
+
+
+def test_project_presentation_openai_5xx_retries_without_html_error(monkeypatch):
+    service = _retry_service()
+    session, _ = service.register_browser_user(
+        SignupRequest(email="retry-openai@example.com", password="secret12345", display_name="Retry")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    project = service.list_projects(session.user).projects[0]
+    queued = service.start_project_presentation(
+        session.user,
+        project.project_id,
+        ProjectPresentationStartRequest(explorations=[], regenerate=True),
+    )
+
+    def fail_openai(**_kwargs):
+        raise _requests_http_error(502, "<html><head><title> | 502: Bad gateway</title></head></html>")
+
+    monkeypatch.setattr(service, "generate_project_presentation", fail_openai)
+
+    processed = service.process_next_job()
+    assert processed is not None
+    assert processed.status == "pending"
+    assert "temporarily unavailable" in (processed.error or "")
+    assert "<html" not in (processed.error or "")
+    presentation = service.get_project_presentation(session.user, project.project_id)
+    assert presentation.presentation_id == queued.presentation_id
+    assert presentation.status == "pending"
+    assert presentation.error == ""
+
+
+def test_project_presentation_openai_404_dead_letters_with_actionable_error(monkeypatch):
+    service = _retry_service()
+    session, _ = service.register_browser_user(
+        SignupRequest(email="bad-model@example.com", password="secret12345", display_name="Bad Model")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    project = service.list_projects(session.user).projects[0]
+    service.start_project_presentation(
+        session.user,
+        project.project_id,
+        ProjectPresentationStartRequest(explorations=[], regenerate=True),
+    )
+
+    def fail_openai(**_kwargs):
+        raise _requests_http_error(404, "model not found")
+
+    monkeypatch.setattr(service, "generate_project_presentation", fail_openai)
+
+    processed = service.process_next_job()
+    assert processed is not None
+    assert processed.status == "dead"
+    assert processed.attempts == 1
+    assert "PAPERBASE_OPENAI_MODEL" in (processed.error or "")
+    assert service.settings.openai_model in (processed.error or "")
+    presentation = service.get_project_presentation(session.user, project.project_id)
+    assert presentation.status == "failed"
+    assert "PAPERBASE_OPENAI_MODEL" in presentation.error
 
 
 def test_claim_skips_jobs_whose_next_run_at_is_in_the_future():
