@@ -1512,8 +1512,8 @@ body:has(.app-shell) #root {
 .project-presentation-primary-button,
 .project-presentation-secondary-button {
   border: 1px solid rgba(27, 22, 17, 0.12);
-  border-radius: 6px;
-  padding: 8px 12px;
+  border-radius: var(--radius);
+  padding: 7px 10px;
   font-family: inherit;
   font-size: 13px;
   font-weight: 650;
@@ -1545,12 +1545,12 @@ body:has(.app-shell) #root {
 }
 
 .project-presentation-page {
-  width: min(1280px, calc(100% - 32px));
-  min-height: calc(100vh - 48px);
-  margin: 24px auto;
+  width: min(1280px, calc(100% - 24px));
+  min-height: calc(100vh - 32px);
+  margin: 16px auto;
   display: grid;
   grid-template-rows: auto auto 1fr;
-  gap: 14px;
+  gap: 12px;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   letter-spacing: 0;
 }
@@ -1593,17 +1593,16 @@ body:has(.app-shell) #root {
 }
 
 .project-presentation-progress,
-.project-presentation-error,
-.project-presentation-share-row {
+.project-presentation-error {
   border: 1px solid rgba(27, 22, 17, 0.1);
-  border-radius: 6px;
+  border-radius: var(--radius);
   background: rgba(255, 253, 250, 0.84);
 }
 
 .project-presentation-progress {
   display: grid;
-  gap: 10px;
-  padding: 14px;
+  gap: 8px;
+  padding: 12px;
 }
 
 .project-presentation-progress span {
@@ -1616,7 +1615,7 @@ body:has(.app-shell) #root {
   position: relative;
   height: 8px;
   overflow: hidden;
-  border-radius: 999px;
+  border-radius: var(--radius);
   background: rgba(27, 22, 17, 0.08);
 }
 
@@ -1639,7 +1638,7 @@ body:has(.app-shell) #root {
 }
 
 .project-presentation-error {
-  padding: 12px 14px;
+  padding: 10px 12px;
   color: #9b3939;
   font-size: 13px;
 }
@@ -1649,7 +1648,7 @@ body:has(.app-shell) #root {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 10px 12px;
+  padding: 0;
 }
 
 .project-presentation-share-row a {
@@ -1678,7 +1677,7 @@ body:has(.app-shell) #root {
   min-height: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 14px;
+  gap: 12px;
 }
 
 .project-presentation-canvas,
@@ -1686,14 +1685,14 @@ body:has(.app-shell) #root {
   min-width: 0;
   min-height: 620px;
   border: 1px solid rgba(27, 22, 17, 0.1);
-  border-radius: 6px;
+  border-radius: var(--radius);
   background: rgba(255, 255, 255, 0.88);
   overflow: hidden;
 }
 
 .project-presentation-summary {
   overflow: auto;
-  padding: 20px;
+  padding: 14px;
 }
 
 .project-presentation-audio-player {
@@ -1701,11 +1700,9 @@ body:has(.app-shell) #root {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 16px;
-  padding: 10px 12px;
-  border: 1px solid rgba(27, 22, 17, 0.1);
-  border-radius: 6px;
-  background: rgba(255, 253, 250, 0.72);
+  margin-bottom: 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(27, 22, 17, 0.1);
 }
 
 .project-presentation-audio-copy {
@@ -1752,22 +1749,22 @@ body:has(.app-shell) #root {
 
 .project-presentation-public-page {
   min-height: 100vh;
-  padding: 24px;
+  padding: 16px;
   background: var(--surface);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   letter-spacing: 0;
 }
 
 .project-presentation-public-shell {
-  min-height: calc(100vh - 48px);
+  min-height: calc(100vh - 32px);
 }
 
 .project-presentation-public-state {
   width: min(520px, calc(100% - 32px));
   margin: 20vh auto 0;
-  padding: 16px;
+  padding: 14px;
   border: 1px solid rgba(27, 22, 17, 0.1);
-  border-radius: 6px;
+  border-radius: var(--radius);
   background: rgba(255, 255, 255, 0.9);
   color: var(--text);
   text-align: center;
@@ -10462,6 +10459,7 @@ body.authenticated-theme-dark .paper-pdf-modal,
 body.authenticated-theme-dark .exploration-picker-panel,
 body.authenticated-theme-dark .exploration-picker-search,
 body.authenticated-theme-dark .paper-pdf-modal-header,
+body.authenticated-theme-dark .project-presentation-audio-player,
 body.authenticated-theme-dark .paper-exploration-header,
 body.authenticated-theme-dark .paper-exploration-frame,
 body.authenticated-theme-dark .paper-exploration-empty {
@@ -10803,8 +10801,6 @@ body.authenticated-theme-dark .thread-paper-cover-placeholder,
 body.authenticated-theme-dark .project-home-stat,
 body.authenticated-theme-dark .project-presentation-progress,
 body.authenticated-theme-dark .project-presentation-error,
-body.authenticated-theme-dark .project-presentation-share-row,
-body.authenticated-theme-dark .project-presentation-audio-player,
 body.authenticated-theme-dark .project-presentation-canvas,
 body.authenticated-theme-dark .project-presentation-summary,
 body.authenticated-theme-dark .project-presentation-secondary-button,
