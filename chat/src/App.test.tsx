@@ -1265,7 +1265,7 @@ describe("App", () => {
     expect(apiMocks.landingMentionEditor).toHaveBeenCalled();
   });
 
-  it("shows top landing papers and routes unauthenticated upvotes to login", async () => {
+  it("shows top landing papers without landing vote controls", async () => {
     apiMocks.loadSession.mockResolvedValue({
       authenticated: false,
       user: null,
@@ -1300,16 +1300,8 @@ describe("App", () => {
     });
     expect(screen.getByRole("heading", { name: "Trending papers" })).toBeTruthy();
 
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Upvote 12" })).toBeTruthy();
-    });
-    const voteButton = screen.getByRole("button", { name: "Upvote 12" });
-    expect(voteButton.textContent).toBe("12");
-    fireEvent.click(voteButton);
-
-    await waitFor(() => {
-      expect(document.querySelector("#auth-modal-title")).toBeTruthy();
-    });
+    expect(screen.queryByRole("button", { name: "Upvote 12" })).toBeNull();
+    expect(apiMocks.upvoteBrowserTrendingPaper).not.toHaveBeenCalled();
   });
 
   it("opens the public trending page from a shared browse URL", async () => {

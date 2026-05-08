@@ -1985,13 +1985,14 @@ body:has(.app-shell) #root {
 
 .trending-card-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(min(176px, 100%), 220px));
+  justify-content: center;
+  gap: 16px;
 }
 
 .trending-page-landing .trending-card-grid {
   grid-template-columns: 1fr;
-  gap: 12px;
+  gap: 24px;
 }
 
 .trending-card {
@@ -2013,28 +2014,24 @@ body:has(.app-shell) #root {
 }
 
 .trending-page-landing .trending-card {
-  grid-template-columns: minmax(128px, 42%) minmax(0, 1fr);
-  grid-template-rows: minmax(0, 1fr) auto;
-  grid-template-areas:
-    "media copy"
-    "media actions";
+  grid-template-columns: minmax(92px, 124px) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  grid-template-areas: "media copy";
   align-items: stretch;
   min-height: 172px;
-  gap: 10px;
+  gap: 14px;
   padding: 10px;
 }
 
 .trending-page-landing .trending-card:nth-child(even) {
-  grid-template-columns: minmax(0, 1fr) minmax(128px, 42%);
-  grid-template-areas:
-    "copy media"
-    "actions media";
+  grid-template-columns: minmax(92px, 124px) minmax(0, 1fr);
+  grid-template-areas: "media copy";
 }
 
 .trending-card:hover,
 .trending-card:focus-within {
-  border-color: rgba(27, 22, 17, 0.18);
-  box-shadow: 0 8px 20px rgba(16, 24, 40, 0.08);
+  border-color: rgba(27, 22, 17, 0.24);
+  box-shadow: 0 4px 14px rgba(16, 24, 40, 0.05);
 }
 
 .trending-card-hero,
@@ -2050,6 +2047,7 @@ body:has(.app-shell) #root {
 
 .trending-card-hero {
   width: 100%;
+  aspect-ratio: 3 / 4;
 }
 
 .trending-page-landing .trending-card-hero {
@@ -2068,10 +2066,10 @@ body:has(.app-shell) #root {
 }
 
 .trending-card-image {
-  height: clamp(108px, 15vw, 132px);
+  height: 100%;
   border: 1px solid rgba(27, 22, 17, 0.1);
   border-radius: 3px 3px 0 0;
-  object-fit: contain;
+  object-fit: cover;
   object-position: top center;
   background: #f3efe6;
 }
@@ -2099,8 +2097,8 @@ body:has(.app-shell) #root {
 
 .trending-page-landing .trending-card-copy {
   grid-area: copy;
-  align-content: start;
-  padding-top: 2px;
+  align-content: center;
+  padding-top: 0;
 }
 
 .trending-card-copy h2,
@@ -2164,6 +2162,7 @@ body:has(.app-shell) #root {
 
 .trending-page-landing .trending-card-actions {
   grid-area: actions;
+  display: none;
   align-self: end;
   justify-content: flex-start;
   padding-top: 0;
@@ -2224,35 +2223,32 @@ body:has(.app-shell) #root {
 
 @media (max-width: 1180px) {
   .trending-card-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(176px, 100%), 220px));
   }
 }
 
 @media (max-width: 900px) {
   .trending-card-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(176px, 100%), 220px));
   }
 }
 
 @media (max-width: 620px) {
   .trending-card-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(min(176px, 100%), 220px);
   }
 }
 
 @media (max-width: 520px) {
   .trending-page-landing .trending-card,
   .trending-page-landing .trending-card:nth-child(even) {
-    grid-template-columns: 1fr;
-    grid-template-areas:
-      "media"
-      "copy"
-      "actions";
-    min-height: 0;
+    grid-template-columns: minmax(86px, 34%) minmax(0, 1fr);
+    grid-template-areas: "media copy";
+    min-height: 156px;
   }
 
   .trending-page-landing .trending-card-image {
-    height: clamp(120px, 44vw, 156px);
+    height: 100%;
     min-height: 0;
   }
 }
@@ -10841,8 +10837,8 @@ body.authenticated-theme-dark .project-repo-info-button {
 
 body.authenticated-theme-dark .trending-card:hover,
 body.authenticated-theme-dark .trending-card:focus-within {
-  border-color: rgba(223, 232, 244, 0.2);
-  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.26);
+  border-color: rgba(223, 232, 244, 0.26);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.18);
 }
 
 body.authenticated-theme-dark .paper-pdf-modal-backdrop {

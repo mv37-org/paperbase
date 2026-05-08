@@ -29,15 +29,17 @@ function Harness({
     paperId: null,
   } satisfies TrendingBrowseState,
   onRequireAuth = vi.fn(),
+  variant = "workspace",
 }: {
   authenticated?: boolean;
   initialState?: TrendingBrowseState;
   onRequireAuth?: () => void;
+  variant?: "landing" | "public" | "workspace";
 }) {
   const [browseState, setBrowseState] = useState<TrendingBrowseState>(initialState);
   return (
     <TrendingPapersPage
-      variant="workspace"
+      variant={variant}
       authenticated={authenticated}
       browseState={browseState}
       onChangeBrowseState={setBrowseState}
@@ -170,6 +172,17 @@ describe("TrendingPapersPage", () => {
     expect(screen.getByRole("link", { name: "PDF" }).getAttribute("href")).toBe(
       "https://example.test/2401.12345.pdf",
     );
+  });
+
+  it("hides vote controls on the landing feed", async () => {
+    render(<Harness authenticated={false} variant="landing" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Trending Paper")).toBeTruthy();
+    });
+
+    expect(screen.queryByRole("button", { name: "Upvote 12" })).toBeNull();
+    expect(document.querySelector(".trending-card-actions")).toBeNull();
   });
 
   it("shows the empty state when the selected day has no papers", async () => {

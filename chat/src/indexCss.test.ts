@@ -37,16 +37,21 @@ describe("index.css", () => {
     const imageBlock = css.match(/\.trending-card-image\s*\{([^}]*)\}/)?.[1] ?? "";
     const activeVoteBlock = css.match(/\.trending-vote-button\.active\s*\{([^}]*)\}/)?.[1] ?? "";
 
-    expect(gridBlock).toContain("grid-template-columns: repeat(4, minmax(0, 1fr));");
+    expect(gridBlock).toContain(
+      "grid-template-columns: repeat(auto-fit, minmax(min(176px, 100%), 220px));",
+    );
+    expect(gridBlock).toContain("justify-content: center;");
+    expect(gridBlock).toContain("gap: 16px;");
     expect(landingGridBlock).toContain("grid-template-columns: 1fr;");
+    expect(landingGridBlock).toContain("gap: 24px;");
     expect(landingCardBlock).toContain('"media copy"');
-    expect(landingCardBlock).toContain('"media actions"');
-    expect(landingEvenCardBlock).toContain('"copy media"');
-    expect(landingEvenCardBlock).toContain('"actions media"');
+    expect(landingCardBlock).not.toContain("actions");
+    expect(landingEvenCardBlock).toContain('"media copy"');
+    expect(landingEvenCardBlock).not.toContain('"copy media"');
     expect(cardBlock).toContain("min-height: 282px;");
     expect(cardBlock).toContain('font-family: Georgia, "Times New Roman", serif;');
     expect(cardBlock).toContain("border-radius: 4px;");
-    expect(imageBlock).toContain("object-fit: contain;");
+    expect(imageBlock).toContain("object-fit: cover;");
     expect(activeVoteBlock).toContain("border-color: #99582a;");
     expect(activeVoteBlock).toContain("color: #99582a;");
     expect(css).toContain(".trending-card-title-button");

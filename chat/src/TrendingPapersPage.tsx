@@ -378,6 +378,7 @@ export function TrendingPapersPage({
   const hasNextPage = feed?.has_next ?? false;
   const showPager = showPagination && (hasPreviousPage || hasNextPage);
   const headingText = browseState.paperId ? (detail?.title ?? "Loading paper") : feedTitle;
+  const showVotes = variant !== "landing";
 
   return (
     <section
@@ -472,14 +473,18 @@ export function TrendingPapersPage({
                           </div>
                         )}
                       </button>
-                      <div className="trending-card-actions">
-                        <TrendingVoteButton
-                          upvoteCount={paper.upvote_count}
-                          viewerHasUpvoted={paper.viewer_has_upvoted}
-                          pending={votePending}
-                          onClick={() => void handleVote(paper.paper_id, paper.viewer_has_upvoted)}
-                        />
-                      </div>
+                      {showVotes ? (
+                        <div className="trending-card-actions">
+                          <TrendingVoteButton
+                            upvoteCount={paper.upvote_count}
+                            viewerHasUpvoted={paper.viewer_has_upvoted}
+                            pending={votePending}
+                            onClick={() =>
+                              void handleVote(paper.paper_id, paper.viewer_has_upvoted)
+                            }
+                          />
+                        </div>
+                      ) : null}
                     </article>
                   );
                 })}
@@ -557,12 +562,14 @@ export function TrendingPapersPage({
                     >
                       PDF
                     </a>
-                    <TrendingVoteButton
-                      upvoteCount={detail.upvote_count}
-                      viewerHasUpvoted={detail.viewer_has_upvoted}
-                      pending={votePendingPaperId === detail.paper_id}
-                      onClick={() => void handleVote(detail.paper_id, detail.viewer_has_upvoted)}
-                    />
+                    {showVotes ? (
+                      <TrendingVoteButton
+                        upvoteCount={detail.upvote_count}
+                        viewerHasUpvoted={detail.viewer_has_upvoted}
+                        pending={votePendingPaperId === detail.paper_id}
+                        onClick={() => void handleVote(detail.paper_id, detail.viewer_has_upvoted)}
+                      />
+                    ) : null}
                   </div>
                   <section className="trending-summary-section">
                     <h2>Summary</h2>
@@ -602,7 +609,11 @@ export function TrendingPapersPage({
                   </form>
                 ) : (
                   <div className="trending-auth-callout">
-                    <p>Log in to upvote, comment, and reply.</p>
+                    <p>
+                      {showVotes
+                        ? "Log in to upvote, comment, and reply."
+                        : "Log in to comment and reply."}
+                    </p>
                     <button type="button" className="primary-button" onClick={onRequireAuth}>
                       Log in
                     </button>
