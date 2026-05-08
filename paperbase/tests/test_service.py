@@ -5633,6 +5633,63 @@ def test_project_presentation_job_caches_shares_and_emails():
     assert cached.job_id == completed.job_id
 
 
+def test_project_presentation_falls_back_when_model_returns_non_json(caplog):
+    class NonJsonPresentationChatModel(FakeChatModel):
+        def create_response(self, *, api_key: str, prompt: Prompt) -> ResponseEnvelope:
+            if "Project presentation generator" in prompt.base_instructions:
+                return ResponseEnvelope(
+                    response_id="resp_project_presentation",
+                    items=[
+                        ResponseItem(
+                            item_id="msg_project_presentation",
+                            item_type="assistant_message",
+                            role="assistant",
+                            content_text="I can explain this project, but this is not JSON.",
+                        )
+                    ],
+                )
+            return super().create_response(api_key=api_key, prompt=prompt)
+
+    email_sender = FakeEmailSender()
+    service = PaperbaseService(
+        settings=Settings(storage_backend="memory", database_url="memory://", api_key="test-token"),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=email_sender,
+        chat_model=NonJsonPresentationChatModel(),
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="fallback-present@example.com", password="topsecret123", display_name="Presenter")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    project = service.list_projects(session.user).projects[0]
+    caplog.set_level(logging.WARNING, logger="paperbase.service")
+
+    queued = service.start_project_presentation(
+        session.user,
+        project.project_id,
+        ProjectPresentationStartRequest(explorations=[]),
+    )
+
+    assert queued.status == "pending"
+    completed_job = service.process_next_job()
+    assert completed_job is not None
+    assert completed_job.status == "completed"
+    completed = service.get_project_presentation(session.user, project.project_id)
+    assert completed.status == "completed"
+    assert "The presentation workflow completed" in completed.summary_markdown
+    assert "| Paper explorations | 0 |" in completed.summary_markdown
+    assert "ReactDOM.createRoot" in completed.visual_code
+    assert email_sender.presentation_emails == [
+        ("fallback-present@example.com", "General", "http://127.0.0.1:8080/")
+    ]
+    assert any(
+        getattr(record, "event", "") == "project.presentation.payload_fallback"
+        for record in caplog.records
+    )
+
+
 def test_project_presentation_audio_uses_saved_elevenlabs_key(monkeypatch):
     class ProjectPresentationChatModel(FakeChatModel):
         def create_response(self, *, api_key: str, prompt: Prompt) -> ResponseEnvelope:
@@ -6732,6 +6789,34 @@ def test_claimed_job_gets_live_lease_and_stalled_effective_status_when_expired()
     assert canceled.status == "canceled"
     assert canceled.effective_status == "canceled"
     assert canceled.lease_token is None
+
+
+def test_claim_reclaims_stalled_job_after_worker_lease_expires():
+    from datetime import UTC, datetime, timedelta
+
+    service = _retry_service()
+    job = service.repository.create_job("index_paper", {"arxiv_id": "test/stalled-reclaim"})
+    first_claim = service.repository.claim_pending_job(worker_id="worker-a", lease_seconds=60)
+    assert first_claim is not None
+    assert first_claim.attempts == 1
+    assert first_claim.lease_token
+
+    service.repository.jobs[job.job_id] = service.repository.jobs[job.job_id].model_copy(
+        update={"lease_expires_at": datetime.now(UTC) - timedelta(seconds=1)}
+    )
+
+    reclaimed = service.repository.claim_pending_job(worker_id="worker-b", lease_seconds=60)
+
+    assert reclaimed is not None
+    assert reclaimed.job_id == job.job_id
+    assert reclaimed.status == "running"
+    assert reclaimed.effective_status == "running"
+    assert reclaimed.worker_id == "worker-b"
+    assert reclaimed.attempts == 2
+    assert reclaimed.lease_token
+    assert reclaimed.lease_token != first_claim.lease_token
+    assert reclaimed.lease_expires_at is not None
+    assert reclaimed.lease_expires_at > datetime.now(UTC)
 
 
 def test_cancel_pending_job_marks_canceled_immediately():

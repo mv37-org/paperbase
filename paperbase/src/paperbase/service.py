@@ -2981,7 +2981,21 @@ class PaperbaseService:
             prompt = self._project_presentation_prompt(context_snapshot)
             response = self._chat_model_create_response(api_key=api_key_value, prompt=prompt)
             response_text = self._assistant_response_text(response)
-            payload = self._parse_project_presentation_payload(response_text)
+            try:
+                payload = self._parse_project_presentation_payload(response_text)
+            except PermanentError as exc:
+                logger.warning(
+                    "Project presentation model payload was invalid; using fallback presentation",
+                    extra={
+                        "event": "project.presentation.payload_fallback",
+                        "presentation_id": presentation_id,
+                        "project_id": project_id,
+                        "response_length": len(response_text),
+                        "response_preview": self._truncate_text(response_text, 240),
+                        "error": str(exc),
+                    },
+                )
+                payload = {}
             project_name = str(context_snapshot.get("project", {}).get("name") or "Project")
             summary_markdown = str(payload.get("summary_markdown") or "").strip()
             visual_code = str(payload.get("visual_code") or "").strip()

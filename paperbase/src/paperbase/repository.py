@@ -23,6 +23,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    and_,
     create_engine,
     delete,
     func,
@@ -5624,8 +5625,17 @@ class SqlAlchemyPaperRepository(PaperRepository):
             row = session.scalar(
                 select(JobORM)
                 .where(
-                    JobORM.status == "pending",
-                    or_(JobORM.next_run_at.is_(None), JobORM.next_run_at <= now),
+                    or_(
+                        and_(
+                            JobORM.status == "pending",
+                            or_(JobORM.next_run_at.is_(None), JobORM.next_run_at <= now),
+                        ),
+                        and_(
+                            JobORM.status == "running",
+                            JobORM.cancel_requested_at.is_(None),
+                            or_(JobORM.lease_expires_at.is_(None), JobORM.lease_expires_at <= now),
+                        ),
+                    ),
                 )
                 .order_by(
                     JobORM.priority.asc(),
@@ -8201,7 +8211,15 @@ class MemoryPaperRepository(PaperRepository):
         candidates = [
             (job_id, job)
             for job_id, job in self.jobs.items()
-            if job.status == "pending" and (job.next_run_at is None or job.next_run_at <= now)
+            if (
+                job.status == "pending"
+                and (job.next_run_at is None or job.next_run_at <= now)
+            )
+            or (
+                job.status == "running"
+                and job.cancel_requested_at is None
+                and (job.lease_expires_at is None or job.lease_expires_at <= now)
+            )
         ]
         candidates.sort(
             key=lambda item: (item[1].priority or 0, item[1].next_run_at is not None, item[1].created_at)
