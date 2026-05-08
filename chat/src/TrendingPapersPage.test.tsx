@@ -134,6 +134,9 @@ describe("TrendingPapersPage", () => {
     await waitFor(() => {
       expect(screen.getByText("Trending Paper")).toBeTruthy();
     });
+    const card = document.querySelector(".trending-card");
+    expect(card?.querySelector(".trending-card-copy h2")?.textContent).toContain("Trending Paper");
+    expect(card?.querySelector(".trending-card-hero")).toBeTruthy();
     expect(apiMocks.loadBrowserTrendingPapers).toHaveBeenCalledWith("2026-04-21", "default", 1);
 
     fireEvent.click(screen.getByRole("tab", { name: "Hottest" }));

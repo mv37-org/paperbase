@@ -2056,6 +2056,33 @@ describe("App", () => {
     expect(settingsIcon?.getAttribute("src")).toMatch(/\/settings\.svg\?v=pb-/);
   });
 
+  it("collapses and expands the desktop sidebar from the sidebar toggle", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Collapse sidebar")).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByLabelText("Collapse sidebar"));
+
+    await waitFor(() => {
+      expect(document.querySelector("#app-shell")?.classList.contains("sidebar-collapsed")).toBe(
+        true,
+      );
+    });
+    expect(screen.getByLabelText("Expand sidebar")).toBeTruthy();
+
+    fireEvent.click(screen.getByLabelText("Expand sidebar"));
+
+    await waitFor(() => {
+      expect(document.querySelector("#app-shell")?.classList.contains("sidebar-collapsed")).toBe(
+        false,
+      );
+    });
+  });
+
   it("expands the collapsed sidebar before running clicked sidebar actions", async () => {
     localStorage.setItem("paperbase-sidebar-collapsed", "true");
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());

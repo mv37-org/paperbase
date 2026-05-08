@@ -23,4 +23,15 @@ describe("index.css", () => {
     expect(blocks.length).toBeGreaterThanOrEqual(2);
     expect(blocks.every((block) => /overflow:\s*hidden;/.test(block))).toBe(true);
   });
+
+  it("keeps trending paper cards aligned with research paper card styling", () => {
+    const cardBlock = css.match(/\.trending-card\s*\{([^}]*)\}/)?.[1] ?? "";
+    const imageBlock = css.match(/\.trending-card-image\s*\{([^}]*)\}/)?.[1] ?? "";
+
+    expect(cardBlock).toContain("min-height: 282px;");
+    expect(cardBlock).toContain('font-family: Georgia, "Times New Roman", serif;');
+    expect(cardBlock).toContain("border-radius: 4px;");
+    expect(imageBlock).toContain("object-fit: contain;");
+    expect(css).toContain(".trending-card-title-button");
+  });
 });

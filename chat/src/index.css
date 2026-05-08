@@ -1656,17 +1656,36 @@ body:has(.app-shell) #root {
 
 .trending-card-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 18px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
 }
 
 .trending-card {
+  position: relative;
   display: grid;
-  gap: 10px;
+  grid-template-rows: minmax(0, 1fr) auto auto;
+  align-content: start;
+  gap: 6px;
+  min-height: 282px;
+  padding: 8px 10px;
+  border: 1px solid rgba(27, 22, 17, 0.12);
+  border-radius: 4px;
+  background: #ffffff;
+  font-family: Georgia, "Times New Roman", serif;
+  overflow: hidden;
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.trending-card:hover,
+.trending-card:focus-within {
+  border-color: rgba(27, 22, 17, 0.18);
+  box-shadow: 0 8px 20px rgba(16, 24, 40, 0.08);
 }
 
 .trending-card-hero,
-.trending-card-copy {
+.trending-card-title-button {
   border: 0;
   background: transparent;
   padding: 0;
@@ -1674,6 +1693,10 @@ body:has(.app-shell) #root {
   color: inherit;
   text-align: left;
   cursor: pointer;
+}
+
+.trending-card-hero {
+  width: 100%;
 }
 
 .trending-card-image,
@@ -1686,7 +1709,12 @@ body:has(.app-shell) #root {
 }
 
 .trending-card-image {
-  aspect-ratio: 4 / 5;
+  height: clamp(108px, 15vw, 132px);
+  border: 1px solid rgba(27, 22, 17, 0.1);
+  border-radius: 3px 3px 0 0;
+  object-fit: contain;
+  object-position: top center;
+  background: #f3efe6;
 }
 
 .trending-card-image-fallback {
@@ -1697,34 +1725,43 @@ body:has(.app-shell) #root {
   letter-spacing: 0.02em;
 }
 
-.trending-card-footer {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 14px;
-  align-items: start;
-}
-
 .trending-card-copy {
+  min-width: 0;
   display: grid;
-  gap: 4px;
+  align-content: center;
+  gap: 5px;
 }
 
-.trending-card-copy strong,
+.trending-card-copy h2,
 .trending-detail-copy h2,
 .trending-section-heading h2 {
   color: var(--text);
 }
 
-.trending-card-copy strong {
-  font-size: 15px;
-  line-height: 1.35;
+.trending-card-copy h2 {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.2;
   font-weight: 600;
+  letter-spacing: 0;
+}
+
+.trending-card-title-button {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  width: 100%;
+  overflow: hidden;
 }
 
 .trending-card-copy span {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
   color: var(--muted);
-  font-size: 13px;
-  line-height: 1.45;
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .trending-card-actions,
@@ -1737,7 +1774,9 @@ body:has(.app-shell) #root {
 }
 
 .trending-card-actions {
-  justify-content: flex-end;
+  justify-content: space-between;
+  gap: 6px;
+  padding-top: 2px;
 }
 
 .trending-pagination {
@@ -10033,6 +10072,8 @@ body.authenticated-theme-dark .paper-pdf-modal-state,
 body.authenticated-theme-dark .exploration-picker-item-copy span,
 body.authenticated-theme-dark .exploration-picker-item-copy small,
 body.authenticated-theme-dark .exploration-picker-empty,
+body.authenticated-theme-dark .trending-card-copy span,
+body.authenticated-theme-dark .trending-card-image-fallback,
 body.authenticated-theme-dark .thread-paper-meta,
 body.authenticated-theme-dark .project-repo-status,
 body.authenticated-theme-dark .project-repo-import-item em,
@@ -10071,6 +10112,8 @@ body.authenticated-theme-dark .paper-pdf-modal-close,
 body.authenticated-theme-dark .exploration-picker-close,
 body.authenticated-theme-dark .exploration-picker-search input,
 body.authenticated-theme-dark .exploration-picker-item-copy strong,
+body.authenticated-theme-dark .trending-card-copy h2,
+body.authenticated-theme-dark .trending-card-title-button,
 body.authenticated-theme-dark .thread-paper-card h2,
 body.authenticated-theme-dark .project-field,
 body.authenticated-theme-dark .project-github-heading,
@@ -10302,6 +10345,9 @@ body.authenticated-theme-dark .paper-drawer-error,
 body.authenticated-theme-dark .citation-card,
 body.authenticated-theme-dark .citation-card-compact-image,
 body.authenticated-theme-dark .citation-card-compact-placeholder,
+body.authenticated-theme-dark .trending-card,
+body.authenticated-theme-dark .trending-card-image,
+body.authenticated-theme-dark .trending-card-image-fallback,
 body.authenticated-theme-dark .thread-paper-card,
 body.authenticated-theme-dark .thread-paper-cover-image,
 body.authenticated-theme-dark .thread-paper-cover-placeholder,
@@ -10333,6 +10379,12 @@ body.authenticated-theme-dark .project-repo-info-popover {
 body.authenticated-theme-dark .project-repo-info-button {
   border: 0;
   background: transparent;
+}
+
+body.authenticated-theme-dark .trending-card:hover,
+body.authenticated-theme-dark .trending-card:focus-within {
+  border-color: rgba(223, 232, 244, 0.2);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.26);
 }
 
 body.authenticated-theme-dark .paper-pdf-modal-backdrop {

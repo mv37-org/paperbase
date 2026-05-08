@@ -413,9 +413,25 @@ export function TrendingPapersPage({
                   const votePending = votePendingPaperId === paper.paper_id;
                   return (
                     <article key={paper.paper_id} className="trending-card">
+                      <div className="trending-card-copy">
+                        <h2>
+                          <button
+                            type="button"
+                            className="trending-card-title-button"
+                            onClick={() => handleOpenDetail(paper.paper_id)}
+                          >
+                            {paper.title}
+                          </button>
+                        </h2>
+                        <span>
+                          {paper.authors}
+                          {paper.published ? ` · ${paper.published}` : ""}
+                        </span>
+                      </div>
                       <button
                         type="button"
                         className="trending-card-hero"
+                        aria-label={`Open ${paper.title} preview`}
                         onClick={() => handleOpenDetail(paper.paper_id)}
                       >
                         {paper.image_url ? (
@@ -430,38 +446,23 @@ export function TrendingPapersPage({
                           </div>
                         )}
                       </button>
-                      <div className="trending-card-footer">
+                      <div className="trending-card-actions">
+                        <a
+                          href={paper.html_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="trending-card-link"
+                        >
+                          Paper
+                        </a>
                         <button
                           type="button"
-                          className="trending-card-copy"
-                          onClick={() => handleOpenDetail(paper.paper_id)}
+                          className={`trending-vote-button${paper.viewer_has_upvoted ? " active" : ""}`}
+                          onClick={() => void handleVote(paper.paper_id, paper.viewer_has_upvoted)}
+                          disabled={votePending}
                         >
-                          <strong>{paper.title}</strong>
-                          <span>
-                            {paper.authors}
-                            {paper.published ? ` · ${paper.published}` : ""}
-                          </span>
+                          {votePending ? "..." : `Upvote ${paper.upvote_count}`}
                         </button>
-                        <div className="trending-card-actions">
-                          <a
-                            href={paper.html_url}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="trending-card-link"
-                          >
-                            Paper
-                          </a>
-                          <button
-                            type="button"
-                            className={`trending-vote-button${paper.viewer_has_upvoted ? " active" : ""}`}
-                            onClick={() =>
-                              void handleVote(paper.paper_id, paper.viewer_has_upvoted)
-                            }
-                            disabled={votePending}
-                          >
-                            {votePending ? "..." : `Upvote ${paper.upvote_count}`}
-                          </button>
-                        </div>
                       </div>
                     </article>
                   );

@@ -4,6 +4,7 @@ import type {
   ChangeEvent,
   FormEvent,
   KeyboardEvent as ReactKeyboardEvent,
+  MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
   UIEvent,
 } from "react";
@@ -4866,6 +4867,17 @@ export default function App() {
     setPaperExplorationSidebarCollapsed(true);
   }, [sidebarCollapsed]);
 
+  const handleSidebarClickCapture = useCallback(
+    (event: ReactMouseEvent<HTMLElement>) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest(".sidebar-toggle")) {
+        return;
+      }
+      expandCollapsedSidebarForAction();
+    },
+    [expandCollapsedSidebarForAction],
+  );
+
   const handleSidebarToggle = useCallback(() => {
     setAccountMenuOpen(false);
     setProjectMenuProjectId(null);
@@ -6165,7 +6177,7 @@ export default function App() {
               setAccountMenuOpen(false);
             }}
           />
-          <aside className="sidebar" onClickCapture={expandCollapsedSidebarForAction}>
+          <aside className="sidebar" onClickCapture={handleSidebarClickCapture}>
             <div className="sidebar-top">
               <div className="sidebar-brand-row">
                 <div className="sidebar-title">Paperbase</div>
