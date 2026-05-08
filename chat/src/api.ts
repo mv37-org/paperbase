@@ -59,6 +59,18 @@ function apiUrl(path: string) {
   return `${API_BASE}${path}`;
 }
 
+export function apiResourceUrl(path: string) {
+  if (
+    !path ||
+    /^(?:[a-z][a-z0-9+.-]*:)?\/\//i.test(path) ||
+    path.startsWith("data:") ||
+    path.startsWith("blob:")
+  ) {
+    return path;
+  }
+  return apiUrl(path);
+}
+
 function encodePathPreservingSlashes(path: string) {
   return path
     .split("/")

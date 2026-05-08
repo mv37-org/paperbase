@@ -80,6 +80,7 @@ from .models import (
     ResetPasswordRequest,
     ResultSetResponse,
     RunPythonFileResponse,
+    SaveElevenLabsKeyRequest,
     SaveOpenAIKeyRequest,
     SaveModalCredentialsRequest,
     SearchClickRequest,
@@ -1432,6 +1433,37 @@ def browser_delete_openai_key(
     )
 
 
+@app.put("/v1/browser/settings/elevenlabs-key", response_model=BrowserSessionResponse)
+def browser_save_elevenlabs_key(
+    request: SaveElevenLabsKeyRequest,
+    http_request: Request,
+    response: Response,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> BrowserSessionResponse:
+    session_response = service.save_user_elevenlabs_key(user, request)
+    return _browser_session_response_with_csrf(
+        session_response,
+        request=http_request,
+        response=response,
+    )
+
+
+@app.delete("/v1/browser/settings/elevenlabs-key", response_model=BrowserSessionResponse)
+def browser_delete_elevenlabs_key(
+    request: Request,
+    response: Response,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> BrowserSessionResponse:
+    session_response = service.delete_user_elevenlabs_key(user)
+    return _browser_session_response_with_csrf(
+        session_response,
+        request=request,
+        response=response,
+    )
+
+
 @app.put("/v1/browser/settings/modal-credentials", response_model=BrowserSessionResponse)
 def browser_save_modal_credentials(
     request: SaveModalCredentialsRequest,
@@ -1644,6 +1676,20 @@ def browser_get_project_presentation(
     return service.get_project_presentation(user, project_id)
 
 
+@app.get("/v1/browser/projects/{project_id}/presentation/audio")
+def browser_get_project_presentation_audio(
+    project_id: str,
+    user=Depends(require_browser_user),
+    service: PaperbaseService = Depends(get_service),
+) -> Response:
+    payload, content_type = service.get_project_presentation_audio(user, project_id)
+    return Response(
+        content=payload,
+        media_type=content_type,
+        headers={"Cache-Control": "private, max-age=300"},
+    )
+
+
 @app.post("/v1/browser/projects/{project_id}/presentation", response_model=ProjectPresentationResponse)
 def browser_start_project_presentation(
     project_id: str,
@@ -1670,6 +1716,19 @@ def browser_get_public_project_presentation(
     service: PaperbaseService = Depends(get_service),
 ) -> ProjectPresentationResponse:
     return service.get_public_project_presentation(share_token)
+
+
+@app.get("/v1/browser/project-presentations/public/{share_token}/audio")
+def browser_get_public_project_presentation_audio(
+    share_token: str,
+    service: PaperbaseService = Depends(get_service),
+) -> Response:
+    payload, content_type = service.get_public_project_presentation_audio(share_token)
+    return Response(
+        content=payload,
+        media_type=content_type,
+        headers={"Cache-Control": "public, max-age=300"},
+    )
 
 
 @app.post("/v1/browser/projects/{project_id}/notebooks", response_model=PythonFileResponse)

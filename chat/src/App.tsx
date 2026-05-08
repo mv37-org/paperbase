@@ -12,6 +12,7 @@ import Editor, { DiffEditor } from "@monaco-editor/react";
 
 import {
   api,
+  apiResourceUrl,
   createPythonFile,
   createProject,
   createThread,
@@ -247,13 +248,15 @@ const AUTH_VIEW_COPY: Record<AuthView, { title: string; caption: string }> = {
   "reset-password": { title: "Reset password", caption: "Choose a new password for your account." },
   settings: {
     title: "Settings",
-    caption: "Manage inference, sandbox, repos, and appearance.",
+    caption: "Manage inference, audio, sandbox, repos, and appearance.",
   },
 };
 
 const DEFAULT_BROWSER_SETTINGS: NonNullable<BrowserSessionResponse["settings"]> = {
   openai_api_key_hint: "",
   anthropic_api_key_hint: "",
+  has_elevenlabs_api_key: false,
+  elevenlabs_api_key_hint: "",
   has_modal_credentials: false,
   modal_token_id_hint: "",
   has_github_connection: false,
@@ -275,6 +278,11 @@ const BASE_SETTINGS_TABS: Array<{
     caption: "Manage OpenAI inference API key.",
   },
   {
+    id: "audio",
+    label: "Audio",
+    caption: "Manage ElevenLabs presentation audio.",
+  },
+  {
     id: "sandbox",
     label: "Sandbox",
     caption: "Manage Modal sandbox credentials.",
@@ -294,6 +302,7 @@ const BASE_SETTINGS_TABS: Array<{
 const normalizeSettingsTab = (value: string | null): SettingsTab | null => {
   if (
     value === "inference" ||
+    value === "audio" ||
     value === "sandbox" ||
     value === "version-control" ||
     value === "appearance"
@@ -390,6 +399,30 @@ function presentationTokenFromUrl() {
     return "";
   }
   return new URLSearchParams(window.location.search).get("presentation")?.trim() ?? "";
+}
+
+function ProjectPresentationAudioPlayer({
+  presentation,
+}: {
+  presentation: ProjectPresentationResponse;
+}) {
+  if (!presentation.audio_url) {
+    return null;
+  }
+  return (
+    <div className="project-presentation-audio-player">
+      <div className="project-presentation-audio-copy">
+        <span>Audio walkthrough</span>
+        <small>Two-person explainer</small>
+      </div>
+      <audio
+        controls
+        preload="metadata"
+        src={apiResourceUrl(presentation.audio_url)}
+        aria-label="Presentation audio walkthrough"
+      />
+    </div>
+  );
 }
 
 function samePaperSections(left: PdfDocumentSection[], right: PdfDocumentSection[]) {
@@ -6308,6 +6341,9 @@ export default function App() {
                 />
               </section>
               <section className="project-presentation-summary">
+                <ProjectPresentationAudioPlayer
+                  presentation={publicPresentationState.presentation}
+                />
                 <MarkdownRenderer
                   markdown={publicPresentationState.presentation.summary_markdown}
                   className="message-markdown project-presentation-markdown"
@@ -7425,6 +7461,9 @@ export default function App() {
                               />
                             </section>
                             <section className="project-presentation-summary">
+                              <ProjectPresentationAudioPlayer
+                                presentation={activeProjectPresentation}
+                              />
                               <MarkdownRenderer
                                 markdown={activeProjectPresentation.summary_markdown}
                                 className="message-markdown project-presentation-markdown"
@@ -10523,6 +10562,113 @@ export default function App() {
                           />
                           <p id="settings-openai-api-key-note" className="settings-field-note">
                             Stored on this workspace and reused for chat and research turns.
+                          </p>
+                        </div>
+                        <div className="settings-footer-actions">
+                          <button className="primary-button settings-submit-button" type="submit">
+                            Save key
+                          </button>
+                        </div>
+                      </form>
+                    )}
+                  </section>
+                ) : null}
+
+                {activeSettingsTab === "audio" ? (
+                  <section
+                    className="settings-section"
+                    role="tabpanel"
+                    id="settings-panel-audio"
+                    aria-labelledby="settings-tab-audio"
+                  >
+                    <SettingsSectionHeading
+                      title="Audio"
+                      caption="Manage ElevenLabs presentation audio."
+                    />
+                    {sessionSettings.has_elevenlabs_api_key ? (
+                      <div className="settings-secret-row">
+                        <div className="settings-secret-copy">
+                          <div className="settings-secret-label">ElevenLabs API key</div>
+                          <div className="settings-secret-value">
+                            {sessionSettings.elevenlabs_api_key_hint || "Saved"}
+                          </div>
+                        </div>
+                        <button
+                          id="delete-elevenlabs-key-button"
+                          className="api-key-delete-button"
+                          type="button"
+                          aria-label="Delete saved ElevenLabs API key"
+                          title="Delete saved ElevenLabs API key"
+                          onClick={async () => {
+                            try {
+                              const nextSession = await api<BrowserSessionResponse>(
+                                "/v1/browser/settings/elevenlabs-key",
+                                { method: "DELETE" },
+                              );
+                              setSession(nextSession);
+                              showNoteFlash("ElevenLabs API key removed.");
+                            } catch (error) {
+                              showErrorFlash(
+                                error instanceof Error
+                                  ? error.message
+                                  : "Deleting ElevenLabs API key failed",
+                              );
+                            }
+                          }}
+                        >
+                          <AppIcon
+                            src={staticAssetPath("delete-session.svg")}
+                            className="api-key-delete-icon"
+                          />
+                        </button>
+                      </div>
+                    ) : (
+                      <form
+                        id="settings-elevenlabs-form"
+                        className="settings-form"
+                        onSubmit={async (event) => {
+                          event.preventDefault();
+                          try {
+                            const payload = Object.fromEntries(
+                              new FormData(event.currentTarget).entries(),
+                            );
+                            const nextSession = await api<BrowserSessionResponse>(
+                              "/v1/browser/settings/elevenlabs-key",
+                              {
+                                method: "PUT",
+                                body: JSON.stringify(payload),
+                              },
+                            );
+                            setSession(nextSession);
+                            showNoteFlash("ElevenLabs API key saved.");
+                          } catch (error) {
+                            showErrorFlash(
+                              error instanceof Error
+                                ? error.message
+                                : "Saving ElevenLabs API key failed",
+                            );
+                          }
+                        }}
+                      >
+                        <CredentialFormUsernameField email={session?.user?.email ?? ""} />
+                        <div className="settings-field">
+                          <label
+                            className="settings-field-label"
+                            htmlFor="settings-elevenlabs-api-key"
+                          >
+                            ElevenLabs API key
+                          </label>
+                          <input
+                            id="settings-elevenlabs-api-key"
+                            name="api_key"
+                            type="password"
+                            placeholder="ElevenLabs API key"
+                            autoComplete="new-password"
+                            aria-describedby="settings-elevenlabs-api-key-note"
+                            required
+                          />
+                          <p id="settings-elevenlabs-api-key-note" className="settings-field-note">
+                            Used only when creating project presentation audio.
                           </p>
                         </div>
                         <div className="settings-footer-actions">

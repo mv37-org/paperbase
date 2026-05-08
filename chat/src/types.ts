@@ -10,6 +10,8 @@ export interface BrowserUser {
 export interface BrowserUserSettingsResponse {
   openai_api_key_hint: string;
   anthropic_api_key_hint?: string;
+  has_elevenlabs_api_key: boolean;
+  elevenlabs_api_key_hint: string;
   has_modal_credentials: boolean;
   modal_token_id_hint: string;
   has_github_connection: boolean;
@@ -573,6 +575,8 @@ export interface ProjectPresentationResponse {
   status: ProjectPresentationStatus;
   visual_code: string;
   summary_markdown: string;
+  audio_url: string;
+  audio_content_type: string;
   is_public: boolean;
   share_token?: string | null;
   share_url: string;

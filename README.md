@@ -147,7 +147,8 @@ The browser chat experience is project-based:
 - the sidebar lazily loads mixed project items per project, persists the last selected project across reloads, and reopens with only that project tree expanded by default
 - each project can start paper explorations from a command-palette style search over paper title or arXiv id
 - paper explorations and PDF modals support text highlights and pen-drawn region selections with cropped image context for grounded chat follow-ups
-- the product exposes a public-readable `Trending papers` feed of fully indexed and enriched papers, with a landing-page top-10 `Latest`/`Hottest` preview and 50-paper signed-in feed pages by publication date or upvotes; signed-in users can upvote, comment, and reply, and allowlisted admins also get a non-tabbed `Admin panel` jobs workspace
+- project home can generate a cached presentation with a React/D3 visual, Markdown summary, optional public share page, and optional ElevenLabs two-speaker audio walkthrough when the user has saved an ElevenLabs API key
+- the product exposes a public-readable `Trending papers` feed of fully indexed and enriched papers, with a landing-page top-10 `Latest`/`Hottest` preview and 20-paper signed-in feed pages by publication date or upvotes; signed-in users can upvote, comment, and reply, and allowlisted admins also get a non-tabbed `Admin panel` jobs workspace
 - the empty first-chat state now shows a dismissible setup checklist for GitHub, inference, and sandbox access so users can connect required services before the coding agent hits save/run failures
 - project descriptions are snapped onto new sessions as per-session prompt context, so later project edits do not rewrite existing chats
 - once the first user prompt lands in a `New chat` thread, Paperbase renames the session to a compact 3-5 word summary and keeps that title for later turns

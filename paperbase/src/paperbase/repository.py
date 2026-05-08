@@ -709,6 +709,8 @@ class BrowserUserSettingsORM(Base):
     encrypted_modal_token_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     encrypted_modal_token_secret: Mapped[str | None] = mapped_column(Text, nullable=True)
     modal_token_id_hint: Mapped[str] = mapped_column(String(32), default="")
+    encrypted_elevenlabs_api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    elevenlabs_api_key_hint: Mapped[str] = mapped_column(String(32), default="")
     weekly_papers_review_email: Mapped[bool] = mapped_column(Boolean, default=False)
     appearance_theme: Mapped[str] = mapped_column(String(16), default="light")
     github_user_id: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
@@ -798,6 +800,8 @@ class ProjectPresentationORM(Base):
     status: Mapped[str] = mapped_column(String(32), default="pending")
     visual_code: Mapped[str] = mapped_column(Text, default="")
     summary_markdown: Mapped[str] = mapped_column(Text, default="")
+    audio_storage_path: Mapped[str] = mapped_column(Text, default="")
+    audio_content_type: Mapped[str] = mapped_column(String(128), default="audio/mpeg")
     context_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     is_public: Mapped[bool] = mapped_column(Boolean, default=False)
     share_token: Mapped[str | None] = mapped_column(String(96), unique=True, nullable=True)
@@ -996,6 +1000,8 @@ def _browser_user_settings_from_orm(row: BrowserUserSettingsORM | None) -> Brows
         return BrowserUserSettingsResponse()
     return BrowserUserSettingsResponse(
         openai_api_key_hint="",
+        has_elevenlabs_api_key=bool(row.encrypted_elevenlabs_api_key),
+        elevenlabs_api_key_hint=row.elevenlabs_api_key_hint or "",
         has_modal_credentials=bool(row.encrypted_modal_token_id and row.encrypted_modal_token_secret),
         modal_token_id_hint=row.modal_token_id_hint or "",
         has_github_connection=bool(row.encrypted_github_access_token and row.github_login),
@@ -1049,6 +1055,8 @@ def _project_presentation_from_orm(
         status=status,  # type: ignore[arg-type]
         visual_code=row.visual_code or "",
         summary_markdown=row.summary_markdown or "",
+        audio_storage_path=row.audio_storage_path or "",
+        audio_content_type=row.audio_content_type or "audio/mpeg",
         is_public=bool(row.is_public),
         share_token=row.share_token,
         share_url=share_url if row.is_public and row.share_token else "",
@@ -2039,7 +2047,31 @@ class SqlAlchemyPaperRepository(PaperRepository):
             connection.execute(
                 text(
                     "ALTER TABLE IF EXISTS browser_user_settings "
+                    "ADD COLUMN IF NOT EXISTS encrypted_elevenlabs_api_key TEXT"
+                )
+            )
+            connection.execute(
+                text(
+                    "ALTER TABLE IF EXISTS browser_user_settings "
+                    "ADD COLUMN IF NOT EXISTS elevenlabs_api_key_hint VARCHAR(32) DEFAULT ''"
+                )
+            )
+            connection.execute(
+                text(
+                    "ALTER TABLE IF EXISTS browser_user_settings "
                     "ADD COLUMN IF NOT EXISTS appearance_theme VARCHAR(16) DEFAULT 'light'"
+                )
+            )
+            connection.execute(
+                text(
+                    "ALTER TABLE IF EXISTS project_presentations "
+                    "ADD COLUMN IF NOT EXISTS audio_storage_path TEXT DEFAULT ''"
+                )
+            )
+            connection.execute(
+                text(
+                    "ALTER TABLE IF EXISTS project_presentations "
+                    "ADD COLUMN IF NOT EXISTS audio_content_type VARCHAR(128) DEFAULT 'audio/mpeg'"
                 )
             )
             connection.execute(
@@ -4106,6 +4138,16 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 "token_id_hint": row.modal_token_id_hint or "",
             }
 
+    def get_elevenlabs_api_key_record(self, user_id: str) -> dict[str, str] | None:
+        with self._session() as session:
+            row = session.scalar(select(BrowserUserSettingsORM).where(BrowserUserSettingsORM.user_id == user_id))
+            if row is None or not row.encrypted_elevenlabs_api_key:
+                return None
+            return {
+                "encrypted_api_key": row.encrypted_elevenlabs_api_key,
+                "api_key_hint": row.elevenlabs_api_key_hint or "",
+            }
+
     def get_github_connection_record(self, user_id: str) -> dict[str, str] | None:
         with self._session() as session:
             row = session.scalar(select(BrowserUserSettingsORM).where(BrowserUserSettingsORM.user_id == user_id))
@@ -4141,6 +4183,28 @@ class SqlAlchemyPaperRepository(PaperRepository):
             row.encrypted_modal_token_id = None
             row.encrypted_modal_token_secret = None
             row.modal_token_id_hint = ""
+            row.updated_at = utcnow()
+
+    def save_elevenlabs_api_key(
+        self,
+        *,
+        user_id: str,
+        encrypted_api_key: str,
+        hint: str,
+    ) -> None:
+        with self._session() as session:
+            row = self._get_or_create_browser_user_settings_row(session, user_id)
+            row.encrypted_elevenlabs_api_key = encrypted_api_key
+            row.elevenlabs_api_key_hint = hint
+            row.updated_at = utcnow()
+
+    def delete_elevenlabs_api_key(self, user_id: str) -> None:
+        with self._session() as session:
+            row = session.scalar(select(BrowserUserSettingsORM).where(BrowserUserSettingsORM.user_id == user_id))
+            if row is None:
+                return
+            row.encrypted_elevenlabs_api_key = None
+            row.elevenlabs_api_key_hint = ""
             row.updated_at = utcnow()
 
     def set_weekly_papers_review_email(self, *, user_id: str, enabled: bool) -> None:
@@ -4625,6 +4689,8 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 row.error = ""
                 row.visual_code = ""
                 row.summary_markdown = ""
+                row.audio_storage_path = ""
+                row.audio_content_type = "audio/mpeg"
                 row.completed_at = None
                 row.updated_at = now
             return _project_presentation_from_orm(row)
@@ -4646,6 +4712,8 @@ class SqlAlchemyPaperRepository(PaperRepository):
         *,
         visual_code: str,
         summary_markdown: str,
+        audio_storage_path: str = "",
+        audio_content_type: str = "audio/mpeg",
     ) -> ProjectPresentationResponse | None:
         now = utcnow()
         with self._session() as session:
@@ -4655,6 +4723,8 @@ class SqlAlchemyPaperRepository(PaperRepository):
             row.status = "completed"
             row.visual_code = visual_code
             row.summary_markdown = summary_markdown
+            row.audio_storage_path = audio_storage_path
+            row.audio_content_type = audio_content_type or "audio/mpeg"
             row.error = ""
             row.completed_at = now
             row.updated_at = now
@@ -5976,6 +6046,7 @@ class MemoryPaperRepository(PaperRepository):
         self.user_api_keys: dict[str, dict[str, str]] = {}
         self.browser_user_settings: dict[str, BrowserUserSettingsResponse] = {}
         self.modal_credentials_records: dict[str, dict[str, str]] = {}
+        self.elevenlabs_api_key_records: dict[str, dict[str, str]] = {}
         self.github_connection_records: dict[str, dict[str, str]] = {}
         self.uploaded_documents: dict[str, UploadedDocumentResponse] = {}
         self.uploaded_document_chunks: dict[str, list[dict[str, str]]] = defaultdict(list)
@@ -6971,6 +7042,9 @@ class MemoryPaperRepository(PaperRepository):
     def get_modal_credentials_record(self, user_id: str) -> dict[str, str] | None:
         return self.modal_credentials_records.get(user_id)
 
+    def get_elevenlabs_api_key_record(self, user_id: str) -> dict[str, str] | None:
+        return self.elevenlabs_api_key_records.get(user_id)
+
     def get_github_connection_record(self, user_id: str) -> dict[str, str] | None:
         return self.github_connection_records.get(user_id)
 
@@ -7002,6 +7076,35 @@ class MemoryPaperRepository(PaperRepository):
             update={
                 "has_modal_credentials": False,
                 "modal_token_id_hint": "",
+            }
+        )
+
+    def save_elevenlabs_api_key(
+        self,
+        *,
+        user_id: str,
+        encrypted_api_key: str,
+        hint: str,
+    ) -> None:
+        current = self._get_or_create_browser_user_settings(user_id)
+        self.elevenlabs_api_key_records[user_id] = {
+            "encrypted_api_key": encrypted_api_key,
+            "api_key_hint": hint,
+        }
+        self.browser_user_settings[user_id] = current.model_copy(
+            update={
+                "has_elevenlabs_api_key": True,
+                "elevenlabs_api_key_hint": hint,
+            }
+        )
+
+    def delete_elevenlabs_api_key(self, user_id: str) -> None:
+        current = self._get_or_create_browser_user_settings(user_id)
+        self.elevenlabs_api_key_records.pop(user_id, None)
+        self.browser_user_settings[user_id] = current.model_copy(
+            update={
+                "has_elevenlabs_api_key": False,
+                "elevenlabs_api_key_hint": "",
             }
         )
 
@@ -7396,6 +7499,8 @@ class MemoryPaperRepository(PaperRepository):
                     "status": "pending",
                     "visual_code": "",
                     "summary_markdown": "",
+                    "audio_storage_path": "",
+                    "audio_content_type": "audio/mpeg",
                     "error": "",
                     "job_id": job_id,
                     "completed_at": None,
@@ -7420,6 +7525,8 @@ class MemoryPaperRepository(PaperRepository):
         *,
         visual_code: str,
         summary_markdown: str,
+        audio_storage_path: str = "",
+        audio_content_type: str = "audio/mpeg",
     ) -> ProjectPresentationResponse | None:
         presentation = self.project_presentations.get(presentation_id)
         if presentation is None:
@@ -7430,6 +7537,8 @@ class MemoryPaperRepository(PaperRepository):
                 "status": "completed",
                 "visual_code": visual_code,
                 "summary_markdown": summary_markdown,
+                "audio_storage_path": audio_storage_path,
+                "audio_content_type": audio_content_type or "audio/mpeg",
                 "error": "",
                 "completed_at": now,
                 "updated_at": now,

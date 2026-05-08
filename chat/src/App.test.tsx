@@ -35,6 +35,7 @@ const apiMocks = vi.hoisted(() => {
   return {
     ApiError: MockApiError,
     api: vi.fn(),
+    apiResourceUrl: vi.fn((path: string) => path),
     browserAdminPaperAssetContentUrl: vi.fn(
       (paperId: string, path: string) =>
         `/v1/browser/admin/papers/${encodeURIComponent(paperId)}/asset-content/${path}`,
@@ -152,6 +153,7 @@ const pdfViewerMocks = vi.hoisted(() => ({
 vi.mock("./api", () => ({
   ApiError: apiMocks.ApiError,
   api: apiMocks.api,
+  apiResourceUrl: apiMocks.apiResourceUrl,
   browserAdminPaperAssetContentUrl: apiMocks.browserAdminPaperAssetContentUrl,
   browserPaperPreviewContentUrl: apiMocks.browserPaperPreviewContentUrl,
   createBrowserPaperComment: apiMocks.createBrowserPaperComment,
@@ -529,6 +531,8 @@ function authenticatedSession(
     settings: Partial<{
       openai_api_key_hint: string;
       anthropic_api_key_hint: string;
+      has_elevenlabs_api_key: boolean;
+      elevenlabs_api_key_hint: string;
       has_modal_credentials: boolean;
       modal_token_id_hint: string;
       has_github_connection: boolean;
@@ -553,6 +557,8 @@ function authenticatedSession(
     settings: {
       openai_api_key_hint: "",
       anthropic_api_key_hint: "",
+      has_elevenlabs_api_key: false,
+      elevenlabs_api_key_hint: "",
       has_modal_credentials: false,
       modal_token_id_hint: "",
       has_github_connection: false,
@@ -653,6 +659,8 @@ function projectPresentationResponse(projectId = "proj_1", status = "completed")
     status,
     visual_code: "ReactDOM.createRoot(document.getElementById('root')).render('ok');",
     summary_markdown: "# Project summary\n\n| Item | Count |\n| --- | ---: |\n| Notes | 1 |",
+    audio_url: "",
+    audio_content_type: "audio/mpeg",
     is_public: false,
     share_token: null,
     share_url: "",
@@ -1490,7 +1498,10 @@ describe("App", () => {
 
   it("starts a project presentation from the project home tab", async () => {
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());
-    apiMocks.startProjectPresentation.mockResolvedValue(projectPresentationResponse("proj_1"));
+    apiMocks.startProjectPresentation.mockResolvedValue({
+      ...projectPresentationResponse("proj_1"),
+      audio_url: "/v1/browser/projects/proj_1/presentation/audio",
+    });
 
     render(<App />);
 
@@ -1509,6 +1520,8 @@ describe("App", () => {
     });
     expect(await screen.findByText("Project Presentation")).toBeTruthy();
     expect(await screen.findByText(/Project summary/)).toBeTruthy();
+    const audio = await screen.findByLabelText("Presentation audio walkthrough");
+    expect(audio.getAttribute("src")).toContain("/v1/browser/projects/proj_1/presentation/audio");
   });
 
   it("starts a paper exploration from the project exploration picker", async () => {
@@ -4696,6 +4709,7 @@ describe("App", () => {
       expect(screen.getByRole("tab", { name: "Inference", selected: true })).toBeTruthy();
     });
     expect(screen.getByRole("tab", { name: "Sandbox" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Audio" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "GitHub" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "Appearance" })).toBeTruthy();
     expect(screen.queryByRole("tab", { name: "Admin" })).toBeNull();
@@ -4703,6 +4717,11 @@ describe("App", () => {
     expect(document.querySelector("#auth-modal-title")).toBeNull();
     expect(document.querySelector(".settings-section-title")?.textContent).toBe("Inference");
     expect(screen.getAllByText("Manage OpenAI inference API key.")).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("tab", { name: "Audio" }));
+    expect(document.querySelector(".settings-section-title")?.textContent).toBe("Audio");
+    expect(screen.getAllByText("Manage ElevenLabs presentation audio.")).toHaveLength(1);
+    expect(screen.getByLabelText("ElevenLabs API key")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("tab", { name: "Sandbox" }));
     expect(document.querySelector(".settings-section-title")?.textContent).toBe("Sandbox");
@@ -5776,12 +5795,16 @@ describe("App", () => {
       user: null,
       has_anthropic_api_key: false,
       settings: {
+        openai_api_key_hint: "",
         anthropic_api_key_hint: "",
+        has_elevenlabs_api_key: false,
+        elevenlabs_api_key_hint: "",
         has_modal_credentials: false,
         modal_token_id_hint: "",
         has_github_connection: false,
         github_login: "",
         github_oauth_available: false,
+        github_manage_access_url: "https://github.com/settings/connections/applications",
         weekly_papers_review_email: false,
         appearance_theme: "light",
       },
@@ -5848,6 +5871,18 @@ describe("App", () => {
     expect(
       document
         .querySelector("#settings-anthropic-form input[name='api_key']")
+        ?.getAttribute("autocomplete"),
+    ).toBe("new-password");
+
+    fireEvent.click(screen.getByRole("tab", { name: "Audio" }));
+
+    await waitFor(() => {
+      expect(document.querySelector("#settings-elevenlabs-form")).toBeTruthy();
+    });
+
+    expect(
+      document
+        .querySelector("#settings-elevenlabs-form input[name='api_key']")
         ?.getAttribute("autocomplete"),
     ).toBe("new-password");
 

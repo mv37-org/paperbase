@@ -751,6 +751,8 @@ describe("chat api", () => {
       status: "completed",
       visual_code: "ReactDOM.createRoot(document.getElementById('root')).render('ok');",
       summary_markdown: "# Summary",
+      audio_url: "/v1/browser/projects/proj_1/presentation/audio",
+      audio_content_type: "audio/mpeg",
       is_public: false,
       share_token: null,
       share_url: "",

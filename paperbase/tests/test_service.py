@@ -47,6 +47,7 @@ from paperbase.models import (
     ProjectPresentationStartRequest,
     ProjectRepoSyncRequest,
     SaveAnthropicKeyRequest,
+    SaveElevenLabsKeyRequest,
     SaveModalCredentialsRequest,
     SaveOpenAIKeyRequest,
     SearchPaperResult,
@@ -2429,6 +2430,10 @@ def test_browser_settings_round_trip(browser_service):
             token_secret="modal-token-secret-999",
         ),
     )
+    elevenlabs = service.save_user_elevenlabs_key(
+        session.user,
+        SaveElevenLabsKeyRequest(api_key="elevenlabs-user-key-999"),
+    )
     notifications = service.update_user_notification_preferences(
         session.user,
         UpdateNotificationsRequest(weekly_papers_review_email=True),
@@ -2449,15 +2454,19 @@ def test_browser_settings_round_trip(browser_service):
     assert anthropic.settings.anthropic_api_key_hint.startswith("anth")
     assert modal_credentials.settings.has_modal_credentials is True
     assert modal_credentials.settings.modal_token_id_hint.startswith("moda")
+    assert elevenlabs.settings.has_elevenlabs_api_key is True
+    assert elevenlabs.settings.elevenlabs_api_key_hint.startswith("elev")
     assert notifications.settings.weekly_papers_review_email is True
     assert appearance.settings.appearance_theme == "dark"
     assert github.settings.has_github_connection is True
     assert github.settings.github_login == "octocat"
 
     cleared = service.delete_user_modal_credentials(session.user)
+    cleared_audio = service.delete_user_elevenlabs_key(session.user)
     disconnected = service.delete_github_connection(session.user)
 
     assert cleared.settings.has_modal_credentials is False
+    assert cleared_audio.settings.has_elevenlabs_api_key is False
     assert disconnected.settings.has_github_connection is False
 
 
@@ -5590,6 +5599,7 @@ def test_project_presentation_job_caches_shares_and_emails():
     assert completed.status == "completed"
     assert "Agent Benchmarks" in completed.summary_markdown
     assert "ReactDOM.createRoot" in completed.visual_code
+    assert completed.audio_url == ""
     assert email_sender.presentation_emails == [("present@example.com", "General", "http://127.0.0.1:8080/")]
 
     shared = service.update_project_presentation_share(
@@ -5610,6 +5620,110 @@ def test_project_presentation_job_caches_shares_and_emails():
     )
     assert cached.status == "completed"
     assert cached.job_id == completed.job_id
+
+
+def test_project_presentation_audio_uses_saved_elevenlabs_key(monkeypatch):
+    class ProjectPresentationChatModel(FakeChatModel):
+        def create_response(self, *, api_key: str, prompt: Prompt) -> ResponseEnvelope:
+            if "Project presentation audio script writer" in prompt.base_instructions:
+                return ResponseEnvelope(
+                    response_id="resp_audio_script",
+                    items=[
+                        ResponseItem(
+                            item_id="msg_audio_script",
+                            item_type="assistant_message",
+                            role="assistant",
+                            content_text=json.dumps(
+                                {
+                                    "turns": [
+                                        {"speaker": "noob", "text": "What does this project explain?"},
+                                        {
+                                            "speaker": "expert",
+                                            "text": "It explains the explored papers, notes, comments, and chats.",
+                                        },
+                                    ]
+                                }
+                            ),
+                        )
+                    ],
+                )
+            if "Project presentation generator" in prompt.base_instructions:
+                return ResponseEnvelope(
+                    response_id="resp_project_presentation",
+                    items=[
+                        ResponseItem(
+                            item_id="msg_project_presentation",
+                            item_type="assistant_message",
+                            role="assistant",
+                            content_text=json.dumps(
+                                {
+                                    "summary_markdown": "# Agent Benchmarks\n\n| Topic | Evidence |\n| --- | --- |",
+                                    "visual_code": (
+                                        "ReactDOM.createRoot(document.getElementById('root'))."
+                                        "render(React.createElement('div', null, 'visual'));"
+                                    ),
+                                }
+                            ),
+                        )
+                    ],
+                )
+            return super().create_response(api_key=api_key, prompt=prompt)
+
+    service = PaperbaseService(
+        settings=Settings(storage_backend="memory", database_url="memory://", api_key="test-token"),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=ProjectPresentationChatModel(),
+    )
+    generated_segments: list[tuple[str, str]] = []
+
+    def fake_tts(*, api_key: str, voice_id: str, text: str) -> bytes:
+        generated_segments.append((voice_id, text))
+        assert api_key == "elevenlabs-user-key-999"
+        return f"audio:{voice_id}:{text}".encode("utf-8")
+
+    monkeypatch.setattr(service, "_request_elevenlabs_tts", fake_tts)
+    monkeypatch.setattr(service, "_stitch_audio_segments", lambda segments: b"|".join(segments))
+
+    session, _ = service.register_browser_user(
+        SignupRequest(email="audio-present@example.com", password="topsecret123", display_name="Audio Presenter")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    service.save_user_elevenlabs_key(
+        session.user,
+        SaveElevenLabsKeyRequest(api_key="elevenlabs-user-key-999"),
+    )
+    project = service.list_projects(session.user).projects[0]
+    queued = service.start_project_presentation(
+        session.user,
+        project.project_id,
+        ProjectPresentationStartRequest(explorations=[]),
+    )
+
+    assert queued.status == "pending"
+    completed_job = service.process_next_job()
+    assert completed_job is not None
+    assert completed_job.status == "completed"
+    completed = service.get_project_presentation(session.user, project.project_id)
+    assert completed.status == "completed"
+    assert completed.audio_url.endswith(f"/v1/browser/projects/{project.project_id}/presentation/audio")
+    assert len(generated_segments) == 2
+    assert generated_segments[0][0] != generated_segments[1][0]
+    audio, content_type = service.get_project_presentation_audio(session.user, project.project_id)
+    assert b"What does this project explain" in audio
+    assert content_type == "audio/mpeg"
+
+    shared = service.update_project_presentation_share(
+        session.user,
+        project.project_id,
+        ProjectPresentationShareRequest(is_public=True),
+    )
+    assert shared.audio_url.endswith(f"/v1/browser/project-presentations/public/{shared.share_token}/audio")
+    public_audio, public_content_type = service.get_public_project_presentation_audio(shared.share_token)
+    assert public_audio == audio
+    assert public_content_type == "audio/mpeg"
 
 
 def test_project_session_paging_and_thread_deletion(browser_service):

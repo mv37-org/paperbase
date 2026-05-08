@@ -730,6 +730,22 @@ class StubApiService:
             has_anthropic_api_key=False,
         )
 
+    def save_user_elevenlabs_key(self, user: BrowserUser, request) -> BrowserSessionResponse:
+        self.calls.append(("save_user_elevenlabs_key", (user.user_id, request.api_key)))
+        return BrowserSessionResponse(
+            authenticated=True,
+            user=user,
+            has_anthropic_api_key=False,
+        )
+
+    def delete_user_elevenlabs_key(self, user: BrowserUser) -> BrowserSessionResponse:
+        self.calls.append(("delete_user_elevenlabs_key", user.user_id))
+        return BrowserSessionResponse(
+            authenticated=True,
+            user=user,
+            has_anthropic_api_key=False,
+        )
+
     def update_user_notification_preferences(self, user: BrowserUser, request) -> BrowserSessionResponse:
         self.calls.append(("update_user_notification_preferences", (user.user_id, request.weekly_papers_review_email)))
         return BrowserSessionResponse(
@@ -1019,6 +1035,14 @@ class StubApiService:
             updated_at=NOW,
             completed_at=NOW,
         )
+
+    def get_project_presentation_audio(self, user: BrowserUser, project_id: str) -> tuple[bytes, str]:
+        self.calls.append(("get_project_presentation_audio", (user.user_id, project_id)))
+        return b"audio-bytes", "audio/mpeg"
+
+    def get_public_project_presentation_audio(self, share_token: str) -> tuple[bytes, str]:
+        self.calls.append(("get_public_project_presentation_audio", share_token))
+        return b"public-audio-bytes", "audio/mpeg"
 
     def create_python_file(self, user: BrowserUser, project_id: str) -> PythonFileResponse:
         self.calls.append(("create_python_file", (user.user_id, project_id)))
@@ -1721,6 +1745,12 @@ def test_browser_settings_routes_delegate_with_valid_csrf(api_client):
         json={"token_id": "modal-token-id-123", "token_secret": "modal-token-secret-456"},
         headers=headers,
     )
+    elevenlabs_key = client.put(
+        "/v1/browser/settings/elevenlabs-key",
+        json={"api_key": "elevenlabs-key-123"},
+        headers=headers,
+    )
+    deleted_elevenlabs_key = client.delete("/v1/browser/settings/elevenlabs-key", headers=headers)
     notifications = client.put(
         "/v1/browser/settings/notifications",
         json={"weekly_papers_review_email": True},
@@ -1734,10 +1764,14 @@ def test_browser_settings_routes_delegate_with_valid_csrf(api_client):
     github = client.delete("/v1/browser/settings/github", headers=headers)
 
     assert modal_credentials.status_code == 200
+    assert elevenlabs_key.status_code == 200
+    assert deleted_elevenlabs_key.status_code == 200
     assert notifications.status_code == 200
     assert appearance.status_code == 200
     assert github.status_code == 200
     assert modal_credentials.json()["csrf_token"] == csrf
+    assert elevenlabs_key.json()["csrf_token"] == csrf
+    assert deleted_elevenlabs_key.json()["csrf_token"] == csrf
     assert notifications.json()["csrf_token"] == csrf
     assert appearance.json()["csrf_token"] == csrf
     assert github.json()["csrf_token"] == csrf
@@ -1745,6 +1779,8 @@ def test_browser_settings_routes_delegate_with_valid_csrf(api_client):
         "save_user_modal_credentials",
         ("user_1", "modal-token-id-123", "modal-token-secret-456"),
     ) in service.calls
+    assert ("save_user_elevenlabs_key", ("user_1", "elevenlabs-key-123")) in service.calls
+    assert ("delete_user_elevenlabs_key", "user_1") in service.calls
     assert ("update_user_notification_preferences", ("user_1", True)) in service.calls
     assert ("update_user_appearance", ("user_1", "dark")) in service.calls
     assert ("delete_github_connection", "user_1") in service.calls
@@ -1925,7 +1961,9 @@ def test_browser_project_item_routes_delegate_to_service(api_client):
     python_file = client.get("/v1/browser/python-files/file_1")
     repo_sync = client.get("/v1/browser/projects/proj_1/repo-sync")
     presentation = client.get("/v1/browser/projects/proj_1/presentation")
+    presentation_audio = client.get("/v1/browser/projects/proj_1/presentation/audio")
     public_presentation = client.get("/v1/browser/project-presentations/public/share_1")
+    public_presentation_audio = client.get("/v1/browser/project-presentations/public/share_1/audio")
 
     assert items.status_code == 200
     assert items.json()["items"][0]["item_kind"] == "python_file"
@@ -1935,13 +1973,19 @@ def test_browser_project_item_routes_delegate_to_service(api_client):
     assert repo_sync.json()["repo_exists"] is False
     assert presentation.status_code == 200
     assert presentation.json()["presentation_id"] == "pres_1"
+    assert presentation_audio.status_code == 200
+    assert presentation_audio.content == b"audio-bytes"
     assert public_presentation.status_code == 200
     assert public_presentation.json()["share_token"] == "share_1"
+    assert public_presentation_audio.status_code == 200
+    assert public_presentation_audio.content == b"public-audio-bytes"
     assert ("list_project_items", ("user_1", "proj_1", 25, 0, "python_file")) in service.calls
     assert ("get_python_file", ("user_1", "file_1")) in service.calls
     assert ("get_project_repo_sync", ("user_1", "proj_1")) in service.calls
     assert ("get_project_presentation", ("user_1", "proj_1")) in service.calls
+    assert ("get_project_presentation_audio", ("user_1", "proj_1")) in service.calls
     assert ("get_public_project_presentation", "share_1") in service.calls
+    assert ("get_public_project_presentation_audio", "share_1") in service.calls
 
 
 def test_google_callback_success_sets_cookie_and_redirects_to_saved_return_to(api_client, monkeypatch):

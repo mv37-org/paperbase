@@ -24,6 +24,7 @@ The browser backend now persists first-class projects in addition to chat sessio
 - sessions belong to a project, and project session lists are paginated for the sidebar
 - project descriptions are copied onto new chat threads as snapped prompt context so existing chats stay stable when a project is edited later
 - project files store their repo path and kind (`python` or `notebook`), with notebooks converted through Jupytext for Python-source editing and regenerated to `.ipynb` during repo sync
+- project presentations are cached background jobs that can store React/D3 visual code, Markdown summaries, public share tokens, and optional ElevenLabs-generated MP3 walkthroughs in object storage
 - repo sync overlays only paths tracked in `.paperbase`, so unrelated existing-repo content is preserved
 - allowlisted browser users (`PAPERBASE_ADMIN_EMAILS`) also get an admin-only jobs workspace in the main shell for queueing one-off harvest/index jobs, monitoring env-driven latest sync status, drilling into tracked indexed papers, searching papers by id/arXiv/title/author, and browsing paper summaries, code state, job touches, and stored artifacts
 

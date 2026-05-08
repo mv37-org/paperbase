@@ -493,6 +493,8 @@ class BrowserUser(BaseModel):
 
 class BrowserUserSettingsResponse(BaseModel):
     openai_api_key_hint: str = ""
+    has_elevenlabs_api_key: bool = False
+    elevenlabs_api_key_hint: str = ""
     has_modal_credentials: bool = False
     modal_token_id_hint: str = ""
     has_github_connection: bool = False
@@ -561,6 +563,10 @@ class SaveOpenAIKeyRequest(BaseModel):
 
 class SaveAnthropicKeyRequest(SaveOpenAIKeyRequest):
     pass
+
+
+class SaveElevenLabsKeyRequest(BaseModel):
+    api_key: str = Field(min_length=8)
 
 
 class SaveModalCredentialsRequest(BaseModel):
@@ -939,6 +945,9 @@ class ProjectPresentationResponse(BaseModel):
     status: ProjectPresentationStatus = "missing"
     visual_code: str = ""
     summary_markdown: str = ""
+    audio_url: str = ""
+    audio_content_type: str = "audio/mpeg"
+    audio_storage_path: str = Field(default="", exclude=True)
     is_public: bool = False
     share_token: str | None = None
     share_url: str = ""

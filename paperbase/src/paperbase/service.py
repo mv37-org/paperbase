@@ -137,6 +137,7 @@ from .models import (
     ResetPasswordRequest,
     ResultSetResponse,
     RunPythonFileResponse,
+    SaveElevenLabsKeyRequest,
     SaveOpenAIKeyRequest,
     SaveModalCredentialsRequest,
     SearchPaperResult,
@@ -2027,6 +2028,22 @@ class PaperbaseService:
         self.repository.delete_modal_credentials(user.user_id)  # type: ignore[attr-defined]
         return self._browser_session_response(user)
 
+    def save_user_elevenlabs_key(
+        self,
+        user: BrowserUser,
+        request: SaveElevenLabsKeyRequest,
+    ) -> BrowserSessionResponse:
+        self.repository.save_elevenlabs_api_key(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            encrypted_api_key=self.secret_cipher.encrypt(request.api_key.strip()),
+            hint=api_key_hint(request.api_key),
+        )
+        return self._browser_session_response(user)
+
+    def delete_user_elevenlabs_key(self, user: BrowserUser) -> BrowserSessionResponse:
+        self.repository.delete_elevenlabs_api_key(user.user_id)  # type: ignore[attr-defined]
+        return self._browser_session_response(user)
+
     def update_user_notification_preferences(
         self,
         user: BrowserUser,
@@ -2079,6 +2096,21 @@ class PaperbaseService:
             self.secret_cipher.decrypt(record["encrypted_token_id"]),
             self.secret_cipher.decrypt(record["encrypted_token_secret"]),
         )
+
+    def _get_elevenlabs_api_key_optional(self, user: BrowserUser) -> str | None:
+        record = self.repository.get_elevenlabs_api_key_record(user.user_id)  # type: ignore[attr-defined]
+        if record is None:
+            return None
+        try:
+            api_key_value = self.secret_cipher.decrypt(record["encrypted_api_key"]).strip()
+        except InvalidToken:
+            logger.warning(
+                "Saved ElevenLabs API key could not be decrypted",
+                extra={"event": "settings.elevenlabs_key_invalid", "user_id": user.user_id},
+            )
+            self.repository.delete_elevenlabs_api_key(user.user_id)  # type: ignore[attr-defined]
+            return None
+        return api_key_value or None
 
     def _get_github_connection(self, user: BrowserUser) -> dict[str, str]:
         record = self.repository.get_github_connection_record(user.user_id)  # type: ignore[attr-defined]
@@ -2451,11 +2483,23 @@ class PaperbaseService:
         self,
         presentation: ProjectPresentationResponse,
     ) -> ProjectPresentationResponse:
+        updates: dict[str, Any] = {}
+        if presentation.audio_storage_path:
+            if presentation.is_public and presentation.share_token:
+                updates["audio_url"] = (
+                    f"/v1/browser/project-presentations/public/{quote(presentation.share_token, safe='')}/audio"
+                )
+            else:
+                updates["audio_url"] = (
+                    f"/v1/browser/projects/{quote(presentation.project_id, safe='')}/presentation/audio"
+                )
+        else:
+            updates["audio_url"] = ""
         if not presentation.is_public or not presentation.share_token:
-            return presentation.model_copy(update={"share_url": ""})
-        return presentation.model_copy(
-            update={"share_url": self._project_presentation_share_url(presentation.share_token)}
-        )
+            updates["share_url"] = ""
+            return presentation.model_copy(update=updates)
+        updates["share_url"] = self._project_presentation_share_url(presentation.share_token)
+        return presentation.model_copy(update=updates)
 
     def get_project_presentation(self, user: BrowserUser, project_id: str) -> ProjectPresentationResponse:
         project = self.repository.get_project(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
@@ -2477,6 +2521,37 @@ class PaperbaseService:
         if presentation is None:
             raise HTTPException(status_code=404, detail="Presentation not found")
         return self._project_presentation_with_share_url(presentation)
+
+    def get_project_presentation_audio(self, user: BrowserUser, project_id: str) -> tuple[bytes, str]:
+        presentation = self.repository.get_project_presentation(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+        )
+        if (
+            presentation is None
+            or presentation.status != "completed"
+            or not presentation.audio_storage_path
+            or not self.object_store.exists(presentation.audio_storage_path)
+        ):
+            raise HTTPException(status_code=404, detail="Presentation audio not found")
+        return self.object_store.get_bytes(presentation.audio_storage_path), (
+            presentation.audio_content_type or "audio/mpeg"
+        )
+
+    def get_public_project_presentation_audio(self, share_token: str) -> tuple[bytes, str]:
+        token = share_token.strip()
+        if not token:
+            raise HTTPException(status_code=404, detail="Presentation audio not found")
+        presentation = self.repository.get_public_project_presentation(token)  # type: ignore[attr-defined]
+        if (
+            presentation is None
+            or not presentation.audio_storage_path
+            or not self.object_store.exists(presentation.audio_storage_path)
+        ):
+            raise HTTPException(status_code=404, detail="Presentation audio not found")
+        return self.object_store.get_bytes(presentation.audio_storage_path), (
+            presentation.audio_content_type or "audio/mpeg"
+        )
 
     def start_project_presentation(
         self,
@@ -2778,10 +2853,23 @@ class PaperbaseService:
                 summary_markdown = self._default_project_presentation_summary(context_snapshot)
             if not visual_code:
                 visual_code = self._default_project_presentation_visual(project_name)
+            audio_storage_path = ""
+            audio_content_type = "audio/mpeg"
+            elevenlabs_api_key = self._get_elevenlabs_api_key_optional(user)
+            if elevenlabs_api_key:
+                audio_storage_path, audio_content_type = self._generate_and_store_project_presentation_audio(
+                    openai_api_key=api_key_value,
+                    elevenlabs_api_key=elevenlabs_api_key,
+                    presentation_id=presentation_id,
+                    context_snapshot=context_snapshot,
+                    summary_markdown=summary_markdown,
+                )
             completed = self.repository.complete_project_presentation(  # type: ignore[attr-defined]
                 presentation_id,
                 visual_code=visual_code,
                 summary_markdown=summary_markdown,
+                audio_storage_path=audio_storage_path,
+                audio_content_type=audio_content_type,
             )
             if completed is None:
                 raise PermanentError("Presentation record disappeared")
@@ -2844,6 +2932,229 @@ class PaperbaseService:
         if not isinstance(payload, dict):
             raise PermanentError("Presentation model returned an invalid payload")
         return payload
+
+    def _generate_and_store_project_presentation_audio(
+        self,
+        *,
+        openai_api_key: str,
+        elevenlabs_api_key: str,
+        presentation_id: str,
+        context_snapshot: dict[str, Any],
+        summary_markdown: str,
+    ) -> tuple[str, str]:
+        script_turns = self._generate_project_presentation_audio_script(
+            api_key=openai_api_key,
+            context_snapshot=context_snapshot,
+            summary_markdown=summary_markdown,
+        )
+        audio_segments: list[bytes] = []
+        for segment in self._project_presentation_audio_segments(script_turns):
+            self._raise_if_current_job_canceled()
+            audio_segments.append(
+                self._request_elevenlabs_tts(
+                    api_key=elevenlabs_api_key,
+                    voice_id=segment["voice_id"],
+                    text=segment["text"],
+                )
+            )
+        if not audio_segments:
+            raise PermanentError("Presentation audio script was empty")
+        audio = self._stitch_audio_segments(audio_segments)
+        storage_path = f"project-presentations/{presentation_id}/audio/presentation.mp3"
+        self.object_store.put_bytes(storage_path, audio, content_type="audio/mpeg")
+        return storage_path, "audio/mpeg"
+
+    def _generate_project_presentation_audio_script(
+        self,
+        *,
+        api_key: str,
+        context_snapshot: dict[str, Any],
+        summary_markdown: str,
+    ) -> list[dict[str, str]]:
+        prompt = Prompt(
+            input=[
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "presentation_summary_markdown": summary_markdown,
+                            "project_context": context_snapshot,
+                        },
+                        ensure_ascii=False,
+                        default=str,
+                    ),
+                }
+            ],
+            base_instructions=(
+                "Project presentation audio script writer. Return only strict JSON with a `turns` "
+                "array. Each turn must have `speaker` equal to `noob` or `expert`, and `text` as "
+                "natural spoken dialogue. Write a 5 to 10 minute two-person explainer about the "
+                "project presentation and all available research context: papers, comments, user "
+                "questions, chats, explorations, notes, and takeaways. The noob knows nothing and "
+                "asks simple questions. The industry expert explains patiently to a total beginner. "
+                "Do not include stage directions, markdown, speaker labels inside `text`, or any "
+                "characters outside the JSON. Keep each turn concise enough for text-to-speech."
+            ),
+            tools=[],
+            tool_choice=None,
+            parallel_tool_calls=False,
+        )
+        response = self._chat_model_create_response(api_key=api_key, prompt=prompt)
+        payload = self._parse_project_presentation_payload(self._assistant_response_text(response))
+        raw_turns = payload.get("turns") or payload.get("dialogue") or []
+        turns: list[dict[str, str]] = []
+        if isinstance(raw_turns, list):
+            for raw_turn in raw_turns:
+                if not isinstance(raw_turn, dict):
+                    continue
+                speaker = str(raw_turn.get("speaker") or "").strip().lower()
+                if speaker not in {"noob", "expert"}:
+                    speaker = "expert"
+                text = str(raw_turn.get("text") or raw_turn.get("line") or "").strip()
+                if text:
+                    turns.append({"speaker": speaker, "text": text})
+        if turns:
+            return turns
+        return [
+            {
+                "speaker": "noob",
+                "text": "I am completely new to this project. What is the main point I should understand?",
+            },
+            {
+                "speaker": "expert",
+                "text": (
+                    "Start with the presentation summary. "
+                    f"{self._plain_text_excerpt(summary_markdown, max_chars=3600)}"
+                ),
+            },
+        ]
+
+    def _project_presentation_audio_segments(self, turns: list[dict[str, str]]) -> list[dict[str, str]]:
+        voices = {
+            "noob": "21m00Tcm4TlvDq8ikWAM",
+            "expert": "ErXwobaYiN019PkySvjV",
+        }
+        segments: list[dict[str, str]] = []
+        for turn in turns:
+            speaker = turn.get("speaker", "expert")
+            voice_id = voices.get(speaker, voices["expert"])
+            for text in self._split_tts_text(turn.get("text", ""), max_chars=4500):
+                segments.append({"speaker": speaker, "voice_id": voice_id, "text": text})
+        return segments
+
+    def _split_tts_text(self, text: str, *, max_chars: int) -> list[str]:
+        normalized = re.sub(r"\s+", " ", text).strip()
+        if not normalized:
+            return []
+        if len(normalized) <= max_chars:
+            return [normalized]
+        pieces = re.split(r"(?<=[.!?])\s+", normalized)
+        chunks: list[str] = []
+        current = ""
+        for piece in pieces:
+            if not piece:
+                continue
+            if len(piece) > max_chars:
+                if current:
+                    chunks.append(current)
+                    current = ""
+                chunks.extend(piece[index : index + max_chars] for index in range(0, len(piece), max_chars))
+                continue
+            candidate = f"{current} {piece}".strip()
+            if len(candidate) <= max_chars:
+                current = candidate
+            else:
+                if current:
+                    chunks.append(current)
+                current = piece
+        if current:
+            chunks.append(current)
+        return chunks
+
+    def _request_elevenlabs_tts(self, *, api_key: str, voice_id: str, text: str) -> bytes:
+        payload = {
+            "text": text,
+            "model_id": "eleven_flash_v2_5",
+            "voice_settings": {
+                "stability": 0.56,
+                "similarity_boost": 0.78,
+                "style": 0.12,
+                "use_speaker_boost": True,
+            },
+        }
+        request = urllib_request.Request(
+            f"https://api.elevenlabs.io/v1/text-to-speech/{quote(voice_id, safe='')}"
+            "?output_format=mp3_44100_128",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Accept": "audio/mpeg",
+                "Content-Type": "application/json",
+                "xi-api-key": api_key,
+            },
+            method="POST",
+        )
+        try:
+            with urllib_request.urlopen(request, timeout=120) as response:
+                data = response.read()
+        except urllib_error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:500]
+            raise RuntimeError(f"ElevenLabs audio generation failed ({exc.code}): {detail}") from exc
+        except urllib_error.URLError as exc:
+            raise RuntimeError(f"ElevenLabs audio generation failed: {exc.reason}") from exc
+        if not data:
+            raise RuntimeError("ElevenLabs audio generation returned empty audio")
+        return data
+
+    def _stitch_audio_segments(self, segments: list[bytes]) -> bytes:
+        if len(segments) == 1:
+            return segments[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            manifest_lines: list[str] = []
+            for index, segment in enumerate(segments):
+                segment_path = tmp_path / f"segment_{index:04d}.mp3"
+                segment_path.write_bytes(segment)
+                manifest_lines.append(f"file '{segment_path.name}'")
+            manifest_path = tmp_path / "segments.txt"
+            manifest_path.write_text("\n".join(manifest_lines), encoding="utf-8")
+            output_path = tmp_path / "presentation.mp3"
+            try:
+                subprocess.run(
+                    [
+                        "ffmpeg",
+                        "-hide_banner",
+                        "-loglevel",
+                        "error",
+                        "-y",
+                        "-f",
+                        "concat",
+                        "-safe",
+                        "0",
+                        "-i",
+                        str(manifest_path),
+                        "-c",
+                        "copy",
+                        str(output_path),
+                    ],
+                    cwd=tmp_path,
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                return output_path.read_bytes()
+            except (OSError, subprocess.CalledProcessError):
+                logger.exception(
+                    "Falling back to direct MP3 concatenation for project presentation audio",
+                    extra={"event": "project.presentation.audio_stitch_fallback"},
+                )
+                return b"".join(segments)
+
+    def _plain_text_excerpt(self, text: str, *, max_chars: int) -> str:
+        plain = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
+        plain = re.sub(r"[#*_`>|\\-]+", " ", plain)
+        plain = re.sub(r"\s+", " ", plain).strip()
+        return plain[:max_chars].strip()
 
     def _default_project_presentation_summary(self, context_snapshot: dict[str, Any]) -> str:
         project = context_snapshot.get("project", {}) if isinstance(context_snapshot.get("project"), dict) else {}
