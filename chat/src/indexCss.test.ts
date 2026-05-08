@@ -33,14 +33,15 @@ describe("index.css", () => {
     const landingEvenCardBlock =
       css.match(/\.trending-page-landing \.trending-card:nth-child\(even\)\s*\{([^}]*)\}/)?.[1] ??
       "";
+    const workspaceTrendingBlock = css.match(/\.workspace-page-trending\s*\{([^}]*)\}/)?.[1] ?? "";
     const cardBlock = css.match(/\.trending-card\s*\{([^}]*)\}/)?.[1] ?? "";
     const imageBlock = css.match(/\.trending-card-image\s*\{([^}]*)\}/)?.[1] ?? "";
     const activeVoteBlock = css.match(/\.trending-vote-button\.active\s*\{([^}]*)\}/)?.[1] ?? "";
 
-    expect(gridBlock).toContain(
-      "grid-template-columns: repeat(auto-fit, minmax(min(176px, 100%), 220px));",
+    expect(workspaceTrendingBlock).toContain(
+      "width: min(var(--chat-content-max-width), calc(100% - 48px));",
     );
-    expect(gridBlock).toContain("justify-content: center;");
+    expect(gridBlock).toContain("grid-template-columns: repeat(3, minmax(0, 1fr));");
     expect(gridBlock).toContain("gap: 16px;");
     expect(landingGridBlock).toContain("grid-template-columns: 1fr;");
     expect(landingGridBlock).toContain("gap: 24px;");
@@ -51,7 +52,8 @@ describe("index.css", () => {
     expect(cardBlock).toContain("min-height: 282px;");
     expect(cardBlock).toContain('font-family: Georgia, "Times New Roman", serif;');
     expect(cardBlock).toContain("border-radius: 4px;");
-    expect(imageBlock).toContain("object-fit: cover;");
+    expect(imageBlock).toContain("height: clamp(108px, 15vw, 132px);");
+    expect(imageBlock).toContain("object-fit: contain;");
     expect(activeVoteBlock).toContain("border-color: #99582a;");
     expect(activeVoteBlock).toContain("color: #99582a;");
     expect(css).toContain(".trending-card-title-button");
