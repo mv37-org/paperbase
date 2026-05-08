@@ -5694,7 +5694,9 @@ def test_project_presentation_job_caches_shares_and_emails():
             "required": ["summary_markdown", "visual_code"],
         },
     }
-    assert email_sender.presentation_emails == [("present@example.com", "General", "http://127.0.0.1:8080/")]
+    assert email_sender.presentation_emails == [
+        ("present@example.com", "General", f"{service.settings.chat_public_url.rstrip('/')}/")
+    ]
 
     shared = service.update_project_presentation_share(
         session.user,
@@ -5767,7 +5769,7 @@ def test_project_presentation_falls_back_when_model_returns_non_json(caplog):
     assert "ReactDOM.createRoot" in completed.visual_code
     assert "Research brief" in completed.visual_code
     assert email_sender.presentation_emails == [
-        ("fallback-present@example.com", "General", "http://127.0.0.1:8080/")
+        ("fallback-present@example.com", "General", f"{service.settings.chat_public_url.rstrip('/')}/")
     ]
     assert any(
         getattr(record, "event", "") == "project.presentation.payload_fallback"
