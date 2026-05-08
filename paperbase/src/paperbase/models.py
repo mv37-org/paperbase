@@ -907,6 +907,48 @@ class ProjectItemPageResponse(BaseModel):
     has_more: bool = False
 
 
+class ProjectPresentationExplorationSnapshot(BaseModel):
+    exploration_id: str = ""
+    paper_id: str = ""
+    chat_thread_id: str = ""
+    path: str = ""
+    title: str = ""
+    authors: str = ""
+    preview_image_url: str = ""
+    pdf_url: str = ""
+    annotations: list[dict[str, Any]] = Field(default_factory=list)
+    created_at: str = ""
+    updated_at: str = ""
+
+
+class ProjectPresentationStartRequest(BaseModel):
+    explorations: list[ProjectPresentationExplorationSnapshot] = Field(default_factory=list)
+    regenerate: bool = False
+
+
+class ProjectPresentationShareRequest(BaseModel):
+    is_public: bool
+
+
+ProjectPresentationStatus = Literal["missing", "pending", "running", "completed", "failed"]
+
+
+class ProjectPresentationResponse(BaseModel):
+    presentation_id: str = ""
+    project_id: str
+    status: ProjectPresentationStatus = "missing"
+    visual_code: str = ""
+    summary_markdown: str = ""
+    is_public: bool = False
+    share_token: str | None = None
+    share_url: str = ""
+    error: str = ""
+    job_id: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    completed_at: datetime | None = None
+
+
 class RunPythonFileResponse(BaseModel):
     file_id: str
     status: str

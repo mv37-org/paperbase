@@ -54,6 +54,7 @@ from paperbase.models import (
     ProjectItemPageResponse,
     ProjectItemSummary,
     ProjectListResponse,
+    ProjectPresentationResponse,
     ProjectRepoSyncResponse,
     ProjectResponse,
     ProjectSessionPageResponse,
@@ -948,6 +949,77 @@ class StubApiService:
             has_more=False,
         )
 
+    def get_project_presentation(self, user: BrowserUser, project_id: str) -> ProjectPresentationResponse:
+        self.calls.append(("get_project_presentation", (user.user_id, project_id)))
+        return ProjectPresentationResponse(
+            presentation_id="pres_1",
+            project_id=project_id,
+            status="completed",
+            visual_code="ReactDOM.createRoot(document.getElementById('root')).render('ok');",
+            summary_markdown="# Summary",
+            created_at=NOW,
+            updated_at=NOW,
+            completed_at=NOW,
+        )
+
+    def start_project_presentation(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        request,
+    ) -> ProjectPresentationResponse:
+        self.calls.append(
+            (
+                "start_project_presentation",
+                (user.user_id, project_id, request.regenerate, len(request.explorations)),
+            )
+        )
+        return ProjectPresentationResponse(
+            presentation_id="pres_1",
+            project_id=project_id,
+            status="pending",
+            job_id="job_project_presentation",
+            created_at=NOW,
+            updated_at=NOW,
+        )
+
+    def update_project_presentation_share(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        request,
+    ) -> ProjectPresentationResponse:
+        self.calls.append(("update_project_presentation_share", (user.user_id, project_id, request.is_public)))
+        return ProjectPresentationResponse(
+            presentation_id="pres_1",
+            project_id=project_id,
+            status="completed",
+            visual_code="ReactDOM.createRoot(document.getElementById('root')).render('ok');",
+            summary_markdown="# Summary",
+            is_public=request.is_public,
+            share_token="share_1" if request.is_public else None,
+            share_url="http://127.0.0.1:8080/?presentation=share_1" if request.is_public else "",
+            created_at=NOW,
+            updated_at=NOW,
+            completed_at=NOW,
+        )
+
+    def get_public_project_presentation(self, share_token: str) -> ProjectPresentationResponse:
+        self.calls.append(("get_public_project_presentation", share_token))
+        return ProjectPresentationResponse(
+            presentation_id="pres_1",
+            project_id="proj_1",
+            status="completed",
+            visual_code="ReactDOM.createRoot(document.getElementById('root')).render('ok');",
+            summary_markdown="# Summary",
+            is_public=True,
+            share_token=share_token,
+            share_url=f"http://127.0.0.1:8080/?presentation={share_token}",
+            created_at=NOW,
+            updated_at=NOW,
+            completed_at=NOW,
+        )
+
     def create_python_file(self, user: BrowserUser, project_id: str) -> PythonFileResponse:
         self.calls.append(("create_python_file", (user.user_id, project_id)))
         return _python_file("file_1", project_id=project_id, filename="something.py")
@@ -1760,6 +1832,16 @@ def test_browser_project_and_chat_write_routes_delegate_with_valid_csrf(api_clie
         json={"commit_message": "Save analysis.py"},
         headers=headers,
     )
+    started_presentation = client.post(
+        "/v1/browser/projects/proj_2/presentation",
+        json={"explorations": [{"exploration_id": "exp_1", "paper_id": "paper_1"}], "regenerate": True},
+        headers=headers,
+    )
+    shared_presentation = client.patch(
+        "/v1/browser/projects/proj_2/presentation/share",
+        json={"is_public": True},
+        headers=headers,
+    )
     deleted_chat = client.delete("/v1/browser/chats/thread_1", headers=headers)
     deleted_project = client.delete("/v1/browser/projects/proj_2", headers=headers)
 
@@ -1787,6 +1869,10 @@ def test_browser_project_and_chat_write_routes_delegate_with_valid_csrf(api_clie
     assert ran_python_file.json()["stdout"] == "runner output"
     assert synced_project_repo.status_code == 200
     assert synced_project_repo.json()["github_repo_name"] == "paperbase-general-123abc"
+    assert started_presentation.status_code == 200
+    assert started_presentation.json()["status"] == "pending"
+    assert shared_presentation.status_code == 200
+    assert shared_presentation.json()["share_token"] == "share_1"
     assert deleted_chat.json() == {"status": "deleted"}
     assert deleted_project.json() == {"status": "deleted"}
     assert ("create_project", ("user_1", "Agents", "Study agent systems", "create", "agent-lab")) in service.calls
@@ -1807,6 +1893,8 @@ def test_browser_project_and_chat_write_routes_delegate_with_valid_csrf(api_clie
     assert ("delete_python_file", ("user_1", "file_1")) in service.calls
     assert ("run_python_file", ("user_1", "file_1", "smoke")) in service.calls
     assert ("sync_project_repo", ("user_1", "proj_2", "Save analysis.py")) in service.calls
+    assert ("start_project_presentation", ("user_1", "proj_2", True, 1)) in service.calls
+    assert ("update_project_presentation_share", ("user_1", "proj_2", True)) in service.calls
     assert ("delete_chat_thread", ("user_1", "thread_1")) in service.calls
     assert ("delete_project", ("user_1", "proj_2")) in service.calls
 
@@ -1836,6 +1924,8 @@ def test_browser_project_item_routes_delegate_to_service(api_client):
     items = client.get("/v1/browser/projects/proj_1/items?limit=25&offset=0&item_kind=python_file")
     python_file = client.get("/v1/browser/python-files/file_1")
     repo_sync = client.get("/v1/browser/projects/proj_1/repo-sync")
+    presentation = client.get("/v1/browser/projects/proj_1/presentation")
+    public_presentation = client.get("/v1/browser/project-presentations/public/share_1")
 
     assert items.status_code == 200
     assert items.json()["items"][0]["item_kind"] == "python_file"
@@ -1843,9 +1933,15 @@ def test_browser_project_item_routes_delegate_to_service(api_client):
     assert python_file.json()["content"] == "print('hello')"
     assert repo_sync.status_code == 200
     assert repo_sync.json()["repo_exists"] is False
+    assert presentation.status_code == 200
+    assert presentation.json()["presentation_id"] == "pres_1"
+    assert public_presentation.status_code == 200
+    assert public_presentation.json()["share_token"] == "share_1"
     assert ("list_project_items", ("user_1", "proj_1", 25, 0, "python_file")) in service.calls
     assert ("get_python_file", ("user_1", "file_1")) in service.calls
     assert ("get_project_repo_sync", ("user_1", "proj_1")) in service.calls
+    assert ("get_project_presentation", ("user_1", "proj_1")) in service.calls
+    assert ("get_public_project_presentation", "share_1") in service.calls
 
 
 def test_google_callback_success_sets_cookie_and_redirects_to_saved_return_to(api_client, monkeypatch):

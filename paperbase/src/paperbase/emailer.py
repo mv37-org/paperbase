@@ -18,6 +18,16 @@ class EmailSender(ABC):
     def send_password_reset(self, *, email: str, reset_link: str) -> None:
         raise NotImplementedError
 
+    @abstractmethod
+    def send_project_presentation_ready(
+        self,
+        *,
+        email: str,
+        project_name: str,
+        presentation_url: str,
+    ) -> None:
+        raise NotImplementedError
+
 
 class ResendEmailSender(EmailSender):
     def __init__(self, settings: Settings) -> None:
@@ -46,3 +56,35 @@ class ResendEmailSender(EmailSender):
         )
         response.raise_for_status()
         logger.info("Sent password reset email", extra={"event": "auth.password_reset.sent", "email": email})
+
+    def send_project_presentation_ready(
+        self,
+        *,
+        email: str,
+        project_name: str,
+        presentation_url: str,
+    ) -> None:
+        if not self._settings.resend_api_key:
+            raise RuntimeError("Resend is not configured")
+        response = requests.post(
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": f"Bearer {self._settings.resend_api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "from": self._settings.resend_from_email,
+                "to": [email],
+                "subject": f"Your {project_name} presentation is ready",
+                "html": (
+                    f"<p>Your Paperbase presentation for <strong>{project_name}</strong> is ready.</p>"
+                    f"<p><a href=\"{presentation_url}\">Open the presentation</a></p>"
+                ),
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        logger.info(
+            "Sent project presentation ready email",
+            extra={"event": "project.presentation.email_sent", "email": email},
+        )

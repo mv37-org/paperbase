@@ -1,0 +1,70 @@
+import { useMemo } from "react";
+
+type ProjectPresentationCanvasProps = {
+  visualCode: string;
+  title?: string;
+};
+
+function projectPresentationSrcDoc(visualCode: string) {
+  const code = JSON.stringify(visualCode || "");
+  return `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+    <style>
+      html, body, #root { width: 100%; height: 100%; margin: 0; }
+      body { background: #ffffff; color: #1b1611; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .presentation-error { padding: 24px; color: #9b3939; font: 14px/1.5 ui-sans-serif, system-ui; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script>
+      const generatedCode = ${code};
+      function showPresentationError(error) {
+        const root = document.getElementById("root");
+        root.innerHTML = "";
+        const node = document.createElement("pre");
+        node.className = "presentation-error";
+        node.textContent = "Presentation visual failed to render.\\n" + (error && error.message ? error.message : String(error));
+        root.appendChild(node);
+      }
+      try {
+        const run = new Function("React", "ReactDOM", "d3", generatedCode);
+        run(window.React, window.ReactDOM, window.d3);
+      } catch (error) {
+        showPresentationError(error);
+      }
+    </script>
+  </body>
+</html>`;
+}
+
+export function ProjectPresentationCanvas({
+  visualCode,
+  title = "Project presentation visual",
+}: ProjectPresentationCanvasProps) {
+  const srcDoc = useMemo(() => projectPresentationSrcDoc(visualCode), [visualCode]);
+
+  if (!visualCode.trim()) {
+    return (
+      <div className="project-presentation-canvas-empty">
+        <span>Visual pending</span>
+      </div>
+    );
+  }
+
+  return (
+    <iframe
+      className="project-presentation-iframe"
+      title={title}
+      sandbox="allow-scripts"
+      srcDoc={srcDoc}
+    />
+  );
+}

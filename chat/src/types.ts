@@ -546,6 +546,43 @@ export interface ProjectItemPageResponse {
   has_more: boolean;
 }
 
+export type ProjectPresentationStatus = "missing" | "pending" | "running" | "completed" | "failed";
+
+export interface ProjectPresentationExplorationSnapshot {
+  exploration_id: string;
+  paper_id: string;
+  chat_thread_id?: string;
+  path: string;
+  title: string;
+  authors: string;
+  preview_image_url: string;
+  pdf_url: string;
+  annotations: Array<Record<string, unknown>>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProjectPresentationStartPayload {
+  explorations: ProjectPresentationExplorationSnapshot[];
+  regenerate?: boolean;
+}
+
+export interface ProjectPresentationResponse {
+  presentation_id: string;
+  project_id: string;
+  status: ProjectPresentationStatus;
+  visual_code: string;
+  summary_markdown: string;
+  is_public: boolean;
+  share_token?: string | null;
+  share_url: string;
+  error: string;
+  job_id?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  completed_at?: string | null;
+}
+
 export interface RunPythonFileResponse {
   file_id: string;
   status: "completed" | "failed";

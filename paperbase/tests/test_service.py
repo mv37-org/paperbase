@@ -42,6 +42,9 @@ from paperbase.models import (
     MoveChatThreadProjectRequest,
     PaperMetadata,
     PaperSelectionPayload,
+    ProjectPresentationExplorationSnapshot,
+    ProjectPresentationShareRequest,
+    ProjectPresentationStartRequest,
     ProjectRepoSyncRequest,
     SaveAnthropicKeyRequest,
     SaveModalCredentialsRequest,
@@ -63,9 +66,19 @@ from paperbase.storage import MemoryObjectStore
 class FakeEmailSender:
     def __init__(self) -> None:
         self.reset_emails: list[tuple[str, str]] = []
+        self.presentation_emails: list[tuple[str, str, str]] = []
 
     def send_password_reset(self, *, email: str, reset_link: str) -> None:
         self.reset_emails.append((email, reset_link))
+
+    def send_project_presentation_ready(
+        self,
+        *,
+        email: str,
+        project_name: str,
+        presentation_url: str,
+    ) -> None:
+        self.presentation_emails.append((email, project_name, presentation_url))
 
 
 class FakeChatModel:
@@ -5476,6 +5489,127 @@ def test_project_defaults_and_thread_snapshots(browser_service):
     assert chat_model.create_calls
     assert "Use grounded citations only." in str(chat_model.create_calls[-1]["system_prompt"])
     assert "Use different instructions now." not in str(chat_model.create_calls[-1]["system_prompt"])
+
+
+def test_project_presentation_job_caches_shares_and_emails():
+    class ProjectPresentationChatModel(FakeChatModel):
+        def create_response(self, *, api_key: str, prompt: Prompt) -> ResponseEnvelope:
+            if "Project presentation generator" in prompt.base_instructions:
+                self.create_calls.append(
+                    {
+                        "api_key": api_key,
+                        "messages": self._legacy_messages_from_prompt(prompt),
+                        "system_prompt": prompt.base_instructions,
+                        "tools": prompt.tools,
+                        "tool_choice": prompt.tool_choice,
+                        "parallel_tool_calls": prompt.parallel_tool_calls,
+                    }
+                )
+                return ResponseEnvelope(
+                    response_id="resp_project_presentation",
+                    items=[
+                        ResponseItem(
+                            item_id="msg_project_presentation",
+                            item_type="assistant_message",
+                            role="assistant",
+                            content_text=json.dumps(
+                                {
+                                    "summary_markdown": (
+                                        "# Agent Benchmarks\n\n"
+                                        "| Topic | Evidence |\n"
+                                        "| --- | --- |\n"
+                                        "| Evaluation | Notes and chat history |"
+                                    ),
+                                    "visual_code": (
+                                        "ReactDOM.createRoot(document.getElementById('root'))."
+                                        "render(React.createElement('div', null, 'visual'));"
+                                    ),
+                                }
+                            ),
+                        )
+                    ],
+                )
+            return super().create_response(api_key=api_key, prompt=prompt)
+
+    email_sender = FakeEmailSender()
+    chat_model = ProjectPresentationChatModel()
+    service = PaperbaseService(
+        settings=Settings(storage_backend="memory", database_url="memory://", api_key="test-token"),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=email_sender,
+        chat_model=chat_model,
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="present@example.com", password="topsecret123", display_name="Presenter")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    project = service.list_projects(session.user).projects[0]
+    thread = service.create_chat_thread(
+        session.user,
+        CreateChatThreadRequest(title="Benchmarks", project_id=project.project_id),
+    )
+    service.repository.add_chat_message(  # type: ignore[attr-defined]
+        thread_id=thread.thread_id,
+        role="user",
+        content_markdown="Which papers explain benchmark reliability?",
+    )
+
+    queued = service.start_project_presentation(
+        session.user,
+        project.project_id,
+        ProjectPresentationStartRequest(
+            explorations=[
+                ProjectPresentationExplorationSnapshot(
+                    exploration_id="exp_1",
+                    paper_id="arxiv:2401.12345",
+                    title="Benchmark Paper",
+                    annotations=[
+                        {
+                            "kind": "text",
+                            "note": "Key takeaway about evaluation",
+                            "selected_text": "Evaluation protocol",
+                        }
+                    ],
+                    path="papers/arxiv:2401.12345",
+                    authors="Ada Lovelace",
+                    preview_image_url="",
+                    pdf_url="",
+                )
+            ]
+        ),
+    )
+
+    assert queued.status == "pending"
+    assert queued.job_id
+    completed_job = service.process_next_job()
+    assert completed_job is not None
+    assert completed_job.status == "completed"
+    completed = service.get_project_presentation(session.user, project.project_id)
+    assert completed.status == "completed"
+    assert "Agent Benchmarks" in completed.summary_markdown
+    assert "ReactDOM.createRoot" in completed.visual_code
+    assert email_sender.presentation_emails == [("present@example.com", "General", "http://127.0.0.1:8080/")]
+
+    shared = service.update_project_presentation_share(
+        session.user,
+        project.project_id,
+        ProjectPresentationShareRequest(is_public=True),
+    )
+    assert shared.is_public is True
+    assert shared.share_token
+    assert shared.share_url.endswith(f"?presentation={shared.share_token}")
+    public = service.get_public_project_presentation(shared.share_token)
+    assert public.presentation_id == completed.presentation_id
+
+    cached = service.start_project_presentation(
+        session.user,
+        project.project_id,
+        ProjectPresentationStartRequest(explorations=[]),
+    )
+    assert cached.status == "completed"
+    assert cached.job_id == completed.job_id
 
 
 def test_project_session_paging_and_thread_deletion(browser_service):

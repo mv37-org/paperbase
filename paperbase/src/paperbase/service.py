@@ -123,6 +123,9 @@ from .models import (
     GitHubRepoMetadataResponse,
     GitHubRepoSummary,
     ProjectItemPageResponse,
+    ProjectPresentationResponse,
+    ProjectPresentationShareRequest,
+    ProjectPresentationStartRequest,
     ProjectRepoConflictDetail,
     ProjectRepoConflictFile,
     ProjectRepoSyncRequest,
@@ -220,6 +223,11 @@ _TEXTUAL_MIME_TYPES = {
     "application/x-yaml",
     "image/svg+xml",
 }
+_PROJECT_PRESENTATION_MAX_CONTEXT_CHARS = 80_000
+_PROJECT_PRESENTATION_MAX_THREADS = 30
+_PROJECT_PRESENTATION_MAX_THREAD_ITEMS = 80
+_PROJECT_PRESENTATION_MAX_EXPLORATIONS = 80
+_PROJECT_PRESENTATION_MAX_ANNOTATIONS = 40
 
 
 def _validate_date(value: str, *, name: str) -> None:
@@ -2438,6 +2446,455 @@ class PaperbaseService:
         if page is None:
             raise HTTPException(status_code=404, detail="Project not found")
         return page
+
+    def _project_presentation_with_share_url(
+        self,
+        presentation: ProjectPresentationResponse,
+    ) -> ProjectPresentationResponse:
+        if not presentation.is_public or not presentation.share_token:
+            return presentation.model_copy(update={"share_url": ""})
+        return presentation.model_copy(
+            update={"share_url": self._project_presentation_share_url(presentation.share_token)}
+        )
+
+    def get_project_presentation(self, user: BrowserUser, project_id: str) -> ProjectPresentationResponse:
+        project = self.repository.get_project(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        presentation = self.repository.get_project_presentation(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+        )
+        if presentation is None:
+            return ProjectPresentationResponse(project_id=project_id, status="missing")
+        return self._project_presentation_with_share_url(presentation)
+
+    def get_public_project_presentation(self, share_token: str) -> ProjectPresentationResponse:
+        token = share_token.strip()
+        if not token:
+            raise HTTPException(status_code=404, detail="Presentation not found")
+        presentation = self.repository.get_public_project_presentation(token)  # type: ignore[attr-defined]
+        if presentation is None:
+            raise HTTPException(status_code=404, detail="Presentation not found")
+        return self._project_presentation_with_share_url(presentation)
+
+    def start_project_presentation(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        request: ProjectPresentationStartRequest,
+    ) -> ProjectPresentationResponse:
+        project = self.repository.get_project(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        existing = self.repository.get_project_presentation(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+        )
+        if (
+            existing is not None
+            and not request.regenerate
+            and existing.status in {"pending", "running", "completed"}
+        ):
+            return self._project_presentation_with_share_url(existing)
+
+        resolved_user = self.repository.get_browser_user_by_id(user.user_id) or user  # type: ignore[attr-defined]
+        api_key_value, api_key_state = self._choose_openai_api_key(resolved_user)
+        if not api_key_value:
+            detail = (
+                "Saved OpenAI API key is no longer valid"
+                if api_key_state == "api_key_invalid"
+                else "Add your OpenAI API key before creating a presentation"
+            )
+            raise HTTPException(status_code=409, detail=detail)
+
+        context_snapshot = self._project_presentation_context_snapshot(
+            user=user,
+            project=project,
+            explorations=request.explorations,
+        )
+        pending = self.repository.upsert_project_presentation_pending(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+            context_snapshot=context_snapshot,
+            job_id="",
+        )
+        if pending is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        job = self.repository.create_job(  # type: ignore[attr-defined]
+            "project_presentation",
+            {
+                "user_id": user.user_id,
+                "project_id": project_id,
+                "presentation_id": pending.presentation_id,
+                "context_snapshot": context_snapshot,
+            },
+        )
+        pending = self.repository.upsert_project_presentation_pending(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+            context_snapshot=context_snapshot,
+            job_id=job.job_id,
+        )
+        if pending is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        return self._project_presentation_with_share_url(pending)
+
+    def update_project_presentation_share(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        request: ProjectPresentationShareRequest,
+    ) -> ProjectPresentationResponse:
+        current = self.repository.get_project_presentation(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+        )
+        if current is None:
+            raise HTTPException(status_code=404, detail="Presentation not found")
+        share_token = current.share_token
+        if request.is_public and not share_token:
+            share_token = new_id("share")
+        updated = self.repository.update_project_presentation_share(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+            is_public=request.is_public,
+            share_token=share_token,
+        )
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Presentation not found")
+        return self._project_presentation_with_share_url(updated)
+
+    def _project_presentation_context_snapshot(
+        self,
+        *,
+        user: BrowserUser,
+        project: ProjectResponse,
+        explorations,
+    ) -> dict[str, Any]:
+        exploration_rows: list[dict[str, Any]] = []
+        paper_ids: set[str] = set()
+        for exploration in list(explorations or [])[:_PROJECT_PRESENTATION_MAX_EXPLORATIONS]:
+            annotations: list[dict[str, Any]] = []
+            for annotation in list(exploration.annotations or [])[:_PROJECT_PRESENTATION_MAX_ANNOTATIONS]:
+                if not isinstance(annotation, dict):
+                    continue
+                annotations.append(
+                    {
+                        "kind": str(annotation.get("kind") or "")[:24],
+                        "note": self._truncate_text(str(annotation.get("note") or ""), 1800),
+                        "selected_text": self._truncate_text(
+                            str(annotation.get("selected_text") or annotation.get("selectedText") or ""),
+                            3000,
+                        ),
+                        "nearby_text": self._truncate_text(
+                            str(annotation.get("nearby_text") or annotation.get("nearbyText") or ""),
+                            3000,
+                        ),
+                        "section_title": self._truncate_text(
+                            str(annotation.get("section_title") or annotation.get("sectionTitle") or ""),
+                            240,
+                        ),
+                        "created_at": str(annotation.get("created_at") or annotation.get("createdAt") or ""),
+                    }
+                )
+            paper_id = exploration.paper_id.strip()
+            if paper_id:
+                paper_ids.add(paper_id)
+            exploration_rows.append(
+                {
+                    "exploration_id": exploration.exploration_id,
+                    "paper_id": paper_id,
+                    "chat_thread_id": exploration.chat_thread_id,
+                    "title": self._truncate_text(exploration.title, 500),
+                    "authors": self._truncate_text(exploration.authors, 500),
+                    "path": exploration.path,
+                    "annotations": annotations,
+                    "created_at": exploration.created_at,
+                    "updated_at": exploration.updated_at,
+                }
+            )
+
+        threads_page = self.repository.list_project_chat_threads(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project.project_id,
+            limit=_PROJECT_PRESENTATION_MAX_THREADS,
+            offset=0,
+        )
+        thread_rows: list[dict[str, Any]] = []
+        for summary in (threads_page.threads if threads_page is not None else []):
+            thread = self.repository.get_chat_thread(  # type: ignore[attr-defined]
+                user_id=user.user_id,
+                thread_id=summary.thread_id,
+            )
+            if thread is None:
+                continue
+            items: list[dict[str, Any]] = []
+            for item in thread.items[:_PROJECT_PRESENTATION_MAX_THREAD_ITEMS]:
+                if item.item_type not in {"user_message", "assistant_message", "compaction"}:
+                    continue
+                if not item.content_text.strip():
+                    continue
+                items.append(
+                    {
+                        "role": item.role,
+                        "item_type": item.item_type,
+                        "content": self._truncate_text(item.content_text, 5000),
+                        "created_at": item.created_at.isoformat(),
+                        "citations": [
+                            {
+                                "paper_id": citation.paper_id,
+                                "title": citation.title,
+                                "path": citation.path,
+                            }
+                            for citation in item.citations[:8]
+                        ],
+                    }
+                )
+                for citation in item.citations:
+                    if citation.paper_id:
+                        paper_ids.add(citation.paper_id)
+            thread_rows.append(
+                {
+                    "thread_id": thread.thread_id,
+                    "title": thread.title,
+                    "created_at": thread.created_at.isoformat(),
+                    "updated_at": thread.updated_at.isoformat(),
+                    "items": items,
+                }
+            )
+
+        comments: list[dict[str, Any]] = []
+        for paper_id in sorted(paper_ids)[:_PROJECT_PRESENTATION_MAX_EXPLORATIONS]:
+            for comment in self.repository.list_paper_comment_records(paper_id)[:30]:
+                comments.append(
+                    {
+                        "paper_id": paper_id,
+                        "author": comment.author_display_name,
+                        "body": self._truncate_text(comment.body, 1600),
+                        "created_at": comment.created_at.isoformat(),
+                    }
+                )
+
+        snapshot = {
+            "project": {
+                "project_id": project.project_id,
+                "name": project.name,
+                "description": project.description,
+                "created_at": project.created_at.isoformat(),
+                "updated_at": project.updated_at.isoformat(),
+            },
+            "explorations": exploration_rows,
+            "chat_threads": thread_rows,
+            "paper_comments": comments,
+            "generated_at": utcnow().isoformat(),
+        }
+        return self._truncate_project_presentation_snapshot(snapshot)
+
+    def _truncate_text(self, value: str, max_chars: int) -> str:
+        text = " ".join(str(value or "").split())
+        if len(text) <= max_chars:
+            return text
+        return text[: max(0, max_chars - 1)].rstrip() + "..."
+
+    def _truncate_project_presentation_snapshot(self, snapshot: dict[str, Any]) -> dict[str, Any]:
+        rendered = json.dumps(snapshot, ensure_ascii=False, default=str)
+        if len(rendered) <= _PROJECT_PRESENTATION_MAX_CONTEXT_CHARS:
+            return snapshot
+
+        trimmed = dict(snapshot)
+        trimmed["chat_threads"] = [
+            {
+                **thread,
+                "items": list(thread.get("items", []))[:20],
+            }
+            for thread in list(trimmed.get("chat_threads", []))[:12]
+            if isinstance(thread, dict)
+        ]
+        trimmed["explorations"] = [
+            {
+                **exploration,
+                "annotations": list(exploration.get("annotations", []))[:12],
+            }
+            for exploration in list(trimmed.get("explorations", []))[:30]
+            if isinstance(exploration, dict)
+        ]
+        trimmed["paper_comments"] = list(trimmed.get("paper_comments", []))[:60]
+        if len(json.dumps(trimmed, ensure_ascii=False, default=str)) <= _PROJECT_PRESENTATION_MAX_CONTEXT_CHARS:
+            return trimmed
+        trimmed["chat_threads"] = [
+            {
+                **thread,
+                "items": [
+                    {
+                        **item,
+                        "content": self._truncate_text(str(item.get("content") or ""), 1800),
+                    }
+                    for item in list(thread.get("items", []))[:10]
+                    if isinstance(item, dict)
+                ],
+            }
+            for thread in list(trimmed.get("chat_threads", []))[:8]
+            if isinstance(thread, dict)
+        ]
+        trimmed["paper_comments"] = list(trimmed.get("paper_comments", []))[:30]
+        return trimmed
+
+    def generate_project_presentation(
+        self,
+        *,
+        user_id: str,
+        project_id: str,
+        presentation_id: str,
+        context_snapshot: dict[str, Any],
+    ) -> ProjectPresentationResponse:
+        self.repository.set_project_presentation_running(presentation_id)  # type: ignore[attr-defined]
+        user = self.repository.get_browser_user_by_id(user_id)  # type: ignore[attr-defined]
+        if user is None:
+            self.repository.fail_project_presentation(  # type: ignore[attr-defined]
+                presentation_id,
+                error="User not found",
+            )
+            raise PermanentError("User not found for project presentation")
+        api_key_value, api_key_state = self._choose_openai_api_key(user)
+        if not api_key_value:
+            detail = (
+                "Saved OpenAI API key is no longer valid"
+                if api_key_state == "api_key_invalid"
+                else "OpenAI API key is required"
+            )
+            self.repository.fail_project_presentation(presentation_id, error=detail)  # type: ignore[attr-defined]
+            raise PermanentError(detail)
+
+        try:
+            prompt = self._project_presentation_prompt(context_snapshot)
+            response = self._chat_model_create_response(api_key=api_key_value, prompt=prompt)
+            response_text = self._assistant_response_text(response)
+            payload = self._parse_project_presentation_payload(response_text)
+            project_name = str(context_snapshot.get("project", {}).get("name") or "Project")
+            summary_markdown = str(payload.get("summary_markdown") or "").strip()
+            visual_code = str(payload.get("visual_code") or "").strip()
+            if not summary_markdown:
+                summary_markdown = self._default_project_presentation_summary(context_snapshot)
+            if not visual_code:
+                visual_code = self._default_project_presentation_visual(project_name)
+            completed = self.repository.complete_project_presentation(  # type: ignore[attr-defined]
+                presentation_id,
+                visual_code=visual_code,
+                summary_markdown=summary_markdown,
+            )
+            if completed is None:
+                raise PermanentError("Presentation record disappeared")
+            completed = self._project_presentation_with_share_url(completed)
+            self._send_project_presentation_ready_email(
+                user=user,
+                project_name=project_name,
+                presentation=completed,
+            )
+            return completed
+        except Exception as exc:
+            self.repository.fail_project_presentation(presentation_id, error=str(exc))  # type: ignore[attr-defined]
+            raise
+
+    def _project_presentation_prompt(self, context_snapshot: dict[str, Any]) -> Prompt:
+        return Prompt(
+            input=[
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": json.dumps(context_snapshot, ensure_ascii=False, default=str),
+                }
+            ],
+            base_instructions=(
+                "Project presentation generator. Create a presentation artifact from the supplied "
+                "Paperbase project context. Return only strict JSON with keys `summary_markdown` "
+                "and `visual_code`. The summary must be Markdown with clear sections and at least "
+                "one table when the context supports it. The visual code must be plain JavaScript "
+                "that runs inside a browser iframe where React, ReactDOM, d3, and Tailwind are "
+                "available as globals. Do not use JSX, imports, external network calls, or markdown "
+                "inside the visual code. Render into document.getElementById('root'). Build a rich "
+                "visual explanation of the user's explorations, notes, agent questions, takeaways, "
+                "paper comments, and chat history."
+            ),
+            tools=[],
+            tool_choice=None,
+            parallel_tool_calls=False,
+        )
+
+    def _assistant_response_text(self, response: ResponseEnvelope) -> str:
+        return "\n".join(
+            item.content_text
+            for item in response.items
+            if item.item_type == "assistant_message" and item.content_text
+        ).strip()
+
+    def _parse_project_presentation_payload(self, text: str) -> dict[str, Any]:
+        payload_text = text.strip()
+        if payload_text.startswith("```"):
+            payload_text = re.sub(r"^```(?:json)?\s*", "", payload_text, flags=re.IGNORECASE)
+            payload_text = re.sub(r"\s*```$", "", payload_text).strip()
+        try:
+            payload = json.loads(payload_text)
+        except json.JSONDecodeError:
+            start = payload_text.find("{")
+            end = payload_text.rfind("}")
+            if start < 0 or end <= start:
+                raise PermanentError("Presentation model did not return JSON")
+            payload = json.loads(payload_text[start : end + 1])
+        if not isinstance(payload, dict):
+            raise PermanentError("Presentation model returned an invalid payload")
+        return payload
+
+    def _default_project_presentation_summary(self, context_snapshot: dict[str, Any]) -> str:
+        project = context_snapshot.get("project", {}) if isinstance(context_snapshot.get("project"), dict) else {}
+        explorations = context_snapshot.get("explorations", [])
+        threads = context_snapshot.get("chat_threads", [])
+        comments = context_snapshot.get("paper_comments", [])
+        project_name = str(project.get("name") or "Project")
+        return (
+            f"# {project_name}\n\n"
+            "## Summary\n\n"
+            "The presentation workflow completed, but the model did not provide a textual summary. "
+            "The project context is available for regeneration.\n\n"
+            "| Context | Count |\n"
+            "| --- | ---: |\n"
+            f"| Paper explorations | {len(explorations) if isinstance(explorations, list) else 0} |\n"
+            f"| Chat threads | {len(threads) if isinstance(threads, list) else 0} |\n"
+            f"| Paper comments | {len(comments) if isinstance(comments, list) else 0} |\n"
+        )
+
+    def _default_project_presentation_visual(self, project_name: str) -> str:
+        safe_name = json.dumps(project_name)
+        return (
+            "const root = document.getElementById('root');"
+            f"const title = {safe_name};"
+            "function App(){return React.createElement('div',{className:'min-h-screen bg-white p-8 text-stone-900'},"
+            "React.createElement('div',{className:'mx-auto flex h-full max-w-3xl flex-col justify-center gap-4'},"
+            "React.createElement('p',{className:'text-xs font-semibold uppercase tracking-wide text-blue-600'},'Project presentation'),"
+            "React.createElement('h1',{className:'text-4xl font-semibold'},title),"
+            "React.createElement('p',{className:'text-base leading-7 text-stone-600'},'Regenerate this presentation to refresh the visual explanation from the latest notes, chats, and explored papers.')))};"
+            "ReactDOM.createRoot(root).render(React.createElement(App));"
+        )
+
+    def _send_project_presentation_ready_email(
+        self,
+        *,
+        user: BrowserUser,
+        project_name: str,
+        presentation: ProjectPresentationResponse,
+    ) -> None:
+        presentation_url = presentation.share_url or self._browser_app_url("/")
+        try:
+            self.email_sender.send_project_presentation_ready(
+                email=user.email,
+                project_name=project_name,
+                presentation_url=presentation_url,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to send project presentation ready email",
+                extra={"event": "project.presentation.email_failed", "user_id": user.user_id},
+            )
 
     def create_python_file(self, user: BrowserUser, project_id: str) -> PythonFileResponse:
         self._get_github_connection(user)
@@ -8088,6 +8545,13 @@ class PaperbaseService:
                     force=bool(job.payload.get("force")),
                     tracking_job=job,
                 )
+            elif job.job_type == "project_presentation":
+                self.generate_project_presentation(
+                    user_id=str(job.payload["user_id"]),
+                    project_id=str(job.payload["project_id"]),
+                    presentation_id=str(job.payload["presentation_id"]),
+                    context_snapshot=dict(job.payload.get("context_snapshot") or {}),
+                )
             else:
                 raise ValueError(f"Unsupported job type: {job.job_type}")
             self._raise_if_current_job_canceled()
@@ -9398,6 +9862,9 @@ class PaperbaseService:
         if not base:
             return path
         return f"{base}{path}"
+
+    def _project_presentation_share_url(self, share_token: str) -> str:
+        return self._browser_app_url(f"/?presentation={quote(share_token)}")
 
     def _paper_artifact_location(self, paper_id: str, path: str) -> tuple[str, str]:
         self.get_indexed_paper(paper_id)

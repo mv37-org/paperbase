@@ -34,7 +34,9 @@ import {
   loadGitHubRepositories,
   loadGitHubRepoImportCandidates,
   loadGitHubRepoMetadata,
+  loadPublicProjectPresentation,
   loadProjectItems,
+  loadProjectPresentation,
   loadProjects,
   loadSession,
   loadUploads,
@@ -46,11 +48,13 @@ import {
   runPythonFile,
   sendThreadMessage,
   sendThreadMessageStream,
+  startProjectPresentation,
   submitChatFeedback,
   suggestBrowserPapers,
   StreamingChatAbortError,
   StreamingChatError,
   syncProjectRepo,
+  updateProjectPresentationShare,
   updateProject,
   updatePythonFile,
   upvoteBrowserPaper,
@@ -171,6 +175,7 @@ import { CredentialFormUsernameField } from "./CredentialFormUsernameField";
 import { CodeSnippet, extractStreamingPythonPreview } from "./CodeSnippet";
 import { LandingMentionEditor } from "./LandingMentionEditor";
 import { MarkdownRenderer } from "./MarkdownRenderer";
+import { ProjectPresentationCanvas } from "./ProjectPresentationCanvas";
 import { formatLocalTimestamp } from "./time";
 import { TrendingPapersPage, type TrendingBrowseState } from "./TrendingPapersPage";
 import type {
@@ -195,6 +200,8 @@ import type {
   PaperSelectionPayload,
   PaperVoteSummary,
   ProjectItemKind,
+  ProjectPresentationExplorationSnapshot,
+  ProjectPresentationResponse,
   ProjectRepoConflictResolution,
   ProjectSummary,
   PythonFileResponse,
@@ -210,6 +217,19 @@ type ThreadRenameModalState = {
   title: string;
   draft: string;
   saving: boolean;
+  error: string;
+};
+
+type ProjectPresentationState = {
+  presentation: ProjectPresentationResponse | null;
+  loading: boolean;
+  error: string;
+  sharing: boolean;
+};
+
+type PublicProjectPresentationState = {
+  presentation: ProjectPresentationResponse | null;
+  loading: boolean;
   error: string;
 };
 
@@ -363,6 +383,13 @@ function authorInitials(author: string) {
     .map((part) => part.trim())
     .filter(Boolean);
   return (parts[0]?.[0] ?? "").concat(parts.length > 1 ? (parts[parts.length - 1]?.[0] ?? "") : "");
+}
+
+function presentationTokenFromUrl() {
+  if (typeof window === "undefined") {
+    return "";
+  }
+  return new URLSearchParams(window.location.search).get("presentation")?.trim() ?? "";
 }
 
 function samePaperSections(left: PdfDocumentSection[], right: PdfDocumentSection[]) {
@@ -810,6 +837,13 @@ export default function App() {
   const [authView, setAuthView] = useState<AuthView>("login");
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [authReady, setAuthReady] = useState(Boolean(bootstrapSession));
+  const [publicPresentationToken] = useState(() => presentationTokenFromUrl());
+  const [publicPresentationState, setPublicPresentationState] =
+    useState<PublicProjectPresentationState>({
+      presentation: null,
+      loading: false,
+      error: "",
+    });
   const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTab>("inference");
   const [appearanceThemeDraft, setAppearanceThemeDraft] = useState<AppearanceTheme>("light");
   const [flash, setFlash] = useState("");
@@ -878,6 +912,10 @@ export default function App() {
   const [paperExplorations, setPaperExplorations] = useState<PaperExploration[]>(() =>
     restorePaperExplorations(),
   );
+  const [presentingProjectId, setPresentingProjectId] = useState<string | null>(null);
+  const [projectPresentationStates, setProjectPresentationStates] = useState<
+    Record<string, ProjectPresentationState>
+  >({});
   const [explorationPicker, setExplorationPicker] = useState<{
     projectId: string;
     projectName: string;
@@ -1222,6 +1260,18 @@ export default function App() {
   const activeProjectHome = activeProjectHomeId
     ? (projects.find((project) => project.project_id === activeProjectHomeId) ?? null)
     : null;
+  const activeProjectPresentationState = activeProjectHomeId
+    ? (projectPresentationStates[activeProjectHomeId] ?? {
+        presentation: null,
+        loading: false,
+        error: "",
+        sharing: false,
+      })
+    : null;
+  const activeProjectPresentation = activeProjectPresentationState?.presentation ?? null;
+  const activeProjectPresenting = Boolean(
+    activeProjectHomeId && presentingProjectId === activeProjectHomeId,
+  );
   const activePaperExploration = activePaperExplorationId
     ? (paperExplorations.find(
         (exploration) => exploration.explorationId === activePaperExplorationId,
@@ -3360,6 +3410,141 @@ export default function App() {
       return false;
     },
     [showErrorFlash],
+  );
+
+  const projectPresentationExplorationSnapshots = useCallback(
+    (projectId: string): ProjectPresentationExplorationSnapshot[] =>
+      paperExplorations
+        .filter((exploration) => exploration.projectId === projectId)
+        .map((exploration) => ({
+          exploration_id: exploration.explorationId,
+          paper_id: exploration.paperId,
+          chat_thread_id: exploration.chatThreadId ?? "",
+          path: exploration.path,
+          title: exploration.title,
+          authors: exploration.authors,
+          preview_image_url: exploration.previewImageUrl,
+          pdf_url: exploration.pdfUrl,
+          annotations: exploration.annotations.map((annotation) => ({
+            annotation_id: annotation.annotationId,
+            kind: annotation.kind,
+            note: annotation.note,
+            page_number: annotation.pageNumber,
+            selected_text: annotation.selectedText ?? "",
+            nearby_text: annotation.nearbyText ?? "",
+            section_title: annotation.sectionTitle ?? "",
+            rects: annotation.rects ?? [],
+            region: annotation.region ?? null,
+            created_at: annotation.createdAt,
+            updated_at: annotation.updatedAt,
+          })),
+          created_at: exploration.createdAt,
+          updated_at: exploration.updatedAt,
+        })),
+    [paperExplorations],
+  );
+
+  const setProjectPresentationState = useCallback(
+    (projectId: string, updater: (state: ProjectPresentationState) => ProjectPresentationState) => {
+      setProjectPresentationStates((current) => {
+        const previous = current[projectId] ?? {
+          presentation: null,
+          loading: false,
+          error: "",
+          sharing: false,
+        };
+        return { ...current, [projectId]: updater(previous) };
+      });
+    },
+    [],
+  );
+
+  const refreshProjectPresentation = useCallback(
+    async (projectId: string) => {
+      setProjectPresentationState(projectId, (state) => ({ ...state, loading: true, error: "" }));
+      try {
+        const presentation = await loadProjectPresentation(projectId);
+        setProjectPresentationState(projectId, (state) => ({
+          ...state,
+          presentation,
+          loading: false,
+          error: "",
+        }));
+        return presentation;
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Presentation could not be loaded.";
+        setProjectPresentationState(projectId, (state) => ({
+          ...state,
+          loading: false,
+          error: message,
+        }));
+        throw error;
+      }
+    },
+    [setProjectPresentationState],
+  );
+
+  const startProjectPresentationWorkflow = useCallback(
+    async (projectId: string, options: { regenerate?: boolean } = {}) => {
+      if (!requireInferenceAccess()) {
+        return;
+      }
+      setPresentingProjectId(projectId);
+      setProjectPresentationState(projectId, (state) => ({ ...state, loading: true, error: "" }));
+      try {
+        const presentation = await startProjectPresentation(projectId, {
+          explorations: projectPresentationExplorationSnapshots(projectId),
+          regenerate: Boolean(options.regenerate),
+        });
+        setProjectPresentationState(projectId, (state) => ({
+          ...state,
+          presentation,
+          loading: false,
+          error: "",
+        }));
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Presentation could not be started.";
+        setProjectPresentationState(projectId, (state) => ({
+          ...state,
+          loading: false,
+          error: message,
+        }));
+        showErrorFlash(message);
+      }
+    },
+    [
+      projectPresentationExplorationSnapshots,
+      requireInferenceAccess,
+      setProjectPresentationState,
+      showErrorFlash,
+    ],
+  );
+
+  const toggleProjectPresentationShare = useCallback(
+    async (projectId: string, isPublic: boolean) => {
+      setProjectPresentationState(projectId, (state) => ({ ...state, sharing: true, error: "" }));
+      try {
+        const presentation = await updateProjectPresentationShare(projectId, isPublic);
+        setProjectPresentationState(projectId, (state) => ({
+          ...state,
+          presentation,
+          sharing: false,
+          error: "",
+        }));
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Presentation sharing could not be updated.";
+        setProjectPresentationState(projectId, (state) => ({
+          ...state,
+          sharing: false,
+          error: message,
+        }));
+        showErrorFlash(message);
+      }
+    },
+    [setProjectPresentationState, showErrorFlash],
   );
 
   const sendMessage = useCallback(
@@ -5938,6 +6123,54 @@ export default function App() {
     return () => window.removeEventListener("paperbase:auth-expired", onAuthExpired);
   }, [resetAuthenticatedState, showNoteFlash]);
 
+  useEffect(() => {
+    if (!publicPresentationToken) {
+      return;
+    }
+    let canceled = false;
+    setPublicPresentationState({ presentation: null, loading: true, error: "" });
+    loadPublicProjectPresentation(publicPresentationToken)
+      .then((presentation) => {
+        if (canceled) {
+          return;
+        }
+        setPublicPresentationState({ presentation, loading: false, error: "" });
+      })
+      .catch((error) => {
+        if (canceled) {
+          return;
+        }
+        setPublicPresentationState({
+          presentation: null,
+          loading: false,
+          error: error instanceof Error ? error.message : "Presentation could not be loaded.",
+        });
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [publicPresentationToken]);
+
+  useEffect(() => {
+    if (
+      !activeProjectHomeId ||
+      !activeProjectPresenting ||
+      !activeProjectPresentation ||
+      !["pending", "running"].includes(activeProjectPresentation.status)
+    ) {
+      return;
+    }
+    const interval = window.setInterval(() => {
+      void refreshProjectPresentation(activeProjectHomeId).catch(() => undefined);
+    }, 3000);
+    return () => window.clearInterval(interval);
+  }, [
+    activeProjectHomeId,
+    activeProjectPresenting,
+    activeProjectPresentation?.status,
+    refreshProjectPresentation,
+  ]);
+
   if (!authReady) {
     return null;
   }
@@ -6058,7 +6291,32 @@ export default function App() {
 
   return (
     <>
-      {!authenticated ? (
+      {publicPresentationToken ? (
+        <main className="project-presentation-public-page">
+          {publicPresentationState.loading ? (
+            <div className="project-presentation-public-state">Loading presentation</div>
+          ) : publicPresentationState.error ? (
+            <div className="project-presentation-public-state error">
+              {publicPresentationState.error}
+            </div>
+          ) : publicPresentationState.presentation ? (
+            <div className="project-presentation-public-shell">
+              <section className="project-presentation-canvas">
+                <ProjectPresentationCanvas
+                  visualCode={publicPresentationState.presentation.visual_code}
+                  title="Shared project presentation visual"
+                />
+              </section>
+              <section className="project-presentation-summary">
+                <MarkdownRenderer
+                  markdown={publicPresentationState.presentation.summary_markdown}
+                  className="message-markdown project-presentation-markdown"
+                />
+              </section>
+            </div>
+          ) : null}
+        </main>
+      ) : !authenticated ? (
         trendingBrowseState ? (
           <main id="landing-page" className="landing-page landing-page-trending">
             <button
@@ -6156,7 +6414,7 @@ export default function App() {
         )
       ) : null}
 
-      {authenticated ? (
+      {!publicPresentationToken && authenticated ? (
         <div
           id="app-shell"
           className={`app-shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${mobileSidebarOpen ? " mobile-sidebar-open" : ""}${paperDrawerOpen ? " paper-drawer-open" : ""}${paperExplorationSidebarOpen ? " paper-exploration-sidebar-open" : ""}`}
@@ -7087,29 +7345,145 @@ export default function App() {
                 )
               ) : activeTab?.kind === "project_home" ? (
                 activeProjectHome ? (
-                  <div className="project-home-page">
-                    <div className="project-home-header">
-                      <span>Project Home</span>
-                      <h1>{activeProjectHome.name}</h1>
-                      <p>
-                        {activeProjectHome.description || "No project summary has been added yet."}
-                      </p>
+                  activeProjectPresenting ? (
+                    <div className="project-presentation-page">
+                      <div className="project-presentation-toolbar">
+                        <div className="project-presentation-heading">
+                          <span>Project Presentation</span>
+                          <h1>{activeProjectHome.name}</h1>
+                        </div>
+                        <div className="project-presentation-actions">
+                          <button
+                            type="button"
+                            className="project-presentation-secondary-button"
+                            onClick={() => setPresentingProjectId(null)}
+                          >
+                            Back to home
+                          </button>
+                          <button
+                            type="button"
+                            className="project-presentation-primary-button"
+                            disabled={Boolean(activeProjectPresentationState?.loading)}
+                            onClick={() =>
+                              void startProjectPresentationWorkflow(activeProjectHome.project_id, {
+                                regenerate: true,
+                              })
+                            }
+                          >
+                            Regenerate presentation
+                          </button>
+                        </div>
+                      </div>
+
+                      {activeProjectPresentationState?.error ? (
+                        <div className="project-presentation-error">
+                          {activeProjectPresentationState.error}
+                        </div>
+                      ) : null}
+
+                      {activeProjectPresentationState?.loading ||
+                      activeProjectPresentation?.status === "pending" ||
+                      activeProjectPresentation?.status === "running" ? (
+                        <div className="project-presentation-progress" role="status">
+                          <span>creating presentation</span>
+                          <div className="project-presentation-progress-track" aria-hidden="true">
+                            <span />
+                          </div>
+                        </div>
+                      ) : activeProjectPresentation?.status === "completed" ? (
+                        <>
+                          <div className="project-presentation-share-row">
+                            <label className="project-presentation-share-toggle">
+                              <input
+                                type="checkbox"
+                                checked={activeProjectPresentation.is_public}
+                                disabled={Boolean(activeProjectPresentationState?.sharing)}
+                                onChange={(event) =>
+                                  void toggleProjectPresentationShare(
+                                    activeProjectHome.project_id,
+                                    event.target.checked,
+                                  )
+                                }
+                              />
+                              <span>Share as webpage</span>
+                            </label>
+                            {activeProjectPresentation.share_url ? (
+                              <a
+                                href={activeProjectPresentation.share_url}
+                                target="_blank"
+                                rel="noreferrer"
+                              >
+                                Open share link
+                              </a>
+                            ) : null}
+                          </div>
+                          <div className="project-presentation-layout">
+                            <section className="project-presentation-canvas">
+                              <ProjectPresentationCanvas
+                                visualCode={activeProjectPresentation.visual_code}
+                                title={`${activeProjectHome.name} presentation visual`}
+                              />
+                            </section>
+                            <section className="project-presentation-summary">
+                              <MarkdownRenderer
+                                markdown={activeProjectPresentation.summary_markdown}
+                                className="message-markdown project-presentation-markdown"
+                              />
+                            </section>
+                          </div>
+                        </>
+                      ) : activeProjectPresentation?.status === "failed" ? (
+                        <div className="project-presentation-error">
+                          {activeProjectPresentation.error || "Presentation generation failed."}
+                        </div>
+                      ) : (
+                        <div className="project-presentation-progress" role="status">
+                          <span>creating presentation</span>
+                          <div className="project-presentation-progress-track" aria-hidden="true">
+                            <span />
+                          </div>
+                        </div>
+                      )}
                     </div>
-                    <div className="project-home-grid">
-                      <div className="project-home-stat">
-                        <span>Code</span>
-                        <strong>{activeProjectHomeCodeCount}</strong>
+                  ) : (
+                    <div className="project-home-page">
+                      <div className="project-home-header">
+                        <div className="project-home-header-copy">
+                          <span>Project Home</span>
+                          <h1>{activeProjectHome.name}</h1>
+                          <p>
+                            {activeProjectHome.description ||
+                              "No project summary has been added yet."}
+                          </p>
+                        </div>
+                        <div className="project-home-header-actions">
+                          <button
+                            type="button"
+                            className="project-home-present-button"
+                            onClick={() =>
+                              void startProjectPresentationWorkflow(activeProjectHome.project_id)
+                            }
+                          >
+                            Present this project
+                          </button>
+                        </div>
                       </div>
-                      <div className="project-home-stat">
-                        <span>Sessions</span>
-                        <strong>{activeProjectHomeSessionCount}</strong>
-                      </div>
-                      <div className="project-home-stat">
-                        <span>Explorations</span>
-                        <strong>{activeProjectHomeExplorationCount}</strong>
+                      <div className="project-home-grid">
+                        <div className="project-home-stat">
+                          <span>Code</span>
+                          <strong>{activeProjectHomeCodeCount}</strong>
+                        </div>
+                        <div className="project-home-stat">
+                          <span>Sessions</span>
+                          <strong>{activeProjectHomeSessionCount}</strong>
+                        </div>
+                        <div className="project-home-stat">
+                          <span>Explorations</span>
+                          <strong>{activeProjectHomeExplorationCount}</strong>
+                        </div>
                       </div>
                     </div>
-                  </div>
+                  )
                 ) : (
                   <div className="project-home-page">
                     <div className="project-home-header">

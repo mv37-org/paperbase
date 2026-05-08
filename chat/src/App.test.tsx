@@ -76,7 +76,9 @@ const apiMocks = vi.hoisted(() => {
     loadBrowserAdminPaperFiles: vi.fn(),
     loadBrowserAdminPapers: vi.fn(),
     loadBrowserTrendingPapers: vi.fn(),
+    loadPublicProjectPresentation: vi.fn(),
     loadProjectItems: vi.fn(),
+    loadProjectPresentation: vi.fn(),
     loadProjectSessions: vi.fn(),
     loadProjects: vi.fn(),
     loadSession: vi.fn(),
@@ -126,11 +128,13 @@ const apiMocks = vi.hoisted(() => {
     runPythonFile: vi.fn(),
     sendThreadMessage: vi.fn(),
     sendThreadMessageStream: vi.fn(),
+    startProjectPresentation: vi.fn(),
     submitChatFeedback: vi.fn(),
     suggestBrowserPapers: vi.fn(),
     StreamingChatAbortError: MockStreamingChatAbortError,
     StreamingChatError: MockStreamingChatError,
     syncProjectRepo: vi.fn(),
+    updateProjectPresentationShare: vi.fn(),
     upvoteBrowserPaper: vi.fn(),
     upvoteBrowserTrendingPaper: vi.fn(),
     updateProject: vi.fn(),
@@ -184,7 +188,9 @@ vi.mock("./api", () => ({
   loadBrowserAdminPaperFiles: apiMocks.loadBrowserAdminPaperFiles,
   loadBrowserAdminPapers: apiMocks.loadBrowserAdminPapers,
   loadBrowserTrendingPapers: apiMocks.loadBrowserTrendingPapers,
+  loadPublicProjectPresentation: apiMocks.loadPublicProjectPresentation,
   loadProjectItems: apiMocks.loadProjectItems,
+  loadProjectPresentation: apiMocks.loadProjectPresentation,
   loadProjectSessions: apiMocks.loadProjectSessions,
   loadProjects: apiMocks.loadProjects,
   loadSession: apiMocks.loadSession,
@@ -204,11 +210,13 @@ vi.mock("./api", () => ({
   runPythonFile: apiMocks.runPythonFile,
   sendThreadMessage: apiMocks.sendThreadMessage,
   sendThreadMessageStream: apiMocks.sendThreadMessageStream,
+  startProjectPresentation: apiMocks.startProjectPresentation,
   submitChatFeedback: apiMocks.submitChatFeedback,
   suggestBrowserPapers: apiMocks.suggestBrowserPapers,
   StreamingChatAbortError: apiMocks.StreamingChatAbortError,
   StreamingChatError: apiMocks.StreamingChatError,
   syncProjectRepo: apiMocks.syncProjectRepo,
+  updateProjectPresentationShare: apiMocks.updateProjectPresentationShare,
   upvoteBrowserPaper: apiMocks.upvoteBrowserPaper,
   upvoteBrowserTrendingPaper: apiMocks.upvoteBrowserTrendingPaper,
   updateProject: apiMocks.updateProject,
@@ -638,6 +646,24 @@ function projectSummary(projectId: string, name: string, sessionCount = 1, githu
   };
 }
 
+function projectPresentationResponse(projectId = "proj_1", status = "completed") {
+  return {
+    presentation_id: "pres_1",
+    project_id: projectId,
+    status,
+    visual_code: "ReactDOM.createRoot(document.getElementById('root')).render('ok');",
+    summary_markdown: "# Project summary\n\n| Item | Count |\n| --- | ---: |\n| Notes | 1 |",
+    is_public: false,
+    share_token: null,
+    share_url: "",
+    error: "",
+    job_id: status === "pending" ? "job_1" : null,
+    created_at: "2026-04-21T00:00:00Z",
+    updated_at: "2026-04-21T00:00:00Z",
+    completed_at: status === "completed" ? "2026-04-21T00:00:00Z" : null,
+  };
+}
+
 function threadResponse(
   threadId: string,
   title: string,
@@ -857,6 +883,25 @@ describe("App", () => {
         };
       },
     );
+    apiMocks.loadProjectPresentation.mockResolvedValue({
+      ...projectPresentationResponse("proj_1", "missing"),
+      presentation_id: "",
+      visual_code: "",
+      summary_markdown: "",
+    });
+    apiMocks.startProjectPresentation.mockResolvedValue(projectPresentationResponse("proj_1"));
+    apiMocks.updateProjectPresentationShare.mockResolvedValue({
+      ...projectPresentationResponse("proj_1"),
+      is_public: true,
+      share_token: "share_1",
+      share_url: "http://127.0.0.1:8080/?presentation=share_1",
+    });
+    apiMocks.loadPublicProjectPresentation.mockResolvedValue({
+      ...projectPresentationResponse("proj_1"),
+      is_public: true,
+      share_token: "share_1",
+      share_url: "http://127.0.0.1:8080/?presentation=share_1",
+    });
     apiMocks.createProject.mockResolvedValue(projectSummary("proj_2", "Agents", 0));
     apiMocks.createThread.mockResolvedValue(threadResponse("thread_2", "New chat"));
     apiMocks.createPythonFile.mockResolvedValue(pythonFileResponse("file_1"));
@@ -1441,6 +1486,29 @@ describe("App", () => {
 
     fireEvent.click(screen.getByText("Home"));
     expect(await screen.findByText("Project Home")).toBeTruthy();
+  });
+
+  it("starts a project presentation from the project home tab", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.startProjectPresentation.mockResolvedValue(projectPresentationResponse("proj_1"));
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+    fireEvent.click(screen.getAllByText("General")[0]!);
+    fireEvent.click(await screen.findByText("Home"));
+    fireEvent.click(await screen.findByRole("button", { name: "Present this project" }));
+
+    await waitFor(() => {
+      expect(apiMocks.startProjectPresentation).toHaveBeenCalledWith("proj_1", {
+        explorations: [],
+        regenerate: false,
+      });
+    });
+    expect(await screen.findByText("Project Presentation")).toBeTruthy();
+    expect(await screen.findByText(/Project summary/)).toBeTruthy();
   });
 
   it("starts a paper exploration from the project exploration picker", async () => {

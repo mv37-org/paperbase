@@ -58,6 +58,7 @@ from .models import (
     PaperResponse,
     ProjectItemPageResponse,
     ProjectItemSummary,
+    ProjectPresentationResponse,
     ProjectRepoSyncResponse,
     ProjectResponse,
     ProjectSessionPageResponse,
@@ -316,6 +317,7 @@ class ResultItemORM(Base):
 # in this map fall back to 3 — the same default encoded on the ORM column.
 _JOB_TYPE_MAX_ATTEMPTS: dict[str, int] = {
     "index_paper": 3,
+    "project_presentation": 2,
     "sync_latest": 5,
     "enrich_missing_metadata": 5,
     "reindex_missing_embeddings": 2,
@@ -337,6 +339,7 @@ def default_max_attempts(job_type: str) -> int:
 # Jobs not in this map fall back to 0 — the same default encoded on the ORM.
 _JOB_TYPE_PRIORITY: dict[str, int] = {
     "index_paper": -10,
+    "project_presentation": -5,
     "sync_latest": 0,
     "enrich_missing_metadata": 0,
     "reindex_missing_embeddings": 0,
@@ -782,6 +785,29 @@ class ProjectORM(Base):
     updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class ProjectPresentationORM(Base):
+    __tablename__ = "project_presentations"
+
+    presentation_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("browser_users.user_id", ondelete="CASCADE"), index=True)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.project_id", ondelete="CASCADE"),
+        unique=True,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(String(32), default="pending")
+    visual_code: Mapped[str] = mapped_column(Text, default="")
+    summary_markdown: Mapped[str] = mapped_column(Text, default="")
+    context_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    is_public: Mapped[bool] = mapped_column(Boolean, default=False)
+    share_token: Mapped[str | None] = mapped_column(String(96), unique=True, nullable=True)
+    job_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    error: Mapped[str] = mapped_column(Text, default="")
+    completed_at: Mapped[Any | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class ChatThreadORM(Base):
     __tablename__ = "chat_threads"
 
@@ -1008,6 +1034,29 @@ def _project_from_orm(
         github_repo_url=github_repo_url,
         created_at=row.created_at,
         updated_at=row.updated_at,
+    )
+
+
+def _project_presentation_from_orm(
+    row: ProjectPresentationORM,
+    *,
+    share_url: str = "",
+) -> ProjectPresentationResponse:
+    status = row.status if row.status in {"pending", "running", "completed", "failed"} else "failed"
+    return ProjectPresentationResponse(
+        presentation_id=row.presentation_id,
+        project_id=row.project_id,
+        status=status,  # type: ignore[arg-type]
+        visual_code=row.visual_code or "",
+        summary_markdown=row.summary_markdown or "",
+        is_public=bool(row.is_public),
+        share_token=row.share_token,
+        share_url=share_url if row.is_public and row.share_token else "",
+        error=row.error or "",
+        job_id=row.job_id,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        completed_at=row.completed_at,
     )
 
 
@@ -2032,6 +2081,18 @@ class SqlAlchemyPaperRepository(PaperRepository):
             connection.execute(
                 text(
                     "CREATE UNIQUE INDEX IF NOT EXISTS projects_default_per_user ON projects (user_id) WHERE is_default"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS project_presentations_user_project_idx "
+                    "ON project_presentations (user_id, project_id)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS project_presentations_share_token_idx "
+                    "ON project_presentations (share_token) WHERE share_token IS NOT NULL"
                 )
             )
             # #39 PR C: index for the list_top_authors aggregation query
@@ -4493,6 +4554,151 @@ class SqlAlchemyPaperRepository(PaperRepository):
             has_more=offset + len(page) < len(items),
         )
 
+    def get_project_presentation(
+        self,
+        *,
+        user_id: str,
+        project_id: str,
+    ) -> ProjectPresentationResponse | None:
+        with self._session() as session:
+            row = session.scalar(
+                select(ProjectPresentationORM).where(
+                    ProjectPresentationORM.user_id == user_id,
+                    ProjectPresentationORM.project_id == project_id,
+                )
+            )
+            if row is None:
+                return None
+            return _project_presentation_from_orm(row)
+
+    def get_public_project_presentation(self, share_token: str) -> ProjectPresentationResponse | None:
+        with self._session() as session:
+            row = session.scalar(
+                select(ProjectPresentationORM).where(
+                    ProjectPresentationORM.share_token == share_token,
+                    ProjectPresentationORM.is_public.is_(True),
+                    ProjectPresentationORM.status == "completed",
+                )
+            )
+            if row is None:
+                return None
+            return _project_presentation_from_orm(row)
+
+    def upsert_project_presentation_pending(
+        self,
+        *,
+        user_id: str,
+        project_id: str,
+        context_snapshot: dict[str, Any],
+        job_id: str,
+    ) -> ProjectPresentationResponse | None:
+        now = utcnow()
+        with self._session() as session:
+            project = session.scalar(
+                select(ProjectORM).where(ProjectORM.project_id == project_id, ProjectORM.user_id == user_id)
+            )
+            if project is None:
+                return None
+            row = session.scalar(
+                select(ProjectPresentationORM).where(
+                    ProjectPresentationORM.user_id == user_id,
+                    ProjectPresentationORM.project_id == project_id,
+                )
+            )
+            if row is None:
+                row = ProjectPresentationORM(
+                    presentation_id=new_id("pres"),
+                    user_id=user_id,
+                    project_id=project_id,
+                    status="pending",
+                    context_snapshot=context_snapshot,
+                    job_id=job_id,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(row)
+                session.flush()
+            else:
+                row.status = "pending"
+                row.context_snapshot = context_snapshot
+                row.job_id = job_id
+                row.error = ""
+                row.visual_code = ""
+                row.summary_markdown = ""
+                row.completed_at = None
+                row.updated_at = now
+            return _project_presentation_from_orm(row)
+
+    def set_project_presentation_running(self, presentation_id: str) -> ProjectPresentationResponse | None:
+        now = utcnow()
+        with self._session() as session:
+            row = session.get(ProjectPresentationORM, presentation_id)
+            if row is None:
+                return None
+            row.status = "running"
+            row.error = ""
+            row.updated_at = now
+            return _project_presentation_from_orm(row)
+
+    def complete_project_presentation(
+        self,
+        presentation_id: str,
+        *,
+        visual_code: str,
+        summary_markdown: str,
+    ) -> ProjectPresentationResponse | None:
+        now = utcnow()
+        with self._session() as session:
+            row = session.get(ProjectPresentationORM, presentation_id)
+            if row is None:
+                return None
+            row.status = "completed"
+            row.visual_code = visual_code
+            row.summary_markdown = summary_markdown
+            row.error = ""
+            row.completed_at = now
+            row.updated_at = now
+            return _project_presentation_from_orm(row)
+
+    def fail_project_presentation(
+        self,
+        presentation_id: str,
+        *,
+        error: str,
+    ) -> ProjectPresentationResponse | None:
+        now = utcnow()
+        with self._session() as session:
+            row = session.get(ProjectPresentationORM, presentation_id)
+            if row is None:
+                return None
+            row.status = "failed"
+            row.error = error[:4000]
+            row.updated_at = now
+            return _project_presentation_from_orm(row)
+
+    def update_project_presentation_share(
+        self,
+        *,
+        user_id: str,
+        project_id: str,
+        is_public: bool,
+        share_token: str | None = None,
+    ) -> ProjectPresentationResponse | None:
+        with self._session() as session:
+            row = session.scalar(
+                select(ProjectPresentationORM).where(
+                    ProjectPresentationORM.user_id == user_id,
+                    ProjectPresentationORM.project_id == project_id,
+                )
+            )
+            if row is None:
+                return None
+            row.is_public = is_public
+            if is_public and share_token:
+                row.share_token = share_token
+            row.updated_at = utcnow()
+            return _project_presentation_from_orm(row)
+
     def list_project_python_files(
         self,
         *,
@@ -5776,6 +5982,8 @@ class MemoryPaperRepository(PaperRepository):
         self.projects: dict[str, ProjectResponse] = {}
         self.project_users: dict[str, str] = {}
         self.default_projects_by_user: dict[str, str] = {}
+        self.project_presentations: dict[str, ProjectPresentationResponse] = {}
+        self.project_presentations_by_project: dict[str, str] = {}
         self.chat_threads: dict[str, ChatThreadResponse] = {}
         self.chat_thread_users: dict[str, str] = {}
         self.chat_feedback: dict[str, ChatFeedbackResponse] = {}
@@ -7041,6 +7249,9 @@ class MemoryPaperRepository(PaperRepository):
             if self.python_file_users.get(file_id) == user_id and python_file.project_id == project_id:
                 self.python_files.pop(file_id, None)
                 self.python_file_users.pop(file_id, None)
+        presentation_id = self.project_presentations_by_project.pop(project_id, None)
+        if presentation_id:
+            self.project_presentations.pop(presentation_id, None)
         self.project_repo_syncs.pop(project_id, None)
         if self.default_projects_by_user.get(user_id) == project_id:
             self.default_projects_by_user.pop(user_id, None)
@@ -7129,6 +7340,139 @@ class MemoryPaperRepository(PaperRepository):
             total_count=len(items),
             has_more=offset + len(page) < len(items),
         )
+
+    def get_project_presentation(
+        self,
+        *,
+        user_id: str,
+        project_id: str,
+    ) -> ProjectPresentationResponse | None:
+        if self.get_project(user_id=user_id, project_id=project_id) is None:
+            return None
+        presentation_id = self.project_presentations_by_project.get(project_id)
+        if not presentation_id:
+            return None
+        presentation = self.project_presentations.get(presentation_id)
+        if presentation is None:
+            return None
+        return presentation if self.project_users.get(project_id) == user_id else None
+
+    def get_public_project_presentation(self, share_token: str) -> ProjectPresentationResponse | None:
+        token = share_token.strip()
+        for presentation in self.project_presentations.values():
+            if (
+                presentation.share_token == token
+                and presentation.is_public
+                and presentation.status == "completed"
+            ):
+                return presentation
+        return None
+
+    def upsert_project_presentation_pending(
+        self,
+        *,
+        user_id: str,
+        project_id: str,
+        context_snapshot: dict[str, Any],
+        job_id: str,
+    ) -> ProjectPresentationResponse | None:
+        if self.get_project(user_id=user_id, project_id=project_id) is None:
+            return None
+        now = utcnow()
+        presentation_id = self.project_presentations_by_project.get(project_id)
+        existing = self.project_presentations.get(presentation_id or "")
+        if existing is None:
+            presentation = ProjectPresentationResponse(
+                presentation_id=new_id("pres"),
+                project_id=project_id,
+                status="pending",
+                job_id=job_id,
+                created_at=now,
+                updated_at=now,
+            )
+        else:
+            presentation = existing.model_copy(
+                update={
+                    "status": "pending",
+                    "visual_code": "",
+                    "summary_markdown": "",
+                    "error": "",
+                    "job_id": job_id,
+                    "completed_at": None,
+                    "updated_at": now,
+                }
+            )
+        self.project_presentations[presentation.presentation_id] = presentation
+        self.project_presentations_by_project[project_id] = presentation.presentation_id
+        return presentation
+
+    def set_project_presentation_running(self, presentation_id: str) -> ProjectPresentationResponse | None:
+        presentation = self.project_presentations.get(presentation_id)
+        if presentation is None:
+            return None
+        updated = presentation.model_copy(update={"status": "running", "error": "", "updated_at": utcnow()})
+        self.project_presentations[presentation_id] = updated
+        return updated
+
+    def complete_project_presentation(
+        self,
+        presentation_id: str,
+        *,
+        visual_code: str,
+        summary_markdown: str,
+    ) -> ProjectPresentationResponse | None:
+        presentation = self.project_presentations.get(presentation_id)
+        if presentation is None:
+            return None
+        now = utcnow()
+        updated = presentation.model_copy(
+            update={
+                "status": "completed",
+                "visual_code": visual_code,
+                "summary_markdown": summary_markdown,
+                "error": "",
+                "completed_at": now,
+                "updated_at": now,
+            }
+        )
+        self.project_presentations[presentation_id] = updated
+        return updated
+
+    def fail_project_presentation(
+        self,
+        presentation_id: str,
+        *,
+        error: str,
+    ) -> ProjectPresentationResponse | None:
+        presentation = self.project_presentations.get(presentation_id)
+        if presentation is None:
+            return None
+        updated = presentation.model_copy(
+            update={"status": "failed", "error": error[:4000], "updated_at": utcnow()}
+        )
+        self.project_presentations[presentation_id] = updated
+        return updated
+
+    def update_project_presentation_share(
+        self,
+        *,
+        user_id: str,
+        project_id: str,
+        is_public: bool,
+        share_token: str | None = None,
+    ) -> ProjectPresentationResponse | None:
+        presentation = self.get_project_presentation(user_id=user_id, project_id=project_id)
+        if presentation is None:
+            return None
+        updated = presentation.model_copy(
+            update={
+                "is_public": is_public,
+                "share_token": share_token if is_public and share_token else presentation.share_token,
+                "updated_at": utcnow(),
+            }
+        )
+        self.project_presentations[presentation.presentation_id] = updated
+        return updated
 
     def list_project_python_files(
         self,

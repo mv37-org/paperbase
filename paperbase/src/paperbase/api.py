@@ -67,6 +67,9 @@ from .models import (
     PaperResponse,
     PaperVoteSummary,
     ProjectItemPageResponse,
+    ProjectPresentationResponse,
+    ProjectPresentationShareRequest,
+    ProjectPresentationStartRequest,
     ProjectRepoSyncRequest,
     ProjectRepoSyncResponse,
     ProjectListResponse,
@@ -1630,6 +1633,43 @@ def browser_list_project_items(
     service: PaperbaseService = Depends(get_service),
 ) -> ProjectItemPageResponse:
     return service.list_project_items(user, project_id, limit=limit, offset=offset, item_kind=item_kind)
+
+
+@app.get("/v1/browser/projects/{project_id}/presentation", response_model=ProjectPresentationResponse)
+def browser_get_project_presentation(
+    project_id: str,
+    user=Depends(require_browser_user),
+    service: PaperbaseService = Depends(get_service),
+) -> ProjectPresentationResponse:
+    return service.get_project_presentation(user, project_id)
+
+
+@app.post("/v1/browser/projects/{project_id}/presentation", response_model=ProjectPresentationResponse)
+def browser_start_project_presentation(
+    project_id: str,
+    request: ProjectPresentationStartRequest,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> ProjectPresentationResponse:
+    return service.start_project_presentation(user, project_id, request)
+
+
+@app.patch("/v1/browser/projects/{project_id}/presentation/share", response_model=ProjectPresentationResponse)
+def browser_update_project_presentation_share(
+    project_id: str,
+    request: ProjectPresentationShareRequest,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> ProjectPresentationResponse:
+    return service.update_project_presentation_share(user, project_id, request)
+
+
+@app.get("/v1/browser/project-presentations/public/{share_token}", response_model=ProjectPresentationResponse)
+def browser_get_public_project_presentation(
+    share_token: str,
+    service: PaperbaseService = Depends(get_service),
+) -> ProjectPresentationResponse:
+    return service.get_public_project_presentation(share_token)
 
 
 @app.post("/v1/browser/projects/{project_id}/notebooks", response_model=PythonFileResponse)

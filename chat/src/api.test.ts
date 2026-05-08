@@ -744,6 +744,73 @@ describe("chat api", () => {
     expect(init?.method).toBe("GET");
   });
 
+  it("loads, starts, shares, and fetches project presentations", async () => {
+    const presentation = {
+      presentation_id: "pres_1",
+      project_id: "proj_1",
+      status: "completed",
+      visual_code: "ReactDOM.createRoot(document.getElementById('root')).render('ok');",
+      summary_markdown: "# Summary",
+      is_public: false,
+      share_token: null,
+      share_url: "",
+      error: "",
+      job_id: null,
+      created_at: "2026-04-21T00:00:00Z",
+      updated_at: "2026-04-21T00:00:00Z",
+      completed_at: "2026-04-21T00:00:00Z",
+    };
+    const fetchMock = vi
+      .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()
+      .mockResolvedValueOnce(jsonResponse(presentation))
+      .mockResolvedValueOnce(jsonResponse({ ...presentation, status: "pending", job_id: "job_1" }))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ...presentation,
+          is_public: true,
+          share_token: "share_1",
+          share_url: "http://127.0.0.1:8080/?presentation=share_1",
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ ...presentation, is_public: true }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await loadApiModule();
+
+    await api.loadProjectPresentation("proj_1");
+    await api.startProjectPresentation("proj_1", {
+      explorations: [
+        {
+          exploration_id: "exp_1",
+          paper_id: "paper_1",
+          path: "papers/paper_1",
+          title: "Paper",
+          authors: "A",
+          preview_image_url: "",
+          pdf_url: "",
+          annotations: [],
+          created_at: "2026-04-21T00:00:00Z",
+          updated_at: "2026-04-21T00:00:00Z",
+        },
+      ],
+      regenerate: true,
+    });
+    await api.updateProjectPresentationShare("proj_1", true);
+    await api.loadPublicProjectPresentation("share_1");
+
+    expect(requestPath(fetchMock.mock.calls[0]?.[0] as RequestInfo)).toBe(
+      "/v1/browser/projects/proj_1/presentation",
+    );
+    const [, startInit] = fetchMock.mock.calls[1] as FetchCall;
+    expect(startInit?.method).toBe("POST");
+    expect(startInit?.body).toContain('"regenerate":true');
+    const [sharePath, shareInit] = fetchMock.mock.calls[2] as FetchCall;
+    expect(requestPath(sharePath)).toBe("/v1/browser/projects/proj_1/presentation/share");
+    expect(shareInit?.body).toBe(JSON.stringify({ is_public: true }));
+    expect(requestPath(fetchMock.mock.calls[3]?.[0] as RequestInfo)).toBe(
+      "/v1/browser/project-presentations/public/share_1",
+    );
+  });
+
   it("sends structured GitHub sync payloads for project saves", async () => {
     const fetchMock = vi
       .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()

@@ -28,6 +28,8 @@ import type {
   PaperVoteSummary,
   ProjectItemKind,
   ProjectItemPageResponse,
+  ProjectPresentationResponse,
+  ProjectPresentationStartPayload,
   ProjectRepoConflictResolution,
   ProjectRepoSyncResponse,
   ProjectListResponse,
@@ -577,6 +579,43 @@ export function loadProjectItems(
   }
   return api<ProjectItemPageResponse>(
     `/v1/browser/projects/${projectId}/items?${params.toString()}`,
+    { method: "GET" },
+  );
+}
+
+export function loadProjectPresentation(projectId: string) {
+  return api<ProjectPresentationResponse>(
+    `/v1/browser/projects/${encodeURIComponent(projectId)}/presentation`,
+    { method: "GET" },
+  );
+}
+
+export function startProjectPresentation(
+  projectId: string,
+  payload: ProjectPresentationStartPayload,
+) {
+  return api<ProjectPresentationResponse>(
+    `/v1/browser/projects/${encodeURIComponent(projectId)}/presentation`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function updateProjectPresentationShare(projectId: string, isPublic: boolean) {
+  return api<ProjectPresentationResponse>(
+    `/v1/browser/projects/${encodeURIComponent(projectId)}/presentation/share`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ is_public: isPublic }),
+    },
+  );
+}
+
+export function loadPublicProjectPresentation(shareToken: string) {
+  return api<ProjectPresentationResponse>(
+    `/v1/browser/project-presentations/public/${encodeURIComponent(shareToken)}`,
     { method: "GET" },
   );
 }
