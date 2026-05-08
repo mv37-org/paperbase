@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 import json
+import logging
 import os
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -115,6 +116,7 @@ app = FastAPI(
 _app_settings = get_settings()
 _PACKAGE_DIR = Path(__file__).resolve().parent
 _STATIC_DIR = _PACKAGE_DIR / "static"
+logger = logging.getLogger(__name__)
 
 
 def _env_flag(name: str) -> bool:
@@ -1330,18 +1332,32 @@ async def browser_github_start(
     return_to: str | None = Query(default=None),
     user=Depends(require_browser_user),
 ):
-    del user
     client = get_github_oauth_client()
     settings = get_settings()
     redirect_base = _chat_redirect_base(request, settings, return_to=return_to)
     if _is_safe_return_to(return_to):
         request.session["browser_github_return_to"] = return_to
+    redirect_uri = settings.github_oauth_redirect_url or str(request.url_for("browser_github_callback"))
+    logger.info(
+        "Starting GitHub repo permission flow",
+        extra={
+            "event": "github.oauth.start",
+            "user_id": getattr(user, "user_id", None),
+            "oauth_configured": client is not None,
+            "return_to_present": bool(return_to),
+            "redirect_uri": redirect_uri,
+            "requested_scope": "read:user repo",
+        },
+    )
     if client is None:
+        logger.info(
+            "GitHub repo permission flow is not configured",
+            extra={"event": "github.oauth.not_configured", "user_id": getattr(user, "user_id", None)},
+        )
         return RedirectResponse(
             f"{redirect_base}/?auth_error=github_not_configured&settings=version-control",
             status_code=302,
         )
-    redirect_uri = settings.github_oauth_redirect_url or str(request.url_for("browser_github_callback"))
     return await client.authorize_redirect(request, redirect_uri, scope="read:user repo")
 
 
@@ -1355,12 +1371,29 @@ async def browser_github_callback(
     redirect_base = _chat_redirect_base(request, settings)
     raw_token = _browser_session_token(request)
     user = service.get_current_browser_user(raw_token)
+    logger.info(
+        "Handling GitHub repo permission callback",
+        extra={
+            "event": "github.oauth.callback",
+            "oauth_configured": client is not None,
+            "browser_session_present": bool(raw_token),
+            "user_id": getattr(user, "user_id", None),
+        },
+    )
     if client is None:
+        logger.info(
+            "GitHub repo permission callback cannot continue because OAuth is not configured",
+            extra={"event": "github.oauth.callback_not_configured", "browser_session_present": bool(raw_token)},
+        )
         return RedirectResponse(
             f"{redirect_base}/?auth_error=github_not_configured&settings=version-control",
             status_code=302,
         )
     if user is None:
+        logger.info(
+            "GitHub repo permission callback has no authenticated browser user",
+            extra={"event": "github.oauth.callback_missing_user", "browser_session_present": bool(raw_token)},
+        )
         return RedirectResponse(
             f"{redirect_base}/?auth_error=github_auth_required&settings=version-control",
             status_code=302,
@@ -1370,12 +1403,31 @@ async def browser_github_callback(
         access_token = str(token.get("access_token") or "").strip()
         if not access_token:
             raise RuntimeError("GitHub did not return an access token")
+        logger.info(
+            "GitHub repo permission callback received an access token",
+            extra={
+                "event": "github.oauth.token_received",
+                "user_id": user.user_id,
+                "scope": str(token.get("scope") or ""),
+                "token_type": str(token.get("token_type") or ""),
+                "access_token_present": bool(access_token),
+            },
+        )
         userinfo_response = await client.get("user", token=token)
         userinfo = userinfo_response.json()
         github_user_id = str(userinfo.get("id") or "").strip()
         github_login = str(userinfo.get("login") or "").strip()
         if not github_user_id or not github_login:
             raise RuntimeError("GitHub response was missing user id or login")
+        logger.info(
+            "GitHub repo permission callback loaded user info",
+            extra={
+                "event": "github.oauth.user_loaded",
+                "user_id": user.user_id,
+                "github_user_id": github_user_id,
+                "github_login": github_login,
+            },
+        )
         service.save_github_connection(
             user,
             github_user_id=github_user_id,
@@ -1388,6 +1440,10 @@ async def browser_github_callback(
             status_code=302,
         )
     except Exception:
+        logger.exception(
+            "GitHub repo permission callback failed",
+            extra={"event": "github.oauth.callback_failed", "user_id": getattr(user, "user_id", None)},
+        )
         return RedirectResponse(
             f"{redirect_base}/?auth_error=github_callback_failed&settings=version-control",
             status_code=302,

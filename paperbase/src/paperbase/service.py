@@ -598,6 +598,10 @@ def _github_scope_allows_repo_write(scope: str) -> bool:
     return "repo" in values or "public_repo" in values
 
 
+def _github_scope_values(scope: str) -> list[str]:
+    return sorted({part.strip() for part in (scope or "").split(",") if part.strip()})
+
+
 def _validate_repo_name(value: str) -> str:
     repo_name = (value or "").strip()
     if not repo_name or "/" in repo_name or "\\" in repo_name or repo_name in {".", ".."}:
@@ -2082,6 +2086,17 @@ class PaperbaseService:
             encrypted_access_token=self.secret_cipher.encrypt(access_token.strip()),
             scope=scope.strip(),
         )
+        logger.info(
+            "Saved GitHub repo permission connection",
+            extra={
+                "event": "github.connection_saved",
+                "user_id": user.user_id,
+                "github_user_id": github_user_id,
+                "github_login": github_login,
+                "scopes": _github_scope_values(scope),
+                "repo_write_allowed": _github_scope_allows_repo_write(scope),
+            },
+        )
         return self._browser_session_response(user)
 
     def delete_github_connection(self, user: BrowserUser) -> BrowserSessionResponse:
@@ -2115,15 +2130,37 @@ class PaperbaseService:
     def _get_github_connection(self, user: BrowserUser) -> dict[str, str]:
         record = self.repository.get_github_connection_record(user.user_id)  # type: ignore[attr-defined]
         if record is None:
+            logger.info(
+                "GitHub repo permission connection is missing",
+                extra={"event": "github.connection_missing", "user_id": user.user_id},
+            )
             raise HTTPException(
                 status_code=409,
                 detail="Connect GitHub before creating or saving project files",
             )
         if not _github_scope_allows_repo_write(record.get("scope", "")):
+            logger.info(
+                "GitHub repo permission connection lacks repo write scope",
+                extra={
+                    "event": "github.connection_scope_denied",
+                    "user_id": user.user_id,
+                    "github_login": record.get("github_login", ""),
+                    "scopes": _github_scope_values(record.get("scope", "")),
+                },
+            )
             raise HTTPException(
                 status_code=409,
                 detail="Reconnect GitHub with repo access before creating or saving project files",
             )
+        logger.info(
+            "GitHub repo permission connection is ready",
+            extra={
+                "event": "github.connection_ready",
+                "user_id": user.user_id,
+                "github_login": record.get("github_login", ""),
+                "scopes": _github_scope_values(record.get("scope", "")),
+            },
+        )
         return record
 
     def list_uploaded_documents(self, user: BrowserUser) -> UploadListResponse:
@@ -2206,7 +2243,17 @@ class PaperbaseService:
 
     def _github_access(self, user: BrowserUser) -> tuple[dict[str, str], str]:
         github = self._get_github_connection(user)
-        return github, self.secret_cipher.decrypt(github["encrypted_access_token"])
+        access_token = self.secret_cipher.decrypt(github["encrypted_access_token"])
+        logger.info(
+            "Decrypted GitHub repo permission token",
+            extra={
+                "event": "github.connection_token_ready",
+                "user_id": user.user_id,
+                "github_login": github.get("github_login", ""),
+                "access_token_present": bool(access_token),
+            },
+        )
+        return github, access_token
 
     def get_github_repo_metadata(
         self,
@@ -2316,9 +2363,31 @@ class PaperbaseService:
         import_rows: list[tuple[str, str, str, str]] = []
         remote_head_sha = ""
         base_branch = "main"
+        logger.info(
+            "Starting project create GitHub permission flow",
+            extra={
+                "event": "project.create.github_start",
+                "user_id": user.user_id,
+                "project_name": name,
+                "repo_mode": repo_request.mode,
+                "repo_owner": repo_request.owner or github.get("github_login", ""),
+                "repo_name": repo_request.name,
+                "base_branch": repo_request.base_branch or "",
+                "import_path_count": len(repo_request.import_paths),
+            },
+        )
         try:
             if repo_request.mode == "create":
                 repo_name = _validate_repo_name(repo_request.name)
+                logger.info(
+                    "Creating GitHub repository for project",
+                    extra={
+                        "event": "project.create.github_repo_create",
+                        "user_id": user.user_id,
+                        "github_login": github["github_login"],
+                        "repo_name": repo_name,
+                    },
+                )
                 repo_info = self.github_repo_manager.create_repo(
                     access_token=access_token,
                     owner_login=github["github_login"],
@@ -2328,11 +2397,32 @@ class PaperbaseService:
                 owner_login = repo_info.owner_login or github["github_login"]
                 default_branch = "main"
                 base_branch = "main"
+                logger.info(
+                    "Created GitHub repository for project",
+                    extra={
+                        "event": "project.create.github_repo_created",
+                        "user_id": user.user_id,
+                        "owner_login": owner_login,
+                        "repo_name": repo_info.repo_name,
+                        "repo_url": repo_info.repo_url,
+                        "default_branch": default_branch,
+                    },
+                )
             else:
                 owner_login = (repo_request.owner or "").strip()
                 if not owner_login:
                     raise HTTPException(status_code=422, detail="GitHub repository owner is required")
                 repo_name = _validate_repo_name(repo_request.name)
+                logger.info(
+                    "Loading existing GitHub repository for project import",
+                    extra={
+                        "event": "project.create.github_existing_load",
+                        "user_id": user.user_id,
+                        "owner_login": owner_login,
+                        "repo_name": repo_name,
+                        "requested_base_branch": repo_request.base_branch or "",
+                    },
+                )
                 repo_info = self.github_repo_manager.get_repo(
                     access_token=access_token,
                     owner_login=owner_login,
@@ -2357,6 +2447,18 @@ class PaperbaseService:
                     owner_login=owner_login,
                     repo_name=repo_name,
                     branch=base_branch,
+                )
+                logger.info(
+                    "Loaded existing GitHub repository branch for project import",
+                    extra={
+                        "event": "project.create.github_existing_branch",
+                        "user_id": user.user_id,
+                        "owner_login": owner_login,
+                        "repo_name": repo_name,
+                        "base_branch": base_branch,
+                        "remote_head_sha": remote_head_sha,
+                        "branch_count": len(branches),
+                    },
                 )
                 candidate_map = {
                     candidate.path: candidate
@@ -2384,7 +2486,29 @@ class PaperbaseService:
                     file_kind = _file_kind_for_repo_path(path)
                     content = _notebook_to_python_source(raw_content) if file_kind == "notebook" else raw_content
                     import_rows.append((Path(path).name, file_kind, path, content))
+                logger.info(
+                    "Prepared GitHub repository imports for project",
+                    extra={
+                        "event": "project.create.github_imports_ready",
+                        "user_id": user.user_id,
+                        "owner_login": owner_login,
+                        "repo_name": repo_name,
+                        "base_branch": base_branch,
+                        "import_path_count": len(import_rows),
+                    },
+                )
         except GitHubSyncError as exc:
+            logger.warning(
+                "GitHub project create flow failed",
+                extra={
+                    "event": "project.create.github_failed",
+                    "user_id": user.user_id,
+                    "repo_mode": repo_request.mode,
+                    "repo_owner": repo_request.owner or github.get("github_login", ""),
+                    "repo_name": repo_request.name,
+                    "error": str(exc),
+                },
+            )
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
         project = self.repository.create_project(  # type: ignore[attr-defined]
@@ -2417,6 +2541,18 @@ class PaperbaseService:
             )
             if imported is None:
                 raise HTTPException(status_code=500, detail=f"Repository path '{repo_path}' could not be imported")
+        logger.info(
+            "Finished project create GitHub permission flow",
+            extra={
+                "event": "project.create.github_completed",
+                "user_id": user.user_id,
+                "project_id": project.project_id,
+                "owner_login": owner_login,
+                "repo_name": repo_info.repo_name,
+                "base_branch": base_branch,
+                "import_path_count": len(import_rows),
+            },
+        )
         return self.repository.get_project(user_id=user.user_id, project_id=project.project_id) or project  # type: ignore[attr-defined]
 
     def update_project(self, user: BrowserUser, project_id: str, request: UpdateProjectRequest) -> ProjectResponse:

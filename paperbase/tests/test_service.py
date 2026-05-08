@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 import json
+import logging
 import threading
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlparse
@@ -4104,7 +4105,7 @@ def test_python_file_sync_project_repo_writes_metadata_and_files():
     assert repo_manager.sync_project_files_calls[0]["previous_managed_paths"] == set()
 
 
-def test_create_project_requires_github_repo_info_and_connection():
+def test_create_project_requires_github_repo_info_and_connection(caplog):
     repo_manager = FakeGitHubRepoManager()
     service = PaperbaseService(
         settings=Settings(
@@ -4121,6 +4122,7 @@ def test_create_project_requires_github_repo_info_and_connection():
         SignupRequest(email="new-project@example.com", password="topsecret123", display_name="Project User")
     )
     assert session.user is not None
+    caplog.set_level(logging.INFO, logger="paperbase.service")
 
     with pytest.raises(HTTPException) as missing_repo:
         service.create_project(
@@ -4135,6 +4137,7 @@ def test_create_project_requires_github_repo_info_and_connection():
             _create_repo_project_request("Agents", "Study agent systems"),
         )
     assert disconnected.value.status_code == 409
+    assert any(getattr(record, "event", "") == "github.connection_missing" for record in caplog.records)
 
 
 def test_list_github_repositories_requires_connection_and_returns_accessible_repos():
@@ -4171,7 +4174,7 @@ def test_list_github_repositories_requires_connection_and_returns_accessible_rep
     assert repo_manager.list_repositories_calls == [{"access_token": "github-access-token"}]
 
 
-def test_create_project_creates_private_github_repo_on_main():
+def test_create_project_creates_private_github_repo_on_main(caplog):
     repo_manager = FakeGitHubRepoManager()
     service = PaperbaseService(
         settings=Settings(
@@ -4188,6 +4191,7 @@ def test_create_project_creates_private_github_repo_on_main():
         SignupRequest(email="repo-create@example.com", password="topsecret123", display_name="Project User")
     )
     assert session.user is not None
+    caplog.set_level(logging.INFO, logger="paperbase.service")
     _connect_github(service, session.user)
 
     project = service.create_project(
@@ -4202,6 +4206,12 @@ def test_create_project_creates_private_github_repo_on_main():
     assert sync.github_repo_name == "agent-lab"
     assert sync.base_branch == "main"
     assert sync.default_branch == "main"
+    events = [getattr(record, "event", "") for record in caplog.records]
+    assert "github.connection_saved" in events
+    assert "github.connection_ready" in events
+    assert "project.create.github_repo_create" in events
+    assert "project.create.github_completed" in events
+    assert "github-access-token" not in caplog.text
 
 
 def test_create_project_imports_existing_repo_python_and_notebook_files():

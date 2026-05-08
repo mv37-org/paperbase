@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -20,6 +21,7 @@ from .utils import slugify, utcnow
 _GITHUB_API_BASE = "https://api.github.com"
 _GITHUB_ACCEPT = "application/vnd.github+json"
 _GITHUB_API_VERSION = "2022-11-28"
+logger = logging.getLogger(__name__)
 
 
 class GitHubSyncError(RuntimeError):
@@ -343,6 +345,16 @@ class GitHubProjectRepoManager:
         repo_name: str,
         description: str,
     ) -> GitHubRepoInfo:
+        logger.info(
+            "Requesting GitHub repository creation",
+            extra={
+                "event": "github.repo.create.request",
+                "owner_login": owner_login,
+                "repo_name": repo_name,
+                "private": True,
+                "auto_init": False,
+            },
+        )
         response = self._session.post(
             f"{self.api_base_url}/user/repos",
             headers=self._headers(access_token),
@@ -357,6 +369,17 @@ class GitHubProjectRepoManager:
         if response.status_code == 201:
             payload = response.json()
             owner = payload.get("owner") if isinstance(payload.get("owner"), dict) else {}
+            logger.info(
+                "GitHub repository creation succeeded",
+                extra={
+                    "event": "github.repo.create.succeeded",
+                    "owner_login": str(owner.get("login") or owner_login),
+                    "repo_name": str(payload.get("name") or repo_name),
+                    "repo_url": str(payload.get("html_url") or ""),
+                    "default_branch": str(payload.get("default_branch") or "main"),
+                    "status_code": response.status_code,
+                },
+            )
             return GitHubRepoInfo(
                 owner_login=str(owner.get("login") or owner_login),
                 repo_name=str(payload.get("name") or repo_name),
@@ -368,6 +391,16 @@ class GitHubProjectRepoManager:
             detail = str((response.json() or {}).get("message") or "").strip()
         except Exception:
             detail = response.text.strip()
+        logger.warning(
+            "GitHub repository creation failed",
+            extra={
+                "event": "github.repo.create.failed",
+                "owner_login": owner_login,
+                "repo_name": repo_name,
+                "status_code": response.status_code,
+                "detail": detail,
+            },
+        )
         raise GitHubSyncError(detail or "Paperbase could not create the project repository on GitHub.")
 
     def ensure_repo(
@@ -380,8 +413,27 @@ class GitHubProjectRepoManager:
         description: str,
     ) -> GitHubRepoInfo:
         repo_name = build_project_repo_name(project_name, project_id)
+        logger.info(
+            "Ensuring GitHub repository exists for project sync",
+            extra={
+                "event": "github.repo.ensure.start",
+                "owner_login": owner_login,
+                "repo_name": repo_name,
+                "project_id": project_id,
+            },
+        )
         existing = self.get_repo(access_token=access_token, owner_login=owner_login, repo_name=repo_name)
         if existing is not None:
+            logger.info(
+                "GitHub repository already exists for project sync",
+                extra={
+                    "event": "github.repo.ensure.exists",
+                    "owner_login": existing.owner_login or owner_login,
+                    "repo_name": existing.repo_name,
+                    "repo_url": existing.repo_url,
+                    "project_id": project_id,
+                },
+            )
             return existing
         response = self._session.post(
             f"{self.api_base_url}/user/repos",
@@ -397,6 +449,17 @@ class GitHubProjectRepoManager:
         if response.status_code == 201:
             payload = response.json()
             owner = payload.get("owner") if isinstance(payload.get("owner"), dict) else {}
+            logger.info(
+                "GitHub repository was created for project sync",
+                extra={
+                    "event": "github.repo.ensure.created",
+                    "owner_login": str(owner.get("login") or owner_login),
+                    "repo_name": str(payload.get("name") or repo_name),
+                    "repo_url": str(payload.get("html_url") or ""),
+                    "project_id": project_id,
+                    "status_code": response.status_code,
+                },
+            )
             return GitHubRepoInfo(
                 owner_login=str(owner.get("login") or owner_login),
                 repo_name=str(payload.get("name") or repo_name),
@@ -410,12 +473,34 @@ class GitHubProjectRepoManager:
                 repo_name=repo_name,
             )
             if existing is not None:
+                logger.info(
+                    "GitHub repository appeared after create conflict",
+                    extra={
+                        "event": "github.repo.ensure.conflict_resolved",
+                        "owner_login": existing.owner_login or owner_login,
+                        "repo_name": existing.repo_name,
+                        "repo_url": existing.repo_url,
+                        "project_id": project_id,
+                        "status_code": response.status_code,
+                    },
+                )
                 return existing
         detail = ""
         try:
             detail = str((response.json() or {}).get("message") or "").strip()
         except Exception:
             detail = response.text.strip()
+        logger.warning(
+            "GitHub repository ensure failed",
+            extra={
+                "event": "github.repo.ensure.failed",
+                "owner_login": owner_login,
+                "repo_name": repo_name,
+                "project_id": project_id,
+                "status_code": response.status_code,
+                "detail": detail,
+            },
+        )
         raise GitHubSyncError(detail or "Paperbase could not create the project repository on GitHub.")
 
     def sync_project_files(
