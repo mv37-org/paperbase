@@ -26,11 +26,23 @@ describe("index.css", () => {
 
   it("keeps trending paper cards aligned with research paper card styling", () => {
     const gridBlock = css.match(/\.trending-card-grid\s*\{([^}]*)\}/)?.[1] ?? "";
+    const landingGridBlock =
+      css.match(/\.trending-page-landing \.trending-card-grid\s*\{([^}]*)\}/)?.[1] ?? "";
+    const landingCardBlock =
+      css.match(/\.trending-page-landing \.trending-card\s*\{([^}]*)\}/)?.[1] ?? "";
+    const landingEvenCardBlock =
+      css.match(/\.trending-page-landing \.trending-card:nth-child\(even\)\s*\{([^}]*)\}/)?.[1] ??
+      "";
     const cardBlock = css.match(/\.trending-card\s*\{([^}]*)\}/)?.[1] ?? "";
     const imageBlock = css.match(/\.trending-card-image\s*\{([^}]*)\}/)?.[1] ?? "";
     const activeVoteBlock = css.match(/\.trending-vote-button\.active\s*\{([^}]*)\}/)?.[1] ?? "";
 
     expect(gridBlock).toContain("grid-template-columns: repeat(4, minmax(0, 1fr));");
+    expect(landingGridBlock).toContain("grid-template-columns: 1fr;");
+    expect(landingCardBlock).toContain('"media copy"');
+    expect(landingCardBlock).toContain('"media actions"');
+    expect(landingEvenCardBlock).toContain('"copy media"');
+    expect(landingEvenCardBlock).toContain('"actions media"');
     expect(cardBlock).toContain("min-height: 282px;");
     expect(cardBlock).toContain('font-family: Georgia, "Times New Roman", serif;');
     expect(cardBlock).toContain("border-radius: 4px;");

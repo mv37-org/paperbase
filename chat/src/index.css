@@ -1664,6 +1664,11 @@ body:has(.app-shell) #root {
   gap: 8px;
 }
 
+.trending-page-landing .trending-card-grid {
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+
 .trending-card {
   position: relative;
   display: grid;
@@ -1680,6 +1685,25 @@ body:has(.app-shell) #root {
   transition:
     border-color 120ms ease,
     box-shadow 120ms ease;
+}
+
+.trending-page-landing .trending-card {
+  grid-template-columns: minmax(128px, 42%) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "media copy"
+    "media actions";
+  align-items: stretch;
+  min-height: 172px;
+  gap: 10px;
+  padding: 10px;
+}
+
+.trending-page-landing .trending-card:nth-child(even) {
+  grid-template-columns: minmax(0, 1fr) minmax(128px, 42%);
+  grid-template-areas:
+    "copy media"
+    "actions media";
 }
 
 .trending-card:hover,
@@ -1703,6 +1727,12 @@ body:has(.app-shell) #root {
   width: 100%;
 }
 
+.trending-page-landing .trending-card-hero {
+  grid-area: media;
+  height: 100%;
+  align-self: stretch;
+}
+
 .trending-card-image,
 .trending-detail-image {
   width: 100%;
@@ -1721,6 +1751,12 @@ body:has(.app-shell) #root {
   background: #f3efe6;
 }
 
+.trending-page-landing .trending-card-image {
+  height: 100%;
+  min-height: 152px;
+  border-radius: 3px;
+}
+
 .trending-card-image-fallback {
   display: grid;
   place-items: center;
@@ -1734,6 +1770,12 @@ body:has(.app-shell) #root {
   display: grid;
   align-content: center;
   gap: 5px;
+}
+
+.trending-page-landing .trending-card-copy {
+  grid-area: copy;
+  align-content: start;
+  padding-top: 2px;
 }
 
 .trending-card-copy h2,
@@ -1750,12 +1792,20 @@ body:has(.app-shell) #root {
   letter-spacing: 0;
 }
 
+.trending-page-landing .trending-card-copy h2 {
+  font-size: 15px;
+}
+
 .trending-card-title-button {
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
   width: 100%;
   overflow: hidden;
+}
+
+.trending-page-landing .trending-card-title-button {
+  -webkit-line-clamp: 4;
 }
 
 .trending-card-copy span {
@@ -1766,6 +1816,10 @@ body:has(.app-shell) #root {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.35;
+}
+
+.trending-page-landing .trending-card-copy span {
+  -webkit-line-clamp: 3;
 }
 
 .trending-card-actions,
@@ -1781,6 +1835,13 @@ body:has(.app-shell) #root {
   justify-content: flex-end;
   gap: 6px;
   padding-top: 2px;
+}
+
+.trending-page-landing .trending-card-actions {
+  grid-area: actions;
+  align-self: end;
+  justify-content: flex-start;
+  padding-top: 0;
 }
 
 .trending-pagination {
@@ -1851,6 +1912,23 @@ body:has(.app-shell) #root {
 @media (max-width: 620px) {
   .trending-card-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 520px) {
+  .trending-page-landing .trending-card,
+  .trending-page-landing .trending-card:nth-child(even) {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "media"
+      "copy"
+      "actions";
+    min-height: 0;
+  }
+
+  .trending-page-landing .trending-card-image {
+    height: clamp(120px, 44vw, 156px);
+    min-height: 0;
   }
 }
 
