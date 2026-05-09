@@ -487,6 +487,11 @@ export function googleLoginUrl() {
   return `${API_BASE}/v1/browser/auth/google/start?return_to=${returnTo}`;
 }
 
+export function mv37LoginUrl() {
+  const returnTo = encodeURIComponent(window.location.origin);
+  return `${API_BASE}/v1/browser/auth/mv37/start?return_to=${returnTo}`;
+}
+
 export function githubLoginUrl() {
   const returnTo = encodeURIComponent(`${window.location.origin}${window.location.pathname}`);
   return `${API_BASE}/v1/browser/auth/github/start?return_to=${returnTo}`;

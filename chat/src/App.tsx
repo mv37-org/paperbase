@@ -68,6 +68,7 @@ import {
   GoogleButton,
   MaskedAssetIcon,
   ModalFlash,
+  MV37Button,
   SettingsSectionHeading,
 } from "./app/AppChrome";
 import { ChatSessionModals } from "./app/ChatSessionModals";
@@ -266,6 +267,7 @@ const DEFAULT_BROWSER_SETTINGS: NonNullable<BrowserSessionResponse["settings"]> 
   github_sync_enabled: false,
   github_oauth_available: false,
   github_manage_access_url: "https://github.com/settings/connections/applications",
+  mv37_oauth_available: false,
   weekly_papers_review_email: false,
   appearance_theme: "light",
 };
@@ -4523,6 +4525,20 @@ export default function App() {
         showNoteFlash("GitHub connected.");
         setActiveSettingsTab("version-control");
         setAuthView("settings");
+        setAuthModalOpen(true);
+      } else if (authStatus === "mv37") {
+        showNoteFlash("Signed in with MV37.");
+      } else if (authError === "mv37_not_configured") {
+        showErrorFlash("MV37 login is not configured yet.");
+        setAuthView("login");
+        setAuthModalOpen(true);
+      } else if (authError === "mv37_email_conflict") {
+        showErrorFlash("That MV37 email already has a Paperbase password account.");
+        setAuthView("login");
+        setAuthModalOpen(true);
+      } else if (authError === "mv37_callback_failed") {
+        showErrorFlash("MV37 login failed. Try again or use legacy email/password.");
+        setAuthView("login");
         setAuthModalOpen(true);
       } else if (authError === "github_not_configured") {
         showErrorFlash("GitHub OAuth is not configured yet.");
@@ -10586,6 +10602,10 @@ export default function App() {
             className={`modal-view${authView === "login" ? " visible" : ""}`}
             data-auth-view="login"
           >
+            <MV37Button />
+            <div className="auth-divider">
+              <span>Legacy Paperbase login</span>
+            </div>
             <form
               id="login-form"
               className="stack"
@@ -10615,6 +10635,9 @@ export default function App() {
                 Log in
               </button>
             </form>
+            <div className="auth-divider auth-divider-compact">
+              <span>Other providers</span>
+            </div>
             <GoogleButton />
             <div className="auth-links">
               <button type="button" className="auth-link" onClick={() => setAuthView("signup")}>
@@ -10634,6 +10657,10 @@ export default function App() {
             className={`modal-view${authView === "signup" ? " visible" : ""}`}
             data-auth-view="signup"
           >
+            <MV37Button />
+            <div className="auth-divider">
+              <span>Legacy Paperbase signup</span>
+            </div>
             <form
               id="signup-form"
               className="stack"
@@ -10664,6 +10691,9 @@ export default function App() {
                 Create account
               </button>
             </form>
+            <div className="auth-divider auth-divider-compact">
+              <span>Other providers</span>
+            </div>
             <GoogleButton />
             <div className="auth-links">
               <button type="button" className="auth-link" onClick={() => setAuthView("login")}>

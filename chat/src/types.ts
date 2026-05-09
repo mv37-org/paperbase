@@ -19,6 +19,7 @@ export interface BrowserUserSettingsResponse {
   github_sync_enabled: boolean;
   github_oauth_available: boolean;
   github_manage_access_url: string;
+  mv37_oauth_available: boolean;
   weekly_papers_review_email: boolean;
   appearance_theme: "light" | "dark";
 }

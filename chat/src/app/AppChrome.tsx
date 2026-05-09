@@ -1,6 +1,6 @@
 import type { CSSProperties } from "react";
 
-import { googleLoginUrl } from "../api";
+import { googleLoginUrl, mv37LoginUrl } from "../api";
 import type { ModalFlashKind } from "./appTypes";
 import { staticAssetPath } from "./appUtils";
 
@@ -69,6 +69,22 @@ export function GoogleButton() {
         />
       </svg>
       <span>Continue with Google</span>
+    </button>
+  );
+}
+
+export function MV37Button() {
+  return (
+    <button
+      className="oauth-button mv37-oauth-button"
+      data-mv37-login="true"
+      type="button"
+      onClick={() => (window.location.href = mv37LoginUrl())}
+    >
+      <span className="mv37-oauth-mark" aria-hidden="true">
+        MV
+      </span>
+      <span>Continue with MV37</span>
     </button>
   );
 }

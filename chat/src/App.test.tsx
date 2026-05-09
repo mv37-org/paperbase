@@ -68,6 +68,7 @@ const apiMocks = vi.hoisted(() => {
     getThread: vi.fn(),
     githubLoginUrl: vi.fn(() => "/v1/browser/auth/github/start"),
     googleLoginUrl: vi.fn(() => "/v1/browser/auth/google/start"),
+    mv37LoginUrl: vi.fn(() => "/v1/browser/auth/mv37/start"),
     importProjectNotebook: vi.fn(),
     loadGitHubRepositories: vi.fn(),
     loadGitHubRepoImportCandidates: vi.fn(),
@@ -182,6 +183,7 @@ vi.mock("./api", () => ({
   getThread: apiMocks.getThread,
   githubLoginUrl: apiMocks.githubLoginUrl,
   googleLoginUrl: apiMocks.googleLoginUrl,
+  mv37LoginUrl: apiMocks.mv37LoginUrl,
   importProjectNotebook: apiMocks.importProjectNotebook,
   loadGitHubRepositories: apiMocks.loadGitHubRepositories,
   loadGitHubRepoImportCandidates: apiMocks.loadGitHubRepoImportCandidates,
@@ -542,6 +544,7 @@ function authenticatedSession(
       github_sync_enabled: boolean;
       github_oauth_available: boolean;
       github_manage_access_url: string;
+      mv37_oauth_available: boolean;
       weekly_papers_review_email: boolean;
       appearance_theme: "light" | "dark";
     }>;
@@ -569,6 +572,7 @@ function authenticatedSession(
       github_sync_enabled: false,
       github_oauth_available: true,
       github_manage_access_url: "https://github.com/settings/connections/applications",
+      mv37_oauth_available: true,
       weekly_papers_review_email: false,
       appearance_theme: "light",
       ...overrides.settings,
@@ -6248,6 +6252,7 @@ describe("App", () => {
         github_sync_enabled: false,
         github_oauth_available: false,
         github_manage_access_url: "https://github.com/settings/connections/applications",
+        mv37_oauth_available: false,
         weekly_papers_review_email: false,
         appearance_theme: "light",
       },
@@ -6345,5 +6350,32 @@ describe("App", () => {
         .querySelector("#settings-modal-form input[name='token_secret']")
         ?.getAttribute("autocomplete"),
     ).toBe("new-password");
+  });
+
+  it("renders MV37 as the primary login and signup action", async () => {
+    apiMocks.loadSession.mockResolvedValueOnce({
+      authenticated: false,
+      user: null,
+      has_anthropic_api_key: false,
+      csrf_token: null,
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(apiMocks.loadSession).toHaveBeenCalledTimes(1);
+    });
+
+    const loginView = document.querySelector('[data-auth-view="login"]');
+    const signupView = document.querySelector('[data-auth-view="signup"]');
+    const loginFirstAction = loginView?.querySelector("button");
+    const signupFirstAction = signupView?.querySelector("button");
+
+    expect(loginFirstAction?.getAttribute("data-mv37-login")).toBe("true");
+    expect(loginFirstAction?.textContent).toContain("Continue with MV37");
+    expect(signupFirstAction?.getAttribute("data-mv37-login")).toBe("true");
+    expect(signupFirstAction?.textContent).toContain("Continue with MV37");
+    expect(loginView?.textContent).toContain("Legacy Paperbase login");
+    expect(signupView?.textContent).toContain("Legacy Paperbase signup");
   });
 });
