@@ -19,6 +19,7 @@ For harvests, `--limit-per-window` is a per category-window cap, not a whole-cat
 
 The browser backend now persists first-class projects in addition to chat sessions:
 
+- primary browser login is MV37 OpenID Connect, mapped by issuer + subject in `external_identities`; legacy Paperbase email/password accounts are not auto-linked by email
 - each browser user gets a default `General` project during initialization
 - user-created projects are local-first; optional GitHub sync can create a private repo on `main` or validate an existing repo and selected branch
 - sessions belong to a project, and project session lists are paginated for the sidebar
