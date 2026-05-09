@@ -939,12 +939,27 @@ class ProjectPresentationShareRequest(BaseModel):
 ProjectPresentationStatus = Literal["missing", "pending", "running", "completed", "failed"]
 
 
+ProjectPresentationSlideVisualType = Literal["code", "image"]
+
+
+class ProjectPresentationSlideResponse(BaseModel):
+    slide_id: str
+    title: str
+    description: str
+    visual_type: ProjectPresentationSlideVisualType = "code"
+    visual_code: str = ""
+    image_prompt: str = ""
+    image_url: str = ""
+    image_storage_path: str = Field(default="", exclude=True)
+
+
 class ProjectPresentationResponse(BaseModel):
     presentation_id: str = ""
     project_id: str
     status: ProjectPresentationStatus = "missing"
     visual_code: str = ""
     summary_markdown: str = ""
+    slides: list[ProjectPresentationSlideResponse] = Field(default_factory=list)
     audio_url: str = ""
     audio_content_type: str = "audio/mpeg"
     audio_storage_path: str = Field(default="", exclude=True)

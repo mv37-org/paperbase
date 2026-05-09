@@ -1687,6 +1687,10 @@ body:has(.app-shell) #root {
   gap: 10px;
 }
 
+.project-presentation-slide-layout {
+  width: 100%;
+}
+
 .project-presentation-canvas,
 .project-presentation-summary {
   min-width: 0;
@@ -1706,15 +1710,219 @@ body:has(.app-shell) #root {
   scrollbar-color: color-mix(in srgb, var(--muted) 38%, transparent) transparent;
 }
 
+.project-presentation-slide-summary {
+  position: relative;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  padding: 0;
+  overflow: hidden;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--paper) 94%, transparent), var(--paper)),
+    var(--paper);
+}
+
+.project-presentation-slide-canvas {
+  position: relative;
+  background: #11100e;
+}
+
+.project-presentation-visual-stage {
+  width: 100%;
+  height: 100%;
+  animation: project-presentation-visual-fade 220ms ease both;
+}
+
+@keyframes project-presentation-visual-fade {
+  from {
+    opacity: 0;
+    transform: scale(0.992);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.project-presentation-generated-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: #11100e;
+}
+
+.project-presentation-fixed-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: grid;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--paper) 96%, transparent);
+  backdrop-filter: blur(10px);
+}
+
+.project-presentation-header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.project-presentation-share-button {
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.project-presentation-share-button:hover,
+.project-presentation-share-button:focus-visible {
+  border-color: color-mix(in srgb, #99582a 48%, var(--line));
+  color: #99582a;
+}
+
+.project-presentation-inline-regenerate-button {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.54;
+}
+
+.project-presentation-inline-regenerate-button:hover,
+.project-presentation-inline-regenerate-button:focus-visible {
+  opacity: 1;
+  border-color: color-mix(in srgb, #99582a 48%, var(--line));
+}
+
+.project-presentation-inline-regenerate-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.24;
+}
+
+.project-presentation-slide-track {
+  min-height: 0;
+  overflow-y: auto;
+  scroll-snap-type: y mandatory;
+  scrollbar-color: color-mix(in srgb, var(--muted) 34%, transparent) transparent;
+}
+
+.project-presentation-slide-copy {
+  min-height: 100%;
+  scroll-snap-align: start;
+  display: grid;
+  align-content: center;
+  gap: 18px;
+  padding: clamp(24px, 5vw, 64px);
+  color: var(--text);
+}
+
+.project-presentation-slide-copy span {
+  color: #99582a;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 12px;
+  font-weight: 750;
+  letter-spacing: 0.16em;
+}
+
+.project-presentation-slide-copy h1 {
+  max-width: 11ch;
+  margin: 0;
+  font-family: Georgia, "Iowan Old Style", serif;
+  font-size: clamp(42px, 6vw, 76px);
+  font-weight: 500;
+  line-height: 0.95;
+  letter-spacing: 0;
+}
+
+.project-presentation-slide-copy p {
+  max-width: 58ch;
+  margin: 0;
+  color: color-mix(in srgb, var(--text) 82%, var(--muted));
+  font-family: Georgia, "Iowan Old Style", serif;
+  font-size: clamp(17px, 1.45vw, 22px);
+  line-height: 1.58;
+}
+
+.project-presentation-slide-dots {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  z-index: 3;
+  display: grid;
+  gap: 8px;
+  transform: translateY(-50%);
+}
+
+.project-presentation-slide-dots button {
+  width: 6px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--muted) 44%, transparent);
+  border-radius: var(--radius);
+  background: transparent;
+  cursor: pointer;
+}
+
+.project-presentation-slide-dots button.active {
+  border-color: #99582a;
+  background: #99582a;
+}
+
+.project-presentation-empty-state {
+  align-self: center;
+  justify-self: center;
+  width: min(420px, 100%);
+  display: grid;
+  justify-items: start;
+  gap: 12px;
+  padding: 18px;
+  color: var(--text);
+}
+
+.project-presentation-empty-state h1 {
+  margin: 0;
+  font-family: Georgia, "Iowan Old Style", serif;
+  font-size: 34px;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.project-presentation-empty-state p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
 .project-presentation-audio-player {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 14px;
-  padding-bottom: 10px;
-  border-bottom: 1px solid var(--line);
+  margin-bottom: 0;
+  padding-bottom: 0;
+  border-bottom: 0;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.project-presentation-audio-player.empty {
+  min-height: 32px;
 }
 
 .project-presentation-audio-copy {
@@ -1747,6 +1955,41 @@ body:has(.app-shell) #root {
   min-height: 0;
   border: 0;
   background: #ffffff;
+}
+
+.project-presentation-share-modal {
+  width: min(460px, calc(100vw - 32px));
+  display: grid;
+  gap: 14px;
+}
+
+.project-presentation-share-link-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.project-presentation-share-link-row input {
+  min-width: 0;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--paper);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.project-presentation-share-link-row button {
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--paper);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 650;
 }
 
 .project-presentation-canvas-empty {
@@ -6655,6 +6898,7 @@ textarea {
 .modal-backdrop {
   position: absolute;
   inset: 0;
+  border: 0;
   background: rgba(18, 16, 12, 0.35);
 }
 

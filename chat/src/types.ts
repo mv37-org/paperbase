@@ -575,6 +575,7 @@ export interface ProjectPresentationResponse {
   status: ProjectPresentationStatus;
   visual_code: string;
   summary_markdown: string;
+  slides: ProjectPresentationSlideResponse[];
   audio_url: string;
   audio_content_type: string;
   is_public: boolean;
@@ -585,6 +586,16 @@ export interface ProjectPresentationResponse {
   created_at?: string | null;
   updated_at?: string | null;
   completed_at?: string | null;
+}
+
+export interface ProjectPresentationSlideResponse {
+  slide_id: string;
+  title: string;
+  description: string;
+  visual_type: "code" | "image";
+  visual_code: string;
+  image_prompt: string;
+  image_url: string;
 }
 
 export interface RunPythonFileResponse {

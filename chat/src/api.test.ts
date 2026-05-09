@@ -751,6 +751,17 @@ describe("chat api", () => {
       status: "completed",
       visual_code: "ReactDOM.createRoot(document.getElementById('root')).render('ok');",
       summary_markdown: "# Summary",
+      slides: [
+        {
+          slide_id: "summary",
+          title: "Summary",
+          description: "A project presentation slide.",
+          visual_type: "code",
+          visual_code: "ReactDOM.createRoot(document.getElementById('root')).render('ok');",
+          image_prompt: "",
+          image_url: "",
+        },
+      ],
       audio_url: "/v1/browser/projects/proj_1/presentation/audio",
       audio_content_type: "audio/mpeg",
       is_public: false,

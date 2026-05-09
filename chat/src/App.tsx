@@ -12,7 +12,6 @@ import Editor, { DiffEditor } from "@monaco-editor/react";
 
 import {
   api,
-  apiResourceUrl,
   createPythonFile,
   createProject,
   createThread,
@@ -176,7 +175,7 @@ import { CredentialFormUsernameField } from "./CredentialFormUsernameField";
 import { CodeSnippet, extractStreamingPythonPreview } from "./CodeSnippet";
 import { LandingMentionEditor } from "./LandingMentionEditor";
 import { MarkdownRenderer } from "./MarkdownRenderer";
-import { ProjectPresentationCanvas } from "./ProjectPresentationCanvas";
+import { ProjectPresentationDeck } from "./ProjectPresentationDeck";
 import { formatLocalTimestamp } from "./time";
 import { TrendingPapersPage, type TrendingBrowseState } from "./TrendingPapersPage";
 import type {
@@ -399,30 +398,6 @@ function presentationTokenFromUrl() {
     return "";
   }
   return new URLSearchParams(window.location.search).get("presentation")?.trim() ?? "";
-}
-
-function ProjectPresentationAudioPlayer({
-  presentation,
-}: {
-  presentation: ProjectPresentationResponse;
-}) {
-  if (!presentation.audio_url) {
-    return null;
-  }
-  return (
-    <div className="project-presentation-audio-player">
-      <div className="project-presentation-audio-copy">
-        <span>Audio walkthrough</span>
-        <small>Two-person explainer</small>
-      </div>
-      <audio
-        controls
-        preload="metadata"
-        src={apiResourceUrl(presentation.audio_url)}
-        aria-label="Presentation audio walkthrough"
-      />
-    </div>
-  );
 }
 
 function samePaperSections(left: PdfDocumentSection[], right: PdfDocumentSection[]) {
@@ -945,7 +920,6 @@ export default function App() {
   const [paperExplorations, setPaperExplorations] = useState<PaperExploration[]>(() =>
     restorePaperExplorations(),
   );
-  const [presentingProjectId, setPresentingProjectId] = useState<string | null>(null);
   const [projectPresentationStates, setProjectPresentationStates] = useState<
     Record<string, ProjectPresentationState>
   >({});
@@ -1302,9 +1276,7 @@ export default function App() {
       })
     : null;
   const activeProjectPresentation = activeProjectPresentationState?.presentation ?? null;
-  const activeProjectPresenting = Boolean(
-    activeProjectHomeId && presentingProjectId === activeProjectHomeId,
-  );
+  const activeProjectPresenting = Boolean(activeProjectHomeId);
   const activePaperExploration = activePaperExplorationId
     ? (paperExplorations.find(
         (exploration) => exploration.explorationId === activePaperExplorationId,
@@ -3140,7 +3112,6 @@ export default function App() {
     if (!projectsRef.current.some((project) => project.project_id === projectId)) {
       return;
     }
-    setPresentingProjectId(null);
     setActiveTab({ kind: "project_home", id: projectId });
     setSelectedProjectId(projectId);
   }, []);
@@ -3207,6 +3178,18 @@ export default function App() {
       console.error(error);
     }
   }, []);
+
+  const copyProjectPresentationShareLink = useCallback(
+    async (url: string) => {
+      try {
+        await navigator.clipboard.writeText(url);
+        showNoteFlash("Copied presentation link.");
+      } catch (error) {
+        console.error(error);
+      }
+    },
+    [showNoteFlash],
+  );
 
   const copyThreadDebugBundle = useCallback(
     async (bundle: ReturnType<typeof buildThreadDebugBundle>) => {
@@ -3524,7 +3507,6 @@ export default function App() {
       if (!requireInferenceAccess()) {
         return;
       }
-      setPresentingProjectId(projectId);
       setProjectPresentationState(projectId, (state) => ({ ...state, loading: true, error: "" }));
       try {
         const presentation = await startProjectPresentation(projectId, {
@@ -6189,6 +6171,27 @@ export default function App() {
     if (
       !activeProjectHomeId ||
       !activeProjectPresenting ||
+      !activeProjectPresentationState ||
+      activeProjectPresentationState.loading ||
+      activeProjectPresentationState.presentation ||
+      activeProjectPresentationState.error
+    ) {
+      return;
+    }
+    void refreshProjectPresentation(activeProjectHomeId).catch(() => undefined);
+  }, [
+    activeProjectHomeId,
+    activeProjectPresenting,
+    activeProjectPresentationState?.error,
+    activeProjectPresentationState?.loading,
+    activeProjectPresentationState?.presentation,
+    refreshProjectPresentation,
+  ]);
+
+  useEffect(() => {
+    if (
+      !activeProjectHomeId ||
+      !activeProjectPresenting ||
       !activeProjectPresentation ||
       !["pending", "running"].includes(activeProjectPresentation.status)
     ) {
@@ -6334,23 +6337,11 @@ export default function App() {
               {publicPresentationState.error}
             </div>
           ) : publicPresentationState.presentation ? (
-            <div className="project-presentation-public-shell">
-              <section className="project-presentation-canvas">
-                <ProjectPresentationCanvas
-                  visualCode={publicPresentationState.presentation.visual_code}
-                  title="Shared project presentation visual"
-                />
-              </section>
-              <section className="project-presentation-summary">
-                <ProjectPresentationAudioPlayer
-                  presentation={publicPresentationState.presentation}
-                />
-                <MarkdownRenderer
-                  markdown={publicPresentationState.presentation.summary_markdown}
-                  className="message-markdown project-presentation-markdown"
-                />
-              </section>
-            </div>
+            <ProjectPresentationDeck
+              presentation={publicPresentationState.presentation}
+              title="Shared project presentation"
+              publicMode
+            />
           ) : null}
         </main>
       ) : !authenticated ? (
@@ -7384,24 +7375,6 @@ export default function App() {
                 activeProjectHome ? (
                   activeProjectPresenting ? (
                     <div className="project-presentation-page">
-                      <button
-                        type="button"
-                        className="project-presentation-regenerate-button"
-                        disabled={Boolean(activeProjectPresentationState?.loading)}
-                        onClick={() =>
-                          void startProjectPresentationWorkflow(activeProjectHome.project_id, {
-                            regenerate: true,
-                          })
-                        }
-                        aria-label="Regenerate presentation"
-                        title="Regenerate presentation"
-                      >
-                        <AppIcon
-                          src={staticAssetPath("icons8-restart-50.svg")}
-                          className="project-presentation-regenerate-icon"
-                        />
-                      </button>
-
                       {activeProjectPresentationState?.error ? (
                         <div className="project-presentation-error">
                           {activeProjectPresentationState.error}
@@ -7418,58 +7391,44 @@ export default function App() {
                           </div>
                         </div>
                       ) : activeProjectPresentation?.status === "completed" ? (
-                        <div className="project-presentation-layout">
-                          <section className="project-presentation-canvas">
-                            <ProjectPresentationCanvas
-                              visualCode={activeProjectPresentation.visual_code}
-                              title={`${activeProjectHome.name} presentation visual`}
-                            />
-                          </section>
-                          <section className="project-presentation-summary">
-                            <div className="project-presentation-share-row">
-                              <label className="project-presentation-share-toggle">
-                                <input
-                                  type="checkbox"
-                                  checked={activeProjectPresentation.is_public}
-                                  disabled={Boolean(activeProjectPresentationState?.sharing)}
-                                  onChange={(event) =>
-                                    void toggleProjectPresentationShare(
-                                      activeProjectHome.project_id,
-                                      event.target.checked,
-                                    )
-                                  }
-                                />
-                                <span>Share as webpage</span>
-                              </label>
-                              {activeProjectPresentation.share_url ? (
-                                <a
-                                  href={activeProjectPresentation.share_url}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                >
-                                  Open share link
-                                </a>
-                              ) : null}
-                            </div>
-                            <ProjectPresentationAudioPlayer
-                              presentation={activeProjectPresentation}
-                            />
-                            <MarkdownRenderer
-                              markdown={activeProjectPresentation.summary_markdown}
-                              className="message-markdown project-presentation-markdown"
-                            />
-                          </section>
-                        </div>
+                        <ProjectPresentationDeck
+                          presentation={activeProjectPresentation}
+                          title={`${activeProjectHome.name} presentation`}
+                          sharing={Boolean(activeProjectPresentationState?.sharing)}
+                          regenerating={Boolean(activeProjectPresentationState?.loading)}
+                          onRegenerate={() =>
+                            void startProjectPresentationWorkflow(activeProjectHome.project_id, {
+                              regenerate: true,
+                            })
+                          }
+                          onToggleShare={(isPublic) =>
+                            void toggleProjectPresentationShare(
+                              activeProjectHome.project_id,
+                              isPublic,
+                            )
+                          }
+                          onCopyShareLink={copyProjectPresentationShareLink}
+                        />
                       ) : activeProjectPresentation?.status === "failed" ? (
                         <div className="project-presentation-error">
                           {activeProjectPresentation.error || "Presentation generation failed."}
                         </div>
                       ) : (
-                        <div className="project-presentation-progress" role="status">
-                          <span>creating presentation</span>
-                          <div className="project-presentation-progress-track" aria-hidden="true">
-                            <span />
-                          </div>
+                        <div className="project-presentation-empty-state">
+                          <h1>Create presentation</h1>
+                          <p>
+                            Turn the project history, papers, notes, comments, chats, and code into
+                            a shareable visual story.
+                          </p>
+                          <button
+                            type="button"
+                            className="project-home-present-button"
+                            onClick={() =>
+                              void startProjectPresentationWorkflow(activeProjectHome.project_id)
+                            }
+                          >
+                            Create presentation
+                          </button>
                         </div>
                       )}
                     </div>

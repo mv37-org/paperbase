@@ -5546,6 +5546,19 @@ def test_project_presentation_job_caches_shares_and_emails():
                                         "ReactDOM.createRoot(document.getElementById('root'))."
                                         "render(React.createElement('div', null, 'visual'));"
                                     ),
+                                    "slides": [
+                                        {
+                                            "slide_id": "benchmark-calibration",
+                                            "title": "Benchmark calibration",
+                                            "description": "Uncertainty intervals explain when benchmark wins are actually reliable.",
+                                            "visual_type": "code",
+                                            "visual_code": (
+                                                "ReactDOM.createRoot(document.getElementById('root'))."
+                                                "render(React.createElement('div', null, 'slide visual'));"
+                                            ),
+                                            "image_prompt": "",
+                                        }
+                                    ],
                                 }
                             ),
                         )
@@ -5628,6 +5641,13 @@ def test_project_presentation_job_caches_shares_and_emails():
         role="user",
         content_markdown="Which papers explain benchmark reliability?",
     )
+    service.repository.create_python_file(  # type: ignore[attr-defined]
+        user_id=session.user.user_id,
+        project_id=project.project_id,
+        filename="analysis.py",
+        content="def calibrate(scores):\n    return sorted(scores)\n",
+        repo_path="analysis.py",
+    )
 
     queued = service.start_project_presentation(
         session.user,
@@ -5663,12 +5683,15 @@ def test_project_presentation_job_caches_shares_and_emails():
     assert completed.status == "completed"
     assert "Agent Benchmarks" in completed.summary_markdown
     assert "ReactDOM.createRoot" in completed.visual_code
+    assert completed.slides[0].title == "Benchmark calibration"
     assert completed.audio_url == ""
     assert "Research presentation designer" in str(chat_model.create_calls[-1]["system_prompt"])
     assert "Do not write meta commentary" in str(chat_model.create_calls[-1]["system_prompt"])
     assert "clean print/editorial research spread" in str(chat_model.create_calls[-1]["system_prompt"])
     assert "Use D3 for rich data-driven charting" in str(chat_model.create_calls[-1]["system_prompt"])
     assert "art-directed infographic" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "First infer the key bullet points" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "GPT Image 2" in str(chat_model.create_calls[-1]["system_prompt"])
     assert "fit inside the iframe viewport without body/page scrolling" in str(
         chat_model.create_calls[-1]["system_prompt"]
     )
@@ -5680,6 +5703,8 @@ def test_project_presentation_job_caches_shares_and_emails():
     assert prompt_payload["research_materials"][0]["paper_comments"][0]["body"].startswith("Focus on uncertainty")
     assert prompt_payload["research_materials"][0]["figures"][0]["caption"].startswith("Figure shows calibrated")
     assert prompt_payload["research_materials"][0]["tables"][0]["sample_rows"][0]["Protocol"] == "baseline"
+    assert prompt_payload["code_artifacts"][0]["filename"] == "analysis.py"
+    assert "calibrate" in prompt_payload["code_artifacts"][0]["content"]
     assert chat_model.create_calls[-1]["text_format"] == {
         "type": "json_schema",
         "name": "project_presentation",
@@ -5694,10 +5719,48 @@ def test_project_presentation_job_caches_shares_and_emails():
                 },
                 "visual_code": {
                     "type": "string",
-                    "description": "Plain browser JavaScript that renders a research-substance visual explanation into #root.",
+                    "description": "Legacy first-slide plain browser JavaScript fallback that renders into #root.",
+                },
+                "slides": {
+                    "type": "array",
+                    "description": "Ordered research presentation slides derived from the full project history.",
+                    "minItems": 1,
+                    "maxItems": 8,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "slide_id": {
+                                "type": "string",
+                                "description": "Stable lowercase identifier using letters, numbers, and hyphens.",
+                            },
+                            "title": {"type": "string", "description": "Short slide title."},
+                            "description": {
+                                "type": "string",
+                                "description": "Slide explanation. Title plus description must be at most 80 words.",
+                            },
+                            "visual_type": {"type": "string", "enum": ["code", "image"]},
+                            "visual_code": {
+                                "type": "string",
+                                "description": "Plain browser JavaScript for code slides, otherwise empty.",
+                            },
+                            "image_prompt": {
+                                "type": "string",
+                                "description": "Detailed GPT Image 2 prompt for image slides, otherwise empty.",
+                            },
+                        },
+                        "required": [
+                            "slide_id",
+                            "title",
+                            "description",
+                            "visual_type",
+                            "visual_code",
+                            "image_prompt",
+                        ],
+                    },
                 },
             },
-            "required": ["summary_markdown", "visual_code"],
+            "required": ["summary_markdown", "visual_code", "slides"],
         },
     }
     assert email_sender.presentation_emails == [
@@ -5722,6 +5785,94 @@ def test_project_presentation_job_caches_shares_and_emails():
     )
     assert cached.status == "completed"
     assert cached.job_id == completed.job_id
+
+
+def test_project_presentation_image_slide_is_stored_and_served(monkeypatch):
+    class ImageSlidePresentationChatModel(FakeChatModel):
+        def create_response(self, *, api_key: str, prompt: Prompt) -> ResponseEnvelope:
+            if "Research presentation designer" in prompt.base_instructions:
+                return ResponseEnvelope(
+                    response_id="resp_project_presentation",
+                    items=[
+                        ResponseItem(
+                            item_id="msg_project_presentation",
+                            item_type="message",
+                            role="assistant",
+                            content_text=json.dumps(
+                                {
+                                    "summary_markdown": "# Concept Map",
+                                    "visual_code": "",
+                                    "slides": [
+                                        {
+                                            "slide_id": "concept-map",
+                                            "title": "Concept map",
+                                            "description": "A visual metaphor explains how the research themes connect.",
+                                            "visual_type": "image",
+                                            "visual_code": "",
+                                            "image_prompt": "Editorial research infographic, warm paper, terracotta accents.",
+                                        }
+                                    ],
+                                }
+                            ),
+                        )
+                    ],
+                )
+            return super().create_response(api_key=api_key, prompt=prompt)
+
+    service = PaperbaseService(
+        settings=Settings(storage_backend="memory", database_url="memory://", api_key="test-token"),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=ImageSlidePresentationChatModel(),
+    )
+    requested_prompts: list[str] = []
+
+    def fake_image_request(*, api_key: str, prompt: str) -> bytes:
+        assert api_key == "openai-user-key-999"
+        requested_prompts.append(prompt)
+        return b"png-bytes"
+
+    monkeypatch.setattr(service, "_request_openai_presentation_image", fake_image_request)
+    session, _ = service.register_browser_user(
+        SignupRequest(email="image-present@example.com", password="topsecret123", display_name="Image Presenter")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    project = service.list_projects(session.user).projects[0]
+
+    service.start_project_presentation(
+        session.user,
+        project.project_id,
+        ProjectPresentationStartRequest(explorations=[]),
+    )
+    service.process_next_job()
+
+    completed = service.get_project_presentation(session.user, project.project_id)
+    assert completed.slides[0].visual_type == "image"
+    assert completed.slides[0].image_url.endswith(
+        f"/v1/browser/projects/{project.project_id}/presentation/slides/concept-map/image"
+    )
+    assert requested_prompts == ["Editorial research infographic, warm paper, terracotta accents."]
+    image, content_type = service.get_project_presentation_slide_image(session.user, project.project_id, "concept-map")
+    assert image == b"png-bytes"
+    assert content_type == "image/png"
+
+    shared = service.update_project_presentation_share(
+        session.user,
+        project.project_id,
+        ProjectPresentationShareRequest(is_public=True),
+    )
+    assert shared.share_token
+    assert shared.slides[0].image_url.endswith(
+        f"/v1/browser/project-presentations/public/{shared.share_token}/slides/concept-map/image"
+    )
+    public_image, public_content_type = service.get_public_project_presentation_slide_image(
+        shared.share_token,
+        "concept-map",
+    )
+    assert public_image == image
+    assert public_content_type == "image/png"
 
 
 def test_project_presentation_falls_back_when_model_returns_non_json(caplog):
@@ -5769,11 +5920,13 @@ def test_project_presentation_falls_back_when_model_returns_non_json(caplog):
     assert completed_job.status == "completed"
     completed = service.get_project_presentation(session.user, project.project_id)
     assert completed.status == "completed"
-    assert "## Research Thesis" in completed.summary_markdown
+    assert "## Presentation Outline" in completed.summary_markdown
     assert "The presentation workflow completed" not in completed.summary_markdown
     assert "| Paper explorations |" not in completed.summary_markdown
     assert "ReactDOM.createRoot" in completed.visual_code
-    assert "Research field map" in completed.visual_code
+    assert "RESEARCH SLIDE" in completed.visual_code
+    assert completed.slides
+    assert completed.slides[0].visual_type == "code"
     assert email_sender.presentation_emails == [
         ("fallback-present@example.com", "General", f"{service.settings.chat_public_url.rstrip('/')}/")
     ]
@@ -5828,6 +5981,19 @@ def test_project_presentation_audio_uses_saved_elevenlabs_key(monkeypatch):
                                         "ReactDOM.createRoot(document.getElementById('root'))."
                                         "render(React.createElement('div', null, 'visual'));"
                                     ),
+                                    "slides": [
+                                        {
+                                            "slide_id": "audio-slide",
+                                            "title": "Audio slide",
+                                            "description": "The audio should explain the research substance slide by slide.",
+                                            "visual_type": "code",
+                                            "visual_code": (
+                                                "ReactDOM.createRoot(document.getElementById('root'))."
+                                                "render(React.createElement('div', null, 'audio visual'));"
+                                            ),
+                                            "image_prompt": "",
+                                        }
+                                    ],
                                 }
                             ),
                         )

@@ -801,6 +801,7 @@ class ProjectPresentationORM(Base):
     status: Mapped[str] = mapped_column(String(32), default="pending")
     visual_code: Mapped[str] = mapped_column(Text, default="")
     summary_markdown: Mapped[str] = mapped_column(Text, default="")
+    slides: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     audio_storage_path: Mapped[str] = mapped_column(Text, default="")
     audio_content_type: Mapped[str] = mapped_column(String(128), default="audio/mpeg")
     context_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
@@ -1056,6 +1057,7 @@ def _project_presentation_from_orm(
         status=status,  # type: ignore[arg-type]
         visual_code=row.visual_code or "",
         summary_markdown=row.summary_markdown or "",
+        slides=row.slides if isinstance(row.slides, list) else [],
         audio_storage_path=row.audio_storage_path or "",
         audio_content_type=row.audio_content_type or "audio/mpeg",
         is_public=bool(row.is_public),
@@ -2073,6 +2075,12 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 text(
                     "ALTER TABLE IF EXISTS project_presentations "
                     "ADD COLUMN IF NOT EXISTS audio_content_type VARCHAR(128) DEFAULT 'audio/mpeg'"
+                )
+            )
+            connection.execute(
+                text(
+                    "ALTER TABLE IF EXISTS project_presentations "
+                    "ADD COLUMN IF NOT EXISTS slides JSON DEFAULT '[]'"
                 )
             )
             connection.execute(
@@ -4690,6 +4698,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 row.error = ""
                 row.visual_code = ""
                 row.summary_markdown = ""
+                row.slides = []
                 row.audio_storage_path = ""
                 row.audio_content_type = "audio/mpeg"
                 row.completed_at = None
@@ -4713,6 +4722,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
         *,
         visual_code: str,
         summary_markdown: str,
+        slides: list[dict[str, Any]] | None = None,
         audio_storage_path: str = "",
         audio_content_type: str = "audio/mpeg",
     ) -> ProjectPresentationResponse | None:
@@ -4724,6 +4734,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
             row.status = "completed"
             row.visual_code = visual_code
             row.summary_markdown = summary_markdown
+            row.slides = slides or []
             row.audio_storage_path = audio_storage_path
             row.audio_content_type = audio_content_type or "audio/mpeg"
             row.error = ""
@@ -7509,6 +7520,7 @@ class MemoryPaperRepository(PaperRepository):
                     "status": "pending",
                     "visual_code": "",
                     "summary_markdown": "",
+                    "slides": [],
                     "audio_storage_path": "",
                     "audio_content_type": "audio/mpeg",
                     "error": "",
@@ -7535,6 +7547,7 @@ class MemoryPaperRepository(PaperRepository):
         *,
         visual_code: str,
         summary_markdown: str,
+        slides: list[dict[str, Any]] | None = None,
         audio_storage_path: str = "",
         audio_content_type: str = "audio/mpeg",
     ) -> ProjectPresentationResponse | None:
@@ -7547,6 +7560,7 @@ class MemoryPaperRepository(PaperRepository):
                 "status": "completed",
                 "visual_code": visual_code,
                 "summary_markdown": summary_markdown,
+                "slides": slides or [],
                 "audio_storage_path": audio_storage_path,
                 "audio_content_type": audio_content_type or "audio/mpeg",
                 "error": "",

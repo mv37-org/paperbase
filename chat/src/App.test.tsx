@@ -659,6 +659,17 @@ function projectPresentationResponse(projectId = "proj_1", status = "completed")
     status,
     visual_code: "ReactDOM.createRoot(document.getElementById('root')).render('ok');",
     summary_markdown: "# Project summary\n\n| Item | Count |\n| --- | ---: |\n| Notes | 1 |",
+    slides: [
+      {
+        slide_id: "project-summary",
+        title: "Project summary",
+        description: "A concise slide about the project research narrative.",
+        visual_type: "code",
+        visual_code: "ReactDOM.createRoot(document.getElementById('root')).render('ok');",
+        image_prompt: "",
+        image_url: "",
+      },
+    ],
     audio_url: "",
     audio_content_type: "audio/mpeg",
     is_public: false,
@@ -1485,7 +1496,7 @@ describe("App", () => {
     expect(await screen.findByText("Recovered thread")).toBeTruthy();
 
     fireEvent.click(screen.getByText("Home"));
-    expect(await screen.findByText("Project Home")).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Create presentation" })).toBeTruthy();
   });
 
   it("starts a project presentation from the project home tab", async () => {
@@ -1502,7 +1513,7 @@ describe("App", () => {
     });
     fireEvent.click(screen.getAllByText("General")[0]!);
     fireEvent.click(await screen.findByText("Home"));
-    fireEvent.click(await screen.findByRole("button", { name: "Present this project" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Create presentation" }));
 
     await waitFor(() => {
       expect(apiMocks.startProjectPresentation).toHaveBeenCalledWith("proj_1", {
@@ -1512,7 +1523,7 @@ describe("App", () => {
     });
     expect(await screen.findByRole("button", { name: "Regenerate presentation" })).toBeTruthy();
     expect(screen.queryByText("Project Presentation")).toBeNull();
-    expect(await screen.findByText(/Project summary/)).toBeTruthy();
+    expect(await screen.findByText("Project summary")).toBeTruthy();
     const audio = await screen.findByLabelText("Presentation audio walkthrough");
     expect(audio.getAttribute("src")).toContain("/v1/browser/projects/proj_1/presentation/audio");
   });
@@ -3742,7 +3753,7 @@ describe("App", () => {
       within(deleteExplorationDialog).getByRole("button", { name: "Delete exploration" }),
     );
     await waitFor(() => {
-      expect(screen.getByText("Project Home")).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Create presentation" })).toBeTruthy();
     });
   });
 

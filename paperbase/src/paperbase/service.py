@@ -127,6 +127,7 @@ from .models import (
     ProjectItemPageResponse,
     ProjectPresentationResponse,
     ProjectPresentationShareRequest,
+    ProjectPresentationSlideResponse,
     ProjectPresentationStartRequest,
     ProjectRepoConflictDetail,
     ProjectRepoConflictFile,
@@ -233,6 +234,9 @@ _PROJECT_PRESENTATION_MAX_COMMENTS_PER_PAPER = 4
 _PROJECT_PRESENTATION_MAX_FIGURES_PER_PAPER = 4
 _PROJECT_PRESENTATION_MAX_TABLES_PER_PAPER = 2
 _PROJECT_PRESENTATION_MAX_TABLE_ROWS = 4
+_PROJECT_PRESENTATION_MAX_SLIDES = 8
+_PROJECT_PRESENTATION_MAX_IMAGE_SLIDES = 3
+_PROJECT_PRESENTATION_IMAGE_MODEL = "gpt-image-2"
 _PROJECT_PRESENTATION_TEXT_FORMAT: dict[str, Any] = {
     "type": "json_schema",
     "name": "project_presentation",
@@ -247,10 +251,51 @@ _PROJECT_PRESENTATION_TEXT_FORMAT: dict[str, Any] = {
             },
             "visual_code": {
                 "type": "string",
-                "description": "Plain browser JavaScript that renders a research-substance visual explanation into #root.",
+                "description": "Legacy first-slide plain browser JavaScript fallback that renders into #root.",
+            },
+            "slides": {
+                "type": "array",
+                "description": "Ordered research presentation slides derived from the full project history.",
+                "minItems": 1,
+                "maxItems": _PROJECT_PRESENTATION_MAX_SLIDES,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "slide_id": {
+                            "type": "string",
+                            "description": "Stable lowercase identifier using letters, numbers, and hyphens.",
+                        },
+                        "title": {
+                            "type": "string",
+                            "description": "Short slide title.",
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "Slide explanation. Title plus description must be at most 80 words.",
+                        },
+                        "visual_type": {"type": "string", "enum": ["code", "image"]},
+                        "visual_code": {
+                            "type": "string",
+                            "description": "Plain browser JavaScript for code slides, otherwise empty.",
+                        },
+                        "image_prompt": {
+                            "type": "string",
+                            "description": "Detailed GPT Image 2 prompt for image slides, otherwise empty.",
+                        },
+                    },
+                    "required": [
+                        "slide_id",
+                        "title",
+                        "description",
+                        "visual_type",
+                        "visual_code",
+                        "image_prompt",
+                    ],
+                },
             },
         },
-        "required": ["summary_markdown", "visual_code"],
+        "required": ["summary_markdown", "visual_code", "slides"],
     },
 }
 _PROJECT_PRESENTATION_AUDIO_TEXT_FORMAT: dict[str, Any] = {
@@ -282,6 +327,8 @@ _PROJECT_PRESENTATION_MAX_THREADS = 30
 _PROJECT_PRESENTATION_MAX_THREAD_ITEMS = 80
 _PROJECT_PRESENTATION_MAX_EXPLORATIONS = 80
 _PROJECT_PRESENTATION_MAX_ANNOTATIONS = 40
+_PROJECT_PRESENTATION_MAX_CODE_ARTIFACTS = 12
+_PROJECT_PRESENTATION_MAX_CODE_CHARS = 8000
 
 
 def _validate_date(value: str, *, name: str) -> None:
@@ -2684,11 +2731,55 @@ class PaperbaseService:
                 )
         else:
             updates["audio_url"] = ""
+        slides: list[ProjectPresentationSlideResponse] = []
+        for raw_slide in presentation.slides:
+            slide = self._project_presentation_slide_response(raw_slide)
+            image_url = ""
+            if slide.image_storage_path:
+                if presentation.is_public and presentation.share_token:
+                    image_url = (
+                        f"/v1/browser/project-presentations/public/"
+                        f"{quote(presentation.share_token, safe='')}/slides/{quote(slide.slide_id, safe='')}/image"
+                    )
+                else:
+                    image_url = (
+                        f"/v1/browser/projects/{quote(presentation.project_id, safe='')}/presentation/"
+                        f"slides/{quote(slide.slide_id, safe='')}/image"
+                    )
+            slides.append(slide.model_copy(update={"image_url": image_url}))
+        updates["slides"] = slides
         if not presentation.is_public or not presentation.share_token:
             updates["share_url"] = ""
             return presentation.model_copy(update=updates)
         updates["share_url"] = self._project_presentation_share_url(presentation.share_token)
         return presentation.model_copy(update=updates)
+
+    def _project_presentation_slide_response(self, slide: Any) -> ProjectPresentationSlideResponse:
+        if isinstance(slide, ProjectPresentationSlideResponse):
+            return slide
+        if isinstance(slide, dict):
+            try:
+                return ProjectPresentationSlideResponse.model_validate(slide)
+            except ValueError:
+                pass
+        return ProjectPresentationSlideResponse(
+            slide_id="slide",
+            title="Slide",
+            description="",
+            visual_type="code",
+        )
+
+    def _project_presentation_slide_storage_dict(self, slide: ProjectPresentationSlideResponse) -> dict[str, Any]:
+        return {
+            "slide_id": slide.slide_id,
+            "title": slide.title,
+            "description": slide.description,
+            "visual_type": slide.visual_type,
+            "visual_code": slide.visual_code,
+            "image_prompt": slide.image_prompt,
+            "image_url": "",
+            "image_storage_path": slide.image_storage_path,
+        }
 
     def get_project_presentation(self, user: BrowserUser, project_id: str) -> ProjectPresentationResponse:
         project = self.repository.get_project(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
@@ -2741,6 +2832,49 @@ class PaperbaseService:
         return self.object_store.get_bytes(presentation.audio_storage_path), (
             presentation.audio_content_type or "audio/mpeg"
         )
+
+    def get_project_presentation_slide_image(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        slide_id: str,
+    ) -> tuple[bytes, str]:
+        presentation = self.repository.get_project_presentation(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+        )
+        return self._project_presentation_slide_image_payload(presentation, slide_id)
+
+    def get_public_project_presentation_slide_image(self, share_token: str, slide_id: str) -> tuple[bytes, str]:
+        token = share_token.strip()
+        if not token:
+            raise HTTPException(status_code=404, detail="Presentation image not found")
+        presentation = self.repository.get_public_project_presentation(token)  # type: ignore[attr-defined]
+        return self._project_presentation_slide_image_payload(presentation, slide_id)
+
+    def _project_presentation_slide_image_payload(
+        self,
+        presentation: ProjectPresentationResponse | None,
+        slide_id: str,
+    ) -> tuple[bytes, str]:
+        if presentation is None or presentation.status != "completed":
+            raise HTTPException(status_code=404, detail="Presentation not found")
+        requested_slide_id = slide_id.strip()
+        slide = next(
+            (
+                self._project_presentation_slide_response(item)
+                for item in presentation.slides
+                if self._project_presentation_slide_response(item).slide_id == requested_slide_id
+            ),
+            None,
+        )
+        if (
+            slide is None
+            or not slide.image_storage_path
+            or not self.object_store.exists(slide.image_storage_path)
+        ):
+            raise HTTPException(status_code=404, detail="Presentation image not found")
+        return self.object_store.get_bytes(slide.image_storage_path), "image/png"
 
     def start_project_presentation(
         self,
@@ -2955,6 +3089,7 @@ class PaperbaseService:
             thread_rows=thread_rows,
             comments=comments,
         )
+        code_artifacts = self._project_presentation_code_artifacts(user=user, project=project)
 
         snapshot = {
             "project": {
@@ -2968,9 +3103,35 @@ class PaperbaseService:
             "explorations": exploration_rows,
             "chat_threads": thread_rows,
             "paper_comments": comments,
+            "code_artifacts": code_artifacts,
             "generated_at": utcnow().isoformat(),
         }
         return self._truncate_project_presentation_snapshot(snapshot)
+
+    def _project_presentation_code_artifacts(
+        self,
+        *,
+        user: BrowserUser,
+        project: ProjectResponse,
+    ) -> list[dict[str, str]]:
+        files = self.repository.list_project_python_files(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project.project_id,
+        )
+        artifacts: list[dict[str, str]] = []
+        for file in list(files or [])[:_PROJECT_PRESENTATION_MAX_CODE_ARTIFACTS]:
+            content = self._truncate_text(file.content or "", _PROJECT_PRESENTATION_MAX_CODE_CHARS)
+            artifacts.append(
+                {
+                    "file_id": file.file_id,
+                    "filename": self._truncate_text(file.filename, 240),
+                    "repo_path": self._truncate_text(file.repo_path, 360),
+                    "file_kind": file.file_kind,
+                    "content": content,
+                    "updated_at": file.updated_at.isoformat(),
+                }
+            )
+        return artifacts
 
     def _project_presentation_research_materials(
         self,
@@ -3228,6 +3389,14 @@ class PaperbaseService:
             if isinstance(exploration, dict)
         ]
         trimmed["paper_comments"] = list(trimmed.get("paper_comments", []))[:60]
+        trimmed["code_artifacts"] = [
+            {
+                **artifact,
+                "content": self._truncate_text(str(artifact.get("content") or ""), 5000),
+            }
+            for artifact in list(trimmed.get("code_artifacts", []))[:8]
+            if isinstance(artifact, dict)
+        ]
         trimmed["research_materials"] = [
             {
                 **material,
@@ -3273,6 +3442,14 @@ class PaperbaseService:
             if isinstance(thread, dict)
         ]
         trimmed["paper_comments"] = list(trimmed.get("paper_comments", []))[:30]
+        trimmed["code_artifacts"] = [
+            {
+                **artifact,
+                "content": self._truncate_text(str(artifact.get("content") or ""), 2500),
+            }
+            for artifact in list(trimmed.get("code_artifacts", []))[:5]
+            if isinstance(artifact, dict)
+        ]
         trimmed["research_materials"] = [
             {
                 **material,
@@ -3350,10 +3527,16 @@ class PaperbaseService:
             project_name = str(context_snapshot.get("project", {}).get("name") or "Project")
             summary_markdown = str(payload.get("summary_markdown") or "").strip()
             visual_code = str(payload.get("visual_code") or "").strip()
+            slides = self._normalize_project_presentation_slides(payload, context_snapshot)
             if not summary_markdown:
-                summary_markdown = self._default_project_presentation_summary(context_snapshot)
+                summary_markdown = self._project_presentation_summary_from_slides(context_snapshot, slides)
             if not visual_code:
-                visual_code = self._default_project_presentation_visual(context_snapshot)
+                visual_code = self._project_presentation_visual_from_slides(context_snapshot, slides)
+            slides = self._generate_and_store_project_presentation_slide_images(
+                api_key=api_key_value,
+                presentation_id=presentation_id,
+                slides=slides,
+            )
             audio_storage_path = ""
             audio_content_type = "audio/mpeg"
             elevenlabs_api_key = self._get_elevenlabs_api_key_optional(user)
@@ -3369,6 +3552,7 @@ class PaperbaseService:
                 presentation_id,
                 visual_code=visual_code,
                 summary_markdown=summary_markdown,
+                slides=[self._project_presentation_slide_storage_dict(slide) for slide in slides],
                 audio_storage_path=audio_storage_path,
                 audio_content_type=audio_content_type,
             )
@@ -3395,37 +3579,50 @@ class PaperbaseService:
                 }
             ],
             base_instructions=(
-                "Research presentation designer. Create a presentation that teaches the actual research "
-                "material to an external audience. Treat `research_materials` as the source of truth: "
-                "paper abstracts, TLDRs, selected passages, user notes, figure captions, table samples, "
-                "and comments identify the research concepts and evidence that matter. Do not write meta "
-                "commentary about the Paperbase project, chat history, number of papers, number of "
-                "comments, notes, or explorations unless a count is itself a scientific result. The "
-                "`summary_markdown` must read like a research briefing with a thesis, core concepts, "
-                "evidence, comparisons, caveats, and implications. Include a compact table only when it "
-                "clarifies the research. The `visual_code` must render a beautiful, art-directed "
-                "infographic that explains the research itself, closer to a custom editorial data poster "
-                "or museum wall graphic than a slide. Choose a concept map, mechanism diagram, metric "
-                "plot, timeline, architecture diagram, evidence landscape, or other visual metaphor based "
-                "on the material. Use D3 for rich data-driven charting, scales, axes, force layouts, "
-                "timelines, annotations, or transitions when it makes the explanation stronger; React can "
-                "own controls and state. The visual must fill 100% width and 100% height of the iframe "
-                "and must fit inside the iframe viewport without body/page scrolling, clipping, or "
-                "overlap. Use responsive measurements from the container via ResizeObserver, SVG viewBox, "
-                "or window dimensions; never rely on fixed oversized canvases, min-h-screen/min-w-screen, "
-                "wide CSS grids, or off-canvas columns. Keep text to short labels and tooltips: no large "
-                "paragraphs, no text blocks over 14 words, and all labels must be clamped or abbreviated "
-                "inside the visible bounds. If extra detail is needed, put it in one small internal scroll "
-                "region or hover/focus panel inside the visual. Use the reference direction of a clean "
-                "print/editorial research spread with an expressive composition, layered marks, restrained "
-                "but not monochrome color, dense readable charting, thin rules, 4px radii or less, and "
-                "excellent spacing. Avoid decorative cards, spreadsheet-like matrices of boxes as the main "
-                "visual, filler copy, marketing layout, and generic dashboard UI. If interaction helps, "
-                "add hover or click states to reveal details, switch concepts, or focus evidence points. "
-                "The visual code must be "
-                "plain JavaScript that runs inside a browser iframe where React, ReactDOM, d3, and "
-                "Tailwind are available as globals. Do not use JSX, imports, external network calls, or "
-                "markdown inside the visual code. Render into document.getElementById('root')."
+                "Research presentation designer. First infer the key bullet points from the entire "
+                "project history: all chats, explorations, annotations, explanations, challenges, paper "
+                "comments, cited papers, selected passages, figures, tables, and `code_artifacts` written "
+                "inside the project. Then turn each bullet point into one slide. Return those slides in "
+                "`slides` as the main product. Each slide must have a title and description whose combined "
+                "length is at most 80 words. Treat `research_materials` as the source of truth for science "
+                "and treat `chat_threads`, `explorations`, `paper_comments`, and `code_artifacts` as clues "
+                "about what the user cared about. Do not write meta commentary about the Paperbase project, "
+                "chat history, number of papers, number of comments, notes, or explorations unless a count "
+                "is itself a scientific result. The presentation must teach the actual research material, "
+                "technical ideas, evidence, code outputs, disagreements, caveats, and implications to an "
+                "external audience. `summary_markdown` is a legacy concise briefing outline of the same "
+                "slides. `visual_code` is a legacy fallback containing the first code slide visual."
+                "\n\n"
+                "For each slide, choose exactly one visual mode. Use `visual_type: \"code\"` when an "
+                "interactive or data-driven custom visual is better; fill `visual_code` with plain browser "
+                "JavaScript. Use `visual_type: \"image\"` when a generated art image would better explain "
+                "the concept; leave `visual_code` empty and write an `image_prompt` for GPT Image 2. Image "
+                "prompts must ask for an editorial research infographic with on-brand restrained colors, "
+                "minimal readable labels, and no tiny body copy because image models can struggle with exact "
+                "text rendering. Prefer code for charts, quantitative comparisons, precise diagrams, and "
+                "anything with exact text. Use images only for evocative conceptual maps, mechanism scenes, "
+                "or artsy visual metaphors."
+                "\n\n"
+                "Code visuals must be art-directed infographics that explain the research itself, closer to "
+                "a clean print/editorial research spread, custom editorial data poster, or museum wall "
+                "graphic than a slide. Use D3 for rich "
+                "data-driven charting, scales, axes, force layouts, timelines, annotations, particles, "
+                "Voronoi/contour fields, Sankey-like flows, or transitions when useful; React can own "
+                "controls and state. Use the Paperbase brand direction: warm paper/ink foundation, restrained "
+                "blue accents, terracotta #99582A for emphasis, crisp 4px radii, thin rules, strong "
+                "typography, and no generic dashboard chrome. The visual must fill 100% width and 100% "
+                "height of the iframe and must fit inside the iframe viewport without body/page scrolling, "
+                "clipping, or overlap. Use "
+                "responsive measurements from the container via ResizeObserver, SVG viewBox, or window "
+                "dimensions; never rely on fixed oversized canvases, min-h-screen/min-w-screen, wide CSS "
+                "grids, or off-canvas columns. Keep text to short labels and tooltips: no large paragraphs, "
+                "no text blocks over 14 words, and all labels must be clamped or abbreviated inside the "
+                "visible bounds. Avoid decorative cards, spreadsheet-like matrices of boxes as the main "
+                "visual, filler copy, marketing layout, and generic dashboard UI. If interaction helps, add "
+                "hover/click states to reveal details, switch concepts, or focus evidence points. The visual "
+                "code must run inside a browser iframe where React, ReactDOM, d3, and Tailwind are available "
+                "as globals. Do not use JSX, imports, external network calls, or markdown inside visual "
+                "code. Render into document.getElementById('root')."
             ),
             tools=[],
             tool_choice=None,
@@ -3458,6 +3655,238 @@ class PaperbaseService:
         if not isinstance(payload, dict):
             raise PermanentError("Presentation model returned an invalid payload")
         return payload
+
+    def _normalize_project_presentation_slides(
+        self,
+        payload: dict[str, Any],
+        context_snapshot: dict[str, Any],
+    ) -> list[ProjectPresentationSlideResponse]:
+        raw_slides = payload.get("slides")
+        slides: list[ProjectPresentationSlideResponse] = []
+        if isinstance(raw_slides, list):
+            image_slide_count = 0
+            used_ids: set[str] = set()
+            for index, raw_slide in enumerate(raw_slides[:_PROJECT_PRESENTATION_MAX_SLIDES]):
+                if not isinstance(raw_slide, dict):
+                    continue
+                title = self._truncate_text(str(raw_slide.get("title") or f"Slide {index + 1}"), 140)
+                description = self._truncate_slide_words(title, str(raw_slide.get("description") or ""))
+                slide_id = self._project_presentation_slide_id(
+                    str(raw_slide.get("slide_id") or title or f"slide-{index + 1}"),
+                    index=index,
+                    used_ids=used_ids,
+                )
+                visual_type = str(raw_slide.get("visual_type") or "code").strip().lower()
+                visual_code = str(raw_slide.get("visual_code") or "").strip()
+                image_prompt = str(raw_slide.get("image_prompt") or "").strip()
+                if visual_type == "image" and image_prompt and image_slide_count < _PROJECT_PRESENTATION_MAX_IMAGE_SLIDES:
+                    image_slide_count += 1
+                    slides.append(
+                        ProjectPresentationSlideResponse(
+                            slide_id=slide_id,
+                            title=title,
+                            description=description,
+                            visual_type="image",
+                            visual_code="",
+                            image_prompt=self._truncate_text(image_prompt, 2000),
+                        )
+                    )
+                    continue
+                if not visual_code:
+                    visual_code = self._default_project_presentation_slide_visual(
+                        context_snapshot,
+                        title=title,
+                        description=description,
+                        index=index,
+                    )
+                slides.append(
+                    ProjectPresentationSlideResponse(
+                        slide_id=slide_id,
+                        title=title,
+                        description=description,
+                        visual_type="code",
+                        visual_code=visual_code,
+                        image_prompt="",
+                    )
+                )
+        if slides:
+            return slides
+        return self._default_project_presentation_slides(context_snapshot)
+
+    def _truncate_slide_words(self, title: str, description: str) -> str:
+        title_words = re.findall(r"\S+", title)
+        description_words = re.findall(r"\S+", description)
+        available = max(8, 80 - len(title_words))
+        if len(description_words) <= available:
+            return self._truncate_text(description, 520)
+        return " ".join(description_words[:available]).rstrip(".,;:") + "..."
+
+    def _project_presentation_slide_id(self, value: str, *, index: int, used_ids: set[str]) -> str:
+        base = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")[:48] or f"slide-{index + 1}"
+        slide_id = base
+        suffix = 2
+        while slide_id in used_ids:
+            slide_id = f"{base}-{suffix}"
+            suffix += 1
+        used_ids.add(slide_id)
+        return slide_id
+
+    def _project_presentation_summary_from_slides(
+        self,
+        context_snapshot: dict[str, Any],
+        slides: list[ProjectPresentationSlideResponse],
+    ) -> str:
+        if not slides:
+            return self._default_project_presentation_summary(context_snapshot)
+        project = context_snapshot.get("project", {}) if isinstance(context_snapshot.get("project"), dict) else {}
+        project_name = str(project.get("name") or "Project")
+        lines = [f"# {project_name}", "", "## Presentation Outline", ""]
+        for slide in slides:
+            lines.append(f"- **{slide.title}:** {slide.description}")
+        return "\n".join(lines).strip() + "\n"
+
+    def _project_presentation_visual_from_slides(
+        self,
+        context_snapshot: dict[str, Any],
+        slides: list[ProjectPresentationSlideResponse],
+    ) -> str:
+        for slide in slides:
+            if slide.visual_type == "code" and slide.visual_code.strip():
+                return slide.visual_code
+        if slides:
+            return self._default_project_presentation_slide_visual(
+                context_snapshot,
+                title=slides[0].title,
+                description=slides[0].description,
+                index=0,
+            )
+        return self._default_project_presentation_visual(context_snapshot)
+
+    def _default_project_presentation_slides(
+        self,
+        context_snapshot: dict[str, Any],
+    ) -> list[ProjectPresentationSlideResponse]:
+        project = context_snapshot.get("project", {}) if isinstance(context_snapshot.get("project"), dict) else {}
+        project_name = str(project.get("name") or "Project")
+        materials = [
+            material
+            for material in list(context_snapshot.get("research_materials", []))
+            if isinstance(material, dict)
+        ]
+        if not materials:
+            description = (
+                "Add explored papers, annotations, comments, chats, or code artifacts, then regenerate "
+                "to create a research presentation."
+            )
+            return [
+                ProjectPresentationSlideResponse(
+                    slide_id="empty-research-map",
+                    title=project_name,
+                    description=description,
+                    visual_type="code",
+                    visual_code=self._default_project_presentation_slide_visual(
+                        context_snapshot,
+                        title=project_name,
+                        description=description,
+                        index=0,
+                    ),
+                    image_prompt="",
+                )
+            ]
+        slides: list[ProjectPresentationSlideResponse] = []
+        used_ids: set[str] = set()
+        for index, material in enumerate(materials[:_PROJECT_PRESENTATION_MAX_SLIDES]):
+            title = self._truncate_text(str(material.get("title") or f"Research point {index + 1}"), 120)
+            description = self._truncate_slide_words(title, self._project_presentation_material_blurb(material))
+            slide_id = self._project_presentation_slide_id(title, index=index, used_ids=used_ids)
+            slides.append(
+                ProjectPresentationSlideResponse(
+                    slide_id=slide_id,
+                    title=title,
+                    description=description,
+                    visual_type="code",
+                    visual_code=self._default_project_presentation_slide_visual(
+                        context_snapshot,
+                        title=title,
+                        description=description,
+                        index=index,
+                    ),
+                    image_prompt="",
+                )
+            )
+        return slides
+
+    def _generate_and_store_project_presentation_slide_images(
+        self,
+        *,
+        api_key: str,
+        presentation_id: str,
+        slides: list[ProjectPresentationSlideResponse],
+    ) -> list[ProjectPresentationSlideResponse]:
+        updated: list[ProjectPresentationSlideResponse] = []
+        for index, slide in enumerate(slides):
+            if slide.visual_type != "image" or not slide.image_prompt.strip():
+                updated.append(slide)
+                continue
+            try:
+                image = self._request_openai_presentation_image(api_key=api_key, prompt=slide.image_prompt)
+                storage_path = f"project-presentations/{presentation_id}/slides/{slide.slide_id}.png"
+                self.object_store.put_bytes(storage_path, image, content_type="image/png")
+                updated.append(slide.model_copy(update={"image_storage_path": storage_path}))
+            except Exception as exc:
+                logger.warning(
+                    "Project presentation image generation failed; falling back to code visual",
+                    extra={
+                        "event": "project.presentation.image_fallback",
+                        "presentation_id": presentation_id,
+                        "slide_id": slide.slide_id,
+                        "error": str(exc),
+                    },
+                )
+                updated.append(
+                    slide.model_copy(
+                        update={
+                            "visual_type": "code",
+                            "visual_code": self._default_project_presentation_slide_visual(
+                                {},
+                                title=slide.title,
+                                description=slide.description,
+                                index=index,
+                            ),
+                            "image_prompt": "",
+                            "image_storage_path": "",
+                        }
+                    )
+                )
+        return updated
+
+    def _request_openai_presentation_image(self, *, api_key: str, prompt: str) -> bytes:
+        response = requests.post(
+            f"{self.settings.openai_base_url.rstrip('/')}/v1/images/generations",
+            headers={
+                "authorization": f"Bearer {api_key}",
+                "content-type": "application/json",
+            },
+            json={
+                "model": _PROJECT_PRESENTATION_IMAGE_MODEL,
+                "prompt": prompt,
+                "size": "1536x1024",
+                "quality": "medium",
+            },
+            timeout=180,
+        )
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            detail = self._truncate_text(response.text, 600)
+            raise requests.HTTPError(f"{exc}. OpenAI image generation error: {detail}", response=response) from exc
+        payload = response.json()
+        data = payload.get("data") if isinstance(payload, dict) else None
+        first = data[0] if isinstance(data, list) and data and isinstance(data[0], dict) else {}
+        image_base64 = str(first.get("b64_json") or "")
+        if not image_base64:
+            raise PermanentError("OpenAI image response did not include b64_json")
+        return base64.b64decode(image_base64)
 
     def _generate_and_store_project_presentation_audio(
         self,
@@ -3762,6 +4191,46 @@ class PaperbaseService:
             if value:
                 return value
         return ""
+
+    def _default_project_presentation_slide_visual(
+        self,
+        context_snapshot: dict[str, Any],
+        *,
+        title: str,
+        description: str,
+        index: int,
+    ) -> str:
+        project = context_snapshot.get("project", {}) if isinstance(context_snapshot.get("project"), dict) else {}
+        project_name = str(project.get("name") or "Project")
+        safe_data = json.dumps(
+            {
+                "projectName": project_name,
+                "title": self._truncate_text(title, 160),
+                "description": self._truncate_text(description, 520),
+                "index": index,
+            },
+            ensure_ascii=False,
+        )
+        return (
+            "const root = document.getElementById('root');"
+            f"const data = {safe_data};"
+            "function App(){"
+            "const accent=['#99582A','#1e7ce8','#57b8a6','#e0a83b'][data.index%4];"
+            "return React.createElement('div',{className:'h-full w-full overflow-hidden bg-[#f6f0e8] text-[#1b1611]'},"
+            "React.createElement('svg',{className:'h-full w-full',viewBox:'0 0 1000 760',preserveAspectRatio:'none'},"
+            "React.createElement('rect',{width:1000,height:760,fill:'#f6f0e8'}),"
+            "React.createElement('path',{d:'M-40 590 C180 420 214 190 430 250 C650 312 694 112 1040 188',fill:'none',stroke:accent,strokeWidth:92,strokeOpacity:.18,strokeLinecap:'round'}),"
+            "React.createElement('path',{d:'M60 606 C238 470 318 286 506 330 C692 372 774 254 948 302',fill:'none',stroke:accent,strokeWidth:5,strokeOpacity:.82,strokeLinecap:'round'}),"
+            "React.createElement('circle',{cx:500,cy:382,r:122,fill:'#1b1611',fillOpacity:.05,stroke:'#1b1611',strokeOpacity:.22}),"
+            "[0,1,2,3,4,5].map((item)=>React.createElement('circle',{key:item,cx:250+item*96,cy:180+Math.sin(item+data.index)*42,r:10+item*2,fill:accent,fillOpacity:.35+item*.07})),"
+            "React.createElement('text',{x:72,y:98,fontSize:13,fontWeight:700,letterSpacing:3,fill:accent},'RESEARCH SLIDE'),"
+            "React.createElement('text',{x:72,y:168,fontSize:52,fontWeight:650,fill:'#1b1611'},data.title.slice(0,42)),"
+            "React.createElement('foreignObject',{x:72,y:214,width:380,height:170},"
+            "React.createElement('div',{style:{font:'16px/1.45 Georgia,serif',color:'#4b4238'}},data.description)),"
+            "React.createElement('text',{x:72,y:696,fontSize:12,fill:'#756b60'},data.projectName)));"
+            "}"
+            "ReactDOM.createRoot(root).render(React.createElement(App));"
+        )
 
     def _default_project_presentation_visual(self, context_snapshot: dict[str, Any]) -> str:
         project = context_snapshot.get("project", {}) if isinstance(context_snapshot.get("project"), dict) else {}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+import html
 import json
 import logging
 import os
@@ -378,6 +379,45 @@ def _serialize_browser_session_for_html(
     )
 
 
+def _presentation_meta_tags(request: Request, service: PaperbaseService) -> str:
+    token = (request.query_params.get("presentation") or "").strip()
+    if not token:
+        return ""
+    try:
+        presentation = service.get_public_project_presentation(token)
+    except HTTPException:
+        return ""
+    first_slide = presentation.slides[0] if presentation.slides else None
+    title = first_slide.title if first_slide else "Paperbase presentation"
+    description = first_slide.description if first_slide else "A shared Paperbase research presentation."
+    page_url = f"{_public_base_url(request)}/?presentation={token}"
+    image_url = ""
+    if first_slide and first_slide.image_url:
+        image_url = f"{_public_base_url(request)}{first_slide.image_url}"
+    escaped_title = html.escape(f"{title} | Paperbase", quote=True)
+    escaped_description = html.escape(description, quote=True)
+    escaped_url = html.escape(page_url, quote=True)
+    tags = [
+        f"<meta property=\"og:title\" content=\"{escaped_title}\" />",
+        f"<meta name=\"twitter:title\" content=\"{escaped_title}\" />",
+        f"<meta name=\"description\" content=\"{escaped_description}\" />",
+        f"<meta property=\"og:description\" content=\"{escaped_description}\" />",
+        f"<meta name=\"twitter:description\" content=\"{escaped_description}\" />",
+        f"<meta property=\"og:url\" content=\"{escaped_url}\" />",
+        "<meta property=\"og:type\" content=\"article\" />",
+        "<meta name=\"twitter:card\" content=\"summary_large_image\" />",
+    ]
+    if image_url:
+        escaped_image_url = html.escape(image_url, quote=True)
+        tags.extend(
+            [
+                f"<meta property=\"og:image\" content=\"{escaped_image_url}\" />",
+                f"<meta name=\"twitter:image\" content=\"{escaped_image_url}\" />",
+            ]
+        )
+    return "\n    ".join(tags)
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -390,6 +430,9 @@ def home(request: Request, service: PaperbaseService = Depends(get_service)) -> 
     html = (_STATIC_DIR / "index.html").read_text(encoding="utf-8")
     api_base_url = _public_base_url(request)
     bootstrap_session = _current_browser_session(request, service)
+    presentation_meta = _presentation_meta_tags(request, service)
+    if presentation_meta:
+        html = html.replace("</title>", f"</title>\n    {presentation_meta}", 1)
     html = html.replace("__PAPERBASE_BASE_URL__", api_base_url)
     html = html.replace(
         "__PAPERBASE_BOOTSTRAP_SESSION__",
@@ -1746,6 +1789,21 @@ def browser_get_project_presentation_audio(
     )
 
 
+@app.get("/v1/browser/projects/{project_id}/presentation/slides/{slide_id}/image")
+def browser_get_project_presentation_slide_image(
+    project_id: str,
+    slide_id: str,
+    user=Depends(require_browser_user),
+    service: PaperbaseService = Depends(get_service),
+) -> Response:
+    payload, content_type = service.get_project_presentation_slide_image(user, project_id, slide_id)
+    return Response(
+        content=payload,
+        media_type=content_type,
+        headers={"Cache-Control": "private, max-age=300"},
+    )
+
+
 @app.post("/v1/browser/projects/{project_id}/presentation", response_model=ProjectPresentationResponse)
 def browser_start_project_presentation(
     project_id: str,
@@ -1780,6 +1838,20 @@ def browser_get_public_project_presentation_audio(
     service: PaperbaseService = Depends(get_service),
 ) -> Response:
     payload, content_type = service.get_public_project_presentation_audio(share_token)
+    return Response(
+        content=payload,
+        media_type=content_type,
+        headers={"Cache-Control": "public, max-age=300"},
+    )
+
+
+@app.get("/v1/browser/project-presentations/public/{share_token}/slides/{slide_id}/image")
+def browser_get_public_project_presentation_slide_image(
+    share_token: str,
+    slide_id: str,
+    service: PaperbaseService = Depends(get_service),
+) -> Response:
+    payload, content_type = service.get_public_project_presentation_slide_image(share_token, slide_id)
     return Response(
         content=payload,
         media_type=content_type,

@@ -2,6 +2,7 @@ import { useMemo } from "react";
 
 type ProjectPresentationCanvasProps = {
   visualCode: string;
+  imageUrl?: string;
   title?: string;
 };
 
@@ -73,9 +74,14 @@ function projectPresentationSrcDoc(visualCode: string) {
 
 export function ProjectPresentationCanvas({
   visualCode,
+  imageUrl = "",
   title = "Project presentation visual",
 }: ProjectPresentationCanvasProps) {
   const srcDoc = useMemo(() => projectPresentationSrcDoc(visualCode), [visualCode]);
+
+  if (imageUrl) {
+    return <img className="project-presentation-generated-image" src={imageUrl} alt={title} />;
+  }
 
   if (!visualCode.trim()) {
     return (
