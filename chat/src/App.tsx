@@ -3140,6 +3140,7 @@ export default function App() {
     if (!projectsRef.current.some((project) => project.project_id === projectId)) {
       return;
     }
+    setPresentingProjectId(null);
     setActiveTab({ kind: "project_home", id: projectId });
     setSelectedProjectId(projectId);
   }, []);
@@ -7204,7 +7205,7 @@ export default function App() {
 
             <div
               ref={messageListRef}
-              className={`chat-message-list${isChatEmpty ? " empty" : ""}${showChatThreadHeader ? " thread-header-visible" : ""}${activeTab?.kind === "python_file" ? " python-file-view" : ""}${activeTab?.kind === "paper_exploration" ? " paper-exploration-view" : ""}${isWorkspaceView ? " workspace-view" : ""}${isAdminWorkspaceView ? " workspace-admin-view" : ""}`}
+              className={`chat-message-list${isChatEmpty ? " empty" : ""}${showChatThreadHeader ? " thread-header-visible" : ""}${activeTab?.kind === "python_file" ? " python-file-view" : ""}${activeTab?.kind === "paper_exploration" ? " paper-exploration-view" : ""}${isWorkspaceView ? " workspace-view" : ""}${activeProjectPresenting ? " project-presentation-view" : ""}${isAdminWorkspaceView ? " workspace-admin-view" : ""}`}
               onScroll={handleMessageListScroll}
             >
               {workspaceView ? (
@@ -7383,33 +7384,23 @@ export default function App() {
                 activeProjectHome ? (
                   activeProjectPresenting ? (
                     <div className="project-presentation-page">
-                      <div className="project-presentation-toolbar">
-                        <div className="project-presentation-heading">
-                          <span>Project Presentation</span>
-                          <h1>{activeProjectHome.name}</h1>
-                        </div>
-                        <div className="project-presentation-actions">
-                          <button
-                            type="button"
-                            className="project-presentation-secondary-button"
-                            onClick={() => setPresentingProjectId(null)}
-                          >
-                            Back to home
-                          </button>
-                          <button
-                            type="button"
-                            className="project-presentation-primary-button"
-                            disabled={Boolean(activeProjectPresentationState?.loading)}
-                            onClick={() =>
-                              void startProjectPresentationWorkflow(activeProjectHome.project_id, {
-                                regenerate: true,
-                              })
-                            }
-                          >
-                            Regenerate presentation
-                          </button>
-                        </div>
-                      </div>
+                      <button
+                        type="button"
+                        className="project-presentation-regenerate-button"
+                        disabled={Boolean(activeProjectPresentationState?.loading)}
+                        onClick={() =>
+                          void startProjectPresentationWorkflow(activeProjectHome.project_id, {
+                            regenerate: true,
+                          })
+                        }
+                        aria-label="Regenerate presentation"
+                        title="Regenerate presentation"
+                      >
+                        <AppIcon
+                          src={staticAssetPath("icons8-restart-50.svg")}
+                          className="project-presentation-regenerate-icon"
+                        />
+                      </button>
 
                       {activeProjectPresentationState?.error ? (
                         <div className="project-presentation-error">
@@ -7427,50 +7418,48 @@ export default function App() {
                           </div>
                         </div>
                       ) : activeProjectPresentation?.status === "completed" ? (
-                        <>
-                          <div className="project-presentation-share-row">
-                            <label className="project-presentation-share-toggle">
-                              <input
-                                type="checkbox"
-                                checked={activeProjectPresentation.is_public}
-                                disabled={Boolean(activeProjectPresentationState?.sharing)}
-                                onChange={(event) =>
-                                  void toggleProjectPresentationShare(
-                                    activeProjectHome.project_id,
-                                    event.target.checked,
-                                  )
-                                }
-                              />
-                              <span>Share as webpage</span>
-                            </label>
-                            {activeProjectPresentation.share_url ? (
-                              <a
-                                href={activeProjectPresentation.share_url}
-                                target="_blank"
-                                rel="noreferrer"
-                              >
-                                Open share link
-                              </a>
-                            ) : null}
-                          </div>
-                          <div className="project-presentation-layout">
-                            <section className="project-presentation-canvas">
-                              <ProjectPresentationCanvas
-                                visualCode={activeProjectPresentation.visual_code}
-                                title={`${activeProjectHome.name} presentation visual`}
-                              />
-                            </section>
-                            <section className="project-presentation-summary">
-                              <ProjectPresentationAudioPlayer
-                                presentation={activeProjectPresentation}
-                              />
-                              <MarkdownRenderer
-                                markdown={activeProjectPresentation.summary_markdown}
-                                className="message-markdown project-presentation-markdown"
-                              />
-                            </section>
-                          </div>
-                        </>
+                        <div className="project-presentation-layout">
+                          <section className="project-presentation-canvas">
+                            <ProjectPresentationCanvas
+                              visualCode={activeProjectPresentation.visual_code}
+                              title={`${activeProjectHome.name} presentation visual`}
+                            />
+                          </section>
+                          <section className="project-presentation-summary">
+                            <div className="project-presentation-share-row">
+                              <label className="project-presentation-share-toggle">
+                                <input
+                                  type="checkbox"
+                                  checked={activeProjectPresentation.is_public}
+                                  disabled={Boolean(activeProjectPresentationState?.sharing)}
+                                  onChange={(event) =>
+                                    void toggleProjectPresentationShare(
+                                      activeProjectHome.project_id,
+                                      event.target.checked,
+                                    )
+                                  }
+                                />
+                                <span>Share as webpage</span>
+                              </label>
+                              {activeProjectPresentation.share_url ? (
+                                <a
+                                  href={activeProjectPresentation.share_url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                >
+                                  Open share link
+                                </a>
+                              ) : null}
+                            </div>
+                            <ProjectPresentationAudioPlayer
+                              presentation={activeProjectPresentation}
+                            />
+                            <MarkdownRenderer
+                              markdown={activeProjectPresentation.summary_markdown}
+                              className="message-markdown project-presentation-markdown"
+                            />
+                          </section>
+                        </div>
                       ) : activeProjectPresentation?.status === "failed" ? (
                         <div className="project-presentation-error">
                           {activeProjectPresentation.error || "Presentation generation failed."}

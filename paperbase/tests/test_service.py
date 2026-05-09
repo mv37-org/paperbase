@@ -5667,6 +5667,10 @@ def test_project_presentation_job_caches_shares_and_emails():
     assert "Research presentation designer" in str(chat_model.create_calls[-1]["system_prompt"])
     assert "Do not write meta commentary" in str(chat_model.create_calls[-1]["system_prompt"])
     assert "clean print/editorial research spread" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "Use D3 for rich data-driven charting" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "fit inside the iframe viewport height without body/page scrolling" in str(
+        chat_model.create_calls[-1]["system_prompt"]
+    )
     prompt_payload = json.loads(str(chat_model.create_calls[-1]["messages"][0]["content"]))
     assert prompt_payload["research_materials"][0]["title"] == "Calibrated Agent Benchmarks"
     assert "benchmark reliability" in prompt_payload["research_materials"][0]["abstract"]

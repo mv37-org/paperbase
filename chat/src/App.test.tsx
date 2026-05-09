@@ -1510,7 +1510,8 @@ describe("App", () => {
         regenerate: false,
       });
     });
-    expect(await screen.findByText("Project Presentation")).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Regenerate presentation" })).toBeTruthy();
+    expect(screen.queryByText("Project Presentation")).toBeNull();
     expect(await screen.findByText(/Project summary/)).toBeTruthy();
     const audio = await screen.findByLabelText("Presentation audio walkthrough");
     expect(audio.getAttribute("src")).toContain("/v1/browser/projects/proj_1/presentation/audio");

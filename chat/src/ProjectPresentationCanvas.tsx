@@ -17,8 +17,9 @@ function projectPresentationSrcDoc(visualCode: string) {
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
     <style>
-      html, body, #root { width: 100%; height: 100%; margin: 0; }
+      html, body, #root { width: 100%; height: 100%; margin: 0; overflow: hidden; }
       body { background: #ffffff; color: #1b1611; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      #root { container-type: size; }
       .presentation-error { padding: 24px; color: #9b3939; font: 14px/1.5 ui-sans-serif, system-ui; }
     </style>
   </head>

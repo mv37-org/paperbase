@@ -1508,9 +1508,7 @@ body:has(.app-shell) #root {
   flex-shrink: 0;
 }
 
-.project-home-present-button,
-.project-presentation-primary-button,
-.project-presentation-secondary-button {
+.project-home-present-button {
   border: 1px solid rgba(27, 22, 17, 0.12);
   border-radius: var(--radius);
   padding: 7px 10px;
@@ -1519,84 +1517,85 @@ body:has(.app-shell) #root {
   font-weight: 650;
   letter-spacing: 0;
   cursor: pointer;
-}
-
-.project-home-present-button,
-.project-presentation-primary-button {
   color: #ffffff;
   border-color: #1e7ce8;
   background: #1e7ce8;
 }
 
-.project-home-present-button:hover,
-.project-presentation-primary-button:hover {
+.project-home-present-button:hover {
   background: #176fd2;
 }
 
-.project-presentation-primary-button:disabled,
-.project-presentation-secondary-button:disabled {
-  cursor: not-allowed;
-  opacity: 0.62;
-}
-
-.project-presentation-secondary-button {
-  color: var(--text);
-  background: rgba(255, 255, 255, 0.88);
-}
-
 .project-presentation-page {
-  width: min(1280px, calc(100% - 24px));
-  min-height: calc(100vh - 32px);
-  margin: 16px auto;
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  padding: 10px;
   display: grid;
-  grid-template-rows: auto auto 1fr;
-  gap: 12px;
+  grid-template-rows: minmax(0, 1fr);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   letter-spacing: 0;
+  background: var(--chat-ui-bg);
+  overflow: hidden;
 }
 
-.project-presentation-toolbar {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
+.chat-message-list.project-presentation-view {
+  overflow: hidden;
 }
 
-.project-presentation-heading {
-  display: grid;
-  gap: 4px;
-  min-width: 0;
-}
-
-.project-presentation-heading span {
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.project-presentation-heading h1 {
-  margin: 0;
+.project-presentation-regenerate-button {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  z-index: 3;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--paper) 86%, transparent);
   color: var(--text);
-  font-size: 26px;
-  line-height: 1.16;
-  letter-spacing: 0;
+  cursor: pointer;
+  opacity: 0.26;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    background-color 140ms ease,
+    border-color 140ms ease,
+    opacity 140ms ease,
+    transform 140ms ease;
 }
 
-.project-presentation-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  justify-content: flex-end;
+.project-presentation-regenerate-button:hover,
+.project-presentation-regenerate-button:focus-visible {
+  border-color: color-mix(in srgb, var(--text) 22%, transparent);
+  background: var(--paper);
+  opacity: 1;
+  transform: translateY(-1px);
+}
+
+.project-presentation-regenerate-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.16;
+  transform: none;
+}
+
+.project-presentation-regenerate-icon {
+  width: 16px;
+  height: 16px;
+  opacity: 0.9;
 }
 
 .project-presentation-progress,
 .project-presentation-error {
+  align-self: center;
+  justify-self: center;
+  width: min(520px, 100%);
   border: 1px solid rgba(27, 22, 17, 0.1);
   border-radius: var(--radius);
-  background: rgba(255, 253, 250, 0.84);
+  background: var(--paper);
 }
 
 .project-presentation-progress {
@@ -1648,7 +1647,10 @@ body:has(.app-shell) #root {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 0;
+  margin: 0 42px 16px 0;
+  padding: 0 0 12px;
+  border-bottom: 1px solid var(--line);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
 .project-presentation-share-row a {
@@ -1674,25 +1676,29 @@ body:has(.app-shell) #root {
 
 .project-presentation-layout,
 .project-presentation-public-shell {
+  height: 100%;
   min-height: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 12px;
+  gap: 10px;
 }
 
 .project-presentation-canvas,
 .project-presentation-summary {
   min-width: 0;
-  min-height: 620px;
+  min-height: 0;
+  height: 100%;
   border: 1px solid rgba(27, 22, 17, 0.1);
   border-radius: var(--radius);
-  background: rgba(255, 255, 255, 0.88);
+  background: var(--paper);
   overflow: hidden;
 }
 
 .project-presentation-summary {
   overflow: auto;
-  padding: 14px;
+  padding: 18px 28px 24px;
+  font-family: "Georgia", "Iowan Old Style", serif;
+  scrollbar-color: color-mix(in srgb, var(--muted) 38%, transparent) transparent;
 }
 
 .project-presentation-audio-player {
@@ -1700,9 +1706,10 @@ body:has(.app-shell) #root {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 14px;
+  margin-bottom: 18px;
   padding-bottom: 12px;
-  border-bottom: 1px solid rgba(27, 22, 17, 0.1);
+  border-bottom: 1px solid var(--line);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
 .project-presentation-audio-copy {
@@ -1732,7 +1739,7 @@ body:has(.app-shell) #root {
   display: block;
   width: 100%;
   height: 100%;
-  min-height: 620px;
+  min-height: 0;
   border: 0;
   background: #ffffff;
 }
@@ -1742,21 +1749,24 @@ body:has(.app-shell) #root {
   place-items: center;
   width: 100%;
   height: 100%;
-  min-height: 620px;
+  min-height: 0;
   color: var(--muted);
   font-size: 13px;
 }
 
 .project-presentation-public-page {
   min-height: 100vh;
-  padding: 16px;
-  background: var(--surface);
+  height: 100vh;
+  padding: 10px;
+  background: var(--chat-ui-bg);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   letter-spacing: 0;
+  overflow: hidden;
 }
 
 .project-presentation-public-shell {
-  min-height: calc(100vh - 32px);
+  min-height: 0;
+  height: calc(100vh - 20px);
 }
 
 .project-presentation-public-state {
@@ -1776,31 +1786,79 @@ body:has(.app-shell) #root {
 
 .project-presentation-markdown {
   color: var(--text);
+  font-size: 17px;
+  line-height: 1.74;
+}
+
+.project-presentation-markdown h1 {
+  margin: 0 0 0.65em;
+  font-size: clamp(29px, 4vw, 44px);
+  line-height: 1.02;
+  letter-spacing: 0;
+  font-weight: 500;
+}
+
+.project-presentation-markdown h2 {
+  margin-top: 1.35em;
+  color: var(--text);
+  font-size: 22px;
+  line-height: 1.16;
+  letter-spacing: 0;
+  font-weight: 500;
+}
+
+.project-presentation-markdown h3,
+.project-presentation-markdown h4 {
+  color: var(--text);
+  letter-spacing: 0;
+}
+
+.project-presentation-markdown p,
+.project-presentation-markdown li {
+  color: color-mix(in srgb, var(--text) 88%, var(--muted));
+}
+
+.project-presentation-markdown .markdown-table-wrap {
+  background: var(--paper);
+  border-color: var(--line);
+}
+
+.project-presentation-markdown table {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
 @media (max-width: 860px) {
   .project-home-header,
-  .project-presentation-toolbar,
   .project-presentation-share-row {
     align-items: stretch;
     flex-direction: column;
   }
 
-  .project-home-header-actions,
-  .project-presentation-actions {
+  .project-home-header-actions {
     justify-content: flex-start;
   }
 
   .project-presentation-layout,
   .project-presentation-public-shell {
     grid-template-columns: 1fr;
+    grid-template-rows: minmax(340px, 48vh) minmax(360px, 1fr);
+    overflow: auto;
   }
 
   .project-presentation-canvas,
   .project-presentation-summary,
   .project-presentation-iframe,
   .project-presentation-canvas-empty {
-    min-height: 420px;
+    min-height: 0;
+  }
+
+  .project-presentation-page,
+  .project-presentation-public-page {
+    overflow: auto;
+  }
+
+  .project-presentation-share-row {
+    margin-right: 34px;
   }
 
   .project-presentation-audio-player {
@@ -10460,6 +10518,7 @@ body.authenticated-theme-dark .exploration-picker-panel,
 body.authenticated-theme-dark .exploration-picker-search,
 body.authenticated-theme-dark .paper-pdf-modal-header,
 body.authenticated-theme-dark .project-presentation-audio-player,
+body.authenticated-theme-dark .project-presentation-share-row,
 body.authenticated-theme-dark .paper-exploration-header,
 body.authenticated-theme-dark .paper-exploration-frame,
 body.authenticated-theme-dark .paper-exploration-empty {
@@ -10492,7 +10551,6 @@ body.authenticated-theme-dark .project-tree-empty,
 body.authenticated-theme-dark .project-home-header span,
 body.authenticated-theme-dark .project-home-header p,
 body.authenticated-theme-dark .project-home-stat span,
-body.authenticated-theme-dark .project-presentation-heading span,
 body.authenticated-theme-dark .project-presentation-canvas-empty,
 body.authenticated-theme-dark .project-presentation-audio-copy small,
 body.authenticated-theme-dark .workspace-page-header span,
@@ -10550,7 +10608,6 @@ body.authenticated-theme-dark .paper-drawer-title,
 body.authenticated-theme-dark .paper-drawer-body,
 body.authenticated-theme-dark .project-home-header h1,
 body.authenticated-theme-dark .project-home-stat strong,
-body.authenticated-theme-dark .project-presentation-heading h1,
 body.authenticated-theme-dark .project-presentation-share-toggle,
 body.authenticated-theme-dark .project-presentation-audio-copy span,
 body.authenticated-theme-dark .paper-exploration-heading h1,
@@ -10803,7 +10860,7 @@ body.authenticated-theme-dark .project-presentation-progress,
 body.authenticated-theme-dark .project-presentation-error,
 body.authenticated-theme-dark .project-presentation-canvas,
 body.authenticated-theme-dark .project-presentation-summary,
-body.authenticated-theme-dark .project-presentation-secondary-button,
+body.authenticated-theme-dark .project-presentation-regenerate-button,
 body.authenticated-theme-dark .paper-exploration-empty,
 body.authenticated-theme-dark .project-repo-info-button,
 body.authenticated-theme-dark .project-github-required,
@@ -10814,6 +10871,11 @@ body.authenticated-theme-dark .modal-flash.warning,
 body.authenticated-theme-dark .python-conflict-file-tab {
   border-color: rgba(223, 232, 244, 0.12);
   background: rgba(255, 255, 255, 0.04);
+}
+
+body.authenticated-theme-dark .project-presentation-regenerate-icon {
+  filter: brightness(0) saturate(100%) invert(92%) sepia(7%) saturate(424%) hue-rotate(182deg)
+    brightness(104%) contrast(96%);
 }
 
 body.authenticated-theme-dark .project-repo-menu {
