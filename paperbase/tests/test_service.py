@@ -5668,9 +5668,11 @@ def test_project_presentation_job_caches_shares_and_emails():
     assert "Do not write meta commentary" in str(chat_model.create_calls[-1]["system_prompt"])
     assert "clean print/editorial research spread" in str(chat_model.create_calls[-1]["system_prompt"])
     assert "Use D3 for rich data-driven charting" in str(chat_model.create_calls[-1]["system_prompt"])
-    assert "fit inside the iframe viewport height without body/page scrolling" in str(
+    assert "art-directed infographic" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "fit inside the iframe viewport without body/page scrolling" in str(
         chat_model.create_calls[-1]["system_prompt"]
     )
+    assert "never rely on fixed oversized canvases" in str(chat_model.create_calls[-1]["system_prompt"])
     prompt_payload = json.loads(str(chat_model.create_calls[-1]["messages"][0]["content"]))
     assert prompt_payload["research_materials"][0]["title"] == "Calibrated Agent Benchmarks"
     assert "benchmark reliability" in prompt_payload["research_materials"][0]["abstract"]
@@ -5771,7 +5773,7 @@ def test_project_presentation_falls_back_when_model_returns_non_json(caplog):
     assert "The presentation workflow completed" not in completed.summary_markdown
     assert "| Paper explorations |" not in completed.summary_markdown
     assert "ReactDOM.createRoot" in completed.visual_code
-    assert "Research brief" in completed.visual_code
+    assert "Research field map" in completed.visual_code
     assert email_sender.presentation_emails == [
         ("fallback-present@example.com", "General", f"{service.settings.chat_public_url.rstrip('/')}/")
     ]

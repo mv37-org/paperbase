@@ -1541,13 +1541,16 @@ body:has(.app-shell) #root {
 }
 
 .chat-message-list.project-presentation-view {
+  height: 100%;
+  padding: 0;
   overflow: hidden;
+  overscroll-behavior: none;
 }
 
 .project-presentation-regenerate-button {
   position: absolute;
-  top: 18px;
-  right: 18px;
+  top: 14px;
+  right: 14px;
   z-index: 3;
   width: 32px;
   height: 32px;
@@ -1647,8 +1650,8 @@ body:has(.app-shell) #root {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin: 0 42px 16px 0;
-  padding: 0 0 12px;
+  margin: 0 38px 12px 0;
+  padding: 0 0 10px;
   border-bottom: 1px solid var(--line);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
@@ -1677,6 +1680,7 @@ body:has(.app-shell) #root {
 .project-presentation-layout,
 .project-presentation-public-shell {
   height: 100%;
+  max-height: 100%;
   min-height: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -1688,6 +1692,7 @@ body:has(.app-shell) #root {
   min-width: 0;
   min-height: 0;
   height: 100%;
+  max-height: 100%;
   border: 1px solid rgba(27, 22, 17, 0.1);
   border-radius: var(--radius);
   background: var(--paper);
@@ -1696,7 +1701,7 @@ body:has(.app-shell) #root {
 
 .project-presentation-summary {
   overflow: auto;
-  padding: 18px 28px 24px;
+  padding: 16px 26px 22px;
   font-family: "Georgia", "Iowan Old Style", serif;
   scrollbar-color: color-mix(in srgb, var(--muted) 38%, transparent) transparent;
 }
@@ -1706,8 +1711,8 @@ body:has(.app-shell) #root {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 18px;
-  padding-bottom: 12px;
+  margin-bottom: 14px;
+  padding-bottom: 10px;
   border-bottom: 1px solid var(--line);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
@@ -1731,8 +1736,8 @@ body:has(.app-shell) #root {
 }
 
 .project-presentation-audio-player audio {
-  width: min(260px, 50%);
-  height: 34px;
+  width: min(260px, 48%);
+  height: 32px;
 }
 
 .project-presentation-iframe {
@@ -1786,20 +1791,22 @@ body:has(.app-shell) #root {
 
 .project-presentation-markdown {
   color: var(--text);
-  font-size: 17px;
-  line-height: 1.74;
+  max-width: 78ch;
+  margin: 0 auto;
+  font-size: 16px;
+  line-height: 1.72;
 }
 
 .project-presentation-markdown h1 {
   margin: 0 0 0.65em;
-  font-size: clamp(29px, 4vw, 44px);
+  font-size: clamp(30px, 3.4vw, 48px);
   line-height: 1.02;
   letter-spacing: 0;
   font-weight: 500;
 }
 
 .project-presentation-markdown h2 {
-  margin-top: 1.35em;
+  margin-top: 1.25em;
   color: var(--text);
   font-size: 22px;
   line-height: 1.16;
