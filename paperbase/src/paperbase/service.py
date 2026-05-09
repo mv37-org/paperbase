@@ -2069,6 +2069,11 @@ class PaperbaseService:
             update={
                 "openai_api_key_hint": openai_api_key_hint,
                 "github_oauth_available": bool(self.settings.github_client_id and self.settings.github_client_secret),
+                "mv37_oauth_available": bool(
+                    self.settings.mv37_issuer_url
+                    and self.settings.mv37_client_id
+                    and self.settings.mv37_client_secret
+                ),
                 "github_manage_access_url": (
                     f"https://github.com/settings/connections/applications/{self.settings.github_client_id}"
                     if self.settings.github_client_id
@@ -2186,6 +2191,44 @@ class PaperbaseService:
                 password_hash=None,
             )
             self.repository.link_google_identity(user_id=user.user_id, google_subject=google_subject, email=email)  # type: ignore[attr-defined]
+        session_token = self._create_browser_session(user.user_id)
+        return self._browser_session_response(user), session_token
+
+    def upsert_mv37_browser_user(
+        self,
+        *,
+        issuer: str,
+        subject: str,
+        email: str,
+        display_name: str,
+    ) -> tuple[BrowserSessionResponse, str]:
+        issuer = issuer.strip().rstrip("/")
+        subject = subject.strip()
+        email = _normalize_email(email)
+        if not issuer or not subject or not email:
+            raise HTTPException(status_code=400, detail="MV37 identity was missing issuer, subject, or email")
+
+        user = self.repository.get_browser_user_by_external_identity(  # type: ignore[attr-defined]
+            issuer=issuer,
+            subject=subject,
+        )
+        if user is None:
+            existing = self.repository.get_browser_user_by_email(email)  # type: ignore[attr-defined]
+            if existing is not None:
+                raise HTTPException(status_code=409, detail="An account with that email already exists")
+            fallback_name = email.split("@", 1)[0]
+            user = self.repository.create_browser_user(  # type: ignore[attr-defined]
+                email=email,
+                display_name=display_name.strip() or fallback_name,
+                password_hash=None,
+            )
+            self.repository.link_external_identity(  # type: ignore[attr-defined]
+                user_id=user.user_id,
+                provider="mv37",
+                issuer=issuer,
+                subject=subject,
+                email=email,
+            )
         session_token = self._create_browser_session(user.user_id)
         return self._browser_session_response(user), session_token
 

@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from urllib.parse import quote
 
 import pytest
+from fastapi import HTTPException
 from fastapi.responses import RedirectResponse
 from fastapi.security import HTTPAuthorizationCredentials
 from fastapi.testclient import TestClient
@@ -1258,6 +1259,26 @@ class StubApiService:
             "google-browser-token",
         )
 
+    def upsert_mv37_browser_user(
+        self,
+        *,
+        issuer: str,
+        subject: str,
+        email: str,
+        display_name: str,
+    ) -> tuple[BrowserSessionResponse, str]:
+        self.calls.append(("upsert_mv37_browser_user", (issuer, subject, email, display_name)))
+        if email == "conflict@example.com":
+            raise HTTPException(status_code=409, detail="An account with that email already exists")
+        return (
+            BrowserSessionResponse(
+                authenticated=True,
+                user=BrowserUser(user_id="user_mv37", email=email, display_name=display_name),
+                has_anthropic_api_key=False,
+            ),
+            "mv37-browser-token",
+        )
+
 
 def _make_request(
     *,
@@ -1288,6 +1309,9 @@ def api_client(monkeypatch):
         chat_public_url="https://paperbase.example",
         app_secret="paperbase-test-secret",
         browser_session_cookie_name="paperbase_session",
+        mv37_issuer_url="https://auth.mv37.org/realms/mv37",
+        mv37_client_id="paperbase-test",
+        mv37_client_secret="paperbase-secret",
     )
     service = StubApiService()
 
@@ -2048,6 +2072,165 @@ def test_browser_project_item_routes_delegate_to_service(api_client):
     assert ("get_project_presentation_audio", ("user_1", "proj_1")) in service.calls
     assert ("get_public_project_presentation", "share_1") in service.calls
     assert ("get_public_project_presentation_audio", "share_1") in service.calls
+
+
+class FakeMv37Client:
+    def __init__(self, claims: dict[str, object] | None = None) -> None:
+        self.claims = {
+            "iss": "https://auth.mv37.org/realms/mv37",
+            "aud": "paperbase-test",
+            "exp": int(api_module.time.time()) + 300,
+            "email_verified": True,
+            "sub": "mv37-user-1",
+            "email": "mv37@example.com",
+            "name": "MV37 User",
+        }
+        if claims:
+            self.claims.update(claims)
+        self.code_verifier = ""
+        self.nonce = ""
+
+    async def authorize_redirect(self, request, redirect_uri, **kwargs):
+        del request
+        assert kwargs["code_challenge"]
+        assert kwargs["code_challenge_method"] == "S256"
+        assert kwargs["nonce"]
+        return RedirectResponse(
+            "https://auth.mv37.org/realms/mv37/protocol/openid-connect/auth"
+            f"?redirect_uri={quote(redirect_uri, safe='')}"
+            f"&code_challenge={kwargs['code_challenge']}"
+            f"&code_challenge_method={kwargs['code_challenge_method']}"
+            f"&nonce={kwargs['nonce']}",
+            status_code=302,
+        )
+
+    async def authorize_access_token(self, request, **kwargs):
+        del request
+        self.code_verifier = str(kwargs.get("code_verifier") or "")
+        assert self.code_verifier
+        return {"id_token": "mv37-id-token"}
+
+    async def parse_id_token(self, request, token, nonce):
+        del request, token
+        self.nonce = nonce
+        assert self.nonce
+        return self.claims
+
+
+def test_mv37_start_redirects_with_pkce_and_saved_return_to(api_client, monkeypatch):
+    client, _, _ = api_client
+    fake_client = FakeMv37Client()
+    monkeypatch.setattr(api_module, "get_mv37_oauth_client", lambda: fake_client)
+
+    response = client.get(
+        "/v1/browser/auth/mv37/start",
+        params={"return_to": "https://chat.example/app"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    assert response.headers["location"].startswith(
+        "https://auth.mv37.org/realms/mv37/protocol/openid-connect/auth"
+    )
+    assert "code_challenge_method=S256" in response.headers["location"]
+
+
+def test_mv37_start_redirects_back_to_return_to_when_not_configured(api_client, monkeypatch):
+    client, _, _ = api_client
+    monkeypatch.setattr(api_module, "get_mv37_oauth_client", lambda: None)
+
+    response = client.get(
+        "/v1/browser/auth/mv37/start",
+        params={"return_to": "https://chat.example/app"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    assert response.headers["location"] == "https://chat.example/app/?auth_error=mv37_not_configured"
+
+
+def test_mv37_callback_success_sets_cookie_and_redirects_to_saved_return_to(api_client, monkeypatch):
+    client, service, _ = api_client
+    fake_client = FakeMv37Client()
+    monkeypatch.setattr(api_module, "get_mv37_oauth_client", lambda: fake_client)
+
+    start = client.get(
+        "/v1/browser/auth/mv37/start",
+        params={"return_to": "https://chat.example/app"},
+        follow_redirects=False,
+    )
+    callback = client.get("/v1/browser/auth/mv37/callback", follow_redirects=False)
+
+    assert start.status_code == 302
+    assert callback.status_code == 302
+    assert callback.headers["location"] == "https://chat.example/app/?auth=mv37"
+    assert "mv37-browser-token" in callback.headers["set-cookie"]
+    assert fake_client.code_verifier
+    assert fake_client.nonce
+    assert (
+        "upsert_mv37_browser_user",
+        (
+            "https://auth.mv37.org/realms/mv37",
+            "mv37-user-1",
+            "mv37@example.com",
+            "MV37 User",
+        ),
+    ) in service.calls
+
+
+def test_mv37_callback_email_conflict_does_not_auto_link(api_client, monkeypatch):
+    client, service, _ = api_client
+    fake_client = FakeMv37Client({"email": "conflict@example.com"})
+    monkeypatch.setattr(api_module, "get_mv37_oauth_client", lambda: fake_client)
+
+    client.get("/v1/browser/auth/mv37/start", follow_redirects=False)
+    response = client.get("/v1/browser/auth/mv37/callback", follow_redirects=False)
+
+    assert response.status_code == 302
+    assert response.headers["location"] == "https://paperbase.example/?auth_error=mv37_email_conflict"
+    assert (
+        "upsert_mv37_browser_user",
+        (
+            "https://auth.mv37.org/realms/mv37",
+            "mv37-user-1",
+            "conflict@example.com",
+            "MV37 User",
+        ),
+    ) in service.calls
+
+
+@pytest.mark.parametrize(
+    "claims",
+    [
+        {"iss": "https://evil.example/realms/mv37"},
+        {"aud": "other-client"},
+        {"exp": 1},
+        {"email_verified": False},
+        {"sub": ""},
+    ],
+)
+def test_mv37_callback_rejects_invalid_claims(api_client, monkeypatch, claims):
+    client, service, _ = api_client
+    fake_client = FakeMv37Client(claims)
+    monkeypatch.setattr(api_module, "get_mv37_oauth_client", lambda: fake_client)
+
+    client.get("/v1/browser/auth/mv37/start", follow_redirects=False)
+    response = client.get("/v1/browser/auth/mv37/callback", follow_redirects=False)
+
+    assert response.status_code == 302
+    assert response.headers["location"] == "https://paperbase.example/?auth_error=mv37_callback_failed"
+    assert not [call for call in service.calls if call[0] == "upsert_mv37_browser_user"]
+
+
+def test_mv37_callback_requires_pkce_and_nonce_state(api_client, monkeypatch):
+    client, service, _ = api_client
+    monkeypatch.setattr(api_module, "get_mv37_oauth_client", lambda: FakeMv37Client())
+
+    response = client.get("/v1/browser/auth/mv37/callback", follow_redirects=False)
+
+    assert response.status_code == 302
+    assert response.headers["location"] == "https://paperbase.example/?auth_error=mv37_callback_failed"
+    assert not [call for call in service.calls if call[0] == "upsert_mv37_browser_user"]
 
 
 def test_google_callback_success_sets_cookie_and_redirects_to_saved_return_to(api_client, monkeypatch):

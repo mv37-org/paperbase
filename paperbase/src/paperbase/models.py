@@ -543,6 +543,7 @@ class BrowserUserSettingsResponse(BaseModel):
     github_sync_enabled: bool = False
     github_oauth_available: bool = False
     github_manage_access_url: str = "https://github.com/settings/connections/applications"
+    mv37_oauth_available: bool = False
     weekly_papers_review_email: bool = False
     appearance_theme: Literal["light", "dark"] = "light"
 

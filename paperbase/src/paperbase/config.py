@@ -98,6 +98,10 @@ class Settings(BaseSettings):
     google_client_id: str | None = None
     google_client_secret: str | None = None
     google_oauth_redirect_url: str | None = None
+    mv37_issuer_url: str | None = None
+    mv37_client_id: str | None = None
+    mv37_client_secret: str | None = None
+    mv37_oauth_redirect_url: str | None = None
     github_client_id: str | None = None
     github_client_secret: str | None = None
     github_oauth_redirect_url: str | None = None

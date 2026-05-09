@@ -2754,6 +2754,52 @@ def test_browser_auth_and_password_reset_flow(browser_service):
     app.dependency_overrides.clear()
 
 
+def test_mv37_browser_user_reuses_existing_external_identity(browser_service):
+    service, _, _ = browser_service
+
+    first, first_token = service.upsert_mv37_browser_user(
+        issuer="https://auth.mv37.org/realms/mv37",
+        subject="mv37-user-1",
+        email="mv37@example.com",
+        display_name="MV37 User",
+    )
+    second, second_token = service.upsert_mv37_browser_user(
+        issuer="https://auth.mv37.org/realms/mv37",
+        subject="mv37-user-1",
+        email="mv37@example.com",
+        display_name="Renamed User",
+    )
+
+    assert first.authenticated is True
+    assert second.authenticated is True
+    assert first.user is not None
+    assert second.user is not None
+    assert second.user.user_id == first.user.user_id
+    assert second.user.display_name == "MV37 User"
+    assert first_token != second_token
+
+
+def test_mv37_browser_user_email_conflict_does_not_auto_link(browser_service):
+    service, _, _ = browser_service
+    service.register_browser_user(
+        SignupRequest(email="conflict@example.com", password="topsecret123", display_name="Existing")
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        service.upsert_mv37_browser_user(
+            issuer="https://auth.mv37.org/realms/mv37",
+            subject="mv37-user-1",
+            email="conflict@example.com",
+            display_name="MV37 User",
+        )
+
+    assert exc_info.value.status_code == 409
+    assert service.repository.get_browser_user_by_external_identity(  # type: ignore[attr-defined]
+        issuer="https://auth.mv37.org/realms/mv37",
+        subject="mv37-user-1",
+    ) is None
+
+
 def test_browser_settings_round_trip(browser_service):
     service, _, _ = browser_service
     session, _ = service.register_browser_user(

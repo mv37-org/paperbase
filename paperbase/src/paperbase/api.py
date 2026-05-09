@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 from functools import lru_cache
 import html
 import json
 import logging
 import os
 from pathlib import Path
+import secrets
+import time
 from urllib.parse import urlsplit
 
 from authlib.integrations.starlette_client import OAuth
@@ -234,7 +238,7 @@ def _is_safe_return_to(value: str | None) -> bool:
 def _chat_redirect_base(request: Request, settings, *, return_to: str | None = None) -> str:
     if _is_safe_return_to(return_to):
         return return_to.rstrip("/")
-    for session_key in ("browser_google_return_to", "browser_github_return_to"):
+    for session_key in ("browser_mv37_return_to", "browser_google_return_to", "browser_github_return_to"):
         session_return_to = request.session.pop(session_key, None)
         if _is_safe_return_to(session_return_to):
             return session_return_to.rstrip("/")
@@ -335,6 +339,23 @@ def get_google_oauth_client():
 
 
 @lru_cache(maxsize=1)
+def get_mv37_oauth_client():
+    settings = get_settings()
+    issuer = (settings.mv37_issuer_url or "").strip().rstrip("/")
+    if not issuer or not settings.mv37_client_id or not settings.mv37_client_secret:
+        return None
+    oauth = OAuth()
+    oauth.register(
+        name="mv37",
+        server_metadata_url=f"{issuer}/.well-known/openid-configuration",
+        client_id=settings.mv37_client_id,
+        client_secret=settings.mv37_client_secret,
+        client_kwargs={"scope": "openid email profile", "code_challenge_method": "S256"},
+    )
+    return oauth.create_client("mv37")
+
+
+@lru_cache(maxsize=1)
 def get_github_oauth_client():
     settings = get_settings()
     if not settings.github_client_id or not settings.github_client_secret:
@@ -350,6 +371,46 @@ def get_github_oauth_client():
         client_kwargs={"scope": "repo read:user user:email"},
     )
     return oauth.create_client("github")
+
+
+def _new_pkce_verifier() -> str:
+    return secrets.token_urlsafe(64)
+
+
+def _pkce_s256_challenge(verifier: str) -> str:
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+
+
+def _validate_mv37_claims(claims: dict[str, object], settings) -> tuple[str, str, str, str]:
+    expected_issuer = (settings.mv37_issuer_url or "").strip().rstrip("/")
+    issuer = str(claims.get("iss") or "").strip().rstrip("/")
+    if not expected_issuer or issuer != expected_issuer:
+        raise RuntimeError("MV37 response had an invalid issuer")
+
+    audience = claims.get("aud")
+    if isinstance(audience, str):
+        audience_values = {audience}
+    elif isinstance(audience, list):
+        audience_values = {str(value) for value in audience}
+    else:
+        audience_values = set()
+    if settings.mv37_client_id not in audience_values:
+        raise RuntimeError("MV37 response had an invalid audience")
+
+    expires_at = claims.get("exp")
+    if not isinstance(expires_at, (int, float)) or expires_at <= time.time():
+        raise RuntimeError("MV37 response was expired")
+
+    if claims.get("email_verified") is not True:
+        raise RuntimeError("MV37 account email is not verified")
+
+    subject = str(claims.get("sub") or "").strip()
+    email = str(claims.get("email") or "").strip()
+    display_name = str(claims.get("name") or claims.get("preferred_username") or "").strip()
+    if not subject or not email:
+        raise RuntimeError("MV37 response was missing subject or email")
+    return issuer, subject, email, display_name
 
 
 def _browser_session_response_with_csrf(
@@ -1341,6 +1402,66 @@ def browser_reset_password(
     service: PaperbaseService = Depends(get_service),
 ) -> dict[str, str]:
     return service.reset_password(request)
+
+
+@app.get("/v1/browser/auth/mv37/start")
+async def browser_mv37_start(request: Request, return_to: str | None = Query(default=None)):
+    client = get_mv37_oauth_client()
+    settings = get_settings()
+    redirect_base = _chat_redirect_base(request, settings, return_to=return_to)
+    if _is_safe_return_to(return_to):
+        request.session["browser_mv37_return_to"] = return_to
+    if client is None:
+        return RedirectResponse(f"{redirect_base}/?auth_error=mv37_not_configured", status_code=302)
+    redirect_uri = settings.mv37_oauth_redirect_url or str(request.url_for("browser_mv37_callback"))
+    verifier = _new_pkce_verifier()
+    nonce = secrets.token_urlsafe(32)
+    request.session["browser_mv37_code_verifier"] = verifier
+    request.session["browser_mv37_nonce"] = nonce
+    return await client.authorize_redirect(
+        request,
+        redirect_uri,
+        code_challenge=_pkce_s256_challenge(verifier),
+        code_challenge_method="S256",
+        nonce=nonce,
+    )
+
+
+@app.get("/v1/browser/auth/mv37/callback", name="browser_mv37_callback")
+async def browser_mv37_callback(
+    request: Request,
+    service: PaperbaseService = Depends(get_service),
+):
+    settings = get_settings()
+    client = get_mv37_oauth_client()
+    redirect_base = _chat_redirect_base(request, settings)
+    if client is None:
+        return RedirectResponse(f"{redirect_base}/?auth_error=mv37_not_configured", status_code=302)
+    try:
+        verifier = request.session.pop("browser_mv37_code_verifier", None)
+        nonce = request.session.pop("browser_mv37_nonce", None)
+        if not isinstance(verifier, str) or not isinstance(nonce, str):
+            raise RuntimeError("MV37 callback was missing PKCE or nonce state")
+        token = await client.authorize_access_token(request, code_verifier=verifier)
+        claims = await client.parse_id_token(request, token, nonce=nonce)
+        if not isinstance(claims, dict):
+            raise RuntimeError("MV37 did not return ID token claims")
+        issuer, subject, email, display_name = _validate_mv37_claims(claims, settings)
+        _session_response, raw_token = service.upsert_mv37_browser_user(
+            issuer=issuer,
+            subject=subject,
+            email=email,
+            display_name=display_name,
+        )
+        response = RedirectResponse(f"{redirect_base}/?auth=mv37", status_code=302)
+        set_browser_session_cookie(response, raw_token, settings)
+        return response
+    except HTTPException as exc:
+        if exc.status_code == 409:
+            return RedirectResponse(f"{redirect_base}/?auth_error=mv37_email_conflict", status_code=302)
+        return RedirectResponse(f"{redirect_base}/?auth_error=mv37_callback_failed", status_code=302)
+    except Exception:
+        return RedirectResponse(f"{redirect_base}/?auth_error=mv37_callback_failed", status_code=302)
 
 
 @app.get("/v1/browser/auth/google/start")
