@@ -5,6 +5,7 @@ import json
 import logging
 import threading
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -1692,8 +1693,28 @@ def test_api_main_respects_reload_env(monkeypatch):
     assert captured["port"] == 8080
     assert captured["reload"] is True
     assert captured["reload_dirs"] == [str(api_module._PACKAGE_DIR)]
-    assert str(api_module._STATIC_DIR) in captured["reload_excludes"]
+    assert api_module._reload_pattern_for_path(api_module._STATIC_DIR) in captured["reload_excludes"]
+    assert all(not Path(pattern).is_absolute() for pattern in captured["reload_excludes"])
     assert captured["log_level"] == "warning"
+
+
+def test_api_reload_excludes_work_when_static_dir_is_missing(monkeypatch, tmp_path):
+    import uvicorn
+    import paperbase.api as api_module
+
+    missing_static_dir = tmp_path / "missing" / "static"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(api_module, "_STATIC_DIR", missing_static_dir)
+
+    excludes = api_module._api_reload_excludes()
+
+    assert excludes == ["missing/static"]
+    uvicorn.Config(
+        "paperbase.api:app",
+        reload=True,
+        reload_dirs=api_module._api_reload_dirs(),
+        reload_excludes=excludes,
+    )
 
 
 def test_get_service_initializes_once_under_concurrent_requests(monkeypatch):

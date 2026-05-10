@@ -137,9 +137,13 @@ def _api_reload_dirs() -> list[str]:
     return [str(_PACKAGE_DIR)]
 
 
+def _reload_pattern_for_path(path: Path) -> str:
+    return os.path.relpath(path, Path.cwd())
+
+
 def _api_reload_excludes() -> list[str]:
     return [
-        str(_STATIC_DIR),
+        _reload_pattern_for_path(_STATIC_DIR),
     ]
 
 
