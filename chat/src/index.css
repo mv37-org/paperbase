@@ -219,15 +219,10 @@ textarea {
   content: "";
   position: absolute;
   inset: 0 0 auto;
-  height: 100px;
+  height: 150px;
   pointer-events: none;
-  background:
-    radial-gradient(circle at 1px 1px, rgba(27, 22, 17, 0.12) 0 0.65px, transparent 0.8px),
-    linear-gradient(to bottom, #f4efe6 0, #ffffff 100px);
-  background-size:
-    9px 9px,
-    100% 100%;
-  opacity: 0.72;
+  background: linear-gradient(to bottom, #f4efe6 0, #ffffff 150px);
+  opacity: 0.46;
 }
 
 .landing-page-trending > * {
@@ -258,7 +253,7 @@ textarea {
 }
 
 .public-trending-brand {
-  font-weight: 700;
+  font-weight: 500;
 }
 
 .public-trending-back {
@@ -2639,6 +2634,8 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
 .trending-page-landing .trending-card-image {
   height: auto;
   aspect-ratio: 4 / 3;
+  border-width: 1px 0 0;
+  border-radius: 0 0 5px 5px;
   object-fit: cover;
   object-position: top center;
 }
@@ -2646,6 +2643,8 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
 .trending-page-public .trending-card-image {
   height: auto;
   aspect-ratio: 4 / 3;
+  border-width: 1px 0 0;
+  border-radius: 0 0 5px 5px;
   object-fit: cover;
   object-position: top center;
 }
@@ -2681,9 +2680,11 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
 
 .trending-page-public .trending-card,
 .trending-page-landing .trending-card {
-  gap: 9px;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  align-content: stretch;
+  gap: 0;
   min-height: 0;
-  padding: 9px;
+  padding: 0;
   border-color: rgba(27, 22, 17, 0.16);
   border-radius: 6px;
   box-shadow: 0 12px 26px rgba(27, 22, 17, 0.04);
@@ -2692,21 +2693,27 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
 .trending-page-public .trending-card-copy,
 .trending-page-landing .trending-card-copy {
   align-content: start;
-  gap: 4px;
+  gap: 3px;
+  padding: 8px 9px 7px;
 }
 
 .trending-page-public .trending-card-copy h2,
 .trending-page-landing .trending-card-copy h2 {
-  font-size: clamp(13px, 1.55vw, 16px);
-  line-height: 1.12;
-  font-weight: 700;
+  font-size: clamp(11px, 1.25vw, 14px);
+  line-height: 1.14;
+  font-weight: 650;
 }
 
 .trending-page-public .trending-card-copy span,
 .trending-page-landing .trending-card-copy span {
   color: rgba(27, 22, 17, 0.68);
-  font-size: 12px;
+  font-size: 11px;
   line-height: 1.25;
+}
+
+.trending-page-public .trending-card-hero,
+.trending-page-landing .trending-card-hero {
+  align-self: end;
 }
 
 .trending-card-title-button {
@@ -2866,7 +2873,7 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
   font-family: Georgia, "Iowan Old Style", serif;
   font-size: clamp(25px, 3vw, 36px);
   line-height: 1.06;
-  font-weight: 700;
+  font-weight: 500;
   letter-spacing: 0;
 }
 
@@ -2993,7 +3000,7 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
 .trending-page-public .trending-section-heading h2 {
   font-size: 18px;
   line-height: 1.15;
-  font-weight: 700;
+  font-weight: 500;
   letter-spacing: 0;
 }
 

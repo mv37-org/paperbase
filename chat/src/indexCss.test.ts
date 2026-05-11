@@ -26,6 +26,8 @@ describe("index.css", () => {
 
   it("keeps trending paper cards aligned with research paper card styling", () => {
     const landingTrendingBlock = css.match(/\.landing-page-trending\s*\{([^}]*)\}/)?.[1] ?? "";
+    const landingGradientBlock =
+      css.match(/\.landing-page-trending::before\s*\{([^}]*)\}/)?.[1] ?? "";
     const gridBlock = css.match(/\.trending-card-grid\s*\{([^}]*)\}/)?.[1] ?? "";
     const publicGridMatch = css.match(
       /\.trending-page-public \.trending-card-grid\s*,\s*\.trending-page-landing \.trending-card-grid\s*\{([^}]*)\}/,
@@ -48,6 +50,10 @@ describe("index.css", () => {
       /\.trending-page-public \.trending-card\s*,\s*\.trending-page-landing \.trending-card\s*\{([^}]*)\}/,
     );
     const publicCardBlock = publicCardBlockMatch?.[1] ?? "";
+    const publicCardCopyBlockMatch = css.match(
+      /\.trending-page-public \.trending-card-copy\s*,\s*\.trending-page-landing \.trending-card-copy\s*\{([^}]*)\}/,
+    );
+    const publicCardCopyBlock = publicCardCopyBlockMatch?.[1] ?? "";
     const publicCardTitleBlockMatch = css.match(
       /\.trending-page-public \.trending-card-copy h2\s*,\s*\.trending-page-landing \.trending-card-copy h2\s*\{([^}]*)\}/,
     );
@@ -95,7 +101,12 @@ describe("index.css", () => {
     );
     expect(landingTrendingBlock).toContain("background: #ffffff;");
     expect(css).toContain(".landing-page-trending::before");
-    expect(css).toContain("linear-gradient(to bottom, #f4efe6 0, #ffffff 100px)");
+    expect(landingGradientBlock).toContain("height: 150px;");
+    expect(landingGradientBlock).toContain(
+      "background: linear-gradient(to bottom, #f4efe6 0, #ffffff 150px);",
+    );
+    expect(landingGradientBlock).toContain("opacity: 0.46;");
+    expect(landingGradientBlock).not.toContain("radial-gradient");
     expect(gridBlock).toContain("grid-template-columns: repeat(3, minmax(0, 1fr));");
     expect(gridBlock).toContain("gap: 16px;");
     expect(publicGridBlock).toContain("grid-template-columns: repeat(2, minmax(0, 1fr));");
@@ -114,19 +125,25 @@ describe("index.css", () => {
     expect(imageBlock).toContain("height: clamp(108px, 15vw, 132px);");
     expect(imageBlock).toContain("object-fit: contain;");
     expect(landingImageBlock).toContain("aspect-ratio: 4 / 3;");
+    expect(landingImageBlock).toContain("border-radius: 0 0 5px 5px;");
     expect(landingImageBlock).toContain("object-fit: cover;");
     expect(publicImageBlock).toContain("aspect-ratio: 4 / 3;");
+    expect(publicImageBlock).toContain("border-radius: 0 0 5px 5px;");
     expect(publicImageBlock).toContain("object-fit: cover;");
-    expect(publicCardBlock).toContain("gap: 9px;");
-    expect(publicCardBlock).toContain("padding: 9px;");
-    expect(publicCardTitleBlock).toContain("font-size: clamp(13px, 1.55vw, 16px);");
-    expect(publicCardMetaBlock).toContain("font-size: 12px;");
+    expect(publicCardBlock).toContain("grid-template-rows: auto minmax(0, 1fr) auto;");
+    expect(publicCardBlock).toContain("gap: 0;");
+    expect(publicCardBlock).toContain("padding: 0;");
+    expect(publicCardCopyBlock).toContain("padding: 8px 9px 7px;");
+    expect(publicCardTitleBlock).toContain("font-size: clamp(11px, 1.25vw, 14px);");
+    expect(publicCardTitleBlock).toContain("font-weight: 650;");
+    expect(publicCardMetaBlock).toContain("font-size: 11px;");
     expect(detailHeroBlock).toContain("grid-template-columns: 1fr;");
     expect(detailImageWrapBlock).toContain("place-items: center;");
     expect(detailImageWrapBlock).toContain("width: min(100%, 1040px);");
     expect(detailImageWrapBlock).toContain("padding: 0;");
     expect(publicDetailTitleBlock).toContain('font-family: Georgia, "Iowan Old Style", serif;');
     expect(publicDetailTitleBlock).toContain("font-size: clamp(25px, 3vw, 36px);");
+    expect(publicDetailTitleBlock).toContain("font-weight: 500;");
     expect(publicDetailDescriptionBlock).toContain("font-size: 14px;");
     expect(publicDetailImageWrapBlock).toContain("width: 100%;");
     expect(publicDetailImageWrapBlock).toContain("border-radius: 10px;");
@@ -139,6 +156,7 @@ describe("index.css", () => {
     expect(publicDetailCopyBlock).toContain("max-width: 900px;");
     expect(publicDetailActionBlock).toContain("font-size: 12px;");
     expect(publicDetailHeadingBlock).toContain("font-size: 18px;");
+    expect(publicDetailHeadingBlock).toContain("font-weight: 500;");
     expect(publicDetailBodyBlock).toContain("font-size: 15px;");
     expect(metadataGridBlock).toContain("display: grid;");
     expect(metadataRowBlock).toContain(
