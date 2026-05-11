@@ -142,6 +142,22 @@ def test_local_file_object_store_round_trip_and_listing(tmp_path: Path):
     assert store.presign_get("papers/arxiv:1/text/full.md", expires_in=60) == str(tmp_path / "papers/arxiv:1/text/full.md")
 
 
+def test_local_file_object_store_delete_missing_prefix_does_not_scan_siblings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    store = LocalFileObjectStore(Settings(storage_backend="local", local_storage_root=str(tmp_path)))
+    store.put_bytes("papers/arxiv:10/text/full.md", b"other", content_type="text/markdown")
+
+    def fail_list_prefix(prefix: str):
+        raise AssertionError(f"delete_prefix should not scan storage for missing prefix {prefix}")
+
+    monkeypatch.setattr(store, "list_prefix", fail_list_prefix)
+
+    store.delete_prefix("papers/arxiv:1")
+
+    assert store.exists("papers/arxiv:10/text/full.md") is True
+
+
 def test_local_file_object_store_rejects_path_escape(tmp_path: Path):
     store = LocalFileObjectStore(Settings(storage_backend="local", local_storage_root=str(tmp_path)))
 
