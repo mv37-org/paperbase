@@ -339,7 +339,7 @@ const buildProjectCategoryCollapseState = (collapsed: boolean) =>
     Record<ProjectSidebarCategoryKey, boolean>
   >;
 const WORKSPACE_SIDEBAR_ITEMS = [
-  { id: "trending", label: "Trending papers", asset: "docs.svg" },
+  { id: "trending", label: "Trending papers", asset: "icons8-ratings.svg" },
   { id: "admin_jobs", label: "Control panel", asset: "settings.svg", adminOnly: true },
 ] satisfies Array<{
   id: "trending" | "admin_jobs";

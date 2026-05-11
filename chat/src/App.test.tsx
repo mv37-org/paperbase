@@ -5072,10 +5072,14 @@ describe("App", () => {
     await waitFor(() => {
       expect(document.querySelector("#account-menu-button")).toBeTruthy();
     });
-    expect(screen.getByRole("button", { name: "Trending papers" })).toBeTruthy();
+    const trendingSidebarButton = screen.getByRole("button", { name: "Trending papers" });
+    expect(trendingSidebarButton).toBeTruthy();
+    expect(trendingSidebarButton.querySelector("img")?.getAttribute("src")).toContain(
+      "icons8-ratings.svg",
+    );
     expect(screen.queryByRole("button", { name: "Control panel" })).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "Trending papers" }));
+    fireEvent.click(trendingSidebarButton);
     await waitFor(() => {
       expect(screen.getByTestId("trending-papers-page")).toBeTruthy();
     });
