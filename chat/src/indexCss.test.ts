@@ -25,7 +25,12 @@ describe("index.css", () => {
   });
 
   it("keeps trending paper cards aligned with research paper card styling", () => {
+    const landingTrendingBlock = css.match(/\.landing-page-trending\s*\{([^}]*)\}/)?.[1] ?? "";
     const gridBlock = css.match(/\.trending-card-grid\s*\{([^}]*)\}/)?.[1] ?? "";
+    const publicGridMatch = css.match(
+      /\.trending-page-public \.trending-card-grid\s*,\s*\.trending-page-landing \.trending-card-grid\s*\{([^}]*)\}/,
+    );
+    const publicGridBlock = publicGridMatch?.[1] ?? "";
     const landingGridBlock =
       css.match(/\.trending-page-landing \.trending-card-grid\s*\{([^}]*)\}/)?.[1] ?? "";
     const workspaceTrendingBlock = css.match(/\.workspace-page-trending\s*\{([^}]*)\}/)?.[1] ?? "";
@@ -37,10 +42,20 @@ describe("index.css", () => {
     const imageBlock = css.match(/\.trending-card-image\s*\{([^}]*)\}/)?.[1] ?? "";
     const landingImageBlock =
       css.match(/\.trending-page-landing \.trending-card-image\s*\{([^}]*)\}/)?.[1] ?? "";
+    const publicImageBlock =
+      css.match(/\.trending-page-public \.trending-card-image\s*\{([^}]*)\}/)?.[1] ?? "";
     const detailHeroBlock = css.match(/\.trending-detail-hero\s*\{([^}]*)\}/)?.[1] ?? "";
     const detailImageWrapBlock = css.match(/\.trending-detail-image-wrap\s*\{([^}]*)\}/)?.[1] ?? "";
     const detailImageBlock = css.match(/\.trending-detail-image\s*\{([^}]*)\}/)?.[1] ?? "";
     const detailCopyBlock = css.match(/\.trending-detail-copy\s*\{([^}]*)\}/)?.[1] ?? "";
+    const publicDetailTitleBlock =
+      css.match(/\.trending-page-public \.workspace-page-header h1\s*\{([^}]*)\}/)?.[1] ?? "";
+    const publicDetailImageWrapBlock =
+      css.match(/\.trending-page-public \.trending-detail-image-wrap\s*\{([^}]*)\}/)?.[1] ?? "";
+    const publicDetailCopyMatch = css.match(
+      /\.trending-page-public \.trending-detail-copy\s*,\s*\.trending-page-public \.trending-comments-section\s*\{([^}]*)\}/,
+    );
+    const publicDetailCopyBlock = publicDetailCopyMatch?.[1] ?? "";
     const metadataGridBlock = css.match(/\.trending-metadata-grid\s*\{([^}]*)\}/)?.[1] ?? "";
     const metadataRowBlock = css.match(/\.trending-metadata-row\s*\{([^}]*)\}/)?.[1] ?? "";
     const landingDetailTitleMatch = css.match(
@@ -52,11 +67,17 @@ describe("index.css", () => {
     expect(workspaceTrendingBlock).toContain(
       "width: min(var(--chat-content-max-width), calc(100% - 48px));",
     );
+    expect(landingTrendingBlock).toContain("background: #ffffff;");
+    expect(css).toContain(".landing-page-trending::before");
+    expect(css).toContain("linear-gradient(to bottom, #f4efe6 0, #ffffff 100px)");
     expect(gridBlock).toContain("grid-template-columns: repeat(3, minmax(0, 1fr));");
     expect(gridBlock).toContain("gap: 16px;");
+    expect(publicGridBlock).toContain("grid-template-columns: repeat(2, minmax(0, 1fr));");
+    expect(publicGridBlock).toContain("gap: 22px;");
     expect(landingGridBlock).toContain("grid-template-columns: repeat(2, minmax(0, 1fr));");
-    expect(landingGridBlock).toContain("gap: 16px;");
+    expect(landingGridBlock).toContain("gap: 22px;");
     expect(publicTrendingHeaderBlock).toContain("width: min(100%, 900px);");
+    expect(publicTrendingHeaderBlock).toContain('font-family: Georgia, "Iowan Old Style", serif;');
     expect(publicTrendingColumnBlock).toContain("max-width: 900px;");
     expect(css).not.toContain(".trending-page-landing .trending-card:nth-child(even)");
     expect(css).not.toContain('"media copy"');
@@ -65,17 +86,25 @@ describe("index.css", () => {
     expect(cardBlock).toContain("border-radius: 4px;");
     expect(imageBlock).toContain("height: clamp(108px, 15vw, 132px);");
     expect(imageBlock).toContain("object-fit: contain;");
-    expect(landingImageBlock).toContain("height: clamp(260px, 31vw, 390px);");
+    expect(landingImageBlock).toContain("aspect-ratio: 4 / 3;");
+    expect(landingImageBlock).toContain("object-fit: cover;");
+    expect(publicImageBlock).toContain("aspect-ratio: 4 / 3;");
+    expect(publicImageBlock).toContain("object-fit: cover;");
     expect(detailHeroBlock).toContain("grid-template-columns: 1fr;");
     expect(detailImageWrapBlock).toContain("place-items: center;");
     expect(detailImageWrapBlock).toContain("width: min(100%, 1040px);");
     expect(detailImageWrapBlock).toContain("padding: 0;");
+    expect(publicDetailTitleBlock).toContain('font-family: Georgia, "Iowan Old Style", serif;');
+    expect(publicDetailTitleBlock).toContain("font-size: clamp(34px, 5vw, 54px);");
+    expect(publicDetailImageWrapBlock).toContain("width: 100%;");
+    expect(publicDetailImageWrapBlock).toContain("border-radius: 10px;");
     expect(detailImageBlock).toContain("height: auto;");
     expect(detailImageBlock).toContain("border: 0;");
     expect(detailImageBlock).toContain("object-fit: contain;");
     expect(detailImageBlock).not.toContain("max-height:");
     expect(detailImageBlock).not.toContain("aspect-ratio:");
     expect(detailCopyBlock).toContain("width: min(100%, 980px);");
+    expect(publicDetailCopyBlock).toContain("max-width: 900px;");
     expect(metadataGridBlock).toContain("display: grid;");
     expect(metadataRowBlock).toContain(
       "grid-template-columns: minmax(116px, 160px) minmax(0, 1fr);",

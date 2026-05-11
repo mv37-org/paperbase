@@ -209,7 +209,30 @@ textarea {
   display: grid;
   justify-items: center;
   align-content: start;
+  min-height: 100%;
   padding-top: 28px;
+  overflow-x: hidden;
+  background: #ffffff;
+}
+
+.landing-page-trending::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 100px;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at 1px 1px, rgba(27, 22, 17, 0.12) 0 0.65px, transparent 0.8px),
+    linear-gradient(to bottom, #f4efe6 0, #ffffff 100px);
+  background-size:
+    9px 9px,
+    100% 100%;
+  opacity: 0.72;
+}
+
+.landing-page-trending > * {
+  position: relative;
+  z-index: 1;
 }
 
 .public-trending-header {
@@ -218,9 +241,10 @@ textarea {
   align-items: center;
   justify-content: space-between;
   gap: 24px;
-  margin-bottom: 72px;
-  font-family: "JetBrains Mono", "SFMono-Regular", monospace;
-  font-size: 12px;
+  margin-bottom: 66px;
+  font-family: Georgia, "Iowan Old Style", serif;
+  font-size: 14px;
+  line-height: 1.2;
 }
 
 .public-trending-brand,
@@ -231,6 +255,10 @@ textarea {
   color: var(--text);
   text-decoration: none;
   cursor: pointer;
+}
+
+.public-trending-brand {
+  font-weight: 700;
 }
 
 .public-trending-back {
@@ -2442,7 +2470,8 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
 }
 
 .trending-page-public {
-  gap: 28px;
+  gap: 34px;
+  font-family: Georgia, "Iowan Old Style", serif;
 }
 
 .trending-page-header {
@@ -2551,15 +2580,16 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
   gap: 16px;
 }
 
+.trending-page-public .trending-card-grid,
 .trending-page-landing .trending-card-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px;
+  gap: 22px;
 }
 
 .trending-card {
   position: relative;
   display: grid;
-  grid-template-rows: minmax(0, 1fr) auto auto;
+  grid-template-rows: auto auto auto;
   align-content: start;
   gap: 6px;
   min-height: 282px;
@@ -2607,7 +2637,17 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
 }
 
 .trending-page-landing .trending-card-image {
-  height: clamp(260px, 31vw, 390px);
+  height: auto;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  object-position: top center;
+}
+
+.trending-page-public .trending-card-image {
+  height: auto;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  object-position: top center;
 }
 
 .trending-card-image-fallback {
@@ -2637,6 +2677,36 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
   line-height: 1.2;
   font-weight: 600;
   letter-spacing: 0;
+}
+
+.trending-page-public .trending-card,
+.trending-page-landing .trending-card {
+  gap: 18px;
+  min-height: 0;
+  padding: 18px;
+  border-color: rgba(27, 22, 17, 0.16);
+  border-radius: 6px;
+  box-shadow: 0 12px 26px rgba(27, 22, 17, 0.04);
+}
+
+.trending-page-public .trending-card-copy,
+.trending-page-landing .trending-card-copy {
+  align-content: start;
+  gap: 8px;
+}
+
+.trending-page-public .trending-card-copy h2,
+.trending-page-landing .trending-card-copy h2 {
+  font-size: clamp(20px, 2.4vw, 25px);
+  line-height: 1.07;
+  font-weight: 700;
+}
+
+.trending-page-public .trending-card-copy span,
+.trending-page-landing .trending-card-copy span {
+  color: rgba(27, 22, 17, 0.68);
+  font-size: 17px;
+  line-height: 1.25;
 }
 
 .trending-card-title-button {
@@ -2750,17 +2820,23 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
     grid-template-columns: 1fr;
   }
 
+  .trending-page-public .trending-card-grid,
   .trending-page-landing .trending-card-grid {
     grid-template-columns: 1fr;
   }
 
+  .trending-page-public .trending-card-image,
   .trending-page-landing .trending-card-image {
-    height: clamp(300px, 70vw, 430px);
+    aspect-ratio: 4 / 3;
   }
 }
 
 .trending-detail {
   gap: 30px;
+}
+
+.trending-page-public.detail-open {
+  gap: 38px;
 }
 
 .trending-page.detail-open .trending-page-header {
@@ -2775,6 +2851,30 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
 .trending-page-landing.detail-open .workspace-page-header h2 {
   font-size: clamp(22px, 3vw, 34px);
   line-height: 1.1;
+}
+
+.trending-page-public.detail-open .workspace-page-header {
+  padding-bottom: 0;
+}
+
+.trending-page-public.detail-open .workspace-page-header-copy {
+  max-width: 820px;
+  gap: 14px;
+}
+
+.trending-page-public .workspace-page-header h1 {
+  font-family: Georgia, "Iowan Old Style", serif;
+  font-size: clamp(34px, 5vw, 54px);
+  line-height: 1.02;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.trending-page-public .workspace-page-header p {
+  max-width: 760px;
+  color: rgba(27, 22, 17, 0.62);
+  font-size: 18px;
+  line-height: 1.48;
 }
 
 .trending-detail-hero {
@@ -2815,6 +2915,19 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
   box-shadow: none;
 }
 
+.trending-page-public .trending-detail-image-wrap {
+  width: 100%;
+  overflow: hidden;
+  border-color: rgba(27, 22, 17, 0.16);
+  border-radius: 10px;
+  background: #ffffff;
+  box-shadow: 0 22px 54px rgba(27, 22, 17, 0.11);
+}
+
+.trending-page-public .trending-detail-image {
+  border-radius: 10px;
+}
+
 .trending-detail-copy {
   display: grid;
   align-content: start;
@@ -2823,11 +2936,33 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
   margin: 0 auto;
 }
 
+.trending-page-public .trending-detail-copy,
+.trending-page-public .trending-comments-section {
+  width: 100%;
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+.trending-page-public .trending-detail-copy {
+  gap: 34px;
+}
+
+.trending-page-public .trending-detail-actions {
+  gap: 10px;
+}
+
 .trending-detail-actions .trending-card-link {
   border-color: rgba(27, 22, 17, 0.14);
   background: #ffffff;
   color: var(--text);
   font-weight: 650;
+}
+
+.trending-page-public .trending-detail-actions .trending-card-link,
+.trending-page-public .trending-detail-actions .trending-vote-button {
+  padding: 9px 12px;
+  border-radius: 5px;
+  font-size: 14px;
 }
 
 .trending-detail-actions .trending-card-link:hover,
@@ -2841,6 +2976,10 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
   gap: 12px;
 }
 
+.trending-page-public .trending-summary-section {
+  gap: 10px;
+}
+
 .trending-summary-section h2,
 .trending-metadata-section h2,
 .trending-section-heading h2 {
@@ -2849,12 +2988,30 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
   line-height: 1.2;
 }
 
+.trending-page-public .trending-summary-section h2,
+.trending-page-public .trending-metadata-section h2,
+.trending-page-public .trending-section-heading h2 {
+  font-size: 24px;
+  line-height: 1.15;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
 .trending-summary-section p,
 .trending-section-heading p,
 .trending-auth-callout p {
   margin: 0;
   color: var(--muted);
   line-height: 1.6;
+}
+
+.trending-page-public .trending-summary-section p,
+.trending-page-public .trending-section-heading p,
+.trending-page-public .trending-auth-callout p {
+  max-width: 70ch;
+  color: rgba(27, 22, 17, 0.72);
+  font-size: 18px;
+  line-height: 1.7;
 }
 
 .trending-metadata-section {
@@ -2868,6 +3025,11 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
   border-top: 1px solid rgba(27, 22, 17, 0.1);
 }
 
+.trending-page-public .trending-metadata-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 28px;
+}
+
 .trending-metadata-row {
   display: grid;
   grid-template-columns: minmax(116px, 160px) minmax(0, 1fr);
@@ -2875,6 +3037,12 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
   align-items: baseline;
   padding: 6px 0;
   border-bottom: 1px solid rgba(27, 22, 17, 0.1);
+}
+
+.trending-page-public .trending-metadata-row {
+  grid-template-columns: 1fr;
+  gap: 2px;
+  padding: 8px 0;
 }
 
 .trending-metadata-row dt {
@@ -2891,6 +3059,16 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
   font-size: 13px;
   line-height: 1.35;
   overflow-wrap: anywhere;
+}
+
+.trending-page-public .trending-metadata-row dt {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+
+.trending-page-public .trending-metadata-row dd {
+  font-size: 15px;
+  line-height: 1.35;
 }
 
 .trending-metadata-row a {
@@ -3010,6 +3188,10 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
   .trending-metadata-row {
     grid-template-columns: 1fr;
     gap: 2px;
+  }
+
+  .trending-page-public .trending-metadata-grid {
+    grid-template-columns: 1fr;
   }
 }
 
