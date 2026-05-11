@@ -5718,6 +5718,12 @@ def test_project_presentation_job_caches_shares_and_emails():
     assert "Use D3 for rich data-driven charting" in str(chat_model.create_calls[-1]["system_prompt"])
     assert "art-directed infographic" in str(chat_model.create_calls[-1]["system_prompt"])
     assert "First infer the key bullet points" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "exactly one direct research fact or conclusion" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "no wordplay, no clever titles" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "Make the slides heavy with research conclusions" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "The title must itself be the fact or conclusion" in str(
+        chat_model.create_calls[-1]["system_prompt"]
+    )
     assert "GPT Image 2" in str(chat_model.create_calls[-1]["system_prompt"])
     assert "fit inside the iframe viewport without body/page scrolling" in str(
         chat_model.create_calls[-1]["system_prompt"]
@@ -5761,10 +5767,19 @@ def test_project_presentation_job_caches_shares_and_emails():
                                 "type": "string",
                                 "description": "Stable lowercase identifier using letters, numbers, and hyphens.",
                             },
-                            "title": {"type": "string", "description": "Short slide title."},
+                            "title": {
+                                "type": "string",
+                                "description": (
+                                    "Short direct research fact or conclusion. No wordplay, metaphor, "
+                                    "question, or theme label."
+                                ),
+                            },
                             "description": {
                                 "type": "string",
-                                "description": "Slide explanation. Title plus description must be at most 80 words.",
+                                "description": (
+                                    "Evidence-heavy explanation of that one fact or conclusion. "
+                                    "Title plus description must be at most 80 words."
+                                ),
                             },
                             "visual_type": {"type": "string", "enum": ["code", "image"]},
                             "visual_code": {

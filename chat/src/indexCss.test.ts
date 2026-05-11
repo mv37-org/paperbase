@@ -72,7 +72,7 @@ describe("index.css", () => {
     expect(canvasBlock).toContain("background: transparent;");
     expect(headerBlock).toContain("display: flex;");
     expect(headerBlock).toContain("padding: 6px 8px;");
-    expect(titleBlock).toContain("font-size: clamp(28px, 3.2vw, 44px);");
+    expect(titleBlock).toContain("font-size: clamp(22px, 2.4vw, 32px);");
     expect(copyBlock).toContain("font-size: clamp(14px, 1vw, 17px);");
     expect(audioBlock).toContain("height: 28px;");
     expect(css).toContain("body.authenticated-theme-dark .project-presentation-slide-canvas");

@@ -270,11 +270,17 @@ _PROJECT_PRESENTATION_TEXT_FORMAT: dict[str, Any] = {
                         },
                         "title": {
                             "type": "string",
-                            "description": "Short slide title.",
+                            "description": (
+                                "Short direct research fact or conclusion. No wordplay, metaphor, "
+                                "question, or theme label."
+                            ),
                         },
                         "description": {
                             "type": "string",
-                            "description": "Slide explanation. Title plus description must be at most 80 words.",
+                            "description": (
+                                "Evidence-heavy explanation of that one fact or conclusion. "
+                                "Title plus description must be at most 80 words."
+                            ),
                         },
                         "visual_type": {"type": "string", "enum": ["code", "image"]},
                         "visual_code": {
@@ -3806,14 +3812,20 @@ class PaperbaseService:
                 "project history: all chats, explorations, annotations, explanations, challenges, paper "
                 "comments, cited papers, selected passages, figures, tables, and `code_artifacts` written "
                 "inside the project. Then turn each bullet point into one slide. Return those slides in "
-                "`slides` as the main product. Each slide must have a title and description whose combined "
-                "length is at most 80 words. Treat `research_materials` as the source of truth for science "
+                "`slides` as the main product. Each bullet point and slide must state exactly one direct "
+                "research fact or conclusion. Use plain technical language; no wordplay, no clever titles, "
+                "no rhetorical questions, no metaphors, and no vague theme labels. Make the slides heavy "
+                "with research conclusions, evidence, comparisons, caveats, and implications. Each slide "
+                "must have a title and description whose combined length is at most 80 words. The title "
+                "must itself be the fact or conclusion, not a teaser. Treat `research_materials` as the "
+                "source of truth for science "
                 "and treat `chat_threads`, `explorations`, `paper_comments`, and `code_artifacts` as clues "
                 "about what the user cared about. Do not write meta commentary about the Paperbase project, "
                 "chat history, number of papers, number of comments, notes, or explorations unless a count "
                 "is itself a scientific result. The presentation must teach the actual research material, "
                 "technical ideas, evidence, code outputs, disagreements, caveats, and implications to an "
                 "external audience. `summary_markdown` is a legacy concise briefing outline of the same "
+                "direct conclusions; write it like research findings, not narrative copy. "
                 "slides. `visual_code` is a legacy fallback containing the first code slide visual."
                 "\n\n"
                 "For each slide, choose exactly one visual mode. Use `visual_type: \"code\"` when an "
