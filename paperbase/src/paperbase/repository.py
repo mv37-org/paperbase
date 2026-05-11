@@ -1758,6 +1758,25 @@ class PaperRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def has_pending_job_with_priority_less_than(
+        self,
+        priority: int,
+        *,
+        exclude_job_id: str | None = None,
+    ) -> bool:
+        raise NotImplementedError
+
+    @abstractmethod
+    def yield_job(
+        self,
+        job_id: str,
+        *,
+        lease_token: str | None = None,
+        next_run_at: Any | None = None,
+    ) -> JobResponse | None:
+        raise NotImplementedError
+
+    @abstractmethod
     def mark_job_running(
         self,
         job_id: str,
@@ -5877,6 +5896,50 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 return self._job_response_from_row(row, now=now)
             return None
 
+    def has_pending_job_with_priority_less_than(
+        self,
+        priority: int,
+        *,
+        exclude_job_id: str | None = None,
+    ) -> bool:
+        now = utcnow()
+        with self._session() as session:
+            statement = select(JobORM.job_id).where(
+                JobORM.status == "pending",
+                JobORM.priority < priority,
+                or_(JobORM.next_run_at.is_(None), JobORM.next_run_at <= now),
+            )
+            if exclude_job_id:
+                statement = statement.where(JobORM.job_id != exclude_job_id)
+            return session.scalar(statement.limit(1)) is not None
+
+    def yield_job(
+        self,
+        job_id: str,
+        *,
+        lease_token: str | None = None,
+        next_run_at: Any | None = None,
+    ) -> JobResponse | None:
+        now = utcnow()
+        with self._session() as session:
+            row = session.get(JobORM, job_id)
+            if row is None or not self._claim_matches(row, lease_token):
+                return None
+            if row.cancel_requested_at is not None:
+                row.status = "canceled"
+                row.finished_at = now
+            else:
+                row.status = "pending"
+                row.next_run_at = next_run_at
+                row.attempts = max(0, (row.attempts or 0) - 1)
+                row.finished_at = None
+            row.updated_at = now
+            row.worker_id = None
+            row.lease_token = None
+            row.heartbeat_at = None
+            row.lease_expires_at = None
+            return self._job_response_from_row(row, now=now)
+
     def _claim_matches(self, row: JobORM, lease_token: str | None) -> bool:
         return lease_token is None or row.lease_token == lease_token
 
@@ -8585,6 +8648,60 @@ class MemoryPaperRepository(PaperRepository):
             self.jobs[job_id] = updated
             return updated
         return None
+
+    def has_pending_job_with_priority_less_than(
+        self,
+        priority: int,
+        *,
+        exclude_job_id: str | None = None,
+    ) -> bool:
+        now = utcnow()
+        for job in self.jobs.values():
+            if exclude_job_id and job.job_id == exclude_job_id:
+                continue
+            if job.status != "pending" or job.priority >= priority:
+                continue
+            if job.next_run_at is not None and job.next_run_at > now:
+                continue
+            return True
+        return False
+
+    def yield_job(
+        self,
+        job_id: str,
+        *,
+        lease_token: str | None = None,
+        next_run_at: Any | None = None,
+    ) -> JobResponse | None:
+        job = self.jobs.get(job_id)
+        if job is None or not self._claim_matches(job, lease_token):
+            return None
+        now = utcnow()
+        if job.cancel_requested_at is not None:
+            update: dict[str, Any] = {
+                "status": "canceled",
+                "effective_status": "canceled",
+                "finished_at": now,
+            }
+        else:
+            update = {
+                "status": "pending",
+                "effective_status": "pending",
+                "next_run_at": next_run_at,
+                "attempts": max(0, (job.attempts or 0) - 1),
+                "finished_at": None,
+            }
+        update.update(
+            {
+                "updated_at": now,
+                "worker_id": None,
+                "lease_token": None,
+                "heartbeat_at": None,
+                "lease_expires_at": None,
+            }
+        )
+        self.jobs[job_id] = job.model_copy(update=update)
+        return self.jobs[job_id]
 
     def _claim_matches(self, job: JobResponse, lease_token: str | None) -> bool:
         return lease_token is None or job.lease_token == lease_token

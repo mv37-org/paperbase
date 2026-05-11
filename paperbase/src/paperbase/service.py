@@ -176,7 +176,7 @@ from .security import (
 from .summaries import build_paper_summary
 from .storage import ObjectStore, build_object_store
 from . import sources
-from .errors import JobCanceled, PermanentError, RetryableError
+from .errors import JobCanceled, JobYielded, PermanentError, RetryableError
 from .utils import canonical_paper_id, new_id, slugify, utcnow
 
 
@@ -1976,6 +1976,16 @@ class PaperbaseService:
             return
         if self.repository.is_job_cancel_requested(job.job_id, lease_token=job.lease_token):
             raise JobCanceled(f"Job {job.job_id} was canceled")
+
+    def _yield_if_higher_priority_job_waiting(self) -> None:
+        job = _CURRENT_JOB.get()
+        if job is None or not job.lease_token:
+            return
+        if self.repository.has_pending_job_with_priority_less_than(  # type: ignore[attr-defined]
+            job.priority,
+            exclude_job_id=job.job_id,
+        ):
+            raise JobYielded(f"Job {job.job_id} yielded to higher-priority queued work")
 
     def _browser_user_settings_response(
         self,
@@ -10302,6 +10312,21 @@ class PaperbaseService:
                     "job_type": job.job_type,
                 },
             )
+        except JobYielded:
+            yielded = self.repository.yield_job(  # type: ignore[attr-defined]
+                job.job_id,
+                lease_token=job.lease_token,
+                next_run_at=utcnow() + timedelta(seconds=30),
+            )
+            logger.info(
+                "Yielded job to higher-priority work",
+                extra={
+                    "event": "jobs.yielded",
+                    "job_id": job.job_id,
+                    "job_type": job.job_type,
+                    "next_run_at": yielded.next_run_at.isoformat() if yielded and yielded.next_run_at else None,
+                },
+            )
         except JobCanceled:
             self.repository.mark_job_canceled(job.job_id, lease_token=job.lease_token)
             self._sync_canceled_job_side_effects(job)
@@ -10919,10 +10944,12 @@ class PaperbaseService:
         seen: set[str] = set()
         for category in categories:
             self._raise_if_current_job_canceled()
+            self._yield_if_higher_priority_job_waiting()
             papers = sources.fetch_recent(category, days=days, max_results=limit_per_category)
             sources.enrich_with_semantic_scholar(papers)
             for paper in papers:
                 self._raise_if_current_job_canceled()
+                self._yield_if_higher_priority_job_waiting()
                 if paper.arxiv_id in seen:
                     continue
                 seen.add(paper.arxiv_id)
@@ -10934,6 +10961,7 @@ class PaperbaseService:
                         tracking_job=tracking_job,
                     )
                 )
+                self._yield_if_higher_priority_job_waiting()
         logger.info(
             "Completed latest sync",
             extra={

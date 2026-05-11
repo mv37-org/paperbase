@@ -34,3 +34,8 @@ class PermanentError(JobError):
 class JobCanceled(JobError):
     """Operator-requested cancellation. Worker marks the job ``canceled``
     instead of treating it as a retryable or dead-letter failure."""
+
+
+class JobYielded(JobError):
+    """Cooperative yield. Worker puts a long-running background job back in
+    the queue so higher-priority interactive work can run next."""

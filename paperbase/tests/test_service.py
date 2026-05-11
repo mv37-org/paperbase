@@ -7557,6 +7557,51 @@ def test_cancel_running_job_requests_cancel_and_worker_marks_canceled(monkeypatc
     assert processed.finished_at is not None
 
 
+def test_sync_latest_yields_to_queued_project_presentation(monkeypatch):
+    service = _retry_service()
+    sync_job = service.repository.create_job(
+        "sync_latest",
+        {"days": 7, "categories": ["cs.AI"], "limit_per_category": 1},
+    )
+
+    def fetch_recent(category, *, days, max_results):
+        service.repository.create_job(
+            "project_presentation",
+            {
+                "user_id": "user_1",
+                "project_id": "proj_1",
+                "presentation_id": "pres_1",
+                "context_snapshot": {},
+            },
+        )
+        return [
+            PaperMetadata(
+                arxiv_id="2605.00001",
+                title="Queued interactive work",
+                abstract="A paper that should not be indexed before an interactive presentation.",
+            )
+        ]
+
+    monkeypatch.setattr("paperbase.service.sources.fetch_recent", fetch_recent)
+    monkeypatch.setattr(
+        "paperbase.service.sources.enrich_with_semantic_scholar",
+        lambda papers, *args, **kwargs: None,
+    )
+
+    processed = service.process_next_job()
+
+    assert processed is not None
+    assert processed.job_id == sync_job.job_id
+    assert processed.status == "pending"
+    assert processed.attempts == 0
+    assert processed.next_run_at is not None
+    assert processed.error is None
+
+    next_claim = service.repository.claim_pending_job()
+    assert next_claim is not None
+    assert next_claim.job_type == "project_presentation"
+
+
 def test_canceling_job_becomes_stalled_if_worker_lease_expires():
     from datetime import UTC, datetime, timedelta
 

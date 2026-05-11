@@ -453,6 +453,16 @@ function formatPresentationEta(seconds: number) {
   return `${minutes}:${remainingSeconds.toString().padStart(2, "0")} remaining`;
 }
 
+function projectPresentationEtaLabel(
+  presentation: ProjectPresentationResponse | null,
+  nowMs: number,
+) {
+  if (presentation?.progress?.phase_key === "queued") {
+    return "waiting for worker";
+  }
+  return formatPresentationEta(projectPresentationRemainingSeconds(presentation, nowMs));
+}
+
 function samePaperSections(left: PdfDocumentSection[], right: PdfDocumentSection[]) {
   return (
     left.length === right.length &&
@@ -1337,7 +1347,7 @@ export default function App() {
     projectPresentationProgressIsActive(activeProjectPresentation);
   const activeProjectPresentationProgressPercent =
     projectPresentationProgressPercent(activeProjectPresentation);
-  const activeProjectPresentationRemainingSeconds = projectPresentationRemainingSeconds(
+  const activeProjectPresentationEta = projectPresentationEtaLabel(
     activeProjectPresentation,
     projectPresentationProgressNow,
   );
@@ -7512,9 +7522,7 @@ export default function App() {
                           </div>
                           <div className="project-presentation-progress-meta">
                             <strong>{activeProjectPresentationProgressPercent}%</strong>
-                            <span>
-                              {formatPresentationEta(activeProjectPresentationRemainingSeconds)}
-                            </span>
+                            <span>{activeProjectPresentationEta}</span>
                           </div>
                           <div className="project-presentation-progress-note">
                             {activeProjectPresentation?.progress?.email_notice ??

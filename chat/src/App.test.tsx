@@ -1590,6 +1590,36 @@ describe("App", () => {
     expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("12");
   });
 
+  it("keeps queued project presentation progress from counting down to finishing", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.loadProjectPresentation.mockResolvedValue({
+      ...projectPresentationResponse("proj_1", "pending"),
+      progress: {
+        phase_key: "queued",
+        phase_label: "Queued presentation workflow",
+        detail: "Preparing the project history for the presentation agent.",
+        percent: 4,
+        estimated_seconds_remaining: 360,
+        can_leave: true,
+        email_notice: "We will email you once it is done. You can leave this page.",
+        updated_at: "2026-04-21T00:00:00Z",
+      },
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+    fireEvent.click(screen.getAllByText("General")[0]!);
+    fireEvent.click(await screen.findByText("Home"));
+
+    expect(await screen.findByText("Queued presentation workflow")).toBeTruthy();
+    expect(screen.getByText("4%")).toBeTruthy();
+    expect(screen.getByText("waiting for worker")).toBeTruthy();
+    expect(screen.queryByText("finishing now")).toBeNull();
+  });
+
   it("cancels an in-progress project presentation", async () => {
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());
     apiMocks.loadProjectPresentation.mockResolvedValue({
