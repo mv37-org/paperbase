@@ -7372,11 +7372,25 @@ ReactDOM.createRoot(root).render(e(App));
             truncated=truncated,
         )
 
+    def _figure_image_input_url(self, *, paper_id: str, figure_id: str, figure: FigureResponse) -> str | None:
+        if figure.image_url and figure.image_url.startswith(("http://", "https://", "data:")):
+            return figure.image_url
+        for extension, mime in self._FIGURE_EXTENSION_CONTENT_TYPES:
+            image_path = f"papers/{paper_id}/figures/{figure_id}/image.{extension}"
+            if not self.object_store.exists(image_path):
+                continue
+            if mime not in {"image/png", "image/jpeg", "image/webp", "image/gif"}:
+                return None
+            encoded = base64.b64encode(self.object_store.get_bytes(image_path)).decode("ascii")
+            return f"data:{mime};base64,{encoded}"
+        return None
+
     def _shell_command_ask_image(
         self,
         command: str,
         tokens: list[str],
         citation_registry: ChatCitationRegistry | None,
+        user: BrowserUser | None,
     ) -> LiteratureShellResponse:
         if len(tokens) < 3:
             raise ValueError("ask-image requires a figure path and a question")
@@ -7391,6 +7405,60 @@ ReactDOM.createRoot(root).render(e(App));
         figure_id = parts[1]
         figure = self.get_figure(paper_id, figure_id)
         paper = self.get_indexed_paper(paper_id)
+        image_input_url = self._figure_image_input_url(paper_id=paper_id, figure_id=figure_id, figure=figure)
+        answer = ""
+        if image_input_url:
+            api_key, key_state = self._map_api_key(user)
+            if not api_key:
+                return self._literature_shell_error(
+                    command,
+                    "ask-image requires an OpenAI API key; save one in Settings for browser chat or set PAPERBASE_OPENAI_API_KEY for MCP/API use"
+                    if key_state == "api_key_required"
+                    else "the saved OpenAI API key is invalid",
+                )
+            prompt = Prompt(
+                input=[
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": json.dumps(
+                                    {
+                                        "question": question,
+                                        "paper": self._shell_paper_summary(paper),
+                                        "figure_id": figure.figure_id,
+                                        "caption": figure.caption,
+                                        "caption_path": f"/papers/{paper_id}/figures/{figure.figure_id}/caption.md",
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                            },
+                            {"type": "input_image", "image_url": image_input_url, "detail": "high"},
+                        ],
+                    }
+                ],
+                base_instructions=(
+                    "You answer questions about one research-paper figure. Inspect the image and use the "
+                    "provided caption and paper metadata as supporting context. If the image is ambiguous, "
+                    "say what is visible and what cannot be determined. Return a concise answer."
+                ),
+                tools=[],
+                tool_choice=None,
+                parallel_tool_calls=False,
+            )
+            try:
+                response = self._chat_model_create_response(api_key=api_key, prompt=prompt)
+                answer = self._assistant_response_text(response).strip()
+            except Exception as exc:
+                logger.warning(
+                    "Literature shell ask-image vision call failed",
+                    extra={"event": "literature_shell.ask_image.failed", "paper_id": paper_id, "figure_id": figure_id, "error": str(exc)},
+                )
+                return self._literature_shell_error(command, f"ask-image vision call failed: {exc}")
+        else:
+            answer = "No image pixels are available for this figure; only caption evidence is available."
         row = {
             "paper_id": paper_id,
             "title": paper.title,
@@ -7401,7 +7469,8 @@ ReactDOM.createRoot(root).render(e(App));
             "content_type": figure.content_type,
             "question": question,
             "caption": figure.caption,
-            "answer": "Figure pixels are exposed through image_url; this shell returns caption evidence for text-only callers.",
+            "answer": answer,
+            "vision_used": bool(image_input_url),
         }
         citation = self._shell_register_paper_citation(
             citation_registry,
@@ -7419,6 +7488,8 @@ ReactDOM.createRoot(root).render(e(App));
             "",
             figure.caption,
         ]
+        if answer:
+            lines.extend(["", f"answer: {answer}"])
         return LiteratureShellResponse(command=command, stdout="\n".join(lines), rows=[row], citations=[citation])
 
     def _shell_command_grep(self, command: str, tokens: list[str], citation_registry: ChatCitationRegistry | None) -> LiteratureShellResponse:
@@ -7807,7 +7878,7 @@ ReactDOM.createRoot(root).render(e(App));
             if name == "sql":
                 return self._shell_command_sql(command, tokens)
             if name in {"ask-image", "ask_image"}:
-                return self._shell_command_ask_image(command, tokens, citation_registry)
+                return self._shell_command_ask_image(command, tokens, citation_registry, user)
             raise ValueError(f"unsupported command {tokens[0]!r}; run help")
         except HTTPException as exc:
             return self._literature_shell_error(command, str(exc.detail))

@@ -2,7 +2,7 @@ Research tools remain available during coding and project turns.
 
 For AI, ML, agent, evaluation, architecture, algorithm, or implementation-code requests, search for relevant research papers before settling the implementation approach.
 
-Use `paperbase_shell` as a literature workspace: `search` for candidates, keep the `result_set_id`, reuse `latest`/`prev`, inspect exact artifacts with `ls`, `find`, `head`, `lines`, and `cat`, narrow with `grep`, inventory metadata with read-only `sql`, inspect figure captions with `ask-image`, and use `map` for repeated extraction across a result set.
+Use `paperbase_shell` as a literature workspace: `search` for candidates, keep the `result_set_id`, reuse `latest`/`prev`, inspect exact artifacts with `ls`, `find`, `head`, `lines`, and `cat`, narrow with `grep`, inventory metadata with read-only `sql`, inspect figure images and captions with `ask-image`, and use `map` for repeated extraction across a result set.
 
 Use evidence-bearing research-paper shell results to justify nontrivial design choices, evaluation plans, algorithms, and model behavior. Cite those paper source ids in the final answer.
 

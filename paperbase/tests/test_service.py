@@ -1554,13 +1554,6 @@ def test_literature_shell_commands_use_virtual_paper_namespace(monkeypatch):
     assert sql_count.error is None
     assert sql_count.rows == [{"count": 1}]
 
-    figure = service.literature_shell(
-        LiteratureShellRequest(command=f'ask-image /papers/{paper_id}/figures/figure-1/ "what is shown?"')
-    )
-    assert figure.error is None
-    assert figure.rows[0]["caption"] == "A model architecture."
-    assert figure.rows[0]["image_url"]
-
 
 def test_literature_shell_rejects_unsafe_syntax_and_invalid_paths(monkeypatch):
     service, paper_id = _make_literature_shell_service(monkeypatch)
@@ -1576,6 +1569,63 @@ def test_literature_shell_rejects_unsafe_syntax_and_invalid_paths(monkeypatch):
     outside_namespace = service.literature_shell(LiteratureShellRequest(command="ls /tmp"))
     assert outside_namespace.error is not None
     assert "path must stay under" in outside_namespace.error
+
+
+def test_literature_shell_ask_image_attaches_image_to_model(monkeypatch):
+    service, paper_id = _make_literature_shell_service(monkeypatch)
+    session, _ = service.register_browser_user(
+        SignupRequest(email="shell-vision@example.com", password="topsecret123", display_name="Shell Vision")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user, api_key="sk-browser-vision")
+    captured: dict[str, object] = {}
+
+    def fake_create_response(*, api_key: str, prompt: Prompt) -> ResponseEnvelope:
+        captured["api_key"] = api_key
+        captured["prompt"] = prompt
+        return ResponseEnvelope(
+            response_id="resp_shell_vision",
+            items=[
+                ResponseItem(
+                    item_id="msg_shell_vision",
+                    item_type="assistant_message",
+                    role="assistant",
+                    status="completed",
+                    content_text="The image shows a compact model architecture diagram.",
+                )
+            ],
+        )
+
+    monkeypatch.setattr(service, "_chat_model_create_response", fake_create_response)
+
+    figure = service.literature_shell(
+        LiteratureShellRequest(command=f'ask-image /papers/{paper_id}/figures/figure-1/ "what is shown?"'),
+        user=session.user,
+    )
+
+    assert figure.error is None
+    assert figure.rows[0]["caption"] == "A model architecture."
+    assert figure.rows[0]["answer"] == "The image shows a compact model architecture diagram."
+    assert figure.rows[0]["vision_used"] is True
+    assert captured["api_key"] == "sk-browser-vision"
+    prompt = captured["prompt"]
+    assert isinstance(prompt, Prompt)
+    content = prompt.input[0]["content"]
+    assert isinstance(content, list)
+    assert any(block.get("type") == "input_text" and "A model architecture." in block.get("text", "") for block in content)
+    image_blocks = [block for block in content if block.get("type") == "input_image"]
+    assert image_blocks == [{"type": "input_image", "image_url": "data:image/png;base64,UE5H", "detail": "high"}]
+
+
+def test_literature_shell_ask_image_requires_key_for_vision(monkeypatch):
+    service, paper_id = _make_literature_shell_service(monkeypatch, openai_api_key=None, chat_model=FakeChatModel())
+
+    figure = service.literature_shell(
+        LiteratureShellRequest(command=f'ask-image /papers/{paper_id}/figures/figure-1/ "what is shown?"')
+    )
+
+    assert figure.error is not None
+    assert "OpenAI API key" in figure.error
 
 
 def test_literature_shell_map_uses_browser_saved_inference_key(monkeypatch):

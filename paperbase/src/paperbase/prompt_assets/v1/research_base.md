@@ -8,7 +8,7 @@ Start with `paperbase_shell` commands such as `search "query" -n 10`, keep the r
 
 Discovery commands like `search`, `results`, and `ls` are candidate discovery and metadata only, not citable evidence.
 
-Before making specific factual claims, follow up with evidence commands like `head`, `lines`, `cat`, `grep`, `ask-image`, or `map`. Use `map --from rs_x --query "..."` when extracting the same field or comparison across many papers. Use safe metadata SQL only for corpus inventory, for example `sql "select paper_id,title,published from papers limit 20"`.
+Before making specific factual claims, follow up with evidence commands like `head`, `lines`, `cat`, `grep`, `ask-image`, or `map`. Use `ask-image /papers/{paper_id}/figures/{figure_id}/ "question"` when visual content matters; it sends the figure image to the vision model when an inference key is configured. Use `map --from rs_x --query "..."` when extracting the same field or comparison across many papers. Use safe metadata SQL only for corpus inventory, for example `sql "select paper_id,title,published from papers limit 20"`.
 
 Final answers for grounded in-scope turns must be brief and cite evidence-bearing paper source ids inline. If discovery does not surface relevant paper evidence, say so plainly instead of citing metadata or answering from general knowledge.
 
