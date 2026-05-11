@@ -44,7 +44,6 @@ import {
   moveThreadToProject,
   renameThread,
   logoutBrowserSession,
-  postForm,
   removeUpvoteBrowserPaper,
   runPythonFile,
   sendThreadMessage,
@@ -65,7 +64,6 @@ import { AdminOpsPanel } from "./AdminOpsPanel";
 import {
   AppIcon,
   EmptyStateActionIcon,
-  GoogleButton,
   MaskedAssetIcon,
   ModalFlash,
   MV37Button,
@@ -245,10 +243,7 @@ const PAPER_EXPLORATIONS_KEY = "paperbase-paper-explorations";
 const PAPER_EXPLORATION_SIDEBAR_MIN_WIDTH = 310;
 const PAPER_EXPLORATION_SIDEBAR_MAX_WIDTH = PAPER_EXPLORATION_SIDEBAR_MIN_WIDTH * 2;
 const AUTH_VIEW_COPY: Record<AuthView, { title: string; caption: string }> = {
-  login: { title: "Log in", caption: "Use your account to continue." },
-  signup: { title: "Create account", caption: "Create your account." },
-  "reset-request": { title: "Forgot password", caption: "Get reset link." },
-  "reset-password": { title: "Reset password", caption: "Choose a new password for your account." },
+  login: { title: "Log in", caption: "Use your MV37 account to continue." },
   settings: {
     title: "Settings",
     caption: "Manage inference, audio, sandbox, repos, and appearance.",
@@ -4514,10 +4509,6 @@ export default function App() {
   useEffect(() => {
     void (async () => {
       const params = new URLSearchParams(window.location.search);
-      if (params.get("reset_token")) {
-        setAuthView("reset-password");
-        setAuthModalOpen(true);
-      }
       const authStatus = params.get("auth");
       const authError = params.get("auth_error");
       const settingsSection = normalizeSettingsTab(params.get("settings"));
@@ -4533,11 +4524,13 @@ export default function App() {
         setAuthView("login");
         setAuthModalOpen(true);
       } else if (authError === "mv37_email_conflict") {
-        showErrorFlash("That MV37 email already has a Paperbase password account.");
+        showErrorFlash(
+          "That email is tied to a legacy Paperbase account. Contact support to migrate it to MV37.",
+        );
         setAuthView("login");
         setAuthModalOpen(true);
       } else if (authError === "mv37_callback_failed") {
-        showErrorFlash("MV37 login failed. Try again or use legacy email/password.");
+        showErrorFlash("MV37 login failed. Try again.");
         setAuthView("login");
         setAuthModalOpen(true);
       } else if (authError === "github_not_configured") {
@@ -4556,7 +4549,7 @@ export default function App() {
         setAuthView("settings");
         setAuthModalOpen(true);
       } else if (authError) {
-        showErrorFlash("Google login failed. Try email/password instead.");
+        showErrorFlash("Login failed. Try again.");
         setAuthView("login");
         setAuthModalOpen(true);
       } else if (settingsSection) {
@@ -4639,15 +4632,6 @@ export default function App() {
       [emptyStateProject.project_id]: missingChatSetupSignature,
     }));
   }, [emptyStateProject?.project_id, missingChatSetupSignature]);
-
-  const handleAuthSuccess = useCallback(
-    async (nextSession: BrowserSessionResponse) => {
-      setSession(nextSession);
-      closeAuthModal();
-      await bootstrapAuthenticatedUi(nextSession);
-    },
-    [bootstrapAuthenticatedUi, closeAuthModal],
-  );
 
   const handleLandingSubmit = useCallback(async () => {
     const prompt = landingPrompt.trim();
@@ -10603,174 +10587,6 @@ export default function App() {
             data-auth-view="login"
           >
             <MV37Button />
-            <div className="auth-divider">
-              <span>Legacy Paperbase login</span>
-            </div>
-            <form
-              id="login-form"
-              className="stack"
-              onSubmit={async (event) => {
-                event.preventDefault();
-                try {
-                  const nextSession = (await postForm(
-                    "/v1/browser/auth/login",
-                    event.currentTarget,
-                  )) as BrowserSessionResponse;
-                  await handleAuthSuccess(nextSession);
-                } catch (error) {
-                  showErrorFlash(error instanceof Error ? error.message : "Login failed");
-                }
-              }}
-            >
-              <input name="email" type="email" placeholder="Email" autoComplete="email" required />
-              <input
-                name="password"
-                type="password"
-                placeholder="Password"
-                autoComplete="current-password"
-                minLength={8}
-                required
-              />
-              <button className="primary-button" type="submit">
-                Log in
-              </button>
-            </form>
-            <div className="auth-divider auth-divider-compact">
-              <span>Other providers</span>
-            </div>
-            <GoogleButton />
-            <div className="auth-links">
-              <button type="button" className="auth-link" onClick={() => setAuthView("signup")}>
-                Create a new account
-              </button>
-              <button
-                type="button"
-                className="auth-link"
-                onClick={() => setAuthView("reset-request")}
-              >
-                Forgot password
-              </button>
-            </div>
-          </div>
-
-          <div
-            className={`modal-view${authView === "signup" ? " visible" : ""}`}
-            data-auth-view="signup"
-          >
-            <MV37Button />
-            <div className="auth-divider">
-              <span>Legacy Paperbase signup</span>
-            </div>
-            <form
-              id="signup-form"
-              className="stack"
-              onSubmit={async (event) => {
-                event.preventDefault();
-                try {
-                  const nextSession = (await postForm(
-                    "/v1/browser/auth/signup",
-                    event.currentTarget,
-                  )) as BrowserSessionResponse;
-                  await handleAuthSuccess(nextSession);
-                } catch (error) {
-                  showErrorFlash(error instanceof Error ? error.message : "Sign up failed");
-                }
-              }}
-            >
-              <input name="display_name" type="text" placeholder="Name" autoComplete="name" />
-              <input name="email" type="email" placeholder="Email" autoComplete="email" required />
-              <input
-                name="password"
-                type="password"
-                placeholder="Password"
-                autoComplete="new-password"
-                minLength={8}
-                required
-              />
-              <button className="primary-button" type="submit">
-                Create account
-              </button>
-            </form>
-            <div className="auth-divider auth-divider-compact">
-              <span>Other providers</span>
-            </div>
-            <GoogleButton />
-            <div className="auth-links">
-              <button type="button" className="auth-link" onClick={() => setAuthView("login")}>
-                Already have an account? Log in
-              </button>
-            </div>
-          </div>
-
-          <div
-            className={`modal-view${authView === "reset-request" ? " visible" : ""}`}
-            data-auth-view="reset-request"
-          >
-            <form
-              id="forgot-form"
-              className="stack"
-              onSubmit={async (event) => {
-                event.preventDefault();
-                try {
-                  await postForm("/v1/browser/auth/forgot-password", event.currentTarget);
-                  showNoteFlash("If that account exists, a reset link has been sent.");
-                } catch (error) {
-                  showErrorFlash(error instanceof Error ? error.message : "Password reset failed");
-                }
-              }}
-            >
-              <input name="email" type="email" placeholder="Email" autoComplete="email" required />
-              <button className="primary-button" type="submit">
-                Send reset link
-              </button>
-            </form>
-            <div className="auth-links">
-              <button type="button" className="auth-link" onClick={() => setAuthView("login")}>
-                Back to log in
-              </button>
-            </div>
-          </div>
-
-          <div
-            className={`modal-view${authView === "reset-password" ? " visible" : ""}`}
-            data-auth-view="reset-password"
-          >
-            <form
-              id="reset-form"
-              className="stack"
-              onSubmit={async (event) => {
-                event.preventDefault();
-                try {
-                  await postForm("/v1/browser/auth/reset-password", event.currentTarget);
-                  showNoteFlash("Password reset complete. You can now log in.");
-                  setAuthView("login");
-                } catch (error) {
-                  showErrorFlash(error instanceof Error ? error.message : "Password reset failed");
-                }
-              }}
-            >
-              <CredentialFormUsernameField />
-              <input
-                name="token"
-                type="text"
-                placeholder="Reset token"
-                defaultValue={new URLSearchParams(window.location.search).get("reset_token") ?? ""}
-                autoComplete="one-time-code"
-                minLength={8}
-                required
-              />
-              <input
-                name="password"
-                type="password"
-                placeholder="New password"
-                autoComplete="new-password"
-                minLength={8}
-                required
-              />
-              <button className="primary-button" type="submit">
-                Reset password
-              </button>
-            </form>
           </div>
 
           <div

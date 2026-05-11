@@ -101,7 +101,6 @@ from .models import (
     FileListResponse,
     FileObject,
     FigureResponse,
-    ForgotPasswordRequest,
     GrepResponse,
     IntegrationProbeComponent,
     IntegrationProbeResponse,
@@ -109,7 +108,6 @@ from .models import (
     JobResponse,
     LiteratureShellRequest,
     LiteratureShellResponse,
-    LoginRequest,
     ManifestResponse,
     PaperCommentsResponse,
     PaperDiscussionResponse,
@@ -141,7 +139,6 @@ from .models import (
     ProjectResponse,
     ProjectSessionPageResponse,
     PythonFileResponse,
-    ResetPasswordRequest,
     ResultSetResponse,
     RunPythonFileResponse,
     SaveElevenLabsKeyRequest,
@@ -173,9 +170,7 @@ from .security import (
     api_key_hint,
     hash_password,
     new_browser_token,
-    password_needs_rehash,
     token_hash,
-    verify_password,
 )
 from .summaries import build_paper_summary
 from .storage import ObjectStore, build_object_store
@@ -2106,6 +2101,11 @@ class PaperbaseService:
         )
 
     def register_browser_user(self, request: SignupRequest) -> tuple[BrowserSessionResponse, str]:
+        """Create a local browser user for tests and local tooling.
+
+        This is intentionally not exposed as a product auth route; user-facing
+        sign-in is delegated to MV37 OIDC.
+        """
         email = _normalize_email(request.email)
         if self.repository.get_browser_user_by_email(email):  # type: ignore[attr-defined]
             raise HTTPException(status_code=409, detail="An account with that email already exists")
@@ -2115,19 +2115,6 @@ class PaperbaseService:
             password_hash=hash_password(request.password),
         )
         self.repository.ensure_default_project(user.user_id)  # type: ignore[attr-defined]
-        session_token = self._create_browser_session(user.user_id)
-        return self._browser_session_response(user), session_token
-
-    def authenticate_browser_user(self, request: LoginRequest) -> tuple[BrowserSessionResponse, str]:
-        email = _normalize_email(request.email)
-        user = self.repository.get_browser_user_by_email(email)  # type: ignore[attr-defined]
-        if user is None:
-            raise HTTPException(status_code=401, detail="Invalid email or password")
-        password_hash_value = self.repository.get_browser_password_hash(user.user_id)  # type: ignore[attr-defined]
-        if not password_hash_value or not verify_password(password_hash_value, request.password):
-            raise HTTPException(status_code=401, detail="Invalid email or password")
-        if password_needs_rehash(password_hash_value):
-            self.repository.set_browser_user_password(user.user_id, hash_password(request.password))  # type: ignore[attr-defined]
         session_token = self._create_browser_session(user.user_id)
         return self._browser_session_response(user), session_token
 
@@ -2155,44 +2142,6 @@ class PaperbaseService:
     def logout_browser_session(self, raw_token: str | None) -> None:
         if raw_token:
             self.repository.delete_browser_session(token_hash(raw_token))  # type: ignore[attr-defined]
-
-    def request_password_reset(self, request: ForgotPasswordRequest) -> dict[str, str]:
-        email = _normalize_email(request.email)
-        user = self.repository.get_browser_user_by_email(email)  # type: ignore[attr-defined]
-        if user is None:
-            return {"status": "ok"}
-        raw_token = new_browser_token()
-        self.repository.create_password_reset_token(  # type: ignore[attr-defined]
-            user_id=user.user_id,
-            token_hash_value=token_hash(raw_token),
-            expires_at=utcnow() + timedelta(seconds=self.settings.password_reset_ttl_seconds),
-        )
-        reset_link = f"{self.settings.chat_public_url.rstrip('/')}/?reset_token={raw_token}"
-        self.email_sender.send_password_reset(email=user.email, reset_link=reset_link)
-        return {"status": "ok"}
-
-    def reset_password(self, request: ResetPasswordRequest) -> dict[str, str]:
-        user = self.repository.consume_password_reset_token(token_hash(request.token))  # type: ignore[attr-defined]
-        if user is None:
-            raise HTTPException(status_code=400, detail="Invalid or expired reset token")
-        self.repository.set_browser_user_password(user.user_id, hash_password(request.password))  # type: ignore[attr-defined]
-        return {"status": "ok"}
-
-    def upsert_google_browser_user(
-        self, *, google_subject: str, email: str, display_name: str
-    ) -> tuple[BrowserSessionResponse, str]:
-        email = _normalize_email(email)
-        user = self.repository.get_browser_user_by_google_subject(google_subject)  # type: ignore[attr-defined]
-        if user is None:
-            existing = self.repository.get_browser_user_by_email(email)  # type: ignore[attr-defined]
-            user = existing or self.repository.create_browser_user(  # type: ignore[attr-defined]
-                email=email,
-                display_name=display_name.strip(),
-                password_hash=None,
-            )
-            self.repository.link_google_identity(user_id=user.user_id, google_subject=google_subject, email=email)  # type: ignore[attr-defined]
-        session_token = self._create_browser_session(user.user_id)
-        return self._browser_session_response(user), session_token
 
     def upsert_mv37_browser_user(
         self,

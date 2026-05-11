@@ -160,8 +160,8 @@ describe("chat api", () => {
         jsonResponse(
           {
             detail: [
-              { loc: ["body", "email"], msg: "Field required" },
-              { loc: ["body", "password"], msg: "Field required" },
+              { loc: ["body", "api_key"], msg: "Field required" },
+              { loc: ["body", "token_secret"], msg: "Field required" },
             ],
           },
           { status: 422 },
@@ -170,16 +170,16 @@ describe("chat api", () => {
     vi.stubGlobal("fetch", fetchMock);
     const api = await loadApiModule();
     const form = document.createElement("form");
-    const email = document.createElement("input");
-    email.name = "email";
-    email.value = "";
-    const password = document.createElement("input");
-    password.name = "password";
-    password.value = "";
-    form.append(email, password);
+    const apiKey = document.createElement("input");
+    apiKey.name = "api_key";
+    apiKey.value = "";
+    const tokenSecret = document.createElement("input");
+    tokenSecret.name = "token_secret";
+    tokenSecret.value = "";
+    form.append(apiKey, tokenSecret);
 
-    await expect(api.postForm("/v1/browser/auth/login", form)).rejects.toThrow(
-      "email: Field required; password: Field required",
+    await expect(api.postForm("/v1/browser/settings/openai-key", form)).rejects.toThrow(
+      "api_key: Field required; token_secret: Field required",
     );
   });
 

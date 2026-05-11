@@ -1242,23 +1242,6 @@ class StubApiService:
             created_at=NOW,
         )
 
-    def upsert_google_browser_user(
-        self,
-        *,
-        google_subject: str,
-        email: str,
-        display_name: str,
-    ) -> tuple[BrowserSessionResponse, str]:
-        self.calls.append(("upsert_google_browser_user", (google_subject, email, display_name)))
-        return (
-            BrowserSessionResponse(
-                authenticated=True,
-                user=BrowserUser(user_id="user_google", email=email, display_name=display_name),
-                has_anthropic_api_key=False,
-            ),
-            "google-browser-token",
-        )
-
     def upsert_mv37_browser_user(
         self,
         *,
@@ -1347,7 +1330,7 @@ def test_chat_redirect_base_prefers_explicit_then_session_then_referer_then_defa
     settings = Settings(chat_public_url="https://paperbase.example")
     request = _make_request(
         headers={"referer": "https://ref.example/thread/123"},
-        session={"browser_google_return_to": "https://session.example/app"},
+        session={"browser_mv37_return_to": "https://session.example/app"},
     )
 
     assert (
@@ -2233,45 +2216,23 @@ def test_mv37_callback_requires_pkce_and_nonce_state(api_client, monkeypatch):
     assert not [call for call in service.calls if call[0] == "upsert_mv37_browser_user"]
 
 
-def test_google_callback_success_sets_cookie_and_redirects_to_saved_return_to(api_client, monkeypatch):
-    client, service, settings = api_client
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("POST", "/v1/browser/auth/signup"),
+        ("POST", "/v1/browser/auth/login"),
+        ("POST", "/v1/browser/auth/forgot-password"),
+        ("POST", "/v1/browser/auth/reset-password"),
+        ("GET", "/v1/browser/auth/google/start"),
+        ("GET", "/v1/browser/auth/google/callback"),
+    ],
+)
+def test_legacy_product_login_routes_are_not_registered(api_client, method, path):
+    client, _, _ = api_client
 
-    class FakeGoogleClient:
-        async def authorize_redirect(self, request, redirect_uri):
-            return RedirectResponse(
-                f"https://accounts.google.com/o/oauth2/auth?redirect_uri={quote(redirect_uri, safe='')}",
-                status_code=302,
-            )
+    response = client.request(method, path, follow_redirects=False)
 
-        async def authorize_access_token(self, request):
-            return {
-                "userinfo": {
-                    "email": "google@example.com",
-                    "sub": "google-user-1",
-                    "name": "Google User",
-                }
-            }
-
-        async def parse_id_token(self, request, token):
-            return token.get("userinfo")
-
-    monkeypatch.setattr(api_module, "get_google_oauth_client", lambda: FakeGoogleClient())
-
-    start = client.get(
-        "/v1/browser/auth/google/start",
-        params={"return_to": "https://chat.example/app"},
-        follow_redirects=False,
-    )
-    callback = client.get("/v1/browser/auth/google/callback", follow_redirects=False)
-
-    assert start.status_code == 302
-    assert callback.status_code == 302
-    assert callback.headers["location"] == "https://chat.example/app/?auth=google"
-    assert "google-browser-token" in callback.headers["set-cookie"]
-    assert (
-        "upsert_google_browser_user",
-        ("google-user-1", "google@example.com", "Google User"),
-    ) in service.calls
+    assert response.status_code == 404
 
 
 def test_github_callback_success_connects_account_and_redirects_to_settings(api_client, monkeypatch):
@@ -2320,24 +2281,6 @@ def test_github_callback_failure_redirects_with_error(api_client, monkeypatch):
         response.headers["location"]
         == f"{settings.chat_public_url}/?auth_error=github_callback_failed&settings=version-control"
     )
-
-
-def test_google_callback_failure_redirects_with_error(api_client, monkeypatch):
-    client, _, settings = api_client
-
-    class FailingGoogleClient:
-        async def authorize_access_token(self, request):
-            raise RuntimeError("no token")
-
-        async def parse_id_token(self, request, token):
-            return None
-
-    monkeypatch.setattr(api_module, "get_google_oauth_client", lambda: FailingGoogleClient())
-
-    response = client.get("/v1/browser/auth/google/callback", follow_redirects=False)
-
-    assert response.status_code == 302
-    assert response.headers["location"] == f"{settings.chat_public_url}/?auth_error=google_callback_failed"
 
 
 def test_list_jobs_endpoint_delegates_to_service(api_client):

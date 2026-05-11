@@ -91,13 +91,9 @@ class Settings(BaseSettings):
     browser_session_cookie_name: str = Field(default="paperbase_browser_session")
     browser_session_ttl_seconds: int = Field(default=60 * 60 * 24 * 30)
     browser_session_secure: bool = Field(default=False)
-    password_reset_ttl_seconds: int = Field(default=60 * 60)
     admin_emails: str = Field(default="")
     resend_api_key: str | None = None
     resend_from_email: str = Field(default="Paperbase <auth@paperbase.local>")
-    google_client_id: str | None = None
-    google_client_secret: str | None = None
-    google_oauth_redirect_url: str | None = None
     mv37_issuer_url: str | None = None
     mv37_client_id: str | None = None
     mv37_client_secret: str | None = None

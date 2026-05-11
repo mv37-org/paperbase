@@ -482,11 +482,6 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   return payload as T;
 }
 
-export function googleLoginUrl() {
-  const returnTo = encodeURIComponent(window.location.origin);
-  return `${API_BASE}/v1/browser/auth/google/start?return_to=${returnTo}`;
-}
-
 export function mv37LoginUrl() {
   const returnTo = encodeURIComponent(window.location.origin);
   return `${API_BASE}/v1/browser/auth/mv37/start?return_to=${returnTo}`;

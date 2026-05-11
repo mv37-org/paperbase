@@ -38,8 +38,7 @@ The sections in that file map to deployment like this:
 
 Optional browser-account settings now hang off the same API env surface:
 
-- `PAPERBASE_MV37_*` powers primary "Continue with MV37" login through `auth.mv37.org`
-- `PAPERBASE_GOOGLE_*` powers Google sign-in
+- `PAPERBASE_MV37_*` powers "Continue with MV37" login through `auth.mv37.org`
 - `PAPERBASE_GITHUB_*` powers the optional in-app GitHub connection flow and project repo sync
 - `PAPERBASE_ADMIN_EMAILS` is a comma-separated allowlist for the signed-in admin jobs workspace
 - `PAPERBASE_WORKER_STATUS_URL` lets the API read worker `/health` and `/metrics` so the admin jobs table can surface `stalled` runs
@@ -133,7 +132,7 @@ The repo has four moving pieces:
 - `chat/` contains the React frontend
 - `paperbase/src/paperbase/static/` is generated build output, not source
 - the `paperbase-api` root HTML response injects the current browser session into the shell so the frontend can boot without an immediate session fetch and can apply signed-in theme state before React mounts
-- primary browser login uses MV37 OpenID Connect (`PAPERBASE_MV37_*`) while existing Paperbase email/password and Google login remain available as secondary/legacy paths
+- browser login uses MV37 OpenID Connect (`PAPERBASE_MV37_*`) as the only product sign-in path; Google, Apple, username/password, and future credential methods should be configured on MV37 rather than in Paperbase
 
 `paperbase-api` and `paperbase-worker` are the same codebase and image with different entrypoints:
 

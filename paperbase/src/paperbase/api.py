@@ -55,7 +55,6 @@ from .models import (
     CreateChatThreadRequest,
     FileContentResponse,
     FileListResponse,
-    ForgotPasswordRequest,
     GitHubRepoImportCandidateResponse,
     GitHubRepoListResponse,
     GitHubRepoMetadataResponse,
@@ -65,7 +64,6 @@ from .models import (
     JobResponse,
     LiteratureShellRequest,
     LiteratureShellResponse,
-    LoginRequest,
     ManifestResponse,
     MoveChatThreadProjectRequest,
     PaperAssetResponse,
@@ -85,7 +83,6 @@ from .models import (
     ProjectSessionPageResponse,
     PythonFileResponse,
     RunPythonFileRequest,
-    ResetPasswordRequest,
     ResultSetResponse,
     RunPythonFileResponse,
     SaveElevenLabsKeyRequest,
@@ -99,7 +96,6 @@ from .models import (
     SearchSectionResponse,
     SendChatMessageRequest,
     SendChatMessageResponse,
-    SignupRequest,
     TableResponse,
     TrendingFeedResponse,
     TrendingPaperDetailResponse,
@@ -238,7 +234,7 @@ def _is_safe_return_to(value: str | None) -> bool:
 def _chat_redirect_base(request: Request, settings, *, return_to: str | None = None) -> str:
     if _is_safe_return_to(return_to):
         return return_to.rstrip("/")
-    for session_key in ("browser_mv37_return_to", "browser_google_return_to", "browser_github_return_to"):
+    for session_key in ("browser_mv37_return_to", "browser_github_return_to"):
         session_return_to = request.session.pop(session_key, None)
         if _is_safe_return_to(session_return_to):
             return session_return_to.rstrip("/")
@@ -320,22 +316,6 @@ def _enqueue_harvest_venue_request(
         )
     except PermanentError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-
-
-@lru_cache(maxsize=1)
-def get_google_oauth_client():
-    settings = get_settings()
-    if not settings.google_client_id or not settings.google_client_secret:
-        return None
-    oauth = OAuth()
-    oauth.register(
-        name="google",
-        server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
-        client_id=settings.google_client_id,
-        client_secret=settings.google_client_secret,
-        client_kwargs={"scope": "openid email profile"},
-    )
-    return oauth.create_client("google")
 
 
 @lru_cache(maxsize=1)
@@ -1349,32 +1329,6 @@ def browser_session(
     return session
 
 
-@app.post("/v1/browser/auth/signup", response_model=BrowserSessionResponse)
-def browser_signup(
-    request: SignupRequest,
-    response: Response,
-    service: PaperbaseService = Depends(get_service),
-) -> BrowserSessionResponse:
-    session_response, raw_token = service.register_browser_user(request)
-    set_browser_session_cookie(response, raw_token, get_settings())
-    session_response.csrf_token = csrf_token_for_session(raw_token, get_settings())
-    set_no_store_headers(response)
-    return session_response
-
-
-@app.post("/v1/browser/auth/login", response_model=BrowserSessionResponse)
-def browser_login(
-    request: LoginRequest,
-    response: Response,
-    service: PaperbaseService = Depends(get_service),
-) -> BrowserSessionResponse:
-    session_response, raw_token = service.authenticate_browser_user(request)
-    set_browser_session_cookie(response, raw_token, get_settings())
-    session_response.csrf_token = csrf_token_for_session(raw_token, get_settings())
-    set_no_store_headers(response)
-    return session_response
-
-
 @app.post("/v1/browser/auth/logout")
 def browser_logout(
     request: Request,
@@ -1386,22 +1340,6 @@ def browser_logout(
     clear_browser_session_cookie(response, get_settings())
     set_no_store_headers(response)
     return {"status": "ok"}
-
-
-@app.post("/v1/browser/auth/forgot-password")
-def browser_forgot_password(
-    request: ForgotPasswordRequest,
-    service: PaperbaseService = Depends(get_service),
-) -> dict[str, str]:
-    return service.request_password_reset(request)
-
-
-@app.post("/v1/browser/auth/reset-password")
-def browser_reset_password(
-    request: ResetPasswordRequest,
-    service: PaperbaseService = Depends(get_service),
-) -> dict[str, str]:
-    return service.reset_password(request)
 
 
 @app.get("/v1/browser/auth/mv37/start")
@@ -1462,51 +1400,6 @@ async def browser_mv37_callback(
         return RedirectResponse(f"{redirect_base}/?auth_error=mv37_callback_failed", status_code=302)
     except Exception:
         return RedirectResponse(f"{redirect_base}/?auth_error=mv37_callback_failed", status_code=302)
-
-
-@app.get("/v1/browser/auth/google/start")
-async def browser_google_start(request: Request, return_to: str | None = Query(default=None)):
-    client = get_google_oauth_client()
-    settings = get_settings()
-    redirect_base = _chat_redirect_base(request, settings, return_to=return_to)
-    if _is_safe_return_to(return_to):
-        request.session["browser_google_return_to"] = return_to
-    if client is None:
-        return RedirectResponse(f"{redirect_base}/?auth_error=google_not_configured", status_code=302)
-    redirect_uri = settings.google_oauth_redirect_url or str(request.url_for("browser_google_callback"))
-    return await client.authorize_redirect(request, redirect_uri)
-
-
-@app.get("/v1/browser/auth/google/callback", name="browser_google_callback")
-async def browser_google_callback(
-    request: Request,
-    service: PaperbaseService = Depends(get_service),
-):
-    settings = get_settings()
-    client = get_google_oauth_client()
-    redirect_base = _chat_redirect_base(request, settings)
-    if client is None:
-        return RedirectResponse(f"{redirect_base}/?auth_error=google_not_configured", status_code=302)
-    try:
-        token = await client.authorize_access_token(request)
-        userinfo = token.get("userinfo") or await client.parse_id_token(request, token)
-        if not userinfo:
-            raise RuntimeError("Google did not return user info")
-        email = userinfo.get("email")
-        subject = userinfo.get("sub")
-        name = userinfo.get("name") or userinfo.get("given_name") or ""
-        if not email or not subject:
-            raise RuntimeError("Google response was missing email or subject")
-        session_response, raw_token = service.upsert_google_browser_user(
-            google_subject=subject,
-            email=email,
-            display_name=name,
-        )
-        response = RedirectResponse(f"{redirect_base}/?auth=google", status_code=302)
-        set_browser_session_cookie(response, raw_token, settings)
-        return response
-    except Exception:
-        return RedirectResponse(f"{redirect_base}/?auth_error=google_callback_failed", status_code=302)
 
 
 @app.get("/v1/browser/auth/github/start")

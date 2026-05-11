@@ -67,7 +67,6 @@ const apiMocks = vi.hoisted(() => {
     getPythonFile: vi.fn(),
     getThread: vi.fn(),
     githubLoginUrl: vi.fn(() => "/v1/browser/auth/github/start"),
-    googleLoginUrl: vi.fn(() => "/v1/browser/auth/google/start"),
     mv37LoginUrl: vi.fn(() => "/v1/browser/auth/mv37/start"),
     importProjectNotebook: vi.fn(),
     loadGitHubRepositories: vi.fn(),
@@ -182,7 +181,6 @@ vi.mock("./api", () => ({
   getPythonFile: apiMocks.getPythonFile,
   getThread: apiMocks.getThread,
   githubLoginUrl: apiMocks.githubLoginUrl,
-  googleLoginUrl: apiMocks.googleLoginUrl,
   mv37LoginUrl: apiMocks.mv37LoginUrl,
   importProjectNotebook: apiMocks.importProjectNotebook,
   loadGitHubRepositories: apiMocks.loadGitHubRepositories,
@@ -6235,7 +6233,7 @@ describe("App", () => {
     expect(document.querySelector("#auth-modal.hidden")).toBeTruthy();
   });
 
-  it("sets explicit autocomplete hints on auth and settings key inputs", async () => {
+  it("renders MV37-only auth and keeps autocomplete hints on settings key inputs", async () => {
     apiMocks.loadSession.mockResolvedValueOnce({
       authenticated: false,
       user: null,
@@ -6264,38 +6262,12 @@ describe("App", () => {
       expect(apiMocks.loadSession).toHaveBeenCalledTimes(1);
     });
 
-    expect(
-      document.querySelector("#login-form input[name='email']")?.getAttribute("autocomplete"),
-    ).toBe("email");
-    expect(
-      document.querySelector("#login-form input[name='password']")?.getAttribute("autocomplete"),
-    ).toBe("current-password");
-    expect(
-      document.querySelector("#login-form input[name='password']")?.getAttribute("minlength"),
-    ).toBe("8");
-    expect(
-      document
-        .querySelector("#signup-form input[name='display_name']")
-        ?.getAttribute("autocomplete"),
-    ).toBe("name");
-    expect(
-      document.querySelector("#signup-form input[name='password']")?.getAttribute("autocomplete"),
-    ).toBe("new-password");
-    expect(
-      document.querySelector("#signup-form input[name='password']")?.getAttribute("minlength"),
-    ).toBe("8");
-    expect(
-      document.querySelector("#reset-form input[name='token']")?.getAttribute("autocomplete"),
-    ).toBe("one-time-code");
-    expect(
-      document.querySelector("#reset-form input[name='token']")?.getAttribute("minlength"),
-    ).toBe("8");
-    expect(
-      document.querySelector("#reset-form input[name='password']")?.getAttribute("autocomplete"),
-    ).toBe("new-password");
-    expect(
-      document.querySelector("#reset-form input[name='password']")?.getAttribute("minlength"),
-    ).toBe("8");
+    const loginView = document.querySelector('[data-auth-view="login"]');
+    expect(loginView?.querySelector("button")?.getAttribute("data-mv37-login")).toBe("true");
+    expect(loginView?.textContent).toContain("Continue with MV37");
+    expect(document.querySelector("#login-form")).toBeNull();
+    expect(document.querySelector("#signup-form")).toBeNull();
+    expect(document.querySelector("#reset-form")).toBeNull();
 
     unmount();
 
@@ -6352,7 +6324,7 @@ describe("App", () => {
     ).toBe("new-password");
   });
 
-  it("renders MV37 as the primary login and signup action", async () => {
+  it("renders MV37 as the only login action", async () => {
     apiMocks.loadSession.mockResolvedValueOnce({
       authenticated: false,
       user: null,
@@ -6367,15 +6339,14 @@ describe("App", () => {
     });
 
     const loginView = document.querySelector('[data-auth-view="login"]');
-    const signupView = document.querySelector('[data-auth-view="signup"]');
     const loginFirstAction = loginView?.querySelector("button");
-    const signupFirstAction = signupView?.querySelector("button");
 
     expect(loginFirstAction?.getAttribute("data-mv37-login")).toBe("true");
     expect(loginFirstAction?.textContent).toContain("Continue with MV37");
-    expect(signupFirstAction?.getAttribute("data-mv37-login")).toBe("true");
-    expect(signupFirstAction?.textContent).toContain("Continue with MV37");
-    expect(loginView?.textContent).toContain("Legacy Paperbase login");
-    expect(signupView?.textContent).toContain("Legacy Paperbase signup");
+    expect(document.querySelector('[data-auth-view="signup"]')).toBeNull();
+    expect(document.querySelector('[data-auth-view="reset-request"]')).toBeNull();
+    expect(document.querySelector('[data-auth-view="reset-password"]')).toBeNull();
+    expect(loginView?.textContent).not.toContain("Legacy Paperbase");
+    expect(loginView?.textContent).not.toContain("Continue with Google");
   });
 });

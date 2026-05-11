@@ -581,23 +581,11 @@ class BrowserSessionResponse(BaseModel):
 
 
 class SignupRequest(BaseModel):
+    """Internal user factory payload; Paperbase product sign-in is MV37-only."""
+
     email: str = Field(min_length=3)
     password: str = Field(min_length=8)
     display_name: str = ""
-
-
-class LoginRequest(BaseModel):
-    email: str = Field(min_length=3)
-    password: str = Field(min_length=8)
-
-
-class ForgotPasswordRequest(BaseModel):
-    email: str = Field(min_length=3)
-
-
-class ResetPasswordRequest(BaseModel):
-    token: str = Field(min_length=8)
-    password: str = Field(min_length=8)
 
 
 class SaveOpenAIKeyRequest(BaseModel):
