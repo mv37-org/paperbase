@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from functools import lru_cache
+import html
 import json
+import logging
 import os
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -57,6 +59,8 @@ from .models import (
     GrepResponse,
     IntegrationProbeResponse,
     JobResponse,
+    LiteratureShellRequest,
+    LiteratureShellResponse,
     LoginRequest,
     ManifestResponse,
     MoveChatThreadProjectRequest,
@@ -67,6 +71,9 @@ from .models import (
     PaperResponse,
     PaperVoteSummary,
     ProjectItemPageResponse,
+    ProjectPresentationResponse,
+    ProjectPresentationShareRequest,
+    ProjectPresentationStartRequest,
     ProjectRepoSyncRequest,
     ProjectRepoSyncResponse,
     ProjectListResponse,
@@ -77,6 +84,7 @@ from .models import (
     ResetPasswordRequest,
     ResultSetResponse,
     RunPythonFileResponse,
+    SaveElevenLabsKeyRequest,
     SaveOpenAIKeyRequest,
     SaveModalCredentialsRequest,
     SearchClickRequest,
@@ -93,6 +101,7 @@ from .models import (
     TrendingPaperDetailResponse,
     UpdateAppearanceRequest,
     UpdateChatThreadRequest,
+    UpdateGitHubSyncSettingsRequest,
     UpdatePythonFileRequest,
     UpdateNotificationsRequest,
     UpdateProjectRequest,
@@ -111,6 +120,7 @@ app = FastAPI(
 _app_settings = get_settings()
 _PACKAGE_DIR = Path(__file__).resolve().parent
 _STATIC_DIR = _PACKAGE_DIR / "static"
+logger = logging.getLogger(__name__)
 
 
 def _env_flag(name: str) -> bool:
@@ -130,9 +140,13 @@ def _api_reload_dirs() -> list[str]:
     return [str(_PACKAGE_DIR)]
 
 
+def _reload_pattern_for_path(path: Path) -> str:
+    return os.path.relpath(path, Path.cwd())
+
+
 def _api_reload_excludes() -> list[str]:
     return [
-        str(_STATIC_DIR),
+        _reload_pattern_for_path(_STATIC_DIR),
     ]
 
 
@@ -372,6 +386,45 @@ def _serialize_browser_session_for_html(
     )
 
 
+def _presentation_meta_tags(request: Request, service: PaperbaseService) -> str:
+    token = (request.query_params.get("presentation") or "").strip()
+    if not token:
+        return ""
+    try:
+        presentation = service.get_public_project_presentation(token)
+    except HTTPException:
+        return ""
+    first_slide = presentation.slides[0] if presentation.slides else None
+    title = first_slide.title if first_slide else "Paperbase presentation"
+    description = first_slide.description if first_slide else "A shared Paperbase research presentation."
+    page_url = f"{_public_base_url(request)}/?presentation={token}"
+    image_url = ""
+    if first_slide and first_slide.image_url:
+        image_url = f"{_public_base_url(request)}{first_slide.image_url}"
+    escaped_title = html.escape(f"{title} | Paperbase", quote=True)
+    escaped_description = html.escape(description, quote=True)
+    escaped_url = html.escape(page_url, quote=True)
+    tags = [
+        f"<meta property=\"og:title\" content=\"{escaped_title}\" />",
+        f"<meta name=\"twitter:title\" content=\"{escaped_title}\" />",
+        f"<meta name=\"description\" content=\"{escaped_description}\" />",
+        f"<meta property=\"og:description\" content=\"{escaped_description}\" />",
+        f"<meta name=\"twitter:description\" content=\"{escaped_description}\" />",
+        f"<meta property=\"og:url\" content=\"{escaped_url}\" />",
+        "<meta property=\"og:type\" content=\"article\" />",
+        "<meta name=\"twitter:card\" content=\"summary_large_image\" />",
+    ]
+    if image_url:
+        escaped_image_url = html.escape(image_url, quote=True)
+        tags.extend(
+            [
+                f"<meta property=\"og:image\" content=\"{escaped_image_url}\" />",
+                f"<meta name=\"twitter:image\" content=\"{escaped_image_url}\" />",
+            ]
+        )
+    return "\n    ".join(tags)
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -384,6 +437,9 @@ def home(request: Request, service: PaperbaseService = Depends(get_service)) -> 
     html = (_STATIC_DIR / "index.html").read_text(encoding="utf-8")
     api_base_url = _public_base_url(request)
     bootstrap_session = _current_browser_session(request, service)
+    presentation_meta = _presentation_meta_tags(request, service)
+    if presentation_meta:
+        html = html.replace("</title>", f"</title>\n    {presentation_meta}", 1)
     html = html.replace("__PAPERBASE_BASE_URL__", api_base_url)
     html = html.replace(
         "__PAPERBASE_BOOTSTRAP_SESSION__",
@@ -751,6 +807,18 @@ def search(request: SearchRequest, service: PaperbaseService = Depends(get_servi
     return service.search(request)
 
 
+@app.post(
+    "/v1/literature/shell",
+    response_model=LiteratureShellResponse,
+    dependencies=[Depends(require_bearer_token)],
+)
+def literature_shell(
+    request: LiteratureShellRequest,
+    service: PaperbaseService = Depends(get_service),
+) -> LiteratureShellResponse:
+    return service.literature_shell(request)
+
+
 @app.post("/v1/search/sections", response_model=SearchSectionResponse, dependencies=[Depends(require_bearer_token)])
 def search_sections(
     request: SearchSectionRequest, service: PaperbaseService = Depends(get_service)
@@ -822,7 +890,7 @@ def browser_list_trending_papers(
     date: str | None = Query(default=None, min_length=10, max_length=10),
     sort: str = Query(default="default"),
     page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=50, ge=1, le=50),
+    page_size: int = Query(default=20, ge=1, le=50),
     user=Depends(get_optional_browser_user),
     service: PaperbaseService = Depends(get_service),
 ) -> TrendingFeedResponse:
@@ -1326,18 +1394,32 @@ async def browser_github_start(
     return_to: str | None = Query(default=None),
     user=Depends(require_browser_user),
 ):
-    del user
     client = get_github_oauth_client()
     settings = get_settings()
     redirect_base = _chat_redirect_base(request, settings, return_to=return_to)
     if _is_safe_return_to(return_to):
         request.session["browser_github_return_to"] = return_to
+    redirect_uri = settings.github_oauth_redirect_url or str(request.url_for("browser_github_callback"))
+    logger.info(
+        "Starting GitHub repo permission flow",
+        extra={
+            "event": "github.oauth.start",
+            "user_id": getattr(user, "user_id", None),
+            "oauth_configured": client is not None,
+            "return_to_present": bool(return_to),
+            "redirect_uri": redirect_uri,
+            "requested_scope": "read:user repo",
+        },
+    )
     if client is None:
+        logger.info(
+            "GitHub repo permission flow is not configured",
+            extra={"event": "github.oauth.not_configured", "user_id": getattr(user, "user_id", None)},
+        )
         return RedirectResponse(
             f"{redirect_base}/?auth_error=github_not_configured&settings=version-control",
             status_code=302,
         )
-    redirect_uri = settings.github_oauth_redirect_url or str(request.url_for("browser_github_callback"))
     return await client.authorize_redirect(request, redirect_uri, scope="read:user repo")
 
 
@@ -1351,12 +1433,29 @@ async def browser_github_callback(
     redirect_base = _chat_redirect_base(request, settings)
     raw_token = _browser_session_token(request)
     user = service.get_current_browser_user(raw_token)
+    logger.info(
+        "Handling GitHub repo permission callback",
+        extra={
+            "event": "github.oauth.callback",
+            "oauth_configured": client is not None,
+            "browser_session_present": bool(raw_token),
+            "user_id": getattr(user, "user_id", None),
+        },
+    )
     if client is None:
+        logger.info(
+            "GitHub repo permission callback cannot continue because OAuth is not configured",
+            extra={"event": "github.oauth.callback_not_configured", "browser_session_present": bool(raw_token)},
+        )
         return RedirectResponse(
             f"{redirect_base}/?auth_error=github_not_configured&settings=version-control",
             status_code=302,
         )
     if user is None:
+        logger.info(
+            "GitHub repo permission callback has no authenticated browser user",
+            extra={"event": "github.oauth.callback_missing_user", "browser_session_present": bool(raw_token)},
+        )
         return RedirectResponse(
             f"{redirect_base}/?auth_error=github_auth_required&settings=version-control",
             status_code=302,
@@ -1366,12 +1465,31 @@ async def browser_github_callback(
         access_token = str(token.get("access_token") or "").strip()
         if not access_token:
             raise RuntimeError("GitHub did not return an access token")
+        logger.info(
+            "GitHub repo permission callback received an access token",
+            extra={
+                "event": "github.oauth.token_received",
+                "user_id": user.user_id,
+                "scope": str(token.get("scope") or ""),
+                "token_type": str(token.get("token_type") or ""),
+                "access_token_present": bool(access_token),
+            },
+        )
         userinfo_response = await client.get("user", token=token)
         userinfo = userinfo_response.json()
         github_user_id = str(userinfo.get("id") or "").strip()
         github_login = str(userinfo.get("login") or "").strip()
         if not github_user_id or not github_login:
             raise RuntimeError("GitHub response was missing user id or login")
+        logger.info(
+            "GitHub repo permission callback loaded user info",
+            extra={
+                "event": "github.oauth.user_loaded",
+                "user_id": user.user_id,
+                "github_user_id": github_user_id,
+                "github_login": github_login,
+            },
+        )
         service.save_github_connection(
             user,
             github_user_id=github_user_id,
@@ -1384,6 +1502,10 @@ async def browser_github_callback(
             status_code=302,
         )
     except Exception:
+        logger.exception(
+            "GitHub repo permission callback failed",
+            extra={"event": "github.oauth.callback_failed", "user_id": getattr(user, "user_id", None)},
+        )
         return RedirectResponse(
             f"{redirect_base}/?auth_error=github_callback_failed&settings=version-control",
             status_code=302,
@@ -1422,6 +1544,37 @@ def browser_delete_openai_key(
         session_response = service.delete_user_openai_key(user)
     else:
         session_response = service.delete_user_anthropic_key(user)
+    return _browser_session_response_with_csrf(
+        session_response,
+        request=request,
+        response=response,
+    )
+
+
+@app.put("/v1/browser/settings/elevenlabs-key", response_model=BrowserSessionResponse)
+def browser_save_elevenlabs_key(
+    request: SaveElevenLabsKeyRequest,
+    http_request: Request,
+    response: Response,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> BrowserSessionResponse:
+    session_response = service.save_user_elevenlabs_key(user, request)
+    return _browser_session_response_with_csrf(
+        session_response,
+        request=http_request,
+        response=response,
+    )
+
+
+@app.delete("/v1/browser/settings/elevenlabs-key", response_model=BrowserSessionResponse)
+def browser_delete_elevenlabs_key(
+    request: Request,
+    response: Response,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> BrowserSessionResponse:
+    session_response = service.delete_user_elevenlabs_key(user)
     return _browser_session_response_with_csrf(
         session_response,
         request=request,
@@ -1485,6 +1638,22 @@ def browser_update_appearance(
     service: PaperbaseService = Depends(get_service),
 ) -> BrowserSessionResponse:
     session_response = service.update_user_appearance(user, request)
+    return _browser_session_response_with_csrf(
+        session_response,
+        request=http_request,
+        response=response,
+    )
+
+
+@app.put("/v1/browser/settings/github-sync", response_model=BrowserSessionResponse)
+def browser_update_github_sync_settings(
+    request: UpdateGitHubSyncSettingsRequest,
+    http_request: Request,
+    response: Response,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> BrowserSessionResponse:
+    session_response = service.update_user_github_sync_settings(user, request)
     return _browser_session_response_with_csrf(
         session_response,
         request=http_request,
@@ -1630,6 +1799,108 @@ def browser_list_project_items(
     service: PaperbaseService = Depends(get_service),
 ) -> ProjectItemPageResponse:
     return service.list_project_items(user, project_id, limit=limit, offset=offset, item_kind=item_kind)
+
+
+@app.get("/v1/browser/projects/{project_id}/presentation", response_model=ProjectPresentationResponse)
+def browser_get_project_presentation(
+    project_id: str,
+    user=Depends(require_browser_user),
+    service: PaperbaseService = Depends(get_service),
+) -> ProjectPresentationResponse:
+    return service.get_project_presentation(user, project_id)
+
+
+@app.get("/v1/browser/projects/{project_id}/presentation/audio")
+def browser_get_project_presentation_audio(
+    project_id: str,
+    user=Depends(require_browser_user),
+    service: PaperbaseService = Depends(get_service),
+) -> Response:
+    payload, content_type = service.get_project_presentation_audio(user, project_id)
+    return Response(
+        content=payload,
+        media_type=content_type,
+        headers={"Cache-Control": "private, max-age=300"},
+    )
+
+
+@app.get("/v1/browser/projects/{project_id}/presentation/slides/{slide_id}/image")
+def browser_get_project_presentation_slide_image(
+    project_id: str,
+    slide_id: str,
+    user=Depends(require_browser_user),
+    service: PaperbaseService = Depends(get_service),
+) -> Response:
+    payload, content_type = service.get_project_presentation_slide_image(user, project_id, slide_id)
+    return Response(
+        content=payload,
+        media_type=content_type,
+        headers={"Cache-Control": "private, max-age=300"},
+    )
+
+
+@app.post("/v1/browser/projects/{project_id}/presentation", response_model=ProjectPresentationResponse)
+def browser_start_project_presentation(
+    project_id: str,
+    request: ProjectPresentationStartRequest,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> ProjectPresentationResponse:
+    return service.start_project_presentation(user, project_id, request)
+
+
+@app.post("/v1/browser/projects/{project_id}/presentation/cancel", response_model=ProjectPresentationResponse)
+def browser_cancel_project_presentation(
+    project_id: str,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> ProjectPresentationResponse:
+    return service.cancel_project_presentation(user, project_id)
+
+
+@app.patch("/v1/browser/projects/{project_id}/presentation/share", response_model=ProjectPresentationResponse)
+def browser_update_project_presentation_share(
+    project_id: str,
+    request: ProjectPresentationShareRequest,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> ProjectPresentationResponse:
+    return service.update_project_presentation_share(user, project_id, request)
+
+
+@app.get("/v1/browser/project-presentations/public/{share_token}", response_model=ProjectPresentationResponse)
+def browser_get_public_project_presentation(
+    share_token: str,
+    service: PaperbaseService = Depends(get_service),
+) -> ProjectPresentationResponse:
+    return service.get_public_project_presentation(share_token)
+
+
+@app.get("/v1/browser/project-presentations/public/{share_token}/audio")
+def browser_get_public_project_presentation_audio(
+    share_token: str,
+    service: PaperbaseService = Depends(get_service),
+) -> Response:
+    payload, content_type = service.get_public_project_presentation_audio(share_token)
+    return Response(
+        content=payload,
+        media_type=content_type,
+        headers={"Cache-Control": "public, max-age=300"},
+    )
+
+
+@app.get("/v1/browser/project-presentations/public/{share_token}/slides/{slide_id}/image")
+def browser_get_public_project_presentation_slide_image(
+    share_token: str,
+    slide_id: str,
+    service: PaperbaseService = Depends(get_service),
+) -> Response:
+    payload, content_type = service.get_public_project_presentation_slide_image(share_token, slide_id)
+    return Response(
+        content=payload,
+        media_type=content_type,
+        headers={"Cache-Control": "public, max-age=300"},
+    )
 
 
 @app.post("/v1/browser/projects/{project_id}/notebooks", response_model=PythonFileResponse)

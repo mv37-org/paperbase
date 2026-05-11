@@ -927,7 +927,11 @@ export function toolActivityLabelForItem(
   const figureId = detail(toolInput?.figure_id);
   const tableId = detail(toolInput?.table_id);
   const execId = detail(toolInput?.exec_id);
+  const shellCommand = detail(toolInput?.command, 80);
 
+  if (toolName === "paperbase_shell") {
+    return shellCommand ? `paperbase shell: ${shellCommand}` : "paperbase shell";
+  }
   if (toolName === "paperbase_search") {
     return query ? `paper search for "${query}"` : "paper search";
   }
@@ -1041,6 +1045,10 @@ export function formatToolActivityText(
   const running = activity.status === "running";
   const target = quotedToolActivityTarget(activity.label);
   switch (activity.toolName) {
+    case "paperbase_shell":
+      return running
+        ? `Running ${activity.label || "paperbase shell"}...`
+        : `Ran ${activity.label || "paperbase shell"}`;
     case "project_list_files":
       return running ? "Listing files..." : "Listed files";
     case "project_read_file":

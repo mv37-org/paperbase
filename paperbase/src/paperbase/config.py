@@ -104,6 +104,7 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     openai_base_url: str = Field(default="https://api.openai.com")
     openai_model: str = Field(default="gpt-5.5")
+    openai_response_timeout_seconds: int = Field(default=600)
     anthropic_api_key: str | None = None
     anthropic_base_url: str = Field(default="https://api.anthropic.com")
     anthropic_model: str = Field(default="claude-opus-4-7")

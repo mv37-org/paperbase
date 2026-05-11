@@ -28,6 +28,8 @@ import type {
   PaperVoteSummary,
   ProjectItemKind,
   ProjectItemPageResponse,
+  ProjectPresentationResponse,
+  ProjectPresentationStartPayload,
   ProjectRepoConflictResolution,
   ProjectRepoSyncResponse,
   ProjectListResponse,
@@ -55,6 +57,18 @@ let browserCsrfToken: string | null = null;
 
 function apiUrl(path: string) {
   return `${API_BASE}${path}`;
+}
+
+export function apiResourceUrl(path: string) {
+  if (
+    !path ||
+    /^(?:[a-z][a-z0-9+.-]*:)?\/\//i.test(path) ||
+    path.startsWith("data:") ||
+    path.startsWith("blob:")
+  ) {
+    return path;
+  }
+  return apiUrl(path);
 }
 
 function encodePathPreservingSlashes(path: string) {
@@ -532,7 +546,7 @@ export function loadGitHubRepoImportCandidates(owner: string, repo: string, bran
 export function createProject(
   name: string,
   description: string,
-  githubRepo: CreateProjectGitHubRepoPayload,
+  githubRepo: CreateProjectGitHubRepoPayload | null = null,
 ) {
   return api<ProjectResponse>("/v1/browser/projects", {
     method: "POST",
@@ -577,6 +591,50 @@ export function loadProjectItems(
   }
   return api<ProjectItemPageResponse>(
     `/v1/browser/projects/${projectId}/items?${params.toString()}`,
+    { method: "GET" },
+  );
+}
+
+export function loadProjectPresentation(projectId: string) {
+  return api<ProjectPresentationResponse>(
+    `/v1/browser/projects/${encodeURIComponent(projectId)}/presentation`,
+    { method: "GET" },
+  );
+}
+
+export function startProjectPresentation(
+  projectId: string,
+  payload: ProjectPresentationStartPayload,
+) {
+  return api<ProjectPresentationResponse>(
+    `/v1/browser/projects/${encodeURIComponent(projectId)}/presentation`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function cancelProjectPresentation(projectId: string) {
+  return api<ProjectPresentationResponse>(
+    `/v1/browser/projects/${encodeURIComponent(projectId)}/presentation/cancel`,
+    { method: "POST" },
+  );
+}
+
+export function updateProjectPresentationShare(projectId: string, isPublic: boolean) {
+  return api<ProjectPresentationResponse>(
+    `/v1/browser/projects/${encodeURIComponent(projectId)}/presentation/share`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ is_public: isPublic }),
+    },
+  );
+}
+
+export function loadPublicProjectPresentation(shareToken: string) {
+  return api<ProjectPresentationResponse>(
+    `/v1/browser/project-presentations/public/${encodeURIComponent(shareToken)}`,
     { method: "GET" },
   );
 }

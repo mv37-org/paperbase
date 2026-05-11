@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 import json
+import logging
 import threading
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+import requests
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
@@ -39,11 +42,16 @@ from paperbase.models import (
     CreateChatThreadRequest,
     CreateProjectGitHubRepoRequest,
     CreateProjectRequest,
+    LiteratureShellRequest,
     MoveChatThreadProjectRequest,
     PaperMetadata,
     PaperSelectionPayload,
+    ProjectPresentationExplorationSnapshot,
+    ProjectPresentationShareRequest,
+    ProjectPresentationStartRequest,
     ProjectRepoSyncRequest,
     SaveAnthropicKeyRequest,
+    SaveElevenLabsKeyRequest,
     SaveModalCredentialsRequest,
     SaveOpenAIKeyRequest,
     SearchPaperResult,
@@ -52,6 +60,7 @@ from paperbase.models import (
     SendChatMessageRequest,
     SignupRequest,
     UpdateAppearanceRequest,
+    UpdateGitHubSyncSettingsRequest,
     UpdateNotificationsRequest,
     UpdateProjectRequest,
 )
@@ -63,9 +72,19 @@ from paperbase.storage import MemoryObjectStore
 class FakeEmailSender:
     def __init__(self) -> None:
         self.reset_emails: list[tuple[str, str]] = []
+        self.presentation_emails: list[tuple[str, str, str]] = []
 
     def send_password_reset(self, *, email: str, reset_link: str) -> None:
         self.reset_emails.append((email, reset_link))
+
+    def send_project_presentation_ready(
+        self,
+        *,
+        email: str,
+        project_name: str,
+        presentation_url: str,
+    ) -> None:
+        self.presentation_emails.append((email, project_name, presentation_url))
 
 
 class FakeChatModel:
@@ -172,6 +191,37 @@ class FakeChatModel:
             "tool_choice": tool_choice,
             "parallel_tool_calls": prompt.parallel_tool_calls,
         }
+
+    def _tool_result_payloads(self, messages) -> list[dict[str, object]]:
+        payloads: list[dict[str, object]] = []
+        for message in messages:
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    continue
+                raw_content = block.get("content")
+                if not isinstance(raw_content, str):
+                    continue
+                try:
+                    parsed = json.loads(raw_content)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(parsed, dict):
+                    payloads.append(parsed)
+        return payloads
+
+    def _latest_result_set_id(self, messages, *, require_papers: bool = False) -> str | None:
+        for payload in reversed(self._tool_result_payloads(messages)):
+            if require_papers and not payload.get("papers"):
+                continue
+            result_set_id = str(payload.get("result_set_id") or "").strip()
+            if result_set_id:
+                return result_set_id
+        return None
 
     def _call_legacy(self, method_name: str, **kwargs):
         method = getattr(self, method_name)
@@ -324,7 +374,9 @@ class FakeChatModel:
                 for message in messages
                 if isinstance(message, dict)
             )
-            if tool_choice == {"type": "any"} or not has_tool_results:
+            tool_result_count = len(self._tool_result_payloads(messages))
+            grep_result_set_id = self._latest_result_set_id(messages, require_papers=True)
+            if not has_tool_results or ("paperbase_shell" in tool_names and tool_result_count == 1 and grep_result_set_id):
                 raw_query = next(
                     (
                         str(message.get("content"))
@@ -344,12 +396,23 @@ class FakeChatModel:
                     query = "methods"
                 else:
                     query = " ".join(query_words[:2]) or raw_query
-                tool_name = (
+                tool_name = "paperbase_shell" if "paperbase_shell" in tool_names else (
                     "paperbase_search_sections"
                     if "paperbase_search_sections" in tool_names
                     else "paperbase_search"
                     if "paperbase_search" in tool_names
                     else str(tool_names[0])
+                )
+                tool_input = (
+                    {
+                        "command": (
+                            f'grep "{query}" --from {grep_result_set_id} -n 3'
+                            if has_tool_results and grep_result_set_id
+                            else f'search "{query}" -n 3'
+                        )
+                    }
+                    if tool_name == "paperbase_shell"
+                    else {"query": query, "limit": 3}
                 )
                 return {
                     "content": [
@@ -357,7 +420,7 @@ class FakeChatModel:
                             "type": "tool_use",
                             "id": "toolu_search_sections",
                             "name": tool_name,
-                            "input": {"query": query, "limit": 3},
+                            "input": tool_input,
                         }
                     ],
                     "usage": {
@@ -413,14 +476,27 @@ class FakeChatModel:
                 for message in messages
                 if isinstance(message, dict)
             )
-            if not has_tool_results:
+            tool_result_count = len(self._tool_result_payloads(messages))
+            grep_result_set_id = self._latest_result_set_id(messages, require_papers=True)
+            if not has_tool_results or ("paperbase_shell" in tool_names and tool_result_count == 1 and grep_result_set_id):
                 query = "grounding"
-                tool_name = (
+                tool_name = "paperbase_shell" if "paperbase_shell" in tool_names else (
                     "paperbase_search_sections"
                     if "paperbase_search_sections" in tool_names
                     else "paperbase_search"
                     if "paperbase_search" in tool_names
                     else str(tool_names[0])
+                )
+                tool_input = (
+                    {
+                        "command": (
+                            f'grep "{query}" --from {grep_result_set_id} -n 3'
+                            if has_tool_results and grep_result_set_id
+                            else f'search "{query}" -n 3'
+                        )
+                    }
+                    if tool_name == "paperbase_shell"
+                    else {"query": query, "limit": 3}
                 )
                 yield ChatModelStreamEvent(usage=self.tool_round_usage)
                 yield ChatModelStreamEvent(
@@ -430,7 +506,7 @@ class FakeChatModel:
                                 "type": "tool_use",
                                 "id": "toolu_search_sections",
                                 "name": tool_name,
-                                "input": {"query": query, "limit": 3},
+                                "input": tool_input,
                             }
                         ],
                         "usage": {
@@ -1344,6 +1420,266 @@ def test_search_and_grep_return_result_handles(monkeypatch, service: PaperbaseSe
     assert section_hits.sections[0].path == "sections/introduction.md"
 
 
+def _make_literature_shell_service(
+    monkeypatch,
+    *,
+    text: str = "## Methods\n\nAttention evidence supports grounded literature reading.",
+    openai_api_key: str | None = None,
+    chat_model: FakeChatModel | None = None,
+) -> tuple[PaperbaseService, str]:
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda paper: _rich_extraction(text=text),
+    )
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            openai_api_key=openai_api_key,
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        chat_model=chat_model,
+    )
+    service.init()
+    indexed = service.index_arxiv_paper(
+        "2401.77777",
+        paper=_sample_paper("2401.77777", title="Literature Shell Paper", abstract="Attention shell abstract."),
+    )
+    return service, indexed.paper_id
+
+
+def test_literature_shell_commands_use_virtual_paper_namespace(monkeypatch):
+    service, paper_id = _make_literature_shell_service(monkeypatch)
+
+    search = service.literature_shell(
+        LiteratureShellRequest(command='search "attention" -n 5 --category cs.AI --year 2024')
+    )
+    assert search.error is None
+    assert search.result_set_id is not None
+    assert f"/papers/{paper_id}/" in search.stdout
+    assert search.papers[0]["paper_id"] == paper_id
+
+    results = service.literature_shell(LiteratureShellRequest(command=f"results {search.result_set_id}"))
+    assert results.error is None
+    assert results.papers[0]["path"] == f"/papers/{paper_id}/"
+
+    latest = service.literature_shell(LiteratureShellRequest(command="results latest"))
+    assert latest.error is None
+    assert latest.result_set_id == search.result_set_id
+
+    root = service.literature_shell(LiteratureShellRequest(command="ls /"))
+    assert root.paths == ["/papers/", "/results/"]
+
+    result_index = service.literature_shell(LiteratureShellRequest(command="ls /results"))
+    assert result_index.error is None
+    assert f"/results/{search.result_set_id}" in result_index.paths
+    assert result_index.rows[0]["result_set_id"] == search.result_set_id
+
+    result_paths = service.literature_shell(LiteratureShellRequest(command=f"ls /results/{search.result_set_id}"))
+    assert result_paths.paths == [f"/papers/{paper_id}/"]
+
+    latest_paths = service.literature_shell(LiteratureShellRequest(command="ls /results/latest"))
+    assert latest_paths.paths == [f"/papers/{paper_id}/"]
+
+    paper_paths = service.literature_shell(LiteratureShellRequest(command=f"ls /papers/{paper_id}/"))
+    assert f"/papers/{paper_id}/abstract.md" in paper_paths.paths
+    assert f"/papers/{paper_id}/files.json" in paper_paths.paths
+    assert f"/papers/{paper_id}/sections/" in paper_paths.paths
+    assert f"/papers/{paper_id}/figures/" in paper_paths.paths
+    assert f"/papers/{paper_id}/tables/" in paper_paths.paths
+
+    section_paths = service.literature_shell(LiteratureShellRequest(command=f"ls /papers/{paper_id}/sections"))
+    assert f"/papers/{paper_id}/sections/index.json" in section_paths.paths
+    assert f"/papers/{paper_id}/sections/introduction.md" in section_paths.paths
+    assert f"/papers/{paper_id}/sections/introduction.lines" in section_paths.paths
+
+    found_sections = service.literature_shell(LiteratureShellRequest(command=f'find /papers/{paper_id}/ "*.md" -n 10'))
+    assert found_sections.error is None
+    assert f"/papers/{paper_id}/abstract.md" in found_sections.paths
+    assert f"/papers/{paper_id}/sections/introduction.md" in found_sections.paths
+
+    files_index = service.literature_shell(LiteratureShellRequest(command=f"cat /papers/{paper_id}/files.json"))
+    assert files_index.error is None
+    assert f"/papers/{paper_id}/sections/introduction.md" in files_index.stdout
+
+    sections_index = service.literature_shell(LiteratureShellRequest(command=f"cat /papers/{paper_id}/sections/index.json"))
+    assert sections_index.error is None
+    assert f"/papers/{paper_id}/sections/introduction.lines" in sections_index.stdout
+
+    abstract = service.literature_shell(LiteratureShellRequest(command=f"cat /papers/{paper_id}/abstract.md"))
+    assert abstract.error is None
+    assert "Attention shell abstract." in abstract.stdout
+
+    cat = service.literature_shell(LiteratureShellRequest(command=f"cat /papers/{paper_id}/sections/introduction.md"))
+    assert cat.error is None
+    assert "Attention evidence" in cat.stdout
+
+    head = service.literature_shell(LiteratureShellRequest(command=f"head -n 2 /papers/{paper_id}/sections/introduction.lines"))
+    assert head.error is None
+    assert head.stdout.splitlines() == ["L1: ## Methods", "L2: "]
+    assert head.truncated is True
+
+    exact_lines = service.literature_shell(LiteratureShellRequest(command=f"lines /papers/{paper_id}/sections/introduction.md 1 2"))
+    assert exact_lines.error is None
+    assert exact_lines.stdout.splitlines() == ["L1: ## Methods", "L2: "]
+
+    grep_result_set = service.literature_shell(
+        LiteratureShellRequest(command='grep "attention" --from latest -n 10')
+    )
+    assert grep_result_set.error is None
+    assert grep_result_set.result_set_id != search.result_set_id
+    assert grep_result_set.parent_result_set_id == search.result_set_id
+    assert grep_result_set.matches
+
+    previous = service.literature_shell(LiteratureShellRequest(command="results prev"))
+    assert previous.error is None
+    assert previous.result_set_id == search.result_set_id
+
+    grep_paper = service.literature_shell(LiteratureShellRequest(command=f'grep "attention" /papers/{paper_id}/ -n 10'))
+    assert grep_paper.error is None
+    assert grep_paper.result_set_id is not None
+    assert grep_paper.matches
+
+    sql = service.literature_shell(
+        LiteratureShellRequest(command='sql "select paper_id,title,published from papers where primary_category=\'cs.AI\' limit 5"')
+    )
+    assert sql.error is None
+    assert sql.result_set_id is not None
+    assert sql.rows == [{"paper_id": paper_id, "title": "Literature Shell Paper", "published": "2024-01-10"}]
+
+    sql_count = service.literature_shell(LiteratureShellRequest(command='sql "select count(*) from papers"'))
+    assert sql_count.error is None
+    assert sql_count.rows == [{"count": 1}]
+
+
+def test_literature_shell_rejects_unsafe_syntax_and_invalid_paths(monkeypatch):
+    service, paper_id = _make_literature_shell_service(monkeypatch)
+
+    piped = service.literature_shell(LiteratureShellRequest(command='search "attention" | cat'))
+    assert piped.error is not None
+    assert "pipes" in piped.error
+
+    traversal = service.literature_shell(LiteratureShellRequest(command=f"cat /papers/{paper_id}/../secret.md"))
+    assert traversal.error is not None
+    assert "parent path traversal" in traversal.error
+
+    outside_namespace = service.literature_shell(LiteratureShellRequest(command="ls /tmp"))
+    assert outside_namespace.error is not None
+    assert "path must stay under" in outside_namespace.error
+
+
+def test_literature_shell_ask_image_attaches_image_to_model(monkeypatch):
+    service, paper_id = _make_literature_shell_service(monkeypatch)
+    session, _ = service.register_browser_user(
+        SignupRequest(email="shell-vision@example.com", password="topsecret123", display_name="Shell Vision")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user, api_key="sk-browser-vision")
+    captured: dict[str, object] = {}
+
+    def fake_create_response(*, api_key: str, prompt: Prompt) -> ResponseEnvelope:
+        captured["api_key"] = api_key
+        captured["prompt"] = prompt
+        return ResponseEnvelope(
+            response_id="resp_shell_vision",
+            items=[
+                ResponseItem(
+                    item_id="msg_shell_vision",
+                    item_type="assistant_message",
+                    role="assistant",
+                    status="completed",
+                    content_text="The image shows a compact model architecture diagram.",
+                )
+            ],
+        )
+
+    monkeypatch.setattr(service, "_chat_model_create_response", fake_create_response)
+
+    figure = service.literature_shell(
+        LiteratureShellRequest(command=f'ask-image /papers/{paper_id}/figures/figure-1/ "what is shown?"'),
+        user=session.user,
+    )
+
+    assert figure.error is None
+    assert figure.rows[0]["caption"] == "A model architecture."
+    assert figure.rows[0]["answer"] == "The image shows a compact model architecture diagram."
+    assert figure.rows[0]["vision_used"] is True
+    assert captured["api_key"] == "sk-browser-vision"
+    prompt = captured["prompt"]
+    assert isinstance(prompt, Prompt)
+    content = prompt.input[0]["content"]
+    assert isinstance(content, list)
+    assert any(block.get("type") == "input_text" and "A model architecture." in block.get("text", "") for block in content)
+    image_blocks = [block for block in content if block.get("type") == "input_image"]
+    assert image_blocks == [{"type": "input_image", "image_url": "data:image/png;base64,UE5H", "detail": "high"}]
+
+
+def test_literature_shell_ask_image_requires_key_for_vision(monkeypatch):
+    service, paper_id = _make_literature_shell_service(monkeypatch, openai_api_key=None, chat_model=FakeChatModel())
+
+    figure = service.literature_shell(
+        LiteratureShellRequest(command=f'ask-image /papers/{paper_id}/figures/figure-1/ "what is shown?"')
+    )
+
+    assert figure.error is not None
+    assert "OpenAI API key" in figure.error
+
+
+def test_literature_shell_map_uses_browser_saved_inference_key(monkeypatch):
+    chat_model = FakeChatModel()
+    service, _ = _make_literature_shell_service(monkeypatch, chat_model=chat_model)
+    search = service.literature_shell(LiteratureShellRequest(command='search "attention" -n 1'))
+    session, _ = service.register_browser_user(
+        SignupRequest(email="shell-map@example.com", password="topsecret123", display_name="Shell Map")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user, api_key="sk-browser-map")
+
+    mapped = service.literature_shell(
+        LiteratureShellRequest(command=f'map --from {search.result_set_id} --query "What evidence is present?" --limit 1'),
+        user=session.user,
+    )
+
+    assert mapped.error is None
+    assert mapped.rows
+    assert chat_model.create_calls[-1]["api_key"] == "sk-browser-map"
+
+
+def test_literature_shell_map_uses_server_key_for_api_path(monkeypatch):
+    chat_model = FakeChatModel()
+    service, _ = _make_literature_shell_service(
+        monkeypatch,
+        openai_api_key="sk-server-map",
+        chat_model=chat_model,
+    )
+    search = service.literature_shell(LiteratureShellRequest(command='search "attention" -n 1'))
+
+    mapped = service.literature_shell(
+        LiteratureShellRequest(
+            command=f'map --from {search.result_set_id} --query "What evidence is present?" --limit 1 --schema json'
+        )
+    )
+
+    assert mapped.error is None
+    assert mapped.rows
+    assert chat_model.create_calls[-1]["api_key"] == "sk-server-map"
+
+
+def test_literature_shell_map_requires_server_key_without_browser_user(monkeypatch):
+    service, _ = _make_literature_shell_service(monkeypatch, openai_api_key=None, chat_model=FakeChatModel())
+    search = service.literature_shell(LiteratureShellRequest(command='search "attention" -n 1'))
+
+    mapped = service.literature_shell(
+        LiteratureShellRequest(command=f'map --from {search.result_set_id} --query "What evidence is present?" --limit 1')
+    )
+
+    assert mapped.error is not None
+    assert "PAPERBASE_OPENAI_API_KEY" in mapped.error
+
+
 def test_search_can_shortlist_from_generated_summaries(monkeypatch, service: PaperbaseService):
     monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
     monkeypatch.setattr(
@@ -1676,8 +2012,28 @@ def test_api_main_respects_reload_env(monkeypatch):
     assert captured["port"] == 8080
     assert captured["reload"] is True
     assert captured["reload_dirs"] == [str(api_module._PACKAGE_DIR)]
-    assert str(api_module._STATIC_DIR) in captured["reload_excludes"]
+    assert api_module._reload_pattern_for_path(api_module._STATIC_DIR) in captured["reload_excludes"]
+    assert all(not Path(pattern).is_absolute() for pattern in captured["reload_excludes"])
     assert captured["log_level"] == "warning"
+
+
+def test_api_reload_excludes_work_when_static_dir_is_missing(monkeypatch, tmp_path):
+    import uvicorn
+    import paperbase.api as api_module
+
+    missing_static_dir = tmp_path / "missing" / "static"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(api_module, "_STATIC_DIR", missing_static_dir)
+
+    excludes = api_module._api_reload_excludes()
+
+    assert excludes == ["missing/static"]
+    uvicorn.Config(
+        "paperbase.api:app",
+        reload=True,
+        reload_dirs=api_module._api_reload_dirs(),
+        reload_excludes=excludes,
+    )
 
 
 def test_get_service_initializes_once_under_concurrent_requests(monkeypatch):
@@ -2416,6 +2772,10 @@ def test_browser_settings_round_trip(browser_service):
             token_secret="modal-token-secret-999",
         ),
     )
+    elevenlabs = service.save_user_elevenlabs_key(
+        session.user,
+        SaveElevenLabsKeyRequest(api_key="elevenlabs-user-key-999"),
+    )
     notifications = service.update_user_notification_preferences(
         session.user,
         UpdateNotificationsRequest(weekly_papers_review_email=True),
@@ -2431,21 +2791,31 @@ def test_browser_settings_round_trip(browser_service):
         access_token="github-access-token",
         scope="repo,read:user",
     )
+    github_sync = service.update_user_github_sync_settings(
+        session.user,
+        UpdateGitHubSyncSettingsRequest(enabled=True),
+    )
 
     assert anthropic.has_anthropic_api_key is True
     assert anthropic.settings.anthropic_api_key_hint.startswith("anth")
     assert modal_credentials.settings.has_modal_credentials is True
     assert modal_credentials.settings.modal_token_id_hint.startswith("moda")
+    assert elevenlabs.settings.has_elevenlabs_api_key is True
+    assert elevenlabs.settings.elevenlabs_api_key_hint.startswith("elev")
     assert notifications.settings.weekly_papers_review_email is True
     assert appearance.settings.appearance_theme == "dark"
     assert github.settings.has_github_connection is True
     assert github.settings.github_login == "octocat"
+    assert github_sync.settings.github_sync_enabled is True
 
     cleared = service.delete_user_modal_credentials(session.user)
+    cleared_audio = service.delete_user_elevenlabs_key(session.user)
     disconnected = service.delete_github_connection(session.user)
 
     assert cleared.settings.has_modal_credentials is False
+    assert cleared_audio.settings.has_elevenlabs_api_key is False
     assert disconnected.settings.has_github_connection is False
+    assert disconnected.settings.github_sync_enabled is False
 
 
 def test_browser_session_marks_admin_users():
@@ -2612,6 +2982,12 @@ def test_trending_feed_pages_ready_papers_and_sorts_by_latest_or_upvotes(browser
         page=2,
         viewer=session_a.user,
     )
+    third_page = service.list_browser_trending_papers(
+        date="2024-02-01",
+        sort="default",
+        page=3,
+        viewer=session_a.user,
+    )
     landing_feed = service.list_browser_trending_papers(
         date="2024-02-01",
         sort="default",
@@ -2626,8 +3002,9 @@ def test_trending_feed_pages_ready_papers_and_sorts_by_latest_or_upvotes(browser
         viewer=session_a.user,
     )
 
-    assert len(default_feed.papers) == 50
+    assert len(default_feed.papers) == 20
     assert default_feed.page == 1
+    assert default_feed.page_size == 20
     assert default_feed.has_next is True
     assert default_feed.has_previous is False
     assert default_feed.papers[0].paper_id == "arxiv:2403.88888"
@@ -2636,15 +3013,22 @@ def test_trending_feed_pages_ready_papers_and_sorts_by_latest_or_upvotes(browser
     assert default_feed.papers[2].image_url is not None
     assert default_feed.papers[3].image_url is None
     assert {paper.published for paper in default_feed.papers} == {"2024-02-01", "2024-02-02", "2024-02-03"}
-    assert len(second_page.papers) == 4
-    assert second_page.has_next is False
+    assert len(second_page.papers) == 20
+    assert second_page.has_next is True
     assert second_page.has_previous is True
+    assert len(third_page.papers) == 14
+    assert third_page.has_next is False
+    assert third_page.has_previous is True
     assert landing_feed.page_size == 10
     assert len(landing_feed.papers) == 10
     assert landing_feed.has_next is True
     assert landing_feed.papers[0].paper_id == default_feed.papers[0].paper_id
-    assert "arxiv:2403.88888" in {paper.paper_id for paper in default_feed.papers + second_page.papers}
-    assert "arxiv:2403.77777" not in {paper.paper_id for paper in default_feed.papers + second_page.papers}
+    assert "arxiv:2402.00000" not in [paper.paper_id for paper in default_feed.papers]
+    default_page_paper_ids = {
+        paper.paper_id for paper in default_feed.papers + second_page.papers + third_page.papers
+    }
+    assert "arxiv:2403.88888" in default_page_paper_ids
+    assert "arxiv:2403.77777" not in default_page_paper_ids
     assert upvote_feed.papers[0].paper_id == "arxiv:2402.00000"
     assert upvote_feed.papers[0].upvote_count == 4
     assert upvote_feed.papers[0].viewer_has_upvoted is True
@@ -3147,7 +3531,7 @@ if grounded:
 ```"""
 
 
-def test_python_file_creation_requires_github_and_normalizes_names(browser_service):
+def test_python_file_creation_is_local_and_normalizes_names(browser_service):
     service, _, _ = browser_service
     session, _ = service.register_browser_user(
         SignupRequest(email="python@example.com", password="topsecret123", display_name="Python User")
@@ -3155,18 +3539,6 @@ def test_python_file_creation_requires_github_and_normalizes_names(browser_servi
     assert session.user is not None
 
     project_id = service.list_projects(session.user).projects[0].project_id
-
-    with pytest.raises(HTTPException) as excinfo:
-        service.create_python_file(session.user, project_id)
-    assert excinfo.value.status_code == 409
-
-    service.save_github_connection(
-        session.user,
-        github_user_id="42",
-        github_login="octocat",
-        access_token="github-access-token",
-        scope="repo,read:user",
-    )
 
     first = service.create_python_file(session.user, project_id)
     second = service.create_python_file(session.user, project_id)
@@ -3373,10 +3745,7 @@ def test_project_chat_tools_are_advertised_for_coding_turns(browser_service):
     tools_by_name = {tool["name"]: tool for tool in tools}
 
     assert {
-        "paperbase_search",
-        "paperbase_search_sections",
-        "paperbase_list_uploaded_documents",
-        "paperbase_search_uploaded_sections",
+        "paperbase_shell",
         "project_list_files",
         "project_read_file",
         "project_grep",
@@ -3394,6 +3763,22 @@ def test_project_chat_tools_are_advertised_for_coding_turns(browser_service):
         "project_lint",
         "project_run",
     }.issubset(tool_names)
+    assert {
+        "paperbase_search",
+        "paperbase_search_sections",
+        "paperbase_get_results",
+        "paperbase_grep_results",
+        "paperbase_get_paper",
+        "paperbase_list_files",
+        "paperbase_read_file",
+        "paperbase_get_figure",
+        "paperbase_get_table",
+        "paperbase_get_related_papers",
+        "paperbase_get_references",
+        "paperbase_list_uploaded_documents",
+        "paperbase_search_uploaded_sections",
+    }.isdisjoint(tool_names)
+    assert "search/results/ls/find/cat/head/lines/grep/map/sql/ask-image" in tools_by_name["paperbase_shell"]["description"]
     assert "workspace text files" in tools_by_name["project_list_files"]["description"]
     assert "Create or replace one repo-relative workspace text file" in tools_by_name["project_write_file"]["description"]
     assert "exact-match text patch" in tools_by_name["project_apply_patch"]["description"]
@@ -4068,7 +4453,7 @@ def test_python_file_sync_project_repo_writes_metadata_and_files():
     assert repo_manager.sync_project_files_calls[0]["previous_managed_paths"] == set()
 
 
-def test_create_project_requires_github_repo_info_and_connection():
+def test_create_project_allows_local_project_and_requires_connection_for_repo_sync(caplog):
     repo_manager = FakeGitHubRepoManager()
     service = PaperbaseService(
         settings=Settings(
@@ -4085,13 +4470,14 @@ def test_create_project_requires_github_repo_info_and_connection():
         SignupRequest(email="new-project@example.com", password="topsecret123", display_name="Project User")
     )
     assert session.user is not None
+    caplog.set_level(logging.INFO, logger="paperbase.service")
 
-    with pytest.raises(HTTPException) as missing_repo:
-        service.create_project(
-            session.user,
-            CreateProjectRequest(name="Agents", description="Study agent systems"),
-        )
-    assert missing_repo.value.status_code == 422
+    local_project = service.create_project(
+        session.user,
+        CreateProjectRequest(name="Agents", description="Study agent systems"),
+    )
+    assert local_project.name == "Agents"
+    assert service.get_project_repo_sync(session.user, local_project.project_id).repo_exists is False
 
     with pytest.raises(HTTPException) as disconnected:
         service.create_project(
@@ -4099,6 +4485,7 @@ def test_create_project_requires_github_repo_info_and_connection():
             _create_repo_project_request("Agents", "Study agent systems"),
         )
     assert disconnected.value.status_code == 409
+    assert any(getattr(record, "event", "") == "github.connection_missing" for record in caplog.records)
 
 
 def test_list_github_repositories_requires_connection_and_returns_accessible_repos():
@@ -4135,7 +4522,41 @@ def test_list_github_repositories_requires_connection_and_returns_accessible_rep
     assert repo_manager.list_repositories_calls == [{"access_token": "github-access-token"}]
 
 
-def test_create_project_creates_private_github_repo_on_main():
+def test_project_files_can_be_created_saved_and_deleted_without_github():
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="local-code@example.com", password="topsecret123", display_name="Local Code")
+    )
+    assert session.user is not None
+
+    project = service.create_project(
+        session.user,
+        CreateProjectRequest(name="Local Code", description="No repository"),
+    )
+    python_file = service.create_python_file(session.user, project.project_id)
+    updated = service.update_python_file(
+        session.user,
+        python_file.file_id,
+        filename="analysis.py",
+        content="print('local')",
+    )
+    deleted = service.delete_python_file(session.user, python_file.file_id)
+
+    assert updated.filename == "analysis.py"
+    assert updated.content == "print('local')"
+    assert deleted["deleted"] is True
+
+
+def test_create_project_creates_private_github_repo_on_main(caplog):
     repo_manager = FakeGitHubRepoManager()
     service = PaperbaseService(
         settings=Settings(
@@ -4152,6 +4573,7 @@ def test_create_project_creates_private_github_repo_on_main():
         SignupRequest(email="repo-create@example.com", password="topsecret123", display_name="Project User")
     )
     assert session.user is not None
+    caplog.set_level(logging.INFO, logger="paperbase.service")
     _connect_github(service, session.user)
 
     project = service.create_project(
@@ -4166,6 +4588,12 @@ def test_create_project_creates_private_github_repo_on_main():
     assert sync.github_repo_name == "agent-lab"
     assert sync.base_branch == "main"
     assert sync.default_branch == "main"
+    events = [getattr(record, "event", "") for record in caplog.records]
+    assert "github.connection_saved" in events
+    assert "github.connection_ready" in events
+    assert "project.create.github_repo_create" in events
+    assert "project.create.github_completed" in events
+    assert "github-access-token" not in caplog.text
 
 
 def test_create_project_imports_existing_repo_python_and_notebook_files():
@@ -4799,8 +5227,9 @@ def test_off_topic_chat_prompt_redirects_without_forcing_research_posture(browse
     first_tool_names = {
         tool["name"] for tool in first_call["tools"] if isinstance(tool, dict) and "name" in tool
     }
-    assert "paperbase_search_sections" in first_tool_names
-    assert "paperbase_search_uploaded_sections" in first_tool_names
+    assert "paperbase_shell" in first_tool_names
+    assert "paperbase_search_sections" not in first_tool_names
+    assert "paperbase_search_uploaded_sections" not in first_tool_names
     assert "If the request is outside Paperbase scope, politely redirect the user back" in str(first_call["system_prompt"])
     assert "do not call tools just to answer an off-topic request" in str(first_call["system_prompt"])
     assert "Every tool-enabled turn must begin by leveraging these research tools" not in str(
@@ -5036,9 +5465,9 @@ def test_stream_chat_preserves_provider_commentary_phase():
                     role="assistant",
                     status="in_progress",
                     call_id="tool_search",
-                    name="paperbase_search",
-                    content_text='{"query": "grounding"}',
-                    content_json={"query": "grounding"},
+                    name="paperbase_shell",
+                    content_text='{"command": "search \\"grounding\\" -n 3"}',
+                    content_json={"command": 'search "grounding" -n 3'},
                 ),
             )
             yield ResponseEvent(
@@ -5050,9 +5479,9 @@ def test_stream_chat_preserves_provider_commentary_phase():
                     role="assistant",
                     status="completed",
                     call_id="tool_search",
-                    name="paperbase_search",
-                    content_text='{"query": "grounding"}',
-                    content_json={"query": "grounding"},
+                    name="paperbase_shell",
+                    content_text='{"command": "search \\"grounding\\" -n 3"}',
+                    content_json={"command": 'search "grounding" -n 3'},
                 ),
             )
             yield ResponseEvent(
@@ -5176,7 +5605,6 @@ def test_stream_chat_compacts_mid_turn_after_tool_results(monkeypatch, browser_s
 
     compaction_call = next(call for call in chat_model.create_calls if call["system_prompt"] == "")
     assert "Compact the conversation transcript" in str(compaction_call["messages"])
-    assert "Active Source IDs" in str(compaction_call["messages"])
     assert "Explain the methods grounding" in str(compaction_call["messages"])
 
     final_sample_call = next(
@@ -5236,8 +5664,8 @@ def test_stream_chat_continues_past_previous_sampling_step_cap():
                             {
                                 "type": "tool_use",
                                 "id": f"toolu_loop_{next_round}",
-                                "name": "paperbase_get_results",
-                                "input": {"result_set_id": f"rs_missing_{next_round}"},
+                                "name": "paperbase_shell",
+                                "input": {"command": f"results rs_missing_{next_round}"},
                             }
                         ],
                         "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
@@ -5326,8 +5754,8 @@ def test_search_only_tool_results_do_not_create_citations(monkeypatch):
                             {
                                 "type": "tool_use",
                                 "id": "toolu_search_only",
-                                "name": "paperbase_search",
-                                "input": {"query": "grounding", "limit": 3},
+                                "name": "paperbase_shell",
+                                "input": {"command": 'search "grounding" -n 3'},
                             }
                         ],
                         "stop_reason": "tool_use",
@@ -5463,6 +5891,911 @@ def test_project_defaults_and_thread_snapshots(browser_service):
     assert chat_model.create_calls
     assert "Use grounded citations only." in str(chat_model.create_calls[-1]["system_prompt"])
     assert "Use different instructions now." not in str(chat_model.create_calls[-1]["system_prompt"])
+
+
+def test_project_presentation_job_caches_shares_and_emails():
+    class ProjectPresentationChatModel(FakeChatModel):
+        def create_response(self, *, api_key: str, prompt: Prompt) -> ResponseEnvelope:
+            if "Research presentation designer" in prompt.base_instructions:
+                self.create_calls.append(
+                    {
+                        "api_key": api_key,
+                        "messages": self._legacy_messages_from_prompt(prompt),
+                        "system_prompt": prompt.base_instructions,
+                        "tools": prompt.tools,
+                        "tool_choice": prompt.tool_choice,
+                        "parallel_tool_calls": prompt.parallel_tool_calls,
+                        "text_format": prompt.text_format,
+                    }
+                )
+                return ResponseEnvelope(
+                    response_id="resp_project_presentation",
+                    items=[
+                        ResponseItem(
+                            item_id="msg_project_presentation",
+                            item_type="message",
+                            role="assistant",
+                            content_text=json.dumps(
+                                {
+                                    "summary_markdown": (
+                                        "# Agent Benchmarks\n\n"
+                                        "| Topic | Evidence |\n"
+                                        "| --- | --- |\n"
+                                        "| Evaluation | Notes and chat history |"
+                                    ),
+                                    "visual_code": (
+                                        "ReactDOM.createRoot(document.getElementById('root'))."
+                                        "render(React.createElement('div', null, 'visual'));"
+                                    ),
+                                    "slides": [
+                                        {
+                                            "slide_id": "benchmark-calibration",
+                                            "title": "Benchmark calibration",
+                                            "description": "Uncertainty intervals explain when benchmark wins are actually reliable.",
+                                            "visual_type": "code",
+                                            "visual_code": (
+                                                "ReactDOM.createRoot(document.getElementById('root'))."
+                                                "render(React.createElement('div', null, 'slide visual'));"
+                                            ),
+                                            "image_prompt": "",
+                                        }
+                                    ],
+                                }
+                            ),
+                        )
+                    ],
+                )
+            return super().create_response(api_key=api_key, prompt=prompt)
+
+    email_sender = FakeEmailSender()
+    chat_model = ProjectPresentationChatModel()
+    service = PaperbaseService(
+        settings=Settings(storage_backend="memory", database_url="memory://", api_key="test-token"),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=email_sender,
+        chat_model=chat_model,
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="present@example.com", password="topsecret123", display_name="Presenter")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    project = service.list_projects(session.user).projects[0]
+    paper = _sample_paper(
+        "2401.12345",
+        title="Calibrated Agent Benchmarks",
+        abstract=(
+            "On AgentBench, the calibration pipeline studies benchmark reliability by estimating uncertainty "
+            "in evaluation scores and reducing error from 0.18 to 0.07 when protocols are stabilized."
+        ),
+    )
+    paper.index_status = "indexed"
+    paper.tldr = "Reliable agent benchmarks require calibrated uncertainty, not just leaderboard averages."
+    paper.summary_short = "Calibration separates meaningful benchmark improvements from noisy score changes."
+    stored_paper = service.repository.upsert_paper(paper)  # type: ignore[attr-defined]
+    service.object_store.put_text(  # type: ignore[attr-defined]
+        f"papers/{stored_paper.paper_id}/figures/index.json",
+        json.dumps(
+            [
+                {
+                    "figure_id": "fig-uncertainty",
+                    "caption": "Benchmark score intervals overlap when protocols are unstable.",
+                    "source_url": "",
+                    "content_type": "image/png",
+                }
+            ]
+        ),
+        content_type="application/json",
+    )
+    service.object_store.put_text(  # type: ignore[attr-defined]
+        f"papers/{stored_paper.paper_id}/figures/fig-uncertainty/caption.md",
+        "Figure shows calibrated confidence intervals around benchmark scores.",
+        content_type="text/markdown",
+    )
+    service.object_store.put_text(  # type: ignore[attr-defined]
+        f"papers/{stored_paper.paper_id}/tables/index.json",
+        json.dumps([{"table_id": "table-calibration", "caption": "Calibration error by protocol", "row_count": 2}]),
+        content_type="application/json",
+    )
+    service.object_store.put_text(  # type: ignore[attr-defined]
+        f"papers/{stored_paper.paper_id}/tables/table-calibration.json",
+        json.dumps(
+            [
+                {"Protocol": "baseline", "Error": "0.18"},
+                {"Protocol": "calibrated", "Error": "0.07"},
+            ]
+        ),
+        content_type="application/json",
+    )
+    service.create_browser_trending_paper_comment(
+        stored_paper.paper_id,
+        user=session.user,
+        request=CreatePaperCommentRequest(body="Focus on uncertainty intervals, not activity counts."),
+    )
+    thread = service.create_chat_thread(
+        session.user,
+        CreateChatThreadRequest(title="Benchmarks", project_id=project.project_id),
+    )
+    service.repository.add_chat_message(  # type: ignore[attr-defined]
+        thread_id=thread.thread_id,
+        role="user",
+        content_markdown="Which papers explain benchmark reliability?",
+    )
+    service.repository.create_python_file(  # type: ignore[attr-defined]
+        user_id=session.user.user_id,
+        project_id=project.project_id,
+        filename="analysis.py",
+        content="def calibrate(scores):\n    return sorted(scores)\n",
+        repo_path="analysis.py",
+    )
+
+    queued = service.start_project_presentation(
+        session.user,
+        project.project_id,
+        ProjectPresentationStartRequest(
+            explorations=[
+                ProjectPresentationExplorationSnapshot(
+                    exploration_id="exp_1",
+                    paper_id=stored_paper.paper_id,
+                    title="Benchmark Paper",
+                    annotations=[
+                        {
+                            "kind": "text",
+                            "note": "Key takeaway about evaluation",
+                            "selected_text": "Evaluation protocol",
+                        }
+                    ],
+                    path="papers/arxiv:2401.12345",
+                    authors="Ada Lovelace",
+                    preview_image_url="",
+                    pdf_url="",
+                )
+            ]
+        ),
+    )
+
+    assert queued.status == "pending"
+    assert queued.job_id
+    assert queued.progress.phase_key == "queued"
+    assert queued.progress.percent == 4
+    assert queued.progress.estimated_seconds_remaining > 0
+    completed_job = service.process_next_job()
+    assert completed_job is not None
+    assert completed_job.status == "completed"
+    completed = service.get_project_presentation(session.user, project.project_id)
+    assert completed.status == "completed"
+    assert completed.progress.phase_key == "complete"
+    assert completed.progress.percent == 100
+    assert completed.progress.estimated_seconds_remaining == 0
+    assert "Agent Benchmarks" in completed.summary_markdown
+    assert "ReactDOM.createRoot" in completed.visual_code
+    assert completed.slides[0].title == "Benchmark calibration"
+    assert completed.audio_url == ""
+    assert "Research presentation designer" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "Do not write meta commentary" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "clean print/editorial research spread" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "Use D3 for rich data-driven charting" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "art-directed infographic" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "First infer the key bullet points" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "exactly one direct research fact or conclusion" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "no wordplay, no clever titles" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "beginner-friendly technical language" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "define acronyms on first mention" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "Make the slides heavy with research conclusions" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "The title must itself be the fact or conclusion" in str(
+        chat_model.create_calls[-1]["system_prompt"]
+    )
+    assert "GPT Image 2" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "builds the visual from data arrays, D3 scales, SVG marks" in str(
+        chat_model.create_calls[-1]["system_prompt"]
+    )
+    assert "high information density" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "conclusion callout that points at the decisive evidence" in str(
+        chat_model.create_calls[-1]["system_prompt"]
+    )
+    assert "The left visual is not a title slide" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "do not repeat the slide title" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "no SVG/HTML text may exceed 22px" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "Avoid oversized typographic posters" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "paperbasePresentation.size()" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "project sidebar opens or closes" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "manually hard-coded node grids" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "fit inside the iframe viewport without body/page scrolling" in str(
+        chat_model.create_calls[-1]["system_prompt"]
+    )
+    assert "never rely on fixed oversized canvases" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "`visual_evidence`" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "`metric_values`" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "`before_after_comparisons`" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "table rows, captions, metric values" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "warm paper background (#f7f2ea)" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "terracotta #99582A" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "muted blue #3F6685" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "Do not use decorative blobs/waves unless the shape encodes data" in str(
+        chat_model.create_calls[-1]["system_prompt"]
+    )
+    prompt_payload = json.loads(str(chat_model.create_calls[-1]["messages"][0]["content"]))
+    assert prompt_payload["research_materials"][0]["title"] == "Calibrated Agent Benchmarks"
+    assert "benchmark reliability" in prompt_payload["research_materials"][0]["abstract"]
+    assert prompt_payload["research_materials"][0]["selected_passages"][0]["selected_text"] == "Evaluation protocol"
+    assert prompt_payload["research_materials"][0]["paper_comments"][0]["body"].startswith("Focus on uncertainty")
+    assert prompt_payload["research_materials"][0]["figures"][0]["caption"].startswith("Figure shows calibrated")
+    assert prompt_payload["research_materials"][0]["tables"][0]["sample_rows"][0]["Protocol"] == "baseline"
+    visual_data = prompt_payload["research_materials"][0]["visual_data"]
+    assert visual_data["figure_captions"][0]["caption"].startswith("Figure shows calibrated")
+    assert visual_data["table_samples"][0]["sample_rows"][0]["Protocol"] == "baseline"
+    assert any(item["metric"] == "Error" and item["value"] == 0.18 for item in visual_data["metric_values"])
+    assert any(
+        comparison["before_value"] == 0.18 and comparison["after_value"] == 0.07
+        for comparison in visual_data["before_after_comparisons"]
+    )
+    assert "AgentBench" in visual_data["datasets"]
+    assert any(
+        "calibration pipeline" in component["component"].lower()
+        for component in visual_data["method_components"]
+    )
+    assert prompt_payload["visual_evidence"]["metric_values"]
+    assert prompt_payload["visual_evidence"]["before_after_comparisons"]
+    assert prompt_payload["code_artifacts"][0]["filename"] == "analysis.py"
+    assert "calibrate" in prompt_payload["code_artifacts"][0]["content"]
+    assert chat_model.create_calls[-1]["text_format"] == {
+        "type": "json_schema",
+        "name": "project_presentation",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "summary_markdown": {
+                    "type": "string",
+                    "description": "Markdown research briefing about the actual research material, including tables when useful.",
+                },
+                "visual_code": {
+                    "type": "string",
+                    "description": "Legacy first-slide plain browser JavaScript fallback that renders into #root.",
+                },
+                "slides": {
+                    "type": "array",
+                    "description": "Ordered research presentation slides derived from the full project history.",
+                    "minItems": 1,
+                    "maxItems": 8,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "slide_id": {
+                                "type": "string",
+                                "description": "Stable lowercase identifier using letters, numbers, and hyphens.",
+                            },
+                            "title": {
+                                "type": "string",
+                                "description": (
+                                    "Short direct research fact or conclusion. No wordplay, metaphor, "
+                                    "question, or theme label."
+                                ),
+                            },
+                            "description": {
+                                "type": "string",
+                                "description": (
+                                    "Evidence-heavy explanation of that one fact or conclusion. "
+                                    "Title plus description must be at most 80 words."
+                                ),
+                            },
+                            "visual_type": {"type": "string", "enum": ["code", "image"]},
+                            "visual_code": {
+                                "type": "string",
+                                "description": (
+                                    "Plain browser JavaScript for responsive D3/SVG/chart code slides, otherwise empty."
+                                ),
+                            },
+                            "image_prompt": {
+                                "type": "string",
+                                "description": "Detailed GPT Image 2 prompt for image slides, otherwise empty.",
+                            },
+                        },
+                        "required": [
+                            "slide_id",
+                            "title",
+                            "description",
+                            "visual_type",
+                            "visual_code",
+                            "image_prompt",
+                        ],
+                    },
+                },
+            },
+            "required": ["summary_markdown", "visual_code", "slides"],
+        },
+    }
+    assert email_sender.presentation_emails == [
+        ("present@example.com", "General", f"{service.settings.chat_public_url.rstrip('/')}/")
+    ]
+
+    shared = service.update_project_presentation_share(
+        session.user,
+        project.project_id,
+        ProjectPresentationShareRequest(is_public=True),
+    )
+    assert shared.is_public is True
+    assert shared.share_token
+    assert shared.share_url.endswith(f"?presentation={shared.share_token}")
+    public = service.get_public_project_presentation(shared.share_token)
+    assert public.presentation_id == completed.presentation_id
+
+    cached = service.start_project_presentation(
+        session.user,
+        project.project_id,
+        ProjectPresentationStartRequest(explorations=[]),
+    )
+    assert cached.status == "completed"
+    assert cached.job_id == completed.job_id
+
+
+def test_cancel_pending_project_presentation_allows_starting_again():
+    service = PaperbaseService(
+        settings=Settings(storage_backend="memory", database_url="memory://", api_key="test-token"),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=FakeChatModel(),
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="cancel-present@example.com", password="topsecret123", display_name="Cancel Presenter")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    project = service.list_projects(session.user).projects[0]
+
+    queued = service.start_project_presentation(
+        session.user,
+        project.project_id,
+        ProjectPresentationStartRequest(explorations=[]),
+    )
+    canceled = service.cancel_project_presentation(session.user, project.project_id)
+
+    assert canceled.presentation_id == queued.presentation_id
+    assert canceled.status == "canceled"
+    assert canceled.error == ""
+    assert canceled.progress.phase_key == "canceled"
+    assert queued.job_id is not None
+    canceled_job = service.repository.get_job(queued.job_id)
+    assert canceled_job is not None
+    assert canceled_job.status == "canceled"
+
+    restarted = service.start_project_presentation(
+        session.user,
+        project.project_id,
+        ProjectPresentationStartRequest(explorations=[]),
+    )
+    assert restarted.status == "pending"
+    assert restarted.presentation_id == queued.presentation_id
+    assert restarted.job_id and restarted.job_id != queued.job_id
+
+
+def test_cancel_running_project_presentation_prevents_late_model_save(monkeypatch):
+    service = PaperbaseService(
+        settings=Settings(storage_backend="memory", database_url="memory://", api_key="test-token"),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=FakeChatModel(),
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="cancel-running@example.com", password="topsecret123", display_name="Cancel Running")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    project = service.list_projects(session.user).projects[0]
+    queued = service.start_project_presentation(
+        session.user,
+        project.project_id,
+        ProjectPresentationStartRequest(explorations=[]),
+    )
+
+    def cancel_during_model(**_kwargs):
+        canceled = service.cancel_project_presentation(session.user, project.project_id)
+        assert canceled.status == "canceled"
+        return ResponseEnvelope(
+            response_id="resp_project_presentation",
+            items=[
+                ResponseItem(
+                    item_id="msg_project_presentation",
+                    item_type="message",
+                    role="assistant",
+                    content_text=json.dumps(
+                        {
+                            "summary_markdown": "# Should not save",
+                            "visual_code": "ReactDOM.createRoot(document.getElementById('root')).render('late');",
+                            "slides": [
+                                {
+                                    "slide_id": "late-slide",
+                                    "title": "Late slide",
+                                    "description": "This would save if cancellation were not checked.",
+                                    "visual_type": "code",
+                                    "visual_code": "ReactDOM.createRoot(document.getElementById('root')).render('late');",
+                                    "image_prompt": "",
+                                }
+                            ],
+                        }
+                    ),
+                )
+            ],
+        )
+
+    monkeypatch.setattr(service, "_chat_model_create_response", cancel_during_model)
+
+    processed = service.process_next_job()
+    assert processed is not None
+    assert processed.status == "canceled"
+    assert processed.effective_status == "canceled"
+    presentation = service.get_project_presentation(session.user, project.project_id)
+    assert presentation.presentation_id == queued.presentation_id
+    assert presentation.status == "canceled"
+    assert presentation.summary_markdown == ""
+    assert presentation.visual_code == ""
+    assert presentation.slides == []
+    assert presentation.progress.phase_key == "canceled"
+
+
+def test_project_presentation_image_slide_is_stored_and_served(monkeypatch):
+    class ImageSlidePresentationChatModel(FakeChatModel):
+        def create_response(self, *, api_key: str, prompt: Prompt) -> ResponseEnvelope:
+            if "Research presentation designer" in prompt.base_instructions:
+                return ResponseEnvelope(
+                    response_id="resp_project_presentation",
+                    items=[
+                        ResponseItem(
+                            item_id="msg_project_presentation",
+                            item_type="message",
+                            role="assistant",
+                            content_text=json.dumps(
+                                {
+                                    "summary_markdown": "# Concept Map",
+                                    "visual_code": "",
+                                    "slides": [
+                                        {
+                                            "slide_id": "concept-map",
+                                            "title": "Concept map",
+                                            "description": "A visual metaphor explains how the research themes connect.",
+                                            "visual_type": "image",
+                                            "visual_code": "",
+                                            "image_prompt": "Editorial research infographic, warm paper, terracotta accents.",
+                                        }
+                                    ],
+                                }
+                            ),
+                        )
+                    ],
+                )
+            return super().create_response(api_key=api_key, prompt=prompt)
+
+    service = PaperbaseService(
+        settings=Settings(storage_backend="memory", database_url="memory://", api_key="test-token"),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=ImageSlidePresentationChatModel(),
+    )
+    requested_prompts: list[str] = []
+
+    def fake_image_request(*, api_key: str, prompt: str) -> bytes:
+        assert api_key == "openai-user-key-999"
+        requested_prompts.append(prompt)
+        return b"png-bytes"
+
+    monkeypatch.setattr(service, "_request_openai_presentation_image", fake_image_request)
+    session, _ = service.register_browser_user(
+        SignupRequest(email="image-present@example.com", password="topsecret123", display_name="Image Presenter")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    project = service.list_projects(session.user).projects[0]
+
+    service.start_project_presentation(
+        session.user,
+        project.project_id,
+        ProjectPresentationStartRequest(explorations=[]),
+    )
+    service.process_next_job()
+
+    completed = service.get_project_presentation(session.user, project.project_id)
+    assert completed.slides[0].visual_type == "image"
+    assert completed.slides[0].image_url.endswith(
+        f"/v1/browser/projects/{project.project_id}/presentation/slides/concept-map/image"
+    )
+    assert requested_prompts == ["Editorial research infographic, warm paper, terracotta accents."]
+    image, content_type = service.get_project_presentation_slide_image(session.user, project.project_id, "concept-map")
+    assert image == b"png-bytes"
+    assert content_type == "image/png"
+
+    shared = service.update_project_presentation_share(
+        session.user,
+        project.project_id,
+        ProjectPresentationShareRequest(is_public=True),
+    )
+    assert shared.share_token
+    assert shared.slides[0].image_url.endswith(
+        f"/v1/browser/project-presentations/public/{shared.share_token}/slides/concept-map/image"
+    )
+    public_image, public_content_type = service.get_public_project_presentation_slide_image(
+        shared.share_token,
+        "concept-map",
+    )
+    assert public_image == image
+    assert public_content_type == "image/png"
+
+
+def test_project_presentation_completes_when_slide_image_generation_fails(monkeypatch, caplog):
+    class ImageFallbackPresentationChatModel(FakeChatModel):
+        def create_response(self, *, api_key: str, prompt: Prompt) -> ResponseEnvelope:
+            if "Research presentation designer" in prompt.base_instructions:
+                return ResponseEnvelope(
+                    response_id="resp_project_presentation",
+                    items=[
+                        ResponseItem(
+                            item_id="msg_project_presentation",
+                            item_type="message",
+                            role="assistant",
+                            content_text=json.dumps(
+                                {
+                                    "summary_markdown": "# Concept Map",
+                                    "visual_code": "",
+                                    "slides": [
+                                        {
+                                            "slide_id": "concept-map",
+                                            "title": "Concept map",
+                                            "description": "A generated image should fall back to code if it times out.",
+                                            "visual_type": "image",
+                                            "visual_code": "",
+                                            "image_prompt": "Editorial research infographic, warm paper, terracotta accents.",
+                                        }
+                                    ],
+                                }
+                            ),
+                        )
+                    ],
+                )
+            return super().create_response(api_key=api_key, prompt=prompt)
+
+    service = PaperbaseService(
+        settings=Settings(storage_backend="memory", database_url="memory://", api_key="test-token"),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=ImageFallbackPresentationChatModel(),
+    )
+    caplog.set_level(logging.WARNING, logger="paperbase.service")
+    session, _ = service.register_browser_user(
+        SignupRequest(email="image-fallback@example.com", password="topsecret123", display_name="Image Fallback")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    project = service.list_projects(session.user).projects[0]
+
+    def fail_image_request(**_kwargs):
+        visible = service.get_project_presentation(session.user, project.project_id)
+        assert visible.status == "completed"
+        assert visible.progress.phase_key == "generating_images"
+        raise TimeoutError("The read operation timed out")
+
+    monkeypatch.setattr(service, "_request_openai_presentation_image", fail_image_request)
+    service.start_project_presentation(
+        session.user,
+        project.project_id,
+        ProjectPresentationStartRequest(explorations=[]),
+    )
+    completed_job = service.process_next_job()
+
+    assert completed_job is not None
+    assert completed_job.status == "completed"
+    completed = service.get_project_presentation(session.user, project.project_id)
+    assert completed.status == "completed"
+    assert completed.progress.phase_key == "complete"
+    assert completed.slides[0].visual_type == "code"
+    assert completed.slides[0].image_url == ""
+    assert "ReactDOM.createRoot" in completed.slides[0].visual_code
+    assert any(
+        getattr(record, "event", "") == "project.presentation.image_fallback"
+        for record in caplog.records
+    )
+
+
+def test_project_presentation_falls_back_when_model_returns_non_json(caplog):
+    class NonJsonPresentationChatModel(FakeChatModel):
+        def create_response(self, *, api_key: str, prompt: Prompt) -> ResponseEnvelope:
+            if "Research presentation designer" in prompt.base_instructions:
+                return ResponseEnvelope(
+                    response_id="resp_project_presentation",
+                    items=[
+                        ResponseItem(
+                            item_id="msg_project_presentation",
+                            item_type="message",
+                            role="assistant",
+                            content_text="I can explain this project, but this is not JSON.",
+                        )
+                    ],
+                )
+            return super().create_response(api_key=api_key, prompt=prompt)
+
+    email_sender = FakeEmailSender()
+    service = PaperbaseService(
+        settings=Settings(storage_backend="memory", database_url="memory://", api_key="test-token"),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=email_sender,
+        chat_model=NonJsonPresentationChatModel(),
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="fallback-present@example.com", password="topsecret123", display_name="Presenter")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    project = service.list_projects(session.user).projects[0]
+    caplog.set_level(logging.WARNING, logger="paperbase.service")
+
+    queued = service.start_project_presentation(
+        session.user,
+        project.project_id,
+        ProjectPresentationStartRequest(explorations=[]),
+    )
+
+    assert queued.status == "pending"
+    completed_job = service.process_next_job()
+    assert completed_job is not None
+    assert completed_job.status == "completed"
+    completed = service.get_project_presentation(session.user, project.project_id)
+    assert completed.status == "completed"
+    assert "## Presentation Outline" in completed.summary_markdown
+    assert "The presentation workflow completed" not in completed.summary_markdown
+    assert "| Paper explorations |" not in completed.summary_markdown
+    assert "ReactDOM.createRoot" in completed.visual_code
+    assert "RESEARCH VISUAL" in completed.visual_code
+    assert "SIGNAL STRENGTH" in completed.visual_code
+    assert completed.slides
+    assert completed.slides[0].visual_type == "code"
+    assert email_sender.presentation_emails == [
+        ("fallback-present@example.com", "General", f"{service.settings.chat_public_url.rstrip('/')}/")
+    ]
+    assert any(
+        getattr(record, "event", "") == "project.presentation.payload_fallback"
+        for record in caplog.records
+    )
+
+
+def test_project_presentation_audio_uses_saved_elevenlabs_key(monkeypatch):
+    class ProjectPresentationChatModel(FakeChatModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.audio_system_prompt = ""
+
+        def create_response(self, *, api_key: str, prompt: Prompt) -> ResponseEnvelope:
+            if "Project presentation audio script writer" in prompt.base_instructions:
+                self.audio_system_prompt = prompt.base_instructions
+                return ResponseEnvelope(
+                    response_id="resp_audio_script",
+                    items=[
+                        ResponseItem(
+                            item_id="msg_audio_script",
+                            item_type="message",
+                            role="assistant",
+                            content_text=json.dumps(
+                                {
+                                    "turns": [
+                                        {"speaker": "noob", "text": "What does this project explain?"},
+                                        {
+                                            "speaker": "expert",
+                                            "text": "It explains the explored papers, notes, comments, and chats.",
+                                        },
+                                    ]
+                                }
+                            ),
+                        )
+                    ],
+                )
+            if "Research presentation designer" in prompt.base_instructions:
+                return ResponseEnvelope(
+                    response_id="resp_project_presentation",
+                    items=[
+                        ResponseItem(
+                            item_id="msg_project_presentation",
+                            item_type="message",
+                            role="assistant",
+                            content_text=json.dumps(
+                                {
+                                    "summary_markdown": "# Agent Benchmarks\n\n| Topic | Evidence |\n| --- | --- |",
+                                    "visual_code": (
+                                        "ReactDOM.createRoot(document.getElementById('root'))."
+                                        "render(React.createElement('div', null, 'visual'));"
+                                    ),
+                                    "slides": [
+                                        {
+                                            "slide_id": "audio-slide",
+                                            "title": "Audio slide",
+                                            "description": "The audio should explain the research substance slide by slide.",
+                                            "visual_type": "code",
+                                            "visual_code": (
+                                                "ReactDOM.createRoot(document.getElementById('root'))."
+                                                "render(React.createElement('div', null, 'audio visual'));"
+                                            ),
+                                            "image_prompt": "",
+                                        }
+                                    ],
+                                }
+                            ),
+                        )
+                    ],
+                )
+            return super().create_response(api_key=api_key, prompt=prompt)
+
+    chat_model = ProjectPresentationChatModel()
+    service = PaperbaseService(
+        settings=Settings(storage_backend="memory", database_url="memory://", api_key="test-token"),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=chat_model,
+    )
+    generated_segments: list[tuple[str, str]] = []
+
+    def fake_tts(*, api_key: str, voice_id: str, text: str) -> bytes:
+        generated_segments.append((voice_id, text))
+        assert api_key == "elevenlabs-user-key-999"
+        return f"audio:{voice_id}:{text}".encode("utf-8")
+
+    monkeypatch.setattr(service, "_request_elevenlabs_tts", fake_tts)
+    monkeypatch.setattr(service, "_stitch_audio_segments", lambda segments: b"|".join(segments))
+
+    session, _ = service.register_browser_user(
+        SignupRequest(email="audio-present@example.com", password="topsecret123", display_name="Audio Presenter")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    service.save_user_elevenlabs_key(
+        session.user,
+        SaveElevenLabsKeyRequest(api_key="elevenlabs-user-key-999"),
+    )
+    project = service.list_projects(session.user).projects[0]
+    queued = service.start_project_presentation(
+        session.user,
+        project.project_id,
+        ProjectPresentationStartRequest(explorations=[]),
+    )
+
+    assert queued.status == "pending"
+    completed_job = service.process_next_job()
+    assert completed_job is not None
+    assert completed_job.status == "completed"
+    completed = service.get_project_presentation(session.user, project.project_id)
+    assert completed.status == "completed"
+    assert completed.audio_url.endswith(f"/v1/browser/projects/{project.project_id}/presentation/audio")
+    assert "research substance and visual story" in chat_model.audio_system_prompt
+    assert "Make it ELI5" in chat_model.audio_system_prompt
+    assert "explain from first principles" in chat_model.audio_system_prompt
+    assert "vivid analogies" in chat_model.audio_system_prompt
+    assert "specific authors and paper titles" in chat_model.audio_system_prompt
+    assert "In the paper titled Y" in chat_model.audio_system_prompt
+    assert "Do not make the app workflow" in chat_model.audio_system_prompt
+    assert len(generated_segments) == 2
+    assert generated_segments[0][0] != generated_segments[1][0]
+    audio, content_type = service.get_project_presentation_audio(session.user, project.project_id)
+    assert b"What does this project explain" in audio
+    assert content_type == "audio/mpeg"
+
+    shared = service.update_project_presentation_share(
+        session.user,
+        project.project_id,
+        ProjectPresentationShareRequest(is_public=True),
+    )
+    assert shared.audio_url.endswith(f"/v1/browser/project-presentations/public/{shared.share_token}/audio")
+    public_audio, public_content_type = service.get_public_project_presentation_audio(shared.share_token)
+    assert public_audio == audio
+    assert public_content_type == "audio/mpeg"
+
+
+def test_project_presentation_completes_when_elevenlabs_audio_fails(monkeypatch, caplog):
+    class AudioFallbackChatModel(FakeChatModel):
+        def create_response(self, *, api_key: str, prompt: Prompt) -> ResponseEnvelope:
+            if "Project presentation audio script writer" in prompt.base_instructions:
+                return ResponseEnvelope(
+                    response_id="resp_audio_script",
+                    items=[
+                        ResponseItem(
+                            item_id="msg_audio_script",
+                            item_type="message",
+                            role="assistant",
+                            content_text=json.dumps(
+                                {
+                                    "turns": [
+                                        {
+                                            "speaker": "expert",
+                                            "text": "Explain the research clearly.",
+                                        }
+                                    ]
+                                }
+                            ),
+                        )
+                    ],
+                )
+            if "Research presentation designer" in prompt.base_instructions:
+                return ResponseEnvelope(
+                    response_id="resp_project_presentation",
+                    items=[
+                        ResponseItem(
+                            item_id="msg_project_presentation",
+                            item_type="message",
+                            role="assistant",
+                            content_text=json.dumps(
+                                {
+                                    "summary_markdown": "# Research brief",
+                                    "visual_code": (
+                                        "ReactDOM.createRoot(document.getElementById('root'))."
+                                        "render(React.createElement('div', null, 'visual'));"
+                                    ),
+                                    "slides": [
+                                        {
+                                            "slide_id": "brief",
+                                            "title": "Research brief",
+                                            "description": "The presentation should still complete if audio fails.",
+                                            "visual_type": "code",
+                                            "visual_code": (
+                                                "ReactDOM.createRoot(document.getElementById('root'))."
+                                                "render(React.createElement('div', null, 'visual'));"
+                                            ),
+                                            "image_prompt": "",
+                                        }
+                                    ],
+                                }
+                            ),
+                        )
+                    ],
+                )
+            return super().create_response(api_key=api_key, prompt=prompt)
+
+    service = PaperbaseService(
+        settings=Settings(storage_backend="memory", database_url="memory://", api_key="test-token"),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=AudioFallbackChatModel(),
+    )
+    caplog.set_level(logging.ERROR, logger="paperbase.service")
+    session, _ = service.register_browser_user(
+        SignupRequest(email="audio-fallback@example.com", password="topsecret123", display_name="Audio Fallback")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    service.save_user_elevenlabs_key(
+        session.user,
+        SaveElevenLabsKeyRequest(api_key="elevenlabs-user-key-999"),
+    )
+    project = service.list_projects(session.user).projects[0]
+
+    def fail_tts(**_kwargs):
+        visible = service.get_project_presentation(session.user, project.project_id)
+        assert visible.status == "completed"
+        assert visible.progress.phase_key == "generating_audio"
+        raise TimeoutError("The read operation timed out")
+
+    monkeypatch.setattr(service, "_request_elevenlabs_tts", fail_tts)
+    service.start_project_presentation(
+        session.user,
+        project.project_id,
+        ProjectPresentationStartRequest(explorations=[]),
+    )
+
+    completed_job = service.process_next_job()
+    assert completed_job is not None
+    assert completed_job.status == "completed"
+    completed = service.get_project_presentation(session.user, project.project_id)
+    assert completed.status == "completed"
+    assert completed.progress.phase_key == "complete"
+    assert completed.audio_url == ""
+    assert "Research brief" in completed.summary_markdown
+    assert any(
+        getattr(record, "event", "") == "project.presentation.audio_fallback"
+        for record in caplog.records
+    )
 
 
 def test_project_session_paging_and_thread_deletion(browser_service):
@@ -5712,10 +7045,10 @@ def test_browser_chat_stream_emits_citations_and_completion(monkeypatch, browser
         phase="final_answer",
     )
     assert function_call_items
-    assert function_call_items[0]["name"] == "paperbase_search_sections"
-    assert function_call_items[0]["content_json"] == {"query": "grounding", "limit": 3}
+    assert function_call_items[0]["name"] == "paperbase_shell"
+    assert function_call_items[0]["content_json"] == {"command": 'search "grounding" -n 3'}
     assert function_output_items
-    assert '"sections": [{' in function_output_items[0]["content_text"]
+    assert '"result_set_id":' in function_output_items[0]["content_text"]
     assert assistant_final_items
     assert "usage" in event_names
     assert event_names[-1] == "turn_completed"
@@ -5730,7 +7063,7 @@ def test_browser_chat_stream_emits_citations_and_completion(monkeypatch, browser
     assert events[final_usage_index][1]["input_tokens"] == 11234
     assert assistant_final_items[0]["citations"]
     assert events[-1][1]["final_item"]["status"] == "completed"
-    assert events[-1][1]["usage"]["output_tokens"] == 125
+    assert events[-1][1]["usage"]["output_tokens"] == 98 * len(function_call_items) + 27
     assert service.chat_model.create_calls
 
     refreshed = client.get(f"/v1/browser/chats/{thread_id}").json()
@@ -6101,9 +7434,8 @@ def test_browser_google_start_redirects_back_to_return_to_when_not_configured(mo
     app.dependency_overrides.clear()
 
 
-def test_chat_search_tool_threads_rerank_flag_into_search_request():
-    """The paperbase_search tool must advertise a `rerank` input and pass it
-    through to SearchRequest so chat/MCP flows can use the deep-search path."""
+def test_chat_literature_shell_threads_rerank_flag_into_search_request():
+    """The literature shell search command passes --rerank through to SearchRequest."""
     from paperbase.service import ChatCitationRegistry
 
     service = PaperbaseService(
@@ -6115,16 +7447,13 @@ def test_chat_search_tool_threads_rerank_flag_into_search_request():
 
     request = SendChatMessageRequest(content="find papers about attention", include_papers=True)
     tools = service._chat_tool_definitions(request)
-    search_tool = next((t for t in tools if t["name"] == "paperbase_search"), None)
-    assert search_tool is not None, "paperbase_search tool should be defined"
-    assert "rerank" in search_tool["input_schema"]["properties"], (
-        "paperbase_search tool schema must advertise the rerank input"
-    )
+    tool_names = {tool["name"] for tool in tools}
+    assert "paperbase_shell" in tool_names
+    assert "paperbase_search" not in tool_names
+    shell_tool = next(t for t in tools if t["name"] == "paperbase_shell")
+    assert shell_tool["input_schema"]["properties"]["command"]["type"] == "string"
 
     captured: list[bool] = []
-
-    class RecordingService(type(service)):
-        pass
 
     original_search = service.search
 
@@ -6138,20 +7467,20 @@ def test_chat_search_tool_threads_rerank_flag_into_search_request():
     fake_user = type("U", (), {"user_id": "u1"})()
 
     service._execute_chat_tool(
-        tool_name="paperbase_search",
-        tool_input={"query": "attention", "rerank": True},
+        tool_name="paperbase_shell",
+        tool_input={"command": 'search "attention" --rerank'},
         user=fake_user,
         citation_registry=registry,
     )
-    assert captured == [True], "rerank=True from tool_input did not reach SearchRequest"
+    assert captured == [True], "--rerank from the shell command did not reach SearchRequest"
 
     service._execute_chat_tool(
-        tool_name="paperbase_search",
-        tool_input={"query": "attention"},
+        tool_name="paperbase_shell",
+        tool_input={"command": 'search "attention"'},
         user=fake_user,
         citation_registry=registry,
     )
-    assert captured == [True, False], "rerank default must be False when tool_input omits it"
+    assert captured == [True, False], "rerank default must be False when the command omits it"
 
 
 def test_memory_repository_search_local_bakes_in_citation_and_recency_boosts():
@@ -6413,6 +7742,74 @@ def test_uncaught_exception_defaults_to_retryable(monkeypatch):
     assert processed.attempts == 1
 
 
+def _requests_http_error(status_code: int, body: str = "") -> requests.HTTPError:
+    response = requests.Response()
+    response.status_code = status_code
+    response.url = "https://api.openai.com/v1/responses"
+    response._content = body.encode("utf-8")
+    return requests.HTTPError(f"{status_code} Error", response=response)
+
+
+def test_project_presentation_openai_5xx_retries_without_html_error(monkeypatch):
+    service = _retry_service()
+    session, _ = service.register_browser_user(
+        SignupRequest(email="retry-openai@example.com", password="secret12345", display_name="Retry")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    project = service.list_projects(session.user).projects[0]
+    queued = service.start_project_presentation(
+        session.user,
+        project.project_id,
+        ProjectPresentationStartRequest(explorations=[], regenerate=True),
+    )
+
+    def fail_openai(**_kwargs):
+        raise _requests_http_error(502, "<html><head><title> | 502: Bad gateway</title></head></html>")
+
+    monkeypatch.setattr(service, "generate_project_presentation", fail_openai)
+
+    processed = service.process_next_job()
+    assert processed is not None
+    assert processed.status == "pending"
+    assert "temporarily unavailable" in (processed.error or "")
+    assert "<html" not in (processed.error or "")
+    presentation = service.get_project_presentation(session.user, project.project_id)
+    assert presentation.presentation_id == queued.presentation_id
+    assert presentation.status == "pending"
+    assert presentation.error == ""
+
+
+def test_project_presentation_openai_404_dead_letters_with_actionable_error(monkeypatch):
+    service = _retry_service()
+    session, _ = service.register_browser_user(
+        SignupRequest(email="bad-model@example.com", password="secret12345", display_name="Bad Model")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    project = service.list_projects(session.user).projects[0]
+    service.start_project_presentation(
+        session.user,
+        project.project_id,
+        ProjectPresentationStartRequest(explorations=[], regenerate=True),
+    )
+
+    def fail_openai(**_kwargs):
+        raise _requests_http_error(404, "model not found")
+
+    monkeypatch.setattr(service, "generate_project_presentation", fail_openai)
+
+    processed = service.process_next_job()
+    assert processed is not None
+    assert processed.status == "dead"
+    assert processed.attempts == 1
+    assert "PAPERBASE_OPENAI_MODEL" in (processed.error or "")
+    assert service.settings.openai_model in (processed.error or "")
+    presentation = service.get_project_presentation(session.user, project.project_id)
+    assert presentation.status == "failed"
+    assert "PAPERBASE_OPENAI_MODEL" in presentation.error
+
+
 def test_claim_skips_jobs_whose_next_run_at_is_in_the_future():
     """A job with a future ``next_run_at`` must not be claimable until the
     backoff window elapses, even if it's the only pending job in the queue."""
@@ -6462,6 +7859,34 @@ def test_claimed_job_gets_live_lease_and_stalled_effective_status_when_expired()
     assert canceled.lease_token is None
 
 
+def test_claim_reclaims_stalled_job_after_worker_lease_expires():
+    from datetime import UTC, datetime, timedelta
+
+    service = _retry_service()
+    job = service.repository.create_job("index_paper", {"arxiv_id": "test/stalled-reclaim"})
+    first_claim = service.repository.claim_pending_job(worker_id="worker-a", lease_seconds=60)
+    assert first_claim is not None
+    assert first_claim.attempts == 1
+    assert first_claim.lease_token
+
+    service.repository.jobs[job.job_id] = service.repository.jobs[job.job_id].model_copy(
+        update={"lease_expires_at": datetime.now(UTC) - timedelta(seconds=1)}
+    )
+
+    reclaimed = service.repository.claim_pending_job(worker_id="worker-b", lease_seconds=60)
+
+    assert reclaimed is not None
+    assert reclaimed.job_id == job.job_id
+    assert reclaimed.status == "running"
+    assert reclaimed.effective_status == "running"
+    assert reclaimed.worker_id == "worker-b"
+    assert reclaimed.attempts == 2
+    assert reclaimed.lease_token
+    assert reclaimed.lease_token != first_claim.lease_token
+    assert reclaimed.lease_expires_at is not None
+    assert reclaimed.lease_expires_at > datetime.now(UTC)
+
+
 def test_cancel_pending_job_marks_canceled_immediately():
     service = _retry_service()
     job = service.repository.create_job("index_paper", {"arxiv_id": "test/cancel-pending"})
@@ -6494,6 +7919,60 @@ def test_cancel_running_job_requests_cancel_and_worker_marks_canceled(monkeypatc
     assert processed.status == "canceled"
     assert processed.effective_status == "canceled"
     assert processed.finished_at is not None
+
+
+def test_sync_latest_yields_to_queued_project_presentation(monkeypatch):
+    service = _retry_service()
+    sync_job = service.repository.create_job(
+        "sync_latest",
+        {"days": 7, "categories": ["cs.AI"], "limit_per_category": 1},
+    )
+
+    def fetch_recent(category, *, days, max_results):
+        service.repository.create_job(
+            "project_presentation",
+            {
+                "user_id": "user_1",
+                "project_id": "proj_1",
+                "presentation_id": "pres_1",
+                "context_snapshot": {},
+            },
+        )
+        return [
+            PaperMetadata(
+                arxiv_id="2605.00001",
+                title="Queued interactive work",
+                abstract="A paper that should not be indexed before an interactive presentation.",
+            )
+        ]
+
+    enrich_calls = []
+
+    def enrich(papers, *args, **kwargs):
+        enrich_calls.append(kwargs)
+
+    monkeypatch.setattr("paperbase.service.sources.fetch_recent", fetch_recent)
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", enrich)
+
+    processed = service.process_next_job()
+
+    assert processed is not None
+    assert processed.job_id == sync_job.job_id
+    assert processed.status == "pending"
+    assert processed.attempts == 0
+    assert processed.next_run_at is not None
+    assert processed.error is None
+    assert enrich_calls == [
+        {
+            "max_retries": 1,
+            "base_backoff_seconds": 0.5,
+            "inter_batch_sleep_seconds": 0.0,
+        }
+    ]
+
+    next_claim = service.repository.claim_pending_job()
+    assert next_claim is not None
+    assert next_claim.job_type == "project_presentation"
 
 
 def test_canceling_job_becomes_stalled_if_worker_lease_expires():
@@ -7068,12 +8547,9 @@ def test_record_search_click_updates_log_and_404s_on_unknown_query_id():
     assert service.record_search_click("qry_nonexistent", paper_id) is False
 
 
-def test_chat_search_tool_does_not_write_search_log_row():
-    """The paperbase_search chat tool runs LLM-generated reformulations, not
-    real user queries, so its searches must never land in search_logs — they
-    would pollute the #21 real-user-query benchmark. The tool path forces
-    log_query=False so the response carries query_id=None and no row is
-    persisted."""
+def test_chat_literature_shell_search_does_not_write_search_log_row():
+    """Chat shell searches are LLM-generated reformulations, not real user
+    queries, so they must never land in search_logs."""
     from paperbase.service import ChatCitationRegistry
 
     service, paper_id = _make_service_with_one_paper()
@@ -7081,15 +8557,13 @@ def test_chat_search_tool_does_not_write_search_log_row():
     fake_user = type("U", (), {"user_id": "u1"})()
 
     result = service._execute_chat_tool(
-        tool_name="paperbase_search",
-        tool_input={"query": "attention"},
+        tool_name="paperbase_shell",
+        tool_input={"command": 'search "attention" -n 5'},
         user=fake_user,
         citation_registry=registry,
     )
 
     assert service.repository.search_logs == {}
-    # The tool result dict is the view the model sees — no query_id surfaces
-    # because click attribution is meaningless for a synthetic reformulation.
     assert "query_id" not in result
     assert any(p["paper_id"] == paper_id for p in result.get("papers", []))
 

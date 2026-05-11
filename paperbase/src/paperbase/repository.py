@@ -23,6 +23,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    and_,
     create_engine,
     delete,
     func,
@@ -58,6 +59,8 @@ from .models import (
     PaperResponse,
     ProjectItemPageResponse,
     ProjectItemSummary,
+    ProjectPresentationProgressResponse,
+    ProjectPresentationResponse,
     ProjectRepoSyncResponse,
     ProjectResponse,
     ProjectSessionPageResponse,
@@ -316,6 +319,7 @@ class ResultItemORM(Base):
 # in this map fall back to 3 — the same default encoded on the ORM column.
 _JOB_TYPE_MAX_ATTEMPTS: dict[str, int] = {
     "index_paper": 3,
+    "project_presentation": 2,
     "sync_latest": 5,
     "enrich_missing_metadata": 5,
     "reindex_missing_embeddings": 2,
@@ -337,6 +341,7 @@ def default_max_attempts(job_type: str) -> int:
 # Jobs not in this map fall back to 0 — the same default encoded on the ORM.
 _JOB_TYPE_PRIORITY: dict[str, int] = {
     "index_paper": -10,
+    "project_presentation": -5,
     "sync_latest": 0,
     "enrich_missing_metadata": 0,
     "reindex_missing_embeddings": 0,
@@ -706,10 +711,13 @@ class BrowserUserSettingsORM(Base):
     encrypted_modal_token_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     encrypted_modal_token_secret: Mapped[str | None] = mapped_column(Text, nullable=True)
     modal_token_id_hint: Mapped[str] = mapped_column(String(32), default="")
+    encrypted_elevenlabs_api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    elevenlabs_api_key_hint: Mapped[str] = mapped_column(String(32), default="")
     weekly_papers_review_email: Mapped[bool] = mapped_column(Boolean, default=False)
     appearance_theme: Mapped[str] = mapped_column(String(16), default="light")
     github_user_id: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
     github_login: Mapped[str] = mapped_column(String(255), default="")
+    github_sync_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     encrypted_github_access_token: Mapped[str | None] = mapped_column(Text, nullable=True)
     github_scope: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -778,6 +786,33 @@ class ProjectORM(Base):
     name: Mapped[str] = mapped_column(Text, default="General")
     description: Mapped[str] = mapped_column(Text, default="")
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class ProjectPresentationORM(Base):
+    __tablename__ = "project_presentations"
+
+    presentation_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("browser_users.user_id", ondelete="CASCADE"), index=True)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.project_id", ondelete="CASCADE"),
+        unique=True,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(String(32), default="pending")
+    visual_code: Mapped[str] = mapped_column(Text, default="")
+    summary_markdown: Mapped[str] = mapped_column(Text, default="")
+    slides: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    audio_storage_path: Mapped[str] = mapped_column(Text, default="")
+    audio_content_type: Mapped[str] = mapped_column(String(128), default="audio/mpeg")
+    context_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    progress: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    is_public: Mapped[bool] = mapped_column(Boolean, default=False)
+    share_token: Mapped[str | None] = mapped_column(String(96), unique=True, nullable=True)
+    job_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    error: Mapped[str] = mapped_column(Text, default="")
+    completed_at: Mapped[Any | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
@@ -970,10 +1005,13 @@ def _browser_user_settings_from_orm(row: BrowserUserSettingsORM | None) -> Brows
         return BrowserUserSettingsResponse()
     return BrowserUserSettingsResponse(
         openai_api_key_hint="",
+        has_elevenlabs_api_key=bool(row.encrypted_elevenlabs_api_key),
+        elevenlabs_api_key_hint=row.elevenlabs_api_key_hint or "",
         has_modal_credentials=bool(row.encrypted_modal_token_id and row.encrypted_modal_token_secret),
         modal_token_id_hint=row.modal_token_id_hint or "",
         has_github_connection=bool(row.encrypted_github_access_token and row.github_login),
         github_login=row.github_login or "",
+        github_sync_enabled=bool(row.github_sync_enabled),
         weekly_papers_review_email=bool(row.weekly_papers_review_email),
         appearance_theme=row.appearance_theme if row.appearance_theme in {"light", "dark"} else "light",
     )
@@ -1008,6 +1046,66 @@ def _project_from_orm(
         github_repo_url=github_repo_url,
         created_at=row.created_at,
         updated_at=row.updated_at,
+    )
+
+
+def _project_presentation_progress_payload(
+    *,
+    phase_key: str,
+    phase_label: str,
+    detail: str,
+    percent: int,
+    estimated_seconds_remaining: int,
+    can_leave: bool = True,
+    email_notice: str = "We will email you once it is done. You can leave this page.",
+    updated_at: Any | None = None,
+) -> dict[str, Any]:
+    updated = updated_at or utcnow()
+    if hasattr(updated, "isoformat"):
+        updated = updated.isoformat()
+    return {
+        "phase_key": phase_key,
+        "phase_label": phase_label,
+        "detail": detail,
+        "percent": max(0, min(100, int(percent))),
+        "estimated_seconds_remaining": max(0, int(estimated_seconds_remaining)),
+        "can_leave": bool(can_leave),
+        "email_notice": email_notice,
+        "updated_at": updated,
+    }
+
+
+def _project_presentation_progress_response(**kwargs: Any) -> ProjectPresentationProgressResponse:
+    return ProjectPresentationProgressResponse.model_validate(
+        _project_presentation_progress_payload(**kwargs)
+    )
+
+
+def _project_presentation_from_orm(
+    row: ProjectPresentationORM,
+    *,
+    share_url: str = "",
+) -> ProjectPresentationResponse:
+    status = row.status if row.status in {"pending", "running", "completed", "failed", "canceled"} else "failed"
+    progress = row.progress if isinstance(row.progress, dict) else {}
+    return ProjectPresentationResponse(
+        presentation_id=row.presentation_id,
+        project_id=row.project_id,
+        status=status,  # type: ignore[arg-type]
+        visual_code=row.visual_code or "",
+        summary_markdown=row.summary_markdown or "",
+        slides=row.slides if isinstance(row.slides, list) else [],
+        audio_storage_path=row.audio_storage_path or "",
+        audio_content_type=row.audio_content_type or "audio/mpeg",
+        is_public=bool(row.is_public),
+        share_token=row.share_token,
+        share_url=share_url if row.is_public and row.share_token else "",
+        error=row.error or "",
+        job_id=row.job_id,
+        progress=progress,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        completed_at=row.completed_at,
     )
 
 
@@ -1611,6 +1709,10 @@ class PaperRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def list_recent_result_sets(self, *, limit: int = 10) -> list[ResultSetResponse]:
+        raise NotImplementedError
+
+    @abstractmethod
     def grep_result_set(self, result_set_id: str, pattern: str, *, limit: int) -> list[GrepPaperMatch]:
         raise NotImplementedError
 
@@ -1657,6 +1759,25 @@ class PaperRepository(ABC):
 
     @abstractmethod
     def cancel_job(self, job_id: str) -> JobResponse | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def has_pending_job_with_priority_less_than(
+        self,
+        priority: int,
+        *,
+        exclude_job_id: str | None = None,
+    ) -> bool:
+        raise NotImplementedError
+
+    @abstractmethod
+    def yield_job(
+        self,
+        job_id: str,
+        *,
+        lease_token: str | None = None,
+        next_run_at: Any | None = None,
+    ) -> JobResponse | None:
         raise NotImplementedError
 
     @abstractmethod
@@ -1990,7 +2111,49 @@ class SqlAlchemyPaperRepository(PaperRepository):
             connection.execute(
                 text(
                     "ALTER TABLE IF EXISTS browser_user_settings "
+                    "ADD COLUMN IF NOT EXISTS encrypted_elevenlabs_api_key TEXT"
+                )
+            )
+            connection.execute(
+                text(
+                    "ALTER TABLE IF EXISTS browser_user_settings "
+                    "ADD COLUMN IF NOT EXISTS elevenlabs_api_key_hint VARCHAR(32) DEFAULT ''"
+                )
+            )
+            connection.execute(
+                text(
+                    "ALTER TABLE IF EXISTS browser_user_settings "
                     "ADD COLUMN IF NOT EXISTS appearance_theme VARCHAR(16) DEFAULT 'light'"
+                )
+            )
+            connection.execute(
+                text(
+                    "ALTER TABLE IF EXISTS browser_user_settings "
+                    "ADD COLUMN IF NOT EXISTS github_sync_enabled BOOLEAN DEFAULT FALSE"
+                )
+            )
+            connection.execute(
+                text(
+                    "ALTER TABLE IF EXISTS project_presentations "
+                    "ADD COLUMN IF NOT EXISTS audio_storage_path TEXT DEFAULT ''"
+                )
+            )
+            connection.execute(
+                text(
+                    "ALTER TABLE IF EXISTS project_presentations "
+                    "ADD COLUMN IF NOT EXISTS audio_content_type VARCHAR(128) DEFAULT 'audio/mpeg'"
+                )
+            )
+            connection.execute(
+                text(
+                    "ALTER TABLE IF EXISTS project_presentations "
+                    "ADD COLUMN IF NOT EXISTS slides JSON DEFAULT '[]'"
+                )
+            )
+            connection.execute(
+                text(
+                    "ALTER TABLE IF EXISTS project_presentations "
+                    "ADD COLUMN IF NOT EXISTS progress JSON DEFAULT '{}'"
                 )
             )
             connection.execute(
@@ -2032,6 +2195,18 @@ class SqlAlchemyPaperRepository(PaperRepository):
             connection.execute(
                 text(
                     "CREATE UNIQUE INDEX IF NOT EXISTS projects_default_per_user ON projects (user_id) WHERE is_default"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS project_presentations_user_project_idx "
+                    "ON project_presentations (user_id, project_id)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS project_presentations_share_token_idx "
+                    "ON project_presentations (share_token) WHERE share_token IS NOT NULL"
                 )
             )
             # #39 PR C: index for the list_top_authors aggregation query
@@ -2503,13 +2678,34 @@ class SqlAlchemyPaperRepository(PaperRepository):
             arxiv_id=paper.arxiv_id,
             title=paper.title,
             authors=paper.authors,
+            abstract=paper.abstract,
+            tldr=paper.tldr,
             published=paper.published,
+            updated=paper.updated,
             primary_category=paper.primary_category,
             categories=paper.categories,
+            doi=paper.doi,
+            comment=paper.comment,
+            journal_ref=paper.journal_ref,
             summary_short=paper.summary_short or paper.tldr or paper.abstract or "",
             html_url=paper.html_url,
             pdf_url=paper.pdf_url,
             image_url=None,
+            citation_count=paper.citation_count,
+            influential_citation_count=paper.influential_citation_count,
+            semantic_scholar_id=paper.semantic_scholar_id,
+            code_url=paper.code_url,
+            code_url_source=paper.code_url_source,
+            code_index_status=paper.code_index_status,
+            code_is_python=paper.code_is_python,
+            code_python_reason=paper.code_python_reason,
+            venue=paper.venue,
+            venue_year=paper.venue_year,
+            venue_source=paper.venue_source,
+            top_author_s2_id=paper.top_author_s2_id,
+            source_type=paper.source_type,
+            index_status=paper.index_status,
+            indexed_at=paper.indexed_at,
             upvote_count=int(upvote_count or 0),
             viewer_has_upvoted=bool(viewer_upvoted),
             comments=[],
@@ -4045,6 +4241,16 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 "token_id_hint": row.modal_token_id_hint or "",
             }
 
+    def get_elevenlabs_api_key_record(self, user_id: str) -> dict[str, str] | None:
+        with self._session() as session:
+            row = session.scalar(select(BrowserUserSettingsORM).where(BrowserUserSettingsORM.user_id == user_id))
+            if row is None or not row.encrypted_elevenlabs_api_key:
+                return None
+            return {
+                "encrypted_api_key": row.encrypted_elevenlabs_api_key,
+                "api_key_hint": row.elevenlabs_api_key_hint or "",
+            }
+
     def get_github_connection_record(self, user_id: str) -> dict[str, str] | None:
         with self._session() as session:
             row = session.scalar(select(BrowserUserSettingsORM).where(BrowserUserSettingsORM.user_id == user_id))
@@ -4082,6 +4288,28 @@ class SqlAlchemyPaperRepository(PaperRepository):
             row.modal_token_id_hint = ""
             row.updated_at = utcnow()
 
+    def save_elevenlabs_api_key(
+        self,
+        *,
+        user_id: str,
+        encrypted_api_key: str,
+        hint: str,
+    ) -> None:
+        with self._session() as session:
+            row = self._get_or_create_browser_user_settings_row(session, user_id)
+            row.encrypted_elevenlabs_api_key = encrypted_api_key
+            row.elevenlabs_api_key_hint = hint
+            row.updated_at = utcnow()
+
+    def delete_elevenlabs_api_key(self, user_id: str) -> None:
+        with self._session() as session:
+            row = session.scalar(select(BrowserUserSettingsORM).where(BrowserUserSettingsORM.user_id == user_id))
+            if row is None:
+                return
+            row.encrypted_elevenlabs_api_key = None
+            row.elevenlabs_api_key_hint = ""
+            row.updated_at = utcnow()
+
     def set_weekly_papers_review_email(self, *, user_id: str, enabled: bool) -> None:
         with self._session() as session:
             row = self._get_or_create_browser_user_settings_row(session, user_id)
@@ -4092,6 +4320,12 @@ class SqlAlchemyPaperRepository(PaperRepository):
         with self._session() as session:
             row = self._get_or_create_browser_user_settings_row(session, user_id)
             row.appearance_theme = theme if theme in {"light", "dark"} else "light"
+            row.updated_at = utcnow()
+
+    def set_github_sync_enabled(self, *, user_id: str, enabled: bool) -> None:
+        with self._session() as session:
+            row = self._get_or_create_browser_user_settings_row(session, user_id)
+            row.github_sync_enabled = enabled
             row.updated_at = utcnow()
 
     def save_github_connection(
@@ -4113,6 +4347,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
             if existing is not None:
                 existing.github_user_id = None
                 existing.github_login = ""
+                existing.github_sync_enabled = False
                 existing.encrypted_github_access_token = None
                 existing.github_scope = ""
                 existing.updated_at = utcnow()
@@ -4130,6 +4365,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 return
             row.github_user_id = None
             row.github_login = ""
+            row.github_sync_enabled = False
             row.encrypted_github_access_token = None
             row.github_scope = ""
             row.updated_at = utcnow()
@@ -4492,6 +4728,242 @@ class SqlAlchemyPaperRepository(PaperRepository):
             total_count=len(items),
             has_more=offset + len(page) < len(items),
         )
+
+    def get_project_presentation(
+        self,
+        *,
+        user_id: str,
+        project_id: str,
+    ) -> ProjectPresentationResponse | None:
+        with self._session() as session:
+            row = session.scalar(
+                select(ProjectPresentationORM).where(
+                    ProjectPresentationORM.user_id == user_id,
+                    ProjectPresentationORM.project_id == project_id,
+                )
+            )
+            if row is None:
+                return None
+            return _project_presentation_from_orm(row)
+
+    def get_public_project_presentation(self, share_token: str) -> ProjectPresentationResponse | None:
+        with self._session() as session:
+            row = session.scalar(
+                select(ProjectPresentationORM).where(
+                    ProjectPresentationORM.share_token == share_token,
+                    ProjectPresentationORM.is_public.is_(True),
+                    ProjectPresentationORM.status == "completed",
+                )
+            )
+            if row is None:
+                return None
+            return _project_presentation_from_orm(row)
+
+    def upsert_project_presentation_pending(
+        self,
+        *,
+        user_id: str,
+        project_id: str,
+        context_snapshot: dict[str, Any],
+        job_id: str,
+    ) -> ProjectPresentationResponse | None:
+        now = utcnow()
+        with self._session() as session:
+            project = session.scalar(
+                select(ProjectORM).where(ProjectORM.project_id == project_id, ProjectORM.user_id == user_id)
+            )
+            if project is None:
+                return None
+            row = session.scalar(
+                select(ProjectPresentationORM).where(
+                    ProjectPresentationORM.user_id == user_id,
+                    ProjectPresentationORM.project_id == project_id,
+                )
+            )
+            if row is None:
+                row = ProjectPresentationORM(
+                    presentation_id=new_id("pres"),
+                    user_id=user_id,
+                    project_id=project_id,
+                    status="pending",
+                    context_snapshot=context_snapshot,
+                    progress=_project_presentation_progress_payload(
+                        phase_key="queued",
+                        phase_label="Queued presentation workflow",
+                        detail="Preparing the project history, papers, notes, chats, and code for the presentation agent.",
+                        percent=4,
+                        estimated_seconds_remaining=360,
+                        updated_at=now,
+                    ),
+                    job_id=job_id,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(row)
+                session.flush()
+            else:
+                row.status = "pending"
+                row.context_snapshot = context_snapshot
+                row.job_id = job_id
+                row.error = ""
+                row.visual_code = ""
+                row.summary_markdown = ""
+                row.slides = []
+                row.audio_storage_path = ""
+                row.audio_content_type = "audio/mpeg"
+                row.progress = _project_presentation_progress_payload(
+                    phase_key="queued",
+                    phase_label="Queued presentation workflow",
+                    detail="Preparing the project history, papers, notes, chats, and code for the presentation agent.",
+                    percent=4,
+                    estimated_seconds_remaining=360,
+                    updated_at=now,
+                )
+                row.completed_at = None
+                row.updated_at = now
+            return _project_presentation_from_orm(row)
+
+    def set_project_presentation_running(self, presentation_id: str) -> ProjectPresentationResponse | None:
+        now = utcnow()
+        with self._session() as session:
+            row = session.get(ProjectPresentationORM, presentation_id)
+            if row is None:
+                return None
+            if row.status == "canceled":
+                return _project_presentation_from_orm(row)
+            row.status = "running"
+            row.error = ""
+            row.updated_at = now
+            return _project_presentation_from_orm(row)
+
+    def update_project_presentation_progress(
+        self,
+        presentation_id: str,
+        *,
+        phase_key: str,
+        phase_label: str,
+        detail: str,
+        percent: int,
+        estimated_seconds_remaining: int,
+        can_leave: bool = True,
+        email_notice: str = "We will email you once it is done. You can leave this page.",
+    ) -> ProjectPresentationResponse | None:
+        now = utcnow()
+        with self._session() as session:
+            row = session.get(ProjectPresentationORM, presentation_id)
+            if row is None:
+                return None
+            if row.status == "canceled":
+                return _project_presentation_from_orm(row)
+            row.progress = _project_presentation_progress_payload(
+                phase_key=phase_key,
+                phase_label=phase_label,
+                detail=detail,
+                percent=percent,
+                estimated_seconds_remaining=estimated_seconds_remaining,
+                can_leave=can_leave,
+                email_notice=email_notice,
+                updated_at=now,
+            )
+            row.updated_at = now
+            return _project_presentation_from_orm(row)
+
+    def complete_project_presentation(
+        self,
+        presentation_id: str,
+        *,
+        visual_code: str,
+        summary_markdown: str,
+        slides: list[dict[str, Any]] | None = None,
+        audio_storage_path: str = "",
+        audio_content_type: str = "audio/mpeg",
+    ) -> ProjectPresentationResponse | None:
+        now = utcnow()
+        with self._session() as session:
+            row = session.get(ProjectPresentationORM, presentation_id)
+            if row is None:
+                return None
+            if row.status == "canceled":
+                return _project_presentation_from_orm(row)
+            row.status = "completed"
+            row.visual_code = visual_code
+            row.summary_markdown = summary_markdown
+            row.slides = slides or []
+            row.audio_storage_path = audio_storage_path
+            row.audio_content_type = audio_content_type or "audio/mpeg"
+            row.error = ""
+            row.completed_at = now
+            row.updated_at = now
+            return _project_presentation_from_orm(row)
+
+    def cancel_project_presentation(self, presentation_id: str) -> ProjectPresentationResponse | None:
+        now = utcnow()
+        with self._session() as session:
+            row = session.get(ProjectPresentationORM, presentation_id)
+            if row is None:
+                return None
+            row.status = "canceled"
+            row.error = ""
+            row.progress = _project_presentation_progress_payload(
+                phase_key="canceled",
+                phase_label="Presentation canceled",
+                detail="Presentation creation was canceled.",
+                percent=100,
+                estimated_seconds_remaining=0,
+                updated_at=now,
+            )
+            row.completed_at = None
+            row.updated_at = now
+            return _project_presentation_from_orm(row)
+
+    def fail_project_presentation(
+        self,
+        presentation_id: str,
+        *,
+        error: str,
+    ) -> ProjectPresentationResponse | None:
+        now = utcnow()
+        with self._session() as session:
+            row = session.get(ProjectPresentationORM, presentation_id)
+            if row is None:
+                return None
+            if row.status == "canceled":
+                return _project_presentation_from_orm(row)
+            row.status = "failed"
+            row.error = error[:4000]
+            row.progress = _project_presentation_progress_payload(
+                phase_key="failed",
+                phase_label="Presentation failed",
+                detail=error[:240],
+                percent=100,
+                estimated_seconds_remaining=0,
+                updated_at=now,
+            )
+            row.updated_at = now
+            return _project_presentation_from_orm(row)
+
+    def update_project_presentation_share(
+        self,
+        *,
+        user_id: str,
+        project_id: str,
+        is_public: bool,
+        share_token: str | None = None,
+    ) -> ProjectPresentationResponse | None:
+        with self._session() as session:
+            row = session.scalar(
+                select(ProjectPresentationORM).where(
+                    ProjectPresentationORM.user_id == user_id,
+                    ProjectPresentationORM.project_id == project_id,
+                )
+            )
+            if row is None:
+                return None
+            row.is_public = is_public
+            if is_public and share_token:
+                row.share_token = share_token
+            row.updated_at = utcnow()
+            return _project_presentation_from_orm(row)
 
     def list_project_python_files(
         self,
@@ -5158,6 +5630,8 @@ class SqlAlchemyPaperRepository(PaperRepository):
         return ResultSetResponse(
             result_set_id=result_set_id,
             query=query,
+            parent_result_set_id=parent_result_set_id,
+            pattern=pattern,
             created_at=now,
             expires_at=expires_at,
             papers=papers,
@@ -5188,10 +5662,30 @@ class SqlAlchemyPaperRepository(PaperRepository):
         return ResultSetResponse(
             result_set_id=result_set.result_set_id,
             query=result_set.query,
+            parent_result_set_id=result_set.parent_result_set_id,
+            pattern=result_set.pattern,
             created_at=result_set.created_at,
             expires_at=result_set.expires_at,
             papers=papers,
         )
+
+    def list_recent_result_sets(self, *, limit: int = 10) -> list[ResultSetResponse]:
+        safe_limit = min(max(limit, 1), 50)
+        with self._session() as session:
+            result_set_ids = list(
+                session.scalars(
+                    select(ResultSetORM.result_set_id)
+                    .where(ResultSetORM.expires_at >= utcnow())
+                    .order_by(ResultSetORM.created_at.desc(), ResultSetORM.result_set_id.desc())
+                    .limit(safe_limit)
+                )
+            )
+        result_sets: list[ResultSetResponse] = []
+        for result_set_id in result_set_ids:
+            result_set = self.get_result_set(result_set_id)
+            if result_set is not None:
+                result_sets.append(result_set)
+        return result_sets
 
     def grep_result_set(self, result_set_id: str, pattern: str, *, limit: int) -> list[GrepPaperMatch]:
         literal = literal_hint_from_pattern(pattern)
@@ -5348,8 +5842,17 @@ class SqlAlchemyPaperRepository(PaperRepository):
             row = session.scalar(
                 select(JobORM)
                 .where(
-                    JobORM.status == "pending",
-                    or_(JobORM.next_run_at.is_(None), JobORM.next_run_at <= now),
+                    or_(
+                        and_(
+                            JobORM.status == "pending",
+                            or_(JobORM.next_run_at.is_(None), JobORM.next_run_at <= now),
+                        ),
+                        and_(
+                            JobORM.status == "running",
+                            JobORM.cancel_requested_at.is_(None),
+                            or_(JobORM.lease_expires_at.is_(None), JobORM.lease_expires_at <= now),
+                        ),
+                    ),
                 )
                 .order_by(
                     JobORM.priority.asc(),
@@ -5439,6 +5942,50 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 row.updated_at = now
                 return self._job_response_from_row(row, now=now)
             return None
+
+    def has_pending_job_with_priority_less_than(
+        self,
+        priority: int,
+        *,
+        exclude_job_id: str | None = None,
+    ) -> bool:
+        now = utcnow()
+        with self._session() as session:
+            statement = select(JobORM.job_id).where(
+                JobORM.status == "pending",
+                JobORM.priority < priority,
+                or_(JobORM.next_run_at.is_(None), JobORM.next_run_at <= now),
+            )
+            if exclude_job_id:
+                statement = statement.where(JobORM.job_id != exclude_job_id)
+            return session.scalar(statement.limit(1)) is not None
+
+    def yield_job(
+        self,
+        job_id: str,
+        *,
+        lease_token: str | None = None,
+        next_run_at: Any | None = None,
+    ) -> JobResponse | None:
+        now = utcnow()
+        with self._session() as session:
+            row = session.get(JobORM, job_id)
+            if row is None or not self._claim_matches(row, lease_token):
+                return None
+            if row.cancel_requested_at is not None:
+                row.status = "canceled"
+                row.finished_at = now
+            else:
+                row.status = "pending"
+                row.next_run_at = next_run_at
+                row.attempts = max(0, (row.attempts or 0) - 1)
+                row.finished_at = None
+            row.updated_at = now
+            row.worker_id = None
+            row.lease_token = None
+            row.heartbeat_at = None
+            row.lease_expires_at = None
+            return self._job_response_from_row(row, now=now)
 
     def _claim_matches(self, row: JobORM, lease_token: str | None) -> bool:
         return lease_token is None or row.lease_token == lease_token
@@ -5770,12 +6317,15 @@ class MemoryPaperRepository(PaperRepository):
         self.user_api_keys: dict[str, dict[str, str]] = {}
         self.browser_user_settings: dict[str, BrowserUserSettingsResponse] = {}
         self.modal_credentials_records: dict[str, dict[str, str]] = {}
+        self.elevenlabs_api_key_records: dict[str, dict[str, str]] = {}
         self.github_connection_records: dict[str, dict[str, str]] = {}
         self.uploaded_documents: dict[str, UploadedDocumentResponse] = {}
         self.uploaded_document_chunks: dict[str, list[dict[str, str]]] = defaultdict(list)
         self.projects: dict[str, ProjectResponse] = {}
         self.project_users: dict[str, str] = {}
         self.default_projects_by_user: dict[str, str] = {}
+        self.project_presentations: dict[str, ProjectPresentationResponse] = {}
+        self.project_presentations_by_project: dict[str, str] = {}
         self.chat_threads: dict[str, ChatThreadResponse] = {}
         self.chat_thread_users: dict[str, str] = {}
         self.chat_feedback: dict[str, ChatFeedbackResponse] = {}
@@ -5971,13 +6521,34 @@ class MemoryPaperRepository(PaperRepository):
             arxiv_id=paper.arxiv_id,
             title=paper.title,
             authors=paper.authors,
+            abstract=paper.abstract,
+            tldr=paper.tldr,
             published=paper.published,
+            updated=paper.updated,
             primary_category=paper.primary_category,
             categories=paper.categories,
+            doi=paper.doi,
+            comment=paper.comment,
+            journal_ref=paper.journal_ref,
             summary_short=paper.summary_short or paper.tldr or paper.abstract or "",
             html_url=paper.html_url,
             pdf_url=paper.pdf_url,
             image_url=None,
+            citation_count=paper.citation_count,
+            influential_citation_count=paper.influential_citation_count,
+            semantic_scholar_id=paper.semantic_scholar_id,
+            code_url=paper.code_url,
+            code_url_source=paper.code_url_source,
+            code_index_status=paper.code_index_status,
+            code_is_python=paper.code_is_python,
+            code_python_reason=paper.code_python_reason,
+            venue=paper.venue,
+            venue_year=paper.venue_year,
+            venue_source=paper.venue_source,
+            top_author_s2_id=paper.top_author_s2_id,
+            source_type=paper.source_type,
+            index_status=paper.index_status,
+            indexed_at=paper.indexed_at,
             upvote_count=self._paper_upvote_count(paper.paper_id),
             viewer_has_upvoted=self._viewer_has_upvoted(paper.paper_id, viewer_user_id),
             comments=[],
@@ -6642,6 +7213,8 @@ class MemoryPaperRepository(PaperRepository):
         result_set = ResultSetResponse(
             result_set_id=new_id("rs"),
             query=query,
+            parent_result_set_id=parent_result_set_id,
+            pattern=pattern,
             created_at=utcnow(),
             expires_at=utcnow() + timedelta(days=ttl_days),
             papers=papers,
@@ -6651,6 +7224,13 @@ class MemoryPaperRepository(PaperRepository):
 
     def get_result_set(self, result_set_id: str) -> ResultSetResponse | None:
         return self.result_sets.get(result_set_id)
+
+    def list_recent_result_sets(self, *, limit: int = 10) -> list[ResultSetResponse]:
+        safe_limit = min(max(limit, 1), 50)
+        now = utcnow()
+        result_sets = [result_set for result_set in self.result_sets.values() if result_set.expires_at >= now]
+        result_sets.sort(key=lambda result_set: (result_set.created_at, result_set.result_set_id), reverse=True)
+        return result_sets[:safe_limit]
 
     def grep_result_set(self, result_set_id: str, pattern: str, *, limit: int) -> list[GrepPaperMatch]:
         regex = re.compile(pattern, re.IGNORECASE)
@@ -6763,6 +7343,9 @@ class MemoryPaperRepository(PaperRepository):
     def get_modal_credentials_record(self, user_id: str) -> dict[str, str] | None:
         return self.modal_credentials_records.get(user_id)
 
+    def get_elevenlabs_api_key_record(self, user_id: str) -> dict[str, str] | None:
+        return self.elevenlabs_api_key_records.get(user_id)
+
     def get_github_connection_record(self, user_id: str) -> dict[str, str] | None:
         return self.github_connection_records.get(user_id)
 
@@ -6797,6 +7380,35 @@ class MemoryPaperRepository(PaperRepository):
             }
         )
 
+    def save_elevenlabs_api_key(
+        self,
+        *,
+        user_id: str,
+        encrypted_api_key: str,
+        hint: str,
+    ) -> None:
+        current = self._get_or_create_browser_user_settings(user_id)
+        self.elevenlabs_api_key_records[user_id] = {
+            "encrypted_api_key": encrypted_api_key,
+            "api_key_hint": hint,
+        }
+        self.browser_user_settings[user_id] = current.model_copy(
+            update={
+                "has_elevenlabs_api_key": True,
+                "elevenlabs_api_key_hint": hint,
+            }
+        )
+
+    def delete_elevenlabs_api_key(self, user_id: str) -> None:
+        current = self._get_or_create_browser_user_settings(user_id)
+        self.elevenlabs_api_key_records.pop(user_id, None)
+        self.browser_user_settings[user_id] = current.model_copy(
+            update={
+                "has_elevenlabs_api_key": False,
+                "elevenlabs_api_key_hint": "",
+            }
+        )
+
     def set_weekly_papers_review_email(self, *, user_id: str, enabled: bool) -> None:
         current = self._get_or_create_browser_user_settings(user_id)
         self.browser_user_settings[user_id] = current.model_copy(update={"weekly_papers_review_email": enabled})
@@ -6806,6 +7418,10 @@ class MemoryPaperRepository(PaperRepository):
         self.browser_user_settings[user_id] = current.model_copy(
             update={"appearance_theme": theme if theme in {"light", "dark"} else "light"}
         )
+
+    def set_github_sync_enabled(self, *, user_id: str, enabled: bool) -> None:
+        current = self._get_or_create_browser_user_settings(user_id)
+        self.browser_user_settings[user_id] = current.model_copy(update={"github_sync_enabled": enabled})
 
     def save_github_connection(
         self,
@@ -6825,6 +7441,7 @@ class MemoryPaperRepository(PaperRepository):
                     update={
                         "has_github_connection": False,
                         "github_login": "",
+                        "github_sync_enabled": False,
                     }
                 )
         current = self._get_or_create_browser_user_settings(user_id)
@@ -6848,6 +7465,7 @@ class MemoryPaperRepository(PaperRepository):
             update={
                 "has_github_connection": False,
                 "github_login": "",
+                "github_sync_enabled": False,
             }
         )
 
@@ -7041,6 +7659,9 @@ class MemoryPaperRepository(PaperRepository):
             if self.python_file_users.get(file_id) == user_id and python_file.project_id == project_id:
                 self.python_files.pop(file_id, None)
                 self.python_file_users.pop(file_id, None)
+        presentation_id = self.project_presentations_by_project.pop(project_id, None)
+        if presentation_id:
+            self.project_presentations.pop(presentation_id, None)
         self.project_repo_syncs.pop(project_id, None)
         if self.default_projects_by_user.get(user_id) == project_id:
             self.default_projects_by_user.pop(user_id, None)
@@ -7129,6 +7750,242 @@ class MemoryPaperRepository(PaperRepository):
             total_count=len(items),
             has_more=offset + len(page) < len(items),
         )
+
+    def get_project_presentation(
+        self,
+        *,
+        user_id: str,
+        project_id: str,
+    ) -> ProjectPresentationResponse | None:
+        if self.get_project(user_id=user_id, project_id=project_id) is None:
+            return None
+        presentation_id = self.project_presentations_by_project.get(project_id)
+        if not presentation_id:
+            return None
+        presentation = self.project_presentations.get(presentation_id)
+        if presentation is None:
+            return None
+        return presentation if self.project_users.get(project_id) == user_id else None
+
+    def get_public_project_presentation(self, share_token: str) -> ProjectPresentationResponse | None:
+        token = share_token.strip()
+        for presentation in self.project_presentations.values():
+            if (
+                presentation.share_token == token
+                and presentation.is_public
+                and presentation.status == "completed"
+            ):
+                return presentation
+        return None
+
+    def upsert_project_presentation_pending(
+        self,
+        *,
+        user_id: str,
+        project_id: str,
+        context_snapshot: dict[str, Any],
+        job_id: str,
+    ) -> ProjectPresentationResponse | None:
+        if self.get_project(user_id=user_id, project_id=project_id) is None:
+            return None
+        now = utcnow()
+        presentation_id = self.project_presentations_by_project.get(project_id)
+        existing = self.project_presentations.get(presentation_id or "")
+        if existing is None:
+            presentation = ProjectPresentationResponse(
+                presentation_id=new_id("pres"),
+                project_id=project_id,
+                status="pending",
+                job_id=job_id,
+                progress=_project_presentation_progress_response(
+                    phase_key="queued",
+                    phase_label="Queued presentation workflow",
+                    detail="Preparing the project history, papers, notes, chats, and code for the presentation agent.",
+                    percent=4,
+                    estimated_seconds_remaining=360,
+                    updated_at=now,
+                ),
+                created_at=now,
+                updated_at=now,
+            )
+        else:
+            presentation = existing.model_copy(
+                update={
+                    "status": "pending",
+                    "visual_code": "",
+                    "summary_markdown": "",
+                    "slides": [],
+                    "audio_storage_path": "",
+                    "audio_content_type": "audio/mpeg",
+                    "error": "",
+                    "job_id": job_id,
+                    "progress": _project_presentation_progress_response(
+                        phase_key="queued",
+                        phase_label="Queued presentation workflow",
+                        detail="Preparing the project history, papers, notes, chats, and code for the presentation agent.",
+                        percent=4,
+                        estimated_seconds_remaining=360,
+                        updated_at=now,
+                    ),
+                    "completed_at": None,
+                    "updated_at": now,
+                }
+            )
+        self.project_presentations[presentation.presentation_id] = presentation
+        self.project_presentations_by_project[project_id] = presentation.presentation_id
+        return presentation
+
+    def set_project_presentation_running(self, presentation_id: str) -> ProjectPresentationResponse | None:
+        presentation = self.project_presentations.get(presentation_id)
+        if presentation is None:
+            return None
+        if presentation.status == "canceled":
+            return presentation
+        updated = presentation.model_copy(update={"status": "running", "error": "", "updated_at": utcnow()})
+        self.project_presentations[presentation_id] = updated
+        return updated
+
+    def update_project_presentation_progress(
+        self,
+        presentation_id: str,
+        *,
+        phase_key: str,
+        phase_label: str,
+        detail: str,
+        percent: int,
+        estimated_seconds_remaining: int,
+        can_leave: bool = True,
+        email_notice: str = "We will email you once it is done. You can leave this page.",
+    ) -> ProjectPresentationResponse | None:
+        presentation = self.project_presentations.get(presentation_id)
+        if presentation is None:
+            return None
+        if presentation.status == "canceled":
+            return presentation
+        now = utcnow()
+        updated = presentation.model_copy(
+            update={
+                "progress": _project_presentation_progress_response(
+                    phase_key=phase_key,
+                    phase_label=phase_label,
+                    detail=detail,
+                    percent=percent,
+                    estimated_seconds_remaining=estimated_seconds_remaining,
+                    can_leave=can_leave,
+                    email_notice=email_notice,
+                    updated_at=now,
+                ),
+                "updated_at": now,
+            }
+        )
+        self.project_presentations[presentation_id] = updated
+        return updated
+
+    def complete_project_presentation(
+        self,
+        presentation_id: str,
+        *,
+        visual_code: str,
+        summary_markdown: str,
+        slides: list[dict[str, Any]] | None = None,
+        audio_storage_path: str = "",
+        audio_content_type: str = "audio/mpeg",
+    ) -> ProjectPresentationResponse | None:
+        presentation = self.project_presentations.get(presentation_id)
+        if presentation is None:
+            return None
+        if presentation.status == "canceled":
+            return presentation
+        now = utcnow()
+        updated = presentation.model_copy(
+            update={
+                "status": "completed",
+                "visual_code": visual_code,
+                "summary_markdown": summary_markdown,
+                "slides": slides or [],
+                "audio_storage_path": audio_storage_path,
+                "audio_content_type": audio_content_type or "audio/mpeg",
+                "error": "",
+                "completed_at": now,
+                "updated_at": now,
+            }
+        )
+        self.project_presentations[presentation_id] = updated
+        return updated
+
+    def cancel_project_presentation(self, presentation_id: str) -> ProjectPresentationResponse | None:
+        presentation = self.project_presentations.get(presentation_id)
+        if presentation is None:
+            return None
+        now = utcnow()
+        updated = presentation.model_copy(
+            update={
+                "status": "canceled",
+                "error": "",
+                "progress": _project_presentation_progress_response(
+                    phase_key="canceled",
+                    phase_label="Presentation canceled",
+                    detail="Presentation creation was canceled.",
+                    percent=100,
+                    estimated_seconds_remaining=0,
+                    updated_at=now,
+                ),
+                "completed_at": None,
+                "updated_at": now,
+            }
+        )
+        self.project_presentations[presentation_id] = updated
+        return updated
+
+    def fail_project_presentation(
+        self,
+        presentation_id: str,
+        *,
+        error: str,
+    ) -> ProjectPresentationResponse | None:
+        presentation = self.project_presentations.get(presentation_id)
+        if presentation is None:
+            return None
+        if presentation.status == "canceled":
+            return presentation
+        updated = presentation.model_copy(
+            update={
+                "status": "failed",
+                "error": error[:4000],
+                "progress": _project_presentation_progress_response(
+                    phase_key="failed",
+                    phase_label="Presentation failed",
+                    detail=error[:240],
+                    percent=100,
+                    estimated_seconds_remaining=0,
+                    updated_at=utcnow(),
+                ),
+                "updated_at": utcnow(),
+            }
+        )
+        self.project_presentations[presentation_id] = updated
+        return updated
+
+    def update_project_presentation_share(
+        self,
+        *,
+        user_id: str,
+        project_id: str,
+        is_public: bool,
+        share_token: str | None = None,
+    ) -> ProjectPresentationResponse | None:
+        presentation = self.get_project_presentation(user_id=user_id, project_id=project_id)
+        if presentation is None:
+            return None
+        updated = presentation.model_copy(
+            update={
+                "is_public": is_public,
+                "share_token": share_token if is_public and share_token else presentation.share_token,
+                "updated_at": utcnow(),
+            }
+        )
+        self.project_presentations[presentation.presentation_id] = updated
+        return updated
 
     def list_project_python_files(
         self,
@@ -7748,7 +8605,15 @@ class MemoryPaperRepository(PaperRepository):
         candidates = [
             (job_id, job)
             for job_id, job in self.jobs.items()
-            if job.status == "pending" and (job.next_run_at is None or job.next_run_at <= now)
+            if (
+                job.status == "pending"
+                and (job.next_run_at is None or job.next_run_at <= now)
+            )
+            or (
+                job.status == "running"
+                and job.cancel_requested_at is None
+                and (job.lease_expires_at is None or job.lease_expires_at <= now)
+            )
         ]
         candidates.sort(
             key=lambda item: (item[1].priority or 0, item[1].next_run_at is not None, item[1].created_at)
@@ -7860,6 +8725,60 @@ class MemoryPaperRepository(PaperRepository):
             self.jobs[job_id] = updated
             return updated
         return None
+
+    def has_pending_job_with_priority_less_than(
+        self,
+        priority: int,
+        *,
+        exclude_job_id: str | None = None,
+    ) -> bool:
+        now = utcnow()
+        for job in self.jobs.values():
+            if exclude_job_id and job.job_id == exclude_job_id:
+                continue
+            if job.status != "pending" or job.priority >= priority:
+                continue
+            if job.next_run_at is not None and job.next_run_at > now:
+                continue
+            return True
+        return False
+
+    def yield_job(
+        self,
+        job_id: str,
+        *,
+        lease_token: str | None = None,
+        next_run_at: Any | None = None,
+    ) -> JobResponse | None:
+        job = self.jobs.get(job_id)
+        if job is None or not self._claim_matches(job, lease_token):
+            return None
+        now = utcnow()
+        if job.cancel_requested_at is not None:
+            update: dict[str, Any] = {
+                "status": "canceled",
+                "effective_status": "canceled",
+                "finished_at": now,
+            }
+        else:
+            update = {
+                "status": "pending",
+                "effective_status": "pending",
+                "next_run_at": next_run_at,
+                "attempts": max(0, (job.attempts or 0) - 1),
+                "finished_at": None,
+            }
+        update.update(
+            {
+                "updated_at": now,
+                "worker_id": None,
+                "lease_token": None,
+                "heartbeat_at": None,
+                "lease_expires_at": None,
+            }
+        )
+        self.jobs[job_id] = job.model_copy(update=update)
+        return self.jobs[job_id]
 
     def _claim_matches(self, job: JobResponse, lease_token: str | None) -> bool:
         return lease_token is None or job.lease_token == lease_token

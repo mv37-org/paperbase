@@ -154,7 +154,7 @@ class LocalFileObjectStore(ObjectStore):
 
     def delete_prefix(self, prefix: str) -> None:
         try:
-            normalized_prefix, target = self._resolve(prefix)
+            _, target = self._resolve(prefix)
         except ValueError:
             return
         if target.is_file():
@@ -163,12 +163,10 @@ class LocalFileObjectStore(ObjectStore):
         if target.is_dir():
             shutil.rmtree(target)
             return
-        prefix_prefix = normalized_prefix + "/"
-        for stored in self.list_prefix(normalized_prefix):
-            if stored.path == normalized_prefix or stored.path.startswith(prefix_prefix):
-                _, stored_target = self._resolve(stored.path)
-                if stored_target.is_file():
-                    stored_target.unlink()
+        # If the exact file/directory path is absent, no child under that
+        # local filesystem prefix can exist. Returning here avoids scanning
+        # large storage roots for every missing test namespace.
+        return
 
     def presign_get(self, path: str, *, expires_in: int) -> str | None:
         try:

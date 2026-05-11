@@ -7,6 +7,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 import json
 import logging
+import re
 from typing import Any
 
 import requests
@@ -49,6 +50,7 @@ class Prompt:
     tools: list[dict[str, Any]] = field(default_factory=list)
     tool_choice: str | dict[str, Any] | None = "auto"
     parallel_tool_calls: bool = False
+    text_format: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -337,6 +339,13 @@ def _response_error_detail(response: requests.Response) -> str:
             if pieces:
                 return "; ".join(pieces)
     text = response.text.strip()
+    if "<html" in text[:500].lower():
+        title_match = re.search(r"<title[^>]*>(.*?)</title>", text, flags=re.IGNORECASE | re.DOTALL)
+        if title_match:
+            title = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", title_match.group(1))).strip()
+            if title:
+                return f"HTTP {response.status_code}: {title}"
+        return f"HTTP {response.status_code}: HTML error response"
     return text[:1000] if text else f"HTTP {response.status_code}"
 
 
@@ -378,6 +387,9 @@ class OpenAIResponsesChatModelClient(ChatModelClient):
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
 
+    def _timeout_seconds(self) -> int:
+        return max(1, int(self._settings.openai_response_timeout_seconds))
+
     def _request_body(self, *, prompt: Prompt, stream: bool) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self._settings.openai_model,
@@ -390,6 +402,8 @@ class OpenAIResponsesChatModelClient(ChatModelClient):
         tool_choice = _tool_choice_value(prompt.tool_choice)
         if tool_choice:
             payload["tool_choice"] = tool_choice
+        if prompt.text_format:
+            payload["text"] = {"format": prompt.text_format}
         return payload
 
     def create_response(self, *, api_key: str, prompt: Prompt) -> ResponseEnvelope:
@@ -400,7 +414,7 @@ class OpenAIResponsesChatModelClient(ChatModelClient):
                 "content-type": "application/json",
             },
             json=self._request_body(prompt=prompt, stream=False),
-            timeout=120,
+            timeout=self._timeout_seconds(),
         )
         _raise_for_status_with_detail(response)
         payload = response.json()
@@ -420,7 +434,7 @@ class OpenAIResponsesChatModelClient(ChatModelClient):
                 "content-type": "application/json",
             },
             json=self._request_body(prompt=prompt, stream=True),
-            timeout=120,
+            timeout=self._timeout_seconds(),
             stream=True,
         )
         _raise_for_status_with_detail(response)

@@ -150,13 +150,34 @@ class TrendingPaperDetailResponse(BaseModel):
     arxiv_id: str
     title: str
     authors: str
+    abstract: str = ""
+    tldr: str = ""
     published: str
+    updated: str = ""
     primary_category: str
     categories: str
+    doi: str | None = None
+    comment: str | None = None
+    journal_ref: str | None = None
     summary_short: str
     html_url: str
     pdf_url: str
     image_url: str | None = None
+    citation_count: int = 0
+    influential_citation_count: int = 0
+    semantic_scholar_id: str | None = None
+    code_url: str | None = None
+    code_url_source: str | None = None
+    code_index_status: str = "none"
+    code_is_python: bool | None = None
+    code_python_reason: str | None = None
+    venue: str | None = None
+    venue_year: int | None = None
+    venue_source: str | None = None
+    top_author_s2_id: str | None = None
+    source_type: str | None = None
+    index_status: str = "indexed"
+    indexed_at: datetime | None = None
     upvote_count: int = 1
     viewer_has_upvoted: bool = False
     comments: list[PaperCommentResponse] = Field(default_factory=list)
@@ -166,7 +187,7 @@ class TrendingFeedResponse(BaseModel):
     date: str
     sort: Literal["default", "upvotes"] = "default"
     page: int = 1
-    page_size: int = 50
+    page_size: int = 20
     has_next: bool = False
     has_previous: bool = False
     papers: list[TrendingPaperCardResponse] = Field(default_factory=list)
@@ -244,6 +265,8 @@ class SearchSectionResponse(BaseModel):
 class ResultSetResponse(BaseModel):
     result_set_id: str
     query: str | None = None
+    parent_result_set_id: str | None = None
+    pattern: str | None = None
     created_at: datetime
     expires_at: datetime
     papers: list[SearchPaperResult]
@@ -268,6 +291,24 @@ class GrepResponse(BaseModel):
     pattern: str
     papers: list[GrepPaperMatch]
     expires_at: datetime
+
+
+class LiteratureShellRequest(BaseModel):
+    command: str = Field(..., min_length=1, max_length=4000)
+
+
+class LiteratureShellResponse(BaseModel):
+    command: str
+    stdout: str = ""
+    result_set_id: str | None = None
+    parent_result_set_id: str | None = None
+    papers: list[dict[str, Any]] = Field(default_factory=list)
+    paths: list[str] = Field(default_factory=list)
+    matches: list[dict[str, Any]] = Field(default_factory=list)
+    rows: list[dict[str, Any]] = Field(default_factory=list)
+    citations: list[dict[str, Any]] = Field(default_factory=list)
+    truncated: bool = False
+    error: str | None = None
 
 
 class JobResponse(BaseModel):
@@ -493,10 +534,13 @@ class BrowserUser(BaseModel):
 
 class BrowserUserSettingsResponse(BaseModel):
     openai_api_key_hint: str = ""
+    has_elevenlabs_api_key: bool = False
+    elevenlabs_api_key_hint: str = ""
     has_modal_credentials: bool = False
     modal_token_id_hint: str = ""
     has_github_connection: bool = False
     github_login: str = ""
+    github_sync_enabled: bool = False
     github_oauth_available: bool = False
     github_manage_access_url: str = "https://github.com/settings/connections/applications"
     weekly_papers_review_email: bool = False
@@ -563,6 +607,10 @@ class SaveAnthropicKeyRequest(SaveOpenAIKeyRequest):
     pass
 
 
+class SaveElevenLabsKeyRequest(BaseModel):
+    api_key: str = Field(min_length=8)
+
+
 class SaveModalCredentialsRequest(BaseModel):
     token_id: str = Field(min_length=4)
     token_secret: str = Field(min_length=8)
@@ -574,6 +622,10 @@ class UpdateNotificationsRequest(BaseModel):
 
 class UpdateAppearanceRequest(BaseModel):
     theme: Literal["light", "dark"]
+
+
+class UpdateGitHubSyncSettingsRequest(BaseModel):
+    enabled: bool
 
 
 class UploadedDocumentResponse(BaseModel):
@@ -905,6 +957,78 @@ class ProjectItemPageResponse(BaseModel):
     limit: int = 0
     total_count: int = 0
     has_more: bool = False
+
+
+class ProjectPresentationExplorationSnapshot(BaseModel):
+    exploration_id: str = ""
+    paper_id: str = ""
+    chat_thread_id: str = ""
+    path: str = ""
+    title: str = ""
+    authors: str = ""
+    preview_image_url: str = ""
+    pdf_url: str = ""
+    annotations: list[dict[str, Any]] = Field(default_factory=list)
+    created_at: str = ""
+    updated_at: str = ""
+
+
+class ProjectPresentationStartRequest(BaseModel):
+    explorations: list[ProjectPresentationExplorationSnapshot] = Field(default_factory=list)
+    regenerate: bool = False
+
+
+class ProjectPresentationShareRequest(BaseModel):
+    is_public: bool
+
+
+ProjectPresentationStatus = Literal["missing", "pending", "running", "completed", "failed", "canceled"]
+
+
+ProjectPresentationSlideVisualType = Literal["code", "image"]
+
+
+class ProjectPresentationSlideResponse(BaseModel):
+    slide_id: str
+    title: str
+    description: str
+    visual_type: ProjectPresentationSlideVisualType = "code"
+    visual_code: str = ""
+    image_prompt: str = ""
+    image_url: str = ""
+    image_storage_path: str = Field(default="", exclude=True)
+
+
+class ProjectPresentationProgressResponse(BaseModel):
+    phase_key: str = "idle"
+    phase_label: str = "Presentation not started"
+    detail: str = ""
+    percent: int = 0
+    estimated_seconds_remaining: int = 0
+    can_leave: bool = True
+    email_notice: str = "We will email you once it is done. You can leave this page."
+    updated_at: datetime | None = None
+
+
+class ProjectPresentationResponse(BaseModel):
+    presentation_id: str = ""
+    project_id: str
+    status: ProjectPresentationStatus = "missing"
+    visual_code: str = ""
+    summary_markdown: str = ""
+    slides: list[ProjectPresentationSlideResponse] = Field(default_factory=list)
+    audio_url: str = ""
+    audio_content_type: str = "audio/mpeg"
+    audio_storage_path: str = Field(default="", exclude=True)
+    is_public: bool = False
+    share_token: str | None = None
+    share_url: str = ""
+    error: str = ""
+    job_id: str | None = None
+    progress: ProjectPresentationProgressResponse = Field(default_factory=ProjectPresentationProgressResponse)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    completed_at: datetime | None = None
 
 
 class RunPythonFileResponse(BaseModel):

@@ -299,13 +299,34 @@ describe("chat api", () => {
           arxiv_id: "2401.12345",
           title: "Benchmark Paper",
           authors: "Ada Lovelace",
+          abstract: "Full benchmark abstract",
+          tldr: "Benchmark TLDR",
           published: "2026-04-21",
+          updated: "2026-04-22",
           primary_category: "cs.AI",
           categories: "cs.AI",
+          doi: "10.1234/benchmark",
+          comment: "Accepted",
+          journal_ref: "Benchmark Journal",
           summary_short: "Technical summary",
           html_url: "https://arxiv.org/abs/2401.12345",
           pdf_url: "https://arxiv.org/pdf/2401.12345.pdf",
           image_url: "/v1/browser/trending/papers/arxiv%3A2401.12345/preview/content",
+          citation_count: 99,
+          influential_citation_count: 11,
+          semantic_scholar_id: "s2-benchmark",
+          code_url: "https://github.com/example/benchmark",
+          code_url_source: "admin",
+          code_index_status: "indexed",
+          code_is_python: true,
+          code_python_reason: "Python files found",
+          venue: "ICLR",
+          venue_year: 2026,
+          venue_source: "s2_bulk",
+          top_author_s2_id: "author-benchmark",
+          source_type: "html",
+          index_status: "indexed",
+          indexed_at: "2026-04-22T00:00:00Z",
           upvote_count: 12,
           viewer_has_upvoted: false,
           comments: [],
@@ -329,6 +350,9 @@ describe("chat api", () => {
     expect(feed.papers[0]?.upvote_count).toBe(12);
     expect(feed.has_next).toBe(true);
     expect(detail.summary_short).toBe("Technical summary");
+    expect(detail.abstract).toBe("Full benchmark abstract");
+    expect(detail.citation_count).toBe(99);
+    expect(detail.code_url).toBe("https://github.com/example/benchmark");
   });
 
   it("loads generic paper discussion and attaches CSRF headers to paper write operations", async () => {
@@ -718,6 +742,35 @@ describe("chat api", () => {
     expect(created.project_id).toBe("proj_2");
   });
 
+  it("creates local projects without a GitHub repository payload", async () => {
+    const fetchMock = vi
+      .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          project_id: "proj_2",
+          name: "Local Lab",
+          description: "Local only",
+          is_default: false,
+          session_count: 0,
+          github_repo_url: "",
+          created_at: "2026-04-21T00:00:00Z",
+          updated_at: "2026-04-21T00:00:00Z",
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await loadApiModule();
+
+    const created = await api.createProject("Local Lab", "Local only");
+
+    const [createPath, createInit] = fetchMock.mock.calls[0] as FetchCall;
+    expect(requestPath(createPath)).toBe("/v1/browser/projects");
+    expect(createInit?.method).toBe("POST");
+    expect(createInit?.body).toBe(
+      JSON.stringify({ name: "Local Lab", description: "Local only", github_repo: null }),
+    );
+    expect(created.github_repo_url).toBe("");
+  });
+
   it("passes project item kind filters", async () => {
     const fetchMock = vi
       .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()
@@ -742,6 +795,91 @@ describe("chat api", () => {
       "python_file",
     );
     expect(init?.method).toBe("GET");
+  });
+
+  it("loads, starts, shares, and fetches project presentations", async () => {
+    const presentation = {
+      presentation_id: "pres_1",
+      project_id: "proj_1",
+      status: "completed",
+      visual_code: "ReactDOM.createRoot(document.getElementById('root')).render('ok');",
+      summary_markdown: "# Summary",
+      slides: [
+        {
+          slide_id: "summary",
+          title: "Summary",
+          description: "A project presentation slide.",
+          visual_type: "code",
+          visual_code: "ReactDOM.createRoot(document.getElementById('root')).render('ok');",
+          image_prompt: "",
+          image_url: "",
+        },
+      ],
+      audio_url: "/v1/browser/projects/proj_1/presentation/audio",
+      audio_content_type: "audio/mpeg",
+      is_public: false,
+      share_token: null,
+      share_url: "",
+      error: "",
+      job_id: null,
+      created_at: "2026-04-21T00:00:00Z",
+      updated_at: "2026-04-21T00:00:00Z",
+      completed_at: "2026-04-21T00:00:00Z",
+    };
+    const fetchMock = vi
+      .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()
+      .mockResolvedValueOnce(jsonResponse(presentation))
+      .mockResolvedValueOnce(jsonResponse({ ...presentation, status: "pending", job_id: "job_1" }))
+      .mockResolvedValueOnce(jsonResponse({ ...presentation, status: "canceled", job_id: "job_1" }))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ...presentation,
+          is_public: true,
+          share_token: "share_1",
+          share_url: "http://127.0.0.1:8080/?presentation=share_1",
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ ...presentation, is_public: true }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await loadApiModule();
+
+    await api.loadProjectPresentation("proj_1");
+    await api.startProjectPresentation("proj_1", {
+      explorations: [
+        {
+          exploration_id: "exp_1",
+          paper_id: "paper_1",
+          path: "papers/paper_1",
+          title: "Paper",
+          authors: "A",
+          preview_image_url: "",
+          pdf_url: "",
+          annotations: [],
+          created_at: "2026-04-21T00:00:00Z",
+          updated_at: "2026-04-21T00:00:00Z",
+        },
+      ],
+      regenerate: true,
+    });
+    await api.cancelProjectPresentation("proj_1");
+    await api.updateProjectPresentationShare("proj_1", true);
+    await api.loadPublicProjectPresentation("share_1");
+
+    expect(requestPath(fetchMock.mock.calls[0]?.[0] as RequestInfo)).toBe(
+      "/v1/browser/projects/proj_1/presentation",
+    );
+    const [, startInit] = fetchMock.mock.calls[1] as FetchCall;
+    expect(startInit?.method).toBe("POST");
+    expect(startInit?.body).toContain('"regenerate":true');
+    const [cancelPath, cancelInit] = fetchMock.mock.calls[2] as FetchCall;
+    expect(requestPath(cancelPath)).toBe("/v1/browser/projects/proj_1/presentation/cancel");
+    expect(cancelInit?.method).toBe("POST");
+    const [sharePath, shareInit] = fetchMock.mock.calls[3] as FetchCall;
+    expect(requestPath(sharePath)).toBe("/v1/browser/projects/proj_1/presentation/share");
+    expect(shareInit?.body).toBe(JSON.stringify({ is_public: true }));
+    expect(requestPath(fetchMock.mock.calls[4]?.[0] as RequestInfo)).toBe(
+      "/v1/browser/project-presentations/public/share_1",
+    );
   });
 
   it("sends structured GitHub sync payloads for project saves", async () => {

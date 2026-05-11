@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-import difflib
 import base64
+import difflib
+import fnmatch
+import hashlib
 import inspect
 import json
 import logging
@@ -28,6 +30,8 @@ from datetime import timedelta
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import Any
+
+import requests
 
 from . import code_ingest
 
@@ -103,6 +107,8 @@ from .models import (
     IntegrationProbeResponse,
     JobPaperRecord,
     JobResponse,
+    LiteratureShellRequest,
+    LiteratureShellResponse,
     LoginRequest,
     ManifestResponse,
     PaperCommentsResponse,
@@ -123,6 +129,10 @@ from .models import (
     GitHubRepoMetadataResponse,
     GitHubRepoSummary,
     ProjectItemPageResponse,
+    ProjectPresentationResponse,
+    ProjectPresentationShareRequest,
+    ProjectPresentationSlideResponse,
+    ProjectPresentationStartRequest,
     ProjectRepoConflictDetail,
     ProjectRepoConflictFile,
     ProjectRepoSyncRequest,
@@ -134,6 +144,7 @@ from .models import (
     ResetPasswordRequest,
     ResultSetResponse,
     RunPythonFileResponse,
+    SaveElevenLabsKeyRequest,
     SaveOpenAIKeyRequest,
     SaveModalCredentialsRequest,
     SearchPaperResult,
@@ -149,6 +160,7 @@ from .models import (
     TrendingPaperDetailResponse,
     UpdateAppearanceRequest,
     UpdateChatThreadRequest,
+    UpdateGitHubSyncSettingsRequest,
     UpdateNotificationsRequest,
     UpdateProjectRequest,
     CreateProjectRequest,
@@ -168,7 +180,7 @@ from .security import (
 from .summaries import build_paper_summary
 from .storage import ObjectStore, build_object_store
 from . import sources
-from .errors import JobCanceled, PermanentError, RetryableError
+from .errors import JobCanceled, JobYielded, PermanentError, RetryableError
 from .utils import canonical_paper_id, new_id, slugify, utcnow
 
 
@@ -220,6 +232,155 @@ _TEXTUAL_MIME_TYPES = {
     "application/x-yaml",
     "image/svg+xml",
 }
+_PROJECT_PRESENTATION_MAX_CONTEXT_CHARS = 80_000
+_PROJECT_PRESENTATION_MAX_RESEARCH_MATERIALS = 10
+_PROJECT_PRESENTATION_MAX_PASSAGES_PER_PAPER = 4
+_PROJECT_PRESENTATION_MAX_COMMENTS_PER_PAPER = 4
+_PROJECT_PRESENTATION_MAX_FIGURES_PER_PAPER = 4
+_PROJECT_PRESENTATION_MAX_TABLES_PER_PAPER = 2
+_PROJECT_PRESENTATION_MAX_TABLE_ROWS = 4
+_PROJECT_PRESENTATION_MAX_VISUAL_ITEMS = 10
+_PROJECT_PRESENTATION_MAX_SLIDES = 8
+_PROJECT_PRESENTATION_MAX_IMAGE_SLIDES = 3
+_PROJECT_PRESENTATION_IMAGE_MODEL = "gpt-image-2"
+_PROJECT_PRESENTATION_IMAGE_TIMEOUT_SECONDS = 45
+_PROJECT_PRESENTATION_TTS_TIMEOUT_SECONDS = 45
+_PROJECT_PRESENTATION_VISUAL_NUMBER_RE = re.compile(
+    r"(?<![\w.])([+-]?\d+(?:,\d{3})*(?:\.\d+)?)\s*"
+    r"(percentage points?|percent|points?|pp|%|x|×|ms|s|seconds?|tokens?|parameters?|k|m|b)?\b",
+    re.IGNORECASE,
+)
+_PROJECT_PRESENTATION_VISUAL_COMPARISON_RE = re.compile(
+    r"\bfrom\s+([+-]?\d+(?:,\d{3})*(?:\.\d+)?)\s*"
+    r"(percentage points?|percent|points?|pp|%|x|×)?\s+"
+    r"(?:to|up to|down to)\s+([+-]?\d+(?:,\d{3})*(?:\.\d+)?)\s*"
+    r"(percentage points?|percent|points?|pp|%|x|×)?\b",
+    re.IGNORECASE,
+)
+_PROJECT_PRESENTATION_DATASET_TOKEN_RE = re.compile(
+    r"\b(?:[A-Z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)*(?:Bench|Benchmark|Eval|Dataset|Set|Suite|QA)"
+    r"|MMLU|GSM8K|HumanEval|LongBench|LongMemEval|LoCoMo|AgentBench)\b"
+)
+_PROJECT_PRESENTATION_METHOD_KEYWORDS = (
+    "agent",
+    "architecture",
+    "benchmark",
+    "calibration",
+    "classifier",
+    "dataset",
+    "decoder",
+    "encoder",
+    "evidence",
+    "memory",
+    "module",
+    "pipeline",
+    "planner",
+    "rerank",
+    "retrieval",
+    "router",
+    "validator",
+    "workflow",
+)
+_PROJECT_PRESENTATION_TEXT_FORMAT: dict[str, Any] = {
+    "type": "json_schema",
+    "name": "project_presentation",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "summary_markdown": {
+                "type": "string",
+                "description": "Markdown research briefing about the actual research material, including tables when useful.",
+            },
+            "visual_code": {
+                "type": "string",
+                "description": "Legacy first-slide plain browser JavaScript fallback that renders into #root.",
+            },
+            "slides": {
+                "type": "array",
+                "description": "Ordered research presentation slides derived from the full project history.",
+                "minItems": 1,
+                "maxItems": _PROJECT_PRESENTATION_MAX_SLIDES,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "slide_id": {
+                            "type": "string",
+                            "description": "Stable lowercase identifier using letters, numbers, and hyphens.",
+                        },
+                        "title": {
+                            "type": "string",
+                            "description": (
+                                "Short direct research fact or conclusion. No wordplay, metaphor, "
+                                "question, or theme label."
+                            ),
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": (
+                                "Evidence-heavy explanation of that one fact or conclusion. "
+                                "Title plus description must be at most 80 words."
+                            ),
+                        },
+                        "visual_type": {"type": "string", "enum": ["code", "image"]},
+                        "visual_code": {
+                            "type": "string",
+                            "description": (
+                                "Plain browser JavaScript for responsive D3/SVG/chart code slides, otherwise empty."
+                            ),
+                        },
+                        "image_prompt": {
+                            "type": "string",
+                            "description": "Detailed GPT Image 2 prompt for image slides, otherwise empty.",
+                        },
+                    },
+                    "required": [
+                        "slide_id",
+                        "title",
+                        "description",
+                        "visual_type",
+                        "visual_code",
+                        "image_prompt",
+                    ],
+                },
+            },
+        },
+        "required": ["summary_markdown", "visual_code", "slides"],
+    },
+}
+_PROJECT_PRESENTATION_AUDIO_TEXT_FORMAT: dict[str, Any] = {
+    "type": "json_schema",
+    "name": "project_presentation_audio_script",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "turns": {
+                "type": "array",
+                "description": "Ordered two-person dialogue turns for text-to-speech.",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "speaker": {"type": "string", "enum": ["noob", "expert"]},
+                        "text": {"type": "string"},
+                    },
+                    "required": ["speaker", "text"],
+                },
+            }
+        },
+        "required": ["turns"],
+    },
+}
+_PROJECT_PRESENTATION_MAX_THREADS = 30
+_PROJECT_PRESENTATION_MAX_THREAD_ITEMS = 80
+_PROJECT_PRESENTATION_MAX_EXPLORATIONS = 80
+_PROJECT_PRESENTATION_MAX_ANNOTATIONS = 40
+_PROJECT_PRESENTATION_MAX_CODE_ARTIFACTS = 12
+_PROJECT_PRESENTATION_MAX_CODE_CHARS = 8000
 
 
 def _validate_date(value: str, *, name: str) -> None:
@@ -587,6 +748,10 @@ def _normalize_python_filename(raw_filename: str) -> str:
 def _github_scope_allows_repo_write(scope: str) -> bool:
     values = {part.strip() for part in (scope or "").split(",") if part.strip()}
     return "repo" in values or "public_repo" in values
+
+
+def _github_scope_values(scope: str) -> list[str]:
+    return sorted({part.strip() for part in (scope or "").split(",") if part.strip()})
 
 
 def _validate_repo_name(value: str) -> str:
@@ -1487,6 +1652,36 @@ _CHAT_TURN_DIFF_MAX_CHARS = 12_000
 _PROJECT_EXEC_DEFAULT_WAIT_SECONDS = 5
 _PROJECT_EXEC_MAX_WAIT_SECONDS = 60
 _PROJECT_EXEC_LOG_CHAR_LIMIT = 12_000
+_LITERATURE_SHELL_MAX_STDOUT_CHARS = 12_000
+_LITERATURE_SHELL_DEFAULT_HEAD_LINES = 80
+_LITERATURE_SHELL_MAP_DEFAULT_LIMIT = 12
+_LITERATURE_SHELL_MAP_MAX_LIMIT = 25
+_LITERATURE_SHELL_UNSAFE_RE = re.compile(r"[|;&<>`]")
+_LITERATURE_SHELL_SQL_COLUMNS = {
+    "paper_id",
+    "arxiv_id",
+    "title",
+    "authors",
+    "abstract",
+    "tldr",
+    "summary_short",
+    "categories",
+    "primary_category",
+    "published",
+    "updated",
+    "html_url",
+    "pdf_url",
+    "citation_count",
+    "influential_citation_count",
+    "semantic_scholar_id",
+    "code_url",
+    "code_index_status",
+    "venue",
+    "venue_year",
+    "source_type",
+    "index_status",
+    "indexed_at",
+}
 
 
 @dataclass(frozen=True)
@@ -1853,6 +2048,16 @@ class PaperbaseService:
         if self.repository.is_job_cancel_requested(job.job_id, lease_token=job.lease_token):
             raise JobCanceled(f"Job {job.job_id} was canceled")
 
+    def _yield_if_higher_priority_job_waiting(self) -> None:
+        job = _CURRENT_JOB.get()
+        if job is None or not job.lease_token:
+            return
+        if self.repository.has_pending_job_with_priority_less_than(  # type: ignore[attr-defined]
+            job.priority,
+            exclude_job_id=job.job_id,
+        ):
+            raise JobYielded(f"Job {job.job_id} yielded to higher-priority queued work")
+
     def _browser_user_settings_response(
         self,
         user: BrowserUser,
@@ -2019,6 +2224,22 @@ class PaperbaseService:
         self.repository.delete_modal_credentials(user.user_id)  # type: ignore[attr-defined]
         return self._browser_session_response(user)
 
+    def save_user_elevenlabs_key(
+        self,
+        user: BrowserUser,
+        request: SaveElevenLabsKeyRequest,
+    ) -> BrowserSessionResponse:
+        self.repository.save_elevenlabs_api_key(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            encrypted_api_key=self.secret_cipher.encrypt(request.api_key.strip()),
+            hint=api_key_hint(request.api_key),
+        )
+        return self._browser_session_response(user)
+
+    def delete_user_elevenlabs_key(self, user: BrowserUser) -> BrowserSessionResponse:
+        self.repository.delete_elevenlabs_api_key(user.user_id)  # type: ignore[attr-defined]
+        return self._browser_session_response(user)
+
     def update_user_notification_preferences(
         self,
         user: BrowserUser,
@@ -2041,6 +2262,19 @@ class PaperbaseService:
         )
         return self._browser_session_response(user)
 
+    def update_user_github_sync_settings(
+        self,
+        user: BrowserUser,
+        request: UpdateGitHubSyncSettingsRequest,
+    ) -> BrowserSessionResponse:
+        if request.enabled:
+            self._get_github_connection(user)
+        self.repository.set_github_sync_enabled(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            enabled=request.enabled,
+        )
+        return self._browser_session_response(user)
+
     def save_github_connection(
         self,
         user: BrowserUser,
@@ -2057,6 +2291,17 @@ class PaperbaseService:
             encrypted_access_token=self.secret_cipher.encrypt(access_token.strip()),
             scope=scope.strip(),
         )
+        logger.info(
+            "Saved GitHub repo permission connection",
+            extra={
+                "event": "github.connection_saved",
+                "user_id": user.user_id,
+                "github_user_id": github_user_id,
+                "github_login": github_login,
+                "scopes": _github_scope_values(scope),
+                "repo_write_allowed": _github_scope_allows_repo_write(scope),
+            },
+        )
         return self._browser_session_response(user)
 
     def delete_github_connection(self, user: BrowserUser) -> BrowserSessionResponse:
@@ -2072,18 +2317,55 @@ class PaperbaseService:
             self.secret_cipher.decrypt(record["encrypted_token_secret"]),
         )
 
+    def _get_elevenlabs_api_key_optional(self, user: BrowserUser) -> str | None:
+        record = self.repository.get_elevenlabs_api_key_record(user.user_id)  # type: ignore[attr-defined]
+        if record is None:
+            return None
+        try:
+            api_key_value = self.secret_cipher.decrypt(record["encrypted_api_key"]).strip()
+        except InvalidToken:
+            logger.warning(
+                "Saved ElevenLabs API key could not be decrypted",
+                extra={"event": "settings.elevenlabs_key_invalid", "user_id": user.user_id},
+            )
+            self.repository.delete_elevenlabs_api_key(user.user_id)  # type: ignore[attr-defined]
+            return None
+        return api_key_value or None
+
     def _get_github_connection(self, user: BrowserUser) -> dict[str, str]:
         record = self.repository.get_github_connection_record(user.user_id)  # type: ignore[attr-defined]
         if record is None:
+            logger.info(
+                "GitHub repo permission connection is missing",
+                extra={"event": "github.connection_missing", "user_id": user.user_id},
+            )
             raise HTTPException(
                 status_code=409,
-                detail="Connect GitHub before creating or saving project files",
+                detail="Connect GitHub before syncing project files",
             )
         if not _github_scope_allows_repo_write(record.get("scope", "")):
+            logger.info(
+                "GitHub repo permission connection lacks repo write scope",
+                extra={
+                    "event": "github.connection_scope_denied",
+                    "user_id": user.user_id,
+                    "github_login": record.get("github_login", ""),
+                    "scopes": _github_scope_values(record.get("scope", "")),
+                },
+            )
             raise HTTPException(
                 status_code=409,
                 detail="Reconnect GitHub with repo access before creating or saving project files",
             )
+        logger.info(
+            "GitHub repo permission connection is ready",
+            extra={
+                "event": "github.connection_ready",
+                "user_id": user.user_id,
+                "github_login": record.get("github_login", ""),
+                "scopes": _github_scope_values(record.get("scope", "")),
+            },
+        )
         return record
 
     def list_uploaded_documents(self, user: BrowserUser) -> UploadListResponse:
@@ -2166,7 +2448,17 @@ class PaperbaseService:
 
     def _github_access(self, user: BrowserUser) -> tuple[dict[str, str], str]:
         github = self._get_github_connection(user)
-        return github, self.secret_cipher.decrypt(github["encrypted_access_token"])
+        access_token = self.secret_cipher.decrypt(github["encrypted_access_token"])
+        logger.info(
+            "Decrypted GitHub repo permission token",
+            extra={
+                "event": "github.connection_token_ready",
+                "user_id": user.user_id,
+                "github_login": github.get("github_login", ""),
+                "access_token_present": bool(access_token),
+            },
+        )
+        return github, access_token
 
     def get_github_repo_metadata(
         self,
@@ -2270,15 +2562,51 @@ class PaperbaseService:
         if not name:
             raise HTTPException(status_code=422, detail="Project name is required")
         if request.github_repo is None:
-            raise HTTPException(status_code=422, detail="GitHub repository information is required")
+            project = self.repository.create_project(  # type: ignore[attr-defined]
+                user_id=user.user_id,
+                name=name,
+                description=request.description.strip(),
+            )
+            logger.info(
+                "Created local-only project",
+                extra={
+                    "event": "project.create.local",
+                    "user_id": user.user_id,
+                    "project_id": project.project_id,
+                    "project_name": name,
+                },
+            )
+            return project
         github, access_token = self._github_access(user)
         repo_request = request.github_repo
         import_rows: list[tuple[str, str, str, str]] = []
         remote_head_sha = ""
         base_branch = "main"
+        logger.info(
+            "Starting project create GitHub permission flow",
+            extra={
+                "event": "project.create.github_start",
+                "user_id": user.user_id,
+                "project_name": name,
+                "repo_mode": repo_request.mode,
+                "repo_owner": repo_request.owner or github.get("github_login", ""),
+                "repo_name": repo_request.name,
+                "base_branch": repo_request.base_branch or "",
+                "import_path_count": len(repo_request.import_paths),
+            },
+        )
         try:
             if repo_request.mode == "create":
                 repo_name = _validate_repo_name(repo_request.name)
+                logger.info(
+                    "Creating GitHub repository for project",
+                    extra={
+                        "event": "project.create.github_repo_create",
+                        "user_id": user.user_id,
+                        "github_login": github["github_login"],
+                        "repo_name": repo_name,
+                    },
+                )
                 repo_info = self.github_repo_manager.create_repo(
                     access_token=access_token,
                     owner_login=github["github_login"],
@@ -2288,11 +2616,32 @@ class PaperbaseService:
                 owner_login = repo_info.owner_login or github["github_login"]
                 default_branch = "main"
                 base_branch = "main"
+                logger.info(
+                    "Created GitHub repository for project",
+                    extra={
+                        "event": "project.create.github_repo_created",
+                        "user_id": user.user_id,
+                        "owner_login": owner_login,
+                        "repo_name": repo_info.repo_name,
+                        "repo_url": repo_info.repo_url,
+                        "default_branch": default_branch,
+                    },
+                )
             else:
                 owner_login = (repo_request.owner or "").strip()
                 if not owner_login:
                     raise HTTPException(status_code=422, detail="GitHub repository owner is required")
                 repo_name = _validate_repo_name(repo_request.name)
+                logger.info(
+                    "Loading existing GitHub repository for project import",
+                    extra={
+                        "event": "project.create.github_existing_load",
+                        "user_id": user.user_id,
+                        "owner_login": owner_login,
+                        "repo_name": repo_name,
+                        "requested_base_branch": repo_request.base_branch or "",
+                    },
+                )
                 repo_info = self.github_repo_manager.get_repo(
                     access_token=access_token,
                     owner_login=owner_login,
@@ -2317,6 +2666,18 @@ class PaperbaseService:
                     owner_login=owner_login,
                     repo_name=repo_name,
                     branch=base_branch,
+                )
+                logger.info(
+                    "Loaded existing GitHub repository branch for project import",
+                    extra={
+                        "event": "project.create.github_existing_branch",
+                        "user_id": user.user_id,
+                        "owner_login": owner_login,
+                        "repo_name": repo_name,
+                        "base_branch": base_branch,
+                        "remote_head_sha": remote_head_sha,
+                        "branch_count": len(branches),
+                    },
                 )
                 candidate_map = {
                     candidate.path: candidate
@@ -2344,7 +2705,29 @@ class PaperbaseService:
                     file_kind = _file_kind_for_repo_path(path)
                     content = _notebook_to_python_source(raw_content) if file_kind == "notebook" else raw_content
                     import_rows.append((Path(path).name, file_kind, path, content))
+                logger.info(
+                    "Prepared GitHub repository imports for project",
+                    extra={
+                        "event": "project.create.github_imports_ready",
+                        "user_id": user.user_id,
+                        "owner_login": owner_login,
+                        "repo_name": repo_name,
+                        "base_branch": base_branch,
+                        "import_path_count": len(import_rows),
+                    },
+                )
         except GitHubSyncError as exc:
+            logger.warning(
+                "GitHub project create flow failed",
+                extra={
+                    "event": "project.create.github_failed",
+                    "user_id": user.user_id,
+                    "repo_mode": repo_request.mode,
+                    "repo_owner": repo_request.owner or github.get("github_login", ""),
+                    "repo_name": repo_request.name,
+                    "error": str(exc),
+                },
+            )
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
         project = self.repository.create_project(  # type: ignore[attr-defined]
@@ -2377,6 +2760,18 @@ class PaperbaseService:
             )
             if imported is None:
                 raise HTTPException(status_code=500, detail=f"Repository path '{repo_path}' could not be imported")
+        logger.info(
+            "Finished project create GitHub permission flow",
+            extra={
+                "event": "project.create.github_completed",
+                "user_id": user.user_id,
+                "project_id": project.project_id,
+                "owner_login": owner_login,
+                "repo_name": repo_info.repo_name,
+                "base_branch": base_branch,
+                "import_path_count": len(import_rows),
+            },
+        )
         return self.repository.get_project(user_id=user.user_id, project_id=project.project_id) or project  # type: ignore[attr-defined]
 
     def update_project(self, user: BrowserUser, project_id: str, request: UpdateProjectRequest) -> ProjectResponse:
@@ -2439,8 +2834,2397 @@ class PaperbaseService:
             raise HTTPException(status_code=404, detail="Project not found")
         return page
 
+    def _project_presentation_with_share_url(
+        self,
+        presentation: ProjectPresentationResponse,
+    ) -> ProjectPresentationResponse:
+        updates: dict[str, Any] = {}
+        if presentation.audio_storage_path:
+            if presentation.is_public and presentation.share_token:
+                updates["audio_url"] = (
+                    f"/v1/browser/project-presentations/public/{quote(presentation.share_token, safe='')}/audio"
+                )
+            else:
+                updates["audio_url"] = (
+                    f"/v1/browser/projects/{quote(presentation.project_id, safe='')}/presentation/audio"
+                )
+        else:
+            updates["audio_url"] = ""
+        slides: list[ProjectPresentationSlideResponse] = []
+        for raw_slide in presentation.slides:
+            slide = self._project_presentation_slide_response(raw_slide)
+            image_url = ""
+            if slide.image_storage_path:
+                if presentation.is_public and presentation.share_token:
+                    image_url = (
+                        f"/v1/browser/project-presentations/public/"
+                        f"{quote(presentation.share_token, safe='')}/slides/{quote(slide.slide_id, safe='')}/image"
+                    )
+                else:
+                    image_url = (
+                        f"/v1/browser/projects/{quote(presentation.project_id, safe='')}/presentation/"
+                        f"slides/{quote(slide.slide_id, safe='')}/image"
+                    )
+            slides.append(slide.model_copy(update={"image_url": image_url}))
+        updates["slides"] = slides
+        if not presentation.is_public or not presentation.share_token:
+            updates["share_url"] = ""
+            return presentation.model_copy(update=updates)
+        updates["share_url"] = self._project_presentation_share_url(presentation.share_token)
+        return presentation.model_copy(update=updates)
+
+    def _project_presentation_slide_response(self, slide: Any) -> ProjectPresentationSlideResponse:
+        if isinstance(slide, ProjectPresentationSlideResponse):
+            return slide
+        if isinstance(slide, dict):
+            try:
+                return ProjectPresentationSlideResponse.model_validate(slide)
+            except ValueError:
+                pass
+        return ProjectPresentationSlideResponse(
+            slide_id="slide",
+            title="Slide",
+            description="",
+            visual_type="code",
+        )
+
+    def _project_presentation_slide_storage_dict(self, slide: ProjectPresentationSlideResponse) -> dict[str, Any]:
+        return {
+            "slide_id": slide.slide_id,
+            "title": slide.title,
+            "description": slide.description,
+            "visual_type": slide.visual_type,
+            "visual_code": slide.visual_code,
+            "image_prompt": slide.image_prompt,
+            "image_url": "",
+            "image_storage_path": slide.image_storage_path,
+        }
+
+    def get_project_presentation(self, user: BrowserUser, project_id: str) -> ProjectPresentationResponse:
+        project = self.repository.get_project(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        presentation = self.repository.get_project_presentation(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+        )
+        if presentation is None:
+            return ProjectPresentationResponse(project_id=project_id, status="missing")
+        return self._project_presentation_with_share_url(presentation)
+
+    def get_public_project_presentation(self, share_token: str) -> ProjectPresentationResponse:
+        token = share_token.strip()
+        if not token:
+            raise HTTPException(status_code=404, detail="Presentation not found")
+        presentation = self.repository.get_public_project_presentation(token)  # type: ignore[attr-defined]
+        if presentation is None:
+            raise HTTPException(status_code=404, detail="Presentation not found")
+        return self._project_presentation_with_share_url(presentation)
+
+    def get_project_presentation_audio(self, user: BrowserUser, project_id: str) -> tuple[bytes, str]:
+        presentation = self.repository.get_project_presentation(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+        )
+        if (
+            presentation is None
+            or presentation.status != "completed"
+            or not presentation.audio_storage_path
+            or not self.object_store.exists(presentation.audio_storage_path)
+        ):
+            raise HTTPException(status_code=404, detail="Presentation audio not found")
+        return self.object_store.get_bytes(presentation.audio_storage_path), (
+            presentation.audio_content_type or "audio/mpeg"
+        )
+
+    def get_public_project_presentation_audio(self, share_token: str) -> tuple[bytes, str]:
+        token = share_token.strip()
+        if not token:
+            raise HTTPException(status_code=404, detail="Presentation audio not found")
+        presentation = self.repository.get_public_project_presentation(token)  # type: ignore[attr-defined]
+        if (
+            presentation is None
+            or not presentation.audio_storage_path
+            or not self.object_store.exists(presentation.audio_storage_path)
+        ):
+            raise HTTPException(status_code=404, detail="Presentation audio not found")
+        return self.object_store.get_bytes(presentation.audio_storage_path), (
+            presentation.audio_content_type or "audio/mpeg"
+        )
+
+    def get_project_presentation_slide_image(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        slide_id: str,
+    ) -> tuple[bytes, str]:
+        presentation = self.repository.get_project_presentation(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+        )
+        return self._project_presentation_slide_image_payload(presentation, slide_id)
+
+    def get_public_project_presentation_slide_image(self, share_token: str, slide_id: str) -> tuple[bytes, str]:
+        token = share_token.strip()
+        if not token:
+            raise HTTPException(status_code=404, detail="Presentation image not found")
+        presentation = self.repository.get_public_project_presentation(token)  # type: ignore[attr-defined]
+        return self._project_presentation_slide_image_payload(presentation, slide_id)
+
+    def _project_presentation_slide_image_payload(
+        self,
+        presentation: ProjectPresentationResponse | None,
+        slide_id: str,
+    ) -> tuple[bytes, str]:
+        if presentation is None or presentation.status != "completed":
+            raise HTTPException(status_code=404, detail="Presentation not found")
+        requested_slide_id = slide_id.strip()
+        slide = next(
+            (
+                self._project_presentation_slide_response(item)
+                for item in presentation.slides
+                if self._project_presentation_slide_response(item).slide_id == requested_slide_id
+            ),
+            None,
+        )
+        if (
+            slide is None
+            or not slide.image_storage_path
+            or not self.object_store.exists(slide.image_storage_path)
+        ):
+            raise HTTPException(status_code=404, detail="Presentation image not found")
+        return self.object_store.get_bytes(slide.image_storage_path), "image/png"
+
+    def start_project_presentation(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        request: ProjectPresentationStartRequest,
+    ) -> ProjectPresentationResponse:
+        project = self.repository.get_project(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        existing = self.repository.get_project_presentation(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+        )
+        if (
+            existing is not None
+            and not request.regenerate
+            and existing.status in {"pending", "running", "completed"}
+        ):
+            return self._project_presentation_with_share_url(existing)
+
+        resolved_user = self.repository.get_browser_user_by_id(user.user_id) or user  # type: ignore[attr-defined]
+        api_key_value, api_key_state = self._choose_openai_api_key(resolved_user)
+        if not api_key_value:
+            detail = (
+                "Saved OpenAI API key is no longer valid"
+                if api_key_state == "api_key_invalid"
+                else "Add your OpenAI API key before creating a presentation"
+            )
+            raise HTTPException(status_code=409, detail=detail)
+
+        context_snapshot = self._project_presentation_context_snapshot(
+            user=user,
+            project=project,
+            explorations=request.explorations,
+        )
+        pending = self.repository.upsert_project_presentation_pending(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+            context_snapshot=context_snapshot,
+            job_id="",
+        )
+        if pending is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        job = self.repository.create_job(  # type: ignore[attr-defined]
+            "project_presentation",
+            {
+                "user_id": user.user_id,
+                "project_id": project_id,
+                "presentation_id": pending.presentation_id,
+                "context_snapshot": context_snapshot,
+            },
+        )
+        pending = self.repository.upsert_project_presentation_pending(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+            context_snapshot=context_snapshot,
+            job_id=job.job_id,
+        )
+        if pending is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        return self._project_presentation_with_share_url(pending)
+
+    def cancel_project_presentation(
+        self,
+        user: BrowserUser,
+        project_id: str,
+    ) -> ProjectPresentationResponse:
+        current = self.repository.get_project_presentation(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+        )
+        if current is None:
+            raise HTTPException(status_code=404, detail="Presentation not found")
+        if current.job_id:
+            self.repository.cancel_job(current.job_id)  # type: ignore[attr-defined]
+        if current.status == "completed":
+            updated = self._update_project_presentation_progress(
+                current.presentation_id,
+                phase_key="complete",
+                phase_label="Presentation ready",
+                detail="The presentation is ready to view and share. Optional media generation was canceled.",
+                percent=100,
+                estimated_seconds_remaining=0,
+            )
+            return self._project_presentation_with_share_url(updated or current)
+        if current.status in {"failed", "canceled"}:
+            return self._project_presentation_with_share_url(current)
+        canceled = self.repository.cancel_project_presentation(current.presentation_id)  # type: ignore[attr-defined]
+        if canceled is None:
+            raise HTTPException(status_code=404, detail="Presentation not found")
+        return self._project_presentation_with_share_url(canceled)
+
+    def update_project_presentation_share(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        request: ProjectPresentationShareRequest,
+    ) -> ProjectPresentationResponse:
+        current = self.repository.get_project_presentation(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+        )
+        if current is None:
+            raise HTTPException(status_code=404, detail="Presentation not found")
+        share_token = current.share_token
+        if request.is_public and not share_token:
+            share_token = new_id("share")
+        updated = self.repository.update_project_presentation_share(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+            is_public=request.is_public,
+            share_token=share_token,
+        )
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Presentation not found")
+        return self._project_presentation_with_share_url(updated)
+
+    def _project_presentation_context_snapshot(
+        self,
+        *,
+        user: BrowserUser,
+        project: ProjectResponse,
+        explorations,
+    ) -> dict[str, Any]:
+        exploration_rows: list[dict[str, Any]] = []
+        paper_ids: set[str] = set()
+        paper_order: list[str] = []
+
+        def remember_paper_id(value: str) -> None:
+            paper_id = value.strip()
+            if not paper_id or paper_id in paper_ids:
+                return
+            paper_ids.add(paper_id)
+            paper_order.append(paper_id)
+
+        for exploration in list(explorations or [])[:_PROJECT_PRESENTATION_MAX_EXPLORATIONS]:
+            annotations: list[dict[str, Any]] = []
+            for annotation in list(exploration.annotations or [])[:_PROJECT_PRESENTATION_MAX_ANNOTATIONS]:
+                if not isinstance(annotation, dict):
+                    continue
+                annotations.append(
+                    {
+                        "kind": str(annotation.get("kind") or "")[:24],
+                        "note": self._truncate_text(str(annotation.get("note") or ""), 1800),
+                        "selected_text": self._truncate_text(
+                            str(annotation.get("selected_text") or annotation.get("selectedText") or ""),
+                            3000,
+                        ),
+                        "nearby_text": self._truncate_text(
+                            str(annotation.get("nearby_text") or annotation.get("nearbyText") or ""),
+                            3000,
+                        ),
+                        "section_title": self._truncate_text(
+                            str(annotation.get("section_title") or annotation.get("sectionTitle") or ""),
+                            240,
+                        ),
+                        "created_at": str(annotation.get("created_at") or annotation.get("createdAt") or ""),
+                    }
+                )
+            paper_id = exploration.paper_id.strip()
+            if paper_id:
+                remember_paper_id(paper_id)
+            exploration_rows.append(
+                {
+                    "exploration_id": exploration.exploration_id,
+                    "paper_id": paper_id,
+                    "chat_thread_id": exploration.chat_thread_id,
+                    "title": self._truncate_text(exploration.title, 500),
+                    "authors": self._truncate_text(exploration.authors, 500),
+                    "path": exploration.path,
+                    "annotations": annotations,
+                    "created_at": exploration.created_at,
+                    "updated_at": exploration.updated_at,
+                }
+            )
+
+        threads_page = self.repository.list_project_chat_threads(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project.project_id,
+            limit=_PROJECT_PRESENTATION_MAX_THREADS,
+            offset=0,
+        )
+        thread_rows: list[dict[str, Any]] = []
+        for summary in (threads_page.threads if threads_page is not None else []):
+            thread = self.repository.get_chat_thread(  # type: ignore[attr-defined]
+                user_id=user.user_id,
+                thread_id=summary.thread_id,
+            )
+            if thread is None:
+                continue
+            items: list[dict[str, Any]] = []
+            for item in thread.items[:_PROJECT_PRESENTATION_MAX_THREAD_ITEMS]:
+                if item.item_type not in {"user_message", "assistant_message", "compaction"}:
+                    continue
+                if not item.content_text.strip():
+                    continue
+                items.append(
+                    {
+                        "role": item.role,
+                        "item_type": item.item_type,
+                        "content": self._truncate_text(item.content_text, 5000),
+                        "created_at": item.created_at.isoformat(),
+                        "citations": [
+                            {
+                                "paper_id": citation.paper_id,
+                                "title": citation.title,
+                                "path": citation.path,
+                            }
+                            for citation in item.citations[:8]
+                        ],
+                    }
+                )
+                for citation in item.citations:
+                    if citation.paper_id:
+                        remember_paper_id(citation.paper_id)
+            thread_rows.append(
+                {
+                    "thread_id": thread.thread_id,
+                    "title": thread.title,
+                    "created_at": thread.created_at.isoformat(),
+                    "updated_at": thread.updated_at.isoformat(),
+                    "items": items,
+                }
+            )
+
+        comments: list[dict[str, Any]] = []
+        for paper_id in paper_order[:_PROJECT_PRESENTATION_MAX_EXPLORATIONS]:
+            for comment in self.repository.list_paper_comment_records(paper_id)[:30]:
+                comments.append(
+                    {
+                        "paper_id": paper_id,
+                        "author": comment.author_display_name,
+                        "body": self._truncate_text(comment.body, 1600),
+                        "created_at": comment.created_at.isoformat(),
+                    }
+                )
+
+        research_materials = self._project_presentation_research_materials(
+            paper_ids=paper_order,
+            exploration_rows=exploration_rows,
+            thread_rows=thread_rows,
+            comments=comments,
+        )
+        code_artifacts = self._project_presentation_code_artifacts(user=user, project=project)
+
+        snapshot = {
+            "project": {
+                "project_id": project.project_id,
+                "name": project.name,
+                "description": project.description,
+                "created_at": project.created_at.isoformat(),
+                "updated_at": project.updated_at.isoformat(),
+            },
+            "research_materials": research_materials,
+            "visual_evidence": self._project_presentation_visual_evidence(research_materials),
+            "explorations": exploration_rows,
+            "chat_threads": thread_rows,
+            "paper_comments": comments,
+            "code_artifacts": code_artifacts,
+            "generated_at": utcnow().isoformat(),
+        }
+        return self._truncate_project_presentation_snapshot(snapshot)
+
+    def _project_presentation_code_artifacts(
+        self,
+        *,
+        user: BrowserUser,
+        project: ProjectResponse,
+    ) -> list[dict[str, str]]:
+        files = self.repository.list_project_python_files(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project.project_id,
+        )
+        artifacts: list[dict[str, str]] = []
+        for file in list(files or [])[:_PROJECT_PRESENTATION_MAX_CODE_ARTIFACTS]:
+            content = self._truncate_text(file.content or "", _PROJECT_PRESENTATION_MAX_CODE_CHARS)
+            artifacts.append(
+                {
+                    "file_id": file.file_id,
+                    "filename": self._truncate_text(file.filename, 240),
+                    "repo_path": self._truncate_text(file.repo_path, 360),
+                    "file_kind": file.file_kind,
+                    "content": content,
+                    "updated_at": file.updated_at.isoformat(),
+                }
+            )
+        return artifacts
+
+    def _project_presentation_research_materials(
+        self,
+        *,
+        paper_ids: list[str],
+        exploration_rows: list[dict[str, Any]],
+        thread_rows: list[dict[str, Any]],
+        comments: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        source_by_paper: dict[str, dict[str, Any]] = {}
+        for exploration in exploration_rows:
+            paper_id = str(exploration.get("paper_id") or "").strip()
+            if not paper_id:
+                continue
+            source = source_by_paper.setdefault(
+                paper_id,
+                {"title": "", "authors": "", "path": "", "selected_passages": [], "user_notes": []},
+            )
+            source["title"] = source.get("title") or str(exploration.get("title") or "")
+            source["authors"] = source.get("authors") or str(exploration.get("authors") or "")
+            source["path"] = source.get("path") or str(exploration.get("path") or "")
+            for annotation in list(exploration.get("annotations") or [])[:_PROJECT_PRESENTATION_MAX_PASSAGES_PER_PAPER]:
+                if not isinstance(annotation, dict):
+                    continue
+                note = self._truncate_text(str(annotation.get("note") or ""), 700)
+                selected_text = self._truncate_text(str(annotation.get("selected_text") or ""), 1200)
+                nearby_text = self._truncate_text(str(annotation.get("nearby_text") or ""), 800)
+                section_title = self._truncate_text(str(annotation.get("section_title") or ""), 180)
+                if selected_text or nearby_text:
+                    source["selected_passages"].append(
+                        {
+                            "section_title": section_title,
+                            "selected_text": selected_text,
+                            "nearby_text": nearby_text,
+                            "note": note,
+                        }
+                    )
+                if note:
+                    source["user_notes"].append(note)
+
+        for thread in thread_rows:
+            for item in list(thread.get("items") or []):
+                if not isinstance(item, dict):
+                    continue
+                for citation in list(item.get("citations") or []):
+                    if not isinstance(citation, dict):
+                        continue
+                    paper_id = str(citation.get("paper_id") or "").strip()
+                    if not paper_id:
+                        continue
+                    source = source_by_paper.setdefault(
+                        paper_id,
+                        {"title": "", "authors": "", "path": "", "selected_passages": [], "user_notes": []},
+                    )
+                    source["title"] = source.get("title") or str(citation.get("title") or "")
+                    source["path"] = source.get("path") or str(citation.get("path") or "")
+
+        comments_by_paper: dict[str, list[dict[str, str]]] = {}
+        for comment in comments:
+            paper_id = str(comment.get("paper_id") or "").strip()
+            if not paper_id:
+                continue
+            bucket = comments_by_paper.setdefault(paper_id, [])
+            if len(bucket) >= _PROJECT_PRESENTATION_MAX_COMMENTS_PER_PAPER:
+                continue
+            body = self._truncate_text(str(comment.get("body") or ""), 700)
+            if body:
+                bucket.append(
+                    {
+                        "author": self._truncate_text(str(comment.get("author") or ""), 120),
+                        "body": body,
+                    }
+                )
+
+        materials: list[dict[str, Any]] = []
+        for paper_id in paper_ids[:_PROJECT_PRESENTATION_MAX_RESEARCH_MATERIALS]:
+            source = source_by_paper.get(paper_id, {})
+            paper = self._project_presentation_resolve_paper(paper_id)
+            material = {
+                "paper_id": paper_id,
+                "arxiv_id": "",
+                "title": self._truncate_text(str(source.get("title") or ""), 500),
+                "authors": self._truncate_text(str(source.get("authors") or ""), 500),
+                "published": "",
+                "updated": "",
+                "primary_category": "",
+                "categories": "",
+                "abstract": "",
+                "tldr": "",
+                "summary_short": "",
+                "citation_count": 0,
+                "influential_citation_count": 0,
+                "selected_passages": list(source.get("selected_passages") or [])[
+                    :_PROJECT_PRESENTATION_MAX_PASSAGES_PER_PAPER
+                ],
+                "user_notes": list(source.get("user_notes") or [])[:_PROJECT_PRESENTATION_MAX_PASSAGES_PER_PAPER],
+                "paper_comments": comments_by_paper.get(paper_id, []),
+                "figures": [],
+                "tables": [],
+            }
+            if paper is not None:
+                material.update(
+                    {
+                        "paper_id": paper.paper_id,
+                        "arxiv_id": paper.arxiv_id,
+                        "title": self._truncate_text(paper.title or material["title"], 500),
+                        "authors": self._truncate_text(paper.authors or material["authors"], 500),
+                        "published": paper.published,
+                        "updated": paper.updated,
+                        "primary_category": paper.primary_category,
+                        "categories": paper.categories,
+                        "abstract": self._truncate_text(paper.abstract, 1800),
+                        "tldr": self._truncate_text(paper.tldr, 1000),
+                        "summary_short": self._truncate_text(paper.summary_short, 1000),
+                        "citation_count": paper.citation_count,
+                        "influential_citation_count": paper.influential_citation_count,
+                        "figures": self._project_presentation_figure_snippets(paper.paper_id),
+                        "tables": self._project_presentation_table_snippets(paper.paper_id),
+                    }
+                )
+            material["visual_data"] = self._project_presentation_material_visual_data(material)
+            if any(
+                material.get(key)
+                for key in (
+                    "title",
+                    "abstract",
+                    "tldr",
+                    "summary_short",
+                    "selected_passages",
+                    "user_notes",
+                    "paper_comments",
+                    "figures",
+                    "tables",
+                    "visual_data",
+                )
+            ):
+                materials.append(material)
+        return materials
+
+    def _project_presentation_resolve_paper(self, paper_id: str) -> PaperResponse | None:
+        paper = self.repository.get_paper(paper_id)  # type: ignore[attr-defined]
+        if paper is not None:
+            return paper
+        if paper_id.startswith("arxiv:"):
+            return self.repository.get_paper_by_arxiv_id(paper_id.removeprefix("arxiv:"))  # type: ignore[attr-defined]
+        paper = self.repository.get_paper(canonical_paper_id(paper_id))  # type: ignore[attr-defined]
+        if paper is not None:
+            return paper
+        return self.repository.get_paper_by_arxiv_id(paper_id)  # type: ignore[attr-defined]
+
+    def _project_presentation_figure_snippets(self, paper_id: str) -> list[dict[str, str]]:
+        index_path = f"papers/{paper_id}/figures/index.json"
+        if not self.object_store.exists(index_path):
+            return []
+        try:
+            index_payload = json.loads(self.object_store.get_text(index_path))
+        except (KeyError, json.JSONDecodeError, UnicodeDecodeError):
+            return []
+        figures: list[dict[str, str]] = []
+        if not isinstance(index_payload, list):
+            return figures
+        for item in index_payload[:_PROJECT_PRESENTATION_MAX_FIGURES_PER_PAPER]:
+            if not isinstance(item, dict):
+                continue
+            figure_id = str(item.get("figure_id") or "").strip()
+            caption = str(item.get("caption") or "").strip()
+            caption_path = f"papers/{paper_id}/figures/{figure_id}/caption.md"
+            if figure_id and self.object_store.exists(caption_path):
+                try:
+                    caption = self.object_store.get_text(caption_path)
+                except (KeyError, UnicodeDecodeError):
+                    pass
+            if figure_id or caption:
+                figures.append(
+                    {
+                        "figure_id": self._truncate_text(figure_id, 120),
+                        "caption": self._truncate_text(caption, 700),
+                    }
+                )
+        return figures
+
+    def _project_presentation_table_snippets(self, paper_id: str) -> list[dict[str, Any]]:
+        index_path = f"papers/{paper_id}/tables/index.json"
+        if not self.object_store.exists(index_path):
+            return []
+        try:
+            index_payload = json.loads(self.object_store.get_text(index_path))
+        except (KeyError, json.JSONDecodeError, UnicodeDecodeError):
+            return []
+        tables: list[dict[str, Any]] = []
+        if not isinstance(index_payload, list):
+            return tables
+        for item in index_payload[:_PROJECT_PRESENTATION_MAX_TABLES_PER_PAPER]:
+            if not isinstance(item, dict):
+                continue
+            table_id = str(item.get("table_id") or "").strip()
+            rows: list[Any] = []
+            json_path = f"papers/{paper_id}/tables/{table_id}.json"
+            if table_id and self.object_store.exists(json_path):
+                try:
+                    rows_payload = json.loads(self.object_store.get_text(json_path))
+                    if isinstance(rows_payload, list):
+                        rows = self._project_presentation_table_rows(rows_payload)
+                except (KeyError, json.JSONDecodeError, UnicodeDecodeError):
+                    rows = []
+            tables.append(
+                {
+                    "table_id": self._truncate_text(table_id, 120),
+                    "caption": self._truncate_text(str(item.get("caption") or ""), 500),
+                    "row_count": item.get("row_count") if isinstance(item.get("row_count"), int) else None,
+                    "sample_rows": rows,
+                }
+            )
+        return tables
+
+    def _project_presentation_table_rows(self, rows_payload: list[Any]) -> list[Any]:
+        rows: list[Any] = []
+        for row in rows_payload[:_PROJECT_PRESENTATION_MAX_TABLE_ROWS]:
+            if isinstance(row, dict):
+                trimmed: dict[str, str] = {}
+                for key, value in list(row.items())[:6]:
+                    trimmed[self._truncate_text(str(key), 120)] = self._truncate_text(str(value), 160)
+                if trimmed:
+                    rows.append(trimmed)
+            elif isinstance(row, list):
+                trimmed_row = [self._truncate_text(str(value), 160) for value in row[:6]]
+                if trimmed_row:
+                    rows.append(trimmed_row)
+        return rows
+
+    def _project_presentation_material_visual_data(self, material: dict[str, Any]) -> dict[str, Any]:
+        text_sources = self._project_presentation_material_text_sources(material)
+        metric_values: list[dict[str, Any]] = []
+        before_after_comparisons: list[dict[str, Any]] = []
+        table_samples: list[dict[str, Any]] = []
+
+        for source in text_sources:
+            text = source["text"]
+            source_label = source["source"]
+            metric_values.extend(self._project_presentation_metric_values_from_text(text, source_label))
+            before_after_comparisons.extend(self._project_presentation_comparisons_from_text(text, source_label))
+
+        for table in list(material.get("tables") or [])[:_PROJECT_PRESENTATION_MAX_TABLES_PER_PAPER]:
+            if not isinstance(table, dict):
+                continue
+            table_id = self._truncate_text(str(table.get("table_id") or ""), 120)
+            caption = self._truncate_text(str(table.get("caption") or ""), 240)
+            sample_rows = list(table.get("sample_rows") or [])[:_PROJECT_PRESENTATION_MAX_TABLE_ROWS]
+            if caption or sample_rows:
+                table_samples.append(
+                    {
+                        "table_id": table_id,
+                        "caption": caption,
+                        "sample_rows": sample_rows,
+                    }
+                )
+            table_metrics, table_comparisons = self._project_presentation_table_visual_data(table)
+            metric_values.extend(table_metrics)
+            before_after_comparisons.extend(table_comparisons)
+
+        figure_captions = [
+            {
+                "figure_id": self._truncate_text(str(figure.get("figure_id") or ""), 120),
+                "caption": self._truncate_text(str(figure.get("caption") or ""), 320),
+            }
+            for figure in list(material.get("figures") or [])[:_PROJECT_PRESENTATION_MAX_FIGURES_PER_PAPER]
+            if isinstance(figure, dict) and str(figure.get("caption") or figure.get("figure_id") or "").strip()
+        ]
+
+        visual_data = {
+            "metric_values": self._project_presentation_limit_visual_items(metric_values),
+            "before_after_comparisons": self._project_presentation_limit_visual_items(before_after_comparisons),
+            "table_samples": self._project_presentation_limit_visual_items(table_samples),
+            "figure_captions": self._project_presentation_limit_visual_items(figure_captions),
+            "method_components": self._project_presentation_limit_visual_items(
+                self._project_presentation_method_components(text_sources)
+            ),
+            "datasets": self._project_presentation_limit_visual_items(
+                self._project_presentation_datasets(text_sources)
+            ),
+            "cited_claims": self._project_presentation_limit_visual_items(
+                self._project_presentation_cited_claims(text_sources)
+            ),
+        }
+        return {key: value for key, value in visual_data.items() if value}
+
+    def _project_presentation_material_text_sources(self, material: dict[str, Any]) -> list[dict[str, str]]:
+        sources: list[dict[str, str]] = []
+
+        def add(source: str, text: Any, *, max_chars: int = 1200) -> None:
+            value = self._truncate_text(str(text or ""), max_chars)
+            if value:
+                sources.append({"source": source, "text": value})
+
+        add("abstract", material.get("abstract"), max_chars=1800)
+        add("tldr", material.get("tldr"))
+        add("summary_short", material.get("summary_short"))
+        for passage in list(material.get("selected_passages") or [])[:_PROJECT_PRESENTATION_MAX_PASSAGES_PER_PAPER]:
+            if not isinstance(passage, dict):
+                continue
+            source = self._truncate_text(str(passage.get("section_title") or "selected passage"), 120)
+            add(source, passage.get("selected_text"))
+            add(f"{source} context", passage.get("nearby_text"), max_chars=800)
+            add(f"{source} note", passage.get("note"), max_chars=600)
+        for index, note in enumerate(list(material.get("user_notes") or [])[:_PROJECT_PRESENTATION_MAX_PASSAGES_PER_PAPER], 1):
+            add(f"user note {index}", note, max_chars=600)
+        for index, comment in enumerate(list(material.get("paper_comments") or [])[:_PROJECT_PRESENTATION_MAX_COMMENTS_PER_PAPER], 1):
+            if isinstance(comment, dict):
+                add(f"comment {index}", comment.get("body"), max_chars=600)
+        for figure in list(material.get("figures") or [])[:_PROJECT_PRESENTATION_MAX_FIGURES_PER_PAPER]:
+            if isinstance(figure, dict):
+                figure_id = self._truncate_text(str(figure.get("figure_id") or "figure"), 80)
+                add(f"figure:{figure_id}", figure.get("caption"), max_chars=700)
+        for table in list(material.get("tables") or [])[:_PROJECT_PRESENTATION_MAX_TABLES_PER_PAPER]:
+            if isinstance(table, dict):
+                table_id = self._truncate_text(str(table.get("table_id") or "table"), 80)
+                add(f"table:{table_id}", table.get("caption"), max_chars=500)
+        return sources
+
+    def _project_presentation_metric_values_from_text(self, text: str, source: str) -> list[dict[str, Any]]:
+        values: list[dict[str, Any]] = []
+        for match in _PROJECT_PRESENTATION_VISUAL_NUMBER_RE.finditer(text):
+            parsed = self._project_presentation_parse_visual_number(match.group(1), match.group(2))
+            if parsed is None:
+                continue
+            value, unit = parsed
+            if self._project_presentation_number_is_likely_year(value=value, unit=unit):
+                continue
+            sentence = self._project_presentation_sentence_around(text, match.start())
+            label = self._truncate_text(sentence or text, 180)
+            values.append(
+                {
+                    "label": label,
+                    "metric": label,
+                    "value": value,
+                    "unit": unit,
+                    "source": source,
+                }
+            )
+        return values
+
+    def _project_presentation_comparisons_from_text(self, text: str, source: str) -> list[dict[str, Any]]:
+        comparisons: list[dict[str, Any]] = []
+        for match in _PROJECT_PRESENTATION_VISUAL_COMPARISON_RE.finditer(text):
+            before = self._project_presentation_parse_visual_number(match.group(1), match.group(2))
+            after = self._project_presentation_parse_visual_number(match.group(3), match.group(4))
+            if before is None or after is None:
+                continue
+            before_value, before_unit = before
+            after_value, after_unit = after
+            unit = after_unit or before_unit
+            sentence = self._project_presentation_sentence_around(text, match.start())
+            comparisons.append(
+                {
+                    "label": self._truncate_text(sentence or text, 220),
+                    "before_label": "before",
+                    "before_value": before_value,
+                    "after_label": "after",
+                    "after_value": after_value,
+                    "unit": unit,
+                    "source": source,
+                }
+            )
+        return comparisons
+
+    def _project_presentation_table_visual_data(
+        self,
+        table: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        table_id = self._truncate_text(str(table.get("table_id") or ""), 120)
+        caption = self._truncate_text(str(table.get("caption") or ""), 220)
+        source = f"table:{table_id or caption or 'sample'}"
+        metric_values: list[dict[str, Any]] = []
+        metric_series: dict[str, list[dict[str, Any]]] = {}
+        for row in list(table.get("sample_rows") or [])[:_PROJECT_PRESENTATION_MAX_TABLE_ROWS]:
+            if not isinstance(row, dict):
+                continue
+            row_label = self._project_presentation_row_label(row)
+            for key, value in row.items():
+                parsed = self._project_presentation_parse_visual_cell(value)
+                if parsed is None:
+                    continue
+                number, unit = parsed
+                metric = self._truncate_text(str(key), 120)
+                label = self._truncate_text(" ".join(part for part in (row_label, metric) if part), 180)
+                item = {
+                    "label": label or metric,
+                    "metric": metric,
+                    "value": number,
+                    "unit": unit,
+                    "source": source,
+                }
+                metric_values.append(item)
+                metric_series.setdefault(metric, []).append(
+                    {
+                        "row_label": row_label,
+                        "value": number,
+                        "unit": unit,
+                    }
+                )
+
+        comparisons: list[dict[str, Any]] = []
+        for metric, series in metric_series.items():
+            if len(series) < 2:
+                continue
+            first = series[0]
+            last = series[-1]
+            comparisons.append(
+                {
+                    "label": caption or metric,
+                    "metric": metric,
+                    "before_label": first["row_label"] or "before",
+                    "before_value": first["value"],
+                    "after_label": last["row_label"] or "after",
+                    "after_value": last["value"],
+                    "unit": last["unit"] or first["unit"],
+                    "source": source,
+                }
+            )
+        return metric_values, comparisons
+
+    def _project_presentation_row_label(self, row: dict[str, Any]) -> str:
+        for key, value in row.items():
+            if self._project_presentation_parse_visual_cell(value) is None:
+                text = self._truncate_text(str(value or ""), 80)
+                if text:
+                    return text
+            key_text = str(key or "").lower()
+            if key_text in {"protocol", "method", "model", "dataset", "condition", "setting"}:
+                text = self._truncate_text(str(value or ""), 80)
+                if text:
+                    return text
+        return ""
+
+    def _project_presentation_parse_visual_cell(self, value: Any) -> tuple[float, str] | None:
+        text = str(value or "").strip()
+        match = re.fullmatch(
+            r"([+-]?\d+(?:,\d{3})*(?:\.\d+)?)\s*"
+            r"(percentage points?|percent|points?|pp|%|x|×|ms|s|seconds?|tokens?|parameters?|k|m|b)?",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if match is None:
+            return None
+        return self._project_presentation_parse_visual_number(match.group(1), match.group(2))
+
+    def _project_presentation_parse_visual_number(self, value: str, unit: str | None = None) -> tuple[float, str] | None:
+        normalized = str(value or "").replace(",", "").strip()
+        try:
+            number = float(normalized)
+        except ValueError:
+            return None
+        unit_value = self._project_presentation_normalize_visual_unit(unit)
+        return number, unit_value
+
+    def _project_presentation_normalize_visual_unit(self, unit: str | None) -> str:
+        unit_value = str(unit or "").strip()
+        lower = unit_value.lower()
+        if lower in {"percent"}:
+            return "%"
+        if lower in {"percentage point", "percentage points", "point", "points", "pp"}:
+            return "points"
+        if lower == "×":
+            return "x"
+        return unit_value
+
+    def _project_presentation_number_is_likely_year(self, *, value: float, unit: str) -> bool:
+        return not unit and value.is_integer() and 1900 <= int(value) <= 2100
+
+    def _project_presentation_sentence_around(self, text: str, index: int) -> str:
+        sentence_start = max(text.rfind(".", 0, index), text.rfind("!", 0, index), text.rfind("?", 0, index))
+        start = sentence_start + 1 if sentence_start >= 0 else 0
+        sentence_end_candidates = [
+            position
+            for position in (text.find(".", index), text.find("!", index), text.find("?", index))
+            if position >= 0
+        ]
+        end = min(sentence_end_candidates) + 1 if sentence_end_candidates else len(text)
+        return self._truncate_text(text[start:end], 240)
+
+    def _project_presentation_split_sentences(self, text: str) -> list[str]:
+        return [
+            self._truncate_text(sentence, 300)
+            for sentence in re.split(r"(?<=[.!?])\s+", str(text or ""))
+            if sentence.strip()
+        ]
+
+    def _project_presentation_method_components(self, text_sources: list[dict[str, str]]) -> list[dict[str, str]]:
+        components: list[dict[str, str]] = []
+        for source in text_sources:
+            for sentence in self._project_presentation_split_sentences(source["text"]):
+                lower = sentence.lower()
+                if not any(keyword in lower for keyword in _PROJECT_PRESENTATION_METHOD_KEYWORDS):
+                    continue
+                components.append(
+                    {
+                        "component": self._truncate_text(sentence, 240),
+                        "source": source["source"],
+                    }
+                )
+        return components
+
+    def _project_presentation_datasets(self, text_sources: list[dict[str, str]]) -> list[str]:
+        datasets: list[str] = []
+        for source in text_sources:
+            for match in _PROJECT_PRESENTATION_DATASET_TOKEN_RE.finditer(source["text"]):
+                value = match.group(0).strip(".,;:()[]{}")
+                if value:
+                    datasets.append(value)
+        return datasets
+
+    def _project_presentation_cited_claims(self, text_sources: list[dict[str, str]]) -> list[dict[str, str]]:
+        claims: list[dict[str, str]] = []
+        for source in text_sources:
+            for sentence in self._project_presentation_split_sentences(source["text"]):
+                if len(sentence.split()) < 5:
+                    continue
+                claims.append(
+                    {
+                        "claim": self._truncate_text(sentence, 260),
+                        "source": source["source"],
+                    }
+                )
+                break
+        return claims
+
+    def _project_presentation_visual_evidence(self, research_materials: list[dict[str, Any]]) -> dict[str, Any]:
+        evidence: dict[str, list[Any]] = {
+            "metric_values": [],
+            "before_after_comparisons": [],
+            "table_samples": [],
+            "figure_captions": [],
+            "method_components": [],
+            "datasets": [],
+            "cited_claims": [],
+        }
+        for material in research_materials:
+            if not isinstance(material, dict):
+                continue
+            paper_title = self._truncate_text(str(material.get("title") or ""), 220)
+            visual_data = material.get("visual_data") if isinstance(material.get("visual_data"), dict) else {}
+            for key in (
+                "metric_values",
+                "before_after_comparisons",
+                "table_samples",
+                "figure_captions",
+                "method_components",
+                "cited_claims",
+            ):
+                for item in list(visual_data.get(key) or []):
+                    if isinstance(item, dict):
+                        enriched = dict(item)
+                        if paper_title:
+                            enriched["paper_title"] = paper_title
+                        evidence[key].append(enriched)
+            for dataset in list(visual_data.get("datasets") or []):
+                if isinstance(dataset, str) and dataset.strip():
+                    evidence["datasets"].append(dataset.strip())
+        return {
+            key: self._project_presentation_limit_visual_items(value)
+            for key, value in evidence.items()
+            if value
+        }
+
+    def _project_presentation_limit_visual_items(self, items: list[Any]) -> list[Any]:
+        limited: list[Any] = []
+        seen: set[str] = set()
+        for item in items:
+            key = json.dumps(item, ensure_ascii=False, sort_keys=True, default=str) if isinstance(item, dict) else str(item)
+            if key in seen:
+                continue
+            seen.add(key)
+            limited.append(item)
+            if len(limited) >= _PROJECT_PRESENTATION_MAX_VISUAL_ITEMS:
+                break
+        return limited
+
+    def _truncate_text(self, value: str, max_chars: int) -> str:
+        text = " ".join(str(value or "").split())
+        if len(text) <= max_chars:
+            return text
+        return text[: max(0, max_chars - 1)].rstrip() + "..."
+
+    def _truncate_project_presentation_snapshot(self, snapshot: dict[str, Any]) -> dict[str, Any]:
+        rendered = json.dumps(snapshot, ensure_ascii=False, default=str)
+        if len(rendered) <= _PROJECT_PRESENTATION_MAX_CONTEXT_CHARS:
+            return snapshot
+
+        trimmed = dict(snapshot)
+        trimmed["chat_threads"] = [
+            {
+                **thread,
+                "items": list(thread.get("items", []))[:20],
+            }
+            for thread in list(trimmed.get("chat_threads", []))[:12]
+            if isinstance(thread, dict)
+        ]
+        trimmed["explorations"] = [
+            {
+                **exploration,
+                "annotations": list(exploration.get("annotations", []))[:12],
+            }
+            for exploration in list(trimmed.get("explorations", []))[:30]
+            if isinstance(exploration, dict)
+        ]
+        trimmed["paper_comments"] = list(trimmed.get("paper_comments", []))[:60]
+        trimmed["code_artifacts"] = [
+            {
+                **artifact,
+                "content": self._truncate_text(str(artifact.get("content") or ""), 5000),
+            }
+            for artifact in list(trimmed.get("code_artifacts", []))[:8]
+            if isinstance(artifact, dict)
+        ]
+        trimmed["research_materials"] = [
+            {
+                **material,
+                "abstract": self._truncate_text(str(material.get("abstract") or ""), 1000),
+                "tldr": self._truncate_text(str(material.get("tldr") or ""), 700),
+                "summary_short": self._truncate_text(str(material.get("summary_short") or ""), 700),
+                "selected_passages": [
+                    {
+                        **passage,
+                        "selected_text": self._truncate_text(str(passage.get("selected_text") or ""), 700),
+                        "nearby_text": self._truncate_text(str(passage.get("nearby_text") or ""), 500),
+                        "note": self._truncate_text(str(passage.get("note") or ""), 400),
+                    }
+                    for passage in list(material.get("selected_passages", []))[:3]
+                    if isinstance(passage, dict)
+                ],
+                "user_notes": [
+                    self._truncate_text(str(note), 400)
+                    for note in list(material.get("user_notes", []))[:3]
+                ],
+                "paper_comments": list(material.get("paper_comments", []))[:3],
+                "figures": list(material.get("figures", []))[:3],
+                "tables": list(material.get("tables", []))[:2],
+                "visual_data": self._truncate_project_presentation_visual_data(material.get("visual_data")),
+            }
+            for material in list(trimmed.get("research_materials", []))[:8]
+            if isinstance(material, dict)
+        ]
+        trimmed["visual_evidence"] = self._truncate_project_presentation_visual_data(trimmed.get("visual_evidence"))
+        if len(json.dumps(trimmed, ensure_ascii=False, default=str)) <= _PROJECT_PRESENTATION_MAX_CONTEXT_CHARS:
+            return trimmed
+        trimmed["chat_threads"] = [
+            {
+                **thread,
+                "items": [
+                    {
+                        **item,
+                        "content": self._truncate_text(str(item.get("content") or ""), 1800),
+                    }
+                    for item in list(thread.get("items", []))[:10]
+                    if isinstance(item, dict)
+                ],
+            }
+            for thread in list(trimmed.get("chat_threads", []))[:8]
+            if isinstance(thread, dict)
+        ]
+        trimmed["paper_comments"] = list(trimmed.get("paper_comments", []))[:30]
+        trimmed["code_artifacts"] = [
+            {
+                **artifact,
+                "content": self._truncate_text(str(artifact.get("content") or ""), 2500),
+            }
+            for artifact in list(trimmed.get("code_artifacts", []))[:5]
+            if isinstance(artifact, dict)
+        ]
+        trimmed["research_materials"] = [
+            {
+                **material,
+                "abstract": self._truncate_text(str(material.get("abstract") or ""), 600),
+                "tldr": self._truncate_text(str(material.get("tldr") or ""), 450),
+                "summary_short": self._truncate_text(str(material.get("summary_short") or ""), 450),
+                "selected_passages": [
+                    {
+                        **passage,
+                        "selected_text": self._truncate_text(str(passage.get("selected_text") or ""), 500),
+                        "nearby_text": self._truncate_text(str(passage.get("nearby_text") or ""), 300),
+                        "note": self._truncate_text(str(passage.get("note") or ""), 240),
+                    }
+                    for passage in list(material.get("selected_passages", []))[:2]
+                    if isinstance(passage, dict)
+                ],
+                "user_notes": [
+                    self._truncate_text(str(note), 240)
+                    for note in list(material.get("user_notes", []))[:2]
+                ],
+                "paper_comments": list(material.get("paper_comments", []))[:2],
+                "figures": list(material.get("figures", []))[:2],
+                "tables": list(material.get("tables", []))[:1],
+                "visual_data": self._truncate_project_presentation_visual_data(
+                    material.get("visual_data"),
+                    max_items=5,
+                    max_text_chars=180,
+                ),
+            }
+            for material in list(trimmed.get("research_materials", []))[:5]
+            if isinstance(material, dict)
+        ]
+        trimmed["visual_evidence"] = self._truncate_project_presentation_visual_data(
+            trimmed.get("visual_evidence"),
+            max_items=5,
+            max_text_chars=180,
+        )
+        return trimmed
+
+    def _truncate_project_presentation_visual_data(
+        self,
+        visual_data: Any,
+        *,
+        max_items: int = _PROJECT_PRESENTATION_MAX_VISUAL_ITEMS,
+        max_text_chars: int = 260,
+    ) -> dict[str, Any]:
+        if not isinstance(visual_data, dict):
+            return {}
+
+        def truncate_item(item: Any) -> Any:
+            if isinstance(item, dict):
+                return {
+                    self._truncate_text(str(key), 120): truncate_item(value)
+                    for key, value in item.items()
+                    if value not in (None, "", [], {})
+                }
+            if isinstance(item, list):
+                return [truncate_item(value) for value in item[:max_items]]
+            if isinstance(item, str):
+                return self._truncate_text(item, max_text_chars)
+            return item
+
+        trimmed: dict[str, Any] = {}
+        for key in (
+            "metric_values",
+            "before_after_comparisons",
+            "table_samples",
+            "figure_captions",
+            "method_components",
+            "datasets",
+            "cited_claims",
+        ):
+            value = visual_data.get(key)
+            if isinstance(value, list):
+                trimmed_value = [truncate_item(item) for item in value[:max_items]]
+                if trimmed_value:
+                    trimmed[key] = trimmed_value
+        return trimmed
+
+    def generate_project_presentation(
+        self,
+        *,
+        user_id: str,
+        project_id: str,
+        presentation_id: str,
+        context_snapshot: dict[str, Any],
+    ) -> ProjectPresentationResponse:
+        existing = self.repository.get_project_presentation(  # type: ignore[attr-defined]
+            user_id=user_id,
+            project_id=project_id,
+        )
+        if existing is not None and existing.presentation_id == presentation_id and existing.status == "completed":
+            logger.info(
+                "Project presentation job already completed; skipping regeneration",
+                extra={
+                    "event": "project.presentation.already_completed",
+                    "presentation_id": presentation_id,
+                    "project_id": project_id,
+                },
+            )
+            return self._project_presentation_with_share_url(existing)
+        self.repository.set_project_presentation_running(presentation_id)  # type: ignore[attr-defined]
+        self._update_project_presentation_progress(
+            presentation_id,
+            phase_key="making_bullet_points",
+            phase_label="Making bullet points",
+            detail="Reading the project history, papers, annotations, comments, chats, and code to find the presentation story.",
+            percent=12,
+            estimated_seconds_remaining=330,
+        )
+        user = self.repository.get_browser_user_by_id(user_id)  # type: ignore[attr-defined]
+        if user is None:
+            self.repository.fail_project_presentation(  # type: ignore[attr-defined]
+                presentation_id,
+                error="User not found",
+            )
+            raise PermanentError("User not found for project presentation")
+        api_key_value, api_key_state = self._choose_openai_api_key(user)
+        if not api_key_value:
+            detail = (
+                "Saved OpenAI API key is no longer valid"
+                if api_key_state == "api_key_invalid"
+                else "OpenAI API key is required"
+            )
+            self.repository.fail_project_presentation(presentation_id, error=detail)  # type: ignore[attr-defined]
+            raise PermanentError(detail)
+
+        try:
+            logger.info(
+                "Project presentation generation started",
+                extra={
+                    "event": "project.presentation.generate_started",
+                    "presentation_id": presentation_id,
+                    "project_id": project_id,
+                },
+            )
+            prompt = self._project_presentation_prompt(context_snapshot)
+            self._raise_if_current_job_canceled()
+            response = self._chat_model_create_response(api_key=api_key_value, prompt=prompt)
+            response_text = self._assistant_response_text(response)
+            logger.info(
+                "Project presentation model response received",
+                extra={
+                    "event": "project.presentation.model_completed",
+                    "presentation_id": presentation_id,
+                    "project_id": project_id,
+                    "response_length": len(response_text),
+                },
+            )
+            self._raise_if_current_job_canceled()
+            self._update_project_presentation_progress(
+                presentation_id,
+                phase_key="drawing_diagrams",
+                phase_label="Drawing diagrams",
+                detail="Turning the slide plan into custom diagrams, visual code, and fallback artwork.",
+                percent=54,
+                estimated_seconds_remaining=180,
+            )
+            try:
+                payload = self._parse_project_presentation_payload(response_text)
+            except PermanentError as exc:
+                logger.warning(
+                    "Project presentation model payload was invalid; using fallback presentation",
+                    extra={
+                        "event": "project.presentation.payload_fallback",
+                        "presentation_id": presentation_id,
+                        "project_id": project_id,
+                        "response_length": len(response_text),
+                        "response_preview": self._truncate_text(response_text, 240),
+                        "error": str(exc),
+                    },
+                )
+                payload = {}
+            project_name = str(context_snapshot.get("project", {}).get("name") or "Project")
+            summary_markdown = str(payload.get("summary_markdown") or "").strip()
+            visual_code = str(payload.get("visual_code") or "").strip()
+            slides = self._normalize_project_presentation_slides(payload, context_snapshot)
+            if not summary_markdown:
+                summary_markdown = self._project_presentation_summary_from_slides(context_snapshot, slides)
+            if not visual_code:
+                visual_code = self._project_presentation_visual_from_slides(context_snapshot, slides)
+            visible_slides = self._project_presentation_slides_with_image_fallbacks(
+                context_snapshot,
+                slides,
+            )
+            slide_payloads = [self._project_presentation_slide_storage_dict(slide) for slide in visible_slides]
+            self._raise_if_current_job_canceled()
+            self._update_project_presentation_progress(
+                presentation_id,
+                phase_key="assembling_presentation",
+                phase_label="Assembling presentation",
+                detail="Saving the slide text, visuals, share state, and the first viewable version.",
+                percent=72,
+                estimated_seconds_remaining=120,
+            )
+            completed = self.repository.complete_project_presentation(  # type: ignore[attr-defined]
+                presentation_id,
+                visual_code=visual_code,
+                summary_markdown=summary_markdown,
+                slides=slide_payloads,
+                audio_storage_path="",
+                audio_content_type="audio/mpeg",
+            )
+            if completed is None:
+                raise PermanentError("Presentation record disappeared")
+            if completed.status == "canceled":
+                raise JobCanceled(f"Job canceled while saving presentation {presentation_id}")
+            completed = self._project_presentation_with_share_url(completed)
+            logger.info(
+                "Project presentation content completed",
+                extra={
+                    "event": "project.presentation.content_completed",
+                    "presentation_id": presentation_id,
+                    "project_id": project_id,
+                    "slide_count": len(visible_slides),
+                },
+            )
+            self._send_project_presentation_ready_email(
+                user=user,
+                project_name=project_name,
+                presentation=completed,
+            )
+            if any(slide.visual_type == "image" and slide.image_prompt.strip() for slide in slides):
+                self._raise_if_current_job_canceled()
+                self._update_project_presentation_progress(
+                    presentation_id,
+                    phase_key="generating_images",
+                    phase_label="Drawing generated images",
+                    detail="Trying generated research artwork for image-based slides. Code diagrams are already available as fallback.",
+                    percent=78,
+                    estimated_seconds_remaining=120,
+                )
+                visible_slides = self._generate_and_store_project_presentation_slide_images(
+                    api_key=api_key_value,
+                    presentation_id=presentation_id,
+                    slides=slides,
+                )
+                slide_payloads = [
+                    self._project_presentation_slide_storage_dict(slide)
+                    for slide in visible_slides
+                ]
+                completed_with_images = self.repository.complete_project_presentation(  # type: ignore[attr-defined]
+                    presentation_id,
+                    visual_code=visual_code,
+                    summary_markdown=summary_markdown,
+                    slides=slide_payloads,
+                    audio_storage_path="",
+                    audio_content_type="audio/mpeg",
+                )
+                if completed_with_images is not None:
+                    if completed_with_images.status == "canceled":
+                        raise JobCanceled(f"Job canceled while saving presentation images {presentation_id}")
+                    completed = self._project_presentation_with_share_url(completed_with_images)
+            audio_storage_path = ""
+            audio_content_type = "audio/mpeg"
+            elevenlabs_api_key = self._get_elevenlabs_api_key_optional(user)
+            if elevenlabs_api_key:
+                try:
+                    self._raise_if_current_job_canceled()
+                    self._update_project_presentation_progress(
+                        presentation_id,
+                        phase_key="generating_audio",
+                        phase_label="Generating audio walkthrough",
+                        detail="Writing and producing the two-person audio explainer for the presentation.",
+                        percent=88,
+                        estimated_seconds_remaining=120,
+                    )
+                    logger.info(
+                        "Project presentation audio generation started",
+                        extra={
+                            "event": "project.presentation.audio_started",
+                            "presentation_id": presentation_id,
+                            "project_id": project_id,
+                        },
+                    )
+                    audio_storage_path, audio_content_type = self._generate_and_store_project_presentation_audio(
+                        openai_api_key=api_key_value,
+                        elevenlabs_api_key=elevenlabs_api_key,
+                        presentation_id=presentation_id,
+                        context_snapshot=context_snapshot,
+                        summary_markdown=summary_markdown,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Project presentation audio generation failed; continuing without audio",
+                        extra={
+                            "event": "project.presentation.audio_fallback",
+                            "presentation_id": presentation_id,
+                            "project_id": project_id,
+                        },
+                    )
+                else:
+                    completed_with_audio = self.repository.complete_project_presentation(  # type: ignore[attr-defined]
+                        presentation_id,
+                        visual_code=visual_code,
+                        summary_markdown=summary_markdown,
+                        slides=slide_payloads,
+                        audio_storage_path=audio_storage_path,
+                        audio_content_type=audio_content_type,
+                    )
+                    if completed_with_audio is not None:
+                        if completed_with_audio.status == "canceled":
+                            raise JobCanceled(f"Job canceled while saving presentation audio {presentation_id}")
+                        completed = self._project_presentation_with_share_url(completed_with_audio)
+                        logger.info(
+                            "Project presentation audio completed",
+                            extra={
+                                "event": "project.presentation.audio_completed",
+                                "presentation_id": presentation_id,
+                                "project_id": project_id,
+                            },
+                        )
+            self._raise_if_current_job_canceled()
+            progress_complete = self._update_project_presentation_progress(
+                presentation_id,
+                phase_key="complete",
+                phase_label="Presentation ready",
+                detail="The presentation is ready to view and share.",
+                percent=100,
+                estimated_seconds_remaining=0,
+            )
+            if progress_complete is not None:
+                completed = self._project_presentation_with_share_url(progress_complete)
+            return completed
+        except JobCanceled:
+            raise
+        except Exception as exc:
+            self._raise_if_current_job_canceled()
+            self.repository.fail_project_presentation(presentation_id, error=str(exc))  # type: ignore[attr-defined]
+            raise
+
+    def _update_project_presentation_progress(
+        self,
+        presentation_id: str,
+        *,
+        phase_key: str,
+        phase_label: str,
+        detail: str,
+        percent: int,
+        estimated_seconds_remaining: int,
+    ) -> ProjectPresentationResponse | None:
+        updater = getattr(self.repository, "update_project_presentation_progress", None)
+        if updater is None:
+            return None
+        try:
+            return updater(
+                presentation_id,
+                phase_key=phase_key,
+                phase_label=phase_label,
+                detail=detail,
+                percent=percent,
+                estimated_seconds_remaining=estimated_seconds_remaining,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to update project presentation progress",
+                extra={"event": "project.presentation.progress_update_failed", "presentation_id": presentation_id},
+            )
+            return None
+
+    def _project_presentation_prompt(self, context_snapshot: dict[str, Any]) -> Prompt:
+        return Prompt(
+            input=[
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": json.dumps(context_snapshot, ensure_ascii=False, default=str),
+                }
+            ],
+            base_instructions=(
+                "Research presentation designer. First infer the key bullet points from the entire "
+                "project history: all chats, explorations, annotations, explanations, challenges, paper "
+                "comments, cited papers, selected passages, figures, tables, and `code_artifacts` written "
+                "inside the project. Then turn each bullet point into one slide. Return those slides in "
+                "`slides` as the main product. Each bullet point and slide must state exactly one direct "
+                "research fact or conclusion. Use beginner-friendly technical language: define acronyms "
+                "on first mention, prefer common words over jargon, and explain why the result matters; "
+                "no wordplay, no clever titles, no rhetorical questions, and no vague theme labels. "
+                "A short everyday analogy is allowed only in the description when it makes the mechanism "
+                "clearer. Make the slides heavy with research conclusions, evidence, comparisons, caveats, "
+                "and implications. Each slide must have a title and description whose combined length is at "
+                "most 70 words. The title must itself be the fact or conclusion, not a teaser, and should "
+                "usually stay under 16 words. Treat `research_materials` as the "
+                "source of truth for science "
+                "and treat `chat_threads`, `explorations`, `paper_comments`, and `code_artifacts` as clues "
+                "about what the user cared about. Do not write meta commentary about the Paperbase project, "
+                "chat history, number of papers, number of comments, notes, or explorations unless a count "
+                "is itself a scientific result. The presentation must teach the actual research material, "
+                "technical ideas, evidence, code outputs, disagreements, caveats, and implications to an "
+                "external audience. `summary_markdown` is a legacy concise briefing outline of the same "
+                "direct conclusions; write it like research findings, not narrative copy. Before choosing "
+                "visuals, inspect top-level `visual_evidence` and each paper's `visual_data`: "
+                "`metric_values`, `before_after_comparisons`, `table_samples`, `figure_captions`, "
+                "`method_components`, `datasets`, and `cited_claims`. Prefer real extracted chartable "
+                "material over invented structure. Use table rows, captions, metric values, method "
+                "components, datasets, before/after comparisons, and cited claims as the raw material for "
+                "charts and diagrams whenever available. "
+                "slides. `visual_code` is a legacy fallback containing the first code slide visual."
+                "\n\n"
+                "For each slide, choose exactly one visual mode. Use `visual_type: \"code\"` when an "
+                "interactive or data-driven custom visual is better; fill `visual_code` with plain browser "
+                "JavaScript that builds the visual from data arrays, D3 scales, SVG marks, axes, legends, "
+                "and annotations. Use `visual_type: \"image\"` when a generated art image would better explain "
+                "the concept; leave `visual_code` empty and write an `image_prompt` for GPT Image 2. Image "
+                "prompts must ask for an editorial research infographic with on-brand restrained colors, "
+                "minimal readable labels, and no tiny body copy because image models can struggle with exact "
+                "text rendering. Prefer code for charts, quantitative comparisons, precise diagrams, and "
+                "anything with exact text. Use images only for evocative conceptual maps, mechanism scenes, "
+                "or artsy visual metaphors. Image prompts must still specify a clean bounded composition "
+                "with no readable paragraph text and no cropped headline text."
+                "\n\n"
+                "Code visuals must be art-directed infographics that explain the research itself, closer to "
+                "a clean print/editorial research spread, custom editorial data poster, or museum wall "
+                "graphic than a slide. They must be high information density and must directly support the "
+                "slide's stated conclusion with visible chart evidence, comparison, trend, mechanism, or "
+                "evidence map. The left visual is not a title slide: do not repeat the slide title, do not "
+                "place a large headline, and do not put paragraphs on the left. Use only compact chart "
+                "labels, short annotations, legends, axis labels, and one concise conclusion tag of at most "
+                "10 words. Prefer real chart/diagram systems over manually positioned decorative boxes: "
+                "Use D3 for rich data-driven charting with scales, axes, force layouts, timelines, "
+                "annotations, Sankey-like flows, "
+                "scatter/line/bar/slope charts, heatmaps, network layouts, confidence intervals, or "
+                "small-multiple comparisons when useful; React can own controls and state. Every visual "
+                "must include a concise conclusion callout that points at the decisive evidence. Use the "
+                "Paperbase house style: warm paper background (#f7f2ea), black ink rules (#1b1611 at low "
+                "opacity), terracotta #99582A for the main emphasis, muted blue #3F6685 for secondary data, "
+                "dense but calm labels, crisp 4px radii, thin black rules, strong typography, and no generic "
+                "dashboard chrome. Do not use decorative blobs/waves unless the shape encodes data. Keep all left-side text small: chart labels "
+                "should usually be 10-14px, annotations 12-16px, and no SVG/HTML text may exceed 22px "
+                "unless it is a single numeric data value. Avoid oversized typographic posters, decorative "
+                "waves, decorative blobs, and abstract background art as the main visual. The visual must fill 100% width and 100% "
+                "height of the iframe and must fit inside the iframe viewport without body/page scrolling, "
+                "clipping, or overlap. Use responsive measurements from the provided "
+                "`paperbasePresentation.size()` / `paperbasePresentation.onResize(callback)` helper, "
+                "ResizeObserver, SVG viewBox, or window dimensions so charts re-render when the project "
+                "sidebar opens or closes; never rely on fixed oversized canvases, fixed pixel-only layouts, "
+                "manually hard-coded node grids, min-h-screen/min-w-screen, wide CSS grids, or off-canvas "
+                "columns. Keep every SVG mark and label inside a padded safe area; reserve at least 28px "
+                "inside every iframe edge. Keep text to short labels and tooltips: no large paragraphs, "
+                "no text blocks over 10 words, and all labels must be clamped, wrapped, or abbreviated inside the "
+                "visible bounds. Avoid decorative cards, spreadsheet-like matrices of boxes as the main "
+                "visual, filler copy, marketing layout, and generic dashboard UI. If interaction helps, add "
+                "hover/click states to reveal details, switch concepts, or focus evidence points. The visual "
+                "code must run inside a browser iframe where React, ReactDOM, d3, and Tailwind are available "
+                "as globals. Do not use JSX, imports, external network calls, or markdown inside visual "
+                "code. Render into document.getElementById('root')."
+            ),
+            tools=[],
+            tool_choice=None,
+            parallel_tool_calls=False,
+            text_format=_PROJECT_PRESENTATION_TEXT_FORMAT,
+        )
+
+    def _assistant_response_text(self, response: ResponseEnvelope) -> str:
+        return "\n".join(
+            item.content_text
+            for item in response.items
+            if item.item_type in {"message", "assistant_message"}
+            and item.role in {"", "assistant"}
+            and item.content_text
+        ).strip()
+
+    def _parse_project_presentation_payload(self, text: str) -> dict[str, Any]:
+        payload_text = text.strip()
+        if payload_text.startswith("```"):
+            payload_text = re.sub(r"^```(?:json)?\s*", "", payload_text, flags=re.IGNORECASE)
+            payload_text = re.sub(r"\s*```$", "", payload_text).strip()
+        try:
+            payload = json.loads(payload_text)
+        except json.JSONDecodeError:
+            start = payload_text.find("{")
+            end = payload_text.rfind("}")
+            if start < 0 or end <= start:
+                raise PermanentError("Presentation model did not return JSON")
+            payload = json.loads(payload_text[start : end + 1])
+        if not isinstance(payload, dict):
+            raise PermanentError("Presentation model returned an invalid payload")
+        return payload
+
+    def _normalize_project_presentation_slides(
+        self,
+        payload: dict[str, Any],
+        context_snapshot: dict[str, Any],
+    ) -> list[ProjectPresentationSlideResponse]:
+        raw_slides = payload.get("slides")
+        slides: list[ProjectPresentationSlideResponse] = []
+        if isinstance(raw_slides, list):
+            image_slide_count = 0
+            used_ids: set[str] = set()
+            for index, raw_slide in enumerate(raw_slides[:_PROJECT_PRESENTATION_MAX_SLIDES]):
+                if not isinstance(raw_slide, dict):
+                    continue
+                title = self._truncate_text(str(raw_slide.get("title") or f"Slide {index + 1}"), 140)
+                description = self._truncate_slide_words(title, str(raw_slide.get("description") or ""))
+                slide_id = self._project_presentation_slide_id(
+                    str(raw_slide.get("slide_id") or title or f"slide-{index + 1}"),
+                    index=index,
+                    used_ids=used_ids,
+                )
+                visual_type = str(raw_slide.get("visual_type") or "code").strip().lower()
+                visual_code = str(raw_slide.get("visual_code") or "").strip()
+                image_prompt = str(raw_slide.get("image_prompt") or "").strip()
+                if visual_type == "image" and image_prompt and image_slide_count < _PROJECT_PRESENTATION_MAX_IMAGE_SLIDES:
+                    image_slide_count += 1
+                    slides.append(
+                        ProjectPresentationSlideResponse(
+                            slide_id=slide_id,
+                            title=title,
+                            description=description,
+                            visual_type="image",
+                            visual_code="",
+                            image_prompt=self._truncate_text(image_prompt, 2000),
+                        )
+                    )
+                    continue
+                if not visual_code:
+                    visual_code = self._default_project_presentation_slide_visual(
+                        context_snapshot,
+                        title=title,
+                        description=description,
+                        index=index,
+                    )
+                slides.append(
+                    ProjectPresentationSlideResponse(
+                        slide_id=slide_id,
+                        title=title,
+                        description=description,
+                        visual_type="code",
+                        visual_code=visual_code,
+                        image_prompt="",
+                    )
+                )
+        if slides:
+            return slides
+        return self._default_project_presentation_slides(context_snapshot)
+
+    def _project_presentation_slides_with_image_fallbacks(
+        self,
+        context_snapshot: dict[str, Any],
+        slides: list[ProjectPresentationSlideResponse],
+    ) -> list[ProjectPresentationSlideResponse]:
+        visible: list[ProjectPresentationSlideResponse] = []
+        for index, slide in enumerate(slides):
+            if slide.visual_type == "image" and slide.image_prompt.strip():
+                visible.append(
+                    slide.model_copy(
+                        update={
+                            "visual_type": "code",
+                            "visual_code": self._default_project_presentation_slide_visual(
+                                context_snapshot,
+                                title=slide.title,
+                                description=slide.description,
+                                index=index,
+                            ),
+                            "image_storage_path": "",
+                        }
+                    )
+                )
+                continue
+            visible.append(slide)
+        return visible
+
+    def _truncate_slide_words(self, title: str, description: str) -> str:
+        title_words = re.findall(r"\S+", title)
+        description_words = re.findall(r"\S+", description)
+        available = max(8, 80 - len(title_words))
+        if len(description_words) <= available:
+            return self._truncate_text(description, 520)
+        return " ".join(description_words[:available]).rstrip(".,;:") + "..."
+
+    def _project_presentation_slide_id(self, value: str, *, index: int, used_ids: set[str]) -> str:
+        base = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")[:48] or f"slide-{index + 1}"
+        slide_id = base
+        suffix = 2
+        while slide_id in used_ids:
+            slide_id = f"{base}-{suffix}"
+            suffix += 1
+        used_ids.add(slide_id)
+        return slide_id
+
+    def _project_presentation_summary_from_slides(
+        self,
+        context_snapshot: dict[str, Any],
+        slides: list[ProjectPresentationSlideResponse],
+    ) -> str:
+        if not slides:
+            return self._default_project_presentation_summary(context_snapshot)
+        project = context_snapshot.get("project", {}) if isinstance(context_snapshot.get("project"), dict) else {}
+        project_name = str(project.get("name") or "Project")
+        lines = [f"# {project_name}", "", "## Presentation Outline", ""]
+        for slide in slides:
+            lines.append(f"- **{slide.title}:** {slide.description}")
+        return "\n".join(lines).strip() + "\n"
+
+    def _project_presentation_visual_from_slides(
+        self,
+        context_snapshot: dict[str, Any],
+        slides: list[ProjectPresentationSlideResponse],
+    ) -> str:
+        for slide in slides:
+            if slide.visual_type == "code" and slide.visual_code.strip():
+                return slide.visual_code
+        if slides:
+            return self._default_project_presentation_slide_visual(
+                context_snapshot,
+                title=slides[0].title,
+                description=slides[0].description,
+                index=0,
+            )
+        return self._default_project_presentation_visual(context_snapshot)
+
+    def _default_project_presentation_slides(
+        self,
+        context_snapshot: dict[str, Any],
+    ) -> list[ProjectPresentationSlideResponse]:
+        project = context_snapshot.get("project", {}) if isinstance(context_snapshot.get("project"), dict) else {}
+        project_name = str(project.get("name") or "Project")
+        materials = [
+            material
+            for material in list(context_snapshot.get("research_materials", []))
+            if isinstance(material, dict)
+        ]
+        if not materials:
+            description = (
+                "Add explored papers, annotations, comments, chats, or code artifacts, then regenerate "
+                "to create a research presentation."
+            )
+            return [
+                ProjectPresentationSlideResponse(
+                    slide_id="empty-research-map",
+                    title=project_name,
+                    description=description,
+                    visual_type="code",
+                    visual_code=self._default_project_presentation_slide_visual(
+                        context_snapshot,
+                        title=project_name,
+                        description=description,
+                        index=0,
+                    ),
+                    image_prompt="",
+                )
+            ]
+        slides: list[ProjectPresentationSlideResponse] = []
+        used_ids: set[str] = set()
+        for index, material in enumerate(materials[:_PROJECT_PRESENTATION_MAX_SLIDES]):
+            title = self._truncate_text(str(material.get("title") or f"Research point {index + 1}"), 120)
+            description = self._truncate_slide_words(title, self._project_presentation_material_blurb(material))
+            slide_id = self._project_presentation_slide_id(title, index=index, used_ids=used_ids)
+            slides.append(
+                ProjectPresentationSlideResponse(
+                    slide_id=slide_id,
+                    title=title,
+                    description=description,
+                    visual_type="code",
+                    visual_code=self._default_project_presentation_slide_visual(
+                        context_snapshot,
+                        title=title,
+                        description=description,
+                        index=index,
+                    ),
+                    image_prompt="",
+                )
+            )
+        return slides
+
+    def _generate_and_store_project_presentation_slide_images(
+        self,
+        *,
+        api_key: str,
+        presentation_id: str,
+        slides: list[ProjectPresentationSlideResponse],
+    ) -> list[ProjectPresentationSlideResponse]:
+        updated: list[ProjectPresentationSlideResponse] = []
+        for index, slide in enumerate(slides):
+            if slide.visual_type != "image" or not slide.image_prompt.strip():
+                updated.append(slide)
+                continue
+            self._raise_if_current_job_canceled()
+            try:
+                logger.info(
+                    "Project presentation image generation started",
+                    extra={
+                        "event": "project.presentation.image_started",
+                        "presentation_id": presentation_id,
+                        "slide_id": slide.slide_id,
+                    },
+                )
+                image = self._request_openai_presentation_image(api_key=api_key, prompt=slide.image_prompt)
+                self._raise_if_current_job_canceled()
+                storage_path = f"project-presentations/{presentation_id}/slides/{slide.slide_id}.png"
+                self.object_store.put_bytes(storage_path, image, content_type="image/png")
+                updated.append(slide.model_copy(update={"image_storage_path": storage_path}))
+                logger.info(
+                    "Project presentation image generation completed",
+                    extra={
+                        "event": "project.presentation.image_completed",
+                        "presentation_id": presentation_id,
+                        "slide_id": slide.slide_id,
+                    },
+                )
+            except JobCanceled:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "Project presentation image generation failed; falling back to code visual",
+                    extra={
+                        "event": "project.presentation.image_fallback",
+                        "presentation_id": presentation_id,
+                        "slide_id": slide.slide_id,
+                        "error": str(exc),
+                    },
+                )
+                updated.append(
+                    slide.model_copy(
+                        update={
+                            "visual_type": "code",
+                            "visual_code": self._default_project_presentation_slide_visual(
+                                {},
+                                title=slide.title,
+                                description=slide.description,
+                                index=index,
+                            ),
+                            "image_prompt": "",
+                            "image_storage_path": "",
+                        }
+                    )
+                )
+        return updated
+
+    def _request_openai_presentation_image(self, *, api_key: str, prompt: str) -> bytes:
+        response = requests.post(
+            f"{self.settings.openai_base_url.rstrip('/')}/v1/images/generations",
+            headers={
+                "authorization": f"Bearer {api_key}",
+                "content-type": "application/json",
+            },
+            json={
+                "model": _PROJECT_PRESENTATION_IMAGE_MODEL,
+                "prompt": prompt,
+                "size": "1536x1024",
+                "quality": "medium",
+            },
+            timeout=_PROJECT_PRESENTATION_IMAGE_TIMEOUT_SECONDS,
+        )
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            detail = self._truncate_text(response.text, 600)
+            raise requests.HTTPError(f"{exc}. OpenAI image generation error: {detail}", response=response) from exc
+        payload = response.json()
+        data = payload.get("data") if isinstance(payload, dict) else None
+        first = data[0] if isinstance(data, list) and data and isinstance(data[0], dict) else {}
+        image_base64 = str(first.get("b64_json") or "")
+        if not image_base64:
+            raise PermanentError("OpenAI image response did not include b64_json")
+        return base64.b64decode(image_base64)
+
+    def _generate_and_store_project_presentation_audio(
+        self,
+        *,
+        openai_api_key: str,
+        elevenlabs_api_key: str,
+        presentation_id: str,
+        context_snapshot: dict[str, Any],
+        summary_markdown: str,
+    ) -> tuple[str, str]:
+        script_turns = self._generate_project_presentation_audio_script(
+            api_key=openai_api_key,
+            context_snapshot=context_snapshot,
+            summary_markdown=summary_markdown,
+        )
+        audio_segments: list[bytes] = []
+        for segment in self._project_presentation_audio_segments(script_turns):
+            self._raise_if_current_job_canceled()
+            segment_audio = self._request_elevenlabs_tts(
+                api_key=elevenlabs_api_key,
+                voice_id=segment["voice_id"],
+                text=segment["text"],
+            )
+            self._raise_if_current_job_canceled()
+            audio_segments.append(segment_audio)
+        if not audio_segments:
+            raise PermanentError("Presentation audio script was empty")
+        audio = self._stitch_audio_segments(audio_segments)
+        storage_path = f"project-presentations/{presentation_id}/audio/presentation.mp3"
+        self.object_store.put_bytes(storage_path, audio, content_type="audio/mpeg")
+        return storage_path, "audio/mpeg"
+
+    def _generate_project_presentation_audio_script(
+        self,
+        *,
+        api_key: str,
+        context_snapshot: dict[str, Any],
+        summary_markdown: str,
+    ) -> list[dict[str, str]]:
+        prompt = Prompt(
+            input=[
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "presentation_summary_markdown": summary_markdown,
+                            "project_context": context_snapshot,
+                        },
+                        ensure_ascii=False,
+                        default=str,
+                    ),
+                }
+            ],
+            base_instructions=(
+                "Project presentation audio script writer. Write a `turns` array. Each turn must "
+                "have `speaker` equal to `noob` or `expert`, and `text` as natural spoken dialogue. "
+                "Write a 5 to 10 minute two-person explainer about the research substance and visual "
+                "story in the presentation. Make it ELI5: start with a warm intro that assumes the "
+                "listener knows nothing, explain from first principles before the main topics, then "
+                "build toward the specific research conclusions. Add excitement, vivid analogies, "
+                "concrete everyday examples, and clear transitions so it feels like a real podcast. "
+                "The noob should ask naive questions without pretending to understand. The industry "
+                "expert should answer simply first, then add the research nuance, evidence, "
+                "comparisons, caveats, and implications. End with a short podcast-style reference "
+                "segment that names specific authors and paper titles when available, using lines like "
+                "`In another paper by X, they argue...` or `In the paper titled Y, the authors show...`. "
+                "Do not make the app workflow, chat history, number of papers, comments, notes, or "
+                "explorations the topic. Mention user interactions only when they point to a substantive "
+                "research question. Do not include stage directions, markdown, or speaker labels inside "
+                "`text`. Keep each turn concise enough for text-to-speech."
+            ),
+            tools=[],
+            tool_choice=None,
+            parallel_tool_calls=False,
+            text_format=_PROJECT_PRESENTATION_AUDIO_TEXT_FORMAT,
+        )
+        response = self._chat_model_create_response(api_key=api_key, prompt=prompt)
+        payload = self._parse_project_presentation_payload(self._assistant_response_text(response))
+        raw_turns = payload.get("turns") or payload.get("dialogue") or []
+        turns: list[dict[str, str]] = []
+        if isinstance(raw_turns, list):
+            for raw_turn in raw_turns:
+                if not isinstance(raw_turn, dict):
+                    continue
+                speaker = str(raw_turn.get("speaker") or "").strip().lower()
+                if speaker not in {"noob", "expert"}:
+                    speaker = "expert"
+                text = str(raw_turn.get("text") or raw_turn.get("line") or "").strip()
+                if text:
+                    turns.append({"speaker": speaker, "text": text})
+        if turns:
+            return turns
+        return [
+            {
+                "speaker": "noob",
+                "text": (
+                    "I am completely new to this. Can we start with the basics, like what problem "
+                    "this research is trying to solve and why it is exciting?"
+                ),
+            },
+            {
+                "speaker": "expert",
+                "text": (
+                    "Absolutely. Think of this research area like a map for understanding a hard "
+                    "problem step by step. We will start simple, build up the main ideas, and then "
+                    "connect them back to the papers and authors behind the work. "
+                    f"{self._plain_text_excerpt(summary_markdown, max_chars=3600)}"
+                ),
+            },
+        ]
+
+    def _project_presentation_audio_segments(self, turns: list[dict[str, str]]) -> list[dict[str, str]]:
+        voices = {
+            "noob": "21m00Tcm4TlvDq8ikWAM",
+            "expert": "ErXwobaYiN019PkySvjV",
+        }
+        segments: list[dict[str, str]] = []
+        for turn in turns:
+            speaker = turn.get("speaker", "expert")
+            voice_id = voices.get(speaker, voices["expert"])
+            for text in self._split_tts_text(turn.get("text", ""), max_chars=4500):
+                segments.append({"speaker": speaker, "voice_id": voice_id, "text": text})
+        return segments
+
+    def _split_tts_text(self, text: str, *, max_chars: int) -> list[str]:
+        normalized = re.sub(r"\s+", " ", text).strip()
+        if not normalized:
+            return []
+        if len(normalized) <= max_chars:
+            return [normalized]
+        pieces = re.split(r"(?<=[.!?])\s+", normalized)
+        chunks: list[str] = []
+        current = ""
+        for piece in pieces:
+            if not piece:
+                continue
+            if len(piece) > max_chars:
+                if current:
+                    chunks.append(current)
+                    current = ""
+                chunks.extend(piece[index : index + max_chars] for index in range(0, len(piece), max_chars))
+                continue
+            candidate = f"{current} {piece}".strip()
+            if len(candidate) <= max_chars:
+                current = candidate
+            else:
+                if current:
+                    chunks.append(current)
+                current = piece
+        if current:
+            chunks.append(current)
+        return chunks
+
+    def _request_elevenlabs_tts(self, *, api_key: str, voice_id: str, text: str) -> bytes:
+        payload = {
+            "text": text,
+            "model_id": "eleven_flash_v2_5",
+            "voice_settings": {
+                "stability": 0.56,
+                "similarity_boost": 0.78,
+                "style": 0.12,
+                "use_speaker_boost": True,
+            },
+        }
+        request = urllib_request.Request(
+            f"https://api.elevenlabs.io/v1/text-to-speech/{quote(voice_id, safe='')}"
+            "?output_format=mp3_44100_128",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Accept": "audio/mpeg",
+                "Content-Type": "application/json",
+                "xi-api-key": api_key,
+            },
+            method="POST",
+        )
+        try:
+            with urllib_request.urlopen(request, timeout=_PROJECT_PRESENTATION_TTS_TIMEOUT_SECONDS) as response:
+                data = response.read()
+        except urllib_error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:500]
+            raise RuntimeError(f"ElevenLabs audio generation failed ({exc.code}): {detail}") from exc
+        except urllib_error.URLError as exc:
+            raise RuntimeError(f"ElevenLabs audio generation failed: {exc.reason}") from exc
+        if not data:
+            raise RuntimeError("ElevenLabs audio generation returned empty audio")
+        return data
+
+    def _stitch_audio_segments(self, segments: list[bytes]) -> bytes:
+        if len(segments) == 1:
+            return segments[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            manifest_lines: list[str] = []
+            for index, segment in enumerate(segments):
+                segment_path = tmp_path / f"segment_{index:04d}.mp3"
+                segment_path.write_bytes(segment)
+                manifest_lines.append(f"file '{segment_path.name}'")
+            manifest_path = tmp_path / "segments.txt"
+            manifest_path.write_text("\n".join(manifest_lines), encoding="utf-8")
+            output_path = tmp_path / "presentation.mp3"
+            try:
+                subprocess.run(
+                    [
+                        "ffmpeg",
+                        "-hide_banner",
+                        "-loglevel",
+                        "error",
+                        "-y",
+                        "-f",
+                        "concat",
+                        "-safe",
+                        "0",
+                        "-i",
+                        str(manifest_path),
+                        "-c",
+                        "copy",
+                        str(output_path),
+                    ],
+                    cwd=tmp_path,
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                return output_path.read_bytes()
+            except (OSError, subprocess.CalledProcessError):
+                logger.exception(
+                    "Falling back to direct MP3 concatenation for project presentation audio",
+                    extra={"event": "project.presentation.audio_stitch_fallback"},
+                )
+                return b"".join(segments)
+
+    def _plain_text_excerpt(self, text: str, *, max_chars: int) -> str:
+        plain = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
+        plain = re.sub(r"[#*_`>|\\-]+", " ", plain)
+        plain = re.sub(r"\s+", " ", plain).strip()
+        return plain[:max_chars].strip()
+
+    def _default_project_presentation_summary(self, context_snapshot: dict[str, Any]) -> str:
+        project = context_snapshot.get("project", {}) if isinstance(context_snapshot.get("project"), dict) else {}
+        materials = [
+            material
+            for material in list(context_snapshot.get("research_materials", []))
+            if isinstance(material, dict)
+        ]
+        project_name = str(project.get("name") or "Project")
+        if not materials:
+            return (
+                f"# {project_name}\n\n"
+                "## Research Thesis\n\n"
+                "The available material does not include enough paper text, selected passages, or notes "
+                "to infer a defensible research thesis yet.\n\n"
+                "## Core Material\n\n"
+                "Add explored papers with abstracts, selected passages, figure captions, table excerpts, "
+                "or research notes, then regenerate the presentation.\n"
+            )
+        primary = materials[0]
+        thesis = self._project_presentation_material_blurb(primary)
+        if not thesis:
+            thesis = "The available research material points to a focused topic, but needs a clearer extracted claim."
+        concept_lines: list[str] = []
+        evidence_lines: list[str] = []
+        for material in materials[:5]:
+            title = self._truncate_text(str(material.get("title") or material.get("paper_id") or "Research item"), 120)
+            blurb = self._project_presentation_material_blurb(material)
+            if blurb:
+                concept_lines.append(f"- **{title}:** {blurb}")
+            for passage in list(material.get("selected_passages") or [])[:2]:
+                if not isinstance(passage, dict):
+                    continue
+                selected = self._truncate_text(str(passage.get("selected_text") or passage.get("nearby_text") or ""), 220)
+                note = self._truncate_text(str(passage.get("note") or ""), 160)
+                if selected:
+                    evidence_lines.append(f"- **{title}:** {selected}" + (f" _Note: {note}_" if note else ""))
+            for figure in list(material.get("figures") or [])[:1]:
+                if isinstance(figure, dict) and figure.get("caption"):
+                    evidence_lines.append(
+                        f"- **{title} figure:** {self._truncate_text(str(figure.get('caption') or ''), 220)}"
+                    )
+            for table in list(material.get("tables") or [])[:1]:
+                if isinstance(table, dict) and table.get("caption"):
+                    evidence_lines.append(
+                        f"- **{title} table:** {self._truncate_text(str(table.get('caption') or ''), 220)}"
+                    )
+        concept_text = "\n".join(concept_lines) or "- The research material needs stronger extracted concepts."
+        evidence_text = "\n".join(evidence_lines[:8]) or "- No specific passages, figures, or tables were available."
+        return (
+            f"# {project_name}\n\n"
+            "## Research Thesis\n\n"
+            f"{thesis}\n\n"
+            "## Core Concepts\n\n"
+            f"{concept_text}\n\n"
+            "## Evidence To Present\n\n"
+            f"{evidence_text}\n\n"
+            "## Caveats\n\n"
+            "This fallback briefing uses only the extracted paper metadata and saved excerpts. Regenerate "
+            "with more selected passages or indexed paper artifacts for a more complete research narrative.\n"
+        )
+
+    def _project_presentation_material_blurb(self, material: dict[str, Any]) -> str:
+        for key in ("summary_short", "tldr", "abstract"):
+            value = self._truncate_text(str(material.get(key) or ""), 360)
+            if value:
+                return value
+        for passage in list(material.get("selected_passages") or []):
+            if not isinstance(passage, dict):
+                continue
+            value = self._truncate_text(str(passage.get("selected_text") or passage.get("nearby_text") or ""), 280)
+            if value:
+                return value
+        for note in list(material.get("user_notes") or []):
+            value = self._truncate_text(str(note), 280)
+            if value:
+                return value
+        return ""
+
+    def _default_project_presentation_slide_visual(
+        self,
+        context_snapshot: dict[str, Any],
+        *,
+        title: str,
+        description: str,
+        index: int,
+    ) -> str:
+        project = context_snapshot.get("project", {}) if isinstance(context_snapshot.get("project"), dict) else {}
+        project_name = str(project.get("name") or "Project")
+        safe_data = json.dumps(
+            {
+                "projectName": project_name,
+                "title": self._truncate_text(title, 160),
+                "description": self._truncate_text(description, 520),
+                "index": index,
+            },
+            ensure_ascii=False,
+        )
+        return (
+            "const root=document.getElementById('root');"
+            f"const data={safe_data};"
+            """
+const e=React.createElement;
+const palette=['#99582A','#1e7ce8','#57b8a6','#d9a441'];
+const accent=palette[Math.abs(data.index||0)%palette.length];
+const ink='#1b1611';
+const muted='#6f655b';
+const paper='#f7f2ea';
+const stop=new Set('the and for with from into that this when then using use are can will each over under through across about into rather than because where there their they them its our your project paper study research framework model agent agents'.split(' '));
+function clean(value){return String(value||'').replace(/\\s+/g,' ').trim();}
+function words(value){
+  return clean(value).toLowerCase().replace(/[^a-z0-9@.+ -]/g,' ').split(/\\s+/)
+    .filter((word)=>word.length>2&&!stop.has(word)).slice(0,8);
+}
+function wrap(value,maxChars,maxLines){
+  const out=[]; let line='';
+  for(const word of clean(value).split(/\\s+/)){
+    const next=line?line+' '+word:word;
+    if(next.length>maxChars&&line){out.push(line); line=word;} else {line=next;}
+    if(out.length===maxLines) break;
+  }
+  if(out.length<maxLines&&line) out.push(line);
+  return out.slice(0,maxLines);
+}
+function App(){
+  const [size,setSize]=React.useState(paperbasePresentation.size());
+  React.useEffect(()=>paperbasePresentation.onResize(setSize),[]);
+  const terms=words(data.title+' '+data.description);
+  while(terms.length<6){terms.push(['evidence','method','comparison','result','caveat','impact'][terms.length]);}
+  const nodes=terms.slice(0,6).map((term,index)=>({
+    term,
+    x:150+(index%3)*310,
+    y:190+Math.floor(index/3)*190+((index+data.index)%2)*22,
+    r:22+(term.length%5)*3,
+  }));
+  const path=d3.line().curve(d3.curveCatmullRom.alpha(.45)).x((point)=>point.x).y((point)=>point.y)(nodes);
+  const bars=terms.slice(0,4).map((term,index)=>({term,value:42+((term.length*13+index*17+data.index*11)%46)}));
+  const titleLines=wrap(data.title,42,2);
+  const descLines=wrap(data.description,56,2);
+  const vw=1000, vh=760;
+  return e('div',{style:{width:'100%',height:'100%',overflow:'hidden',background:paper,color:ink,fontFamily:'Inter, ui-sans-serif, system-ui'}},
+    e('svg',{viewBox:'0 0 '+vw+' '+vh,preserveAspectRatio:'xMidYMid meet',style:{display:'block',width:'100%',height:'100%',overflow:'hidden'}},
+      e('defs',null,
+        e('linearGradient',{id:'wash',x1:'0',x2:'1',y1:'0',y2:'1'},
+          e('stop',{offset:'0%',stopColor:accent,stopOpacity:.16}),
+          e('stop',{offset:'100%',stopColor:'#ffffff',stopOpacity:.02})),
+        e('filter',{id:'soft'},e('feGaussianBlur',{stdDeviation:18}))
+      ),
+      e('rect',{width:vw,height:vh,fill:paper}),
+      Array.from({length:9}).map((_,index)=>e('line',{key:'v'+index,x1:80+index*105,x2:80+index*105,y1:72,y2:688,stroke:'#1b1611',strokeOpacity:.045})),
+      Array.from({length:6}).map((_,index)=>e('line',{key:'h'+index,x1:64,x2:936,y1:112+index*96,y2:112+index*96,stroke:'#1b1611',strokeOpacity:.055})),
+      e('circle',{cx:815,cy:164,r:150,fill:'url(#wash)',filter:'url(#soft)'}),
+      e('text',{x:64,y:72,fontSize:11,fontWeight:760,letterSpacing:3,fill:accent},'RESEARCH VISUAL'),
+      e('text',{x:64,y:96,fontSize:10,letterSpacing:1.8,fill:muted},clean(data.projectName).slice(0,38)),
+      e('path',{d:path,fill:'none',stroke:accent,strokeWidth:4.5,strokeLinecap:'round',strokeLinejoin:'round'}),
+      nodes.map((node,index)=>e('g',{key:node.term,transform:'translate('+node.x+' '+node.y+')'},
+        e('circle',{r:node.r+12,fill:accent,fillOpacity:.08}),
+        e('circle',{r:node.r,fill:paper,stroke:accent,strokeWidth:2.4}),
+        e('text',{y:5,textAnchor:'middle',fontSize:11,fontWeight:720,fill:ink},node.term.slice(0,14)),
+        e('text',{y:node.r+27,textAnchor:'middle',fontSize:9,fill:muted},index<3?'evidence':'implication')
+      )),
+      e('g',{transform:'translate(640 438)'},
+        e('text',{x:0,y:0,fontSize:11,fontWeight:760,letterSpacing:2,fill:accent},'SIGNAL STRENGTH'),
+        bars.map((bar,index)=>e('g',{key:bar.term,transform:'translate(0 '+(28+index*42)+')'},
+          e('text',{x:0,y:12,fontSize:10,fill:muted},bar.term.slice(0,16)),
+          e('rect',{x:118,y:2,width:184,height:12,rx:4,fill:'#1b1611',fillOpacity:.08}),
+          e('rect',{x:118,y:2,width:Math.max(28,bar.value*2),height:12,rx:4,fill:index%2?accent:'#1e7ce8',fillOpacity:.82}),
+          e('text',{x:318,y:12,fontSize:10,fontWeight:700,fill:ink},String(bar.value))
+        ))
+      ),
+      e('g',{transform:'translate(64 584)'},
+        e('line',{x1:0,x2:360,y1:0,y2:0,stroke:ink,strokeOpacity:.28}),
+        e('text',{x:0,y:28,fontSize:10,fontWeight:760,letterSpacing:2,fill:accent},'CONCLUSION'),
+        titleLines.map((line,index)=>e('text',{key:'title'+index,x:0,y:58+index*24,fontSize:18,fontWeight:720,fill:ink},line)),
+        descLines.map((line,index)=>e('text',{key:'desc'+index,x:0,y:116+index*18,fontSize:12,fill:muted},line))
+      ),
+      e('text',{x:936,y:704,textAnchor:'end',fontSize:10,fill:muted},'bounded responsive SVG')
+    )
+  );
+}
+ReactDOM.createRoot(root).render(e(App));
+"""
+        )
+
+    def _default_project_presentation_visual(self, context_snapshot: dict[str, Any]) -> str:
+        project = context_snapshot.get("project", {}) if isinstance(context_snapshot.get("project"), dict) else {}
+        project_name = str(project.get("name") or "Project")
+        materials = [
+            material
+            for material in list(context_snapshot.get("research_materials", []))
+            if isinstance(material, dict)
+        ]
+        visual_materials = []
+        for material in materials[:5]:
+            evidence = []
+            for passage in list(material.get("selected_passages") or [])[:2]:
+                if isinstance(passage, dict):
+                    text = self._truncate_text(str(passage.get("selected_text") or passage.get("nearby_text") or ""), 160)
+                    if text:
+                        evidence.append(text)
+            for figure in list(material.get("figures") or [])[:1]:
+                if isinstance(figure, dict) and figure.get("caption"):
+                    evidence.append(self._truncate_text(str(figure.get("caption") or ""), 160))
+            visual_materials.append(
+                {
+                    "title": self._truncate_text(
+                        str(material.get("title") or material.get("paper_id") or "Research item"),
+                        80,
+                    ),
+                    "subtitle": self._truncate_text(
+                        str(material.get("primary_category") or material.get("published") or "Research material"),
+                        80,
+                    ),
+                    "summary": self._project_presentation_material_blurb(material),
+                    "evidence": evidence[:3],
+                }
+            )
+        safe_data = json.dumps({"projectName": project_name, "materials": visual_materials})
+        return (
+            "const root = document.getElementById('root');"
+            f"const data = {safe_data};"
+            "const {useState} = React;"
+            "function short(value,max){value=String(value||'');return value.length>max?value.slice(0,max-1)+'...':value;}"
+            "function pick(value,fallback){return String(value||fallback||'').trim();}"
+            "function App(){"
+            "const fallback={title:data.projectName,subtitle:'Research field',summary:'Add paper abstracts, selected passages, figures, or table excerpts, then regenerate for a richer research visualization.',evidence:[]};"
+            "const materials=(data.materials&&data.materials.length?data.materials:[fallback]);"
+            "const [active,setActive]=useState(0);"
+            "const current=materials[Math.min(active,materials.length-1)]||fallback;"
+            "const palette=['#e85d4f','#57b8a6','#f0b94f','#4f77c8','#99582a','#6b5dd3'];"
+            "const angle=d3.scaleLinear().domain([0,Math.max(materials.length-1,1)]).range([-124,124]);"
+            "const marks=materials.map((material,index)=>{const a=angle(index)*Math.PI/180;const r=190+(index%2)*48;return {material,index,x:500+Math.cos(a)*r,y:398+Math.sin(a)*r,color:palette[index%palette.length]};});"
+            "return React.createElement('div',{className:'h-full w-full overflow-hidden bg-[#15120f] p-3 text-[#1b1611]'},"
+            "React.createElement('main',{className:'relative h-full w-full overflow-hidden bg-[#fbf7ed]'},"
+            "React.createElement('svg',{className:'absolute inset-0 h-full w-full',viewBox:'0 0 1000 760',preserveAspectRatio:'none'},"
+            "React.createElement('defs',null,"
+            "React.createElement('linearGradient',{id:'wash',x1:'0%',x2:'100%',y1:'0%',y2:'100%'},React.createElement('stop',{offset:'0%',stopColor:'#fffaf0'}),React.createElement('stop',{offset:'100%',stopColor:'#ece3d4'}))),"
+            "React.createElement('rect',{x:0,y:0,width:1000,height:760,fill:'url(#wash)'}),"
+            "React.createElement('path',{d:'M72 582 C220 456 278 164 486 222 C696 282 702 520 928 394',fill:'none',stroke:'#1b1611',strokeOpacity:.14,strokeWidth:38,strokeLinecap:'round'}),"
+            "React.createElement('path',{d:'M80 612 C260 500 320 214 518 256 C704 296 736 554 936 420',fill:'none',stroke:'#57b8a6',strokeOpacity:.45,strokeWidth:6,strokeLinecap:'round'}),"
+            "React.createElement('circle',{cx:500,cy:398,r:108,fill:'#1b1611',fillOpacity:.05,stroke:'#1b1611',strokeOpacity:.22,strokeWidth:1}),"
+            "React.createElement('circle',{cx:500,cy:398,r:16,fill:'#1b1611'}),"
+            "marks.map(mark=>React.createElement('g',{key:mark.index,onMouseEnter:()=>setActive(mark.index),onClick:()=>setActive(mark.index),style:{cursor:'pointer'}},"
+            "React.createElement('line',{x1:500,y1:398,x2:mark.x,y2:mark.y,stroke:mark.color,strokeOpacity:mark.index===active ? .9 : .32,strokeWidth:mark.index===active ? 4 : 2}),"
+            "React.createElement('circle',{cx:mark.x,cy:mark.y,r:mark.index===active ? 34 : 25,fill:mark.color,fillOpacity:mark.index===active ? .96 : .74,stroke:'#1b1611',strokeWidth:1}),"
+            "React.createElement('circle',{cx:mark.x,cy:mark.y,r:7,fill:'#fbf7ed'}),"
+            "React.createElement('text',{x:mark.x,y:mark.y+52,textAnchor:'middle',fontSize:14,fontWeight:700,fill:'#1b1611'},short(mark.material.title,28))))),"
+            "React.createElement('section',{className:'absolute left-6 top-6',style:{width:'min(390px,44%)'}},"
+            "React.createElement('p',{className:'mb-2 text-[11px] font-bold uppercase tracking-[0.18em] text-[#99582a]'},'Research field map'),"
+            "React.createElement('h1',{className:'m-0 text-[clamp(24px,4.2vw,44px)] font-semibold leading-[0.95] tracking-normal'},short(data.projectName,72))),"
+            "React.createElement('aside',{className:'absolute bottom-5 left-6 max-h-[30%] overflow-auto border-t border-[#1b1611] pt-3 pr-3 text-[12px] leading-5',style:{width:'min(430px,48%)'}},"
+            "React.createElement('p',{className:'mb-1 text-[11px] font-bold uppercase tracking-[0.16em]',style:{color:palette[active%palette.length]}},pick(current.subtitle,'Research material')),"
+            "React.createElement('h2',{className:'m-0 mb-2 text-[18px] font-semibold leading-tight'},short(current.title,72)),"
+            "React.createElement('p',{className:'m-0 text-[#51483e]'},short(current.summary,260)),"
+            "React.createElement('div',{className:'mt-3 grid gap-1'},(current.evidence&&current.evidence.length?current.evidence:['No extracted figure, table, or passage evidence was available.']).slice(0,2).map((item,index)=>React.createElement('p',{key:index,className:'m-0 text-[11px] leading-4 text-[#665c50]'},short(item,120))))),"
+            "React.createElement('div',{className:'absolute bottom-5 right-6 flex gap-2'},materials.slice(0,6).map((material,index)=>React.createElement('button',{key:index,type:'button',onClick:()=>setActive(index),className:'h-3 w-8 border border-[#1b1611]',style:{background:index===active?palette[index%palette.length]:'transparent'}})))));"
+            "}"
+            "ReactDOM.createRoot(root).render(React.createElement(App));"
+        )
+
+    def _send_project_presentation_ready_email(
+        self,
+        *,
+        user: BrowserUser,
+        project_name: str,
+        presentation: ProjectPresentationResponse,
+    ) -> None:
+        presentation_url = presentation.share_url or self._browser_app_url("/")
+        try:
+            self.email_sender.send_project_presentation_ready(
+                email=user.email,
+                project_name=project_name,
+                presentation_url=presentation_url,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to send project presentation ready email",
+                extra={"event": "project.presentation.email_failed", "user_id": user.user_id},
+            )
+
     def create_python_file(self, user: BrowserUser, project_id: str) -> PythonFileResponse:
-        self._get_github_connection(user)
         project = self.repository.get_project(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
         if project is None:
             raise HTTPException(status_code=404, detail="Project not found")
@@ -2462,7 +5246,6 @@ class PaperbaseService:
         filename: str,
         data: bytes,
     ) -> PythonFileResponse:
-        self._get_github_connection(user)
         project = self.repository.get_project(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
         if project is None:
             raise HTTPException(status_code=404, detail="Project not found")
@@ -2666,7 +5449,6 @@ class PaperbaseService:
         repo_path: str,
         content: str = "",
     ) -> PythonFileResponse:
-        self._get_github_connection(user)
         project = self.repository.get_project(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
         if project is None:
             raise HTTPException(status_code=404, detail="Project not found")
@@ -2699,7 +5481,6 @@ class PaperbaseService:
         repo_path: str,
         content: str,
     ) -> dict[str, Any]:
-        self._get_github_connection(user)
         normalized_repo_path = _normalize_project_workspace_repo_path(repo_path)
         existing = self.repository.get_project_python_file_by_path(  # type: ignore[attr-defined]
             user_id=user.user_id,
@@ -2764,7 +5545,6 @@ class PaperbaseService:
         new_string: str,
         replace_all: bool = False,
     ) -> dict[str, Any]:
-        self._get_github_connection(user)
         project_file = self._get_project_workspace_file(user, project_id, repo_path)
         if old_string == "":
             if not new_string.strip():
@@ -2833,7 +5613,6 @@ class PaperbaseService:
         repo_path: str,
         new_repo_path: str,
     ) -> dict[str, Any]:
-        self._get_github_connection(user)
         project_file = self._get_project_workspace_file(user, project_id, repo_path)
         normalized_new_repo_path = _normalize_project_workspace_repo_path(new_repo_path)
         if project_file.repo_path == normalized_new_repo_path:
@@ -2861,7 +5640,6 @@ class PaperbaseService:
         }
 
     def delete_project_workspace_file(self, user: BrowserUser, project_id: str, *, repo_path: str) -> dict[str, Any]:
-        self._get_github_connection(user)
         project_file = self._get_project_workspace_file(user, project_id, repo_path)
         deleted = self.repository.delete_python_file(user_id=user.user_id, file_id=project_file.file_id)  # type: ignore[attr-defined]
         if not deleted:
@@ -3218,7 +5996,6 @@ class PaperbaseService:
         filename: str | None,
         content: str | None,
     ) -> PythonFileResponse:
-        self._get_github_connection(user)
         normalized_filename = _normalize_python_filename(filename) if filename is not None else None
         python_file = self.repository.update_python_file(  # type: ignore[attr-defined]
             user_id=user.user_id,
@@ -3231,7 +6008,6 @@ class PaperbaseService:
         return python_file
 
     def delete_python_file(self, user: BrowserUser, file_id: str) -> dict[str, Any]:
-        self._get_github_connection(user)
         project_file = self.repository.get_python_file(user_id=user.user_id, file_id=file_id)  # type: ignore[attr-defined]
         if project_file is None:
             raise HTTPException(status_code=404, detail="Python file not found")
@@ -3807,11 +6583,7 @@ class PaperbaseService:
                 extra={"event": "chat.title_generation.failed"},
             )
             return fallback
-        response_text = "\n".join(
-            item.content_text
-            for item in response.items
-            if item.item_type == "assistant_message" and item.content_text
-        )
+        response_text = self._assistant_response_text(response)
         return _clean_generated_chat_title(response_text) or fallback
 
     def _project_prompt_suffix(self, thread: ChatThreadResponse) -> str:
@@ -4182,147 +6954,17 @@ class PaperbaseService:
     def _research_chat_tool_specs(self) -> list[dict[str, Any]]:
         return [
             {
-                "name": "paperbase_search",
-                "description": "Search fully indexed Paperbase papers by topic, title, abstract, or author. Use this to find candidate papers and result-set ids before narrowing to sections or specific files. Set rerank=true for a slower, higher-recall deep-search pass that also surfaces body-content matches.",
+                "name": "paperbase_shell",
+                "description": "Run one command in the Paperbase literature shell. Use search/results/ls/find/cat/head/lines/grep/map/sql/ask-image to discover papers, inspect exact artifacts, narrow result sets, and extract structured evidence.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
-                        "query": {"type": "string"},
-                        "limit": {"type": "integer", "minimum": 1, "maximum": 20},
-                        "category": {"type": "string"},
-                        "year": {"type": "string"},
-                        "rerank": {"type": "boolean"},
+                        "command": {
+                            "type": "string",
+                            "description": "Examples: search \"GRPO verifier\" -n 10; results latest; find /papers/arxiv:2501.12948/ \"*.md\"; lines /papers/arxiv:2501.12948/sections/method.md 40 90; grep \"KL\" --from latest; map --from latest --query \"Extract method and limitations\"; sql \"select paper_id,title from papers limit 20\"",
+                        },
                     },
-                    "required": ["query"],
-                },
-            },
-            {
-                "name": "paperbase_search_sections",
-                "description": "Search grounded paper sections and captions inside Paperbase. Use this when the user asks about methods, results, experiments, figures, tables, or any specific detail that needs evidence.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string"},
-                        "limit": {"type": "integer", "minimum": 1, "maximum": 12},
-                        "result_set_id": {"type": "string"},
-                        "paper_ids": {"type": "array", "items": {"type": "string"}},
-                    },
-                    "required": ["query"],
-                },
-            },
-            {
-                "name": "paperbase_get_results",
-                "description": "Load a previously saved search result set by id. Use this when you already have a result_set_id from an earlier tool call and need the shortlisted papers again.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {"result_set_id": {"type": "string"}},
-                    "required": ["result_set_id"],
-                },
-            },
-            {
-                "name": "paperbase_grep_results",
-                "description": "Filter a saved result set by a literal or regex-like pattern and get matching previews. Use this after search when you need a narrower subset of papers containing a specific phrase.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "result_set_id": {"type": "string"},
-                        "pattern": {"type": "string"},
-                        "limit": {"type": "integer", "minimum": 1, "maximum": 50},
-                    },
-                    "required": ["result_set_id", "pattern"],
-                },
-            },
-            {
-                "name": "paperbase_get_paper",
-                "description": "Fetch full metadata for a specific paper id. Use this when you need authors, abstract, summary, venue metadata, dates, or citation counts for a paper you already identified.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {"paper_id": {"type": "string"}},
-                    "required": ["paper_id"],
-                },
-            },
-            {
-                "name": "paperbase_list_files",
-                "description": "List the extracted files available for a paper. Use this when you need to discover which sections, figure captions, raw files, or tables exist before reading one.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {"paper_id": {"type": "string"}},
-                    "required": ["paper_id"],
-                },
-            },
-            {
-                "name": "paperbase_read_file",
-                "description": "Read the textual content of a specific extracted file for a paper. Use this for section markdown, captions, manifests, or other text files when you need exact content.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "paper_id": {"type": "string"},
-                        "path": {"type": "string"},
-                    },
-                    "required": ["paper_id", "path"],
-                },
-            },
-            {
-                "name": "paperbase_get_figure",
-                "description": "Fetch figure caption metadata for a paper figure id. Use this when the user asks about a figure or architecture diagram and the caption is the primary evidence.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "paper_id": {"type": "string"},
-                        "figure_id": {"type": "string"},
-                    },
-                    "required": ["paper_id", "figure_id"],
-                },
-            },
-            {
-                "name": "paperbase_get_table",
-                "description": "Fetch structured table rows and caption metadata for a paper table id. Use this when the user asks for metrics, benchmarks, ablations, or comparisons stored in a table.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "paper_id": {"type": "string"},
-                        "table_id": {"type": "string"},
-                    },
-                    "required": ["paper_id", "table_id"],
-                },
-            },
-            {
-                "name": "paperbase_get_related_papers",
-                "description": "Fetch related papers for a known paper id. Use this when the user wants similar work, follow-ons, or neighboring papers in the citation graph.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {"paper_id": {"type": "string"}},
-                    "required": ["paper_id"],
-                },
-            },
-            {
-                "name": "paperbase_get_references",
-                "description": "Fetch the outgoing references for a paper id. Use this when the user asks what a paper cites or wants the citation graph expanded from a known paper.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "paper_id": {"type": "string"},
-                        "refresh": {"type": "boolean"},
-                    },
-                    "required": ["paper_id"],
-                },
-            },
-            {
-                "name": "paperbase_list_uploaded_documents",
-                "description": "List the user's uploaded documents and tags. Use this when you need to discover which uploads are available before searching within them.",
-                "input_schema": {"type": "object", "properties": {}},
-            },
-            {
-                "name": "paperbase_search_uploaded_sections",
-                "description": "Search the user's uploaded documents by content and optional tags. Use this when the question may be answered by uploaded notes, PDFs, or documents rather than indexed papers.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string"},
-                        "limit": {"type": "integer", "minimum": 1, "maximum": 12},
-                        "tag_filters": {"type": "array", "items": {"type": "string"}},
-                    },
-                    "required": ["query"],
+                    "required": ["command"],
                 },
             },
         ]
@@ -4558,6 +7200,1150 @@ class PaperbaseService:
             paper_id=paper_id,
         )
 
+    def _literature_shell_error(self, command: str, message: str) -> LiteratureShellResponse:
+        return LiteratureShellResponse(command=command, stdout=f"error: {message}", error=message)
+
+    def _literature_shell_tokens(self, command: str) -> list[str]:
+        if not command.strip():
+            raise ValueError("command must not be empty")
+        if "\n" in command or _LITERATURE_SHELL_UNSAFE_RE.search(command):
+            raise ValueError("unsupported shell syntax; pipes, redirects, chaining, and backticks are not allowed")
+        if "$(" in command or "${" in command:
+            raise ValueError("shell interpolation is not allowed")
+        try:
+            tokens = shlex.split(command)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+        if not tokens:
+            raise ValueError("command must not be empty")
+        return tokens
+
+    def _literature_shell_path(self, path: str) -> str:
+        cleaned = (path or "").strip()
+        if not cleaned:
+            raise ValueError("path must not be empty")
+        if "\\" in cleaned:
+            raise ValueError("paths must use forward slashes")
+        if not cleaned.startswith("/"):
+            raise ValueError("paths must start with /")
+        raw_parts = [part for part in cleaned.split("/") if part]
+        if any(part == ".." for part in raw_parts):
+            raise ValueError("parent path traversal is not allowed")
+        normalized = "/" + str(PurePosixPath(cleaned)).lstrip("/")
+        if normalized != "/" and normalized.endswith("/"):
+            normalized = normalized.rstrip("/")
+        parts = [part for part in normalized.split("/") if part]
+        if parts and parts[0] not in {"papers", "results"}:
+            raise ValueError("path must stay under /, /papers, or /results")
+        return normalized
+
+    def _literature_shell_paper_path(self, path: str) -> tuple[str, str]:
+        normalized = self._literature_shell_path(path)
+        parts = [part for part in normalized.split("/") if part]
+        if len(parts) < 2 or parts[0] != "papers":
+            raise ValueError("expected a path under /papers/{paper_id}/")
+        return parts[1], "/".join(parts[2:])
+
+    def _line_numbered_text(self, text: str) -> str:
+        return "\n".join(f"L{index}: {line}" for index, line in enumerate(text.splitlines(), start=1))
+
+    def _cap_shell_stdout(self, text: str, *, limit: int = _LITERATURE_SHELL_MAX_STDOUT_CHARS) -> tuple[str, bool]:
+        if len(text) <= limit:
+            return text, False
+        clipped = text[:limit].rstrip()
+        return f"{clipped}\n\n[truncated]", True
+
+    def _shell_paper_summary(self, paper: PaperResponse | SearchPaperResult, *, score: float | None = None) -> dict[str, Any]:
+        return {
+            "paper_id": paper.paper_id,
+            "path": f"/papers/{paper.paper_id}/",
+            "title": paper.title,
+            "authors": paper.authors,
+            "published": paper.published,
+            "summary_short": paper.summary_short,
+            "tldr": getattr(paper, "tldr", None),
+            "html_url": paper.html_url,
+            "pdf_url": paper.pdf_url,
+            "citation_count": paper.citation_count,
+            "score": score if score is not None else getattr(paper, "score", None),
+        }
+
+    def _shell_register_paper_citation(
+        self,
+        citation_registry: ChatCitationRegistry | None,
+        *,
+        paper_id: str,
+        title: str,
+        path: str,
+        content: str,
+        question: str,
+    ) -> dict[str, Any]:
+        excerpt = _best_excerpt(content, question)
+        citation_payload: dict[str, Any] = {
+            "paper_id": paper_id,
+            "title": title,
+            "path": path,
+            "excerpt": excerpt,
+        }
+        if citation_registry is not None:
+            citation = self._paper_path_citation(
+                citation_registry,
+                paper_id=paper_id,
+                title=title,
+                path=path,
+                content=content,
+                question=question,
+            )
+            citation_payload["source_id"] = citation.source_id
+        return citation_payload
+
+    def _shell_stdout_papers(self, *, heading: str, result_set_id: str | None, papers: list[dict[str, Any]]) -> str:
+        lines = [heading]
+        if result_set_id:
+            lines.append(f"result_set_id: {result_set_id}")
+        if not papers:
+            lines.append("No papers found.")
+            return "\n".join(lines)
+        for index, paper in enumerate(papers, start=1):
+            bits = [paper.get("published") or "", paper.get("paper_id") or ""]
+            meta = " · ".join(bit for bit in bits if bit)
+            lines.append(f"{index}. {paper.get('title') or paper.get('paper_id')}")
+            lines.append(f"   {paper.get('path')}")
+            if meta:
+                lines.append(f"   {meta}")
+            summary = paper.get("summary_short") or paper.get("tldr") or ""
+            if summary:
+                lines.append(f"   {summary}")
+        return "\n".join(lines)
+
+    def _shell_parse_limit(self, tokens: list[str], *, default: int, maximum: int) -> tuple[int, list[str]]:
+        limit = default
+        remaining: list[str] = []
+        index = 0
+        while index < len(tokens):
+            token = tokens[index]
+            if token in {"-n", "--limit"}:
+                if index + 1 >= len(tokens):
+                    raise ValueError(f"{token} requires a value")
+                limit = _tool_int(tokens[index + 1], default=default, maximum=maximum)
+                index += 2
+                continue
+            if token.startswith("-n") and len(token) > 2 and token[2:].isdigit():
+                limit = _tool_int(token[2:], default=default, maximum=maximum)
+                index += 1
+                continue
+            remaining.append(token)
+            index += 1
+        return limit, remaining
+
+    def _shell_recent_result_sets(self, *, limit: int = 10) -> list[ResultSetResponse]:
+        return self.repository.list_recent_result_sets(limit=limit)
+
+    def _resolve_shell_result_set_id(self, result_set_id: str) -> str:
+        alias = result_set_id.strip().lower()
+        if alias not in {"latest", "prev", "previous"}:
+            return result_set_id
+        recent = self._shell_recent_result_sets(limit=2)
+        if alias == "latest":
+            if not recent:
+                raise ValueError("no recent result sets are available")
+            return recent[0].result_set_id
+        if len(recent) < 2:
+            raise ValueError("no previous result set is available")
+        return recent[1].result_set_id
+
+    def _shell_result_set_summaries(self, result_sets: list[ResultSetResponse]) -> list[dict[str, Any]]:
+        return [
+            {
+                "result_set_id": result_set.result_set_id,
+                "query": result_set.query,
+                "parent_result_set_id": result_set.parent_result_set_id,
+                "pattern": result_set.pattern,
+                "paper_count": len(result_set.papers),
+                "created_at": result_set.created_at.isoformat(),
+                "expires_at": result_set.expires_at.isoformat(),
+                "path": f"/results/{result_set.result_set_id}",
+            }
+            for result_set in result_sets
+        ]
+
+    def _shell_command_help(self, command: str) -> LiteratureShellResponse:
+        stdout = "\n".join(
+            [
+                "Paperbase literature shell commands:",
+                '  search "query" -n 20 [--category cs.LG] [--year 2026] [--rerank]',
+                "  results rs_x | latest | prev",
+                "  ls / | /results/rs_x | /papers/{paper_id}/",
+                '  find /papers/{paper_id}/ ["*.md"] [-n 100]',
+                "  cat /papers/{paper_id}/sections/method.md",
+                "  head -n 80 /papers/{paper_id}/sections/method.lines",
+                "  lines /papers/{paper_id}/sections/method.md 40 90",
+                '  grep "pattern" --from rs_x [-n 50]',
+                '  grep "pattern" /papers/{paper_id}/sections/method.md',
+                '  map --from rs_x --query "question" [--limit 12] [--schema \'{}\']',
+                '  sql "select paper_id,title,published from papers limit 20"',
+                '  ask-image /papers/{paper_id}/figures/{figure_id}/ "question"',
+            ]
+        )
+        return LiteratureShellResponse(command=command, stdout=stdout)
+
+    def _shell_command_search(self, command: str, tokens: list[str]) -> LiteratureShellResponse:
+        limit = 20
+        category: str | None = None
+        year: str | None = None
+        rerank = False
+        query_parts: list[str] = []
+        index = 1
+        while index < len(tokens):
+            token = tokens[index]
+            if token in {"-n", "--limit"}:
+                if index + 1 >= len(tokens):
+                    raise ValueError(f"{token} requires a value")
+                limit = _tool_int(tokens[index + 1], default=20, maximum=20)
+                index += 2
+                continue
+            if token.startswith("-n") and len(token) > 2 and token[2:].isdigit():
+                limit = _tool_int(token[2:], default=20, maximum=20)
+                index += 1
+                continue
+            if token == "--category":
+                if index + 1 >= len(tokens):
+                    raise ValueError("--category requires a value")
+                category = tokens[index + 1]
+                index += 2
+                continue
+            if token == "--year":
+                if index + 1 >= len(tokens):
+                    raise ValueError("--year requires a value")
+                year = tokens[index + 1]
+                index += 2
+                continue
+            if token == "--rerank":
+                rerank = True
+                index += 1
+                continue
+            if token.startswith("-"):
+                raise ValueError(f"unsupported search option {token}")
+            query_parts.append(token)
+            index += 1
+        query = " ".join(query_parts).strip()
+        if not query:
+            raise ValueError("search requires a query")
+        response = self.search(
+            SearchRequest(
+                query=query,
+                limit=limit,
+                category=category,
+                year=year,
+                include_live_sources=False,
+                rerank=rerank,
+                log_query=False,
+            )
+        )
+        papers = [self._shell_paper_summary(paper) for paper in response.papers]
+        return LiteratureShellResponse(
+            command=command,
+            stdout=self._shell_stdout_papers(
+                heading=f'Search results for "{response.query}"',
+                result_set_id=response.result_set_id,
+                papers=papers,
+            ),
+            result_set_id=response.result_set_id,
+            papers=papers,
+        )
+
+    def _shell_command_results(self, command: str, tokens: list[str]) -> LiteratureShellResponse:
+        if len(tokens) != 2:
+            raise ValueError("results requires exactly one result_set_id")
+        result_set_id = self._resolve_shell_result_set_id(tokens[1])
+        response = self.get_results(result_set_id)
+        papers = [self._shell_paper_summary(paper) for paper in response.papers]
+        return LiteratureShellResponse(
+            command=command,
+            stdout=self._shell_stdout_papers(
+                heading=f"Result set {response.result_set_id}",
+                result_set_id=response.result_set_id,
+                papers=papers,
+            ),
+            result_set_id=response.result_set_id,
+            papers=papers,
+        )
+
+    def _paper_virtual_artifact_paths(self, paper_id: str) -> list[str]:
+        paper = self.get_indexed_paper(paper_id)
+        actual_paths = {item.path for item in self.list_files(paper_id).files}
+        paths = {
+            "abstract.md",
+            "files.json",
+            "meta.json",
+            "manifest.json",
+            "references.json",
+            "related.json",
+            "sections/index.json",
+            *actual_paths,
+        }
+        for path in list(actual_paths):
+            if path.startswith("sections/") and path.endswith(".md"):
+                paths.add(f"{path[:-3]}.lines")
+        if paper.code_manifest is not None:
+            paths.add("code/manifest.json")
+        return sorted(paths)
+
+    def _section_index_payload(self, paper_id: str) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for file_object in self.list_files(paper_id).files:
+            path = file_object.path
+            if not (path.startswith("sections/") and path.endswith(".md")):
+                continue
+            try:
+                content = self.read_file(paper_id, path).content
+            except HTTPException:
+                content = ""
+            title = ""
+            for line in content.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("#"):
+                    title = stripped.lstrip("#").strip()
+                    break
+            rows.append(
+                {
+                    "path": f"/papers/{paper_id}/{path}",
+                    "lines_path": f"/papers/{paper_id}/{path[:-3]}.lines",
+                    "title": title or path.removeprefix("sections/").removesuffix(".md").replace("-", " ").title(),
+                    "line_count": len(content.splitlines()),
+                    "size_bytes": file_object.size,
+                }
+            )
+        return rows
+
+    def _paper_files_payload(self, paper_id: str) -> list[dict[str, Any]]:
+        actual = {item.path: item for item in self.list_files(paper_id).files}
+        rows: list[dict[str, Any]] = []
+        for rel_path in self._paper_virtual_artifact_paths(paper_id):
+            file_object = actual.get(rel_path)
+            rows.append(
+                {
+                    "path": f"/papers/{paper_id}/{rel_path}",
+                    "rel_path": rel_path,
+                    "virtual": file_object is None,
+                    "size_bytes": file_object.size if file_object is not None else None,
+                    "content_type": file_object.content_type if file_object is not None else "application/json",
+                }
+            )
+        return rows
+
+    def _shell_list_children(self, paper_id: str, rel_path: str) -> list[str]:
+        rel = rel_path.strip("/")
+        prefix = f"{rel}/" if rel else ""
+        children: set[str] = set()
+        for path in self._paper_virtual_artifact_paths(paper_id):
+            if rel and path == rel:
+                children.add(f"/papers/{paper_id}/{path}")
+                continue
+            if not path.startswith(prefix):
+                continue
+            remainder = path[len(prefix) :]
+            if not remainder:
+                continue
+            first, sep, _rest = remainder.partition("/")
+            child_rel = f"{prefix}{first}{'/' if sep else ''}"
+            children.add(f"/papers/{paper_id}/{child_rel}")
+        return sorted(children)
+
+    def _shell_command_ls(self, command: str, tokens: list[str]) -> LiteratureShellResponse:
+        path = self._literature_shell_path(tokens[1] if len(tokens) > 1 else "/")
+        if len(tokens) > 2:
+            raise ValueError("ls accepts at most one path")
+        if path == "/":
+            paths = ["/papers/", "/results/"]
+            return LiteratureShellResponse(command=command, stdout="\n".join(paths), paths=paths)
+        if path == "/papers":
+            stdout = "Use search to discover papers, then ls /papers/{paper_id}/."
+            return LiteratureShellResponse(command=command, stdout=stdout)
+        if path == "/results":
+            recent = self._shell_recent_result_sets(limit=10)
+            rows = self._shell_result_set_summaries(recent)
+            if not rows:
+                stdout = "Use search to create a result set, then ls /results/{result_set_id}."
+                return LiteratureShellResponse(command=command, stdout=stdout, rows=[])
+            lines = ["/results/latest -> " + rows[0]["path"]]
+            if len(rows) > 1:
+                lines.append("/results/prev -> " + rows[1]["path"])
+            lines.extend(row["path"] for row in rows)
+            return LiteratureShellResponse(command=command, stdout="\n".join(lines), paths=[row["path"] for row in rows], rows=rows)
+        if path.startswith("/results/"):
+            result_set_id = self._resolve_shell_result_set_id(path.split("/", 2)[2])
+            response = self.get_results(result_set_id)
+            paths = [f"/papers/{paper.paper_id}/" for paper in response.papers]
+            return LiteratureShellResponse(command=command, stdout="\n".join(paths), result_set_id=result_set_id, paths=paths)
+        paper_id, rel_path = self._literature_shell_paper_path(path)
+        paths = self._shell_list_children(paper_id, rel_path)
+        return LiteratureShellResponse(command=command, stdout="\n".join(paths) or "(empty)", paths=paths)
+
+    def _shell_command_find(self, command: str, tokens: list[str]) -> LiteratureShellResponse:
+        limit, remaining = self._shell_parse_limit(tokens[1:], default=100, maximum=500)
+        if not remaining:
+            path = "/"
+            pattern = "*"
+        elif len(remaining) == 1:
+            path = remaining[0]
+            pattern = "*"
+        elif len(remaining) == 2:
+            path = remaining[0]
+            pattern = remaining[1]
+        else:
+            raise ValueError("find accepts a path, optional glob pattern, and optional -n/--limit")
+        path = self._literature_shell_path(path)
+
+        def matches(full_path: str, rel_path: str) -> bool:
+            basename = PurePosixPath(rel_path.rstrip("/")).name if rel_path else PurePosixPath(full_path.rstrip("/")).name
+            return (
+                pattern in {"", "*"}
+                or fnmatch.fnmatch(full_path, pattern)
+                or fnmatch.fnmatch(rel_path, pattern)
+                or fnmatch.fnmatch(basename, pattern)
+            )
+
+        paths: list[str] = []
+        if path == "/":
+            paths = ["/papers/", "/results/"]
+        elif path == "/results":
+            paths = [f"/results/{result_set.result_set_id}" for result_set in self._shell_recent_result_sets(limit=limit)]
+        elif path.startswith("/results/"):
+            result_set_id = self._resolve_shell_result_set_id(path.split("/", 2)[2])
+            response = self.get_results(result_set_id)
+            for paper in response.papers:
+                paper_root = f"/papers/{paper.paper_id}/"
+                if matches(paper_root, ""):
+                    paths.append(paper_root)
+                for rel_path in self._paper_virtual_artifact_paths(paper.paper_id):
+                    full_path = f"/papers/{paper.paper_id}/{rel_path}"
+                    if matches(full_path, rel_path):
+                        paths.append(full_path)
+                    if len(paths) >= limit:
+                        break
+                if len(paths) >= limit:
+                    break
+        elif path == "/papers":
+            raise ValueError("find /papers requires a paper id or a result set, e.g. find /results/latest '*.md'")
+        else:
+            paper_id, rel_path = self._literature_shell_paper_path(path)
+            prefix = rel_path.strip("/")
+            for candidate in self._paper_virtual_artifact_paths(paper_id):
+                if prefix and candidate != prefix and not candidate.startswith(f"{prefix}/"):
+                    continue
+                full_path = f"/papers/{paper_id}/{candidate}"
+                display_rel = candidate.removeprefix(f"{prefix}/") if prefix and candidate.startswith(f"{prefix}/") else candidate
+                if matches(full_path, display_rel):
+                    paths.append(full_path)
+                if len(paths) >= limit:
+                    break
+        truncated = len(paths) >= limit
+        return LiteratureShellResponse(command=command, stdout="\n".join(paths) or "(empty)", paths=paths, truncated=truncated)
+
+    def _read_literature_path(self, path: str) -> tuple[str, str, str, str]:
+        paper_id, rel_path = self._literature_shell_paper_path(path)
+        paper = self.get_indexed_paper(paper_id)
+        if not rel_path:
+            rel_path = "meta.json"
+        if rel_path == "abstract.md":
+            content = f"# Abstract\n\n{paper.abstract}".rstrip() + "\n"
+        elif rel_path == "files.json":
+            content = json.dumps(self._paper_files_payload(paper_id), indent=2, sort_keys=True)
+        elif rel_path == "meta.json":
+            content = json.dumps(paper.model_dump(mode="json"), indent=2, sort_keys=True)
+        elif rel_path == "manifest.json":
+            content = json.dumps(self.get_manifest(paper_id).manifest, indent=2, sort_keys=True)
+        elif rel_path == "references.json":
+            content = json.dumps(self.get_paper_references(paper_id), indent=2, sort_keys=True)
+        elif rel_path == "related.json":
+            content = json.dumps([item.model_dump(mode="json") for item in self.get_related_papers(paper_id)], indent=2, sort_keys=True)
+        elif rel_path == "sections/index.json":
+            content = json.dumps(self._section_index_payload(paper_id), indent=2, sort_keys=True)
+        elif rel_path == "code/manifest.json" and paper.code_manifest is not None:
+            content = json.dumps(paper.code_manifest, indent=2, sort_keys=True)
+        elif rel_path.startswith("sections/") and rel_path.endswith(".lines"):
+            source_path = f"{rel_path[:-6]}.md"
+            content = self._line_numbered_text(self.read_file(paper_id, source_path).content)
+        else:
+            content = self.read_file(paper_id, rel_path).content
+        return paper_id, paper.title, rel_path, content
+
+    def _shell_command_cat(self, command: str, tokens: list[str], citation_registry: ChatCitationRegistry | None) -> LiteratureShellResponse:
+        if len(tokens) != 2:
+            raise ValueError("cat requires exactly one path")
+        path = self._literature_shell_path(tokens[1])
+        paper_id, title, rel_path, content = self._read_literature_path(path)
+        stdout, truncated = self._cap_shell_stdout(content)
+        citation = self._shell_register_paper_citation(
+            citation_registry,
+            paper_id=paper_id,
+            title=title,
+            path=rel_path,
+            content=stdout,
+            question=command,
+        )
+        return LiteratureShellResponse(command=command, stdout=stdout, citations=[citation], truncated=truncated)
+
+    def _shell_command_head(self, command: str, tokens: list[str], citation_registry: ChatCitationRegistry | None) -> LiteratureShellResponse:
+        limit, remaining = self._shell_parse_limit(tokens[1:], default=_LITERATURE_SHELL_DEFAULT_HEAD_LINES, maximum=500)
+        if len(remaining) != 1:
+            raise ValueError("head requires exactly one path")
+        path = self._literature_shell_path(remaining[0])
+        paper_id, title, rel_path, content = self._read_literature_path(path)
+        stdout = "\n".join(content.splitlines()[:limit])
+        citation = self._shell_register_paper_citation(
+            citation_registry,
+            paper_id=paper_id,
+            title=title,
+            path=rel_path,
+            content=stdout,
+            question=command,
+        )
+        return LiteratureShellResponse(
+            command=command,
+            stdout=stdout,
+            citations=[citation],
+            truncated=len(content.splitlines()) > limit,
+        )
+
+    def _shell_command_lines(self, command: str, tokens: list[str], citation_registry: ChatCitationRegistry | None) -> LiteratureShellResponse:
+        if len(tokens) != 4:
+            raise ValueError("lines requires a path, start line, and end line")
+        path = self._literature_shell_path(tokens[1])
+        start = _tool_int(tokens[2], default=1, maximum=1_000_000)
+        end = _tool_int(tokens[3], default=start, maximum=1_000_000)
+        if start < 1:
+            raise ValueError("start line must be at least 1")
+        if end < start:
+            raise ValueError("end line must be greater than or equal to start line")
+        if end - start + 1 > 500:
+            raise ValueError("lines is capped at 500 lines per call")
+        paper_id, title, rel_path, content = self._read_literature_path(path)
+        raw_lines = content.splitlines()
+        selected = raw_lines[start - 1 : end]
+        if rel_path.endswith(".lines"):
+            stdout = "\n".join(selected)
+        else:
+            stdout = "\n".join(f"L{line_no}: {line}" for line_no, line in enumerate(selected, start=start))
+        citation = self._shell_register_paper_citation(
+            citation_registry,
+            paper_id=paper_id,
+            title=title,
+            path=rel_path,
+            content=stdout,
+            question=command,
+        )
+        return LiteratureShellResponse(
+            command=command,
+            stdout=stdout,
+            citations=[citation],
+            truncated=end < len(raw_lines),
+        )
+
+    def _shell_sql_value(self, raw_value: str) -> str:
+        value = raw_value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            return value[1:-1]
+        return value
+
+    def _shell_command_sql(self, command: str, tokens: list[str]) -> LiteratureShellResponse:
+        if len(tokens) < 2:
+            raise ValueError("sql requires a SELECT query")
+        sql = " ".join(tokens[1:]).strip()
+        match = re.fullmatch(
+            r"select\s+(?P<columns>\*|count\(\*\)|[a-z0-9_,\s]+)\s+from\s+papers"
+            r"(?:\s+where\s+(?P<where_col>[a-z_][a-z0-9_]*)\s*=\s*(?P<where_val>\"[^\"]*\"|'[^']*'|[A-Za-z0-9_.:/-]+))?"
+            r"(?:\s+order\s+by\s+(?P<order_col>[a-z_][a-z0-9_]*)(?:\s+(?P<direction>asc|desc))?)?"
+            r"(?:\s+limit\s+(?P<limit>\d+))?",
+            sql,
+            flags=re.IGNORECASE,
+        )
+        if match is None:
+            raise ValueError(
+                "sql supports read-only SELECT over papers: select columns from papers "
+                "[where column='value'] [order by column asc|desc] [limit N]"
+            )
+        columns_raw = match.group("columns").strip().lower()
+        where_col = (match.group("where_col") or "").lower()
+        order_col = (match.group("order_col") or "").lower()
+        if where_col and where_col not in _LITERATURE_SHELL_SQL_COLUMNS:
+            raise ValueError(f"unsupported where column {where_col}")
+        if order_col and order_col not in _LITERATURE_SHELL_SQL_COLUMNS:
+            raise ValueError(f"unsupported order column {order_col}")
+        if columns_raw == "count(*)":
+            selected_columns: list[str] = []
+        elif columns_raw == "*":
+            selected_columns = sorted(_LITERATURE_SHELL_SQL_COLUMNS)
+        else:
+            selected_columns = [column.strip().lower() for column in columns_raw.split(",") if column.strip()]
+            unsupported = [column for column in selected_columns if column not in _LITERATURE_SHELL_SQL_COLUMNS]
+            if unsupported:
+                raise ValueError(f"unsupported select columns: {', '.join(unsupported)}")
+        limit = _tool_int(match.group("limit"), default=50, maximum=200) if match.group("limit") else 50
+        rows_source = [paper.model_dump(mode="json") for paper in self.list_papers(index_status="indexed", limit=1000)]
+        if where_col:
+            where_value = self._shell_sql_value(match.group("where_val") or "")
+            rows_source = [row for row in rows_source if str(row.get(where_col) or "") == where_value]
+        if order_col:
+            reverse = (match.group("direction") or "asc").lower() == "desc"
+            rows_source.sort(key=lambda row: (row.get(order_col) is None, row.get(order_col)), reverse=reverse)
+        if columns_raw == "count(*)":
+            rows = [{"count": len(rows_source)}]
+            stdout = json.dumps(rows, indent=2, sort_keys=True)
+            return LiteratureShellResponse(command=command, stdout=stdout, rows=rows)
+        rows = [{column: row.get(column) for column in selected_columns} for row in rows_source[:limit]]
+        result_set_id: str | None = None
+        if rows and "paper_id" in selected_columns:
+            papers: list[SearchPaperResult] = []
+            for row in rows:
+                paper_id = str(row.get("paper_id") or "")
+                paper = self.repository.get_paper(paper_id)
+                if paper is not None:
+                    papers.append(SearchPaperResult(**paper.model_dump(mode="json"), score=1.0, source="sql"))
+            if papers:
+                result_set = self.repository.save_result_set(
+                    query=sql,
+                    papers=papers,
+                    ttl_days=self.settings.result_ttl_days,
+                )
+                result_set_id = result_set.result_set_id
+        payload = {"result_set_id": result_set_id, "rows": rows} if result_set_id else rows
+        stdout, truncated = self._cap_shell_stdout(json.dumps(payload, indent=2, sort_keys=True))
+        return LiteratureShellResponse(
+            command=command,
+            stdout=stdout,
+            result_set_id=result_set_id,
+            rows=rows,
+            truncated=truncated,
+        )
+
+    def _figure_image_input_url(self, *, paper_id: str, figure_id: str, figure: FigureResponse) -> str | None:
+        if figure.image_url and figure.image_url.startswith(("http://", "https://", "data:")):
+            return figure.image_url
+        for extension, mime in self._FIGURE_EXTENSION_CONTENT_TYPES:
+            image_path = f"papers/{paper_id}/figures/{figure_id}/image.{extension}"
+            if not self.object_store.exists(image_path):
+                continue
+            if mime not in {"image/png", "image/jpeg", "image/webp", "image/gif"}:
+                return None
+            encoded = base64.b64encode(self.object_store.get_bytes(image_path)).decode("ascii")
+            return f"data:{mime};base64,{encoded}"
+        return None
+
+    def _shell_command_ask_image(
+        self,
+        command: str,
+        tokens: list[str],
+        citation_registry: ChatCitationRegistry | None,
+        user: BrowserUser | None,
+    ) -> LiteratureShellResponse:
+        if len(tokens) < 3:
+            raise ValueError("ask-image requires a figure path and a question")
+        path = self._literature_shell_path(tokens[1])
+        question = " ".join(tokens[2:]).strip()
+        if not question:
+            raise ValueError("ask-image requires a question")
+        paper_id, rel_path = self._literature_shell_paper_path(path)
+        parts = [part for part in rel_path.split("/") if part]
+        if len(parts) < 2 or parts[0] != "figures":
+            raise ValueError("ask-image expects /papers/{paper_id}/figures/{figure_id}/...")
+        figure_id = parts[1]
+        figure = self.get_figure(paper_id, figure_id)
+        paper = self.get_indexed_paper(paper_id)
+        image_input_url = self._figure_image_input_url(paper_id=paper_id, figure_id=figure_id, figure=figure)
+        answer = ""
+        if image_input_url:
+            api_key, key_state = self._map_api_key(user)
+            if not api_key:
+                return self._literature_shell_error(
+                    command,
+                    "ask-image requires an OpenAI API key; save one in Settings for browser chat or set PAPERBASE_OPENAI_API_KEY for MCP/API use"
+                    if key_state == "api_key_required"
+                    else "the saved OpenAI API key is invalid",
+                )
+            prompt = Prompt(
+                input=[
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": json.dumps(
+                                    {
+                                        "question": question,
+                                        "paper": self._shell_paper_summary(paper),
+                                        "figure_id": figure.figure_id,
+                                        "caption": figure.caption,
+                                        "caption_path": f"/papers/{paper_id}/figures/{figure.figure_id}/caption.md",
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                            },
+                            {"type": "input_image", "image_url": image_input_url, "detail": "high"},
+                        ],
+                    }
+                ],
+                base_instructions=(
+                    "You answer questions about one research-paper figure. Inspect the image and use the "
+                    "provided caption and paper metadata as supporting context. If the image is ambiguous, "
+                    "say what is visible and what cannot be determined. Return a concise answer."
+                ),
+                tools=[],
+                tool_choice=None,
+                parallel_tool_calls=False,
+            )
+            try:
+                response = self._chat_model_create_response(api_key=api_key, prompt=prompt)
+                answer = self._assistant_response_text(response).strip()
+            except Exception as exc:
+                logger.warning(
+                    "Literature shell ask-image vision call failed",
+                    extra={"event": "literature_shell.ask_image.failed", "paper_id": paper_id, "figure_id": figure_id, "error": str(exc)},
+                )
+                return self._literature_shell_error(command, f"ask-image vision call failed: {exc}")
+        else:
+            answer = "No image pixels are available for this figure; only caption evidence is available."
+        row = {
+            "paper_id": paper_id,
+            "title": paper.title,
+            "figure_id": figure.figure_id,
+            "path": f"/papers/{paper_id}/figures/{figure.figure_id}/",
+            "caption_path": f"/papers/{paper_id}/figures/{figure.figure_id}/caption.md",
+            "image_url": figure.image_url,
+            "content_type": figure.content_type,
+            "question": question,
+            "caption": figure.caption,
+            "answer": answer,
+            "vision_used": bool(image_input_url),
+        }
+        citation = self._shell_register_paper_citation(
+            citation_registry,
+            paper_id=paper_id,
+            title=paper.title,
+            path=f"figures/{figure.figure_id}/caption.md",
+            content=figure.caption,
+            question=question,
+        )
+        lines = [
+            f"{paper_id} {figure.figure_id}",
+            f"caption_path: {row['caption_path']}",
+            f"image_url: {figure.image_url or '(none)'}",
+            f"content_type: {figure.content_type or '(unknown)'}",
+            "",
+            figure.caption,
+        ]
+        if answer:
+            lines.extend(["", f"answer: {answer}"])
+        return LiteratureShellResponse(command=command, stdout="\n".join(lines), rows=[row], citations=[citation])
+
+    def _shell_command_grep(self, command: str, tokens: list[str], citation_registry: ChatCitationRegistry | None) -> LiteratureShellResponse:
+        if len(tokens) < 2:
+            raise ValueError("grep requires a pattern")
+        pattern = tokens[1]
+        limit, remaining = self._shell_parse_limit(tokens[2:], default=50, maximum=50)
+        result_set_id: str | None = None
+        target: str | None = None
+        index = 0
+        while index < len(remaining):
+            token = remaining[index]
+            if token == "--from":
+                if index + 1 >= len(remaining):
+                    raise ValueError("--from requires a result_set_id")
+                result_set_id = remaining[index + 1]
+                index += 2
+                continue
+            if target is None:
+                target = token
+                index += 1
+                continue
+            raise ValueError(f"unexpected grep argument {token}")
+        if result_set_id:
+            result_set_id = self._resolve_shell_result_set_id(result_set_id)
+            response = self.grep_results(result_set_id, pattern, limit=limit)
+            matches = [match.model_dump(mode="json") for match in response.papers]
+            citations: list[dict[str, Any]] = []
+            for match in response.papers:
+                for preview in match.previews[:3]:
+                    path, sep, excerpt = preview.partition(":")
+                    citations.append(
+                        self._shell_register_paper_citation(
+                            citation_registry,
+                            paper_id=match.paper_id,
+                            title=match.title,
+                            path=path.strip() if sep else "text/full.md",
+                            content=excerpt.strip() if sep else preview,
+                            question=pattern,
+                        )
+                    )
+            lines = [f"result_set_id: {response.result_set_id}", f"parent_result_set_id: {response.parent_result_set_id}"]
+            for match in response.papers:
+                lines.append(f"{match.paper_id} ({match.match_count} matches): {match.title}")
+                for preview in match.previews[:3]:
+                    lines.append(f"  {preview}")
+            return LiteratureShellResponse(
+                command=command,
+                stdout="\n".join(lines),
+                result_set_id=response.result_set_id,
+                parent_result_set_id=response.parent_result_set_id,
+                matches=matches,
+                citations=citations,
+            )
+        if not target:
+            raise ValueError("grep requires either --from rs_x or a /papers/... target")
+        path = self._literature_shell_path(target)
+        paper_id, rel_path = self._literature_shell_paper_path(path)
+        virtual_paths = set(self._paper_virtual_artifact_paths(paper_id))
+        if not rel_path or (rel_path not in virtual_paths and self._shell_list_children(paper_id, rel_path)):
+            paper = self.get_indexed_paper(paper_id)
+            singleton = self.repository.save_result_set(
+                query=pattern,
+                papers=[SearchPaperResult(**paper.model_dump(mode="json"), score=1.0, source="local")],
+                ttl_days=self.settings.result_ttl_days,
+            )
+            response = self.grep_results(singleton.result_set_id, pattern, limit=limit)
+            matches = [match.model_dump(mode="json") for match in response.papers]
+            lines = [f"result_set_id: {response.result_set_id}", f"parent_result_set_id: {response.parent_result_set_id}"]
+            citations: list[dict[str, Any]] = []
+            for match in response.papers:
+                lines.append(f"{match.paper_id} ({match.match_count} matches): {match.title}")
+                for preview in match.previews[:3]:
+                    lines.append(f"  {preview}")
+                    preview_path, sep, excerpt = preview.partition(":")
+                    citations.append(
+                        self._shell_register_paper_citation(
+                            citation_registry,
+                            paper_id=match.paper_id,
+                            title=match.title,
+                            path=preview_path.strip() if sep else "text/full.md",
+                            content=excerpt.strip() if sep else preview,
+                            question=pattern,
+                        )
+                    )
+            if len(lines) == 2:
+                lines.append("No matches.")
+            return LiteratureShellResponse(
+                command=command,
+                stdout="\n".join(lines),
+                result_set_id=response.result_set_id,
+                parent_result_set_id=response.parent_result_set_id,
+                matches=matches,
+                citations=citations,
+            )
+        paper_id, title, rel_path, content = self._read_literature_path(path)
+        regex = re.compile(pattern, re.IGNORECASE)
+        matches = []
+        for line_no, line in enumerate(content.splitlines(), start=1):
+            if regex.search(line):
+                matches.append({"paper_id": paper_id, "path": rel_path, "line": line_no, "preview": line})
+                if len(matches) >= limit:
+                    break
+        citations = [
+            self._shell_register_paper_citation(
+                citation_registry,
+                paper_id=paper_id,
+                title=title,
+                path=rel_path,
+                content="\n".join(match["preview"] for match in matches[:5]),
+                question=pattern,
+            )
+        ] if matches else []
+        stdout = "\n".join(f"{rel_path}:L{match['line']}: {match['preview']}" for match in matches) or "No matches."
+        return LiteratureShellResponse(command=command, stdout=stdout, matches=matches, citations=citations)
+
+    def _parse_shell_schema(self, raw_schema: str | None) -> dict[str, Any] | None:
+        if not raw_schema:
+            return None
+        if raw_schema.strip().lower() == "json":
+            return {}
+        payload = json.loads(raw_schema)
+        if not isinstance(payload, dict):
+            raise ValueError("--schema must be a JSON object")
+        return payload
+
+    def _parse_shell_json_object(self, text: str) -> dict[str, Any]:
+        payload_text = text.strip()
+        if payload_text.startswith("```"):
+            payload_text = re.sub(r"^```(?:json)?\s*", "", payload_text, flags=re.IGNORECASE)
+            payload_text = re.sub(r"\s*```$", "", payload_text).strip()
+        try:
+            payload = json.loads(payload_text)
+        except json.JSONDecodeError:
+            start = payload_text.find("{")
+            end = payload_text.rfind("}")
+            if start < 0 or end <= start:
+                return {"answer": payload_text[:2000]}
+            payload = json.loads(payload_text[start : end + 1])
+        return payload if isinstance(payload, dict) else {"answer": str(payload)[:2000]}
+
+    def _map_cache_path(self, *, result_set_id: str, query: str, schema: dict[str, Any] | None, paper_ids: list[str]) -> str:
+        payload = {
+            "result_set_id": result_set_id,
+            "query": query,
+            "schema": schema or {},
+            "paper_ids": paper_ids,
+            "model": self.settings.openai_model,
+        }
+        digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+        return f"literature/maps/{digest}.json"
+
+    def _map_api_key(self, user: BrowserUser | None) -> tuple[str | None, str]:
+        if user is not None:
+            return self._choose_openai_api_key(user)
+        return self.settings.openai_api_key, "completed" if self.settings.openai_api_key else "api_key_required"
+
+    def _map_evidence_for_paper(self, paper: SearchPaperResult, query: str) -> list[dict[str, str]]:
+        response = self.search_sections(SearchSectionRequest(query=query, limit=5, paper_ids=[paper.paper_id]))
+        evidence: list[dict[str, str]] = []
+        for hit in response.sections[:5]:
+            try:
+                artifact = self.read_file(hit.paper_id, hit.path).content
+                quote = _best_excerpt(artifact, query)
+            except Exception:
+                quote = hit.preview
+            evidence.append(
+                {
+                    "paper_id": hit.paper_id,
+                    "title": hit.title,
+                    "path": hit.path,
+                    "quote": quote[:1000],
+                }
+            )
+        return evidence
+
+    def _register_map_row_citations(
+        self,
+        row: dict[str, Any],
+        citation_registry: ChatCitationRegistry | None,
+        *,
+        question: str,
+    ) -> dict[str, Any]:
+        evidence = row.get("evidence")
+        if not isinstance(evidence, list):
+            return row
+        registered = []
+        for item in evidence:
+            if not isinstance(item, dict):
+                continue
+            paper_id = str(item.get("paper_id") or row.get("paper_id") or "").strip()
+            title = str(item.get("title") or row.get("title") or paper_id).strip()
+            path = str(item.get("path") or "").strip()
+            quote = str(item.get("quote") or item.get("excerpt") or "").strip()
+            if not paper_id or not path or not quote:
+                registered.append(item)
+                continue
+            citation = self._shell_register_paper_citation(
+                citation_registry,
+                paper_id=paper_id,
+                title=title,
+                path=path,
+                content=quote,
+                question=question,
+            )
+            registered.append({**item, **citation})
+        return {**row, "evidence": registered}
+
+    def _map_row_citation_payloads(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        citations: list[dict[str, Any]] = []
+        for row in rows:
+            evidence = row.get("evidence")
+            if not isinstance(evidence, list):
+                continue
+            citations.extend(item for item in evidence if isinstance(item, dict))
+        return citations
+
+    def _shell_command_map(
+        self,
+        command: str,
+        tokens: list[str],
+        citation_registry: ChatCitationRegistry | None,
+        user: BrowserUser | None,
+    ) -> LiteratureShellResponse:
+        result_set_id: str | None = None
+        query: str | None = None
+        raw_schema: str | None = None
+        limit = _LITERATURE_SHELL_MAP_DEFAULT_LIMIT
+        index = 1
+        while index < len(tokens):
+            token = tokens[index]
+            if token == "--from":
+                if index + 1 >= len(tokens):
+                    raise ValueError("--from requires a result_set_id")
+                result_set_id = tokens[index + 1]
+                index += 2
+                continue
+            if token == "--query":
+                if index + 1 >= len(tokens):
+                    raise ValueError("--query requires a question")
+                query = tokens[index + 1]
+                index += 2
+                continue
+            if token in {"--limit", "-n"}:
+                if index + 1 >= len(tokens):
+                    raise ValueError(f"{token} requires a value")
+                limit = _tool_int(tokens[index + 1], default=_LITERATURE_SHELL_MAP_DEFAULT_LIMIT, maximum=_LITERATURE_SHELL_MAP_MAX_LIMIT)
+                index += 2
+                continue
+            if token == "--schema":
+                if index + 1 >= len(tokens):
+                    raise ValueError("--schema requires a JSON object")
+                raw_schema = tokens[index + 1]
+                index += 2
+                continue
+            raise ValueError(f"unexpected map argument {token}")
+        if not result_set_id:
+            raise ValueError("map requires --from result_set_id")
+        result_set_id = self._resolve_shell_result_set_id(result_set_id)
+        if not query:
+            raise ValueError("map requires --query")
+        schema = self._parse_shell_schema(raw_schema)
+        api_key, key_state = self._map_api_key(user)
+        if not api_key:
+            return self._literature_shell_error(
+                command,
+                "map requires an OpenAI API key; save one in Settings for browser chat or set PAPERBASE_OPENAI_API_KEY for MCP/API use"
+                if key_state == "api_key_required"
+                else "the saved OpenAI API key is invalid",
+            )
+        result_set = self.get_results(result_set_id)
+        selected = result_set.papers[:limit]
+        paper_ids = [paper.paper_id for paper in selected]
+        cache_path = self._map_cache_path(result_set_id=result_set_id, query=query, schema=schema, paper_ids=paper_ids)
+        if self.object_store.exists(cache_path):
+            cached = json.loads(self.object_store.get_text(cache_path))
+            rows = [
+                self._register_map_row_citations(row, citation_registry, question=query)
+                for row in cached.get("rows", [])
+                if isinstance(row, dict)
+            ]
+            return LiteratureShellResponse(
+                command=command,
+                stdout=f"Loaded cached map for {len(rows)} papers.",
+                result_set_id=result_set_id,
+                rows=rows,
+                citations=self._map_row_citation_payloads(rows),
+            )
+
+        rows: list[dict[str, Any]] = []
+        for paper in selected:
+            evidence = self._map_evidence_for_paper(paper, query)
+            prompt = Prompt(
+                input=[
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": json.dumps(
+                            {
+                                "question": query,
+                                "schema": schema or {},
+                                "paper": self._shell_paper_summary(paper),
+                                "evidence": evidence,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    }
+                ],
+                base_instructions=(
+                    "You extract structured evidence from one research paper. "
+                    "Use only the provided evidence. Return a single JSON object with keys: "
+                    "paper_id, title, answer, fields, evidence. The evidence array must contain "
+                    "objects with paper_id, title, path, and quote copied from the provided evidence."
+                ),
+                tools=[],
+                tool_choice=None,
+                parallel_tool_calls=False,
+            )
+            try:
+                response = self._chat_model_create_response(api_key=api_key, prompt=prompt)
+                payload = self._parse_shell_json_object(self._assistant_response_text(response))
+            except Exception as exc:
+                logger.warning(
+                    "Literature shell map extraction failed",
+                    extra={"event": "literature_shell.map.paper_failed", "paper_id": paper.paper_id, "error": str(exc)},
+                )
+                payload = {"answer": "", "fields": {}, "error": str(exc)}
+            row = {
+                "paper_id": paper.paper_id,
+                "title": paper.title,
+                "path": f"/papers/{paper.paper_id}/",
+                "answer": str(payload.get("answer") or "").strip(),
+                "fields": payload.get("fields") if isinstance(payload.get("fields"), dict) else {},
+                "evidence": payload.get("evidence") if isinstance(payload.get("evidence"), list) else evidence[:3],
+            }
+            if payload.get("error"):
+                row["error"] = payload.get("error")
+            rows.append(row)
+        self.object_store.put_text(
+            cache_path,
+            json.dumps({"rows": rows}, ensure_ascii=False, indent=2),
+            content_type="application/json",
+        )
+        registered_rows = [self._register_map_row_citations(row, citation_registry, question=query) for row in rows]
+        lines = [f"Mapped {len(registered_rows)} papers from {result_set_id} for: {query}"]
+        for row in registered_rows:
+            lines.append(f"- {row['paper_id']}: {row.get('answer') or '(no answer)'}")
+        return LiteratureShellResponse(
+            command=command,
+            stdout="\n".join(lines),
+            result_set_id=result_set_id,
+            rows=registered_rows,
+            citations=self._map_row_citation_payloads(registered_rows),
+        )
+
+    def execute_literature_shell(
+        self,
+        command: str,
+        *,
+        citation_registry: ChatCitationRegistry | None = None,
+        user: BrowserUser | None = None,
+    ) -> LiteratureShellResponse:
+        try:
+            tokens = self._literature_shell_tokens(command)
+            name = tokens[0].lower()
+            if name == "help":
+                return self._shell_command_help(command)
+            if name == "search":
+                return self._shell_command_search(command, tokens)
+            if name == "results":
+                return self._shell_command_results(command, tokens)
+            if name == "ls":
+                return self._shell_command_ls(command, tokens)
+            if name == "find":
+                return self._shell_command_find(command, tokens)
+            if name == "cat":
+                return self._shell_command_cat(command, tokens, citation_registry)
+            if name == "head":
+                return self._shell_command_head(command, tokens, citation_registry)
+            if name == "lines":
+                return self._shell_command_lines(command, tokens, citation_registry)
+            if name == "grep":
+                return self._shell_command_grep(command, tokens, citation_registry)
+            if name == "map":
+                return self._shell_command_map(command, tokens, citation_registry, user)
+            if name == "sql":
+                return self._shell_command_sql(command, tokens)
+            if name in {"ask-image", "ask_image"}:
+                return self._shell_command_ask_image(command, tokens, citation_registry, user)
+            raise ValueError(f"unsupported command {tokens[0]!r}; run help")
+        except HTTPException as exc:
+            return self._literature_shell_error(command, str(exc.detail))
+        except Exception as exc:
+            return self._literature_shell_error(command, str(exc))
+
+    def literature_shell(
+        self,
+        request: LiteratureShellRequest,
+        *,
+        citation_registry: ChatCitationRegistry | None = None,
+        user: BrowserUser | None = None,
+    ) -> LiteratureShellResponse:
+        return self.execute_literature_shell(
+            request.command,
+            citation_registry=citation_registry,
+            user=user,
+        )
+
     def _uploaded_citation(
         self,
         citation_registry: ChatCitationRegistry,
@@ -4589,6 +8375,14 @@ class PaperbaseService:
         thread_id: str | None = None,
         project_id: str | None = None,
     ) -> dict[str, Any]:
+        if tool_name == "paperbase_shell":
+            response = self.literature_shell(
+                LiteratureShellRequest(command=str(tool_input.get("command") or "").strip()),
+                citation_registry=citation_registry,
+                user=user,
+            )
+            return response.model_dump(mode="json")
+
         if tool_name == "paperbase_search":
             query = str(tool_input.get("query") or "").strip()
             # Chat-tool searches are synthetic LLM reformulations, not real user
@@ -5052,7 +8846,10 @@ class PaperbaseService:
         figure_id = detail(tool_input.get("figure_id"))
         table_id = detail(tool_input.get("table_id"))
         exec_id = detail(tool_input.get("exec_id"))
+        shell_command = detail(tool_input.get("command"), limit=80)
 
+        if tool_name == "paperbase_shell":
+            return f'paperbase shell: {shell_command}' if shell_command else "paperbase shell"
         if tool_name == "paperbase_search":
             return f'paper search for "{query}"' if query else "paper search"
         if tool_name == "paperbase_search_sections":
@@ -8088,6 +11885,13 @@ class PaperbaseService:
                     force=bool(job.payload.get("force")),
                     tracking_job=job,
                 )
+            elif job.job_type == "project_presentation":
+                self.generate_project_presentation(
+                    user_id=str(job.payload["user_id"]),
+                    project_id=str(job.payload["project_id"]),
+                    presentation_id=str(job.payload["presentation_id"]),
+                    context_snapshot=dict(job.payload.get("context_snapshot") or {}),
+                )
             else:
                 raise ValueError(f"Unsupported job type: {job.job_type}")
             self._raise_if_current_job_canceled()
@@ -8100,8 +11904,24 @@ class PaperbaseService:
                     "job_type": job.job_type,
                 },
             )
+        except JobYielded:
+            yielded = self.repository.yield_job(  # type: ignore[attr-defined]
+                job.job_id,
+                lease_token=job.lease_token,
+                next_run_at=utcnow() + timedelta(seconds=30),
+            )
+            logger.info(
+                "Yielded job to higher-priority work",
+                extra={
+                    "event": "jobs.yielded",
+                    "job_id": job.job_id,
+                    "job_type": job.job_type,
+                    "next_run_at": yielded.next_run_at.isoformat() if yielded and yielded.next_run_at else None,
+                },
+            )
         except JobCanceled:
             self.repository.mark_job_canceled(job.job_id, lease_token=job.lease_token)
+            self._sync_canceled_job_side_effects(job)
             logger.info(
                 "Canceled job",
                 extra={
@@ -8126,19 +11946,21 @@ class PaperbaseService:
         exponentially with jitter until ``max_attempts`` is reached; after
         that they too dead-letter. Uncaught defaults to retryable — safer
         to retry a bug than to silently drop work."""
-        permanent = isinstance(exc, PermanentError)
+        permanent = isinstance(exc, PermanentError) or self._job_error_is_permanent(job, exc)
         attempts = (job.attempts or 0) + 0  # claim already incremented
         max_attempts = job.max_attempts or 3
         will_retry = (not permanent) and attempts < max_attempts
         next_run_at = _retry_delay_for(attempts) if will_retry else None
+        error_message = self._job_error_message(job, exc, will_retry=will_retry)
         self.repository.mark_job_failed(
             job.job_id,
-            str(exc),
+            error_message,
             permanent=permanent,
             next_run_at=next_run_at,
             lease_token=job.lease_token,
             error_trace=traceback.format_exc(),
         )
+        self._sync_failed_job_side_effects(job, error_message=error_message, will_retry=will_retry)
         logger.exception(
             "Job failed",
             extra={
@@ -8152,6 +11974,91 @@ class PaperbaseService:
                 "next_run_at": next_run_at.isoformat() if next_run_at else None,
             },
         )
+
+    def _job_error_is_permanent(self, job: JobResponse, exc: Exception) -> bool:
+        if job.job_type != "project_presentation":
+            return False
+        status_code = self._http_status_code(exc)
+        if status_code is None:
+            return False
+        return 400 <= status_code < 500 and status_code not in {408, 409, 425, 429}
+
+    def _job_error_message(self, job: JobResponse, exc: Exception, *, will_retry: bool) -> str:
+        if job.job_type == "project_presentation":
+            message = self._project_presentation_error_message(exc, will_retry=will_retry)
+            if message:
+                return message
+        return self._sanitize_job_error_message(str(exc))
+
+    def _sync_failed_job_side_effects(self, job: JobResponse, *, error_message: str, will_retry: bool) -> None:
+        if job.job_type != "project_presentation":
+            return
+        presentation_id = str(job.payload.get("presentation_id") or "")
+        if not presentation_id:
+            return
+        if will_retry:
+            self.repository.upsert_project_presentation_pending(  # type: ignore[attr-defined]
+                user_id=str(job.payload.get("user_id") or ""),
+                project_id=str(job.payload.get("project_id") or ""),
+                context_snapshot=dict(job.payload.get("context_snapshot") or {}),
+                job_id=job.job_id,
+            )
+            return
+        self.repository.fail_project_presentation(presentation_id, error=error_message)  # type: ignore[attr-defined]
+
+    def _sync_canceled_job_side_effects(self, job: JobResponse) -> None:
+        if job.job_type != "project_presentation":
+            return
+        presentation_id = str(job.payload.get("presentation_id") or "")
+        project_id = str(job.payload.get("project_id") or "")
+        user_id = str(job.payload.get("user_id") or "")
+        if not presentation_id or not project_id or not user_id:
+            return
+        current = self.repository.get_project_presentation(  # type: ignore[attr-defined]
+            user_id=user_id,
+            project_id=project_id,
+        )
+        if current is not None and current.status == "completed":
+            return
+        self.repository.cancel_project_presentation(presentation_id)  # type: ignore[attr-defined]
+
+    def _project_presentation_error_message(self, exc: Exception, *, will_retry: bool) -> str:
+        status_code = self._http_status_code(exc)
+        if status_code is None:
+            return self._sanitize_job_error_message(str(exc))
+        if status_code in {408, 409, 425, 429} or 500 <= status_code < 600:
+            suffix = " It will retry automatically." if will_retry else " Retry the presentation in a few minutes."
+            return f"OpenAI is temporarily unavailable for presentation generation (HTTP {status_code}).{suffix}"
+        if status_code in {401, 403}:
+            return f"OpenAI rejected the saved API key for presentation generation (HTTP {status_code}). Update the OpenAI key in Settings."
+        if status_code == 404:
+            return (
+                "OpenAI returned HTTP 404 for presentation generation. Check that "
+                f"`PAPERBASE_OPENAI_MODEL` (`{self.settings.openai_model}`) is available for this API key "
+                "and that `PAPERBASE_OPENAI_BASE_URL` points to the OpenAI API."
+            )
+        if 400 <= status_code < 500:
+            return (
+                f"OpenAI rejected the presentation request (HTTP {status_code}). Check the configured "
+                f"model `{self.settings.openai_model}` and saved OpenAI API key."
+            )
+        return self._sanitize_job_error_message(str(exc))
+
+    @staticmethod
+    def _http_status_code(exc: Exception) -> int | None:
+        if isinstance(exc, requests.HTTPError) and exc.response is not None:
+            return exc.response.status_code
+        return None
+
+    @staticmethod
+    def _sanitize_job_error_message(message: str) -> str:
+        text = str(message or "").strip()
+        if "<html" in text[:1000].lower():
+            text = re.sub(r"<script\b.*?</script>", " ", text, flags=re.IGNORECASE | re.DOTALL)
+            text = re.sub(r"<style\b.*?</style>", " ", text, flags=re.IGNORECASE | re.DOTALL)
+            text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text[:1000] if text else "Job failed"
 
     def retry_dead_job(self, job_id: str) -> JobResponse | None:
         """Promote a dead job back to pending with attempts reset. Returns
@@ -8629,10 +12536,17 @@ class PaperbaseService:
         seen: set[str] = set()
         for category in categories:
             self._raise_if_current_job_canceled()
+            self._yield_if_higher_priority_job_waiting()
             papers = sources.fetch_recent(category, days=days, max_results=limit_per_category)
-            sources.enrich_with_semantic_scholar(papers)
+            sources.enrich_with_semantic_scholar(
+                papers,
+                max_retries=1,
+                base_backoff_seconds=0.5,
+                inter_batch_sleep_seconds=0.0,
+            )
             for paper in papers:
                 self._raise_if_current_job_canceled()
+                self._yield_if_higher_priority_job_waiting()
                 if paper.arxiv_id in seen:
                     continue
                 seen.add(paper.arxiv_id)
@@ -8644,6 +12558,7 @@ class PaperbaseService:
                         tracking_job=tracking_job,
                     )
                 )
+                self._yield_if_higher_priority_job_waiting()
         logger.info(
             "Completed latest sync",
             extra={
@@ -9221,7 +13136,7 @@ class PaperbaseService:
         date: str | None = None,
         sort: str,
         page: int = 1,
-        page_size: int = 50,
+        page_size: int = 20,
         viewer: BrowserUser | None = None,
     ) -> TrendingFeedResponse:
         if date is not None:
@@ -9398,6 +13313,9 @@ class PaperbaseService:
         if not base:
             return path
         return f"{base}{path}"
+
+    def _project_presentation_share_url(self, share_token: str) -> str:
+        return self._browser_app_url(f"/?presentation={quote(share_token)}")
 
     def _paper_artifact_location(self, paper_id: str, path: str) -> tuple[str, str]:
         self.get_indexed_paper(paper_id)

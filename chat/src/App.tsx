@@ -4,6 +4,7 @@ import type {
   ChangeEvent,
   FormEvent,
   KeyboardEvent as ReactKeyboardEvent,
+  MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
   UIEvent,
 } from "react";
@@ -11,6 +12,7 @@ import Editor, { DiffEditor } from "@monaco-editor/react";
 
 import {
   api,
+  cancelProjectPresentation,
   createPythonFile,
   createProject,
   createThread,
@@ -33,7 +35,9 @@ import {
   loadGitHubRepositories,
   loadGitHubRepoImportCandidates,
   loadGitHubRepoMetadata,
+  loadPublicProjectPresentation,
   loadProjectItems,
+  loadProjectPresentation,
   loadProjects,
   loadSession,
   loadUploads,
@@ -45,11 +49,13 @@ import {
   runPythonFile,
   sendThreadMessage,
   sendThreadMessageStream,
+  startProjectPresentation,
   submitChatFeedback,
   suggestBrowserPapers,
   StreamingChatAbortError,
   StreamingChatError,
   syncProjectRepo,
+  updateProjectPresentationShare,
   updateProject,
   updatePythonFile,
   upvoteBrowserPaper,
@@ -170,6 +176,7 @@ import { CredentialFormUsernameField } from "./CredentialFormUsernameField";
 import { CodeSnippet, extractStreamingPythonPreview } from "./CodeSnippet";
 import { LandingMentionEditor } from "./LandingMentionEditor";
 import { MarkdownRenderer } from "./MarkdownRenderer";
+import { ProjectPresentationDeck } from "./ProjectPresentationDeck";
 import { formatLocalTimestamp } from "./time";
 import { TrendingPapersPage, type TrendingBrowseState } from "./TrendingPapersPage";
 import type {
@@ -194,10 +201,13 @@ import type {
   PaperSelectionPayload,
   PaperVoteSummary,
   ProjectItemKind,
+  ProjectPresentationExplorationSnapshot,
+  ProjectPresentationResponse,
   ProjectRepoConflictResolution,
   ProjectSummary,
   PythonFileResponse,
   SendChatMessageResponse,
+  TrendingPaperDetail,
 } from "./types";
 
 function chatMessageRowId(messageId: string) {
@@ -209,6 +219,20 @@ type ThreadRenameModalState = {
   title: string;
   draft: string;
   saving: boolean;
+  error: string;
+};
+
+type ProjectPresentationState = {
+  presentation: ProjectPresentationResponse | null;
+  loading: boolean;
+  error: string;
+  sharing: boolean;
+  canceling: boolean;
+};
+
+type PublicProjectPresentationState = {
+  presentation: ProjectPresentationResponse | null;
+  loading: boolean;
   error: string;
 };
 
@@ -226,17 +250,20 @@ const AUTH_VIEW_COPY: Record<AuthView, { title: string; caption: string }> = {
   "reset-password": { title: "Reset password", caption: "Choose a new password for your account." },
   settings: {
     title: "Settings",
-    caption: "Manage inference, sandbox, repos, and appearance.",
+    caption: "Manage inference, audio, sandbox, repos, and appearance.",
   },
 };
 
 const DEFAULT_BROWSER_SETTINGS: NonNullable<BrowserSessionResponse["settings"]> = {
   openai_api_key_hint: "",
   anthropic_api_key_hint: "",
+  has_elevenlabs_api_key: false,
+  elevenlabs_api_key_hint: "",
   has_modal_credentials: false,
   modal_token_id_hint: "",
   has_github_connection: false,
   github_login: "",
+  github_sync_enabled: false,
   github_oauth_available: false,
   github_manage_access_url: "https://github.com/settings/connections/applications",
   weekly_papers_review_email: false,
@@ -252,6 +279,11 @@ const BASE_SETTINGS_TABS: Array<{
     id: "inference",
     label: "Inference",
     caption: "Manage OpenAI inference API key.",
+  },
+  {
+    id: "audio",
+    label: "Audio",
+    caption: "Manage ElevenLabs presentation audio.",
   },
   {
     id: "sandbox",
@@ -273,6 +305,7 @@ const BASE_SETTINGS_TABS: Array<{
 const normalizeSettingsTab = (value: string | null): SettingsTab | null => {
   if (
     value === "inference" ||
+    value === "audio" ||
     value === "sandbox" ||
     value === "version-control" ||
     value === "appearance"
@@ -306,7 +339,7 @@ const buildProjectCategoryCollapseState = (collapsed: boolean) =>
     Record<ProjectSidebarCategoryKey, boolean>
   >;
 const WORKSPACE_SIDEBAR_ITEMS = [
-  { id: "trending", label: "Trending papers", asset: "docs.svg" },
+  { id: "trending", label: "Trending papers", asset: "icons8-ratings.svg" },
   { id: "admin_jobs", label: "Control panel", asset: "settings.svg", adminOnly: true },
 ] satisfies Array<{
   id: "trending" | "admin_jobs";
@@ -314,6 +347,8 @@ const WORKSPACE_SIDEBAR_ITEMS = [
   asset: string;
   adminOnly?: boolean;
 }>;
+
+const PENDING_PAPER_EXPLORATION_KEY = "paperbase-pending-paper-exploration";
 
 function timestampMs(value: string | null | undefined) {
   if (!value) {
@@ -349,6 +384,94 @@ function paperExplorationIdFor(projectId: string, paperId: string) {
   return `paper-exploration:${projectId}:${paperId}`;
 }
 
+function paperResponseFromTrendingDetail(detail: TrendingPaperDetail): PaperResponse {
+  return {
+    paper_id: detail.paper_id,
+    arxiv_id: detail.arxiv_id,
+    title: detail.title,
+    authors: detail.authors,
+    abstract: detail.abstract ?? "",
+    summary_short: detail.summary_short ?? "",
+    categories: detail.categories,
+    primary_category: detail.primary_category,
+    published: detail.published,
+    updated: detail.updated ?? detail.published,
+    doi: detail.doi,
+    comment: detail.comment,
+    journal_ref: detail.journal_ref,
+    pdf_url: detail.pdf_url,
+    html_url: detail.html_url,
+    citation_count: detail.citation_count ?? 0,
+    influential_citation_count: detail.influential_citation_count ?? 0,
+    semantic_scholar_id: detail.semantic_scholar_id,
+    code_url: detail.code_url,
+    code_url_source: detail.code_url_source,
+    code_index_status: detail.code_index_status,
+    code_is_python: detail.code_is_python,
+    code_python_reason: detail.code_python_reason,
+    venue: detail.venue,
+    venue_year: detail.venue_year,
+    venue_source: detail.venue_source,
+    top_author_s2_id: detail.top_author_s2_id,
+    source_type: detail.source_type,
+    index_status: detail.index_status ?? "",
+    indexed_at: detail.indexed_at,
+  };
+}
+
+function paperActionTargetFromTrendingDetail(detail: TrendingPaperDetail): PaperActionTarget {
+  return {
+    paperId: detail.paper_id,
+    path: detail.arxiv_id || detail.paper_id,
+    paper: paperResponseFromTrendingDetail(detail),
+    title: detail.title,
+    authors: detail.authors,
+    previewImageUrl: detail.image_url,
+    pdfUrl: detail.pdf_url,
+  };
+}
+
+function rememberPendingPaperExploration(target: PaperActionTarget) {
+  sessionStorage.setItem(
+    PENDING_PAPER_EXPLORATION_KEY,
+    JSON.stringify({
+      paperId: target.paperId,
+      path: target.path,
+      title: target.title ?? "",
+      authors: target.authors ?? "",
+      previewImageUrl: target.previewImageUrl ?? "",
+      pdfUrl: target.pdfUrl ?? "",
+    }),
+  );
+}
+
+function consumePendingPaperExploration(): PaperActionTarget | null {
+  const raw = sessionStorage.getItem(PENDING_PAPER_EXPLORATION_KEY);
+  sessionStorage.removeItem(PENDING_PAPER_EXPLORATION_KEY);
+  if (!raw) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const paperId = typeof parsed.paperId === "string" ? parsed.paperId : "";
+    const path = typeof parsed.path === "string" ? parsed.path : paperId;
+    if (!paperId || !path) {
+      return null;
+    }
+    return {
+      paperId,
+      path,
+      title: typeof parsed.title === "string" ? parsed.title : undefined,
+      authors: typeof parsed.authors === "string" ? parsed.authors : undefined,
+      previewImageUrl:
+        typeof parsed.previewImageUrl === "string" ? parsed.previewImageUrl : undefined,
+      pdfUrl: typeof parsed.pdfUrl === "string" ? parsed.pdfUrl : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function splitPaperAuthors(authors: string) {
   return authors
     .split(/\s*(?:,|\band\b)\s*/i)
@@ -362,6 +485,135 @@ function authorInitials(author: string) {
     .map((part) => part.trim())
     .filter(Boolean);
   return (parts[0]?.[0] ?? "").concat(parts.length > 1 ? (parts[parts.length - 1]?.[0] ?? "") : "");
+}
+
+function presentationTokenFromUrl() {
+  if (typeof window === "undefined") {
+    return "";
+  }
+  return new URLSearchParams(window.location.search).get("presentation")?.trim() ?? "";
+}
+
+function projectPresentationProgressIsActive(presentation: ProjectPresentationResponse | null) {
+  if (!presentation) {
+    return false;
+  }
+  if (presentation.status === "pending" || presentation.status === "running") {
+    return true;
+  }
+  const phaseKey = presentation.progress?.phase_key ?? "";
+  return presentation.status === "completed" && phaseKey !== "" && phaseKey !== "complete";
+}
+
+function projectPresentationProgressPercent(presentation: ProjectPresentationResponse | null) {
+  const percent = presentation?.progress?.percent;
+  if (typeof percent === "number" && Number.isFinite(percent)) {
+    return Math.max(0, Math.min(100, Math.round(percent)));
+  }
+  if (presentation?.status === "completed") {
+    return 100;
+  }
+  if (presentation?.status === "running") {
+    return 24;
+  }
+  return 4;
+}
+
+const PROJECT_PRESENTATION_PROGRESS_STEPS = [
+  {
+    keys: ["queued"],
+    label: "Queue",
+    detail: "Waiting for a worker",
+  },
+  {
+    keys: ["making_bullet_points"],
+    label: "Story",
+    detail: "Finding the argument",
+  },
+  {
+    keys: ["drawing_diagrams"],
+    label: "Visuals",
+    detail: "Designing diagrams",
+  },
+  {
+    keys: ["assembling_presentation"],
+    label: "Slides",
+    detail: "Saving the deck",
+  },
+  {
+    keys: ["generating_images", "generating_audio"],
+    label: "Media",
+    detail: "Images and audio",
+  },
+  {
+    keys: ["complete"],
+    label: "Ready",
+    detail: "View and share",
+  },
+] as const;
+
+function projectPresentationProgressStepIndex(
+  presentation: ProjectPresentationResponse | null,
+  percent: number,
+) {
+  const phaseKey = presentation?.progress?.phase_key ?? "";
+  const exactIndex = PROJECT_PRESENTATION_PROGRESS_STEPS.findIndex((step) =>
+    step.keys.includes(phaseKey),
+  );
+  if (exactIndex >= 0) {
+    return exactIndex;
+  }
+  if (percent >= 100) {
+    return PROJECT_PRESENTATION_PROGRESS_STEPS.length - 1;
+  }
+  if (percent >= 78) {
+    return 4;
+  }
+  if (percent >= 72) {
+    return 3;
+  }
+  if (percent >= 54) {
+    return 2;
+  }
+  if (percent >= 12) {
+    return 1;
+  }
+  return 0;
+}
+
+function projectPresentationRemainingSeconds(
+  presentation: ProjectPresentationResponse | null,
+  nowMs: number,
+) {
+  const progress = presentation?.progress;
+  const estimate = progress?.estimated_seconds_remaining;
+  if (typeof estimate !== "number" || !Number.isFinite(estimate) || estimate <= 0) {
+    return 0;
+  }
+  const updatedAtMs = progress.updated_at ? Date.parse(progress.updated_at) : Number.NaN;
+  if (!Number.isFinite(updatedAtMs)) {
+    return Math.ceil(estimate);
+  }
+  return Math.max(0, Math.ceil(estimate - Math.max(0, nowMs - updatedAtMs) / 1000));
+}
+
+function formatPresentationEta(seconds: number) {
+  if (seconds <= 0) {
+    return "finishing now";
+  }
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  return `${minutes}:${remainingSeconds.toString().padStart(2, "0")} remaining`;
+}
+
+function projectPresentationEtaLabel(
+  presentation: ProjectPresentationResponse | null,
+  nowMs: number,
+) {
+  if (presentation?.progress?.phase_key === "queued") {
+    return "waiting for worker";
+  }
+  return formatPresentationEta(projectPresentationRemainingSeconds(presentation, nowMs));
 }
 
 function samePaperSections(left: PdfDocumentSection[], right: PdfDocumentSection[]) {
@@ -809,6 +1061,13 @@ export default function App() {
   const [authView, setAuthView] = useState<AuthView>("login");
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [authReady, setAuthReady] = useState(Boolean(bootstrapSession));
+  const [publicPresentationToken] = useState(() => presentationTokenFromUrl());
+  const [publicPresentationState, setPublicPresentationState] =
+    useState<PublicProjectPresentationState>({
+      presentation: null,
+      loading: false,
+      error: "",
+    });
   const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTab>("inference");
   const [appearanceThemeDraft, setAppearanceThemeDraft] = useState<AppearanceTheme>("light");
   const [flash, setFlash] = useState("");
@@ -877,6 +1136,12 @@ export default function App() {
   const [paperExplorations, setPaperExplorations] = useState<PaperExploration[]>(() =>
     restorePaperExplorations(),
   );
+  const [projectPresentationStates, setProjectPresentationStates] = useState<
+    Record<string, ProjectPresentationState>
+  >({});
+  const [projectPresentationProgressNow, setProjectPresentationProgressNow] = useState(() =>
+    Date.now(),
+  );
   const [explorationPicker, setExplorationPicker] = useState<{
     projectId: string;
     projectName: string;
@@ -934,6 +1199,9 @@ export default function App() {
   const explorationSuggestionRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const projectMenuRef = useRef<HTMLDivElement | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
+  const startPaperExplorationRef = useRef<
+    ((target: PaperActionTarget, options?: { navigate?: boolean }) => Promise<boolean>) | null
+  >(null);
   const pendingTurnAnchorMessageIdRef = useRef<string | null>(null);
   const skipNextAutoBottomScrollRef = useRef(false);
   const streamAbortControllerRef = useRef<AbortController | null>(null);
@@ -1221,6 +1489,29 @@ export default function App() {
   const activeProjectHome = activeProjectHomeId
     ? (projects.find((project) => project.project_id === activeProjectHomeId) ?? null)
     : null;
+  const activeProjectPresentationState = activeProjectHomeId
+    ? (projectPresentationStates[activeProjectHomeId] ?? {
+        presentation: null,
+        loading: false,
+        error: "",
+        sharing: false,
+        canceling: false,
+      })
+    : null;
+  const activeProjectPresentation = activeProjectPresentationState?.presentation ?? null;
+  const activeProjectPresentationProgressActive =
+    projectPresentationProgressIsActive(activeProjectPresentation);
+  const activeProjectPresentationProgressPercent =
+    projectPresentationProgressPercent(activeProjectPresentation);
+  const activeProjectPresentationProgressStepIndex = projectPresentationProgressStepIndex(
+    activeProjectPresentation,
+    activeProjectPresentationProgressPercent,
+  );
+  const activeProjectPresentationEta = projectPresentationEtaLabel(
+    activeProjectPresentation,
+    projectPresentationProgressNow,
+  );
+  const activeProjectPresenting = Boolean(activeProjectHomeId);
   const activePaperExploration = activePaperExplorationId
     ? (paperExplorations.find(
         (exploration) => exploration.explorationId === activePaperExplorationId,
@@ -1385,13 +1676,8 @@ export default function App() {
   const isWorkspaceView = workspaceView !== null;
   const isAdminWorkspaceView =
     workspaceView?.kind === "admin_jobs" || workspaceView?.kind === "admin_job_papers";
-  const activeThreadHasAssistantReply = Boolean(
-    activeThread?.messages.some(
-      (message) => message.role === "assistant" && message.kind !== "compaction",
-    ),
-  );
   const showChatThreadHeader = Boolean(
-    activeTab?.kind === "thread" && activeThread && activeThreadHasAssistantReply,
+    activeTab?.kind === "thread" && activeThread && activeThread.messages.length > 0,
   );
   const showThreadStageChrome =
     !isWorkspaceView && activeTab?.kind === "thread" && threadPane === "chat" && !isChatEmpty;
@@ -1810,6 +2096,8 @@ export default function App() {
     };
   }, [session]);
   const sessionSettings = sessionSummary?.settings ?? DEFAULT_BROWSER_SETTINGS;
+  const githubSyncActive =
+    sessionSettings.has_github_connection && sessionSettings.github_sync_enabled;
   const settingsTabs = BASE_SETTINGS_TABS;
   const workspaceSidebarItems = useMemo(
     () => WORKSPACE_SIDEBAR_ITEMS.filter((item) => !item.adminOnly || sessionSummary?.isAdmin),
@@ -1821,11 +2109,11 @@ export default function App() {
     {
       id: "github",
       provider: "github",
-      label: "GitHub connection",
-      description: "Needed for the agent to create, edit, and save project files.",
-      actionLabel: sessionSettings.has_github_connection ? "Connected" : "Open GitHub setup",
-      ready: sessionSettings.has_github_connection,
-      required: true,
+      label: "GitHub sync",
+      description: "Optional version control for project files. Local projects work without it.",
+      actionLabel: githubSyncActive ? "Sync on" : "Optional",
+      ready: true,
+      required: false,
       settingsTab: "version-control" as const,
     },
     {
@@ -2208,6 +2496,7 @@ export default function App() {
     },
     [activeProjectHomeId, activeThread?.project_id, openPaperExploration, showErrorFlash],
   );
+  startPaperExplorationRef.current = startPaperExploration;
 
   const startExplorationFromSuggestion = useCallback(
     async (paper: MentionSuggestion) => {
@@ -3123,6 +3412,18 @@ export default function App() {
     }
   }, []);
 
+  const copyProjectPresentationShareLink = useCallback(
+    async (url: string) => {
+      try {
+        await navigator.clipboard.writeText(url);
+        showNoteFlash("Copied presentation link.");
+      } catch (error) {
+        console.error(error);
+      }
+    },
+    [showNoteFlash],
+  );
+
   const copyThreadDebugBundle = useCallback(
     async (bundle: ReturnType<typeof buildThreadDebugBundle>) => {
       try {
@@ -3359,6 +3660,175 @@ export default function App() {
       return false;
     },
     [showErrorFlash],
+  );
+
+  const projectPresentationExplorationSnapshots = useCallback(
+    (projectId: string): ProjectPresentationExplorationSnapshot[] =>
+      paperExplorations
+        .filter((exploration) => exploration.projectId === projectId)
+        .map((exploration) => ({
+          exploration_id: exploration.explorationId,
+          paper_id: exploration.paperId,
+          chat_thread_id: exploration.chatThreadId ?? "",
+          path: exploration.path,
+          title: exploration.title,
+          authors: exploration.authors,
+          preview_image_url: exploration.previewImageUrl,
+          pdf_url: exploration.pdfUrl,
+          annotations: exploration.annotations.map((annotation) => ({
+            annotation_id: annotation.annotationId,
+            kind: annotation.kind,
+            note: annotation.note,
+            page_number: annotation.pageNumber,
+            selected_text: annotation.selectedText ?? "",
+            nearby_text: annotation.nearbyText ?? "",
+            section_title: annotation.sectionTitle ?? "",
+            rects: annotation.rects ?? [],
+            region: annotation.region ?? null,
+            created_at: annotation.createdAt,
+            updated_at: annotation.updatedAt,
+          })),
+          created_at: exploration.createdAt,
+          updated_at: exploration.updatedAt,
+        })),
+    [paperExplorations],
+  );
+
+  const setProjectPresentationState = useCallback(
+    (projectId: string, updater: (state: ProjectPresentationState) => ProjectPresentationState) => {
+      setProjectPresentationStates((current) => {
+        const previous = current[projectId] ?? {
+          presentation: null,
+          loading: false,
+          error: "",
+          sharing: false,
+          canceling: false,
+        };
+        return { ...current, [projectId]: updater(previous) };
+      });
+    },
+    [],
+  );
+
+  const refreshProjectPresentation = useCallback(
+    async (projectId: string) => {
+      setProjectPresentationState(projectId, (state) => ({ ...state, loading: true, error: "" }));
+      try {
+        const presentation = await loadProjectPresentation(projectId);
+        setProjectPresentationState(projectId, (state) => ({
+          ...state,
+          presentation,
+          loading: false,
+          canceling: false,
+          error: "",
+        }));
+        return presentation;
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Presentation could not be loaded.";
+        setProjectPresentationState(projectId, (state) => ({
+          ...state,
+          loading: false,
+          canceling: false,
+          error: message,
+        }));
+        throw error;
+      }
+    },
+    [setProjectPresentationState],
+  );
+
+  const startProjectPresentationWorkflow = useCallback(
+    async (projectId: string, options: { regenerate?: boolean } = {}) => {
+      if (!requireInferenceAccess()) {
+        return;
+      }
+      setProjectPresentationState(projectId, (state) => ({ ...state, loading: true, error: "" }));
+      try {
+        const presentation = await startProjectPresentation(projectId, {
+          explorations: projectPresentationExplorationSnapshots(projectId),
+          regenerate: Boolean(options.regenerate),
+        });
+        setProjectPresentationState(projectId, (state) => ({
+          ...state,
+          presentation,
+          loading: false,
+          canceling: false,
+          error: "",
+        }));
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Presentation could not be started.";
+        setProjectPresentationState(projectId, (state) => ({
+          ...state,
+          loading: false,
+          canceling: false,
+          error: message,
+        }));
+        showErrorFlash(message);
+      }
+    },
+    [
+      projectPresentationExplorationSnapshots,
+      requireInferenceAccess,
+      setProjectPresentationState,
+      showErrorFlash,
+    ],
+  );
+
+  const cancelProjectPresentationWorkflow = useCallback(
+    async (projectId: string) => {
+      setProjectPresentationState(projectId, (state) => ({
+        ...state,
+        canceling: true,
+        error: "",
+      }));
+      try {
+        const presentation = await cancelProjectPresentation(projectId);
+        setProjectPresentationState(projectId, (state) => ({
+          ...state,
+          presentation,
+          loading: false,
+          canceling: false,
+          error: "",
+        }));
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Presentation could not be canceled.";
+        setProjectPresentationState(projectId, (state) => ({
+          ...state,
+          canceling: false,
+          error: message,
+        }));
+        showErrorFlash(message);
+      }
+    },
+    [setProjectPresentationState, showErrorFlash],
+  );
+
+  const toggleProjectPresentationShare = useCallback(
+    async (projectId: string, isPublic: boolean) => {
+      setProjectPresentationState(projectId, (state) => ({ ...state, sharing: true, error: "" }));
+      try {
+        const presentation = await updateProjectPresentationShare(projectId, isPublic);
+        setProjectPresentationState(projectId, (state) => ({
+          ...state,
+          presentation,
+          sharing: false,
+          error: "",
+        }));
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Presentation sharing could not be updated.";
+        setProjectPresentationState(projectId, (state) => ({
+          ...state,
+          sharing: false,
+          error: message,
+        }));
+        showErrorFlash(message);
+      }
+    },
+    [setProjectPresentationState, showErrorFlash],
   );
 
   const sendMessage = useCallback(
@@ -3951,6 +4421,14 @@ export default function App() {
         return;
       }
 
+      const pendingPaperExploration = consumePendingPaperExploration();
+      if (pendingPaperExploration) {
+        const didStart = await startPaperExplorationRef.current?.(pendingPaperExploration);
+        if (didStart) {
+          return;
+        }
+      }
+
       const initialTrendingBrowseState = trendingBrowseStateFromUrl();
       if (initialTrendingBrowseState) {
         setActiveTab(null);
@@ -4182,6 +4660,19 @@ export default function App() {
     requireInferenceAccess,
     sendMessage,
   ]);
+
+  const handleReadTrendingPaper = useCallback(
+    (detail: TrendingPaperDetail) => {
+      const target = paperActionTargetFromTrendingDetail(detail);
+      if (!sessionRef.current?.authenticated) {
+        rememberPendingPaperExploration(target);
+        openAuthModal("login");
+        return;
+      }
+      void startPaperExploration(target);
+    },
+    [openAuthModal, startPaperExploration],
+  );
 
   const handlePaperDiscussionVote = useCallback(async () => {
     if (!activePaperExploration) {
@@ -4866,6 +5357,17 @@ export default function App() {
     setPaperExplorationSidebarCollapsed(true);
   }, [sidebarCollapsed]);
 
+  const handleSidebarClickCapture = useCallback(
+    (event: ReactMouseEvent<HTMLElement>) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest(".sidebar-toggle")) {
+        return;
+      }
+      expandCollapsedSidebarForAction();
+    },
+    [expandCollapsedSidebarForAction],
+  );
+
   const handleSidebarToggle = useCallback(() => {
     setAccountMenuOpen(false);
     setProjectMenuProjectId(null);
@@ -5147,14 +5649,10 @@ export default function App() {
     setProjectMenuProjectId(null);
     setEmptyStateProjectPickerOpen(false);
     setEmptyStateProjectSearch("");
-    if (sessionSettings.has_github_connection) {
+    if (githubSyncActive) {
       void refreshProjectRepositories(false);
     }
-  }, [
-    refreshProjectRepositories,
-    sessionSettings.github_login,
-    sessionSettings.has_github_connection,
-  ]);
+  }, [githubSyncActive, refreshProjectRepositories, sessionSettings.github_login]);
 
   const openEditProjectModal = useCallback(
     (projectId: string) => {
@@ -5215,11 +5713,7 @@ export default function App() {
     }
     try {
       if (projectModalState.mode === "create") {
-        if (!sessionSettings.has_github_connection) {
-          setProjectFormError("Connect GitHub before creating a project.");
-          return;
-        }
-        if (!projectRepoMode) {
+        if (githubSyncActive && !projectRepoMode) {
           setProjectFormError("Choose a GitHub repository.");
           return;
         }
@@ -5227,8 +5721,9 @@ export default function App() {
         const existingRepoImportPaths = projectRepoImportAll
           ? projectRepoCandidates.map((candidate) => candidate.path)
           : projectRepoSelectedPaths;
-        const githubRepo =
-          projectRepoMode === "create"
+        const githubRepo = !githubSyncActive
+          ? null
+          : projectRepoMode === "create"
             ? {
                 mode: "create" as const,
                 name: repoName,
@@ -5242,11 +5737,11 @@ export default function App() {
                 base_branch: projectRepoBranch.trim(),
                 import_paths: existingRepoImportPaths,
               };
-        if (!githubRepo.name) {
+        if (githubRepo && !githubRepo.name) {
           setProjectFormError("GitHub repository name is required.");
           return;
         }
-        if (githubRepo.mode === "existing" && (!githubRepo.owner || !githubRepo.base_branch)) {
+        if (githubRepo?.mode === "existing" && (!githubRepo.owner || !githubRepo.base_branch)) {
           setProjectFormError("Existing repositories require an owner and base branch.");
           return;
         }
@@ -5268,6 +5763,7 @@ export default function App() {
   }, [
     closeProjectModal,
     fetchProjectItems,
+    githubSyncActive,
     projectFormDescription,
     projectFormName,
     projectModalState,
@@ -5279,7 +5775,6 @@ export default function App() {
     projectRepoOwner,
     projectRepoSelectedPaths,
     refreshProjects,
-    sessionSettings.has_github_connection,
   ]);
 
   const saveProjectInferenceKey = useCallback(async () => {
@@ -5463,11 +5958,6 @@ export default function App() {
   );
 
   const handleCreatePythonFile = useCallback(async () => {
-    if (!sessionSettings.has_github_connection) {
-      showErrorFlash("Connect GitHub before creating Python files.");
-      openAuthModal("settings", "version-control");
-      return;
-    }
     const projectId = selectedProjectIdRef.current ?? projectsRef.current[0]?.project_id;
     if (!projectId) {
       setComposerStatus("Create a project before adding a Python file.");
@@ -5497,24 +5987,13 @@ export default function App() {
       }
       setComposerStatus(message);
     }
-  }, [
-    openAuthModal,
-    refreshProjects,
-    sessionSettings.has_github_connection,
-    showErrorFlash,
-    upsertPythonFileIntoProjectItems,
-  ]);
+  }, [refreshProjects, upsertPythonFileIntoProjectItems]);
 
   const handleImportNotebookUpload = useCallback(
     async (event: ChangeEvent<HTMLInputElement>) => {
       const file = event.target.files?.[0] ?? null;
       event.target.value = "";
       if (!file) {
-        return;
-      }
-      if (!sessionSettings.has_github_connection) {
-        showErrorFlash("Connect GitHub before importing notebooks.");
-        openAuthModal("settings", "version-control");
         return;
       }
       const projectId = selectedProjectIdRef.current ?? projectsRef.current[0]?.project_id;
@@ -5543,13 +6022,7 @@ export default function App() {
         );
       }
     },
-    [
-      openAuthModal,
-      refreshProjects,
-      sessionSettings.has_github_connection,
-      showErrorFlash,
-      upsertPythonFileIntoProjectItems,
-    ],
+    [refreshProjects, upsertPythonFileIntoProjectItems],
   );
 
   const applyConflictResolutionsLocally = useCallback(
@@ -5684,6 +6157,27 @@ export default function App() {
       });
     },
     [fetchAndStorePythonFile, openAuthModal, sessionSettings.has_github_connection, showErrorFlash],
+  );
+
+  const handleSavePythonFile = useCallback(
+    async (fileId: string) => {
+      if (githubSyncActive) {
+        await openSaveModal(fileId);
+        return;
+      }
+      try {
+        const currentFile =
+          pythonFileMapRef.current[fileId] ?? (await fetchAndStorePythonFile(fileId));
+        const nextContent = pythonFileDraftsRef.current[fileId]?.content ?? currentFile.content;
+        await persistPythonFile(fileId, nextContent);
+        showNoteFlash("Saved locally.");
+      } catch (error) {
+        setComposerStatus(
+          error instanceof Error ? error.message : "Python file could not be saved.",
+        );
+      }
+    },
+    [fetchAndStorePythonFile, githubSyncActive, openSaveModal, persistPythonFile, showNoteFlash],
   );
 
   const closeSaveModal = useCallback(() => {
@@ -5844,11 +6338,6 @@ export default function App() {
     if (!activePythonFileId) {
       return;
     }
-    if (!sessionSettings.has_github_connection) {
-      showErrorFlash("Connect GitHub before running Python files.");
-      openAuthModal("settings", "version-control");
-      return;
-    }
     if (!sessionSettings.has_modal_credentials) {
       return;
     }
@@ -5863,18 +6352,20 @@ export default function App() {
         [activePythonFileId]: { running: true, result: null, error: "" },
       }));
       const savedFile = await persistPythonFile(activePythonFileId, nextContent);
-      const outcome = await syncProjectToGitHub({
-        fileId: activePythonFileId,
-        projectId: savedFile.project_id,
-        commitMessage: `Run ${savedFile.filename}`,
-        afterSaveAction: "run",
-      });
-      if (outcome.conflict) {
-        setPythonFileRuns((current) => ({
-          ...current,
-          [activePythonFileId]: { running: false, result: null, error: "" },
-        }));
-        return;
+      if (githubSyncActive) {
+        const outcome = await syncProjectToGitHub({
+          fileId: activePythonFileId,
+          projectId: savedFile.project_id,
+          commitMessage: `Run ${savedFile.filename}`,
+          afterSaveAction: "run",
+        });
+        if (outcome.conflict) {
+          setPythonFileRuns((current) => ({
+            ...current,
+            [activePythonFileId]: { running: false, result: null, error: "" },
+          }));
+          return;
+        }
       }
       const result = await runPythonFile(activePythonFileId, "full");
       setPythonFileRuns((current) => ({
@@ -5894,11 +6385,9 @@ export default function App() {
   }, [
     activePythonFileId,
     fetchAndStorePythonFile,
-    openAuthModal,
+    githubSyncActive,
     persistPythonFile,
-    sessionSettings.has_github_connection,
     sessionSettings.has_modal_credentials,
-    showErrorFlash,
     syncProjectToGitHub,
   ]);
 
@@ -5925,6 +6414,87 @@ export default function App() {
     window.addEventListener("paperbase:auth-expired", onAuthExpired);
     return () => window.removeEventListener("paperbase:auth-expired", onAuthExpired);
   }, [resetAuthenticatedState, showNoteFlash]);
+
+  useEffect(() => {
+    if (!publicPresentationToken) {
+      return;
+    }
+    let canceled = false;
+    setPublicPresentationState({ presentation: null, loading: true, error: "" });
+    loadPublicProjectPresentation(publicPresentationToken)
+      .then((presentation) => {
+        if (canceled) {
+          return;
+        }
+        setPublicPresentationState({ presentation, loading: false, error: "" });
+      })
+      .catch((error) => {
+        if (canceled) {
+          return;
+        }
+        setPublicPresentationState({
+          presentation: null,
+          loading: false,
+          error: error instanceof Error ? error.message : "Presentation could not be loaded.",
+        });
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [publicPresentationToken]);
+
+  useEffect(() => {
+    if (
+      !activeProjectHomeId ||
+      !activeProjectPresenting ||
+      !activeProjectPresentationState ||
+      activeProjectPresentationState.loading ||
+      activeProjectPresentationState.presentation ||
+      activeProjectPresentationState.error
+    ) {
+      return;
+    }
+    void refreshProjectPresentation(activeProjectHomeId).catch(() => undefined);
+  }, [
+    activeProjectHomeId,
+    activeProjectPresenting,
+    activeProjectPresentationState?.error,
+    activeProjectPresentationState?.loading,
+    activeProjectPresentationState?.presentation,
+    refreshProjectPresentation,
+  ]);
+
+  useEffect(() => {
+    if (
+      !activeProjectHomeId ||
+      !activeProjectPresenting ||
+      !activeProjectPresentation ||
+      !projectPresentationProgressIsActive(activeProjectPresentation)
+    ) {
+      return;
+    }
+    const interval = window.setInterval(() => {
+      void refreshProjectPresentation(activeProjectHomeId).catch(() => undefined);
+    }, 3000);
+    return () => window.clearInterval(interval);
+  }, [
+    activeProjectHomeId,
+    activeProjectPresenting,
+    activeProjectPresentation?.progress?.phase_key,
+    activeProjectPresentation?.status,
+    refreshProjectPresentation,
+  ]);
+
+  useEffect(() => {
+    if (!activeProjectPresentationProgressActive) {
+      return;
+    }
+    setProjectPresentationProgressNow(Date.now());
+    const interval = window.setInterval(() => {
+      setProjectPresentationProgressNow(Date.now());
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, [activeProjectPresentationProgressActive]);
 
   if (!authReady) {
     return null;
@@ -6023,8 +6593,7 @@ export default function App() {
     />
   );
 
-  const projectCreateBlocked =
-    projectModalState?.mode === "create" && !sessionSettings.has_github_connection;
+  const projectCreateBlocked = false;
   const selectedRepoFullName =
     projectRepoMode === "existing" && projectRepoOwner && projectRepoName
       ? `${projectRepoOwner}/${projectRepoName}`
@@ -6046,34 +6615,49 @@ export default function App() {
 
   return (
     <>
-      {!authenticated ? (
+      {publicPresentationToken ? (
+        <main className="project-presentation-public-page">
+          {publicPresentationState.loading ? (
+            <div className="project-presentation-public-state">Loading presentation</div>
+          ) : publicPresentationState.error ? (
+            <div className="project-presentation-public-state error">
+              {publicPresentationState.error}
+            </div>
+          ) : publicPresentationState.presentation ? (
+            <ProjectPresentationDeck
+              presentation={publicPresentationState.presentation}
+              title="Shared project presentation"
+              publicMode
+            />
+          ) : null}
+        </main>
+      ) : !authenticated ? (
         trendingBrowseState ? (
           <main id="landing-page" className="landing-page landing-page-trending">
-            <button
-              id="landing-login-button"
-              className="landing-login-button"
-              type="button"
-              onClick={() => openAuthModal("login")}
-            >
-              <span className="landing-login-icon" aria-hidden="true">
-                <AppIcon src={staticAssetPath("login.svg")} className="landing-login-icon-image" />
-              </span>
-              <span className="landing-login-label">Log in</span>
-            </button>
-            <div className="landing-column landing-column-wide">
+            <header className="public-trending-header" aria-label="Paperbase public navigation">
               <a
-                className="brandline brandline-link"
+                className="public-trending-brand"
                 href="https://mv37.org"
                 target="_blank"
                 rel="noreferrer"
               >
-                MV37
+                mv37.org
               </a>
+              <button
+                type="button"
+                className="public-trending-back"
+                onClick={() => updateTrendingBrowseState(null)}
+              >
+                Back to Paperbase
+              </button>
+            </header>
+            <div className="landing-column landing-column-wide public-trending-column">
               <TrendingPapersPage
                 variant="public"
                 authenticated={false}
                 browseState={trendingBrowseState}
                 onChangeBrowseState={updateTrendingBrowseState}
+                onReadPaper={handleReadTrendingPaper}
                 onRequireAuth={() => openAuthModal("login")}
               />
             </div>
@@ -6132,6 +6716,8 @@ export default function App() {
                   authenticated={false}
                   browseState={landingTrendingBrowseState}
                   onChangeBrowseState={setLandingTrendingBrowseState}
+                  onOpenPaper={updateTrendingBrowseState}
+                  onReadPaper={handleReadTrendingPaper}
                   onRequireAuth={() => openAuthModal("login")}
                   feedTitle="Trending papers"
                   feedDescription=""
@@ -6144,7 +6730,7 @@ export default function App() {
         )
       ) : null}
 
-      {authenticated ? (
+      {!publicPresentationToken && authenticated ? (
         <div
           id="app-shell"
           className={`app-shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${mobileSidebarOpen ? " mobile-sidebar-open" : ""}${paperDrawerOpen ? " paper-drawer-open" : ""}${paperExplorationSidebarOpen ? " paper-exploration-sidebar-open" : ""}`}
@@ -6165,7 +6751,7 @@ export default function App() {
               setAccountMenuOpen(false);
             }}
           />
-          <aside className="sidebar" onClickCapture={expandCollapsedSidebarForAction}>
+          <aside className="sidebar" onClickCapture={handleSidebarClickCapture}>
             <div className="sidebar-top">
               <div className="sidebar-brand-row">
                 <div className="sidebar-title">Paperbase</div>
@@ -6898,12 +7484,12 @@ export default function App() {
 
             <div
               ref={messageListRef}
-              className={`chat-message-list${isChatEmpty ? " empty" : ""}${showChatThreadHeader ? " thread-header-visible" : ""}${activeTab?.kind === "python_file" ? " python-file-view" : ""}${activeTab?.kind === "paper_exploration" ? " paper-exploration-view" : ""}${isWorkspaceView ? " workspace-view" : ""}${isAdminWorkspaceView ? " workspace-admin-view" : ""}`}
+              className={`chat-message-list${isChatEmpty ? " empty" : ""}${showChatThreadHeader ? " thread-header-visible" : ""}${activeTab?.kind === "python_file" ? " python-file-view" : ""}${activeTab?.kind === "paper_exploration" ? " paper-exploration-view" : ""}${isWorkspaceView ? " workspace-view" : ""}${activeProjectPresenting ? " project-presentation-view" : ""}${isAdminWorkspaceView ? " workspace-admin-view" : ""}`}
               onScroll={handleMessageListScroll}
             >
               {workspaceView ? (
                 workspaceView.kind === "trending" ? (
-                  <div className="workspace-page workspace-page-wide">
+                  <div className="workspace-page workspace-page-trending">
                     <TrendingPapersPage
                       variant="workspace"
                       authenticated={authenticated}
@@ -6916,6 +7502,7 @@ export default function App() {
                         }
                       }
                       onChangeBrowseState={(nextState) => updateTrendingBrowseState(nextState)}
+                      onReadPaper={handleReadTrendingPaper}
                       onRequireAuth={() => openAuthModal("login")}
                     />
                   </div>
@@ -7075,29 +7662,178 @@ export default function App() {
                 )
               ) : activeTab?.kind === "project_home" ? (
                 activeProjectHome ? (
-                  <div className="project-home-page">
-                    <div className="project-home-header">
-                      <span>Project Home</span>
-                      <h1>{activeProjectHome.name}</h1>
-                      <p>
-                        {activeProjectHome.description || "No project summary has been added yet."}
-                      </p>
+                  activeProjectPresenting ? (
+                    <div className="project-presentation-page">
+                      {activeProjectPresentationState?.error ? (
+                        <div className="project-presentation-error">
+                          {activeProjectPresentationState.error}
+                        </div>
+                      ) : null}
+
+                      {activeProjectPresentationState?.loading ||
+                      activeProjectPresentationProgressActive ? (
+                        <div className="project-presentation-progress" role="status">
+                          <div className="project-presentation-progress-header">
+                            <div className="project-presentation-progress-copy">
+                              <div className="project-presentation-progress-kicker">
+                                Creating presentation
+                              </div>
+                              <h1>
+                                {activeProjectPresentation?.progress?.phase_label ??
+                                  "Starting presentation workflow"}
+                              </h1>
+                              <p>
+                                {activeProjectPresentation?.progress?.detail ??
+                                  "Preparing the project history, papers, notes, comments, chats, and code."}
+                              </p>
+                            </div>
+                            <div
+                              className="project-presentation-progress-stat"
+                              aria-label="Progress summary"
+                            >
+                              <strong>{activeProjectPresentationProgressPercent}%</strong>
+                              <span>{activeProjectPresentationEta}</span>
+                            </div>
+                          </div>
+                          <div className="project-presentation-progress-body">
+                            <div
+                              className="project-presentation-progress-track"
+                              aria-label={`Presentation progress ${activeProjectPresentationProgressPercent}%`}
+                              aria-valuemin={0}
+                              aria-valuemax={100}
+                              aria-valuenow={activeProjectPresentationProgressPercent}
+                              role="progressbar"
+                              style={
+                                {
+                                  "--presentation-progress-percent": `${activeProjectPresentationProgressPercent}%`,
+                                } as CSSProperties
+                              }
+                            >
+                              <span />
+                            </div>
+                            <ol className="project-presentation-progress-steps">
+                              {PROJECT_PRESENTATION_PROGRESS_STEPS.map((step, index) => {
+                                const status =
+                                  index < activeProjectPresentationProgressStepIndex
+                                    ? "complete"
+                                    : index === activeProjectPresentationProgressStepIndex
+                                      ? "active"
+                                      : "pending";
+                                return (
+                                  <li
+                                    key={step.label}
+                                    className={`project-presentation-progress-step ${status}`}
+                                  >
+                                    <span>{index + 1}</span>
+                                    <div>
+                                      <strong>{step.label}</strong>
+                                      <small>{step.detail}</small>
+                                    </div>
+                                  </li>
+                                );
+                              })}
+                            </ol>
+                          </div>
+                          <div className="project-presentation-progress-footer">
+                            <span>
+                              {activeProjectPresentation?.progress?.email_notice ??
+                                "We will email you once it is done. You can leave this page."}
+                            </span>
+                            {activeProjectPresentation?.presentation_id ? (
+                              <button
+                                type="button"
+                                className="project-presentation-cancel-button"
+                                disabled={Boolean(activeProjectPresentationState?.canceling)}
+                                onClick={() =>
+                                  void cancelProjectPresentationWorkflow(
+                                    activeProjectHome.project_id,
+                                  )
+                                }
+                              >
+                                {activeProjectPresentationState?.canceling
+                                  ? "Canceling..."
+                                  : "Cancel presentation"}
+                              </button>
+                            ) : null}
+                          </div>
+                        </div>
+                      ) : activeProjectPresentation?.status === "completed" ? (
+                        <ProjectPresentationDeck
+                          presentation={activeProjectPresentation}
+                          title={`${activeProjectHome.name} presentation`}
+                          sharing={Boolean(activeProjectPresentationState?.sharing)}
+                          regenerating={Boolean(activeProjectPresentationState?.loading)}
+                          onRegenerate={() =>
+                            void startProjectPresentationWorkflow(activeProjectHome.project_id, {
+                              regenerate: true,
+                            })
+                          }
+                          onToggleShare={(isPublic) =>
+                            void toggleProjectPresentationShare(
+                              activeProjectHome.project_id,
+                              isPublic,
+                            )
+                          }
+                          onCopyShareLink={copyProjectPresentationShareLink}
+                        />
+                      ) : (
+                        <div className="project-presentation-empty-state">
+                          <h1>Create presentation</h1>
+                          <p>
+                            Turn the project history, papers, notes, comments, chats, and code into
+                            a shareable visual story.
+                          </p>
+                          <button
+                            type="button"
+                            className="project-home-present-button"
+                            onClick={() =>
+                              void startProjectPresentationWorkflow(activeProjectHome.project_id)
+                            }
+                          >
+                            Create presentation
+                          </button>
+                        </div>
+                      )}
                     </div>
-                    <div className="project-home-grid">
-                      <div className="project-home-stat">
-                        <span>Code</span>
-                        <strong>{activeProjectHomeCodeCount}</strong>
+                  ) : (
+                    <div className="project-home-page">
+                      <div className="project-home-header">
+                        <div className="project-home-header-copy">
+                          <span>Project Home</span>
+                          <h1>{activeProjectHome.name}</h1>
+                          <p>
+                            {activeProjectHome.description ||
+                              "No project summary has been added yet."}
+                          </p>
+                        </div>
+                        <div className="project-home-header-actions">
+                          <button
+                            type="button"
+                            className="project-home-present-button"
+                            onClick={() =>
+                              void startProjectPresentationWorkflow(activeProjectHome.project_id)
+                            }
+                          >
+                            Present this project
+                          </button>
+                        </div>
                       </div>
-                      <div className="project-home-stat">
-                        <span>Sessions</span>
-                        <strong>{activeProjectHomeSessionCount}</strong>
-                      </div>
-                      <div className="project-home-stat">
-                        <span>Explorations</span>
-                        <strong>{activeProjectHomeExplorationCount}</strong>
+                      <div className="project-home-grid">
+                        <div className="project-home-stat">
+                          <span>Code</span>
+                          <strong>{activeProjectHomeCodeCount}</strong>
+                        </div>
+                        <div className="project-home-stat">
+                          <span>Sessions</span>
+                          <strong>{activeProjectHomeSessionCount}</strong>
+                        </div>
+                        <div className="project-home-stat">
+                          <span>Explorations</span>
+                          <strong>{activeProjectHomeExplorationCount}</strong>
+                        </div>
                       </div>
                     </div>
-                  </div>
+                  )
                 ) : (
                   <div className="project-home-page">
                     <div className="project-home-header">
@@ -7117,11 +7853,11 @@ export default function App() {
                         <button
                           type="button"
                           className="python-file-save-button"
-                          onClick={() => void openSaveModal(activePythonFile.file_id)}
+                          onClick={() => void handleSavePythonFile(activePythonFile.file_id)}
                         >
                           <span className="python-file-action-icon" aria-hidden="true">
                             <MaskedAssetIcon
-                              asset="github.svg"
+                              asset={githubSyncActive ? "github.svg" : "code.svg"}
                               className="python-file-action-glyph"
                             />
                           </span>
@@ -7430,7 +8166,7 @@ export default function App() {
                         Create a project to get started
                       </h1>
                       <p className="chat-empty-projectless-copy">
-                        Projects hold your chats, Python files, and repo-backed code workspace.
+                        Projects hold your chats, Python files, and local code workspace.
                       </p>
                       <button
                         type="button"
@@ -9284,7 +10020,7 @@ export default function App() {
                 />
               </label>
               {projectModalState?.mode === "create" ? (
-                sessionSettings.has_github_connection ? (
+                githubSyncActive ? (
                   <div className="project-repo-section">
                     <div className="project-github-heading">
                       <AppIcon
@@ -9661,30 +10397,17 @@ export default function App() {
                   </div>
                 ) : (
                   <div className="project-github-required">
-                    <button
-                      className="primary-button project-github-connect-button"
-                      type="button"
-                      disabled={!sessionSettings.github_oauth_available}
-                      onClick={() => {
-                        sessionStorage.setItem(RESUME_PROJECT_MODAL_KEY, "1");
-                        window.location.href = githubLoginUrl();
-                      }}
-                    >
+                    <div className="project-github-heading">
                       <AppIcon
-                        src={staticAssetPath("github.svg")}
+                        src={staticAssetPath("project-closed.svg")}
                         className="project-github-icon"
                       />
-                      Connect GitHub account
-                    </button>
+                      <span>Local project</span>
+                    </div>
                     <p className="project-github-required-note">
-                      You need to connect GitHub before creating a project. GitHub is the source of
-                      truth for project files, and every change is committed there.
+                      Project files will be saved in Paperbase. GitHub sync is optional and can be
+                      enabled from Settings when you want repository backup or import.
                     </p>
-                    {!sessionSettings.github_oauth_available ? (
-                      <div className="project-repo-status">
-                        GitHub OAuth is not configured in this environment yet.
-                      </div>
-                    ) : null}
                   </div>
                 )
               ) : null}
@@ -10149,6 +10872,113 @@ export default function App() {
                   </section>
                 ) : null}
 
+                {activeSettingsTab === "audio" ? (
+                  <section
+                    className="settings-section"
+                    role="tabpanel"
+                    id="settings-panel-audio"
+                    aria-labelledby="settings-tab-audio"
+                  >
+                    <SettingsSectionHeading
+                      title="Audio"
+                      caption="Manage ElevenLabs presentation audio."
+                    />
+                    {sessionSettings.has_elevenlabs_api_key ? (
+                      <div className="settings-secret-row">
+                        <div className="settings-secret-copy">
+                          <div className="settings-secret-label">ElevenLabs API key</div>
+                          <div className="settings-secret-value">
+                            {sessionSettings.elevenlabs_api_key_hint || "Saved"}
+                          </div>
+                        </div>
+                        <button
+                          id="delete-elevenlabs-key-button"
+                          className="api-key-delete-button"
+                          type="button"
+                          aria-label="Delete saved ElevenLabs API key"
+                          title="Delete saved ElevenLabs API key"
+                          onClick={async () => {
+                            try {
+                              const nextSession = await api<BrowserSessionResponse>(
+                                "/v1/browser/settings/elevenlabs-key",
+                                { method: "DELETE" },
+                              );
+                              setSession(nextSession);
+                              showNoteFlash("ElevenLabs API key removed.");
+                            } catch (error) {
+                              showErrorFlash(
+                                error instanceof Error
+                                  ? error.message
+                                  : "Deleting ElevenLabs API key failed",
+                              );
+                            }
+                          }}
+                        >
+                          <AppIcon
+                            src={staticAssetPath("delete-session.svg")}
+                            className="api-key-delete-icon"
+                          />
+                        </button>
+                      </div>
+                    ) : (
+                      <form
+                        id="settings-elevenlabs-form"
+                        className="settings-form"
+                        onSubmit={async (event) => {
+                          event.preventDefault();
+                          try {
+                            const payload = Object.fromEntries(
+                              new FormData(event.currentTarget).entries(),
+                            );
+                            const nextSession = await api<BrowserSessionResponse>(
+                              "/v1/browser/settings/elevenlabs-key",
+                              {
+                                method: "PUT",
+                                body: JSON.stringify(payload),
+                              },
+                            );
+                            setSession(nextSession);
+                            showNoteFlash("ElevenLabs API key saved.");
+                          } catch (error) {
+                            showErrorFlash(
+                              error instanceof Error
+                                ? error.message
+                                : "Saving ElevenLabs API key failed",
+                            );
+                          }
+                        }}
+                      >
+                        <CredentialFormUsernameField email={session?.user?.email ?? ""} />
+                        <div className="settings-field">
+                          <label
+                            className="settings-field-label"
+                            htmlFor="settings-elevenlabs-api-key"
+                          >
+                            ElevenLabs API key
+                          </label>
+                          <input
+                            id="settings-elevenlabs-api-key"
+                            name="api_key"
+                            type="password"
+                            placeholder="ElevenLabs API key"
+                            autoComplete="new-password"
+                            aria-describedby="settings-elevenlabs-api-key-note"
+                            required
+                          />
+                          <p id="settings-elevenlabs-api-key-note" className="settings-field-note">
+                            Used only when creating project presentation audio.
+                          </p>
+                        </div>
+                        <div className="settings-footer-actions">
+                          <button className="primary-button settings-submit-button" type="submit">
+                            Save key
+                          </button>
+                        </div>
+                      </form>
+                    )}
+                  </section>
+                ) : null}
+
                 {activeSettingsTab === "sandbox" ? (
                   <section
                     className="settings-section"
@@ -10282,39 +11112,78 @@ export default function App() {
                   >
                     <SettingsSectionHeading
                       title="Version control"
-                      caption="Manage GitHub connection for repositories."
+                      caption="GitHub is optional. Use it when you want repository backup, imports, or external version control."
                     />
                     {sessionSettings.has_github_connection ? (
-                      <div className="settings-connected-card">
-                        <div>
-                          <div className="settings-secret-label">GitHub account</div>
-                          <div className="settings-secret-value">
-                            {sessionSettings.github_login || "Connected"}
+                      <>
+                        <div className="settings-connected-card">
+                          <div>
+                            <div className="settings-secret-label">GitHub account</div>
+                            <div className="settings-secret-value">
+                              {sessionSettings.github_login || "Connected"}
+                            </div>
                           </div>
+                          <button
+                            type="button"
+                            className="secondary-button"
+                            onClick={async () => {
+                              try {
+                                const nextSession = await api<BrowserSessionResponse>(
+                                  "/v1/browser/settings/github",
+                                  { method: "DELETE" },
+                                );
+                                setSession(nextSession);
+                                showNoteFlash("GitHub disconnected.");
+                              } catch (error) {
+                                showErrorFlash(
+                                  error instanceof Error
+                                    ? error.message
+                                    : "Disconnecting GitHub failed",
+                                );
+                              }
+                            }}
+                          >
+                            Disconnect
+                          </button>
                         </div>
-                        <button
-                          type="button"
-                          className="secondary-button"
-                          onClick={async () => {
-                            try {
-                              const nextSession = await api<BrowserSessionResponse>(
-                                "/v1/browser/settings/github",
-                                { method: "DELETE" },
-                              );
-                              setSession(nextSession);
-                              showNoteFlash("GitHub disconnected.");
-                            } catch (error) {
-                              showErrorFlash(
-                                error instanceof Error
-                                  ? error.message
-                                  : "Disconnecting GitHub failed",
-                              );
-                            }
-                          }}
-                        >
-                          Disconnect
-                        </button>
-                      </div>
+                        <div className="settings-form">
+                          <label className="settings-checkbox-row">
+                            <input
+                              type="checkbox"
+                              checked={sessionSettings.github_sync_enabled}
+                              onChange={async (event) => {
+                                const enabled = event.target.checked;
+                                try {
+                                  const nextSession = await api<BrowserSessionResponse>(
+                                    "/v1/browser/settings/github-sync",
+                                    {
+                                      method: "PUT",
+                                      body: JSON.stringify({ enabled }),
+                                    },
+                                  );
+                                  setSession(nextSession);
+                                  showNoteFlash(
+                                    enabled ? "GitHub sync enabled." : "GitHub sync disabled.",
+                                  );
+                                } catch (error) {
+                                  showErrorFlash(
+                                    error instanceof Error
+                                      ? error.message
+                                      : "Saving GitHub sync settings failed",
+                                  );
+                                }
+                              }}
+                            />
+                            <span>
+                              Sync project files to GitHub when creating projects and saving code.
+                            </span>
+                          </label>
+                          <p className="settings-inline-note">
+                            When this is off, projects and code stay local in Paperbase. You can
+                            still turn it on later and sync a project when needed.
+                          </p>
+                        </div>
+                      </>
                     ) : (
                       <div className="settings-actions">
                         <div className="settings-footer-actions">
@@ -10334,6 +11203,10 @@ export default function App() {
                             GitHub OAuth is not configured in this environment yet.
                           </p>
                         ) : null}
+                        <p className="settings-inline-note">
+                          Project files can be created, edited, saved, and run locally without
+                          connecting GitHub.
+                        </p>
                       </div>
                     )}
                   </section>

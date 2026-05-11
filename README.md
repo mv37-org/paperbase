@@ -39,7 +39,7 @@ The sections in that file map to deployment like this:
 Optional browser-account settings now hang off the same API env surface:
 
 - `PAPERBASE_GOOGLE_*` powers Google sign-in
-- `PAPERBASE_GITHUB_*` powers the in-app GitHub connection flow and project repo sync
+- `PAPERBASE_GITHUB_*` powers the optional in-app GitHub connection flow and project repo sync
 - `PAPERBASE_ADMIN_EMAILS` is a comma-separated allowlist for the signed-in admin jobs workspace
 - `PAPERBASE_WORKER_STATUS_URL` lets the API read worker `/health` and `/metrics` so the admin jobs table can surface `stalled` runs
 - `PAPERBASE_FETCH_CODE_CROSSLINKS_AT_INDEX` controls the default-on Hugging Face paper-page lookup that prefers an exact arXiv-id `githubRepo` match over raw text extraction; turn it off for pure text-only harvests
@@ -141,19 +141,21 @@ The repo has four moving pieces:
 The browser chat experience is project-based:
 
 - projects are persisted in the backend and own chat sessions
-- creating a new project requires a connected GitHub account and either an existing accessible repo/branch selected from the GitHub-backed repo dropdown or a new private repo created under the connected user
-- the new-project modal can refresh the accessible repo list, link to GitHub's Paperbase access settings, and expose optional inference/sandbox credential fields
-- existing repos expose a branch picker and optional import selection for `.py` and `.ipynb` files; new repos start on a fixed `main` branch
+- creating a new project is local-first; GitHub sync is optional and can be enabled in Settings when users want repository backup, imports, or external version control
+- when GitHub sync is enabled, the new-project modal can refresh the accessible repo list, link to GitHub's Paperbase access settings, and expose optional inference/sandbox credential fields
+- synced existing repos expose a branch picker and optional import selection for `.py` and `.ipynb` files; new synced repos start on a fixed `main` branch
 - the sidebar lazily loads mixed project items per project, persists the last selected project across reloads, and reopens with only that project tree expanded by default
 - each project can start paper explorations from a command-palette style search over paper title or arXiv id
 - paper explorations and PDF modals support text highlights and pen-drawn region selections with cropped image context for grounded chat follow-ups
-- the product exposes a public-readable `Trending papers` feed of fully indexed and enriched papers, with a landing-page top-10 `Latest`/`Hottest` preview and 50-paper signed-in feed pages by publication date or upvotes; signed-in users can upvote, comment, and reply, and allowlisted admins also get a non-tabbed `Admin panel` jobs workspace
-- the empty first-chat state now shows a dismissible setup checklist for GitHub, inference, and sandbox access so users can connect required services before the coding agent hits save/run failures
+- project home can generate a cached presentation with a React/D3 visual, Markdown summary, optional public share page, and optional ElevenLabs two-speaker audio walkthrough when the user has saved an ElevenLabs API key
+- the product exposes a public-readable `Trending papers` feed of fully indexed and enriched papers, with a landing-page top-10 `Latest`/`Hottest` preview and 20-paper signed-in feed pages by publication date or upvotes; signed-in users can upvote, comment, and reply, and allowlisted admins also get a non-tabbed `Admin panel` jobs workspace
+- the empty first-chat state now shows a dismissible setup checklist for optional GitHub sync, inference, and sandbox access
 - project descriptions are snapped onto new sessions as per-session prompt context, so later project edits do not rewrite existing chats
 - once the first user prompt lands in a `New chat` thread, Paperbase renames the session to a compact 3-5 word summary and keeps that title for later turns
 - Python and notebook files open as the single active project resource in a Monaco-backed high-contrast editor view
 - project code files can be renamed or deleted directly from the sidebar Code section, projects themselves can be deleted from the project menu including the default `General` project, and if a user has no projects left the app drops into a create-project-only state until a new project is created
 - project chats can invoke a project-scoped coding tool surface against repo-relative workspace text files, including list/read/grep/write/patch/move/delete/git-diff/exec/test/lint/run operations instead of raw repo-shell access
+- research turns expose a single restricted `paperbase_shell` literature tool for `search`, `results`, `ls`, `find`, `cat`, `head`, `lines`, `grep`, `map`, read-only metadata `sql`, and `ask-image` over virtual paper paths; the MCP bridge exposes the same shell plus operational job/index tools
 - coding turns auto-persist dirty project Python drafts before the agent runs tools, so the backend tool view stays aligned with Monaco edits
 - duplicate Python basenames are disambiguated with repo-path context in the sidebar and active-resource title
 - assistant commentary is now prompted before non-trivial tool batches, then collapsed behind a `Worked for ...` summary once the final answer arrives so session-level actions stay attached to the conclusion
@@ -165,9 +167,9 @@ The browser chat experience is project-based:
 - signed-in pages support a persisted appearance setting, so the sidebar, chat shell, markdown surfaces, drawers, and modals can switch between light and dark mode without affecting the public landing page
 - allowlisted admin emails also get an Admin panel jobs workspace for creating one-off indexing/backfill jobs, monitoring env-driven latest-sync runs, searching papers by paper id/arXiv id/title/author, drilling into tracked job papers for every paper-touching worker job, inspecting job payloads / Cloud Run log filters / stored failure traces, and browsing paper summaries, code state, job touches, and stored artifacts through the browser session
 - the admin tracked-papers drilldown now paginates per job run instead of loading the entire tracked paper list at once
-- creating, importing, or saving project files requires a connected GitHub account with repo access
+- creating, importing, and saving project files works locally without GitHub; enabling GitHub sync adds repository import/export and conflict handling
 - the coding agent is PyTorch-first for generated ML code, uses a Codex-style single turn loop with `tool_choice=auto` that continues while the model emits tool follow-ups rather than stopping at a fixed sampling-step cap, prefers reading and patching existing workspace files before broad rewrites, keeps final answers brief and grounded in cited research-paper evidence for in-scope turns, uses uploaded-document evidence only when explicitly requested, briefly redirects off-topic requests back to AI research or project code, can edit repo-relative text files beyond just managed `.py` sources, keeps turn-local diff and exec-session state visible to the model during long turns and compaction, streams final answers live instead of buffering them until the end, and can run stateful project commands with follow-up wait/log/cancel steps alongside compatibility `project_run` smoke/full entrypoints
-- `Save` creates a single Paperbase-managed GitHub commit for the current project, and `Run` saves first, then executes the full saved project workspace through the user’s Modal sandbox credentials with `full` mode by default
+- `Save` stores the current project file locally by default; when GitHub sync is enabled it can create a single Paperbase-managed GitHub commit, while `Run` saves first and then executes the full saved project workspace through the user’s Modal sandbox credentials with `full` mode by default
 - project sync writes only Paperbase-managed paths tracked in `.paperbase`, preserving unrelated files in existing repositories
 - if GitHub has moved ahead since the last project save, Paperbase opens a Monaco conflict-resolution flow before creating the next commit
 - @-mentioning a paper in the chat composer sends the paper's id with the request; if the row is not yet at `index_status='indexed'` the send path synchronously fetches and indexes it from arXiv before the chat turn runs, with `mention_indexing_*` SSE events surfacing fetch progress on the streaming endpoint

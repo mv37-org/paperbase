@@ -24,11 +24,15 @@ export type TrendingBrowseState = {
   paperId: string | null;
 };
 
+const DEFAULT_TRENDING_PAGE_SIZE = 20;
+
 type TrendingPapersPageProps = {
   variant: "landing" | "public" | "workspace";
   authenticated: boolean;
   browseState: TrendingBrowseState;
   onChangeBrowseState: (nextState: TrendingBrowseState) => void;
+  onOpenPaper?: (nextState: TrendingBrowseState) => void;
+  onReadPaper?: (detail: TrendingPaperDetail) => void;
   onRequireAuth: () => void;
   feedDescription?: string | null;
   feedTitle?: string;
@@ -38,6 +42,269 @@ type TrendingPapersPageProps = {
 
 function sortLabel(sort: TrendingSort) {
   return sort === "upvotes" ? "Hottest" : "Latest";
+}
+
+type TrendingMetadataRow = {
+  label: string;
+  value?: string;
+  href?: string;
+  links?: Array<{ label: string; href: string }>;
+};
+
+const ARXIV_CATEGORY_LABELS: Record<string, string> = {
+  "cs.AI": "Artificial Intelligence",
+  "cs.AR": "Hardware Architecture",
+  "cs.CC": "Computational Complexity",
+  "cs.CE": "Computational Engineering, Finance, and Science",
+  "cs.CG": "Computational Geometry",
+  "cs.CL": "Computation and Language",
+  "cs.CR": "Cryptography and Security",
+  "cs.CV": "Computer Vision and Pattern Recognition",
+  "cs.CY": "Computers and Society",
+  "cs.DB": "Databases",
+  "cs.DC": "Distributed, Parallel, and Cluster Computing",
+  "cs.DL": "Digital Libraries",
+  "cs.DM": "Discrete Mathematics",
+  "cs.DS": "Data Structures and Algorithms",
+  "cs.ET": "Emerging Technologies",
+  "cs.FL": "Formal Languages and Automata Theory",
+  "cs.GL": "General Literature",
+  "cs.GR": "Graphics",
+  "cs.GT": "Computer Science and Game Theory",
+  "cs.HC": "Human-Computer Interaction",
+  "cs.IR": "Information Retrieval",
+  "cs.IT": "Information Theory",
+  "cs.LG": "Machine Learning",
+  "cs.LO": "Logic in Computer Science",
+  "cs.MA": "Multiagent Systems",
+  "cs.MM": "Multimedia",
+  "cs.MS": "Mathematical Software",
+  "cs.NA": "Numerical Analysis",
+  "cs.NE": "Neural and Evolutionary Computing",
+  "cs.NI": "Networking and Internet Architecture",
+  "cs.OH": "Other Computer Science",
+  "cs.OS": "Operating Systems",
+  "cs.PF": "Performance",
+  "cs.PL": "Programming Languages",
+  "cs.RO": "Robotics",
+  "cs.SC": "Symbolic Computation",
+  "cs.SD": "Sound",
+  "cs.SE": "Software Engineering",
+  "cs.SI": "Social and Information Networks",
+  "cs.SY": "Systems and Control",
+  "econ.EM": "Econometrics",
+  "econ.GN": "General Economics",
+  "econ.TH": "Theoretical Economics",
+  "math.IT": "Information Theory",
+  "math.OC": "Optimization and Control",
+  "q-bio.NC": "Neurons and Cognition",
+  "stat.AP": "Applications",
+  "stat.CO": "Computation",
+  "stat.ME": "Methodology",
+  "stat.ML": "Machine Learning",
+  "stat.TH": "Statistics Theory",
+};
+
+function cleanMetadataValue(value: string | number | boolean | null | undefined) {
+  if (value === null || value === undefined) {
+    return "";
+  }
+  if (typeof value === "boolean") {
+    return value ? "Yes" : "No";
+  }
+  return String(value).trim();
+}
+
+function formatMetadataCount(value: number | null | undefined) {
+  return typeof value === "number" ? new Intl.NumberFormat().format(value) : "";
+}
+
+function formatArxivCategory(value: string | null | undefined) {
+  const code = (value ?? "").trim();
+  if (!code) {
+    return "";
+  }
+  const label = ARXIV_CATEGORY_LABELS[code];
+  return label ? `${label} (${code})` : code;
+}
+
+function formatArxivCategories(value: string | null | undefined) {
+  const seen = new Set<string>();
+  return (value ?? "")
+    .split(/[\s,]+/)
+    .map((category) => category.trim())
+    .filter((category) => {
+      if (!category || seen.has(category)) {
+        return false;
+      }
+      seen.add(category);
+      return true;
+    })
+    .map(formatArxivCategory)
+    .join(", ");
+}
+
+function parseMetadataDate(value: string | null | undefined) {
+  if (!value) {
+    return null;
+  }
+  const dateOnly = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const date = dateOnly
+    ? new Date(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]))
+    : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function ordinalDay(day: number) {
+  const remainder = day % 100;
+  if (remainder >= 11 && remainder <= 13) {
+    return `${day}th`;
+  }
+  switch (day % 10) {
+    case 1:
+      return `${day}st`;
+    case 2:
+      return `${day}nd`;
+    case 3:
+      return `${day}rd`;
+    default:
+      return `${day}th`;
+  }
+}
+
+function formatPublishedDate(value: string | null | undefined) {
+  const date = parseMetadataDate(value);
+  if (!date) {
+    return value ?? "";
+  }
+  const month = date.toLocaleString("en-US", { month: "short" });
+  return `${ordinalDay(date.getDate())} ${month} ${date.getFullYear()}`;
+}
+
+function formatRelativeMetadataDate(value: string | null | undefined) {
+  const date = parseMetadataDate(value);
+  if (!date) {
+    return value ?? "";
+  }
+  const now = new Date();
+  const diffMs = date.getTime() - now.getTime();
+  const absDays = Math.floor(Math.abs(diffMs) / 86_400_000);
+  const suffix = diffMs > 0 ? "from now" : "ago";
+  if (absDays === 0) {
+    return "Today";
+  }
+  if (absDays === 1) {
+    return diffMs > 0 ? "Tomorrow" : "Yesterday";
+  }
+  const units = [
+    { name: "year", days: 365 },
+    { name: "month", days: 30 },
+    { name: "week", days: 7 },
+    { name: "day", days: 1 },
+  ];
+  const unit = units.find((candidate) => absDays >= candidate.days) ?? units[units.length - 1];
+  const amount = Math.max(1, Math.floor(absDays / unit.days));
+  return `${amount} ${unit.name}${amount === 1 ? "" : "s"} ${suffix}`;
+}
+
+function normalizeDetailText(value: string | null | undefined) {
+  return (value ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function doiUrl(doi: string) {
+  const trimmed = doi.trim();
+  return trimmed.startsWith("http://") || trimmed.startsWith("https://")
+    ? trimmed
+    : `https://doi.org/${trimmed}`;
+}
+
+function buildTrendingMetadataRows(detail: TrendingPaperDetail): TrendingMetadataRow[] {
+  const rows: TrendingMetadataRow[] = [];
+  const add = (
+    label: string,
+    value: string | number | boolean | null | undefined,
+    href?: string | null,
+  ) => {
+    const cleanValue = cleanMetadataValue(value);
+    if (!cleanValue) {
+      return;
+    }
+    rows.push({ label, value: cleanValue, href: href ?? undefined });
+  };
+  const addLinks = (label: string, links: Array<{ label: string; href: string | null }>) => {
+    const cleanLinks = links
+      .map((link) => ({
+        label: cleanMetadataValue(link.label),
+        href: cleanMetadataValue(link.href),
+      }))
+      .filter((link) => link.label && link.href);
+    if (!cleanLinks.length) {
+      return;
+    }
+    rows.push({ label, links: cleanLinks });
+  };
+  const venue = [detail.venue, detail.venue_year].filter(Boolean).join(" ");
+  const primaryCategory = formatArxivCategory(detail.primary_category);
+  const categories = formatArxivCategories(detail.categories);
+
+  add("Authors", detail.authors);
+  addLinks("arXiv", [
+    {
+      label: detail.arxiv_id,
+      href: detail.arxiv_id ? `https://arxiv.org/abs/${detail.arxiv_id}` : null,
+    },
+    { label: "PDF", href: detail.pdf_url },
+  ]);
+  add("Primary category", primaryCategory);
+  if (detail.categories !== detail.primary_category) {
+    add("Categories", categories);
+  }
+  add("Published", formatPublishedDate(detail.published));
+  add("Updated", formatRelativeMetadataDate(detail.updated));
+  add("Venue", venue);
+  add("Venue source", detail.venue_source);
+  add("Journal reference", detail.journal_ref);
+  add("DOI", detail.doi, detail.doi ? doiUrl(detail.doi) : null);
+  add("Citations", formatMetadataCount(detail.citation_count));
+  add(
+    "Top author S2 ID",
+    detail.top_author_s2_id,
+    detail.top_author_s2_id
+      ? `https://www.semanticscholar.org/author/${detail.top_author_s2_id}`
+      : null,
+  );
+  add("Code URL", detail.code_url, detail.code_url);
+
+  return rows;
+}
+
+function TrendingVoteButton({
+  upvoteCount,
+  viewerHasUpvoted,
+  pending,
+  onClick,
+}: {
+  upvoteCount: number;
+  viewerHasUpvoted: boolean;
+  pending: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={`trending-vote-button${viewerHasUpvoted ? " active" : ""}`}
+      aria-label={viewerHasUpvoted ? `Remove upvote ${upvoteCount}` : `Upvote ${upvoteCount}`}
+      aria-pressed={viewerHasUpvoted}
+      onClick={(event) => {
+        event.stopPropagation();
+        onClick();
+      }}
+      disabled={pending}
+    >
+      <span className="trending-vote-chevron" aria-hidden="true" />
+      <span className="trending-vote-count">{pending ? "..." : upvoteCount}</span>
+    </button>
+  );
 }
 
 function applyVoteToFeed(
@@ -176,6 +443,8 @@ export function TrendingPapersPage({
   authenticated,
   browseState,
   onChangeBrowseState,
+  onOpenPaper,
+  onReadPaper,
   onRequireAuth,
   feedDescription,
   feedTitle = "Trending papers",
@@ -195,6 +464,7 @@ export function TrendingPapersPage({
   const [commentSubmittingTarget, setCommentSubmittingTarget] = useState<string | "root" | null>(
     null,
   );
+  const effectivePageSize = pageSize ?? DEFAULT_TRENDING_PAGE_SIZE;
 
   useEffect(() => {
     let cancelled = false;
@@ -202,15 +472,12 @@ export function TrendingPapersPage({
     setFeedError("");
     void (async () => {
       try {
-        const nextFeed =
-          pageSize === undefined
-            ? await loadBrowserTrendingPapers(browseState.date, browseState.sort, browseState.page)
-            : await loadBrowserTrendingPapers(
-                browseState.date,
-                browseState.sort,
-                browseState.page,
-                pageSize,
-              );
+        const nextFeed = await loadBrowserTrendingPapers(
+          browseState.date,
+          browseState.sort,
+          browseState.page,
+          effectivePageSize,
+        );
         if (cancelled) {
           return;
         }
@@ -229,7 +496,7 @@ export function TrendingPapersPage({
     return () => {
       cancelled = true;
     };
-  }, [browseState.date, browseState.page, browseState.sort, pageSize]);
+  }, [browseState.date, browseState.page, browseState.sort, effectivePageSize]);
 
   useEffect(() => {
     if (!browseState.paperId) {
@@ -264,17 +531,31 @@ export function TrendingPapersPage({
     };
   }, [browseState.paperId]);
 
+  const detailDescription =
+    detail && browseState.paperId
+      ? [
+          detail.primary_category || detail.categories,
+          detail.published && `Published ${formatPublishedDate(detail.published)}`,
+        ]
+          .filter(Boolean)
+          .join(" · ")
+      : `Published ${formatPublishedDate(browseState.date)}`;
   const pageDescription = browseState.paperId
-    ? `Published ${detail?.published ?? browseState.date}. Read the paper summary and join the discussion.`
+    ? detailDescription
     : (feedDescription ??
-      `Browse the newest fully indexed and enriched papers, or switch to Hottest to rank the same ready corpus by reader upvotes.`);
+      "Explore research papers that are ready to read in Paperbase. Latest shows the newest papers across the library, while Hottest shows the most-upvoted papers overall.");
 
   const handleSortChange = (sort: TrendingSort) => {
     onChangeBrowseState({ ...browseState, sort, page: 1, paperId: null });
   };
 
   const handleOpenDetail = (paperId: string) => {
-    onChangeBrowseState({ ...browseState, paperId });
+    const nextState = { ...browseState, paperId };
+    if (onOpenPaper) {
+      onOpenPaper(nextState);
+      return;
+    }
+    onChangeBrowseState(nextState);
   };
 
   const handleBackToFeed = () => {
@@ -347,11 +628,22 @@ export function TrendingPapersPage({
 
   const emptyState = feedStatus === "ready" && (feed?.papers.length ?? 0) === 0;
   const currentPage = feed?.page ?? browseState.page;
-  const currentPageSize = feed?.page_size ?? pageSize ?? 50;
+  const currentPageSize = feed?.page_size ?? effectivePageSize;
   const hasPreviousPage = feed?.has_previous ?? browseState.page > 1;
   const hasNextPage = feed?.has_next ?? false;
   const showPager = showPagination && (hasPreviousPage || hasNextPage);
   const headingText = browseState.paperId ? (detail?.title ?? "Loading paper") : feedTitle;
+  const showVotes = variant !== "landing";
+  const metadataRows = detail ? buildTrendingMetadataRows(detail) : [];
+  const summaryText = detail?.summary_short?.trim() || "Summary is still being prepared.";
+  const showTldr =
+    Boolean(detail?.tldr?.trim()) &&
+    normalizeDetailText(detail?.tldr) !== normalizeDetailText(summaryText);
+  const showAbstract =
+    Boolean(detail?.abstract?.trim()) &&
+    normalizeDetailText(detail?.abstract) !== normalizeDetailText(summaryText) &&
+    normalizeDetailText(detail?.abstract) !== normalizeDetailText(detail?.tldr);
+  const primaryDetailActionLabel = variant === "workspace" ? "Explore" : "Read paper";
 
   return (
     <section
@@ -402,8 +694,8 @@ export function TrendingPapersPage({
           {emptyState ? (
             <div className="trending-empty-state">
               {browseState.page > 1
-                ? "No more fully indexed and enriched papers are ready on this page."
-                : "No fully indexed and enriched papers are ready yet."}
+                ? "No more papers are ready on this page."
+                : "No papers are ready here yet. Check back soon as the library grows."}
             </div>
           ) : null}
           {feed?.papers.length ? (
@@ -412,11 +704,37 @@ export function TrendingPapersPage({
                 {feed.papers.map((paper) => {
                   const votePending = votePendingPaperId === paper.paper_id;
                   return (
-                    <article key={paper.paper_id} className="trending-card">
+                    <article
+                      key={paper.paper_id}
+                      className="trending-card"
+                      onClick={() => handleOpenDetail(paper.paper_id)}
+                    >
+                      <div className="trending-card-copy">
+                        <h2>
+                          <button
+                            type="button"
+                            className="trending-card-title-button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              handleOpenDetail(paper.paper_id);
+                            }}
+                          >
+                            {paper.title}
+                          </button>
+                        </h2>
+                        <span>
+                          {paper.authors}
+                          {paper.published ? ` · ${formatPublishedDate(paper.published)}` : ""}
+                        </span>
+                      </div>
                       <button
                         type="button"
                         className="trending-card-hero"
-                        onClick={() => handleOpenDetail(paper.paper_id)}
+                        aria-label={`Open ${paper.title} preview`}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          handleOpenDetail(paper.paper_id);
+                        }}
                       >
                         {paper.image_url ? (
                           <img
@@ -430,39 +748,18 @@ export function TrendingPapersPage({
                           </div>
                         )}
                       </button>
-                      <div className="trending-card-footer">
-                        <button
-                          type="button"
-                          className="trending-card-copy"
-                          onClick={() => handleOpenDetail(paper.paper_id)}
-                        >
-                          <strong>{paper.title}</strong>
-                          <span>
-                            {paper.authors}
-                            {paper.published ? ` · ${paper.published}` : ""}
-                          </span>
-                        </button>
+                      {showVotes ? (
                         <div className="trending-card-actions">
-                          <a
-                            href={paper.html_url}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="trending-card-link"
-                          >
-                            Paper
-                          </a>
-                          <button
-                            type="button"
-                            className={`trending-vote-button${paper.viewer_has_upvoted ? " active" : ""}`}
+                          <TrendingVoteButton
+                            upvoteCount={paper.upvote_count}
+                            viewerHasUpvoted={paper.viewer_has_upvoted}
+                            pending={votePending}
                             onClick={() =>
                               void handleVote(paper.paper_id, paper.viewer_has_upvoted)
                             }
-                            disabled={votePending}
-                          >
-                            {votePending ? "..." : `Upvote ${paper.upvote_count}`}
-                          </button>
+                          />
                         </div>
-                      </div>
+                      ) : null}
                     </article>
                   );
                 })}
@@ -515,48 +812,93 @@ export function TrendingPapersPage({
                     </div>
                   )}
                 </div>
-                <div className="trending-detail-copy">
-                  <div className="trending-detail-meta">
-                    <span>{detail.authors}</span>
-                    <span>
-                      {detail.primary_category || detail.categories}
-                      {detail.published ? ` · ${detail.published}` : ""}
-                    </span>
-                  </div>
-                  <div className="trending-detail-actions">
-                    <a
-                      href={detail.html_url}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="trending-card-link"
-                    >
-                      Read paper
-                    </a>
-                    <a
-                      href={detail.pdf_url}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="trending-card-link"
-                    >
-                      PDF
-                    </a>
-                    <button
-                      type="button"
-                      className={`trending-vote-button${detail.viewer_has_upvoted ? " active" : ""}`}
-                      onClick={() => void handleVote(detail.paper_id, detail.viewer_has_upvoted)}
-                      disabled={votePendingPaperId === detail.paper_id}
-                    >
-                      {votePendingPaperId === detail.paper_id
-                        ? "..."
-                        : `Upvote ${detail.upvote_count}`}
-                    </button>
-                  </div>
-                  <section className="trending-summary-section">
-                    <h2>Summary</h2>
-                    <p>{detail.summary_short || "Summary is still being prepared."}</p>
-                  </section>
-                </div>
               </section>
+
+              <div className="trending-detail-copy">
+                <div className="trending-detail-actions">
+                  <button
+                    type="button"
+                    className="trending-card-link"
+                    onClick={() => {
+                      if (onReadPaper) {
+                        onReadPaper(detail);
+                      } else {
+                        onRequireAuth();
+                      }
+                    }}
+                  >
+                    {primaryDetailActionLabel}
+                  </button>
+                  <a
+                    href={detail.pdf_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="trending-card-link"
+                  >
+                    PDF
+                  </a>
+                  {showVotes ? (
+                    <TrendingVoteButton
+                      upvoteCount={detail.upvote_count}
+                      viewerHasUpvoted={detail.viewer_has_upvoted}
+                      pending={votePendingPaperId === detail.paper_id}
+                      onClick={() => void handleVote(detail.paper_id, detail.viewer_has_upvoted)}
+                    />
+                  ) : null}
+                </div>
+
+                <section className="trending-summary-section">
+                  <h2>Summary</h2>
+                  <p>{summaryText}</p>
+                </section>
+
+                {showTldr ? (
+                  <section className="trending-summary-section">
+                    <h2>TL;DR</h2>
+                    <p>{detail.tldr}</p>
+                  </section>
+                ) : null}
+
+                {metadataRows.length ? (
+                  <section className="trending-metadata-section">
+                    <h2>Paper details</h2>
+                    <dl className="trending-metadata-grid">
+                      {metadataRows.map((row) => (
+                        <div key={row.label} className="trending-metadata-row">
+                          <dt>{row.label}</dt>
+                          <dd>
+                            {row.links?.length ? (
+                              <span className="trending-metadata-link-list">
+                                {row.links.map((link, index) => (
+                                  <span key={`${link.label}-${link.href}`}>
+                                    {index > 0 ? <span aria-hidden="true"> · </span> : null}
+                                    <a href={link.href} target="_blank" rel="noreferrer">
+                                      {link.label}
+                                    </a>
+                                  </span>
+                                ))}
+                              </span>
+                            ) : row.href ? (
+                              <a href={row.href} target="_blank" rel="noreferrer">
+                                {row.value}
+                              </a>
+                            ) : (
+                              row.value
+                            )}
+                          </dd>
+                        </div>
+                      ))}
+                    </dl>
+                  </section>
+                ) : null}
+
+                {showAbstract ? (
+                  <section className="trending-summary-section">
+                    <h2>Abstract</h2>
+                    <p>{detail.abstract}</p>
+                  </section>
+                ) : null}
+              </div>
 
               <section className="trending-comments-section">
                 <div className="trending-section-heading">
@@ -589,7 +931,11 @@ export function TrendingPapersPage({
                   </form>
                 ) : (
                   <div className="trending-auth-callout">
-                    <p>Log in to upvote, comment, and reply.</p>
+                    <p>
+                      {showVotes
+                        ? "Log in to upvote, comment, and reply."
+                        : "Log in to comment and reply."}
+                    </p>
                     <button type="button" className="primary-button" onClick={onRequireAuth}>
                       Log in
                     </button>

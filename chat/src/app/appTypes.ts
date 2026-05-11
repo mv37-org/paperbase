@@ -211,7 +211,7 @@ export type ThreadStreamState = {
 
 export type AppearanceTheme = "light" | "dark";
 
-export type SettingsTab = "inference" | "sandbox" | "version-control" | "appearance";
+export type SettingsTab = "inference" | "audio" | "sandbox" | "version-control" | "appearance";
 
 export type PendingPromptState = {
   prompt: string;

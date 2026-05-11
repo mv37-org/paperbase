@@ -54,6 +54,7 @@ from paperbase.models import (
     ProjectItemPageResponse,
     ProjectItemSummary,
     ProjectListResponse,
+    ProjectPresentationResponse,
     ProjectRepoSyncResponse,
     ProjectResponse,
     ProjectSessionPageResponse,
@@ -274,7 +275,7 @@ class StubApiService:
         date: str | None = None,
         sort: str,
         page: int = 1,
-        page_size: int = 50,
+        page_size: int = 20,
         viewer: BrowserUser | None = None,
     ) -> TrendingFeedResponse:
         self.calls.append(
@@ -487,6 +488,21 @@ class StubApiService:
             expires_at=NOW,
             papers=[paper],
         )
+
+    def literature_shell(self, request):
+        self.calls.append(("literature_shell", request.command))
+        return {
+            "command": request.command,
+            "stdout": "Paperbase literature shell",
+            "result_set_id": None,
+            "papers": [],
+            "paths": [],
+            "matches": [],
+            "rows": [],
+            "citations": [],
+            "truncated": False,
+            "error": None,
+        }
 
     def get_related_papers(self, paper_id: str) -> list[SearchPaperResult]:
         self.calls.append(("get_related_papers", paper_id))
@@ -729,6 +745,22 @@ class StubApiService:
             has_anthropic_api_key=False,
         )
 
+    def save_user_elevenlabs_key(self, user: BrowserUser, request) -> BrowserSessionResponse:
+        self.calls.append(("save_user_elevenlabs_key", (user.user_id, request.api_key)))
+        return BrowserSessionResponse(
+            authenticated=True,
+            user=user,
+            has_anthropic_api_key=False,
+        )
+
+    def delete_user_elevenlabs_key(self, user: BrowserUser) -> BrowserSessionResponse:
+        self.calls.append(("delete_user_elevenlabs_key", user.user_id))
+        return BrowserSessionResponse(
+            authenticated=True,
+            user=user,
+            has_anthropic_api_key=False,
+        )
+
     def update_user_notification_preferences(self, user: BrowserUser, request) -> BrowserSessionResponse:
         self.calls.append(("update_user_notification_preferences", (user.user_id, request.weekly_papers_review_email)))
         return BrowserSessionResponse(
@@ -739,6 +771,14 @@ class StubApiService:
 
     def update_user_appearance(self, user: BrowserUser, request) -> BrowserSessionResponse:
         self.calls.append(("update_user_appearance", (user.user_id, request.theme)))
+        return BrowserSessionResponse(
+            authenticated=True,
+            user=user,
+            has_anthropic_api_key=False,
+        )
+
+    def update_user_github_sync_settings(self, user: BrowserUser, request) -> BrowserSessionResponse:
+        self.calls.append(("update_user_github_sync_settings", (user.user_id, request.enabled)))
         return BrowserSessionResponse(
             authenticated=True,
             user=user,
@@ -947,6 +987,100 @@ class StubApiService:
             total_count=len(items),
             has_more=False,
         )
+
+    def get_project_presentation(self, user: BrowserUser, project_id: str) -> ProjectPresentationResponse:
+        self.calls.append(("get_project_presentation", (user.user_id, project_id)))
+        return ProjectPresentationResponse(
+            presentation_id="pres_1",
+            project_id=project_id,
+            status="completed",
+            visual_code="ReactDOM.createRoot(document.getElementById('root')).render('ok');",
+            summary_markdown="# Summary",
+            created_at=NOW,
+            updated_at=NOW,
+            completed_at=NOW,
+        )
+
+    def start_project_presentation(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        request,
+    ) -> ProjectPresentationResponse:
+        self.calls.append(
+            (
+                "start_project_presentation",
+                (user.user_id, project_id, request.regenerate, len(request.explorations)),
+            )
+        )
+        return ProjectPresentationResponse(
+            presentation_id="pres_1",
+            project_id=project_id,
+            status="pending",
+            job_id="job_project_presentation",
+            created_at=NOW,
+            updated_at=NOW,
+        )
+
+    def update_project_presentation_share(
+        self,
+        user: BrowserUser,
+        project_id: str,
+        request,
+    ) -> ProjectPresentationResponse:
+        self.calls.append(("update_project_presentation_share", (user.user_id, project_id, request.is_public)))
+        return ProjectPresentationResponse(
+            presentation_id="pres_1",
+            project_id=project_id,
+            status="completed",
+            visual_code="ReactDOM.createRoot(document.getElementById('root')).render('ok');",
+            summary_markdown="# Summary",
+            is_public=request.is_public,
+            share_token="share_1" if request.is_public else None,
+            share_url="http://127.0.0.1:8080/?presentation=share_1" if request.is_public else "",
+            created_at=NOW,
+            updated_at=NOW,
+            completed_at=NOW,
+        )
+
+    def cancel_project_presentation(
+        self,
+        user: BrowserUser,
+        project_id: str,
+    ) -> ProjectPresentationResponse:
+        self.calls.append(("cancel_project_presentation", (user.user_id, project_id)))
+        return ProjectPresentationResponse(
+            presentation_id="pres_1",
+            project_id=project_id,
+            status="canceled",
+            job_id="job_project_presentation",
+            created_at=NOW,
+            updated_at=NOW,
+        )
+
+    def get_public_project_presentation(self, share_token: str) -> ProjectPresentationResponse:
+        self.calls.append(("get_public_project_presentation", share_token))
+        return ProjectPresentationResponse(
+            presentation_id="pres_1",
+            project_id="proj_1",
+            status="completed",
+            visual_code="ReactDOM.createRoot(document.getElementById('root')).render('ok');",
+            summary_markdown="# Summary",
+            is_public=True,
+            share_token=share_token,
+            share_url=f"http://127.0.0.1:8080/?presentation={share_token}",
+            created_at=NOW,
+            updated_at=NOW,
+            completed_at=NOW,
+        )
+
+    def get_project_presentation_audio(self, user: BrowserUser, project_id: str) -> tuple[bytes, str]:
+        self.calls.append(("get_project_presentation_audio", (user.user_id, project_id)))
+        return b"audio-bytes", "audio/mpeg"
+
+    def get_public_project_presentation_audio(self, share_token: str) -> tuple[bytes, str]:
+        self.calls.append(("get_public_project_presentation_audio", share_token))
+        return b"public-audio-bytes", "audio/mpeg"
 
     def create_python_file(self, user: BrowserUser, project_id: str) -> PythonFileResponse:
         self.calls.append(("create_python_file", (user.user_id, project_id)))
@@ -1367,6 +1501,7 @@ def test_bearer_routes_delegate_to_service(api_client):
     paper = client.get("/v1/papers/arxiv:2401.54321", headers=headers)
     files = client.get("/v1/papers/arxiv:2401.54321/files", headers=headers)
     results = client.get("/v1/results/rs_1", headers=headers)
+    shell = client.post("/v1/literature/shell", headers=headers, json={"command": "help"})
     related = client.get("/v1/papers/arxiv:2401.54321/related", headers=headers)
     references = client.get("/v1/papers/arxiv:2401.54321/references?refresh=true", headers=headers)
     job = client.get("/v1/jobs/job_123", headers=headers)
@@ -1384,12 +1519,20 @@ def test_bearer_routes_delegate_to_service(api_client):
     assert paper.json()["paper_id"] == "arxiv:2401.54321"
     assert files.json()["files"][0]["path"] == "text/full.md"
     assert results.json()["result_set_id"] == "rs_1"
+    assert shell.json()["stdout"] == "Paperbase literature shell"
     assert related.json()[0]["source"] == "semantic-scholar"
     assert references.json()[0]["reference_type"] == "citation"
     assert job.json()["payload"]["job_id"] == "job_123"
     assert ("sync_latest", None) in service.calls
     assert ("reindex_embeddings", (11, False, False)) in service.calls
+    assert ("literature_shell", "help") in service.calls
     assert ("get_job", "job_123") in service.calls
+
+
+def test_literature_shell_endpoint_requires_bearer_auth(api_client):
+    client, _, _ = api_client
+    response = client.post("/v1/literature/shell", json={"command": "help"})
+    assert response.status_code == 401
 
 
 def test_browser_suggest_route_is_public(api_client):
@@ -1649,6 +1792,12 @@ def test_browser_settings_routes_delegate_with_valid_csrf(api_client):
         json={"token_id": "modal-token-id-123", "token_secret": "modal-token-secret-456"},
         headers=headers,
     )
+    elevenlabs_key = client.put(
+        "/v1/browser/settings/elevenlabs-key",
+        json={"api_key": "elevenlabs-key-123"},
+        headers=headers,
+    )
+    deleted_elevenlabs_key = client.delete("/v1/browser/settings/elevenlabs-key", headers=headers)
     notifications = client.put(
         "/v1/browser/settings/notifications",
         json={"weekly_papers_review_email": True},
@@ -1659,22 +1808,36 @@ def test_browser_settings_routes_delegate_with_valid_csrf(api_client):
         json={"theme": "dark"},
         headers=headers,
     )
+    github_sync = client.put(
+        "/v1/browser/settings/github-sync",
+        json={"enabled": True},
+        headers=headers,
+    )
     github = client.delete("/v1/browser/settings/github", headers=headers)
 
     assert modal_credentials.status_code == 200
+    assert elevenlabs_key.status_code == 200
+    assert deleted_elevenlabs_key.status_code == 200
     assert notifications.status_code == 200
     assert appearance.status_code == 200
+    assert github_sync.status_code == 200
     assert github.status_code == 200
     assert modal_credentials.json()["csrf_token"] == csrf
+    assert elevenlabs_key.json()["csrf_token"] == csrf
+    assert deleted_elevenlabs_key.json()["csrf_token"] == csrf
     assert notifications.json()["csrf_token"] == csrf
     assert appearance.json()["csrf_token"] == csrf
+    assert github_sync.json()["csrf_token"] == csrf
     assert github.json()["csrf_token"] == csrf
     assert (
         "save_user_modal_credentials",
         ("user_1", "modal-token-id-123", "modal-token-secret-456"),
     ) in service.calls
+    assert ("save_user_elevenlabs_key", ("user_1", "elevenlabs-key-123")) in service.calls
+    assert ("delete_user_elevenlabs_key", "user_1") in service.calls
     assert ("update_user_notification_preferences", ("user_1", True)) in service.calls
     assert ("update_user_appearance", ("user_1", "dark")) in service.calls
+    assert ("update_user_github_sync_settings", ("user_1", True)) in service.calls
     assert ("delete_github_connection", "user_1") in service.calls
 
 
@@ -1760,6 +1923,20 @@ def test_browser_project_and_chat_write_routes_delegate_with_valid_csrf(api_clie
         json={"commit_message": "Save analysis.py"},
         headers=headers,
     )
+    started_presentation = client.post(
+        "/v1/browser/projects/proj_2/presentation",
+        json={"explorations": [{"exploration_id": "exp_1", "paper_id": "paper_1"}], "regenerate": True},
+        headers=headers,
+    )
+    canceled_presentation = client.post(
+        "/v1/browser/projects/proj_2/presentation/cancel",
+        headers=headers,
+    )
+    shared_presentation = client.patch(
+        "/v1/browser/projects/proj_2/presentation/share",
+        json={"is_public": True},
+        headers=headers,
+    )
     deleted_chat = client.delete("/v1/browser/chats/thread_1", headers=headers)
     deleted_project = client.delete("/v1/browser/projects/proj_2", headers=headers)
 
@@ -1787,6 +1964,12 @@ def test_browser_project_and_chat_write_routes_delegate_with_valid_csrf(api_clie
     assert ran_python_file.json()["stdout"] == "runner output"
     assert synced_project_repo.status_code == 200
     assert synced_project_repo.json()["github_repo_name"] == "paperbase-general-123abc"
+    assert started_presentation.status_code == 200
+    assert started_presentation.json()["status"] == "pending"
+    assert canceled_presentation.status_code == 200
+    assert canceled_presentation.json()["status"] == "canceled"
+    assert shared_presentation.status_code == 200
+    assert shared_presentation.json()["share_token"] == "share_1"
     assert deleted_chat.json() == {"status": "deleted"}
     assert deleted_project.json() == {"status": "deleted"}
     assert ("create_project", ("user_1", "Agents", "Study agent systems", "create", "agent-lab")) in service.calls
@@ -1807,6 +1990,9 @@ def test_browser_project_and_chat_write_routes_delegate_with_valid_csrf(api_clie
     assert ("delete_python_file", ("user_1", "file_1")) in service.calls
     assert ("run_python_file", ("user_1", "file_1", "smoke")) in service.calls
     assert ("sync_project_repo", ("user_1", "proj_2", "Save analysis.py")) in service.calls
+    assert ("start_project_presentation", ("user_1", "proj_2", True, 1)) in service.calls
+    assert ("cancel_project_presentation", ("user_1", "proj_2")) in service.calls
+    assert ("update_project_presentation_share", ("user_1", "proj_2", True)) in service.calls
     assert ("delete_chat_thread", ("user_1", "thread_1")) in service.calls
     assert ("delete_project", ("user_1", "proj_2")) in service.calls
 
@@ -1836,6 +2022,10 @@ def test_browser_project_item_routes_delegate_to_service(api_client):
     items = client.get("/v1/browser/projects/proj_1/items?limit=25&offset=0&item_kind=python_file")
     python_file = client.get("/v1/browser/python-files/file_1")
     repo_sync = client.get("/v1/browser/projects/proj_1/repo-sync")
+    presentation = client.get("/v1/browser/projects/proj_1/presentation")
+    presentation_audio = client.get("/v1/browser/projects/proj_1/presentation/audio")
+    public_presentation = client.get("/v1/browser/project-presentations/public/share_1")
+    public_presentation_audio = client.get("/v1/browser/project-presentations/public/share_1/audio")
 
     assert items.status_code == 200
     assert items.json()["items"][0]["item_kind"] == "python_file"
@@ -1843,9 +2033,21 @@ def test_browser_project_item_routes_delegate_to_service(api_client):
     assert python_file.json()["content"] == "print('hello')"
     assert repo_sync.status_code == 200
     assert repo_sync.json()["repo_exists"] is False
+    assert presentation.status_code == 200
+    assert presentation.json()["presentation_id"] == "pres_1"
+    assert presentation_audio.status_code == 200
+    assert presentation_audio.content == b"audio-bytes"
+    assert public_presentation.status_code == 200
+    assert public_presentation.json()["share_token"] == "share_1"
+    assert public_presentation_audio.status_code == 200
+    assert public_presentation_audio.content == b"public-audio-bytes"
     assert ("list_project_items", ("user_1", "proj_1", 25, 0, "python_file")) in service.calls
     assert ("get_python_file", ("user_1", "file_1")) in service.calls
     assert ("get_project_repo_sync", ("user_1", "proj_1")) in service.calls
+    assert ("get_project_presentation", ("user_1", "proj_1")) in service.calls
+    assert ("get_project_presentation_audio", ("user_1", "proj_1")) in service.calls
+    assert ("get_public_project_presentation", "share_1") in service.calls
+    assert ("get_public_project_presentation_audio", "share_1") in service.calls
 
 
 def test_google_callback_success_sets_cookie_and_redirects_to_saved_return_to(api_client, monkeypatch):
@@ -2041,13 +2243,27 @@ def test_browser_trending_feed_is_public(api_client):
     assert ("list_browser_trending_papers", ("2026-04-21", "upvotes", 2, 10, None)) in service.calls
 
 
+def test_browser_trending_feed_defaults_to_twenty_papers(api_client):
+    client, service, _ = api_client
+
+    response = client.get("/v1/browser/trending?date=2026-04-21")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["page_size"] == 20
+    assert ("list_browser_trending_papers", ("2026-04-21", "default", 1, 20, None)) in service.calls
+
+
 def test_browser_trending_detail_is_public(api_client):
     client, service, _ = api_client
 
     response = client.get("/v1/browser/trending/papers/arxiv:2401.54321")
 
     assert response.status_code == 200
-    assert response.json()["paper_id"] == "arxiv:2401.54321"
+    payload = response.json()
+    assert payload["paper_id"] == "arxiv:2401.54321"
+    assert payload["citation_count"] == 0
+    assert payload["code_index_status"] == "none"
     assert ("get_browser_trending_paper", ("arxiv:2401.54321", None)) in service.calls
 
 

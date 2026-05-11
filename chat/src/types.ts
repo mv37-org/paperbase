@@ -10,10 +10,13 @@ export interface BrowserUser {
 export interface BrowserUserSettingsResponse {
   openai_api_key_hint: string;
   anthropic_api_key_hint?: string;
+  has_elevenlabs_api_key: boolean;
+  elevenlabs_api_key_hint: string;
   has_modal_credentials: boolean;
   modal_token_id_hint: string;
   has_github_connection: boolean;
   github_login: string;
+  github_sync_enabled: boolean;
   github_oauth_available: boolean;
   github_manage_access_url: string;
   weekly_papers_review_email: boolean;
@@ -334,13 +337,34 @@ export interface TrendingPaperDetail {
   arxiv_id: string;
   title: string;
   authors: string;
+  abstract?: string;
+  tldr?: string;
   published: string;
+  updated?: string;
   primary_category: string;
   categories: string;
+  doi?: string | null;
+  comment?: string | null;
+  journal_ref?: string | null;
   summary_short: string;
   html_url: string;
   pdf_url: string;
   image_url?: string | null;
+  citation_count?: number;
+  influential_citation_count?: number;
+  semantic_scholar_id?: string | null;
+  code_url?: string | null;
+  code_url_source?: string | null;
+  code_index_status?: string;
+  code_is_python?: boolean | null;
+  code_python_reason?: string | null;
+  venue?: string | null;
+  venue_year?: number | null;
+  venue_source?: string | null;
+  top_author_s2_id?: string | null;
+  source_type?: string | null;
+  index_status?: string;
+  indexed_at?: string | null;
   upvote_count: number;
   viewer_has_upvoted: boolean;
   comments: PaperComment[];
@@ -544,6 +568,74 @@ export interface ProjectItemPageResponse {
   limit: number;
   total_count: number;
   has_more: boolean;
+}
+
+export type ProjectPresentationStatus =
+  | "missing"
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed"
+  | "canceled";
+
+export interface ProjectPresentationExplorationSnapshot {
+  exploration_id: string;
+  paper_id: string;
+  chat_thread_id?: string;
+  path: string;
+  title: string;
+  authors: string;
+  preview_image_url: string;
+  pdf_url: string;
+  annotations: Array<Record<string, unknown>>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProjectPresentationStartPayload {
+  explorations: ProjectPresentationExplorationSnapshot[];
+  regenerate?: boolean;
+}
+
+export interface ProjectPresentationResponse {
+  presentation_id: string;
+  project_id: string;
+  status: ProjectPresentationStatus;
+  visual_code: string;
+  summary_markdown: string;
+  slides: ProjectPresentationSlideResponse[];
+  audio_url: string;
+  audio_content_type: string;
+  is_public: boolean;
+  share_token?: string | null;
+  share_url: string;
+  error: string;
+  job_id?: string | null;
+  progress: ProjectPresentationProgress;
+  created_at?: string | null;
+  updated_at?: string | null;
+  completed_at?: string | null;
+}
+
+export interface ProjectPresentationProgress {
+  phase_key: string;
+  phase_label: string;
+  detail: string;
+  percent: number;
+  estimated_seconds_remaining: number;
+  can_leave: boolean;
+  email_notice: string;
+  updated_at?: string | null;
+}
+
+export interface ProjectPresentationSlideResponse {
+  slide_id: string;
+  title: string;
+  description: string;
+  visual_type: "code" | "image";
+  visual_code: string;
+  image_prompt: string;
+  image_url: string;
 }
 
 export interface RunPythonFileResponse {
