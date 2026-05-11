@@ -1419,10 +1419,10 @@ describe("App", () => {
     render(<App />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Read paper" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Explore" })).toBeTruthy();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Read paper" }));
+    fireEvent.click(screen.getByRole("button", { name: "Explore" }));
 
     await waitFor(() => {
       expect(document.querySelector(".paper-exploration-frame")).toBeTruthy();

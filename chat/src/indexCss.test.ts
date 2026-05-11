@@ -40,6 +40,8 @@ describe("index.css", () => {
       css.match(/\.public-trending-header\s*\{([^}]*)\}/)?.[1] ?? "";
     const publicTrendingColumnBlock =
       css.match(/\.public-trending-column\s*\{([^}]*)\}/)?.[1] ?? "";
+    const workspaceDetailBlock =
+      css.match(/\.trending-page-workspace\.detail-open\s*\{([^}]*)\}/)?.[1] ?? "";
     const cardBlock = css.match(/\.trending-card\s*\{([^}]*)\}/)?.[1] ?? "";
     const imageBlock = css.match(/\.trending-card-image\s*\{([^}]*)\}/)?.[1] ?? "";
     const landingImageBlock =
@@ -125,6 +127,7 @@ describe("index.css", () => {
     expect(publicTrendingHeaderBlock).toContain('font-family: Georgia, "Iowan Old Style", serif;');
     expect(publicTrendingHeaderBlock).toContain("font-size: 12px;");
     expect(publicTrendingColumnBlock).toContain("max-width: 900px;");
+    expect(workspaceDetailBlock).toContain('font-family: Georgia, "Iowan Old Style", serif;');
     expect(css).not.toContain(".trending-page-landing .trending-card:nth-child(even)");
     expect(css).not.toContain('"media copy"');
     expect(cardBlock).toContain("min-height: 282px;");

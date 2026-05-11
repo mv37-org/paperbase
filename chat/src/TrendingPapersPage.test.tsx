@@ -244,11 +244,11 @@ describe("TrendingPapersPage", () => {
     expect(
       screen.getByText("Full abstract with the main result and evaluation setup."),
     ).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Read paper" }));
+    fireEvent.click(screen.getByRole("button", { name: "Explore" }));
     expect(onReadPaper).toHaveBeenCalledWith(
       expect.objectContaining({ paper_id: "arxiv:2401.12345" }),
     );
-    expect(screen.queryByRole("link", { name: "Read paper" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Read paper" })).toBeNull();
     expect(screen.getAllByRole("link", { name: "PDF" })[0]?.getAttribute("href")).toBe(
       "https://example.test/2401.12345.pdf",
     );

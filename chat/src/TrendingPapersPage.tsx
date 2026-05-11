@@ -643,6 +643,7 @@ export function TrendingPapersPage({
     Boolean(detail?.abstract?.trim()) &&
     normalizeDetailText(detail?.abstract) !== normalizeDetailText(summaryText) &&
     normalizeDetailText(detail?.abstract) !== normalizeDetailText(detail?.tldr);
+  const primaryDetailActionLabel = variant === "workspace" ? "Explore" : "Read paper";
 
   return (
     <section
@@ -826,7 +827,7 @@ export function TrendingPapersPage({
                       }
                     }}
                   >
-                    Read paper
+                    {primaryDetailActionLabel}
                   </button>
                   <a
                     href={detail.pdf_url}

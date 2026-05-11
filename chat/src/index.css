@@ -2469,6 +2469,10 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
   font-family: Georgia, "Iowan Old Style", serif;
 }
 
+.trending-page-workspace.detail-open {
+  font-family: Georgia, "Iowan Old Style", serif;
+}
+
 .trending-page-header {
   display: flex;
   align-items: center;
