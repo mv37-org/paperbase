@@ -239,11 +239,48 @@ _PROJECT_PRESENTATION_MAX_COMMENTS_PER_PAPER = 4
 _PROJECT_PRESENTATION_MAX_FIGURES_PER_PAPER = 4
 _PROJECT_PRESENTATION_MAX_TABLES_PER_PAPER = 2
 _PROJECT_PRESENTATION_MAX_TABLE_ROWS = 4
+_PROJECT_PRESENTATION_MAX_VISUAL_ITEMS = 10
 _PROJECT_PRESENTATION_MAX_SLIDES = 8
 _PROJECT_PRESENTATION_MAX_IMAGE_SLIDES = 3
 _PROJECT_PRESENTATION_IMAGE_MODEL = "gpt-image-2"
 _PROJECT_PRESENTATION_IMAGE_TIMEOUT_SECONDS = 45
 _PROJECT_PRESENTATION_TTS_TIMEOUT_SECONDS = 45
+_PROJECT_PRESENTATION_VISUAL_NUMBER_RE = re.compile(
+    r"(?<![\w.])([+-]?\d+(?:,\d{3})*(?:\.\d+)?)\s*"
+    r"(percentage points?|percent|points?|pp|%|x|×|ms|s|seconds?|tokens?|parameters?|k|m|b)?\b",
+    re.IGNORECASE,
+)
+_PROJECT_PRESENTATION_VISUAL_COMPARISON_RE = re.compile(
+    r"\bfrom\s+([+-]?\d+(?:,\d{3})*(?:\.\d+)?)\s*"
+    r"(percentage points?|percent|points?|pp|%|x|×)?\s+"
+    r"(?:to|up to|down to)\s+([+-]?\d+(?:,\d{3})*(?:\.\d+)?)\s*"
+    r"(percentage points?|percent|points?|pp|%|x|×)?\b",
+    re.IGNORECASE,
+)
+_PROJECT_PRESENTATION_DATASET_TOKEN_RE = re.compile(
+    r"\b(?:[A-Z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)*(?:Bench|Benchmark|Eval|Dataset|Set|Suite|QA)"
+    r"|MMLU|GSM8K|HumanEval|LongBench|LongMemEval|LoCoMo|AgentBench)\b"
+)
+_PROJECT_PRESENTATION_METHOD_KEYWORDS = (
+    "agent",
+    "architecture",
+    "benchmark",
+    "calibration",
+    "classifier",
+    "dataset",
+    "decoder",
+    "encoder",
+    "evidence",
+    "memory",
+    "module",
+    "pipeline",
+    "planner",
+    "rerank",
+    "retrieval",
+    "router",
+    "validator",
+    "workflow",
+)
 _PROJECT_PRESENTATION_TEXT_FORMAT: dict[str, Any] = {
     "type": "json_schema",
     "name": "project_presentation",
@@ -3212,6 +3249,7 @@ class PaperbaseService:
                 "updated_at": project.updated_at.isoformat(),
             },
             "research_materials": research_materials,
+            "visual_evidence": self._project_presentation_visual_evidence(research_materials),
             "explorations": exploration_rows,
             "chat_threads": thread_rows,
             "paper_comments": comments,
@@ -3364,6 +3402,7 @@ class PaperbaseService:
                         "tables": self._project_presentation_table_snippets(paper.paper_id),
                     }
                 )
+            material["visual_data"] = self._project_presentation_material_visual_data(material)
             if any(
                 material.get(key)
                 for key in (
@@ -3376,6 +3415,7 @@ class PaperbaseService:
                     "paper_comments",
                     "figures",
                     "tables",
+                    "visual_data",
                 )
             ):
                 materials.append(material)
@@ -3472,6 +3512,353 @@ class PaperbaseService:
                     rows.append(trimmed_row)
         return rows
 
+    def _project_presentation_material_visual_data(self, material: dict[str, Any]) -> dict[str, Any]:
+        text_sources = self._project_presentation_material_text_sources(material)
+        metric_values: list[dict[str, Any]] = []
+        before_after_comparisons: list[dict[str, Any]] = []
+        table_samples: list[dict[str, Any]] = []
+
+        for source in text_sources:
+            text = source["text"]
+            source_label = source["source"]
+            metric_values.extend(self._project_presentation_metric_values_from_text(text, source_label))
+            before_after_comparisons.extend(self._project_presentation_comparisons_from_text(text, source_label))
+
+        for table in list(material.get("tables") or [])[:_PROJECT_PRESENTATION_MAX_TABLES_PER_PAPER]:
+            if not isinstance(table, dict):
+                continue
+            table_id = self._truncate_text(str(table.get("table_id") or ""), 120)
+            caption = self._truncate_text(str(table.get("caption") or ""), 240)
+            sample_rows = list(table.get("sample_rows") or [])[:_PROJECT_PRESENTATION_MAX_TABLE_ROWS]
+            if caption or sample_rows:
+                table_samples.append(
+                    {
+                        "table_id": table_id,
+                        "caption": caption,
+                        "sample_rows": sample_rows,
+                    }
+                )
+            table_metrics, table_comparisons = self._project_presentation_table_visual_data(table)
+            metric_values.extend(table_metrics)
+            before_after_comparisons.extend(table_comparisons)
+
+        figure_captions = [
+            {
+                "figure_id": self._truncate_text(str(figure.get("figure_id") or ""), 120),
+                "caption": self._truncate_text(str(figure.get("caption") or ""), 320),
+            }
+            for figure in list(material.get("figures") or [])[:_PROJECT_PRESENTATION_MAX_FIGURES_PER_PAPER]
+            if isinstance(figure, dict) and str(figure.get("caption") or figure.get("figure_id") or "").strip()
+        ]
+
+        visual_data = {
+            "metric_values": self._project_presentation_limit_visual_items(metric_values),
+            "before_after_comparisons": self._project_presentation_limit_visual_items(before_after_comparisons),
+            "table_samples": self._project_presentation_limit_visual_items(table_samples),
+            "figure_captions": self._project_presentation_limit_visual_items(figure_captions),
+            "method_components": self._project_presentation_limit_visual_items(
+                self._project_presentation_method_components(text_sources)
+            ),
+            "datasets": self._project_presentation_limit_visual_items(
+                self._project_presentation_datasets(text_sources)
+            ),
+            "cited_claims": self._project_presentation_limit_visual_items(
+                self._project_presentation_cited_claims(text_sources)
+            ),
+        }
+        return {key: value for key, value in visual_data.items() if value}
+
+    def _project_presentation_material_text_sources(self, material: dict[str, Any]) -> list[dict[str, str]]:
+        sources: list[dict[str, str]] = []
+
+        def add(source: str, text: Any, *, max_chars: int = 1200) -> None:
+            value = self._truncate_text(str(text or ""), max_chars)
+            if value:
+                sources.append({"source": source, "text": value})
+
+        add("abstract", material.get("abstract"), max_chars=1800)
+        add("tldr", material.get("tldr"))
+        add("summary_short", material.get("summary_short"))
+        for passage in list(material.get("selected_passages") or [])[:_PROJECT_PRESENTATION_MAX_PASSAGES_PER_PAPER]:
+            if not isinstance(passage, dict):
+                continue
+            source = self._truncate_text(str(passage.get("section_title") or "selected passage"), 120)
+            add(source, passage.get("selected_text"))
+            add(f"{source} context", passage.get("nearby_text"), max_chars=800)
+            add(f"{source} note", passage.get("note"), max_chars=600)
+        for index, note in enumerate(list(material.get("user_notes") or [])[:_PROJECT_PRESENTATION_MAX_PASSAGES_PER_PAPER], 1):
+            add(f"user note {index}", note, max_chars=600)
+        for index, comment in enumerate(list(material.get("paper_comments") or [])[:_PROJECT_PRESENTATION_MAX_COMMENTS_PER_PAPER], 1):
+            if isinstance(comment, dict):
+                add(f"comment {index}", comment.get("body"), max_chars=600)
+        for figure in list(material.get("figures") or [])[:_PROJECT_PRESENTATION_MAX_FIGURES_PER_PAPER]:
+            if isinstance(figure, dict):
+                figure_id = self._truncate_text(str(figure.get("figure_id") or "figure"), 80)
+                add(f"figure:{figure_id}", figure.get("caption"), max_chars=700)
+        for table in list(material.get("tables") or [])[:_PROJECT_PRESENTATION_MAX_TABLES_PER_PAPER]:
+            if isinstance(table, dict):
+                table_id = self._truncate_text(str(table.get("table_id") or "table"), 80)
+                add(f"table:{table_id}", table.get("caption"), max_chars=500)
+        return sources
+
+    def _project_presentation_metric_values_from_text(self, text: str, source: str) -> list[dict[str, Any]]:
+        values: list[dict[str, Any]] = []
+        for match in _PROJECT_PRESENTATION_VISUAL_NUMBER_RE.finditer(text):
+            parsed = self._project_presentation_parse_visual_number(match.group(1), match.group(2))
+            if parsed is None:
+                continue
+            value, unit = parsed
+            if self._project_presentation_number_is_likely_year(value=value, unit=unit):
+                continue
+            sentence = self._project_presentation_sentence_around(text, match.start())
+            label = self._truncate_text(sentence or text, 180)
+            values.append(
+                {
+                    "label": label,
+                    "metric": label,
+                    "value": value,
+                    "unit": unit,
+                    "source": source,
+                }
+            )
+        return values
+
+    def _project_presentation_comparisons_from_text(self, text: str, source: str) -> list[dict[str, Any]]:
+        comparisons: list[dict[str, Any]] = []
+        for match in _PROJECT_PRESENTATION_VISUAL_COMPARISON_RE.finditer(text):
+            before = self._project_presentation_parse_visual_number(match.group(1), match.group(2))
+            after = self._project_presentation_parse_visual_number(match.group(3), match.group(4))
+            if before is None or after is None:
+                continue
+            before_value, before_unit = before
+            after_value, after_unit = after
+            unit = after_unit or before_unit
+            sentence = self._project_presentation_sentence_around(text, match.start())
+            comparisons.append(
+                {
+                    "label": self._truncate_text(sentence or text, 220),
+                    "before_label": "before",
+                    "before_value": before_value,
+                    "after_label": "after",
+                    "after_value": after_value,
+                    "unit": unit,
+                    "source": source,
+                }
+            )
+        return comparisons
+
+    def _project_presentation_table_visual_data(
+        self,
+        table: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        table_id = self._truncate_text(str(table.get("table_id") or ""), 120)
+        caption = self._truncate_text(str(table.get("caption") or ""), 220)
+        source = f"table:{table_id or caption or 'sample'}"
+        metric_values: list[dict[str, Any]] = []
+        metric_series: dict[str, list[dict[str, Any]]] = {}
+        for row in list(table.get("sample_rows") or [])[:_PROJECT_PRESENTATION_MAX_TABLE_ROWS]:
+            if not isinstance(row, dict):
+                continue
+            row_label = self._project_presentation_row_label(row)
+            for key, value in row.items():
+                parsed = self._project_presentation_parse_visual_cell(value)
+                if parsed is None:
+                    continue
+                number, unit = parsed
+                metric = self._truncate_text(str(key), 120)
+                label = self._truncate_text(" ".join(part for part in (row_label, metric) if part), 180)
+                item = {
+                    "label": label or metric,
+                    "metric": metric,
+                    "value": number,
+                    "unit": unit,
+                    "source": source,
+                }
+                metric_values.append(item)
+                metric_series.setdefault(metric, []).append(
+                    {
+                        "row_label": row_label,
+                        "value": number,
+                        "unit": unit,
+                    }
+                )
+
+        comparisons: list[dict[str, Any]] = []
+        for metric, series in metric_series.items():
+            if len(series) < 2:
+                continue
+            first = series[0]
+            last = series[-1]
+            comparisons.append(
+                {
+                    "label": caption or metric,
+                    "metric": metric,
+                    "before_label": first["row_label"] or "before",
+                    "before_value": first["value"],
+                    "after_label": last["row_label"] or "after",
+                    "after_value": last["value"],
+                    "unit": last["unit"] or first["unit"],
+                    "source": source,
+                }
+            )
+        return metric_values, comparisons
+
+    def _project_presentation_row_label(self, row: dict[str, Any]) -> str:
+        for key, value in row.items():
+            if self._project_presentation_parse_visual_cell(value) is None:
+                text = self._truncate_text(str(value or ""), 80)
+                if text:
+                    return text
+            key_text = str(key or "").lower()
+            if key_text in {"protocol", "method", "model", "dataset", "condition", "setting"}:
+                text = self._truncate_text(str(value or ""), 80)
+                if text:
+                    return text
+        return ""
+
+    def _project_presentation_parse_visual_cell(self, value: Any) -> tuple[float, str] | None:
+        text = str(value or "").strip()
+        match = re.fullmatch(
+            r"([+-]?\d+(?:,\d{3})*(?:\.\d+)?)\s*"
+            r"(percentage points?|percent|points?|pp|%|x|×|ms|s|seconds?|tokens?|parameters?|k|m|b)?",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if match is None:
+            return None
+        return self._project_presentation_parse_visual_number(match.group(1), match.group(2))
+
+    def _project_presentation_parse_visual_number(self, value: str, unit: str | None = None) -> tuple[float, str] | None:
+        normalized = str(value or "").replace(",", "").strip()
+        try:
+            number = float(normalized)
+        except ValueError:
+            return None
+        unit_value = self._project_presentation_normalize_visual_unit(unit)
+        return number, unit_value
+
+    def _project_presentation_normalize_visual_unit(self, unit: str | None) -> str:
+        unit_value = str(unit or "").strip()
+        lower = unit_value.lower()
+        if lower in {"percent"}:
+            return "%"
+        if lower in {"percentage point", "percentage points", "point", "points", "pp"}:
+            return "points"
+        if lower == "×":
+            return "x"
+        return unit_value
+
+    def _project_presentation_number_is_likely_year(self, *, value: float, unit: str) -> bool:
+        return not unit and value.is_integer() and 1900 <= int(value) <= 2100
+
+    def _project_presentation_sentence_around(self, text: str, index: int) -> str:
+        sentence_start = max(text.rfind(".", 0, index), text.rfind("!", 0, index), text.rfind("?", 0, index))
+        start = sentence_start + 1 if sentence_start >= 0 else 0
+        sentence_end_candidates = [
+            position
+            for position in (text.find(".", index), text.find("!", index), text.find("?", index))
+            if position >= 0
+        ]
+        end = min(sentence_end_candidates) + 1 if sentence_end_candidates else len(text)
+        return self._truncate_text(text[start:end], 240)
+
+    def _project_presentation_split_sentences(self, text: str) -> list[str]:
+        return [
+            self._truncate_text(sentence, 300)
+            for sentence in re.split(r"(?<=[.!?])\s+", str(text or ""))
+            if sentence.strip()
+        ]
+
+    def _project_presentation_method_components(self, text_sources: list[dict[str, str]]) -> list[dict[str, str]]:
+        components: list[dict[str, str]] = []
+        for source in text_sources:
+            for sentence in self._project_presentation_split_sentences(source["text"]):
+                lower = sentence.lower()
+                if not any(keyword in lower for keyword in _PROJECT_PRESENTATION_METHOD_KEYWORDS):
+                    continue
+                components.append(
+                    {
+                        "component": self._truncate_text(sentence, 240),
+                        "source": source["source"],
+                    }
+                )
+        return components
+
+    def _project_presentation_datasets(self, text_sources: list[dict[str, str]]) -> list[str]:
+        datasets: list[str] = []
+        for source in text_sources:
+            for match in _PROJECT_PRESENTATION_DATASET_TOKEN_RE.finditer(source["text"]):
+                value = match.group(0).strip(".,;:()[]{}")
+                if value:
+                    datasets.append(value)
+        return datasets
+
+    def _project_presentation_cited_claims(self, text_sources: list[dict[str, str]]) -> list[dict[str, str]]:
+        claims: list[dict[str, str]] = []
+        for source in text_sources:
+            for sentence in self._project_presentation_split_sentences(source["text"]):
+                if len(sentence.split()) < 5:
+                    continue
+                claims.append(
+                    {
+                        "claim": self._truncate_text(sentence, 260),
+                        "source": source["source"],
+                    }
+                )
+                break
+        return claims
+
+    def _project_presentation_visual_evidence(self, research_materials: list[dict[str, Any]]) -> dict[str, Any]:
+        evidence: dict[str, list[Any]] = {
+            "metric_values": [],
+            "before_after_comparisons": [],
+            "table_samples": [],
+            "figure_captions": [],
+            "method_components": [],
+            "datasets": [],
+            "cited_claims": [],
+        }
+        for material in research_materials:
+            if not isinstance(material, dict):
+                continue
+            paper_title = self._truncate_text(str(material.get("title") or ""), 220)
+            visual_data = material.get("visual_data") if isinstance(material.get("visual_data"), dict) else {}
+            for key in (
+                "metric_values",
+                "before_after_comparisons",
+                "table_samples",
+                "figure_captions",
+                "method_components",
+                "cited_claims",
+            ):
+                for item in list(visual_data.get(key) or []):
+                    if isinstance(item, dict):
+                        enriched = dict(item)
+                        if paper_title:
+                            enriched["paper_title"] = paper_title
+                        evidence[key].append(enriched)
+            for dataset in list(visual_data.get("datasets") or []):
+                if isinstance(dataset, str) and dataset.strip():
+                    evidence["datasets"].append(dataset.strip())
+        return {
+            key: self._project_presentation_limit_visual_items(value)
+            for key, value in evidence.items()
+            if value
+        }
+
+    def _project_presentation_limit_visual_items(self, items: list[Any]) -> list[Any]:
+        limited: list[Any] = []
+        seen: set[str] = set()
+        for item in items:
+            key = json.dumps(item, ensure_ascii=False, sort_keys=True, default=str) if isinstance(item, dict) else str(item)
+            if key in seen:
+                continue
+            seen.add(key)
+            limited.append(item)
+            if len(limited) >= _PROJECT_PRESENTATION_MAX_VISUAL_ITEMS:
+                break
+        return limited
+
     def _truncate_text(self, value: str, max_chars: int) -> str:
         text = " ".join(str(value or "").split())
         if len(text) <= max_chars:
@@ -3532,10 +3919,12 @@ class PaperbaseService:
                 "paper_comments": list(material.get("paper_comments", []))[:3],
                 "figures": list(material.get("figures", []))[:3],
                 "tables": list(material.get("tables", []))[:2],
+                "visual_data": self._truncate_project_presentation_visual_data(material.get("visual_data")),
             }
             for material in list(trimmed.get("research_materials", []))[:8]
             if isinstance(material, dict)
         ]
+        trimmed["visual_evidence"] = self._truncate_project_presentation_visual_data(trimmed.get("visual_evidence"))
         if len(json.dumps(trimmed, ensure_ascii=False, default=str)) <= _PROJECT_PRESENTATION_MAX_CONTEXT_CHARS:
             return trimmed
         trimmed["chat_threads"] = [
@@ -3585,10 +3974,60 @@ class PaperbaseService:
                 "paper_comments": list(material.get("paper_comments", []))[:2],
                 "figures": list(material.get("figures", []))[:2],
                 "tables": list(material.get("tables", []))[:1],
+                "visual_data": self._truncate_project_presentation_visual_data(
+                    material.get("visual_data"),
+                    max_items=5,
+                    max_text_chars=180,
+                ),
             }
             for material in list(trimmed.get("research_materials", []))[:5]
             if isinstance(material, dict)
         ]
+        trimmed["visual_evidence"] = self._truncate_project_presentation_visual_data(
+            trimmed.get("visual_evidence"),
+            max_items=5,
+            max_text_chars=180,
+        )
+        return trimmed
+
+    def _truncate_project_presentation_visual_data(
+        self,
+        visual_data: Any,
+        *,
+        max_items: int = _PROJECT_PRESENTATION_MAX_VISUAL_ITEMS,
+        max_text_chars: int = 260,
+    ) -> dict[str, Any]:
+        if not isinstance(visual_data, dict):
+            return {}
+
+        def truncate_item(item: Any) -> Any:
+            if isinstance(item, dict):
+                return {
+                    self._truncate_text(str(key), 120): truncate_item(value)
+                    for key, value in item.items()
+                    if value not in (None, "", [], {})
+                }
+            if isinstance(item, list):
+                return [truncate_item(value) for value in item[:max_items]]
+            if isinstance(item, str):
+                return self._truncate_text(item, max_text_chars)
+            return item
+
+        trimmed: dict[str, Any] = {}
+        for key in (
+            "metric_values",
+            "before_after_comparisons",
+            "table_samples",
+            "figure_captions",
+            "method_components",
+            "datasets",
+            "cited_claims",
+        ):
+            value = visual_data.get(key)
+            if isinstance(value, list):
+                trimmed_value = [truncate_item(item) for item in value[:max_items]]
+                if trimmed_value:
+                    trimmed[key] = trimmed_value
         return trimmed
 
     def generate_project_presentation(
@@ -3902,7 +4341,13 @@ class PaperbaseService:
                 "is itself a scientific result. The presentation must teach the actual research material, "
                 "technical ideas, evidence, code outputs, disagreements, caveats, and implications to an "
                 "external audience. `summary_markdown` is a legacy concise briefing outline of the same "
-                "direct conclusions; write it like research findings, not narrative copy. "
+                "direct conclusions; write it like research findings, not narrative copy. Before choosing "
+                "visuals, inspect top-level `visual_evidence` and each paper's `visual_data`: "
+                "`metric_values`, `before_after_comparisons`, `table_samples`, `figure_captions`, "
+                "`method_components`, `datasets`, and `cited_claims`. Prefer real extracted chartable "
+                "material over invented structure. Use table rows, captions, metric values, method "
+                "components, datasets, before/after comparisons, and cited claims as the raw material for "
+                "charts and diagrams whenever available. "
                 "slides. `visual_code` is a legacy fallback containing the first code slide visual."
                 "\n\n"
                 "For each slide, choose exactly one visual mode. Use `visual_type: \"code\"` when an "
@@ -3930,9 +4375,10 @@ class PaperbaseService:
                 "scatter/line/bar/slope charts, heatmaps, network layouts, confidence intervals, or "
                 "small-multiple comparisons when useful; React can own controls and state. Every visual "
                 "must include a concise conclusion callout that points at the decisive evidence. Use the "
-                "Paperbase brand direction: warm paper/ink foundation, restrained "
-                "blue accents, terracotta #99582A for emphasis, crisp 4px radii, thin rules, strong "
-                "typography, and no generic dashboard chrome. Keep all left-side text small: chart labels "
+                "Paperbase house style: warm paper background (#f7f2ea), black ink rules (#1b1611 at low "
+                "opacity), terracotta #99582A for the main emphasis, muted blue #3F6685 for secondary data, "
+                "dense but calm labels, crisp 4px radii, thin black rules, strong typography, and no generic "
+                "dashboard chrome. Do not use decorative blobs/waves unless the shape encodes data. Keep all left-side text small: chart labels "
                 "should usually be 10-14px, annotations 12-16px, and no SVG/HTML text may exceed 22px "
                 "unless it is a single numeric data value. Avoid oversized typographic posters, decorative "
                 "waves, decorative blobs, and abstract background art as the main visual. The visual must fill 100% width and 100% "

@@ -5966,8 +5966,8 @@ def test_project_presentation_job_caches_shares_and_emails():
         "2401.12345",
         title="Calibrated Agent Benchmarks",
         abstract=(
-            "This paper studies benchmark reliability by estimating uncertainty in evaluation "
-            "scores and showing when small changes in protocol alter conclusions."
+            "On AgentBench, the calibration pipeline studies benchmark reliability by estimating uncertainty "
+            "in evaluation scores and reducing error from 0.18 to 0.07 when protocols are stabilized."
         ),
     )
     paper.index_status = "indexed"
@@ -6105,6 +6105,16 @@ def test_project_presentation_job_caches_shares_and_emails():
         chat_model.create_calls[-1]["system_prompt"]
     )
     assert "never rely on fixed oversized canvases" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "`visual_evidence`" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "`metric_values`" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "`before_after_comparisons`" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "table rows, captions, metric values" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "warm paper background (#f7f2ea)" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "terracotta #99582A" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "muted blue #3F6685" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "Do not use decorative blobs/waves unless the shape encodes data" in str(
+        chat_model.create_calls[-1]["system_prompt"]
+    )
     prompt_payload = json.loads(str(chat_model.create_calls[-1]["messages"][0]["content"]))
     assert prompt_payload["research_materials"][0]["title"] == "Calibrated Agent Benchmarks"
     assert "benchmark reliability" in prompt_payload["research_materials"][0]["abstract"]
@@ -6112,6 +6122,21 @@ def test_project_presentation_job_caches_shares_and_emails():
     assert prompt_payload["research_materials"][0]["paper_comments"][0]["body"].startswith("Focus on uncertainty")
     assert prompt_payload["research_materials"][0]["figures"][0]["caption"].startswith("Figure shows calibrated")
     assert prompt_payload["research_materials"][0]["tables"][0]["sample_rows"][0]["Protocol"] == "baseline"
+    visual_data = prompt_payload["research_materials"][0]["visual_data"]
+    assert visual_data["figure_captions"][0]["caption"].startswith("Figure shows calibrated")
+    assert visual_data["table_samples"][0]["sample_rows"][0]["Protocol"] == "baseline"
+    assert any(item["metric"] == "Error" and item["value"] == 0.18 for item in visual_data["metric_values"])
+    assert any(
+        comparison["before_value"] == 0.18 and comparison["after_value"] == 0.07
+        for comparison in visual_data["before_after_comparisons"]
+    )
+    assert "AgentBench" in visual_data["datasets"]
+    assert any(
+        "calibration pipeline" in component["component"].lower()
+        for component in visual_data["method_components"]
+    )
+    assert prompt_payload["visual_evidence"]["metric_values"]
+    assert prompt_payload["visual_evidence"]["before_after_comparisons"]
     assert prompt_payload["code_artifacts"][0]["filename"] == "analysis.py"
     assert "calibrate" in prompt_payload["code_artifacts"][0]["content"]
     assert chat_model.create_calls[-1]["text_format"] == {
