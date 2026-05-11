@@ -3,6 +3,7 @@ import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { TrendingPapersPage, type TrendingBrowseState } from "./TrendingPapersPage";
+import type { TrendingPaperDetail } from "./types";
 
 const apiMocks = vi.hoisted(() => ({
   createBrowserTrendingPaperComment: vi.fn(),
@@ -29,12 +30,14 @@ function Harness({
     paperId: null,
   } satisfies TrendingBrowseState,
   onOpenPaper,
+  onReadPaper,
   onRequireAuth = vi.fn(),
   variant = "workspace",
 }: {
   authenticated?: boolean;
   initialState?: TrendingBrowseState;
   onOpenPaper?: (nextState: TrendingBrowseState) => void;
+  onReadPaper?: (detail: TrendingPaperDetail) => void;
   onRequireAuth?: () => void;
   variant?: "landing" | "public" | "workspace";
 }) {
@@ -46,6 +49,7 @@ function Harness({
       browseState={browseState}
       onChangeBrowseState={setBrowseState}
       onOpenPaper={onOpenPaper}
+      onReadPaper={onReadPaper}
       onRequireAuth={onRequireAuth}
     />
   );
@@ -155,7 +159,8 @@ describe("TrendingPapersPage", () => {
   });
 
   it("renders the feed, re-sorts it, and opens the detail view with nested comments", async () => {
-    render(<Harness />);
+    const onReadPaper = vi.fn();
+    render(<Harness onReadPaper={onReadPaper} />);
 
     await waitFor(() => {
       expect(screen.getByText("Trending Paper")).toBeTruthy();
@@ -206,8 +211,14 @@ describe("TrendingPapersPage", () => {
       "21st Apr 2026",
     );
     expect(screen.getByText("Updated").nextElementSibling?.textContent).toMatch(/years ago/);
-    expect(screen.getByText("Categories")).toBeTruthy();
-    expect(screen.getByText("cs.AI cs.LG")).toBeTruthy();
+    expect(screen.getByText("arXiv").nextElementSibling?.textContent).toContain("2401.12345");
+    expect(screen.getByText("arXiv").nextElementSibling?.textContent).toContain("PDF");
+    expect(screen.getByText("Primary category").nextElementSibling?.textContent).toContain(
+      "Artificial Intelligence (cs.AI)",
+    );
+    expect(screen.getByText("Categories").nextElementSibling?.textContent).toContain(
+      "Artificial Intelligence (cs.AI), Machine Learning (cs.LG)",
+    );
     expect(screen.getByText("Citations")).toBeTruthy();
     expect(screen.getByText("42")).toBeTruthy();
     expect(screen.getByText("DOI").nextElementSibling?.textContent).toContain("10.1234/trending");
@@ -215,7 +226,9 @@ describe("TrendingPapersPage", () => {
       "https://github.com/example/trending-paper",
     );
     expect(screen.queryByText("Paperbase ID")).toBeNull();
+    expect(screen.queryByText("arXiv ID")).toBeNull();
     expect(screen.queryByText("HTML URL")).toBeNull();
+    expect(screen.queryByText("PDF URL")).toBeNull();
     expect(screen.queryByText("arXiv comment")).toBeNull();
     expect(screen.queryByText("Influential citations")).toBeNull();
     expect(screen.queryByText("Code URL source")).toBeNull();
@@ -231,10 +244,12 @@ describe("TrendingPapersPage", () => {
     expect(
       screen.getByText("Full abstract with the main result and evaluation setup."),
     ).toBeTruthy();
-    expect(screen.getByRole("link", { name: "Read paper" }).getAttribute("href")).toBe(
-      "https://example.test/2401.12345",
+    fireEvent.click(screen.getByRole("button", { name: "Read paper" }));
+    expect(onReadPaper).toHaveBeenCalledWith(
+      expect.objectContaining({ paper_id: "arxiv:2401.12345" }),
     );
-    expect(screen.getByRole("link", { name: "PDF" }).getAttribute("href")).toBe(
+    expect(screen.queryByRole("link", { name: "Read paper" })).toBeNull();
+    expect(screen.getAllByRole("link", { name: "PDF" })[0]?.getAttribute("href")).toBe(
       "https://example.test/2401.12345.pdf",
     );
   });

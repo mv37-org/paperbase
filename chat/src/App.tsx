@@ -207,6 +207,7 @@ import type {
   ProjectSummary,
   PythonFileResponse,
   SendChatMessageResponse,
+  TrendingPaperDetail,
 } from "./types";
 
 function chatMessageRowId(messageId: string) {
@@ -347,6 +348,8 @@ const WORKSPACE_SIDEBAR_ITEMS = [
   adminOnly?: boolean;
 }>;
 
+const PENDING_PAPER_EXPLORATION_KEY = "paperbase-pending-paper-exploration";
+
 function timestampMs(value: string | null | undefined) {
   if (!value) {
     return null;
@@ -379,6 +382,94 @@ function formatWorkedDuration(startMs: number | null, endMs: number | null) {
 
 function paperExplorationIdFor(projectId: string, paperId: string) {
   return `paper-exploration:${projectId}:${paperId}`;
+}
+
+function paperResponseFromTrendingDetail(detail: TrendingPaperDetail): PaperResponse {
+  return {
+    paper_id: detail.paper_id,
+    arxiv_id: detail.arxiv_id,
+    title: detail.title,
+    authors: detail.authors,
+    abstract: detail.abstract ?? "",
+    summary_short: detail.summary_short ?? "",
+    categories: detail.categories,
+    primary_category: detail.primary_category,
+    published: detail.published,
+    updated: detail.updated ?? detail.published,
+    doi: detail.doi,
+    comment: detail.comment,
+    journal_ref: detail.journal_ref,
+    pdf_url: detail.pdf_url,
+    html_url: detail.html_url,
+    citation_count: detail.citation_count ?? 0,
+    influential_citation_count: detail.influential_citation_count ?? 0,
+    semantic_scholar_id: detail.semantic_scholar_id,
+    code_url: detail.code_url,
+    code_url_source: detail.code_url_source,
+    code_index_status: detail.code_index_status,
+    code_is_python: detail.code_is_python,
+    code_python_reason: detail.code_python_reason,
+    venue: detail.venue,
+    venue_year: detail.venue_year,
+    venue_source: detail.venue_source,
+    top_author_s2_id: detail.top_author_s2_id,
+    source_type: detail.source_type,
+    index_status: detail.index_status ?? "",
+    indexed_at: detail.indexed_at,
+  };
+}
+
+function paperActionTargetFromTrendingDetail(detail: TrendingPaperDetail): PaperActionTarget {
+  return {
+    paperId: detail.paper_id,
+    path: detail.arxiv_id || detail.paper_id,
+    paper: paperResponseFromTrendingDetail(detail),
+    title: detail.title,
+    authors: detail.authors,
+    previewImageUrl: detail.image_url,
+    pdfUrl: detail.pdf_url,
+  };
+}
+
+function rememberPendingPaperExploration(target: PaperActionTarget) {
+  sessionStorage.setItem(
+    PENDING_PAPER_EXPLORATION_KEY,
+    JSON.stringify({
+      paperId: target.paperId,
+      path: target.path,
+      title: target.title ?? "",
+      authors: target.authors ?? "",
+      previewImageUrl: target.previewImageUrl ?? "",
+      pdfUrl: target.pdfUrl ?? "",
+    }),
+  );
+}
+
+function consumePendingPaperExploration(): PaperActionTarget | null {
+  const raw = sessionStorage.getItem(PENDING_PAPER_EXPLORATION_KEY);
+  sessionStorage.removeItem(PENDING_PAPER_EXPLORATION_KEY);
+  if (!raw) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const paperId = typeof parsed.paperId === "string" ? parsed.paperId : "";
+    const path = typeof parsed.path === "string" ? parsed.path : paperId;
+    if (!paperId || !path) {
+      return null;
+    }
+    return {
+      paperId,
+      path,
+      title: typeof parsed.title === "string" ? parsed.title : undefined,
+      authors: typeof parsed.authors === "string" ? parsed.authors : undefined,
+      previewImageUrl:
+        typeof parsed.previewImageUrl === "string" ? parsed.previewImageUrl : undefined,
+      pdfUrl: typeof parsed.pdfUrl === "string" ? parsed.pdfUrl : undefined,
+    };
+  } catch {
+    return null;
+  }
 }
 
 function splitPaperAuthors(authors: string) {
@@ -1108,6 +1199,9 @@ export default function App() {
   const explorationSuggestionRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const projectMenuRef = useRef<HTMLDivElement | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
+  const startPaperExplorationRef = useRef<
+    ((target: PaperActionTarget, options?: { navigate?: boolean }) => Promise<boolean>) | null
+  >(null);
   const pendingTurnAnchorMessageIdRef = useRef<string | null>(null);
   const skipNextAutoBottomScrollRef = useRef(false);
   const streamAbortControllerRef = useRef<AbortController | null>(null);
@@ -2402,6 +2496,7 @@ export default function App() {
     },
     [activeProjectHomeId, activeThread?.project_id, openPaperExploration, showErrorFlash],
   );
+  startPaperExplorationRef.current = startPaperExploration;
 
   const startExplorationFromSuggestion = useCallback(
     async (paper: MentionSuggestion) => {
@@ -4326,6 +4421,14 @@ export default function App() {
         return;
       }
 
+      const pendingPaperExploration = consumePendingPaperExploration();
+      if (pendingPaperExploration) {
+        const didStart = await startPaperExplorationRef.current?.(pendingPaperExploration);
+        if (didStart) {
+          return;
+        }
+      }
+
       const initialTrendingBrowseState = trendingBrowseStateFromUrl();
       if (initialTrendingBrowseState) {
         setActiveTab(null);
@@ -4557,6 +4660,19 @@ export default function App() {
     requireInferenceAccess,
     sendMessage,
   ]);
+
+  const handleReadTrendingPaper = useCallback(
+    (detail: TrendingPaperDetail) => {
+      const target = paperActionTargetFromTrendingDetail(detail);
+      if (!sessionRef.current?.authenticated) {
+        rememberPendingPaperExploration(target);
+        openAuthModal("login");
+        return;
+      }
+      void startPaperExploration(target);
+    },
+    [openAuthModal, startPaperExploration],
+  );
 
   const handlePaperDiscussionVote = useCallback(async () => {
     if (!activePaperExploration) {
@@ -6543,6 +6659,7 @@ export default function App() {
                 authenticated={false}
                 browseState={trendingBrowseState}
                 onChangeBrowseState={updateTrendingBrowseState}
+                onReadPaper={handleReadTrendingPaper}
                 onRequireAuth={() => openAuthModal("login")}
               />
             </div>
@@ -6602,6 +6719,7 @@ export default function App() {
                   browseState={landingTrendingBrowseState}
                   onChangeBrowseState={setLandingTrendingBrowseState}
                   onOpenPaper={updateTrendingBrowseState}
+                  onReadPaper={handleReadTrendingPaper}
                   onRequireAuth={() => openAuthModal("login")}
                   feedTitle="Trending papers"
                   feedDescription=""
@@ -7386,6 +7504,7 @@ export default function App() {
                         }
                       }
                       onChangeBrowseState={(nextState) => updateTrendingBrowseState(nextState)}
+                      onReadPaper={handleReadTrendingPaper}
                       onRequireAuth={() => openAuthModal("login")}
                     />
                   </div>

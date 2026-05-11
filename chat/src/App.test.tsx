@@ -1368,6 +1368,10 @@ describe("App", () => {
     expect(window.location.search).toContain("browse=trending");
     expect(window.location.search).toContain("trendingPaper=arxiv%3A2401.12345");
     expect(screen.getByRole("button", { name: "Back to feed" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Read paper" }));
+
+    expect(document.querySelector("#auth-modal")?.classList.contains("hidden")).toBe(false);
   });
 
   it("opens the public trending page from a shared browse URL", async () => {
@@ -1392,6 +1396,27 @@ describe("App", () => {
         20,
       );
     });
+  });
+
+  it("starts a paper exploration from an authenticated trending detail", async () => {
+    window.history.replaceState({}, "", "/?browse=trending&trendingPaper=arxiv%3A2401.12345");
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Read paper" })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Read paper" }));
+
+    await waitFor(() => {
+      expect(document.querySelector(".paper-exploration-frame")).toBeTruthy();
+    });
+    expect(document.querySelector(".paper-exploration-frame")?.getAttribute("data-url")).toBe(
+      "https://example.test/2401.12345.pdf",
+    );
+    expect(screen.getByRole("heading", { name: "Trending Paper" })).toBeTruthy();
   });
 
   it("boots from the server session payload without refetching the browser session", async () => {
