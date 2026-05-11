@@ -5697,11 +5697,17 @@ def test_project_presentation_job_caches_shares_and_emails():
 
     assert queued.status == "pending"
     assert queued.job_id
+    assert queued.progress.phase_key == "queued"
+    assert queued.progress.percent == 4
+    assert queued.progress.estimated_seconds_remaining > 0
     completed_job = service.process_next_job()
     assert completed_job is not None
     assert completed_job.status == "completed"
     completed = service.get_project_presentation(session.user, project.project_id)
     assert completed.status == "completed"
+    assert completed.progress.phase_key == "complete"
+    assert completed.progress.percent == 100
+    assert completed.progress.estimated_seconds_remaining == 0
     assert "Agent Benchmarks" in completed.summary_markdown
     assert "ReactDOM.createRoot" in completed.visual_code
     assert completed.slides[0].title == "Benchmark calibration"
@@ -5946,6 +5952,7 @@ def test_project_presentation_completes_when_slide_image_generation_fails(monkey
     def fail_image_request(**_kwargs):
         visible = service.get_project_presentation(session.user, project.project_id)
         assert visible.status == "completed"
+        assert visible.progress.phase_key == "generating_images"
         raise TimeoutError("The read operation timed out")
 
     monkeypatch.setattr(service, "_request_openai_presentation_image", fail_image_request)
@@ -5960,6 +5967,7 @@ def test_project_presentation_completes_when_slide_image_generation_fails(monkey
     assert completed_job.status == "completed"
     completed = service.get_project_presentation(session.user, project.project_id)
     assert completed.status == "completed"
+    assert completed.progress.phase_key == "complete"
     assert completed.slides[0].visual_type == "code"
     assert completed.slides[0].image_url == ""
     assert "ReactDOM.createRoot" in completed.slides[0].visual_code
@@ -6236,6 +6244,7 @@ def test_project_presentation_completes_when_elevenlabs_audio_fails(monkeypatch,
     def fail_tts(**_kwargs):
         visible = service.get_project_presentation(session.user, project.project_id)
         assert visible.status == "completed"
+        assert visible.progress.phase_key == "generating_audio"
         raise TimeoutError("The read operation timed out")
 
     monkeypatch.setattr(service, "_request_elevenlabs_tts", fail_tts)
@@ -6250,6 +6259,7 @@ def test_project_presentation_completes_when_elevenlabs_audio_fails(monkeypatch,
     assert completed_job.status == "completed"
     completed = service.get_project_presentation(session.user, project.project_id)
     assert completed.status == "completed"
+    assert completed.progress.phase_key == "complete"
     assert completed.audio_url == ""
     assert "Research brief" in completed.summary_markdown
     assert any(

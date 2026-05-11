@@ -1595,48 +1595,83 @@ body:has(.app-shell) #root {
 .project-presentation-error {
   align-self: center;
   justify-self: center;
-  width: min(520px, 100%);
+  width: min(560px, 100%);
   border: 1px solid rgba(27, 22, 17, 0.1);
-  border-radius: var(--radius);
+  border-radius: 4px;
   background: var(--paper);
 }
 
 .project-presentation-progress {
   display: grid;
-  gap: 8px;
-  padding: 12px;
+  gap: 10px;
+  padding: 16px;
 }
 
-.project-presentation-progress span {
+.project-presentation-progress-kicker {
+  color: #99582a;
+  font-size: 11px;
+  font-weight: 760;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.project-presentation-progress h1 {
+  margin: 0;
+  color: var(--text);
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 28px;
+  font-weight: 650;
+  line-height: 1.08;
+}
+
+.project-presentation-progress p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.project-presentation-progress-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   color: var(--text);
   font-size: 13px;
-  font-weight: 650;
+}
+
+.project-presentation-progress-meta strong {
+  color: #99582a;
+  font-variant-numeric: tabular-nums;
+}
+
+.project-presentation-progress-meta span {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.project-presentation-progress-note {
+  padding-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .project-presentation-progress-track {
   position: relative;
-  height: 8px;
+  height: 9px;
   overflow: hidden;
-  border-radius: var(--radius);
+  border-radius: 4px;
   background: rgba(27, 22, 17, 0.08);
 }
 
 .project-presentation-progress-track span {
   position: absolute;
   inset: 0 auto 0 0;
-  width: 44%;
+  width: var(--presentation-progress-percent, 4%);
   border-radius: inherit;
-  background: #1e7ce8;
-  animation: project-presentation-progress 1.4s ease-in-out infinite;
-}
-
-@keyframes project-presentation-progress {
-  0% {
-    transform: translateX(-100%);
-  }
-  100% {
-    transform: translateX(230%);
-  }
+  background: linear-gradient(90deg, #99582a, #1e7ce8);
+  transition: width 260ms ease;
 }
 
 .project-presentation-error {

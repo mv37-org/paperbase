@@ -3504,6 +3504,14 @@ class PaperbaseService:
             )
             return self._project_presentation_with_share_url(existing)
         self.repository.set_project_presentation_running(presentation_id)  # type: ignore[attr-defined]
+        self._update_project_presentation_progress(
+            presentation_id,
+            phase_key="making_bullet_points",
+            phase_label="Making bullet points",
+            detail="Reading the project history, papers, annotations, comments, chats, and code to find the presentation story.",
+            percent=12,
+            estimated_seconds_remaining=330,
+        )
         user = self.repository.get_browser_user_by_id(user_id)  # type: ignore[attr-defined]
         if user is None:
             self.repository.fail_project_presentation(  # type: ignore[attr-defined]
@@ -3542,6 +3550,14 @@ class PaperbaseService:
                     "response_length": len(response_text),
                 },
             )
+            self._update_project_presentation_progress(
+                presentation_id,
+                phase_key="drawing_diagrams",
+                phase_label="Drawing diagrams",
+                detail="Turning the slide plan into custom diagrams, visual code, and fallback artwork.",
+                percent=54,
+                estimated_seconds_remaining=180,
+            )
             try:
                 payload = self._parse_project_presentation_payload(response_text)
             except PermanentError as exc:
@@ -3570,6 +3586,14 @@ class PaperbaseService:
                 slides,
             )
             slide_payloads = [self._project_presentation_slide_storage_dict(slide) for slide in visible_slides]
+            self._update_project_presentation_progress(
+                presentation_id,
+                phase_key="assembling_presentation",
+                phase_label="Assembling presentation",
+                detail="Saving the slide text, visuals, share state, and the first viewable version.",
+                percent=72,
+                estimated_seconds_remaining=120,
+            )
             completed = self.repository.complete_project_presentation(  # type: ignore[attr-defined]
                 presentation_id,
                 visual_code=visual_code,
@@ -3596,6 +3620,14 @@ class PaperbaseService:
                 presentation=completed,
             )
             if any(slide.visual_type == "image" and slide.image_prompt.strip() for slide in slides):
+                self._update_project_presentation_progress(
+                    presentation_id,
+                    phase_key="generating_images",
+                    phase_label="Drawing generated images",
+                    detail="Trying generated research artwork for image-based slides. Code diagrams are already available as fallback.",
+                    percent=78,
+                    estimated_seconds_remaining=120,
+                )
                 visible_slides = self._generate_and_store_project_presentation_slide_images(
                     api_key=api_key_value,
                     presentation_id=presentation_id,
@@ -3620,6 +3652,14 @@ class PaperbaseService:
             elevenlabs_api_key = self._get_elevenlabs_api_key_optional(user)
             if elevenlabs_api_key:
                 try:
+                    self._update_project_presentation_progress(
+                        presentation_id,
+                        phase_key="generating_audio",
+                        phase_label="Generating audio walkthrough",
+                        detail="Writing and producing the two-person audio explainer for the presentation.",
+                        percent=88,
+                        estimated_seconds_remaining=120,
+                    )
                     logger.info(
                         "Project presentation audio generation started",
                         extra={
@@ -3663,10 +3703,49 @@ class PaperbaseService:
                                 "project_id": project_id,
                             },
                         )
+            progress_complete = self._update_project_presentation_progress(
+                presentation_id,
+                phase_key="complete",
+                phase_label="Presentation ready",
+                detail="The presentation is ready to view and share.",
+                percent=100,
+                estimated_seconds_remaining=0,
+            )
+            if progress_complete is not None:
+                completed = self._project_presentation_with_share_url(progress_complete)
             return completed
         except Exception as exc:
             self.repository.fail_project_presentation(presentation_id, error=str(exc))  # type: ignore[attr-defined]
             raise
+
+    def _update_project_presentation_progress(
+        self,
+        presentation_id: str,
+        *,
+        phase_key: str,
+        phase_label: str,
+        detail: str,
+        percent: int,
+        estimated_seconds_remaining: int,
+    ) -> ProjectPresentationResponse | None:
+        updater = getattr(self.repository, "update_project_presentation_progress", None)
+        if updater is None:
+            return None
+        try:
+            return updater(
+                presentation_id,
+                phase_key=phase_key,
+                phase_label=phase_label,
+                detail=detail,
+                percent=percent,
+                estimated_seconds_remaining=estimated_seconds_remaining,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to update project presentation progress",
+                extra={"event": "project.presentation.progress_update_failed", "presentation_id": presentation_id},
+            )
+            return None
 
     def _project_presentation_prompt(self, context_snapshot: dict[str, Any]) -> Prompt:
         return Prompt(

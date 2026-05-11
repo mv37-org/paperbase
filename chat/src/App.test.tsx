@@ -677,6 +677,19 @@ function projectPresentationResponse(projectId = "proj_1", status = "completed")
     share_url: "",
     error: "",
     job_id: status === "pending" ? "job_1" : null,
+    progress: {
+      phase_key: status === "completed" ? "complete" : "queued",
+      phase_label: status === "completed" ? "Presentation ready" : "Queued presentation workflow",
+      detail:
+        status === "completed"
+          ? "The presentation is ready to view and share."
+          : "Preparing the project history for the presentation agent.",
+      percent: status === "completed" ? 100 : 4,
+      estimated_seconds_remaining: status === "completed" ? 0 : 360,
+      can_leave: true,
+      email_notice: "We will email you once it is done. You can leave this page.",
+      updated_at: "2026-04-21T00:00:00Z",
+    },
     created_at: "2026-04-21T00:00:00Z",
     updated_at: "2026-04-21T00:00:00Z",
     completed_at: status === "completed" ? "2026-04-21T00:00:00Z" : null,
@@ -1526,6 +1539,40 @@ describe("App", () => {
     expect(await screen.findByText("Project summary")).toBeTruthy();
     const audio = await screen.findByLabelText("Presentation audio walkthrough");
     expect(audio.getAttribute("src")).toContain("/v1/browser/projects/proj_1/presentation/audio");
+  });
+
+  it("shows live project presentation progress with an ETA", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.loadProjectPresentation.mockResolvedValue({
+      ...projectPresentationResponse("proj_1", "running"),
+      progress: {
+        phase_key: "making_bullet_points",
+        phase_label: "Making bullet points",
+        detail: "Reading papers, notes, annotations, chats, and code.",
+        percent: 12,
+        estimated_seconds_remaining: 125,
+        can_leave: true,
+        email_notice: "We will email you once it is done. You can leave this page.",
+        updated_at: new Date(Date.now()).toISOString(),
+      },
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+    fireEvent.click(screen.getAllByText("General")[0]!);
+    fireEvent.click(await screen.findByText("Home"));
+
+    expect(await screen.findByText("Making bullet points")).toBeTruthy();
+    expect(screen.getByText("Reading papers, notes, annotations, chats, and code.")).toBeTruthy();
+    expect(screen.getByText("12%")).toBeTruthy();
+    expect(screen.getByText(/remaining/)).toBeTruthy();
+    expect(
+      screen.getByText("We will email you once it is done. You can leave this page."),
+    ).toBeTruthy();
+    expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("12");
   });
 
   it("lets the project home recover from a failed presentation", async () => {

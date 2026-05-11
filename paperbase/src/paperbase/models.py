@@ -953,6 +953,17 @@ class ProjectPresentationSlideResponse(BaseModel):
     image_storage_path: str = Field(default="", exclude=True)
 
 
+class ProjectPresentationProgressResponse(BaseModel):
+    phase_key: str = "idle"
+    phase_label: str = "Presentation not started"
+    detail: str = ""
+    percent: int = 0
+    estimated_seconds_remaining: int = 0
+    can_leave: bool = True
+    email_notice: str = "We will email you once it is done. You can leave this page."
+    updated_at: datetime | None = None
+
+
 class ProjectPresentationResponse(BaseModel):
     presentation_id: str = ""
     project_id: str
@@ -968,6 +979,7 @@ class ProjectPresentationResponse(BaseModel):
     share_url: str = ""
     error: str = ""
     job_id: str | None = None
+    progress: ProjectPresentationProgressResponse = Field(default_factory=ProjectPresentationProgressResponse)
     created_at: datetime | None = None
     updated_at: datetime | None = None
     completed_at: datetime | None = None

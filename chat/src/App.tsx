@@ -400,6 +400,56 @@ function presentationTokenFromUrl() {
   return new URLSearchParams(window.location.search).get("presentation")?.trim() ?? "";
 }
 
+function projectPresentationProgressIsActive(presentation: ProjectPresentationResponse | null) {
+  if (!presentation) {
+    return false;
+  }
+  if (presentation.status === "pending" || presentation.status === "running") {
+    return true;
+  }
+  const phaseKey = presentation.progress?.phase_key ?? "";
+  return presentation.status === "completed" && phaseKey !== "" && phaseKey !== "complete";
+}
+
+function projectPresentationProgressPercent(presentation: ProjectPresentationResponse | null) {
+  const percent = presentation?.progress?.percent;
+  if (typeof percent === "number" && Number.isFinite(percent)) {
+    return Math.max(0, Math.min(100, Math.round(percent)));
+  }
+  if (presentation?.status === "completed") {
+    return 100;
+  }
+  if (presentation?.status === "running") {
+    return 24;
+  }
+  return 4;
+}
+
+function projectPresentationRemainingSeconds(
+  presentation: ProjectPresentationResponse | null,
+  nowMs: number,
+) {
+  const progress = presentation?.progress;
+  const estimate = progress?.estimated_seconds_remaining;
+  if (typeof estimate !== "number" || !Number.isFinite(estimate) || estimate <= 0) {
+    return 0;
+  }
+  const updatedAtMs = progress.updated_at ? Date.parse(progress.updated_at) : Number.NaN;
+  if (!Number.isFinite(updatedAtMs)) {
+    return Math.ceil(estimate);
+  }
+  return Math.max(0, Math.ceil(estimate - Math.max(0, nowMs - updatedAtMs) / 1000));
+}
+
+function formatPresentationEta(seconds: number) {
+  if (seconds <= 0) {
+    return "finishing now";
+  }
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  return `${minutes}:${remainingSeconds.toString().padStart(2, "0")} remaining`;
+}
+
 function samePaperSections(left: PdfDocumentSection[], right: PdfDocumentSection[]) {
   return (
     left.length === right.length &&
@@ -923,6 +973,9 @@ export default function App() {
   const [projectPresentationStates, setProjectPresentationStates] = useState<
     Record<string, ProjectPresentationState>
   >({});
+  const [projectPresentationProgressNow, setProjectPresentationProgressNow] = useState(() =>
+    Date.now(),
+  );
   const [explorationPicker, setExplorationPicker] = useState<{
     projectId: string;
     projectName: string;
@@ -1276,6 +1329,14 @@ export default function App() {
       })
     : null;
   const activeProjectPresentation = activeProjectPresentationState?.presentation ?? null;
+  const activeProjectPresentationProgressActive =
+    projectPresentationProgressIsActive(activeProjectPresentation);
+  const activeProjectPresentationProgressPercent =
+    projectPresentationProgressPercent(activeProjectPresentation);
+  const activeProjectPresentationRemainingSeconds = projectPresentationRemainingSeconds(
+    activeProjectPresentation,
+    projectPresentationProgressNow,
+  );
   const activeProjectPresenting = Boolean(activeProjectHomeId);
   const activePaperExploration = activePaperExplorationId
     ? (paperExplorations.find(
@@ -6193,7 +6254,7 @@ export default function App() {
       !activeProjectHomeId ||
       !activeProjectPresenting ||
       !activeProjectPresentation ||
-      !["pending", "running"].includes(activeProjectPresentation.status)
+      !projectPresentationProgressIsActive(activeProjectPresentation)
     ) {
       return;
     }
@@ -6204,9 +6265,21 @@ export default function App() {
   }, [
     activeProjectHomeId,
     activeProjectPresenting,
+    activeProjectPresentation?.progress?.phase_key,
     activeProjectPresentation?.status,
     refreshProjectPresentation,
   ]);
+
+  useEffect(() => {
+    if (!activeProjectPresentationProgressActive) {
+      return;
+    }
+    setProjectPresentationProgressNow(Date.now());
+    const interval = window.setInterval(() => {
+      setProjectPresentationProgressNow(Date.now());
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, [activeProjectPresentationProgressActive]);
 
   if (!authReady) {
     return null;
@@ -7382,12 +7455,43 @@ export default function App() {
                       ) : null}
 
                       {activeProjectPresentationState?.loading ||
-                      activeProjectPresentation?.status === "pending" ||
-                      activeProjectPresentation?.status === "running" ? (
+                      activeProjectPresentationProgressActive ? (
                         <div className="project-presentation-progress" role="status">
-                          <span>creating presentation</span>
-                          <div className="project-presentation-progress-track" aria-hidden="true">
+                          <div className="project-presentation-progress-kicker">
+                            Creating presentation
+                          </div>
+                          <h1>
+                            {activeProjectPresentation?.progress?.phase_label ??
+                              "Starting presentation workflow"}
+                          </h1>
+                          <p>
+                            {activeProjectPresentation?.progress?.detail ??
+                              "Preparing the project history, papers, notes, comments, chats, and code."}
+                          </p>
+                          <div
+                            className="project-presentation-progress-track"
+                            aria-label={`Presentation progress ${activeProjectPresentationProgressPercent}%`}
+                            aria-valuemin={0}
+                            aria-valuemax={100}
+                            aria-valuenow={activeProjectPresentationProgressPercent}
+                            role="progressbar"
+                            style={
+                              {
+                                "--presentation-progress-percent": `${activeProjectPresentationProgressPercent}%`,
+                              } as CSSProperties
+                            }
+                          >
                             <span />
+                          </div>
+                          <div className="project-presentation-progress-meta">
+                            <strong>{activeProjectPresentationProgressPercent}%</strong>
+                            <span>
+                              {formatPresentationEta(activeProjectPresentationRemainingSeconds)}
+                            </span>
+                          </div>
+                          <div className="project-presentation-progress-note">
+                            {activeProjectPresentation?.progress?.email_notice ??
+                              "We will email you once it is done. You can leave this page."}
                           </div>
                         </div>
                       ) : activeProjectPresentation?.status === "completed" ? (

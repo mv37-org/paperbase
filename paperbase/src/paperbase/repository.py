@@ -59,6 +59,7 @@ from .models import (
     PaperResponse,
     ProjectItemPageResponse,
     ProjectItemSummary,
+    ProjectPresentationProgressResponse,
     ProjectPresentationResponse,
     ProjectRepoSyncResponse,
     ProjectResponse,
@@ -805,6 +806,7 @@ class ProjectPresentationORM(Base):
     audio_storage_path: Mapped[str] = mapped_column(Text, default="")
     audio_content_type: Mapped[str] = mapped_column(String(128), default="audio/mpeg")
     context_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    progress: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     is_public: Mapped[bool] = mapped_column(Boolean, default=False)
     share_token: Mapped[str | None] = mapped_column(String(96), unique=True, nullable=True)
     job_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
@@ -1045,12 +1047,45 @@ def _project_from_orm(
     )
 
 
+def _project_presentation_progress_payload(
+    *,
+    phase_key: str,
+    phase_label: str,
+    detail: str,
+    percent: int,
+    estimated_seconds_remaining: int,
+    can_leave: bool = True,
+    email_notice: str = "We will email you once it is done. You can leave this page.",
+    updated_at: Any | None = None,
+) -> dict[str, Any]:
+    updated = updated_at or utcnow()
+    if hasattr(updated, "isoformat"):
+        updated = updated.isoformat()
+    return {
+        "phase_key": phase_key,
+        "phase_label": phase_label,
+        "detail": detail,
+        "percent": max(0, min(100, int(percent))),
+        "estimated_seconds_remaining": max(0, int(estimated_seconds_remaining)),
+        "can_leave": bool(can_leave),
+        "email_notice": email_notice,
+        "updated_at": updated,
+    }
+
+
+def _project_presentation_progress_response(**kwargs: Any) -> ProjectPresentationProgressResponse:
+    return ProjectPresentationProgressResponse.model_validate(
+        _project_presentation_progress_payload(**kwargs)
+    )
+
+
 def _project_presentation_from_orm(
     row: ProjectPresentationORM,
     *,
     share_url: str = "",
 ) -> ProjectPresentationResponse:
     status = row.status if row.status in {"pending", "running", "completed", "failed"} else "failed"
+    progress = row.progress if isinstance(row.progress, dict) else {}
     return ProjectPresentationResponse(
         presentation_id=row.presentation_id,
         project_id=row.project_id,
@@ -1065,6 +1100,7 @@ def _project_presentation_from_orm(
         share_url=share_url if row.is_public and row.share_token else "",
         error=row.error or "",
         job_id=row.job_id,
+        progress=progress,
         created_at=row.created_at,
         updated_at=row.updated_at,
         completed_at=row.completed_at,
@@ -2081,6 +2117,12 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 text(
                     "ALTER TABLE IF EXISTS project_presentations "
                     "ADD COLUMN IF NOT EXISTS slides JSON DEFAULT '[]'"
+                )
+            )
+            connection.execute(
+                text(
+                    "ALTER TABLE IF EXISTS project_presentations "
+                    "ADD COLUMN IF NOT EXISTS progress JSON DEFAULT '{}'"
                 )
             )
             connection.execute(
@@ -4685,6 +4727,14 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     project_id=project_id,
                     status="pending",
                     context_snapshot=context_snapshot,
+                    progress=_project_presentation_progress_payload(
+                        phase_key="queued",
+                        phase_label="Queued presentation workflow",
+                        detail="Preparing the project history, papers, notes, chats, and code for the presentation agent.",
+                        percent=4,
+                        estimated_seconds_remaining=360,
+                        updated_at=now,
+                    ),
                     job_id=job_id,
                     created_at=now,
                     updated_at=now,
@@ -4701,6 +4751,14 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 row.slides = []
                 row.audio_storage_path = ""
                 row.audio_content_type = "audio/mpeg"
+                row.progress = _project_presentation_progress_payload(
+                    phase_key="queued",
+                    phase_label="Queued presentation workflow",
+                    detail="Preparing the project history, papers, notes, chats, and code for the presentation agent.",
+                    percent=4,
+                    estimated_seconds_remaining=360,
+                    updated_at=now,
+                )
                 row.completed_at = None
                 row.updated_at = now
             return _project_presentation_from_orm(row)
@@ -4713,6 +4771,36 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 return None
             row.status = "running"
             row.error = ""
+            row.updated_at = now
+            return _project_presentation_from_orm(row)
+
+    def update_project_presentation_progress(
+        self,
+        presentation_id: str,
+        *,
+        phase_key: str,
+        phase_label: str,
+        detail: str,
+        percent: int,
+        estimated_seconds_remaining: int,
+        can_leave: bool = True,
+        email_notice: str = "We will email you once it is done. You can leave this page.",
+    ) -> ProjectPresentationResponse | None:
+        now = utcnow()
+        with self._session() as session:
+            row = session.get(ProjectPresentationORM, presentation_id)
+            if row is None:
+                return None
+            row.progress = _project_presentation_progress_payload(
+                phase_key=phase_key,
+                phase_label=phase_label,
+                detail=detail,
+                percent=percent,
+                estimated_seconds_remaining=estimated_seconds_remaining,
+                can_leave=can_leave,
+                email_notice=email_notice,
+                updated_at=now,
+            )
             row.updated_at = now
             return _project_presentation_from_orm(row)
 
@@ -4755,6 +4843,14 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 return None
             row.status = "failed"
             row.error = error[:4000]
+            row.progress = _project_presentation_progress_payload(
+                phase_key="failed",
+                phase_label="Presentation failed",
+                detail=error[:240],
+                percent=100,
+                estimated_seconds_remaining=0,
+                updated_at=now,
+            )
             row.updated_at = now
             return _project_presentation_from_orm(row)
 
@@ -7511,6 +7607,14 @@ class MemoryPaperRepository(PaperRepository):
                 project_id=project_id,
                 status="pending",
                 job_id=job_id,
+                progress=_project_presentation_progress_response(
+                    phase_key="queued",
+                    phase_label="Queued presentation workflow",
+                    detail="Preparing the project history, papers, notes, chats, and code for the presentation agent.",
+                    percent=4,
+                    estimated_seconds_remaining=360,
+                    updated_at=now,
+                ),
                 created_at=now,
                 updated_at=now,
             )
@@ -7525,6 +7629,14 @@ class MemoryPaperRepository(PaperRepository):
                     "audio_content_type": "audio/mpeg",
                     "error": "",
                     "job_id": job_id,
+                    "progress": _project_presentation_progress_response(
+                        phase_key="queued",
+                        phase_label="Queued presentation workflow",
+                        detail="Preparing the project history, papers, notes, chats, and code for the presentation agent.",
+                        percent=4,
+                        estimated_seconds_remaining=360,
+                        updated_at=now,
+                    ),
                     "completed_at": None,
                     "updated_at": now,
                 }
@@ -7538,6 +7650,40 @@ class MemoryPaperRepository(PaperRepository):
         if presentation is None:
             return None
         updated = presentation.model_copy(update={"status": "running", "error": "", "updated_at": utcnow()})
+        self.project_presentations[presentation_id] = updated
+        return updated
+
+    def update_project_presentation_progress(
+        self,
+        presentation_id: str,
+        *,
+        phase_key: str,
+        phase_label: str,
+        detail: str,
+        percent: int,
+        estimated_seconds_remaining: int,
+        can_leave: bool = True,
+        email_notice: str = "We will email you once it is done. You can leave this page.",
+    ) -> ProjectPresentationResponse | None:
+        presentation = self.project_presentations.get(presentation_id)
+        if presentation is None:
+            return None
+        now = utcnow()
+        updated = presentation.model_copy(
+            update={
+                "progress": _project_presentation_progress_response(
+                    phase_key=phase_key,
+                    phase_label=phase_label,
+                    detail=detail,
+                    percent=percent,
+                    estimated_seconds_remaining=estimated_seconds_remaining,
+                    can_leave=can_leave,
+                    email_notice=email_notice,
+                    updated_at=now,
+                ),
+                "updated_at": now,
+            }
+        )
         self.project_presentations[presentation_id] = updated
         return updated
 
@@ -7581,7 +7727,19 @@ class MemoryPaperRepository(PaperRepository):
         if presentation is None:
             return None
         updated = presentation.model_copy(
-            update={"status": "failed", "error": error[:4000], "updated_at": utcnow()}
+            update={
+                "status": "failed",
+                "error": error[:4000],
+                "progress": _project_presentation_progress_response(
+                    phase_key="failed",
+                    phase_label="Presentation failed",
+                    detail=error[:240],
+                    percent=100,
+                    estimated_seconds_remaining=0,
+                    updated_at=utcnow(),
+                ),
+                "updated_at": utcnow(),
+            }
         )
         self.project_presentations[presentation_id] = updated
         return updated

@@ -583,9 +583,21 @@ export interface ProjectPresentationResponse {
   share_url: string;
   error: string;
   job_id?: string | null;
+  progress: ProjectPresentationProgress;
   created_at?: string | null;
   updated_at?: string | null;
   completed_at?: string | null;
+}
+
+export interface ProjectPresentationProgress {
+  phase_key: string;
+  phase_label: string;
+  detail: string;
+  percent: number;
+  estimated_seconds_remaining: number;
+  can_leave: boolean;
+  email_notice: string;
+  updated_at?: string | null;
 }
 
 export interface ProjectPresentationSlideResponse {
