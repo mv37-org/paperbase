@@ -63,6 +63,69 @@ function formatMetadataCount(value: number | null | undefined) {
   return typeof value === "number" ? new Intl.NumberFormat().format(value) : "";
 }
 
+function parseMetadataDate(value: string | null | undefined) {
+  if (!value) {
+    return null;
+  }
+  const dateOnly = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const date = dateOnly
+    ? new Date(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]))
+    : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function ordinalDay(day: number) {
+  const remainder = day % 100;
+  if (remainder >= 11 && remainder <= 13) {
+    return `${day}th`;
+  }
+  switch (day % 10) {
+    case 1:
+      return `${day}st`;
+    case 2:
+      return `${day}nd`;
+    case 3:
+      return `${day}rd`;
+    default:
+      return `${day}th`;
+  }
+}
+
+function formatPublishedDate(value: string | null | undefined) {
+  const date = parseMetadataDate(value);
+  if (!date) {
+    return value ?? "";
+  }
+  const month = date.toLocaleString("en-US", { month: "short" });
+  return `${ordinalDay(date.getDate())} ${month} ${date.getFullYear()}`;
+}
+
+function formatRelativeMetadataDate(value: string | null | undefined) {
+  const date = parseMetadataDate(value);
+  if (!date) {
+    return value ?? "";
+  }
+  const now = new Date();
+  const diffMs = date.getTime() - now.getTime();
+  const absDays = Math.floor(Math.abs(diffMs) / 86_400_000);
+  const suffix = diffMs > 0 ? "from now" : "ago";
+  if (absDays === 0) {
+    return "Today";
+  }
+  if (absDays === 1) {
+    return diffMs > 0 ? "Tomorrow" : "Yesterday";
+  }
+  const units = [
+    { name: "year", days: 365 },
+    { name: "month", days: 30 },
+    { name: "week", days: 7 },
+    { name: "day", days: 1 },
+  ];
+  const unit = units.find((candidate) => absDays >= candidate.days) ?? units[units.length - 1];
+  const amount = Math.max(1, Math.floor(absDays / unit.days));
+  return `${amount} ${unit.name}${amount === 1 ? "" : "s"} ${suffix}`;
+}
+
 function normalizeDetailText(value: string | null | undefined) {
   return (value ?? "").replace(/\s+/g, " ").trim().toLowerCase();
 }
@@ -90,23 +153,19 @@ function buildTrendingMetadataRows(detail: TrendingPaperDetail): TrendingMetadat
   const venue = [detail.venue, detail.venue_year].filter(Boolean).join(" ");
 
   add("Authors", detail.authors);
-  add("Paperbase ID", detail.paper_id);
   add("arXiv ID", detail.arxiv_id, `https://arxiv.org/abs/${detail.arxiv_id}`);
-  add("HTML URL", detail.html_url, detail.html_url);
   add("PDF URL", detail.pdf_url, detail.pdf_url);
   add("Primary category", detail.primary_category);
   if (detail.categories !== detail.primary_category) {
     add("Categories", detail.categories);
   }
-  add("Published", detail.published);
-  add("Updated", detail.updated);
+  add("Published", formatPublishedDate(detail.published));
+  add("Updated", formatRelativeMetadataDate(detail.updated));
   add("Venue", venue);
   add("Venue source", detail.venue_source);
   add("Journal reference", detail.journal_ref);
   add("DOI", detail.doi, detail.doi ? doiUrl(detail.doi) : null);
-  add("arXiv comment", detail.comment);
   add("Citations", formatMetadataCount(detail.citation_count));
-  add("Influential citations", formatMetadataCount(detail.influential_citation_count));
   add(
     "Top author S2 ID",
     detail.top_author_s2_id,
@@ -115,9 +174,6 @@ function buildTrendingMetadataRows(detail: TrendingPaperDetail): TrendingMetadat
       : null,
   );
   add("Code URL", detail.code_url, detail.code_url);
-  add("Code URL source", detail.code_url_source);
-  add("Python code", detail.code_is_python);
-  add("Code note", detail.code_python_reason);
 
   return rows;
 }
@@ -375,11 +431,11 @@ export function TrendingPapersPage({
     detail && browseState.paperId
       ? [
           detail.primary_category || detail.categories,
-          detail.published && `Published ${detail.published}`,
+          detail.published && `Published ${formatPublishedDate(detail.published)}`,
         ]
           .filter(Boolean)
           .join(" · ")
-      : `Published ${browseState.date}`;
+      : `Published ${formatPublishedDate(browseState.date)}`;
   const pageDescription = browseState.paperId
     ? detailDescription
     : (feedDescription ??
@@ -556,7 +612,7 @@ export function TrendingPapersPage({
                         </h2>
                         <span>
                           {paper.authors}
-                          {paper.published ? ` · ${paper.published}` : ""}
+                          {paper.published ? ` · ${formatPublishedDate(paper.published)}` : ""}
                         </span>
                       </div>
                       <button

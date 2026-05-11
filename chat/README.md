@@ -10,7 +10,7 @@ The landing prompt and authenticated chat composer both support live `@` paper m
 
 The authenticated sidebar is project-first, with a small signed-in Browse area above projects:
 
-- `Trending papers` now works for public read and signed-in interaction, with paginated 20-paper `Latest` and `Hottest` feeds over fully indexed and enriched papers, full-aspect paper previews, metadata-rich detail pages, and nested comments/replies
+- `Trending papers` now works for public read and signed-in interaction, with paginated 20-paper `Latest` and `Hottest` feeds over fully indexed and enriched papers, full-aspect paper previews, curated compact metadata with readable dates, and nested comments/replies
 - allowlisted admins also get an `Admin panel` jobs workspace in that Browse section
 - the admin jobs header includes paper search by paper id, arXiv id, title, or author, and the paper detail modal shows summaries, metadata, code state, stored artifacts, and every tracked job touch
 - the admin tracked-papers drilldown fetches paginated paper pages per job run, and expanded job rows expose payloads, Cloud Run log filters, and stored failure traces for debugging

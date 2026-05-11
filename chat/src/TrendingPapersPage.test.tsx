@@ -83,7 +83,7 @@ describe("TrendingPapersPage", () => {
       abstract: "Full abstract with the main result and evaluation setup.",
       tldr: "Semantic Scholar TLDR",
       published: "2026-04-21",
-      updated: "2026-04-22",
+      updated: "2022-01-04",
       primary_category: "cs.AI",
       categories: "cs.AI cs.LG",
       doi: "10.1234/trending",
@@ -169,6 +169,7 @@ describe("TrendingPapersPage", () => {
     const voteButton = screen.getByRole("button", { name: "Upvote 12" });
     expect(voteButton.textContent).toBe("12");
     expect(voteButton.querySelector(".trending-vote-chevron")).toBeTruthy();
+    expect(screen.getByText("Ada Lovelace · 21st Apr 2026")).toBeTruthy();
     expect(apiMocks.loadBrowserTrendingPapers).toHaveBeenCalledWith("2026-04-21", "default", 1, 20);
 
     fireEvent.click(screen.getByRole("tab", { name: "Hottest" }));
@@ -201,6 +202,10 @@ describe("TrendingPapersPage", () => {
     expect(screen.getByText("Semantic Scholar TLDR")).toBeTruthy();
     expect(screen.getByText("Paper details")).toBeTruthy();
     expect(screen.getByText("Authors")).toBeTruthy();
+    expect(screen.getByText("Published").nextElementSibling?.textContent).toContain(
+      "21st Apr 2026",
+    );
+    expect(screen.getByText("Updated").nextElementSibling?.textContent).toMatch(/years ago/);
     expect(screen.getByText("Categories")).toBeTruthy();
     expect(screen.getByText("cs.AI cs.LG")).toBeTruthy();
     expect(screen.getByText("Citations")).toBeTruthy();
@@ -209,6 +214,13 @@ describe("TrendingPapersPage", () => {
     expect(screen.getByText("Code URL").nextElementSibling?.textContent).toContain(
       "https://github.com/example/trending-paper",
     );
+    expect(screen.queryByText("Paperbase ID")).toBeNull();
+    expect(screen.queryByText("HTML URL")).toBeNull();
+    expect(screen.queryByText("arXiv comment")).toBeNull();
+    expect(screen.queryByText("Influential citations")).toBeNull();
+    expect(screen.queryByText("Code URL source")).toBeNull();
+    expect(screen.queryByText("Python code")).toBeNull();
+    expect(screen.queryByText("Code note")).toBeNull();
     expect(screen.queryByText("Paperbase upvotes")).toBeNull();
     expect(screen.queryByText("Semantic Scholar")).toBeNull();
     expect(screen.queryByText("Code index status")).toBeNull();
