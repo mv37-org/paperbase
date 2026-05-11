@@ -41,6 +41,7 @@ describe("index.css", () => {
     const detailImageBlock = css.match(/\.trending-detail-image\s*\{([^}]*)\}/)?.[1] ?? "";
     const detailCopyBlock = css.match(/\.trending-detail-copy\s*\{([^}]*)\}/)?.[1] ?? "";
     const metadataGridBlock = css.match(/\.trending-metadata-grid\s*\{([^}]*)\}/)?.[1] ?? "";
+    const metadataRowBlock = css.match(/\.trending-metadata-row\s*\{([^}]*)\}/)?.[1] ?? "";
     const landingDetailTitleMatch = css.match(
       /\.trending-page-landing\.detail-open \.workspace-page-header h2\s*\{([^}]*)\}/,
     );
@@ -66,12 +67,18 @@ describe("index.css", () => {
     expect(detailHeroBlock).toContain("grid-template-columns: 1fr;");
     expect(detailImageWrapBlock).toContain("place-items: center;");
     expect(detailImageWrapBlock).toContain("width: min(100%, 1040px);");
+    expect(detailImageWrapBlock).toContain("padding: 0;");
     expect(detailImageBlock).toContain("height: auto;");
+    expect(detailImageBlock).toContain("border: 0;");
     expect(detailImageBlock).toContain("object-fit: contain;");
     expect(detailImageBlock).not.toContain("max-height:");
     expect(detailImageBlock).not.toContain("aspect-ratio:");
     expect(detailCopyBlock).toContain("width: min(100%, 980px);");
     expect(metadataGridBlock).toContain("display: grid;");
+    expect(metadataRowBlock).toContain(
+      "grid-template-columns: minmax(116px, 160px) minmax(0, 1fr);",
+    );
+    expect(metadataRowBlock).toContain("padding: 6px 0;");
     expect(landingDetailTitleBlock).toContain("font-size: clamp(22px, 3vw, 34px);");
     expect(activeVoteBlock).toContain("border-color: #99582a;");
     expect(activeVoteBlock).toContain("color: #99582a;");

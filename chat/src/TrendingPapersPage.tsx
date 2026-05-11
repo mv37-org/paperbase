@@ -73,10 +73,7 @@ function doiUrl(doi: string) {
     : `https://doi.org/${trimmed}`;
 }
 
-function buildTrendingMetadataRows(
-  detail: TrendingPaperDetail,
-  showVotes: boolean,
-): TrendingMetadataRow[] {
+function buildTrendingMetadataRows(detail: TrendingPaperDetail): TrendingMetadataRow[] {
   const rows: TrendingMetadataRow[] = [];
   const add = (
     label: string,
@@ -109,16 +106,6 @@ function buildTrendingMetadataRows(
   add("arXiv comment", detail.comment);
   add("Citations", formatMetadataCount(detail.citation_count));
   add("Influential citations", formatMetadataCount(detail.influential_citation_count));
-  if (showVotes) {
-    add("Paperbase upvotes", formatMetadataCount(detail.upvote_count));
-  }
-  add(
-    "Semantic Scholar",
-    detail.semantic_scholar_id,
-    detail.semantic_scholar_id
-      ? `https://www.semanticscholar.org/paper/${detail.semantic_scholar_id}`
-      : null,
-  );
   add(
     "Top author S2 ID",
     detail.top_author_s2_id,
@@ -128,12 +115,8 @@ function buildTrendingMetadataRows(
   );
   add("Code URL", detail.code_url, detail.code_url);
   add("Code URL source", detail.code_url_source);
-  add("Code index status", detail.code_index_status);
   add("Python code", detail.code_is_python);
   add("Code note", detail.code_python_reason);
-  add("Source type", detail.source_type);
-  add("Index status", detail.index_status);
-  add("Indexed at", detail.indexed_at);
 
   return rows;
 }
@@ -484,7 +467,7 @@ export function TrendingPapersPage({
   const showPager = showPagination && (hasPreviousPage || hasNextPage);
   const headingText = browseState.paperId ? (detail?.title ?? "Loading paper") : feedTitle;
   const showVotes = variant !== "landing";
-  const metadataRows = detail ? buildTrendingMetadataRows(detail, showVotes) : [];
+  const metadataRows = detail ? buildTrendingMetadataRows(detail) : [];
   const summaryText = detail?.summary_short?.trim() || "Summary is still being prepared.";
   const showTldr =
     Boolean(detail?.tldr?.trim()) &&

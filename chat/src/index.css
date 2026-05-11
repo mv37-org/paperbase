@@ -2796,7 +2796,7 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
   place-items: center;
   width: min(100%, 1040px);
   margin: 0 auto;
-  padding: clamp(10px, 2vw, 18px);
+  padding: 0;
   border: 1px solid rgba(27, 22, 17, 0.12);
   border-radius: 8px;
   background: #f3efe6;
@@ -2807,8 +2807,8 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
   display: block;
   width: 100%;
   height: auto;
-  border: 1px solid rgba(27, 22, 17, 0.1);
-  border-radius: 4px;
+  border: 0;
+  border-radius: 8px;
   background: #ffffff;
   object-fit: contain;
   object-position: center;
@@ -2866,7 +2866,7 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
 
 .trending-metadata-section {
   display: grid;
-  gap: 12px;
+  gap: 8px;
 }
 
 .trending-metadata-grid {
@@ -2877,14 +2877,16 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
 
 .trending-metadata-row {
   display: grid;
-  gap: 4px;
-  padding: 10px 0;
+  grid-template-columns: minmax(116px, 160px) minmax(0, 1fr);
+  gap: 12px;
+  align-items: baseline;
+  padding: 6px 0;
   border-bottom: 1px solid rgba(27, 22, 17, 0.1);
 }
 
 .trending-metadata-row dt {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -2893,8 +2895,8 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
 .trending-metadata-row dd {
   margin: 0;
   color: var(--text);
-  font-size: 14px;
-  line-height: 1.45;
+  font-size: 13px;
+  line-height: 1.35;
   overflow-wrap: anywhere;
 }
 
@@ -3005,11 +3007,16 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
   }
 
   .trending-detail-image-wrap {
-    padding: 8px;
+    padding: 0;
   }
 
   .trending-detail-image.trending-card-image-fallback {
     min-height: 260px;
+  }
+
+  .trending-metadata-row {
+    grid-template-columns: 1fr;
+    gap: 2px;
   }
 }
 

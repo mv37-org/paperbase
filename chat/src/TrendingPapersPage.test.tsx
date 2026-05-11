@@ -206,6 +206,12 @@ describe("TrendingPapersPage", () => {
     expect(screen.getByText("Code URL").nextElementSibling?.textContent).toContain(
       "https://github.com/example/trending-paper",
     );
+    expect(screen.queryByText("Paperbase upvotes")).toBeNull();
+    expect(screen.queryByText("Semantic Scholar")).toBeNull();
+    expect(screen.queryByText("Code index status")).toBeNull();
+    expect(screen.queryByText("Source type")).toBeNull();
+    expect(screen.queryByText("Index status")).toBeNull();
+    expect(screen.queryByText("Indexed at")).toBeNull();
     expect(screen.getByText("Abstract")).toBeTruthy();
     expect(
       screen.getByText("Full abstract with the main result and evaluation setup."),
