@@ -1595,7 +1595,7 @@ body:has(.app-shell) #root {
 .project-presentation-error {
   align-self: center;
   justify-self: center;
-  width: min(560px, 100%);
+  width: min(680px, 100%);
   border: 1px solid rgba(27, 22, 17, 0.1);
   border-radius: 4px;
   background: var(--paper);
@@ -1603,62 +1603,104 @@ body:has(.app-shell) #root {
 
 .project-presentation-progress {
   display: grid;
-  gap: 10px;
-  padding: 16px;
+  gap: 0;
+  overflow: hidden;
+  box-shadow: 0 18px 48px rgba(31, 24, 18, 0.08);
+}
+
+.project-presentation-progress::before {
+  content: "";
+  display: block;
+  height: 3px;
+  background: linear-gradient(90deg, #99582a 0%, #1e7ce8 58%, #72b4a1 100%);
+}
+
+.project-presentation-progress-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 18px;
+  align-items: start;
+  padding: 18px 18px 14px;
+}
+
+.project-presentation-progress-copy {
+  min-width: 0;
 }
 
 .project-presentation-progress-kicker {
   color: #99582a;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 760;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
 }
 
 .project-presentation-progress h1 {
-  margin: 0;
+  margin: 8px 0 0;
   color: var(--text);
   font-family: Georgia, "Times New Roman", serif;
-  font-size: 28px;
-  font-weight: 650;
-  line-height: 1.08;
+  font-size: 24px;
+  font-weight: 620;
+  line-height: 1.12;
 }
 
 .project-presentation-progress p {
-  margin: 0;
+  max-width: 54ch;
+  margin: 8px 0 0;
   color: var(--muted);
   font-size: 13px;
   line-height: 1.5;
 }
 
-.project-presentation-progress-meta {
+.project-presentation-progress-stat {
   display: flex;
+  min-width: 124px;
+  padding-left: 16px;
+  border-left: 1px solid rgba(27, 22, 17, 0.1);
+  flex-direction: column;
+  align-items: flex-end;
+  text-align: right;
+}
+
+.project-presentation-progress-stat strong {
+  color: #99582a;
+  font-size: 24px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.project-presentation-progress-stat span {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.25;
+  font-variant-numeric: tabular-nums;
+}
+
+.project-presentation-progress-body {
+  display: grid;
+  gap: 14px;
+  padding: 0 18px 16px;
+}
+
+.project-presentation-progress-footer {
+  display: flex;
+  gap: 14px;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  color: var(--text);
-  font-size: 13px;
+  padding: 13px 18px;
+  border-top: 1px solid rgba(27, 22, 17, 0.08);
 }
 
-.project-presentation-progress-meta strong {
-  color: #99582a;
-  font-variant-numeric: tabular-nums;
-}
-
-.project-presentation-progress-meta span {
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-}
-
-.project-presentation-progress-note {
-  padding-top: 2px;
+.project-presentation-progress-footer span {
+  min-width: 0;
   color: var(--muted);
   font-size: 12px;
   line-height: 1.45;
 }
 
 .project-presentation-cancel-button {
-  justify-self: start;
+  flex: 0 0 auto;
   min-height: 32px;
   padding: 0 10px;
   border: 1px solid rgba(27, 22, 17, 0.18);
@@ -1683,7 +1725,7 @@ body:has(.app-shell) #root {
 
 .project-presentation-progress-track {
   position: relative;
-  height: 9px;
+  height: 6px;
   overflow: hidden;
   border-radius: 4px;
   background: rgba(27, 22, 17, 0.08);
@@ -1696,6 +1738,109 @@ body:has(.app-shell) #root {
   border-radius: inherit;
   background: linear-gradient(90deg, #99582a, #1e7ce8);
   transition: width 260ms ease;
+}
+
+.project-presentation-progress-steps {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.project-presentation-progress-step {
+  position: relative;
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  padding-top: 8px;
+  border-top: 1px solid rgba(27, 22, 17, 0.12);
+  color: var(--muted);
+}
+
+.project-presentation-progress-step span {
+  width: 18px;
+  height: 18px;
+  border: 1px solid rgba(27, 22, 17, 0.14);
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: inherit;
+  font-size: 10px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.project-presentation-progress-step strong {
+  display: block;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-presentation-progress-step small {
+  display: block;
+  margin-top: 2px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-presentation-progress-step.complete {
+  border-color: rgba(153, 88, 42, 0.42);
+}
+
+.project-presentation-progress-step.complete span {
+  border-color: rgba(153, 88, 42, 0.34);
+  background: rgba(153, 88, 42, 0.12);
+  color: #99582a;
+}
+
+.project-presentation-progress-step.active {
+  border-color: #1e7ce8;
+}
+
+.project-presentation-progress-step.active span {
+  border-color: #1e7ce8;
+  background: rgba(30, 124, 232, 0.12);
+  color: #1e7ce8;
+}
+
+body.authenticated-theme-dark .project-presentation-progress {
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.22);
+}
+
+body.authenticated-theme-dark .project-presentation-progress-stat,
+body.authenticated-theme-dark .project-presentation-progress-footer,
+body.authenticated-theme-dark .project-presentation-progress-step {
+  border-color: rgba(223, 232, 244, 0.12);
+}
+
+body.authenticated-theme-dark .project-presentation-progress-track {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+body.authenticated-theme-dark .project-presentation-progress-step span {
+  border-color: rgba(223, 232, 244, 0.16);
+}
+
+body.authenticated-theme-dark .project-presentation-progress-step.complete {
+  border-color: rgba(192, 130, 86, 0.54);
+}
+
+body.authenticated-theme-dark .project-presentation-progress-step.complete span {
+  border-color: rgba(192, 130, 86, 0.42);
+  background: rgba(192, 130, 86, 0.16);
+  color: #d3996f;
 }
 
 .project-presentation-error {
@@ -2160,6 +2305,28 @@ body:has(.app-shell) #root {
 
   .project-presentation-header-actions {
     flex-wrap: wrap;
+  }
+
+  .project-presentation-progress-header {
+    grid-template-columns: 1fr;
+  }
+
+  .project-presentation-progress-stat {
+    width: 100%;
+    padding: 12px 0 0;
+    border-left: 0;
+    border-top: 1px solid rgba(27, 22, 17, 0.1);
+    align-items: flex-start;
+    text-align: left;
+  }
+
+  .project-presentation-progress-steps {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .project-presentation-progress-footer {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .project-presentation-audio-player audio {

@@ -1586,6 +1586,8 @@ describe("App", () => {
     expect(screen.getByText("Reading papers, notes, annotations, chats, and code.")).toBeTruthy();
     expect(screen.getByText("12%")).toBeTruthy();
     expect(screen.getByText(/remaining/)).toBeTruthy();
+    expect(screen.getByText("Story")).toBeTruthy();
+    expect(screen.getByText("Finding the argument")).toBeTruthy();
     expect(
       screen.getByText("We will email you once it is done. You can leave this page."),
     ).toBeTruthy();

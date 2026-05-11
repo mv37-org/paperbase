@@ -428,6 +428,68 @@ function projectPresentationProgressPercent(presentation: ProjectPresentationRes
   return 4;
 }
 
+const PROJECT_PRESENTATION_PROGRESS_STEPS = [
+  {
+    keys: ["queued"],
+    label: "Queue",
+    detail: "Waiting for a worker",
+  },
+  {
+    keys: ["making_bullet_points"],
+    label: "Story",
+    detail: "Finding the argument",
+  },
+  {
+    keys: ["drawing_diagrams"],
+    label: "Visuals",
+    detail: "Designing diagrams",
+  },
+  {
+    keys: ["assembling_presentation"],
+    label: "Slides",
+    detail: "Saving the deck",
+  },
+  {
+    keys: ["generating_images", "generating_audio"],
+    label: "Media",
+    detail: "Images and audio",
+  },
+  {
+    keys: ["complete"],
+    label: "Ready",
+    detail: "View and share",
+  },
+] as const;
+
+function projectPresentationProgressStepIndex(
+  presentation: ProjectPresentationResponse | null,
+  percent: number,
+) {
+  const phaseKey = presentation?.progress?.phase_key ?? "";
+  const exactIndex = PROJECT_PRESENTATION_PROGRESS_STEPS.findIndex((step) =>
+    step.keys.includes(phaseKey),
+  );
+  if (exactIndex >= 0) {
+    return exactIndex;
+  }
+  if (percent >= 100) {
+    return PROJECT_PRESENTATION_PROGRESS_STEPS.length - 1;
+  }
+  if (percent >= 78) {
+    return 4;
+  }
+  if (percent >= 72) {
+    return 3;
+  }
+  if (percent >= 54) {
+    return 2;
+  }
+  if (percent >= 12) {
+    return 1;
+  }
+  return 0;
+}
+
 function projectPresentationRemainingSeconds(
   presentation: ProjectPresentationResponse | null,
   nowMs: number,
@@ -1347,6 +1409,10 @@ export default function App() {
     projectPresentationProgressIsActive(activeProjectPresentation);
   const activeProjectPresentationProgressPercent =
     projectPresentationProgressPercent(activeProjectPresentation);
+  const activeProjectPresentationProgressStepIndex = projectPresentationProgressStepIndex(
+    activeProjectPresentation,
+    activeProjectPresentationProgressPercent,
+  );
   const activeProjectPresentationEta = projectPresentationEtaLabel(
     activeProjectPresentation,
     projectPresentationProgressNow,
@@ -7494,54 +7560,89 @@ export default function App() {
                       {activeProjectPresentationState?.loading ||
                       activeProjectPresentationProgressActive ? (
                         <div className="project-presentation-progress" role="status">
-                          <div className="project-presentation-progress-kicker">
-                            Creating presentation
+                          <div className="project-presentation-progress-header">
+                            <div className="project-presentation-progress-copy">
+                              <div className="project-presentation-progress-kicker">
+                                Creating presentation
+                              </div>
+                              <h1>
+                                {activeProjectPresentation?.progress?.phase_label ??
+                                  "Starting presentation workflow"}
+                              </h1>
+                              <p>
+                                {activeProjectPresentation?.progress?.detail ??
+                                  "Preparing the project history, papers, notes, comments, chats, and code."}
+                              </p>
+                            </div>
+                            <div
+                              className="project-presentation-progress-stat"
+                              aria-label="Progress summary"
+                            >
+                              <strong>{activeProjectPresentationProgressPercent}%</strong>
+                              <span>{activeProjectPresentationEta}</span>
+                            </div>
                           </div>
-                          <h1>
-                            {activeProjectPresentation?.progress?.phase_label ??
-                              "Starting presentation workflow"}
-                          </h1>
-                          <p>
-                            {activeProjectPresentation?.progress?.detail ??
-                              "Preparing the project history, papers, notes, comments, chats, and code."}
-                          </p>
-                          <div
-                            className="project-presentation-progress-track"
-                            aria-label={`Presentation progress ${activeProjectPresentationProgressPercent}%`}
-                            aria-valuemin={0}
-                            aria-valuemax={100}
-                            aria-valuenow={activeProjectPresentationProgressPercent}
-                            role="progressbar"
-                            style={
-                              {
-                                "--presentation-progress-percent": `${activeProjectPresentationProgressPercent}%`,
-                              } as CSSProperties
-                            }
-                          >
-                            <span />
-                          </div>
-                          <div className="project-presentation-progress-meta">
-                            <strong>{activeProjectPresentationProgressPercent}%</strong>
-                            <span>{activeProjectPresentationEta}</span>
-                          </div>
-                          <div className="project-presentation-progress-note">
-                            {activeProjectPresentation?.progress?.email_notice ??
-                              "We will email you once it is done. You can leave this page."}
-                          </div>
-                          {activeProjectPresentation?.presentation_id ? (
-                            <button
-                              type="button"
-                              className="project-presentation-cancel-button"
-                              disabled={Boolean(activeProjectPresentationState?.canceling)}
-                              onClick={() =>
-                                void cancelProjectPresentationWorkflow(activeProjectHome.project_id)
+                          <div className="project-presentation-progress-body">
+                            <div
+                              className="project-presentation-progress-track"
+                              aria-label={`Presentation progress ${activeProjectPresentationProgressPercent}%`}
+                              aria-valuemin={0}
+                              aria-valuemax={100}
+                              aria-valuenow={activeProjectPresentationProgressPercent}
+                              role="progressbar"
+                              style={
+                                {
+                                  "--presentation-progress-percent": `${activeProjectPresentationProgressPercent}%`,
+                                } as CSSProperties
                               }
                             >
-                              {activeProjectPresentationState?.canceling
-                                ? "Canceling..."
-                                : "Cancel presentation"}
-                            </button>
-                          ) : null}
+                              <span />
+                            </div>
+                            <ol className="project-presentation-progress-steps">
+                              {PROJECT_PRESENTATION_PROGRESS_STEPS.map((step, index) => {
+                                const status =
+                                  index < activeProjectPresentationProgressStepIndex
+                                    ? "complete"
+                                    : index === activeProjectPresentationProgressStepIndex
+                                      ? "active"
+                                      : "pending";
+                                return (
+                                  <li
+                                    key={step.label}
+                                    className={`project-presentation-progress-step ${status}`}
+                                  >
+                                    <span>{index + 1}</span>
+                                    <div>
+                                      <strong>{step.label}</strong>
+                                      <small>{step.detail}</small>
+                                    </div>
+                                  </li>
+                                );
+                              })}
+                            </ol>
+                          </div>
+                          <div className="project-presentation-progress-footer">
+                            <span>
+                              {activeProjectPresentation?.progress?.email_notice ??
+                                "We will email you once it is done. You can leave this page."}
+                            </span>
+                            {activeProjectPresentation?.presentation_id ? (
+                              <button
+                                type="button"
+                                className="project-presentation-cancel-button"
+                                disabled={Boolean(activeProjectPresentationState?.canceling)}
+                                onClick={() =>
+                                  void cancelProjectPresentationWorkflow(
+                                    activeProjectHome.project_id,
+                                  )
+                                }
+                              >
+                                {activeProjectPresentationState?.canceling
+                                  ? "Canceling..."
+                                  : "Cancel presentation"}
+                              </button>
+                            ) : null}
+                          </div>
                         </div>
                       ) : activeProjectPresentation?.status === "completed" ? (
                         <ProjectPresentationDeck
