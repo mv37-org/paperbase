@@ -499,6 +499,7 @@ class BrowserUserSettingsResponse(BaseModel):
     modal_token_id_hint: str = ""
     has_github_connection: bool = False
     github_login: str = ""
+    github_sync_enabled: bool = False
     github_oauth_available: bool = False
     github_manage_access_url: str = "https://github.com/settings/connections/applications"
     weekly_papers_review_email: bool = False
@@ -580,6 +581,10 @@ class UpdateNotificationsRequest(BaseModel):
 
 class UpdateAppearanceRequest(BaseModel):
     theme: Literal["light", "dark"]
+
+
+class UpdateGitHubSyncSettingsRequest(BaseModel):
+    enabled: bool
 
 
 class UploadedDocumentResponse(BaseModel):

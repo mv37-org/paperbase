@@ -539,6 +539,7 @@ function authenticatedSession(
       modal_token_id_hint: string;
       has_github_connection: boolean;
       github_login: string;
+      github_sync_enabled: boolean;
       github_oauth_available: boolean;
       github_manage_access_url: string;
       weekly_papers_review_email: boolean;
@@ -565,6 +566,7 @@ function authenticatedSession(
       modal_token_id_hint: "",
       has_github_connection: false,
       github_login: "",
+      github_sync_enabled: false,
       github_oauth_available: true,
       github_manage_access_url: "https://github.com/settings/connections/applications",
       weekly_papers_review_email: false,
@@ -2333,7 +2335,13 @@ describe("App", () => {
 
   it("creates a project from the sidebar modal", async () => {
     apiMocks.loadSession.mockResolvedValue(
-      authenticatedSession({ settings: { has_github_connection: true, github_login: "octocat" } }),
+      authenticatedSession({
+        settings: {
+          has_github_connection: true,
+          github_login: "octocat",
+          github_sync_enabled: true,
+        },
+      }),
     );
     apiMocks.loadProjects
       .mockResolvedValueOnce({ projects: [projectSummary("proj_1", "General")] })
@@ -2426,7 +2434,13 @@ describe("App", () => {
 
   it("opens the new project modal from the empty-state project picker", async () => {
     apiMocks.loadSession.mockResolvedValue(
-      authenticatedSession({ settings: { has_github_connection: true, github_login: "octocat" } }),
+      authenticatedSession({
+        settings: {
+          has_github_connection: true,
+          github_login: "octocat",
+          github_sync_enabled: true,
+        },
+      }),
     );
     apiMocks.loadProjects
       .mockResolvedValueOnce({
@@ -2492,8 +2506,15 @@ describe("App", () => {
     });
   });
 
-  it("blocks new project creation until GitHub is connected", async () => {
+  it("creates a local project when GitHub sync is off", async () => {
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.loadProjects
+      .mockResolvedValueOnce({ projects: [projectSummary("proj_1", "General")] })
+      .mockResolvedValueOnce({
+        projects: [projectSummary("proj_1", "General"), projectSummary("proj_2", "Local Lab", 0)],
+      });
+    apiMocks.loadProjectItems.mockResolvedValue(projectItemsPage("proj_2", []));
+    apiMocks.createProject.mockResolvedValue(projectSummary("proj_2", "Local Lab", 0));
 
     render(<App />);
 
@@ -2502,23 +2523,38 @@ describe("App", () => {
     });
 
     fireEvent.click(screen.getByLabelText("Create project"));
+    fireEvent.change(screen.getByPlaceholderText("Project name"), {
+      target: { value: "Local Lab" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("Description, goal, or custom instructions"), {
+      target: { value: "Work without a repository." },
+    });
 
     await waitFor(() => {
-      expect(screen.getByText("Connect GitHub account")).toBeTruthy();
+      expect(screen.getByText("Local project")).toBeTruthy();
     });
-    expect((screen.getByLabelText("Project name") as HTMLInputElement).disabled).toBe(true);
-    expect((screen.getByLabelText("Description") as HTMLTextAreaElement).disabled).toBe(true);
-    expect(screen.getByText(/GitHub is the source of truth for project files/)).toBeTruthy();
-    expect(
-      (document.querySelector("#project-modal button[type='submit']") as HTMLButtonElement | null)
-        ?.disabled,
-    ).toBe(true);
-    expect(apiMocks.createProject).not.toHaveBeenCalled();
+    expect(screen.getByText(/GitHub sync is optional/)).toBeTruthy();
+    fireEvent.submit(document.querySelector("#project-modal form")!);
+
+    await waitFor(() => {
+      expect(apiMocks.createProject).toHaveBeenCalledWith(
+        "Local Lab",
+        "Work without a repository.",
+        null,
+      );
+    });
+    expect(apiMocks.loadGitHubRepositories).not.toHaveBeenCalled();
   });
 
   it("refreshes the repository dropdown from GitHub", async () => {
     apiMocks.loadSession.mockResolvedValue(
-      authenticatedSession({ settings: { has_github_connection: true, github_login: "octocat" } }),
+      authenticatedSession({
+        settings: {
+          has_github_connection: true,
+          github_login: "octocat",
+          github_sync_enabled: true,
+        },
+      }),
     );
     apiMocks.loadGitHubRepositories.mockResolvedValueOnce({ repos: [] });
 
@@ -2568,7 +2604,13 @@ describe("App", () => {
 
   it("defaults existing repo project creation to import all relevant files", async () => {
     apiMocks.loadSession.mockResolvedValue(
-      authenticatedSession({ settings: { has_github_connection: true, github_login: "octocat" } }),
+      authenticatedSession({
+        settings: {
+          has_github_connection: true,
+          github_login: "octocat",
+          github_sync_enabled: true,
+        },
+      }),
     );
     apiMocks.loadGitHubRepoMetadata.mockResolvedValue({
       owner: "octocat",
@@ -2624,7 +2666,13 @@ describe("App", () => {
 
   it("creates a project from an existing repo with branch and custom import selection", async () => {
     apiMocks.loadSession.mockResolvedValue(
-      authenticatedSession({ settings: { has_github_connection: true, github_login: "octocat" } }),
+      authenticatedSession({
+        settings: {
+          has_github_connection: true,
+          github_login: "octocat",
+          github_sync_enabled: true,
+        },
+      }),
     );
     apiMocks.loadGitHubRepoMetadata.mockResolvedValue({
       owner: "octocat",
@@ -2710,7 +2758,13 @@ describe("App", () => {
 
   it("imports uploaded notebooks into the selected project", async () => {
     apiMocks.loadSession.mockResolvedValue(
-      authenticatedSession({ settings: { has_github_connection: true, github_login: "octocat" } }),
+      authenticatedSession({
+        settings: {
+          has_github_connection: true,
+          github_login: "octocat",
+          github_sync_enabled: true,
+        },
+      }),
     );
     apiMocks.importProjectNotebook.mockResolvedValue(
       pythonFileResponse("file_2", "colab_export.ipynb", "# %%\nprint('colab')\n"),
@@ -2799,8 +2853,11 @@ describe("App", () => {
     expect(apiMocks.createThread).toHaveBeenCalledTimes(1);
   });
 
-  it("requires GitHub connection before creating a Python file", async () => {
+  it("creates a Python file locally without a GitHub connection", async () => {
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.createPythonFile.mockResolvedValue(
+      pythonFileResponse("file_1", "something.py", "", "proj_1"),
+    );
 
     render(<App />);
 
@@ -2811,9 +2868,10 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add python file" }));
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Connect GitHub account" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Save" })).toBeTruthy();
     });
-    expect(apiMocks.createPythonFile).not.toHaveBeenCalled();
+    expect(apiMocks.createPythonFile).toHaveBeenCalledWith("proj_1");
+    expect(screen.queryByRole("button", { name: "Connect GitHub account" })).toBeNull();
   });
 
   it("shows a first-chat setup checklist when project agent prerequisites are missing", async () => {
@@ -2830,12 +2888,12 @@ describe("App", () => {
         /Add your OpenAI API key and connect anything else missing for .* so the first chat can run cleanly\./,
       ),
     ).toBeTruthy();
-    expect(within(checklist).getByText("GitHub connection")).toBeTruthy();
+    expect(within(checklist).getByText("GitHub sync")).toBeTruthy();
     expect(within(checklist).getByText("OpenAI API key")).toBeTruthy();
     expect(within(checklist).getByText("Sandbox credentials")).toBeTruthy();
     expect(checklist.querySelector(".chat-setup-provider-mark.provider-modal")).toBeTruthy();
     expect(checklist.querySelector(".chat-setup-provider-mark.modal")).toBeNull();
-    expect(screen.getByRole("button", { name: "Open GitHub setup" })).toBeTruthy();
+    expect(screen.getByLabelText("GitHub sync configured")).toBeTruthy();
     expect(screen.getByLabelText("OpenAI API key configured")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Open sandbox setup" })).toBeTruthy();
   });
@@ -2865,10 +2923,10 @@ describe("App", () => {
       expect(screen.getByText("Prepare the agent before the first chat")).toBeTruthy();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Open GitHub setup" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open sandbox setup" }));
 
     await waitFor(() => {
-      expect(screen.getByText("Manage GitHub connection for repositories.")).toBeTruthy();
+      expect(screen.getByText("Manage Modal sandbox credentials.")).toBeTruthy();
     });
   });
 
@@ -3140,6 +3198,7 @@ describe("App", () => {
         settings: {
           has_github_connection: true,
           github_login: "octocat",
+          github_sync_enabled: true,
         },
       }),
     );
@@ -3187,12 +3246,45 @@ describe("App", () => {
     });
   });
 
+  it("saves a Python file locally when GitHub sync is off", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.createPythonFile.mockResolvedValue(
+      pythonFileResponse("file_1", "something.py", "", "proj_1"),
+    );
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Start new research in")).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Add python file" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Save" })).toBeTruthy();
+    });
+
+    fireEvent.change(screen.getByTestId("monaco-editor"), {
+      target: { value: "print('local')" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(apiMocks.updatePythonFile).toHaveBeenCalledWith("file_1", {
+        content: "print('local')",
+      });
+    });
+    expect(apiMocks.syncProjectRepo).not.toHaveBeenCalled();
+    expect(document.querySelector("#python-save-modal")?.classList.contains("hidden")).toBe(true);
+  });
+
   it("opens a Monaco merge flow when GitHub save hits a conflict", async () => {
     apiMocks.loadSession.mockResolvedValue(
       authenticatedSession({
         settings: {
           has_github_connection: true,
           github_login: "octocat",
+          github_sync_enabled: true,
         },
       }),
     );
@@ -3258,6 +3350,7 @@ describe("App", () => {
           has_modal_credentials: true,
           has_github_connection: true,
           github_login: "octocat",
+          github_sync_enabled: true,
         },
       }),
     );
@@ -3296,6 +3389,44 @@ describe("App", () => {
     await waitFor(() => {
       expect(screen.getByText("Latest run")).toBeTruthy();
     });
+  });
+
+  it("runs a Python file locally when GitHub sync is off", async () => {
+    apiMocks.loadSession.mockResolvedValue(
+      authenticatedSession({
+        settings: {
+          has_modal_credentials: true,
+        },
+      }),
+    );
+    apiMocks.createPythonFile.mockResolvedValue(
+      pythonFileResponse("file_1", "something.py", "", "proj_1"),
+    );
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Start new research in")).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Add python file" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Run" })).toBeTruthy();
+    });
+
+    fireEvent.change(screen.getByTestId("monaco-editor"), {
+      target: { value: "print('run local')" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Run" }));
+
+    await waitFor(() => {
+      expect(apiMocks.updatePythonFile).toHaveBeenCalledWith("file_1", {
+        content: "print('run local')",
+      });
+    });
+    expect(apiMocks.syncProjectRepo).not.toHaveBeenCalled();
+    expect(apiMocks.runPythonFile).toHaveBeenCalledWith("file_1", "full");
   });
 
   it("persists dirty project drafts before project-code chat turns", async () => {
@@ -4867,11 +4998,68 @@ describe("App", () => {
     expect(screen.getByLabelText("Modal token ID")).toBeTruthy();
     expect(screen.getByLabelText("Modal token secret")).toBeTruthy();
 
+    fireEvent.click(screen.getByRole("tab", { name: "GitHub" }));
+    expect(document.querySelector(".settings-section-title")?.textContent).toBe("Version control");
+    expect(screen.getByText(/GitHub is optional/)).toBeTruthy();
+    expect(screen.getByText(/run locally without connecting GitHub/)).toBeTruthy();
+
     fireEvent.click(screen.getByRole("tab", { name: "Appearance" }));
     expect(document.querySelector(".settings-section-title")?.textContent).toBe("Appearance");
     expect(screen.getAllByText("Choose the theme for signed-in pages.")).toHaveLength(1);
     expect(screen.getByRole("radio", { name: /Light/i })).toBeTruthy();
     expect(screen.getByRole("radio", { name: /Dark/i })).toBeTruthy();
+  });
+
+  it("updates the GitHub sync setting from the settings modal", async () => {
+    apiMocks.loadSession.mockResolvedValue(
+      authenticatedSession({
+        settings: {
+          has_github_connection: true,
+          github_login: "octocat",
+          github_sync_enabled: false,
+        },
+      }),
+    );
+    apiMocks.api.mockResolvedValueOnce(
+      authenticatedSession({
+        settings: {
+          has_github_connection: true,
+          github_login: "octocat",
+          github_sync_enabled: true,
+        },
+      }),
+    );
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(document.querySelector("#account-menu-button")).toBeTruthy();
+    });
+
+    fireEvent.click(document.querySelector("#account-menu-button") as HTMLElement);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Settings" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("tab", { name: "GitHub" })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("tab", { name: "GitHub" }));
+    const syncCheckbox = screen.getByLabelText(
+      "Sync project files to GitHub when creating projects and saving code.",
+    ) as HTMLInputElement;
+    expect(syncCheckbox.checked).toBe(false);
+
+    fireEvent.click(syncCheckbox);
+
+    await waitFor(() => {
+      expect(apiMocks.api).toHaveBeenCalledWith("/v1/browser/settings/github-sync", {
+        method: "PUT",
+        body: JSON.stringify({ enabled: true }),
+      });
+    });
+    await waitFor(() => {
+      expect(syncCheckbox.checked).toBe(true);
+    });
   });
 
   it("opens the sidebar admin panel for admin users and keeps it out of settings", async () => {
@@ -5943,6 +6131,7 @@ describe("App", () => {
         modal_token_id_hint: "",
         has_github_connection: false,
         github_login: "",
+        github_sync_enabled: false,
         github_oauth_available: false,
         github_manage_access_url: "https://github.com/settings/connections/applications",
         weekly_papers_review_email: false,

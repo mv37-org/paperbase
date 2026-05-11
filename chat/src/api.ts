@@ -546,7 +546,7 @@ export function loadGitHubRepoImportCandidates(owner: string, repo: string, bran
 export function createProject(
   name: string,
   description: string,
-  githubRepo: CreateProjectGitHubRepoPayload,
+  githubRepo: CreateProjectGitHubRepoPayload | null = null,
 ) {
   return api<ProjectResponse>("/v1/browser/projects", {
     method: "POST",

@@ -762,6 +762,14 @@ class StubApiService:
             has_anthropic_api_key=False,
         )
 
+    def update_user_github_sync_settings(self, user: BrowserUser, request) -> BrowserSessionResponse:
+        self.calls.append(("update_user_github_sync_settings", (user.user_id, request.enabled)))
+        return BrowserSessionResponse(
+            authenticated=True,
+            user=user,
+            has_anthropic_api_key=False,
+        )
+
     def save_github_connection(
         self,
         user: BrowserUser,
@@ -1776,6 +1784,11 @@ def test_browser_settings_routes_delegate_with_valid_csrf(api_client):
         json={"theme": "dark"},
         headers=headers,
     )
+    github_sync = client.put(
+        "/v1/browser/settings/github-sync",
+        json={"enabled": True},
+        headers=headers,
+    )
     github = client.delete("/v1/browser/settings/github", headers=headers)
 
     assert modal_credentials.status_code == 200
@@ -1783,12 +1796,14 @@ def test_browser_settings_routes_delegate_with_valid_csrf(api_client):
     assert deleted_elevenlabs_key.status_code == 200
     assert notifications.status_code == 200
     assert appearance.status_code == 200
+    assert github_sync.status_code == 200
     assert github.status_code == 200
     assert modal_credentials.json()["csrf_token"] == csrf
     assert elevenlabs_key.json()["csrf_token"] == csrf
     assert deleted_elevenlabs_key.json()["csrf_token"] == csrf
     assert notifications.json()["csrf_token"] == csrf
     assert appearance.json()["csrf_token"] == csrf
+    assert github_sync.json()["csrf_token"] == csrf
     assert github.json()["csrf_token"] == csrf
     assert (
         "save_user_modal_credentials",
@@ -1798,6 +1813,7 @@ def test_browser_settings_routes_delegate_with_valid_csrf(api_client):
     assert ("delete_user_elevenlabs_key", "user_1") in service.calls
     assert ("update_user_notification_preferences", ("user_1", True)) in service.calls
     assert ("update_user_appearance", ("user_1", "dark")) in service.calls
+    assert ("update_user_github_sync_settings", ("user_1", True)) in service.calls
     assert ("delete_github_connection", "user_1") in service.calls
 
 

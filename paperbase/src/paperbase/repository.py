@@ -717,6 +717,7 @@ class BrowserUserSettingsORM(Base):
     appearance_theme: Mapped[str] = mapped_column(String(16), default="light")
     github_user_id: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
     github_login: Mapped[str] = mapped_column(String(255), default="")
+    github_sync_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     encrypted_github_access_token: Mapped[str | None] = mapped_column(Text, nullable=True)
     github_scope: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -1010,6 +1011,7 @@ def _browser_user_settings_from_orm(row: BrowserUserSettingsORM | None) -> Brows
         modal_token_id_hint=row.modal_token_id_hint or "",
         has_github_connection=bool(row.encrypted_github_access_token and row.github_login),
         github_login=row.github_login or "",
+        github_sync_enabled=bool(row.github_sync_enabled),
         weekly_papers_review_email=bool(row.weekly_papers_review_email),
         appearance_theme=row.appearance_theme if row.appearance_theme in {"light", "dark"} else "light",
     )
@@ -2099,6 +2101,12 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 text(
                     "ALTER TABLE IF EXISTS browser_user_settings "
                     "ADD COLUMN IF NOT EXISTS appearance_theme VARCHAR(16) DEFAULT 'light'"
+                )
+            )
+            connection.execute(
+                text(
+                    "ALTER TABLE IF EXISTS browser_user_settings "
+                    "ADD COLUMN IF NOT EXISTS github_sync_enabled BOOLEAN DEFAULT FALSE"
                 )
             )
             connection.execute(
@@ -4270,6 +4278,12 @@ class SqlAlchemyPaperRepository(PaperRepository):
             row.appearance_theme = theme if theme in {"light", "dark"} else "light"
             row.updated_at = utcnow()
 
+    def set_github_sync_enabled(self, *, user_id: str, enabled: bool) -> None:
+        with self._session() as session:
+            row = self._get_or_create_browser_user_settings_row(session, user_id)
+            row.github_sync_enabled = enabled
+            row.updated_at = utcnow()
+
     def save_github_connection(
         self,
         *,
@@ -4289,6 +4303,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
             if existing is not None:
                 existing.github_user_id = None
                 existing.github_login = ""
+                existing.github_sync_enabled = False
                 existing.encrypted_github_access_token = None
                 existing.github_scope = ""
                 existing.updated_at = utcnow()
@@ -4306,6 +4321,7 @@ class SqlAlchemyPaperRepository(PaperRepository):
                 return
             row.github_user_id = None
             row.github_login = ""
+            row.github_sync_enabled = False
             row.encrypted_github_access_token = None
             row.github_scope = ""
             row.updated_at = utcnow()
@@ -7263,6 +7279,10 @@ class MemoryPaperRepository(PaperRepository):
             update={"appearance_theme": theme if theme in {"light", "dark"} else "light"}
         )
 
+    def set_github_sync_enabled(self, *, user_id: str, enabled: bool) -> None:
+        current = self._get_or_create_browser_user_settings(user_id)
+        self.browser_user_settings[user_id] = current.model_copy(update={"github_sync_enabled": enabled})
+
     def save_github_connection(
         self,
         *,
@@ -7281,6 +7301,7 @@ class MemoryPaperRepository(PaperRepository):
                     update={
                         "has_github_connection": False,
                         "github_login": "",
+                        "github_sync_enabled": False,
                     }
                 )
         current = self._get_or_create_browser_user_settings(user_id)
@@ -7304,6 +7325,7 @@ class MemoryPaperRepository(PaperRepository):
             update={
                 "has_github_connection": False,
                 "github_login": "",
+                "github_sync_enabled": False,
             }
         )
 

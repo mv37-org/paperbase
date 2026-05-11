@@ -718,6 +718,35 @@ describe("chat api", () => {
     expect(created.project_id).toBe("proj_2");
   });
 
+  it("creates local projects without a GitHub repository payload", async () => {
+    const fetchMock = vi
+      .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          project_id: "proj_2",
+          name: "Local Lab",
+          description: "Local only",
+          is_default: false,
+          session_count: 0,
+          github_repo_url: "",
+          created_at: "2026-04-21T00:00:00Z",
+          updated_at: "2026-04-21T00:00:00Z",
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await loadApiModule();
+
+    const created = await api.createProject("Local Lab", "Local only");
+
+    const [createPath, createInit] = fetchMock.mock.calls[0] as FetchCall;
+    expect(requestPath(createPath)).toBe("/v1/browser/projects");
+    expect(createInit?.method).toBe("POST");
+    expect(createInit?.body).toBe(
+      JSON.stringify({ name: "Local Lab", description: "Local only", github_repo: null }),
+    );
+    expect(created.github_repo_url).toBe("");
+  });
+
   it("passes project item kind filters", async () => {
     const fetchMock = vi
       .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()

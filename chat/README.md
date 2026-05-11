@@ -15,15 +15,15 @@ The authenticated sidebar is project-first, with a small signed-in Browse area a
 - the admin jobs header includes paper search by paper id, arXiv id, title, or author, and the paper detail modal shows summaries, metadata, code state, stored artifacts, and every tracked job touch
 - the admin tracked-papers drilldown fetches paginated paper pages per job run, and expanded job rows expose payloads, Cloud Run log filters, and stored failure traces for debugging
 - projects expand and collapse independently and lazily fetch mixed project items
-- each project can start new chats, be renamed, or be deleted from the sidebar, but new projects require a connected GitHub repo
+- each project can start new chats, be renamed, or be deleted from the sidebar; new projects are local by default and GitHub sync is optional
 - each project can also start paper explorations from a command-palette style search over paper title or arXiv id
 - each project home can generate a cached presentation with a React/D3 visual, Markdown summary, optional public share page, and optional ElevenLabs two-person audio walkthrough when a key is saved in Settings -> Audio
 - paper PDF views expose text-highlight actions and a pen tool for freeform region selection
-- the new-project modal lists accessible GitHub repos in a custom dropdown, with "Create new repo" as the first option and `main` fixed for newly created repos
-- existing repo selection includes a branch picker, repo/branch refresh, a GitHub access-management link, and optional `.py`/`.ipynb` imports
+- when GitHub sync is enabled in Settings, the new-project modal lists accessible GitHub repos in a custom dropdown, with "Create new repo" as the first option and `main` fixed for newly created repos
+- synced existing repo selection includes a branch picker, repo/branch refresh, a GitHub access-management link, and optional `.py`/`.ipynb` imports
 - the modal's advanced section exposes inference and Modal sandbox credential entry points for users who have not configured them yet
 - the selected project persists across reloads, and the sidebar reopens with that project selected and its tree as the only expanded root by default
-- empty first-chat screens include a dismissible setup checklist that points users to GitHub, inference, and sandbox settings before the coding agent starts doing repo-backed work
+- empty first-chat screens include a dismissible setup checklist that points users to optional GitHub sync, inference, and sandbox settings
 - chat rows expose delete-on-hover actions and only fetch full thread content when opened
 - `New chat` sessions are renamed after the first real user prompt to a compact 3-5 word summary and then keep that title on later turns
 - chat markdown renders inline/block LaTeX formulas, while localhost-only thread debug metadata stays out of the empty-chat landing layout
@@ -33,7 +33,7 @@ The authenticated sidebar is project-first, with a small signed-in Browse area a
 - Python and imported notebook rows open as the single active Monaco-backed editor view with explicit `Save` and `Run` actions
 - project coding turns use the Codex-style turn loop and can mix commentary, tool calls, and final answers in a single persisted turn while keeping final answers brief and grounded in cited research-paper evidence for in-scope turns; uploaded-document evidence is used only when explicitly requested
 - `.ipynb` and Colab uploads are converted through Jupytext to `py:percent` source for editing, while GitHub saves regenerate the notebook path
-- project file creation/import/save flows require a connected GitHub account, and `Run` saves to GitHub before executing through Modal
+- project file creation/import/save flows work locally without a GitHub account; when GitHub sync is enabled, saves can also commit managed files to GitHub
 - project sync writes only `.paperbase` managed paths, and GitHub conflicts reopen inside a Monaco diff-and-merge modal
 - project descriptions act as instructions for new sessions by being snapshotted onto the thread at creation time
 

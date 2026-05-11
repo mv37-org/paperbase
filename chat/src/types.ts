@@ -16,6 +16,7 @@ export interface BrowserUserSettingsResponse {
   modal_token_id_hint: string;
   has_github_connection: boolean;
   github_login: string;
+  github_sync_enabled: boolean;
   github_oauth_available: boolean;
   github_manage_access_url: string;
   weekly_papers_review_email: boolean;

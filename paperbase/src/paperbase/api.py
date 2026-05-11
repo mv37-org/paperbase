@@ -99,6 +99,7 @@ from .models import (
     TrendingPaperDetailResponse,
     UpdateAppearanceRequest,
     UpdateChatThreadRequest,
+    UpdateGitHubSyncSettingsRequest,
     UpdatePythonFileRequest,
     UpdateNotificationsRequest,
     UpdateProjectRequest,
@@ -1623,6 +1624,22 @@ def browser_update_appearance(
     service: PaperbaseService = Depends(get_service),
 ) -> BrowserSessionResponse:
     session_response = service.update_user_appearance(user, request)
+    return _browser_session_response_with_csrf(
+        session_response,
+        request=http_request,
+        response=response,
+    )
+
+
+@app.put("/v1/browser/settings/github-sync", response_model=BrowserSessionResponse)
+def browser_update_github_sync_settings(
+    request: UpdateGitHubSyncSettingsRequest,
+    http_request: Request,
+    response: Response,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> BrowserSessionResponse:
+    session_response = service.update_user_github_sync_settings(user, request)
     return _browser_session_response_with_csrf(
         session_response,
         request=http_request,

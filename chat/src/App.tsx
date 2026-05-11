@@ -262,6 +262,7 @@ const DEFAULT_BROWSER_SETTINGS: NonNullable<BrowserSessionResponse["settings"]> 
   modal_token_id_hint: "",
   has_github_connection: false,
   github_login: "",
+  github_sync_enabled: false,
   github_oauth_available: false,
   github_manage_access_url: "https://github.com/settings/connections/applications",
   weekly_papers_review_email: false,
@@ -1930,6 +1931,8 @@ export default function App() {
     };
   }, [session]);
   const sessionSettings = sessionSummary?.settings ?? DEFAULT_BROWSER_SETTINGS;
+  const githubSyncActive =
+    sessionSettings.has_github_connection && sessionSettings.github_sync_enabled;
   const settingsTabs = BASE_SETTINGS_TABS;
   const workspaceSidebarItems = useMemo(
     () => WORKSPACE_SIDEBAR_ITEMS.filter((item) => !item.adminOnly || sessionSummary?.isAdmin),
@@ -1941,11 +1944,11 @@ export default function App() {
     {
       id: "github",
       provider: "github",
-      label: "GitHub connection",
-      description: "Needed for the agent to create, edit, and save project files.",
-      actionLabel: sessionSettings.has_github_connection ? "Connected" : "Open GitHub setup",
-      ready: sessionSettings.has_github_connection,
-      required: true,
+      label: "GitHub sync",
+      description: "Optional version control for project files. Local projects work without it.",
+      actionLabel: githubSyncActive ? "Sync on" : "Optional",
+      ready: true,
+      required: false,
       settingsTab: "version-control" as const,
     },
     {
@@ -5459,14 +5462,10 @@ export default function App() {
     setProjectMenuProjectId(null);
     setEmptyStateProjectPickerOpen(false);
     setEmptyStateProjectSearch("");
-    if (sessionSettings.has_github_connection) {
+    if (githubSyncActive) {
       void refreshProjectRepositories(false);
     }
-  }, [
-    refreshProjectRepositories,
-    sessionSettings.github_login,
-    sessionSettings.has_github_connection,
-  ]);
+  }, [githubSyncActive, refreshProjectRepositories, sessionSettings.github_login]);
 
   const openEditProjectModal = useCallback(
     (projectId: string) => {
@@ -5527,11 +5526,7 @@ export default function App() {
     }
     try {
       if (projectModalState.mode === "create") {
-        if (!sessionSettings.has_github_connection) {
-          setProjectFormError("Connect GitHub before creating a project.");
-          return;
-        }
-        if (!projectRepoMode) {
+        if (githubSyncActive && !projectRepoMode) {
           setProjectFormError("Choose a GitHub repository.");
           return;
         }
@@ -5539,8 +5534,9 @@ export default function App() {
         const existingRepoImportPaths = projectRepoImportAll
           ? projectRepoCandidates.map((candidate) => candidate.path)
           : projectRepoSelectedPaths;
-        const githubRepo =
-          projectRepoMode === "create"
+        const githubRepo = !githubSyncActive
+          ? null
+          : projectRepoMode === "create"
             ? {
                 mode: "create" as const,
                 name: repoName,
@@ -5554,11 +5550,11 @@ export default function App() {
                 base_branch: projectRepoBranch.trim(),
                 import_paths: existingRepoImportPaths,
               };
-        if (!githubRepo.name) {
+        if (githubRepo && !githubRepo.name) {
           setProjectFormError("GitHub repository name is required.");
           return;
         }
-        if (githubRepo.mode === "existing" && (!githubRepo.owner || !githubRepo.base_branch)) {
+        if (githubRepo?.mode === "existing" && (!githubRepo.owner || !githubRepo.base_branch)) {
           setProjectFormError("Existing repositories require an owner and base branch.");
           return;
         }
@@ -5580,6 +5576,7 @@ export default function App() {
   }, [
     closeProjectModal,
     fetchProjectItems,
+    githubSyncActive,
     projectFormDescription,
     projectFormName,
     projectModalState,
@@ -5591,7 +5588,6 @@ export default function App() {
     projectRepoOwner,
     projectRepoSelectedPaths,
     refreshProjects,
-    sessionSettings.has_github_connection,
   ]);
 
   const saveProjectInferenceKey = useCallback(async () => {
@@ -5775,11 +5771,6 @@ export default function App() {
   );
 
   const handleCreatePythonFile = useCallback(async () => {
-    if (!sessionSettings.has_github_connection) {
-      showErrorFlash("Connect GitHub before creating Python files.");
-      openAuthModal("settings", "version-control");
-      return;
-    }
     const projectId = selectedProjectIdRef.current ?? projectsRef.current[0]?.project_id;
     if (!projectId) {
       setComposerStatus("Create a project before adding a Python file.");
@@ -5809,24 +5800,13 @@ export default function App() {
       }
       setComposerStatus(message);
     }
-  }, [
-    openAuthModal,
-    refreshProjects,
-    sessionSettings.has_github_connection,
-    showErrorFlash,
-    upsertPythonFileIntoProjectItems,
-  ]);
+  }, [refreshProjects, upsertPythonFileIntoProjectItems]);
 
   const handleImportNotebookUpload = useCallback(
     async (event: ChangeEvent<HTMLInputElement>) => {
       const file = event.target.files?.[0] ?? null;
       event.target.value = "";
       if (!file) {
-        return;
-      }
-      if (!sessionSettings.has_github_connection) {
-        showErrorFlash("Connect GitHub before importing notebooks.");
-        openAuthModal("settings", "version-control");
         return;
       }
       const projectId = selectedProjectIdRef.current ?? projectsRef.current[0]?.project_id;
@@ -5855,13 +5835,7 @@ export default function App() {
         );
       }
     },
-    [
-      openAuthModal,
-      refreshProjects,
-      sessionSettings.has_github_connection,
-      showErrorFlash,
-      upsertPythonFileIntoProjectItems,
-    ],
+    [refreshProjects, upsertPythonFileIntoProjectItems],
   );
 
   const applyConflictResolutionsLocally = useCallback(
@@ -5996,6 +5970,27 @@ export default function App() {
       });
     },
     [fetchAndStorePythonFile, openAuthModal, sessionSettings.has_github_connection, showErrorFlash],
+  );
+
+  const handleSavePythonFile = useCallback(
+    async (fileId: string) => {
+      if (githubSyncActive) {
+        await openSaveModal(fileId);
+        return;
+      }
+      try {
+        const currentFile =
+          pythonFileMapRef.current[fileId] ?? (await fetchAndStorePythonFile(fileId));
+        const nextContent = pythonFileDraftsRef.current[fileId]?.content ?? currentFile.content;
+        await persistPythonFile(fileId, nextContent);
+        showNoteFlash("Saved locally.");
+      } catch (error) {
+        setComposerStatus(
+          error instanceof Error ? error.message : "Python file could not be saved.",
+        );
+      }
+    },
+    [fetchAndStorePythonFile, githubSyncActive, openSaveModal, persistPythonFile, showNoteFlash],
   );
 
   const closeSaveModal = useCallback(() => {
@@ -6156,11 +6151,6 @@ export default function App() {
     if (!activePythonFileId) {
       return;
     }
-    if (!sessionSettings.has_github_connection) {
-      showErrorFlash("Connect GitHub before running Python files.");
-      openAuthModal("settings", "version-control");
-      return;
-    }
     if (!sessionSettings.has_modal_credentials) {
       return;
     }
@@ -6175,18 +6165,20 @@ export default function App() {
         [activePythonFileId]: { running: true, result: null, error: "" },
       }));
       const savedFile = await persistPythonFile(activePythonFileId, nextContent);
-      const outcome = await syncProjectToGitHub({
-        fileId: activePythonFileId,
-        projectId: savedFile.project_id,
-        commitMessage: `Run ${savedFile.filename}`,
-        afterSaveAction: "run",
-      });
-      if (outcome.conflict) {
-        setPythonFileRuns((current) => ({
-          ...current,
-          [activePythonFileId]: { running: false, result: null, error: "" },
-        }));
-        return;
+      if (githubSyncActive) {
+        const outcome = await syncProjectToGitHub({
+          fileId: activePythonFileId,
+          projectId: savedFile.project_id,
+          commitMessage: `Run ${savedFile.filename}`,
+          afterSaveAction: "run",
+        });
+        if (outcome.conflict) {
+          setPythonFileRuns((current) => ({
+            ...current,
+            [activePythonFileId]: { running: false, result: null, error: "" },
+          }));
+          return;
+        }
       }
       const result = await runPythonFile(activePythonFileId, "full");
       setPythonFileRuns((current) => ({
@@ -6206,11 +6198,9 @@ export default function App() {
   }, [
     activePythonFileId,
     fetchAndStorePythonFile,
-    openAuthModal,
+    githubSyncActive,
     persistPythonFile,
-    sessionSettings.has_github_connection,
     sessionSettings.has_modal_credentials,
-    showErrorFlash,
     syncProjectToGitHub,
   ]);
 
@@ -6416,8 +6406,7 @@ export default function App() {
     />
   );
 
-  const projectCreateBlocked =
-    projectModalState?.mode === "create" && !sessionSettings.has_github_connection;
+  const projectCreateBlocked = false;
   const selectedRepoFullName =
     projectRepoMode === "existing" && projectRepoOwner && projectRepoName
       ? `${projectRepoOwner}/${projectRepoName}`
@@ -7642,11 +7631,11 @@ export default function App() {
                         <button
                           type="button"
                           className="python-file-save-button"
-                          onClick={() => void openSaveModal(activePythonFile.file_id)}
+                          onClick={() => void handleSavePythonFile(activePythonFile.file_id)}
                         >
                           <span className="python-file-action-icon" aria-hidden="true">
                             <MaskedAssetIcon
-                              asset="github.svg"
+                              asset={githubSyncActive ? "github.svg" : "code.svg"}
                               className="python-file-action-glyph"
                             />
                           </span>
@@ -7955,7 +7944,7 @@ export default function App() {
                         Create a project to get started
                       </h1>
                       <p className="chat-empty-projectless-copy">
-                        Projects hold your chats, Python files, and repo-backed code workspace.
+                        Projects hold your chats, Python files, and local code workspace.
                       </p>
                       <button
                         type="button"
@@ -9809,7 +9798,7 @@ export default function App() {
                 />
               </label>
               {projectModalState?.mode === "create" ? (
-                sessionSettings.has_github_connection ? (
+                githubSyncActive ? (
                   <div className="project-repo-section">
                     <div className="project-github-heading">
                       <AppIcon
@@ -10186,30 +10175,17 @@ export default function App() {
                   </div>
                 ) : (
                   <div className="project-github-required">
-                    <button
-                      className="primary-button project-github-connect-button"
-                      type="button"
-                      disabled={!sessionSettings.github_oauth_available}
-                      onClick={() => {
-                        sessionStorage.setItem(RESUME_PROJECT_MODAL_KEY, "1");
-                        window.location.href = githubLoginUrl();
-                      }}
-                    >
+                    <div className="project-github-heading">
                       <AppIcon
-                        src={staticAssetPath("github.svg")}
+                        src={staticAssetPath("project-closed.svg")}
                         className="project-github-icon"
                       />
-                      Connect GitHub account
-                    </button>
+                      <span>Local project</span>
+                    </div>
                     <p className="project-github-required-note">
-                      You need to connect GitHub before creating a project. GitHub is the source of
-                      truth for project files, and every change is committed there.
+                      Project files will be saved in Paperbase. GitHub sync is optional and can be
+                      enabled from Settings when you want repository backup or import.
                     </p>
-                    {!sessionSettings.github_oauth_available ? (
-                      <div className="project-repo-status">
-                        GitHub OAuth is not configured in this environment yet.
-                      </div>
-                    ) : null}
                   </div>
                 )
               ) : null}
@@ -10914,39 +10890,78 @@ export default function App() {
                   >
                     <SettingsSectionHeading
                       title="Version control"
-                      caption="Manage GitHub connection for repositories."
+                      caption="GitHub is optional. Use it when you want repository backup, imports, or external version control."
                     />
                     {sessionSettings.has_github_connection ? (
-                      <div className="settings-connected-card">
-                        <div>
-                          <div className="settings-secret-label">GitHub account</div>
-                          <div className="settings-secret-value">
-                            {sessionSettings.github_login || "Connected"}
+                      <>
+                        <div className="settings-connected-card">
+                          <div>
+                            <div className="settings-secret-label">GitHub account</div>
+                            <div className="settings-secret-value">
+                              {sessionSettings.github_login || "Connected"}
+                            </div>
                           </div>
+                          <button
+                            type="button"
+                            className="secondary-button"
+                            onClick={async () => {
+                              try {
+                                const nextSession = await api<BrowserSessionResponse>(
+                                  "/v1/browser/settings/github",
+                                  { method: "DELETE" },
+                                );
+                                setSession(nextSession);
+                                showNoteFlash("GitHub disconnected.");
+                              } catch (error) {
+                                showErrorFlash(
+                                  error instanceof Error
+                                    ? error.message
+                                    : "Disconnecting GitHub failed",
+                                );
+                              }
+                            }}
+                          >
+                            Disconnect
+                          </button>
                         </div>
-                        <button
-                          type="button"
-                          className="secondary-button"
-                          onClick={async () => {
-                            try {
-                              const nextSession = await api<BrowserSessionResponse>(
-                                "/v1/browser/settings/github",
-                                { method: "DELETE" },
-                              );
-                              setSession(nextSession);
-                              showNoteFlash("GitHub disconnected.");
-                            } catch (error) {
-                              showErrorFlash(
-                                error instanceof Error
-                                  ? error.message
-                                  : "Disconnecting GitHub failed",
-                              );
-                            }
-                          }}
-                        >
-                          Disconnect
-                        </button>
-                      </div>
+                        <div className="settings-form">
+                          <label className="settings-checkbox-row">
+                            <input
+                              type="checkbox"
+                              checked={sessionSettings.github_sync_enabled}
+                              onChange={async (event) => {
+                                const enabled = event.target.checked;
+                                try {
+                                  const nextSession = await api<BrowserSessionResponse>(
+                                    "/v1/browser/settings/github-sync",
+                                    {
+                                      method: "PUT",
+                                      body: JSON.stringify({ enabled }),
+                                    },
+                                  );
+                                  setSession(nextSession);
+                                  showNoteFlash(
+                                    enabled ? "GitHub sync enabled." : "GitHub sync disabled.",
+                                  );
+                                } catch (error) {
+                                  showErrorFlash(
+                                    error instanceof Error
+                                      ? error.message
+                                      : "Saving GitHub sync settings failed",
+                                  );
+                                }
+                              }}
+                            />
+                            <span>
+                              Sync project files to GitHub when creating projects and saving code.
+                            </span>
+                          </label>
+                          <p className="settings-inline-note">
+                            When this is off, projects and code stay local in Paperbase. You can
+                            still turn it on later and sync a project when needed.
+                          </p>
+                        </div>
+                      </>
                     ) : (
                       <div className="settings-actions">
                         <div className="settings-footer-actions">
@@ -10966,6 +10981,10 @@ export default function App() {
                             GitHub OAuth is not configured in this environment yet.
                           </p>
                         ) : null}
+                        <p className="settings-inline-note">
+                          Project files can be created, edited, saved, and run locally without
+                          connecting GitHub.
+                        </p>
                       </div>
                     )}
                   </section>

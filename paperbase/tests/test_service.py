@@ -59,6 +59,7 @@ from paperbase.models import (
     SendChatMessageRequest,
     SignupRequest,
     UpdateAppearanceRequest,
+    UpdateGitHubSyncSettingsRequest,
     UpdateNotificationsRequest,
     UpdateProjectRequest,
 )
@@ -2472,6 +2473,10 @@ def test_browser_settings_round_trip(browser_service):
         access_token="github-access-token",
         scope="repo,read:user",
     )
+    github_sync = service.update_user_github_sync_settings(
+        session.user,
+        UpdateGitHubSyncSettingsRequest(enabled=True),
+    )
 
     assert anthropic.has_anthropic_api_key is True
     assert anthropic.settings.anthropic_api_key_hint.startswith("anth")
@@ -2483,6 +2488,7 @@ def test_browser_settings_round_trip(browser_service):
     assert appearance.settings.appearance_theme == "dark"
     assert github.settings.has_github_connection is True
     assert github.settings.github_login == "octocat"
+    assert github_sync.settings.github_sync_enabled is True
 
     cleared = service.delete_user_modal_credentials(session.user)
     cleared_audio = service.delete_user_elevenlabs_key(session.user)
@@ -2491,6 +2497,7 @@ def test_browser_settings_round_trip(browser_service):
     assert cleared.settings.has_modal_credentials is False
     assert cleared_audio.settings.has_elevenlabs_api_key is False
     assert disconnected.settings.has_github_connection is False
+    assert disconnected.settings.github_sync_enabled is False
 
 
 def test_browser_session_marks_admin_users():
@@ -3206,7 +3213,7 @@ if grounded:
 ```"""
 
 
-def test_python_file_creation_requires_github_and_normalizes_names(browser_service):
+def test_python_file_creation_is_local_and_normalizes_names(browser_service):
     service, _, _ = browser_service
     session, _ = service.register_browser_user(
         SignupRequest(email="python@example.com", password="topsecret123", display_name="Python User")
@@ -3214,18 +3221,6 @@ def test_python_file_creation_requires_github_and_normalizes_names(browser_servi
     assert session.user is not None
 
     project_id = service.list_projects(session.user).projects[0].project_id
-
-    with pytest.raises(HTTPException) as excinfo:
-        service.create_python_file(session.user, project_id)
-    assert excinfo.value.status_code == 409
-
-    service.save_github_connection(
-        session.user,
-        github_user_id="42",
-        github_login="octocat",
-        access_token="github-access-token",
-        scope="repo,read:user",
-    )
 
     first = service.create_python_file(session.user, project_id)
     second = service.create_python_file(session.user, project_id)
@@ -4127,7 +4122,7 @@ def test_python_file_sync_project_repo_writes_metadata_and_files():
     assert repo_manager.sync_project_files_calls[0]["previous_managed_paths"] == set()
 
 
-def test_create_project_requires_github_repo_info_and_connection(caplog):
+def test_create_project_allows_local_project_and_requires_connection_for_repo_sync(caplog):
     repo_manager = FakeGitHubRepoManager()
     service = PaperbaseService(
         settings=Settings(
@@ -4146,12 +4141,12 @@ def test_create_project_requires_github_repo_info_and_connection(caplog):
     assert session.user is not None
     caplog.set_level(logging.INFO, logger="paperbase.service")
 
-    with pytest.raises(HTTPException) as missing_repo:
-        service.create_project(
-            session.user,
-            CreateProjectRequest(name="Agents", description="Study agent systems"),
-        )
-    assert missing_repo.value.status_code == 422
+    local_project = service.create_project(
+        session.user,
+        CreateProjectRequest(name="Agents", description="Study agent systems"),
+    )
+    assert local_project.name == "Agents"
+    assert service.get_project_repo_sync(session.user, local_project.project_id).repo_exists is False
 
     with pytest.raises(HTTPException) as disconnected:
         service.create_project(
@@ -4194,6 +4189,40 @@ def test_list_github_repositories_requires_connection_and_returns_accessible_rep
     assert repos.repos[0].private is True
     assert repos.repos[1].default_branch == "dev"
     assert repo_manager.list_repositories_calls == [{"access_token": "github-access-token"}]
+
+
+def test_project_files_can_be_created_saved_and_deleted_without_github():
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            anthropic_api_key="product-key-123",
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="local-code@example.com", password="topsecret123", display_name="Local Code")
+    )
+    assert session.user is not None
+
+    project = service.create_project(
+        session.user,
+        CreateProjectRequest(name="Local Code", description="No repository"),
+    )
+    python_file = service.create_python_file(session.user, project.project_id)
+    updated = service.update_python_file(
+        session.user,
+        python_file.file_id,
+        filename="analysis.py",
+        content="print('local')",
+    )
+    deleted = service.delete_python_file(session.user, python_file.file_id)
+
+    assert updated.filename == "analysis.py"
+    assert updated.content == "print('local')"
+    assert deleted["deleted"] is True
 
 
 def test_create_project_creates_private_github_repo_on_main(caplog):

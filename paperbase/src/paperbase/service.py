@@ -156,6 +156,7 @@ from .models import (
     TrendingPaperDetailResponse,
     UpdateAppearanceRequest,
     UpdateChatThreadRequest,
+    UpdateGitHubSyncSettingsRequest,
     UpdateNotificationsRequest,
     UpdateProjectRequest,
     CreateProjectRequest,
@@ -2180,6 +2181,19 @@ class PaperbaseService:
         )
         return self._browser_session_response(user)
 
+    def update_user_github_sync_settings(
+        self,
+        user: BrowserUser,
+        request: UpdateGitHubSyncSettingsRequest,
+    ) -> BrowserSessionResponse:
+        if request.enabled:
+            self._get_github_connection(user)
+        self.repository.set_github_sync_enabled(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            enabled=request.enabled,
+        )
+        return self._browser_session_response(user)
+
     def save_github_connection(
         self,
         user: BrowserUser,
@@ -2246,7 +2260,7 @@ class PaperbaseService:
             )
             raise HTTPException(
                 status_code=409,
-                detail="Connect GitHub before creating or saving project files",
+                detail="Connect GitHub before syncing project files",
             )
         if not _github_scope_allows_repo_write(record.get("scope", "")):
             logger.info(
@@ -2467,7 +2481,21 @@ class PaperbaseService:
         if not name:
             raise HTTPException(status_code=422, detail="Project name is required")
         if request.github_repo is None:
-            raise HTTPException(status_code=422, detail="GitHub repository information is required")
+            project = self.repository.create_project(  # type: ignore[attr-defined]
+                user_id=user.user_id,
+                name=name,
+                description=request.description.strip(),
+            )
+            logger.info(
+                "Created local-only project",
+                extra={
+                    "event": "project.create.local",
+                    "user_id": user.user_id,
+                    "project_id": project.project_id,
+                    "project_name": name,
+                },
+            )
+            return project
         github, access_token = self._github_access(user)
         repo_request = request.github_repo
         import_rows: list[tuple[str, str, str, str]] = []
@@ -4620,7 +4648,6 @@ class PaperbaseService:
             )
 
     def create_python_file(self, user: BrowserUser, project_id: str) -> PythonFileResponse:
-        self._get_github_connection(user)
         project = self.repository.get_project(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
         if project is None:
             raise HTTPException(status_code=404, detail="Project not found")
@@ -4642,7 +4669,6 @@ class PaperbaseService:
         filename: str,
         data: bytes,
     ) -> PythonFileResponse:
-        self._get_github_connection(user)
         project = self.repository.get_project(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
         if project is None:
             raise HTTPException(status_code=404, detail="Project not found")
@@ -4846,7 +4872,6 @@ class PaperbaseService:
         repo_path: str,
         content: str = "",
     ) -> PythonFileResponse:
-        self._get_github_connection(user)
         project = self.repository.get_project(user_id=user.user_id, project_id=project_id)  # type: ignore[attr-defined]
         if project is None:
             raise HTTPException(status_code=404, detail="Project not found")
@@ -4879,7 +4904,6 @@ class PaperbaseService:
         repo_path: str,
         content: str,
     ) -> dict[str, Any]:
-        self._get_github_connection(user)
         normalized_repo_path = _normalize_project_workspace_repo_path(repo_path)
         existing = self.repository.get_project_python_file_by_path(  # type: ignore[attr-defined]
             user_id=user.user_id,
@@ -4944,7 +4968,6 @@ class PaperbaseService:
         new_string: str,
         replace_all: bool = False,
     ) -> dict[str, Any]:
-        self._get_github_connection(user)
         project_file = self._get_project_workspace_file(user, project_id, repo_path)
         if old_string == "":
             if not new_string.strip():
@@ -5013,7 +5036,6 @@ class PaperbaseService:
         repo_path: str,
         new_repo_path: str,
     ) -> dict[str, Any]:
-        self._get_github_connection(user)
         project_file = self._get_project_workspace_file(user, project_id, repo_path)
         normalized_new_repo_path = _normalize_project_workspace_repo_path(new_repo_path)
         if project_file.repo_path == normalized_new_repo_path:
@@ -5041,7 +5063,6 @@ class PaperbaseService:
         }
 
     def delete_project_workspace_file(self, user: BrowserUser, project_id: str, *, repo_path: str) -> dict[str, Any]:
-        self._get_github_connection(user)
         project_file = self._get_project_workspace_file(user, project_id, repo_path)
         deleted = self.repository.delete_python_file(user_id=user.user_id, file_id=project_file.file_id)  # type: ignore[attr-defined]
         if not deleted:
@@ -5398,7 +5419,6 @@ class PaperbaseService:
         filename: str | None,
         content: str | None,
     ) -> PythonFileResponse:
-        self._get_github_connection(user)
         normalized_filename = _normalize_python_filename(filename) if filename is not None else None
         python_file = self.repository.update_python_file(  # type: ignore[attr-defined]
             user_id=user.user_id,
@@ -5411,7 +5431,6 @@ class PaperbaseService:
         return python_file
 
     def delete_python_file(self, user: BrowserUser, file_id: str) -> dict[str, Any]:
-        self._get_github_connection(user)
         project_file = self.repository.get_python_file(user_id=user.user_id, file_id=file_id)  # type: ignore[attr-defined]
         if project_file is None:
             raise HTTPException(status_code=404, detail="Python file not found")
