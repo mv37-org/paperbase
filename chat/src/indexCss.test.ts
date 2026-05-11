@@ -44,18 +44,44 @@ describe("index.css", () => {
       css.match(/\.trending-page-landing \.trending-card-image\s*\{([^}]*)\}/)?.[1] ?? "";
     const publicImageBlock =
       css.match(/\.trending-page-public \.trending-card-image\s*\{([^}]*)\}/)?.[1] ?? "";
+    const publicCardBlockMatch = css.match(
+      /\.trending-page-public \.trending-card\s*,\s*\.trending-page-landing \.trending-card\s*\{([^}]*)\}/,
+    );
+    const publicCardBlock = publicCardBlockMatch?.[1] ?? "";
+    const publicCardTitleBlockMatch = css.match(
+      /\.trending-page-public \.trending-card-copy h2\s*,\s*\.trending-page-landing \.trending-card-copy h2\s*\{([^}]*)\}/,
+    );
+    const publicCardTitleBlock = publicCardTitleBlockMatch?.[1] ?? "";
+    const publicCardMetaBlockMatch = css.match(
+      /\.trending-page-public \.trending-card-copy span\s*,\s*\.trending-page-landing \.trending-card-copy span\s*\{([^}]*)\}/,
+    );
+    const publicCardMetaBlock = publicCardMetaBlockMatch?.[1] ?? "";
     const detailHeroBlock = css.match(/\.trending-detail-hero\s*\{([^}]*)\}/)?.[1] ?? "";
     const detailImageWrapBlock = css.match(/\.trending-detail-image-wrap\s*\{([^}]*)\}/)?.[1] ?? "";
     const detailImageBlock = css.match(/\.trending-detail-image\s*\{([^}]*)\}/)?.[1] ?? "";
     const detailCopyBlock = css.match(/\.trending-detail-copy\s*\{([^}]*)\}/)?.[1] ?? "";
     const publicDetailTitleBlock =
       css.match(/\.trending-page-public \.workspace-page-header h1\s*\{([^}]*)\}/)?.[1] ?? "";
+    const publicDetailDescriptionBlock =
+      css.match(/\.trending-page-public \.workspace-page-header p\s*\{([^}]*)\}/)?.[1] ?? "";
     const publicDetailImageWrapBlock =
       css.match(/\.trending-page-public \.trending-detail-image-wrap\s*\{([^}]*)\}/)?.[1] ?? "";
     const publicDetailCopyMatch = css.match(
       /\.trending-page-public \.trending-detail-copy\s*,\s*\.trending-page-public \.trending-comments-section\s*\{([^}]*)\}/,
     );
     const publicDetailCopyBlock = publicDetailCopyMatch?.[1] ?? "";
+    const publicDetailActionMatch = css.match(
+      /\.trending-page-public \.trending-detail-actions \.trending-card-link\s*,\s*\.trending-page-public \.trending-detail-actions \.trending-vote-button\s*\{([^}]*)\}/,
+    );
+    const publicDetailActionBlock = publicDetailActionMatch?.[1] ?? "";
+    const publicDetailHeadingMatch = css.match(
+      /\.trending-page-public \.trending-summary-section h2\s*,\s*\.trending-page-public \.trending-metadata-section h2\s*,\s*\.trending-page-public \.trending-section-heading h2\s*\{([^}]*)\}/,
+    );
+    const publicDetailHeadingBlock = publicDetailHeadingMatch?.[1] ?? "";
+    const publicDetailBodyMatch = css.match(
+      /\.trending-page-public \.trending-summary-section p\s*,\s*\.trending-page-public \.trending-section-heading p\s*,\s*\.trending-page-public \.trending-auth-callout p\s*\{([^}]*)\}/,
+    );
+    const publicDetailBodyBlock = publicDetailBodyMatch?.[1] ?? "";
     const metadataGridBlock = css.match(/\.trending-metadata-grid\s*\{([^}]*)\}/)?.[1] ?? "";
     const metadataRowBlock = css.match(/\.trending-metadata-row\s*\{([^}]*)\}/)?.[1] ?? "";
     const landingDetailTitleMatch = css.match(
@@ -78,6 +104,7 @@ describe("index.css", () => {
     expect(landingGridBlock).toContain("gap: 22px;");
     expect(publicTrendingHeaderBlock).toContain("width: min(100%, 900px);");
     expect(publicTrendingHeaderBlock).toContain('font-family: Georgia, "Iowan Old Style", serif;');
+    expect(publicTrendingHeaderBlock).toContain("font-size: 12px;");
     expect(publicTrendingColumnBlock).toContain("max-width: 900px;");
     expect(css).not.toContain(".trending-page-landing .trending-card:nth-child(even)");
     expect(css).not.toContain('"media copy"');
@@ -90,12 +117,17 @@ describe("index.css", () => {
     expect(landingImageBlock).toContain("object-fit: cover;");
     expect(publicImageBlock).toContain("aspect-ratio: 4 / 3;");
     expect(publicImageBlock).toContain("object-fit: cover;");
+    expect(publicCardBlock).toContain("gap: 9px;");
+    expect(publicCardBlock).toContain("padding: 9px;");
+    expect(publicCardTitleBlock).toContain("font-size: clamp(13px, 1.55vw, 16px);");
+    expect(publicCardMetaBlock).toContain("font-size: 12px;");
     expect(detailHeroBlock).toContain("grid-template-columns: 1fr;");
     expect(detailImageWrapBlock).toContain("place-items: center;");
     expect(detailImageWrapBlock).toContain("width: min(100%, 1040px);");
     expect(detailImageWrapBlock).toContain("padding: 0;");
     expect(publicDetailTitleBlock).toContain('font-family: Georgia, "Iowan Old Style", serif;');
-    expect(publicDetailTitleBlock).toContain("font-size: clamp(34px, 5vw, 54px);");
+    expect(publicDetailTitleBlock).toContain("font-size: clamp(25px, 3vw, 36px);");
+    expect(publicDetailDescriptionBlock).toContain("font-size: 14px;");
     expect(publicDetailImageWrapBlock).toContain("width: 100%;");
     expect(publicDetailImageWrapBlock).toContain("border-radius: 10px;");
     expect(detailImageBlock).toContain("height: auto;");
@@ -105,6 +137,9 @@ describe("index.css", () => {
     expect(detailImageBlock).not.toContain("aspect-ratio:");
     expect(detailCopyBlock).toContain("width: min(100%, 980px);");
     expect(publicDetailCopyBlock).toContain("max-width: 900px;");
+    expect(publicDetailActionBlock).toContain("font-size: 12px;");
+    expect(publicDetailHeadingBlock).toContain("font-size: 18px;");
+    expect(publicDetailBodyBlock).toContain("font-size: 15px;");
     expect(metadataGridBlock).toContain("display: grid;");
     expect(metadataRowBlock).toContain(
       "grid-template-columns: minmax(116px, 160px) minmax(0, 1fr);",

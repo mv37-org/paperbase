@@ -243,7 +243,7 @@ textarea {
   gap: 24px;
   margin-bottom: 66px;
   font-family: Georgia, "Iowan Old Style", serif;
-  font-size: 14px;
+  font-size: 12px;
   line-height: 1.2;
 }
 
@@ -2681,9 +2681,9 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
 
 .trending-page-public .trending-card,
 .trending-page-landing .trending-card {
-  gap: 18px;
+  gap: 9px;
   min-height: 0;
-  padding: 18px;
+  padding: 9px;
   border-color: rgba(27, 22, 17, 0.16);
   border-radius: 6px;
   box-shadow: 0 12px 26px rgba(27, 22, 17, 0.04);
@@ -2692,20 +2692,20 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
 .trending-page-public .trending-card-copy,
 .trending-page-landing .trending-card-copy {
   align-content: start;
-  gap: 8px;
+  gap: 4px;
 }
 
 .trending-page-public .trending-card-copy h2,
 .trending-page-landing .trending-card-copy h2 {
-  font-size: clamp(20px, 2.4vw, 25px);
-  line-height: 1.07;
+  font-size: clamp(13px, 1.55vw, 16px);
+  line-height: 1.12;
   font-weight: 700;
 }
 
 .trending-page-public .trending-card-copy span,
 .trending-page-landing .trending-card-copy span {
   color: rgba(27, 22, 17, 0.68);
-  font-size: 17px;
+  font-size: 12px;
   line-height: 1.25;
 }
 
@@ -2864,8 +2864,8 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
 
 .trending-page-public .workspace-page-header h1 {
   font-family: Georgia, "Iowan Old Style", serif;
-  font-size: clamp(34px, 5vw, 54px);
-  line-height: 1.02;
+  font-size: clamp(25px, 3vw, 36px);
+  line-height: 1.06;
   font-weight: 700;
   letter-spacing: 0;
 }
@@ -2873,8 +2873,8 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
 .trending-page-public .workspace-page-header p {
   max-width: 760px;
   color: rgba(27, 22, 17, 0.62);
-  font-size: 18px;
-  line-height: 1.48;
+  font-size: 14px;
+  line-height: 1.45;
 }
 
 .trending-detail-hero {
@@ -2960,9 +2960,9 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
 
 .trending-page-public .trending-detail-actions .trending-card-link,
 .trending-page-public .trending-detail-actions .trending-vote-button {
-  padding: 9px 12px;
+  padding: 7px 10px;
   border-radius: 5px;
-  font-size: 14px;
+  font-size: 12px;
 }
 
 .trending-detail-actions .trending-card-link:hover,
@@ -2991,7 +2991,7 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
 .trending-page-public .trending-summary-section h2,
 .trending-page-public .trending-metadata-section h2,
 .trending-page-public .trending-section-heading h2 {
-  font-size: 24px;
+  font-size: 18px;
   line-height: 1.15;
   font-weight: 700;
   letter-spacing: 0;
@@ -3010,8 +3010,8 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
 .trending-page-public .trending-auth-callout p {
   max-width: 70ch;
   color: rgba(27, 22, 17, 0.72);
-  font-size: 18px;
-  line-height: 1.7;
+  font-size: 15px;
+  line-height: 1.62;
 }
 
 .trending-metadata-section {
@@ -3062,12 +3062,12 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
 }
 
 .trending-page-public .trending-metadata-row dt {
-  font-size: 10px;
+  font-size: 9px;
   letter-spacing: 0.08em;
 }
 
 .trending-page-public .trending-metadata-row dd {
-  font-size: 15px;
+  font-size: 13px;
   line-height: 1.35;
 }
 
