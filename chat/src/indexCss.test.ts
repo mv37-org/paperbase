@@ -29,8 +29,14 @@ describe("index.css", () => {
     const landingGridBlock =
       css.match(/\.trending-page-landing \.trending-card-grid\s*\{([^}]*)\}/)?.[1] ?? "";
     const workspaceTrendingBlock = css.match(/\.workspace-page-trending\s*\{([^}]*)\}/)?.[1] ?? "";
+    const publicTrendingHeaderBlock =
+      css.match(/\.public-trending-header\s*\{([^}]*)\}/)?.[1] ?? "";
+    const publicTrendingColumnBlock =
+      css.match(/\.public-trending-column\s*\{([^}]*)\}/)?.[1] ?? "";
     const cardBlock = css.match(/\.trending-card\s*\{([^}]*)\}/)?.[1] ?? "";
     const imageBlock = css.match(/\.trending-card-image\s*\{([^}]*)\}/)?.[1] ?? "";
+    const landingImageBlock =
+      css.match(/\.trending-page-landing \.trending-card-image\s*\{([^}]*)\}/)?.[1] ?? "";
     const detailHeroBlock = css.match(/\.trending-detail-hero\s*\{([^}]*)\}/)?.[1] ?? "";
     const detailImageWrapBlock = css.match(/\.trending-detail-image-wrap\s*\{([^}]*)\}/)?.[1] ?? "";
     const detailImageBlock = css.match(/\.trending-detail-image\s*\{([^}]*)\}/)?.[1] ?? "";
@@ -50,6 +56,8 @@ describe("index.css", () => {
     expect(gridBlock).toContain("gap: 16px;");
     expect(landingGridBlock).toContain("grid-template-columns: repeat(2, minmax(0, 1fr));");
     expect(landingGridBlock).toContain("gap: 16px;");
+    expect(publicTrendingHeaderBlock).toContain("width: min(100%, 900px);");
+    expect(publicTrendingColumnBlock).toContain("max-width: 900px;");
     expect(css).not.toContain(".trending-page-landing .trending-card:nth-child(even)");
     expect(css).not.toContain('"media copy"');
     expect(cardBlock).toContain("min-height: 282px;");
@@ -57,6 +65,7 @@ describe("index.css", () => {
     expect(cardBlock).toContain("border-radius: 4px;");
     expect(imageBlock).toContain("height: clamp(108px, 15vw, 132px);");
     expect(imageBlock).toContain("object-fit: contain;");
+    expect(landingImageBlock).toContain("height: clamp(260px, 31vw, 390px);");
     expect(detailHeroBlock).toContain("grid-template-columns: 1fr;");
     expect(detailImageWrapBlock).toContain("place-items: center;");
     expect(detailImageWrapBlock).toContain("width: min(100%, 1040px);");

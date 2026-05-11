@@ -6634,26 +6634,24 @@ export default function App() {
       ) : !authenticated ? (
         trendingBrowseState ? (
           <main id="landing-page" className="landing-page landing-page-trending">
-            <button
-              id="landing-login-button"
-              className="landing-login-button"
-              type="button"
-              onClick={() => openAuthModal("login")}
-            >
-              <span className="landing-login-icon" aria-hidden="true">
-                <AppIcon src={staticAssetPath("login.svg")} className="landing-login-icon-image" />
-              </span>
-              <span className="landing-login-label">Log in</span>
-            </button>
-            <div className="landing-column landing-column-wide">
+            <header className="public-trending-header" aria-label="Paperbase public navigation">
               <a
-                className="brandline brandline-link"
+                className="public-trending-brand"
                 href="https://mv37.org"
                 target="_blank"
                 rel="noreferrer"
               >
-                MV37
+                mv37.org
               </a>
+              <button
+                type="button"
+                className="public-trending-back"
+                onClick={() => updateTrendingBrowseState(null)}
+              >
+                Back to Paperbase
+              </button>
+            </header>
+            <div className="landing-column landing-column-wide public-trending-column">
               <TrendingPapersPage
                 variant="public"
                 authenticated={false}

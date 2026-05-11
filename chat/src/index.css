@@ -206,7 +206,47 @@ textarea {
 }
 
 .landing-page-trending {
-  padding-top: 96px;
+  display: grid;
+  justify-items: center;
+  align-content: start;
+  padding-top: 28px;
+}
+
+.public-trending-header {
+  width: min(100%, 900px);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 72px;
+  font-family: "JetBrains Mono", "SFMono-Regular", monospace;
+  font-size: 12px;
+}
+
+.public-trending-brand,
+.public-trending-back {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: var(--text);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.public-trending-back {
+  color: var(--muted);
+  font-family: inherit;
+}
+
+.public-trending-brand:hover,
+.public-trending-brand:focus-visible,
+.public-trending-back:hover,
+.public-trending-back:focus-visible {
+  color: var(--text);
+}
+
+.public-trending-column {
+  max-width: 900px;
 }
 
 .landing-paper-section {
@@ -2566,6 +2606,10 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
   background: #f3efe6;
 }
 
+.trending-page-landing .trending-card-image {
+  height: clamp(260px, 31vw, 390px);
+}
+
 .trending-card-image-fallback {
   display: grid;
   place-items: center;
@@ -2708,6 +2752,10 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
 
   .trending-page-landing .trending-card-grid {
     grid-template-columns: 1fr;
+  }
+
+  .trending-page-landing .trending-card-image {
+    height: clamp(300px, 70vw, 430px);
   }
 }
 

@@ -1388,6 +1388,10 @@ describe("App", () => {
     await waitFor(() => {
       expect(screen.getByTestId("trending-papers-page")).toBeTruthy();
     });
+    expect(screen.getByRole("link", { name: "mv37.org" }).getAttribute("href")).toBe(
+      "https://mv37.org",
+    );
+    expect(screen.getByRole("button", { name: "Back to Paperbase" })).toBeTruthy();
     await waitFor(() => {
       expect(apiMocks.loadBrowserTrendingPapers).toHaveBeenCalledWith(
         expect.any(String),
@@ -1396,6 +1400,16 @@ describe("App", () => {
         20,
       );
     });
+
+    await waitFor(() => {
+      expect(screen.getByText("Trending Paper")).toBeTruthy();
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Back to Paperbase" }));
+    });
+
+    expect(window.location.search).not.toContain("browse=trending");
+    expect(document.querySelector("#landing-login-button")).toBeTruthy();
   });
 
   it("starts a paper exploration from an authenticated trending detail", async () => {

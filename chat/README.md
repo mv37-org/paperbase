@@ -6,7 +6,7 @@ Source lives here. Generated assets are built into `paperbase/src/paperbase/stat
 
 The server-rendered HTML shell now inlines the current browser session and applies the authenticated dark-theme class before React mounts, so reloads do not block on a second `/v1/browser/session` round trip or flash a white shell for signed-in dark-theme users.
 
-The landing prompt and authenticated chat composer both support live `@` paper mentions backed by the browser suggestion endpoint, and the public landing page shows a two-column top-10 `Latest`/`Hottest` paper preview from the indexed corpus with clicks routed to the public trending detail page.
+The landing prompt and authenticated chat composer both support live `@` paper mentions backed by the browser suggestion endpoint, and the public landing page shows a two-column top-10 `Latest`/`Hottest` paper preview from the indexed corpus with clicks routed to the narrower public trending detail page.
 
 The authenticated sidebar is project-first, with a small signed-in Browse area above projects:
 
