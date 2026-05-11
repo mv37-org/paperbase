@@ -82,6 +82,29 @@ def test_responses_request_body_includes_structured_text_format():
     assert body["text"] == {"format": text_format}
 
 
+def test_create_response_uses_configured_timeout(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_post(*_args, **kwargs):
+        captured["timeout"] = kwargs.get("timeout")
+        response = requests.Response()
+        response.status_code = 200
+        response._content = b'{"id":"resp_1","output":[]}'
+        return response
+
+    monkeypatch.setattr("paperbase.llm.requests.post", fake_post)
+
+    client = OpenAIResponsesChatModelClient(
+        Settings(openai_response_timeout_seconds=600),
+    )
+    client.create_response(
+        api_key="test-key",
+        prompt=Prompt(input=[], base_instructions="Return a response."),
+    )
+
+    assert captured["timeout"] == 600
+
+
 def test_response_error_detail_summarizes_html_errors():
     response = requests.Response()
     response.status_code = 502

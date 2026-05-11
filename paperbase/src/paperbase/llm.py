@@ -387,6 +387,9 @@ class OpenAIResponsesChatModelClient(ChatModelClient):
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
 
+    def _timeout_seconds(self) -> int:
+        return max(1, int(self._settings.openai_response_timeout_seconds))
+
     def _request_body(self, *, prompt: Prompt, stream: bool) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self._settings.openai_model,
@@ -411,7 +414,7 @@ class OpenAIResponsesChatModelClient(ChatModelClient):
                 "content-type": "application/json",
             },
             json=self._request_body(prompt=prompt, stream=False),
-            timeout=120,
+            timeout=self._timeout_seconds(),
         )
         _raise_for_status_with_detail(response)
         payload = response.json()
@@ -431,7 +434,7 @@ class OpenAIResponsesChatModelClient(ChatModelClient):
                 "content-type": "application/json",
             },
             json=self._request_body(prompt=prompt, stream=True),
-            timeout=120,
+            timeout=self._timeout_seconds(),
             stream=True,
         )
         _raise_for_status_with_detail(response)
