@@ -12,6 +12,9 @@ from paperbase_plugin import mcp_server
 
 
 class StubClient:
+    def paperbase_shell(self, command: str):
+        return {"command": command, "stdout": "ok", "result_set_id": "rs_test", "papers": []}
+
     def search_papers(self, **kwargs):
         query = kwargs["query"].lower()
         if "agent" in query or "tool use" in query or "reasoning" in query:
@@ -162,6 +165,9 @@ async def test_mcp_server_exposes_tools(client_session: ClientSession):
         "sync_latest_papers",
         "get_job",
         "cancel_job",
+        "paperbase_shell",
+    }.issubset(tool_names)
+    assert {
         "search_papers",
         "search_sections",
         "get_results",
@@ -174,27 +180,14 @@ async def test_mcp_server_exposes_tools(client_session: ClientSession):
         "get_figure",
         "get_table",
         "research_qa",
-    }.issubset(tool_names)
+    }.isdisjoint(tool_names)
 
-    result = await client_session.call_tool("search_papers", {"query": "transformers"})
+    result = await client_session.call_tool("paperbase_shell", {"command": 'search "transformers" -n 20'})
     payload = result.structuredContent
     if payload is None:
         payload = json.loads(result.content[0].text)
     assert payload["result_set_id"] == "rs_test"
-
-    section_result = await client_session.call_tool("search_sections", {"query": "agent", "paper_ids": ["arxiv:1"]})
-    section_payload = section_result.structuredContent
-    if section_payload is None:
-        section_payload = json.loads(section_result.content[0].text)
-    assert section_payload["sections"][0]["path"] == "sections/introduction.md"
-
-    qa_result = await client_session.call_tool("research_qa", {"question": "How do you build an agent?"})
-    qa_payload = qa_result.structuredContent
-    if qa_payload is None:
-        qa_payload = json.loads(qa_result.content[0].text)
-    assert qa_payload["shortlisted_papers"][0]["paper_id"] == "arxiv:1"
-    assert qa_payload["evidence"][0]["path"] == "sections/introduction.md"
-    assert "Agent Paper" in qa_payload["answer"]
+    assert payload["command"] == 'search "transformers" -n 20'
 
 
 def test_research_qa_trusts_server_pass_through(monkeypatch):

@@ -270,6 +270,24 @@ class GrepResponse(BaseModel):
     expires_at: datetime
 
 
+class LiteratureShellRequest(BaseModel):
+    command: str = Field(..., min_length=1, max_length=4000)
+
+
+class LiteratureShellResponse(BaseModel):
+    command: str
+    stdout: str = ""
+    result_set_id: str | None = None
+    parent_result_set_id: str | None = None
+    papers: list[dict[str, Any]] = Field(default_factory=list)
+    paths: list[str] = Field(default_factory=list)
+    matches: list[dict[str, Any]] = Field(default_factory=list)
+    rows: list[dict[str, Any]] = Field(default_factory=list)
+    citations: list[dict[str, Any]] = Field(default_factory=list)
+    truncated: bool = False
+    error: str | None = None
+
+
 class JobResponse(BaseModel):
     job_id: str
     root_job_id: str | None = None

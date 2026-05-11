@@ -4252,8 +4252,8 @@ describe("App", () => {
             thread_id: "thread_2",
             turn_id: "turn_2",
             call_id: "tool_1",
-            name: "paperbase_search",
-            content_json: { query: "grounding" },
+            name: "paperbase_shell",
+            content_json: { command: 'search "grounding" -n 10' },
             status: "in_progress",
           }),
         });
@@ -4262,8 +4262,8 @@ describe("App", () => {
             thread_id: "thread_2",
             turn_id: "turn_2",
             call_id: "tool_1",
-            name: "paperbase_search",
-            content_json: { query: "grounding" },
+            name: "paperbase_shell",
+            content_json: { command: 'search "grounding" -n 10' },
           }),
         });
         onEvent("item_started", {
@@ -4271,7 +4271,7 @@ describe("App", () => {
             thread_id: "thread_2",
             turn_id: "turn_2",
             call_id: "tool_1",
-            name: "paperbase_search",
+            name: "paperbase_shell",
             status: "in_progress",
           }),
         });
@@ -4285,8 +4285,12 @@ describe("App", () => {
               thread_id: "thread_2",
               turn_id: "turn_2",
               call_id: "tool_1",
-              name: "paperbase_search",
-              content_json: { result_set_id: "rs_1" },
+              name: "paperbase_shell",
+              content_json: {
+                command: 'search "grounding" -n 10',
+                stdout: "result_set_id: rs_1",
+                result_set_id: "rs_1",
+              },
             },
           ),
         });
@@ -4320,19 +4324,21 @@ describe("App", () => {
     expect(
       replyTitle.compareDocumentPosition(commentaryText) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
-    const toolActivityText = await screen.findByText('Did paper search for "grounding"');
+    const toolActivityText = await screen.findByText(
+      'Ran paperbase shell: search "grounding" -n 10',
+    );
     expect(screen.queryByText("Commentary")).toBeNull();
     expect(
       commentaryText.compareDocumentPosition(toolActivityText) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
     const toolActivitySummary = screen
-      .getByText('Did paper search for "grounding"')
+      .getByText('Ran paperbase shell: search "grounding" -n 10')
       .closest("summary");
     expect(toolActivitySummary?.textContent).toContain("Command and output");
     fireEvent.click(toolActivitySummary!);
     expect(screen.getByText("Command")).toBeTruthy();
     expect(screen.getByText("Output")).toBeTruthy();
-    expect(screen.getByText(/paperbase_search\(\{/)).toBeTruthy();
+    expect(screen.getByText(/paperbase_shell\(\{/)).toBeTruthy();
     expect(screen.getByText(/"result_set_id": "rs_1"/)).toBeTruthy();
     await waitFor(() => {
       expect(

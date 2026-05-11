@@ -42,6 +42,7 @@ from paperbase.models import (
     CreateChatThreadRequest,
     CreateProjectGitHubRepoRequest,
     CreateProjectRequest,
+    LiteratureShellRequest,
     MoveChatThreadProjectRequest,
     PaperMetadata,
     PaperSelectionPayload,
@@ -190,6 +191,37 @@ class FakeChatModel:
             "tool_choice": tool_choice,
             "parallel_tool_calls": prompt.parallel_tool_calls,
         }
+
+    def _tool_result_payloads(self, messages) -> list[dict[str, object]]:
+        payloads: list[dict[str, object]] = []
+        for message in messages:
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    continue
+                raw_content = block.get("content")
+                if not isinstance(raw_content, str):
+                    continue
+                try:
+                    parsed = json.loads(raw_content)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(parsed, dict):
+                    payloads.append(parsed)
+        return payloads
+
+    def _latest_result_set_id(self, messages, *, require_papers: bool = False) -> str | None:
+        for payload in reversed(self._tool_result_payloads(messages)):
+            if require_papers and not payload.get("papers"):
+                continue
+            result_set_id = str(payload.get("result_set_id") or "").strip()
+            if result_set_id:
+                return result_set_id
+        return None
 
     def _call_legacy(self, method_name: str, **kwargs):
         method = getattr(self, method_name)
@@ -342,7 +374,9 @@ class FakeChatModel:
                 for message in messages
                 if isinstance(message, dict)
             )
-            if tool_choice == {"type": "any"} or not has_tool_results:
+            tool_result_count = len(self._tool_result_payloads(messages))
+            grep_result_set_id = self._latest_result_set_id(messages, require_papers=True)
+            if not has_tool_results or ("paperbase_shell" in tool_names and tool_result_count == 1 and grep_result_set_id):
                 raw_query = next(
                     (
                         str(message.get("content"))
@@ -362,12 +396,23 @@ class FakeChatModel:
                     query = "methods"
                 else:
                     query = " ".join(query_words[:2]) or raw_query
-                tool_name = (
+                tool_name = "paperbase_shell" if "paperbase_shell" in tool_names else (
                     "paperbase_search_sections"
                     if "paperbase_search_sections" in tool_names
                     else "paperbase_search"
                     if "paperbase_search" in tool_names
                     else str(tool_names[0])
+                )
+                tool_input = (
+                    {
+                        "command": (
+                            f'grep "{query}" --from {grep_result_set_id} -n 3'
+                            if has_tool_results and grep_result_set_id
+                            else f'search "{query}" -n 3'
+                        )
+                    }
+                    if tool_name == "paperbase_shell"
+                    else {"query": query, "limit": 3}
                 )
                 return {
                     "content": [
@@ -375,7 +420,7 @@ class FakeChatModel:
                             "type": "tool_use",
                             "id": "toolu_search_sections",
                             "name": tool_name,
-                            "input": {"query": query, "limit": 3},
+                            "input": tool_input,
                         }
                     ],
                     "usage": {
@@ -431,14 +476,27 @@ class FakeChatModel:
                 for message in messages
                 if isinstance(message, dict)
             )
-            if not has_tool_results:
+            tool_result_count = len(self._tool_result_payloads(messages))
+            grep_result_set_id = self._latest_result_set_id(messages, require_papers=True)
+            if not has_tool_results or ("paperbase_shell" in tool_names and tool_result_count == 1 and grep_result_set_id):
                 query = "grounding"
-                tool_name = (
+                tool_name = "paperbase_shell" if "paperbase_shell" in tool_names else (
                     "paperbase_search_sections"
                     if "paperbase_search_sections" in tool_names
                     else "paperbase_search"
                     if "paperbase_search" in tool_names
                     else str(tool_names[0])
+                )
+                tool_input = (
+                    {
+                        "command": (
+                            f'grep "{query}" --from {grep_result_set_id} -n 3'
+                            if has_tool_results and grep_result_set_id
+                            else f'search "{query}" -n 3'
+                        )
+                    }
+                    if tool_name == "paperbase_shell"
+                    else {"query": query, "limit": 3}
                 )
                 yield ChatModelStreamEvent(usage=self.tool_round_usage)
                 yield ChatModelStreamEvent(
@@ -448,7 +506,7 @@ class FakeChatModel:
                                 "type": "tool_use",
                                 "id": "toolu_search_sections",
                                 "name": tool_name,
-                                "input": {"query": query, "limit": 3},
+                                "input": tool_input,
                             }
                         ],
                         "usage": {
@@ -1360,6 +1418,158 @@ def test_search_and_grep_return_result_handles(monkeypatch, service: PaperbaseSe
     assert section_hits.sections
     assert section_hits.sections[0].paper_id == "arxiv:2401.10001"
     assert section_hits.sections[0].path == "sections/introduction.md"
+
+
+def _make_literature_shell_service(
+    monkeypatch,
+    *,
+    text: str = "## Methods\n\nAttention evidence supports grounded literature reading.",
+    openai_api_key: str | None = None,
+    chat_model: FakeChatModel | None = None,
+) -> tuple[PaperbaseService, str]:
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
+    monkeypatch.setattr(
+        "paperbase.service.index_paper_artifacts",
+        lambda paper: _rich_extraction(text=text),
+    )
+    service = PaperbaseService(
+        settings=Settings(
+            storage_backend="memory",
+            database_url="memory://",
+            api_key="test-token",
+            openai_api_key=openai_api_key,
+        ),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        chat_model=chat_model,
+    )
+    service.init()
+    indexed = service.index_arxiv_paper(
+        "2401.77777",
+        paper=_sample_paper("2401.77777", title="Literature Shell Paper", abstract="Attention shell abstract."),
+    )
+    return service, indexed.paper_id
+
+
+def test_literature_shell_commands_use_virtual_paper_namespace(monkeypatch):
+    service, paper_id = _make_literature_shell_service(monkeypatch)
+
+    search = service.literature_shell(
+        LiteratureShellRequest(command='search "attention" -n 5 --category cs.AI --year 2024')
+    )
+    assert search.error is None
+    assert search.result_set_id is not None
+    assert f"/papers/{paper_id}/" in search.stdout
+    assert search.papers[0]["paper_id"] == paper_id
+
+    results = service.literature_shell(LiteratureShellRequest(command=f"results {search.result_set_id}"))
+    assert results.error is None
+    assert results.papers[0]["path"] == f"/papers/{paper_id}/"
+
+    root = service.literature_shell(LiteratureShellRequest(command="ls /"))
+    assert root.paths == ["/papers/", "/results/"]
+
+    result_paths = service.literature_shell(LiteratureShellRequest(command=f"ls /results/{search.result_set_id}"))
+    assert result_paths.paths == [f"/papers/{paper_id}/"]
+
+    paper_paths = service.literature_shell(LiteratureShellRequest(command=f"ls /papers/{paper_id}/"))
+    assert f"/papers/{paper_id}/sections/" in paper_paths.paths
+    assert f"/papers/{paper_id}/figures/" in paper_paths.paths
+    assert f"/papers/{paper_id}/tables/" in paper_paths.paths
+
+    section_paths = service.literature_shell(LiteratureShellRequest(command=f"ls /papers/{paper_id}/sections"))
+    assert f"/papers/{paper_id}/sections/introduction.md" in section_paths.paths
+    assert f"/papers/{paper_id}/sections/introduction.lines" in section_paths.paths
+
+    cat = service.literature_shell(LiteratureShellRequest(command=f"cat /papers/{paper_id}/sections/introduction.md"))
+    assert cat.error is None
+    assert "Attention evidence" in cat.stdout
+
+    head = service.literature_shell(LiteratureShellRequest(command=f"head -n 2 /papers/{paper_id}/sections/introduction.lines"))
+    assert head.error is None
+    assert head.stdout.splitlines() == ["L1: ## Methods", "L2: "]
+    assert head.truncated is True
+
+    grep_result_set = service.literature_shell(
+        LiteratureShellRequest(command=f'grep "attention" --from {search.result_set_id} -n 10')
+    )
+    assert grep_result_set.error is None
+    assert grep_result_set.result_set_id != search.result_set_id
+    assert grep_result_set.parent_result_set_id == search.result_set_id
+    assert grep_result_set.matches
+
+    grep_paper = service.literature_shell(LiteratureShellRequest(command=f'grep "attention" /papers/{paper_id}/ -n 10'))
+    assert grep_paper.error is None
+    assert grep_paper.result_set_id is not None
+    assert grep_paper.matches
+
+
+def test_literature_shell_rejects_unsafe_syntax_and_invalid_paths(monkeypatch):
+    service, paper_id = _make_literature_shell_service(monkeypatch)
+
+    piped = service.literature_shell(LiteratureShellRequest(command='search "attention" | cat'))
+    assert piped.error is not None
+    assert "pipes" in piped.error
+
+    traversal = service.literature_shell(LiteratureShellRequest(command=f"cat /papers/{paper_id}/../secret.md"))
+    assert traversal.error is not None
+    assert "parent path traversal" in traversal.error
+
+    outside_namespace = service.literature_shell(LiteratureShellRequest(command="ls /tmp"))
+    assert outside_namespace.error is not None
+    assert "path must stay under" in outside_namespace.error
+
+
+def test_literature_shell_map_uses_browser_saved_inference_key(monkeypatch):
+    chat_model = FakeChatModel()
+    service, _ = _make_literature_shell_service(monkeypatch, chat_model=chat_model)
+    search = service.literature_shell(LiteratureShellRequest(command='search "attention" -n 1'))
+    session, _ = service.register_browser_user(
+        SignupRequest(email="shell-map@example.com", password="topsecret123", display_name="Shell Map")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user, api_key="sk-browser-map")
+
+    mapped = service.literature_shell(
+        LiteratureShellRequest(command=f'map --from {search.result_set_id} --query "What evidence is present?" --limit 1'),
+        user=session.user,
+    )
+
+    assert mapped.error is None
+    assert mapped.rows
+    assert chat_model.create_calls[-1]["api_key"] == "sk-browser-map"
+
+
+def test_literature_shell_map_uses_server_key_for_api_path(monkeypatch):
+    chat_model = FakeChatModel()
+    service, _ = _make_literature_shell_service(
+        monkeypatch,
+        openai_api_key="sk-server-map",
+        chat_model=chat_model,
+    )
+    search = service.literature_shell(LiteratureShellRequest(command='search "attention" -n 1'))
+
+    mapped = service.literature_shell(
+        LiteratureShellRequest(
+            command=f'map --from {search.result_set_id} --query "What evidence is present?" --limit 1 --schema json'
+        )
+    )
+
+    assert mapped.error is None
+    assert mapped.rows
+    assert chat_model.create_calls[-1]["api_key"] == "sk-server-map"
+
+
+def test_literature_shell_map_requires_server_key_without_browser_user(monkeypatch):
+    service, _ = _make_literature_shell_service(monkeypatch, openai_api_key=None, chat_model=FakeChatModel())
+    search = service.literature_shell(LiteratureShellRequest(command='search "attention" -n 1'))
+
+    mapped = service.literature_shell(
+        LiteratureShellRequest(command=f'map --from {search.result_set_id} --query "What evidence is present?" --limit 1')
+    )
+
+    assert mapped.error is not None
+    assert "PAPERBASE_OPENAI_API_KEY" in mapped.error
 
 
 def test_search_can_shortlist_from_generated_summaries(monkeypatch, service: PaperbaseService):
@@ -3427,10 +3637,7 @@ def test_project_chat_tools_are_advertised_for_coding_turns(browser_service):
     tools_by_name = {tool["name"]: tool for tool in tools}
 
     assert {
-        "paperbase_search",
-        "paperbase_search_sections",
-        "paperbase_list_uploaded_documents",
-        "paperbase_search_uploaded_sections",
+        "paperbase_shell",
         "project_list_files",
         "project_read_file",
         "project_grep",
@@ -3448,6 +3655,22 @@ def test_project_chat_tools_are_advertised_for_coding_turns(browser_service):
         "project_lint",
         "project_run",
     }.issubset(tool_names)
+    assert {
+        "paperbase_search",
+        "paperbase_search_sections",
+        "paperbase_get_results",
+        "paperbase_grep_results",
+        "paperbase_get_paper",
+        "paperbase_list_files",
+        "paperbase_read_file",
+        "paperbase_get_figure",
+        "paperbase_get_table",
+        "paperbase_get_related_papers",
+        "paperbase_get_references",
+        "paperbase_list_uploaded_documents",
+        "paperbase_search_uploaded_sections",
+    }.isdisjoint(tool_names)
+    assert "search/results/ls/cat/head/grep/map" in tools_by_name["paperbase_shell"]["description"]
     assert "workspace text files" in tools_by_name["project_list_files"]["description"]
     assert "Create or replace one repo-relative workspace text file" in tools_by_name["project_write_file"]["description"]
     assert "exact-match text patch" in tools_by_name["project_apply_patch"]["description"]
@@ -4896,8 +5119,9 @@ def test_off_topic_chat_prompt_redirects_without_forcing_research_posture(browse
     first_tool_names = {
         tool["name"] for tool in first_call["tools"] if isinstance(tool, dict) and "name" in tool
     }
-    assert "paperbase_search_sections" in first_tool_names
-    assert "paperbase_search_uploaded_sections" in first_tool_names
+    assert "paperbase_shell" in first_tool_names
+    assert "paperbase_search_sections" not in first_tool_names
+    assert "paperbase_search_uploaded_sections" not in first_tool_names
     assert "If the request is outside Paperbase scope, politely redirect the user back" in str(first_call["system_prompt"])
     assert "do not call tools just to answer an off-topic request" in str(first_call["system_prompt"])
     assert "Every tool-enabled turn must begin by leveraging these research tools" not in str(
@@ -5133,9 +5357,9 @@ def test_stream_chat_preserves_provider_commentary_phase():
                     role="assistant",
                     status="in_progress",
                     call_id="tool_search",
-                    name="paperbase_search",
-                    content_text='{"query": "grounding"}',
-                    content_json={"query": "grounding"},
+                    name="paperbase_shell",
+                    content_text='{"command": "search \\"grounding\\" -n 3"}',
+                    content_json={"command": 'search "grounding" -n 3'},
                 ),
             )
             yield ResponseEvent(
@@ -5147,9 +5371,9 @@ def test_stream_chat_preserves_provider_commentary_phase():
                     role="assistant",
                     status="completed",
                     call_id="tool_search",
-                    name="paperbase_search",
-                    content_text='{"query": "grounding"}',
-                    content_json={"query": "grounding"},
+                    name="paperbase_shell",
+                    content_text='{"command": "search \\"grounding\\" -n 3"}',
+                    content_json={"command": 'search "grounding" -n 3'},
                 ),
             )
             yield ResponseEvent(
@@ -5273,7 +5497,6 @@ def test_stream_chat_compacts_mid_turn_after_tool_results(monkeypatch, browser_s
 
     compaction_call = next(call for call in chat_model.create_calls if call["system_prompt"] == "")
     assert "Compact the conversation transcript" in str(compaction_call["messages"])
-    assert "Active Source IDs" in str(compaction_call["messages"])
     assert "Explain the methods grounding" in str(compaction_call["messages"])
 
     final_sample_call = next(
@@ -5333,8 +5556,8 @@ def test_stream_chat_continues_past_previous_sampling_step_cap():
                             {
                                 "type": "tool_use",
                                 "id": f"toolu_loop_{next_round}",
-                                "name": "paperbase_get_results",
-                                "input": {"result_set_id": f"rs_missing_{next_round}"},
+                                "name": "paperbase_shell",
+                                "input": {"command": f"results rs_missing_{next_round}"},
                             }
                         ],
                         "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
@@ -5423,8 +5646,8 @@ def test_search_only_tool_results_do_not_create_citations(monkeypatch):
                             {
                                 "type": "tool_use",
                                 "id": "toolu_search_only",
-                                "name": "paperbase_search",
-                                "input": {"query": "grounding", "limit": 3},
+                                "name": "paperbase_shell",
+                                "input": {"command": 'search "grounding" -n 3'},
                             }
                         ],
                         "stop_reason": "tool_use",
@@ -6677,10 +6900,10 @@ def test_browser_chat_stream_emits_citations_and_completion(monkeypatch, browser
         phase="final_answer",
     )
     assert function_call_items
-    assert function_call_items[0]["name"] == "paperbase_search_sections"
-    assert function_call_items[0]["content_json"] == {"query": "grounding", "limit": 3}
+    assert function_call_items[0]["name"] == "paperbase_shell"
+    assert function_call_items[0]["content_json"] == {"command": 'search "grounding" -n 3'}
     assert function_output_items
-    assert '"sections": [{' in function_output_items[0]["content_text"]
+    assert '"result_set_id":' in function_output_items[0]["content_text"]
     assert assistant_final_items
     assert "usage" in event_names
     assert event_names[-1] == "turn_completed"
@@ -6695,7 +6918,7 @@ def test_browser_chat_stream_emits_citations_and_completion(monkeypatch, browser
     assert events[final_usage_index][1]["input_tokens"] == 11234
     assert assistant_final_items[0]["citations"]
     assert events[-1][1]["final_item"]["status"] == "completed"
-    assert events[-1][1]["usage"]["output_tokens"] == 125
+    assert events[-1][1]["usage"]["output_tokens"] == 98 * len(function_call_items) + 27
     assert service.chat_model.create_calls
 
     refreshed = client.get(f"/v1/browser/chats/{thread_id}").json()
@@ -7066,9 +7289,8 @@ def test_browser_google_start_redirects_back_to_return_to_when_not_configured(mo
     app.dependency_overrides.clear()
 
 
-def test_chat_search_tool_threads_rerank_flag_into_search_request():
-    """The paperbase_search tool must advertise a `rerank` input and pass it
-    through to SearchRequest so chat/MCP flows can use the deep-search path."""
+def test_chat_literature_shell_threads_rerank_flag_into_search_request():
+    """The literature shell search command passes --rerank through to SearchRequest."""
     from paperbase.service import ChatCitationRegistry
 
     service = PaperbaseService(
@@ -7080,16 +7302,13 @@ def test_chat_search_tool_threads_rerank_flag_into_search_request():
 
     request = SendChatMessageRequest(content="find papers about attention", include_papers=True)
     tools = service._chat_tool_definitions(request)
-    search_tool = next((t for t in tools if t["name"] == "paperbase_search"), None)
-    assert search_tool is not None, "paperbase_search tool should be defined"
-    assert "rerank" in search_tool["input_schema"]["properties"], (
-        "paperbase_search tool schema must advertise the rerank input"
-    )
+    tool_names = {tool["name"] for tool in tools}
+    assert "paperbase_shell" in tool_names
+    assert "paperbase_search" not in tool_names
+    shell_tool = next(t for t in tools if t["name"] == "paperbase_shell")
+    assert shell_tool["input_schema"]["properties"]["command"]["type"] == "string"
 
     captured: list[bool] = []
-
-    class RecordingService(type(service)):
-        pass
 
     original_search = service.search
 
@@ -7103,20 +7322,20 @@ def test_chat_search_tool_threads_rerank_flag_into_search_request():
     fake_user = type("U", (), {"user_id": "u1"})()
 
     service._execute_chat_tool(
-        tool_name="paperbase_search",
-        tool_input={"query": "attention", "rerank": True},
+        tool_name="paperbase_shell",
+        tool_input={"command": 'search "attention" --rerank'},
         user=fake_user,
         citation_registry=registry,
     )
-    assert captured == [True], "rerank=True from tool_input did not reach SearchRequest"
+    assert captured == [True], "--rerank from the shell command did not reach SearchRequest"
 
     service._execute_chat_tool(
-        tool_name="paperbase_search",
-        tool_input={"query": "attention"},
+        tool_name="paperbase_shell",
+        tool_input={"command": 'search "attention"'},
         user=fake_user,
         citation_registry=registry,
     )
-    assert captured == [True, False], "rerank default must be False when tool_input omits it"
+    assert captured == [True, False], "rerank default must be False when the command omits it"
 
 
 def test_memory_repository_search_local_bakes_in_citation_and_recency_boosts():
@@ -7583,10 +7802,7 @@ def test_sync_latest_yields_to_queued_project_presentation(monkeypatch):
         ]
 
     monkeypatch.setattr("paperbase.service.sources.fetch_recent", fetch_recent)
-    monkeypatch.setattr(
-        "paperbase.service.sources.enrich_with_semantic_scholar",
-        lambda papers, *args, **kwargs: None,
-    )
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, *args, **kwargs: None)
 
     processed = service.process_next_job()
 
@@ -8174,12 +8390,9 @@ def test_record_search_click_updates_log_and_404s_on_unknown_query_id():
     assert service.record_search_click("qry_nonexistent", paper_id) is False
 
 
-def test_chat_search_tool_does_not_write_search_log_row():
-    """The paperbase_search chat tool runs LLM-generated reformulations, not
-    real user queries, so its searches must never land in search_logs — they
-    would pollute the #21 real-user-query benchmark. The tool path forces
-    log_query=False so the response carries query_id=None and no row is
-    persisted."""
+def test_chat_literature_shell_search_does_not_write_search_log_row():
+    """Chat shell searches are LLM-generated reformulations, not real user
+    queries, so they must never land in search_logs."""
     from paperbase.service import ChatCitationRegistry
 
     service, paper_id = _make_service_with_one_paper()
@@ -8187,15 +8400,13 @@ def test_chat_search_tool_does_not_write_search_log_row():
     fake_user = type("U", (), {"user_id": "u1"})()
 
     result = service._execute_chat_tool(
-        tool_name="paperbase_search",
-        tool_input={"query": "attention"},
+        tool_name="paperbase_shell",
+        tool_input={"command": 'search "attention" -n 5'},
         user=fake_user,
         citation_registry=registry,
     )
 
     assert service.repository.search_logs == {}
-    # The tool result dict is the view the model sees — no query_id surfaces
-    # because click attribution is meaningless for a synthetic reformulation.
     assert "query_id" not in result
     assert any(p["paper_id"] == paper_id for p in result.get("papers", []))
 

@@ -10,7 +10,6 @@ from mcp.server.fastmcp import FastMCP
 
 from .client import PaperbaseClient
 from .logging_utils import configure_logging
-from .research_qa import run_research_qa
 
 
 mcp = FastMCP("paperbase", json_response=True)
@@ -47,101 +46,9 @@ def cancel_job(job_id: str) -> dict:
 
 
 @mcp.tool()
-def search_papers(query: str, limit: int = 20, category: str | None = None, year: str | None = None, include_live_sources: bool = True) -> dict:
-    """Hybrid-search papers and receive a result-set handle for downstream workflows."""
-    return get_client().search_papers(
-        query=query,
-        limit=limit,
-        category=category,
-        year=year,
-        include_live_sources=include_live_sources,
-    )
-
-
-@mcp.tool()
-def get_results(result_set_id: str) -> dict:
-    """Fetch a saved result set by ID."""
-    return get_client().get_results(result_set_id)
-
-
-@mcp.tool()
-def search_sections(query: str, limit: int = 20, result_set_id: str | None = None, paper_ids: list[str] | None = None) -> dict:
-    """Search section-level paper artifacts and return the strongest matching passages."""
-    return get_client().search_sections(
-        query=query,
-        limit=limit,
-        result_set_id=result_set_id,
-        paper_ids=paper_ids,
-    )
-
-
-@mcp.tool()
-def grep_results(result_set_id: str, pattern: str, limit: int = 50) -> dict:
-    """Narrow a saved result set with a regex-like pattern and receive a new result-set handle."""
-    return get_client().grep_results(result_set_id, pattern=pattern, limit=limit)
-
-
-@mcp.tool()
-def get_paper(paper_id: str) -> dict:
-    """Fetch paper metadata and indexing status."""
-    return get_client().get_paper(paper_id)
-
-
-@mcp.tool()
-def get_paper_manifest(paper_id: str) -> dict:
-    """Read the normalized artifact manifest for an indexed paper."""
-    return get_client().get_paper_manifest(paper_id)
-
-
-@mcp.tool()
-def list_paper_files(paper_id: str) -> dict:
-    """List extracted artifact files for an indexed paper."""
-    return get_client().list_paper_files(paper_id)
-
-
-@mcp.tool()
-def read_paper_file(paper_id: str, path: str) -> dict:
-    """Read a specific extracted artifact file by relative path."""
-    return get_client().read_paper_file(paper_id, path)
-
-
-@mcp.tool()
-def get_related_papers(paper_id: str) -> dict:
-    """Fetch Semantic Scholar related-paper recommendations for a paper."""
-    return get_client().get_related_papers(paper_id)
-
-
-@mcp.tool()
-def get_figure(paper_id: str, figure_id: str) -> dict:
-    """Fetch figure caption metadata and a signed image URL."""
-    return get_client().get_figure(paper_id, figure_id)
-
-
-@mcp.tool()
-def get_table(paper_id: str, table_id: str) -> dict:
-    """Fetch structured table rows and a signed CSV URL."""
-    return get_client().get_table(paper_id, table_id)
-
-
-@mcp.tool()
-def research_qa(
-    question: str,
-    query_limit: int = 6,
-    paper_limit: int = 8,
-    section_limit: int = 12,
-    evidence_limit: int = 5,
-    include_live_sources: bool = False,
-) -> dict:
-    """Answer a broad research question by rewriting the query, shortlisting papers, and reading relevant sections."""
-    return run_research_qa(
-        get_client(),
-        question=question,
-        query_limit=query_limit,
-        paper_limit=paper_limit,
-        section_limit=section_limit,
-        evidence_limit=evidence_limit,
-        include_live_sources=include_live_sources,
-    )
+def paperbase_shell(command: str) -> dict:
+    """Run a command in the Paperbase literature shell."""
+    return get_client().paperbase_shell(command)
 
 
 def main() -> None:

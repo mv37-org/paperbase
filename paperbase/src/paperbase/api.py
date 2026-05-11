@@ -59,6 +59,8 @@ from .models import (
     GrepResponse,
     IntegrationProbeResponse,
     JobResponse,
+    LiteratureShellRequest,
+    LiteratureShellResponse,
     LoginRequest,
     ManifestResponse,
     MoveChatThreadProjectRequest,
@@ -803,6 +805,18 @@ def code_context(
 @app.post("/v1/search", response_model=SearchResponse, dependencies=[Depends(require_bearer_token)])
 def search(request: SearchRequest, service: PaperbaseService = Depends(get_service)) -> SearchResponse:
     return service.search(request)
+
+
+@app.post(
+    "/v1/literature/shell",
+    response_model=LiteratureShellResponse,
+    dependencies=[Depends(require_bearer_token)],
+)
+def literature_shell(
+    request: LiteratureShellRequest,
+    service: PaperbaseService = Depends(get_service),
+) -> LiteratureShellResponse:
+    return service.literature_shell(request)
 
 
 @app.post("/v1/search/sections", response_model=SearchSectionResponse, dependencies=[Depends(require_bearer_token)])

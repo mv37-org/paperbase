@@ -489,6 +489,21 @@ class StubApiService:
             papers=[paper],
         )
 
+    def literature_shell(self, request):
+        self.calls.append(("literature_shell", request.command))
+        return {
+            "command": request.command,
+            "stdout": "Paperbase literature shell",
+            "result_set_id": None,
+            "papers": [],
+            "paths": [],
+            "matches": [],
+            "rows": [],
+            "citations": [],
+            "truncated": False,
+            "error": None,
+        }
+
     def get_related_papers(self, paper_id: str) -> list[SearchPaperResult]:
         self.calls.append(("get_related_papers", paper_id))
         return [SearchPaperResult(**_paper().model_dump(), score=0.5, source="semantic-scholar")]
@@ -1486,6 +1501,7 @@ def test_bearer_routes_delegate_to_service(api_client):
     paper = client.get("/v1/papers/arxiv:2401.54321", headers=headers)
     files = client.get("/v1/papers/arxiv:2401.54321/files", headers=headers)
     results = client.get("/v1/results/rs_1", headers=headers)
+    shell = client.post("/v1/literature/shell", headers=headers, json={"command": "help"})
     related = client.get("/v1/papers/arxiv:2401.54321/related", headers=headers)
     references = client.get("/v1/papers/arxiv:2401.54321/references?refresh=true", headers=headers)
     job = client.get("/v1/jobs/job_123", headers=headers)
@@ -1503,12 +1519,20 @@ def test_bearer_routes_delegate_to_service(api_client):
     assert paper.json()["paper_id"] == "arxiv:2401.54321"
     assert files.json()["files"][0]["path"] == "text/full.md"
     assert results.json()["result_set_id"] == "rs_1"
+    assert shell.json()["stdout"] == "Paperbase literature shell"
     assert related.json()[0]["source"] == "semantic-scholar"
     assert references.json()[0]["reference_type"] == "citation"
     assert job.json()["payload"]["job_id"] == "job_123"
     assert ("sync_latest", None) in service.calls
     assert ("reindex_embeddings", (11, False, False)) in service.calls
+    assert ("literature_shell", "help") in service.calls
     assert ("get_job", "job_123") in service.calls
+
+
+def test_literature_shell_endpoint_requires_bearer_auth(api_client):
+    client, _, _ = api_client
+    response = client.post("/v1/literature/shell", json={"command": "help"})
+    assert response.status_code == 401
 
 
 def test_browser_suggest_route_is_public(api_client):
