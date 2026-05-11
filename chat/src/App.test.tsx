@@ -3038,7 +3038,7 @@ describe("App", () => {
     expect(screen.getByText("I'm checking the repo layout before I edit anything.")).toBeTruthy();
   });
 
-  it("hides the chat tabs until an assistant reply exists", async () => {
+  it("hides the chat tabs for an empty thread", async () => {
     localStorage.setItem(ACTIVE_TAB_KEY, JSON.stringify({ kind: "thread", id: "thread_1" }));
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());
     apiMocks.getThread.mockResolvedValue(emptyThreadResponse("thread_1"));
@@ -3053,7 +3053,7 @@ describe("App", () => {
     expect(document.querySelector(".chat-message-list.thread-header-visible")).toBeNull();
   });
 
-  it("keeps the chat tabs hidden while only the user prompt is visible", async () => {
+  it("shows the chat tabs as soon as a user prompt is visible", async () => {
     localStorage.setItem(ACTIVE_TAB_KEY, JSON.stringify({ kind: "thread", id: "thread_1" }));
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());
     apiMocks.getThread.mockResolvedValue({
@@ -3076,9 +3076,9 @@ describe("App", () => {
     await waitFor(() => {
       expect(screen.getByText("Summarize recent planning papers")).toBeTruthy();
     });
-    expect(screen.queryByRole("tab", { name: "Conversation" })).toBeNull();
-    expect(screen.queryByRole("tab", { name: "Research papers" })).toBeNull();
-    expect(document.querySelector(".chat-message-list.thread-header-visible")).toBeNull();
+    expect(screen.getByRole("tab", { name: "Conversation" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Research papers" })).toBeTruthy();
+    expect(document.querySelector(".chat-message-list.thread-header-visible")).toBeTruthy();
   });
 
   it("renders each reply title after its matching user prompt", async () => {
@@ -4322,6 +4322,10 @@ describe("App", () => {
       name: "Grounding Methods Under Review",
       level: 2,
     });
+    const conversationTab = screen.getByRole("tab", { name: "Conversation" });
+    expect(
+      conversationTab.compareDocumentPosition(replyTitle) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
     expect(
       userText.compareDocumentPosition(replyTitle) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();

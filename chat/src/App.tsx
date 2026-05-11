@@ -1582,13 +1582,8 @@ export default function App() {
   const isWorkspaceView = workspaceView !== null;
   const isAdminWorkspaceView =
     workspaceView?.kind === "admin_jobs" || workspaceView?.kind === "admin_job_papers";
-  const activeThreadHasAssistantReply = Boolean(
-    activeThread?.messages.some(
-      (message) => message.role === "assistant" && message.kind !== "compaction",
-    ),
-  );
   const showChatThreadHeader = Boolean(
-    activeTab?.kind === "thread" && activeThread && activeThreadHasAssistantReply,
+    activeTab?.kind === "thread" && activeThread && activeThread.messages.length > 0,
   );
   const showThreadStageChrome =
     !isWorkspaceView && activeTab?.kind === "thread" && threadPane === "chat" && !isChatEmpty;
