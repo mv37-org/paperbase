@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import difflib
+import fnmatch
 import hashlib
 import inspect
 import json
@@ -1619,6 +1620,31 @@ _LITERATURE_SHELL_DEFAULT_HEAD_LINES = 80
 _LITERATURE_SHELL_MAP_DEFAULT_LIMIT = 12
 _LITERATURE_SHELL_MAP_MAX_LIMIT = 25
 _LITERATURE_SHELL_UNSAFE_RE = re.compile(r"[|;&<>`]")
+_LITERATURE_SHELL_SQL_COLUMNS = {
+    "paper_id",
+    "arxiv_id",
+    "title",
+    "authors",
+    "abstract",
+    "tldr",
+    "summary_short",
+    "categories",
+    "primary_category",
+    "published",
+    "updated",
+    "html_url",
+    "pdf_url",
+    "citation_count",
+    "influential_citation_count",
+    "semantic_scholar_id",
+    "code_url",
+    "code_index_status",
+    "venue",
+    "venue_year",
+    "source_type",
+    "index_status",
+    "indexed_at",
+}
 
 
 @dataclass(frozen=True)
@@ -6407,13 +6433,13 @@ class PaperbaseService:
         return [
             {
                 "name": "paperbase_shell",
-                "description": "Run one command in the Paperbase literature shell. Use search/results/ls/cat/head/grep/map to discover papers, inspect exact artifacts, narrow result sets, and extract structured evidence.",
+                "description": "Run one command in the Paperbase literature shell. Use search/results/ls/find/cat/head/lines/grep/map/sql/ask-image to discover papers, inspect exact artifacts, narrow result sets, and extract structured evidence.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
                         "command": {
                             "type": "string",
-                            "description": "Examples: search \"GRPO verifier\" -n 10; ls /papers/arxiv:2501.12948/; head -n 80 /papers/arxiv:2501.12948/sections/method.lines; grep \"KL\" --from rs_123; map --from rs_123 --query \"Extract method and limitations\"",
+                            "description": "Examples: search \"GRPO verifier\" -n 10; results latest; find /papers/arxiv:2501.12948/ \"*.md\"; lines /papers/arxiv:2501.12948/sections/method.md 40 90; grep \"KL\" --from latest; map --from latest --query \"Extract method and limitations\"; sql \"select paper_id,title from papers limit 20\"",
                         },
                     },
                     "required": ["command"],
@@ -6788,18 +6814,53 @@ class PaperbaseService:
             index += 1
         return limit, remaining
 
+    def _shell_recent_result_sets(self, *, limit: int = 10) -> list[ResultSetResponse]:
+        return self.repository.list_recent_result_sets(limit=limit)
+
+    def _resolve_shell_result_set_id(self, result_set_id: str) -> str:
+        alias = result_set_id.strip().lower()
+        if alias not in {"latest", "prev", "previous"}:
+            return result_set_id
+        recent = self._shell_recent_result_sets(limit=2)
+        if alias == "latest":
+            if not recent:
+                raise ValueError("no recent result sets are available")
+            return recent[0].result_set_id
+        if len(recent) < 2:
+            raise ValueError("no previous result set is available")
+        return recent[1].result_set_id
+
+    def _shell_result_set_summaries(self, result_sets: list[ResultSetResponse]) -> list[dict[str, Any]]:
+        return [
+            {
+                "result_set_id": result_set.result_set_id,
+                "query": result_set.query,
+                "parent_result_set_id": result_set.parent_result_set_id,
+                "pattern": result_set.pattern,
+                "paper_count": len(result_set.papers),
+                "created_at": result_set.created_at.isoformat(),
+                "expires_at": result_set.expires_at.isoformat(),
+                "path": f"/results/{result_set.result_set_id}",
+            }
+            for result_set in result_sets
+        ]
+
     def _shell_command_help(self, command: str) -> LiteratureShellResponse:
         stdout = "\n".join(
             [
                 "Paperbase literature shell commands:",
                 '  search "query" -n 20 [--category cs.LG] [--year 2026] [--rerank]',
-                "  results rs_x",
+                "  results rs_x | latest | prev",
                 "  ls / | /results/rs_x | /papers/{paper_id}/",
+                '  find /papers/{paper_id}/ ["*.md"] [-n 100]',
                 "  cat /papers/{paper_id}/sections/method.md",
                 "  head -n 80 /papers/{paper_id}/sections/method.lines",
+                "  lines /papers/{paper_id}/sections/method.md 40 90",
                 '  grep "pattern" --from rs_x [-n 50]',
                 '  grep "pattern" /papers/{paper_id}/sections/method.md',
                 '  map --from rs_x --query "question" [--limit 12] [--schema \'{}\']',
+                '  sql "select paper_id,title,published from papers limit 20"',
+                '  ask-image /papers/{paper_id}/figures/{figure_id}/ "question"',
             ]
         )
         return LiteratureShellResponse(command=command, stdout=stdout)
@@ -6872,7 +6933,7 @@ class PaperbaseService:
     def _shell_command_results(self, command: str, tokens: list[str]) -> LiteratureShellResponse:
         if len(tokens) != 2:
             raise ValueError("results requires exactly one result_set_id")
-        result_set_id = tokens[1]
+        result_set_id = self._resolve_shell_result_set_id(tokens[1])
         response = self.get_results(result_set_id)
         papers = [self._shell_paper_summary(paper) for paper in response.papers]
         return LiteratureShellResponse(
@@ -6889,13 +6950,65 @@ class PaperbaseService:
     def _paper_virtual_artifact_paths(self, paper_id: str) -> list[str]:
         paper = self.get_indexed_paper(paper_id)
         actual_paths = {item.path for item in self.list_files(paper_id).files}
-        paths = {"meta.json", "manifest.json", "references.json", "related.json", *actual_paths}
+        paths = {
+            "abstract.md",
+            "files.json",
+            "meta.json",
+            "manifest.json",
+            "references.json",
+            "related.json",
+            "sections/index.json",
+            *actual_paths,
+        }
         for path in list(actual_paths):
             if path.startswith("sections/") and path.endswith(".md"):
                 paths.add(f"{path[:-3]}.lines")
         if paper.code_manifest is not None:
             paths.add("code/manifest.json")
         return sorted(paths)
+
+    def _section_index_payload(self, paper_id: str) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for file_object in self.list_files(paper_id).files:
+            path = file_object.path
+            if not (path.startswith("sections/") and path.endswith(".md")):
+                continue
+            try:
+                content = self.read_file(paper_id, path).content
+            except HTTPException:
+                content = ""
+            title = ""
+            for line in content.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("#"):
+                    title = stripped.lstrip("#").strip()
+                    break
+            rows.append(
+                {
+                    "path": f"/papers/{paper_id}/{path}",
+                    "lines_path": f"/papers/{paper_id}/{path[:-3]}.lines",
+                    "title": title or path.removeprefix("sections/").removesuffix(".md").replace("-", " ").title(),
+                    "line_count": len(content.splitlines()),
+                    "size_bytes": file_object.size,
+                }
+            )
+        return rows
+
+    def _paper_files_payload(self, paper_id: str) -> list[dict[str, Any]]:
+        actual = {item.path: item for item in self.list_files(paper_id).files}
+        rows: list[dict[str, Any]] = []
+        for rel_path in self._paper_virtual_artifact_paths(paper_id):
+            file_object = actual.get(rel_path)
+            rows.append(
+                {
+                    "path": f"/papers/{paper_id}/{rel_path}",
+                    "rel_path": rel_path,
+                    "virtual": file_object is None,
+                    "size_bytes": file_object.size if file_object is not None else None,
+                    "content_type": file_object.content_type if file_object is not None else "application/json",
+                }
+            )
+        return rows
 
     def _shell_list_children(self, paper_id: str, rel_path: str) -> list[str]:
         rel = rel_path.strip("/")
@@ -6926,10 +7039,18 @@ class PaperbaseService:
             stdout = "Use search to discover papers, then ls /papers/{paper_id}/."
             return LiteratureShellResponse(command=command, stdout=stdout)
         if path == "/results":
-            stdout = "Use search to create a result set, then ls /results/{result_set_id}."
-            return LiteratureShellResponse(command=command, stdout=stdout)
+            recent = self._shell_recent_result_sets(limit=10)
+            rows = self._shell_result_set_summaries(recent)
+            if not rows:
+                stdout = "Use search to create a result set, then ls /results/{result_set_id}."
+                return LiteratureShellResponse(command=command, stdout=stdout, rows=[])
+            lines = ["/results/latest -> " + rows[0]["path"]]
+            if len(rows) > 1:
+                lines.append("/results/prev -> " + rows[1]["path"])
+            lines.extend(row["path"] for row in rows)
+            return LiteratureShellResponse(command=command, stdout="\n".join(lines), paths=[row["path"] for row in rows], rows=rows)
         if path.startswith("/results/"):
-            result_set_id = path.split("/", 2)[2]
+            result_set_id = self._resolve_shell_result_set_id(path.split("/", 2)[2])
             response = self.get_results(result_set_id)
             paths = [f"/papers/{paper.paper_id}/" for paper in response.papers]
             return LiteratureShellResponse(command=command, stdout="\n".join(paths), result_set_id=result_set_id, paths=paths)
@@ -6937,12 +7058,77 @@ class PaperbaseService:
         paths = self._shell_list_children(paper_id, rel_path)
         return LiteratureShellResponse(command=command, stdout="\n".join(paths) or "(empty)", paths=paths)
 
+    def _shell_command_find(self, command: str, tokens: list[str]) -> LiteratureShellResponse:
+        limit, remaining = self._shell_parse_limit(tokens[1:], default=100, maximum=500)
+        if not remaining:
+            path = "/"
+            pattern = "*"
+        elif len(remaining) == 1:
+            path = remaining[0]
+            pattern = "*"
+        elif len(remaining) == 2:
+            path = remaining[0]
+            pattern = remaining[1]
+        else:
+            raise ValueError("find accepts a path, optional glob pattern, and optional -n/--limit")
+        path = self._literature_shell_path(path)
+
+        def matches(full_path: str, rel_path: str) -> bool:
+            basename = PurePosixPath(rel_path.rstrip("/")).name if rel_path else PurePosixPath(full_path.rstrip("/")).name
+            return (
+                pattern in {"", "*"}
+                or fnmatch.fnmatch(full_path, pattern)
+                or fnmatch.fnmatch(rel_path, pattern)
+                or fnmatch.fnmatch(basename, pattern)
+            )
+
+        paths: list[str] = []
+        if path == "/":
+            paths = ["/papers/", "/results/"]
+        elif path == "/results":
+            paths = [f"/results/{result_set.result_set_id}" for result_set in self._shell_recent_result_sets(limit=limit)]
+        elif path.startswith("/results/"):
+            result_set_id = self._resolve_shell_result_set_id(path.split("/", 2)[2])
+            response = self.get_results(result_set_id)
+            for paper in response.papers:
+                paper_root = f"/papers/{paper.paper_id}/"
+                if matches(paper_root, ""):
+                    paths.append(paper_root)
+                for rel_path in self._paper_virtual_artifact_paths(paper.paper_id):
+                    full_path = f"/papers/{paper.paper_id}/{rel_path}"
+                    if matches(full_path, rel_path):
+                        paths.append(full_path)
+                    if len(paths) >= limit:
+                        break
+                if len(paths) >= limit:
+                    break
+        elif path == "/papers":
+            raise ValueError("find /papers requires a paper id or a result set, e.g. find /results/latest '*.md'")
+        else:
+            paper_id, rel_path = self._literature_shell_paper_path(path)
+            prefix = rel_path.strip("/")
+            for candidate in self._paper_virtual_artifact_paths(paper_id):
+                if prefix and candidate != prefix and not candidate.startswith(f"{prefix}/"):
+                    continue
+                full_path = f"/papers/{paper_id}/{candidate}"
+                display_rel = candidate.removeprefix(f"{prefix}/") if prefix and candidate.startswith(f"{prefix}/") else candidate
+                if matches(full_path, display_rel):
+                    paths.append(full_path)
+                if len(paths) >= limit:
+                    break
+        truncated = len(paths) >= limit
+        return LiteratureShellResponse(command=command, stdout="\n".join(paths) or "(empty)", paths=paths, truncated=truncated)
+
     def _read_literature_path(self, path: str) -> tuple[str, str, str, str]:
         paper_id, rel_path = self._literature_shell_paper_path(path)
         paper = self.get_indexed_paper(paper_id)
         if not rel_path:
             rel_path = "meta.json"
-        if rel_path == "meta.json":
+        if rel_path == "abstract.md":
+            content = f"# Abstract\n\n{paper.abstract}".rstrip() + "\n"
+        elif rel_path == "files.json":
+            content = json.dumps(self._paper_files_payload(paper_id), indent=2, sort_keys=True)
+        elif rel_path == "meta.json":
             content = json.dumps(paper.model_dump(mode="json"), indent=2, sort_keys=True)
         elif rel_path == "manifest.json":
             content = json.dumps(self.get_manifest(paper_id).manifest, indent=2, sort_keys=True)
@@ -6950,6 +7136,8 @@ class PaperbaseService:
             content = json.dumps(self.get_paper_references(paper_id), indent=2, sort_keys=True)
         elif rel_path == "related.json":
             content = json.dumps([item.model_dump(mode="json") for item in self.get_related_papers(paper_id)], indent=2, sort_keys=True)
+        elif rel_path == "sections/index.json":
+            content = json.dumps(self._section_index_payload(paper_id), indent=2, sort_keys=True)
         elif rel_path == "code/manifest.json" and paper.code_manifest is not None:
             content = json.dumps(paper.code_manifest, indent=2, sort_keys=True)
         elif rel_path.startswith("sections/") and rel_path.endswith(".lines"):
@@ -6997,6 +7185,166 @@ class PaperbaseService:
             truncated=len(content.splitlines()) > limit,
         )
 
+    def _shell_command_lines(self, command: str, tokens: list[str], citation_registry: ChatCitationRegistry | None) -> LiteratureShellResponse:
+        if len(tokens) != 4:
+            raise ValueError("lines requires a path, start line, and end line")
+        path = self._literature_shell_path(tokens[1])
+        start = _tool_int(tokens[2], default=1, maximum=1_000_000)
+        end = _tool_int(tokens[3], default=start, maximum=1_000_000)
+        if start < 1:
+            raise ValueError("start line must be at least 1")
+        if end < start:
+            raise ValueError("end line must be greater than or equal to start line")
+        if end - start + 1 > 500:
+            raise ValueError("lines is capped at 500 lines per call")
+        paper_id, title, rel_path, content = self._read_literature_path(path)
+        raw_lines = content.splitlines()
+        selected = raw_lines[start - 1 : end]
+        if rel_path.endswith(".lines"):
+            stdout = "\n".join(selected)
+        else:
+            stdout = "\n".join(f"L{line_no}: {line}" for line_no, line in enumerate(selected, start=start))
+        citation = self._shell_register_paper_citation(
+            citation_registry,
+            paper_id=paper_id,
+            title=title,
+            path=rel_path,
+            content=stdout,
+            question=command,
+        )
+        return LiteratureShellResponse(
+            command=command,
+            stdout=stdout,
+            citations=[citation],
+            truncated=end < len(raw_lines),
+        )
+
+    def _shell_sql_value(self, raw_value: str) -> str:
+        value = raw_value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            return value[1:-1]
+        return value
+
+    def _shell_command_sql(self, command: str, tokens: list[str]) -> LiteratureShellResponse:
+        if len(tokens) < 2:
+            raise ValueError("sql requires a SELECT query")
+        sql = " ".join(tokens[1:]).strip()
+        match = re.fullmatch(
+            r"select\s+(?P<columns>\*|count\(\*\)|[a-z0-9_,\s]+)\s+from\s+papers"
+            r"(?:\s+where\s+(?P<where_col>[a-z_][a-z0-9_]*)\s*=\s*(?P<where_val>\"[^\"]*\"|'[^']*'|[A-Za-z0-9_.:/-]+))?"
+            r"(?:\s+order\s+by\s+(?P<order_col>[a-z_][a-z0-9_]*)(?:\s+(?P<direction>asc|desc))?)?"
+            r"(?:\s+limit\s+(?P<limit>\d+))?",
+            sql,
+            flags=re.IGNORECASE,
+        )
+        if match is None:
+            raise ValueError(
+                "sql supports read-only SELECT over papers: select columns from papers "
+                "[where column='value'] [order by column asc|desc] [limit N]"
+            )
+        columns_raw = match.group("columns").strip().lower()
+        where_col = (match.group("where_col") or "").lower()
+        order_col = (match.group("order_col") or "").lower()
+        if where_col and where_col not in _LITERATURE_SHELL_SQL_COLUMNS:
+            raise ValueError(f"unsupported where column {where_col}")
+        if order_col and order_col not in _LITERATURE_SHELL_SQL_COLUMNS:
+            raise ValueError(f"unsupported order column {order_col}")
+        if columns_raw == "count(*)":
+            selected_columns: list[str] = []
+        elif columns_raw == "*":
+            selected_columns = sorted(_LITERATURE_SHELL_SQL_COLUMNS)
+        else:
+            selected_columns = [column.strip().lower() for column in columns_raw.split(",") if column.strip()]
+            unsupported = [column for column in selected_columns if column not in _LITERATURE_SHELL_SQL_COLUMNS]
+            if unsupported:
+                raise ValueError(f"unsupported select columns: {', '.join(unsupported)}")
+        limit = _tool_int(match.group("limit"), default=50, maximum=200) if match.group("limit") else 50
+        rows_source = [paper.model_dump(mode="json") for paper in self.list_papers(index_status="indexed", limit=1000)]
+        if where_col:
+            where_value = self._shell_sql_value(match.group("where_val") or "")
+            rows_source = [row for row in rows_source if str(row.get(where_col) or "") == where_value]
+        if order_col:
+            reverse = (match.group("direction") or "asc").lower() == "desc"
+            rows_source.sort(key=lambda row: (row.get(order_col) is None, row.get(order_col)), reverse=reverse)
+        if columns_raw == "count(*)":
+            rows = [{"count": len(rows_source)}]
+            stdout = json.dumps(rows, indent=2, sort_keys=True)
+            return LiteratureShellResponse(command=command, stdout=stdout, rows=rows)
+        rows = [{column: row.get(column) for column in selected_columns} for row in rows_source[:limit]]
+        result_set_id: str | None = None
+        if rows and "paper_id" in selected_columns:
+            papers: list[SearchPaperResult] = []
+            for row in rows:
+                paper_id = str(row.get("paper_id") or "")
+                paper = self.repository.get_paper(paper_id)
+                if paper is not None:
+                    papers.append(SearchPaperResult(**paper.model_dump(mode="json"), score=1.0, source="sql"))
+            if papers:
+                result_set = self.repository.save_result_set(
+                    query=sql,
+                    papers=papers,
+                    ttl_days=self.settings.result_ttl_days,
+                )
+                result_set_id = result_set.result_set_id
+        payload = {"result_set_id": result_set_id, "rows": rows} if result_set_id else rows
+        stdout, truncated = self._cap_shell_stdout(json.dumps(payload, indent=2, sort_keys=True))
+        return LiteratureShellResponse(
+            command=command,
+            stdout=stdout,
+            result_set_id=result_set_id,
+            rows=rows,
+            truncated=truncated,
+        )
+
+    def _shell_command_ask_image(
+        self,
+        command: str,
+        tokens: list[str],
+        citation_registry: ChatCitationRegistry | None,
+    ) -> LiteratureShellResponse:
+        if len(tokens) < 3:
+            raise ValueError("ask-image requires a figure path and a question")
+        path = self._literature_shell_path(tokens[1])
+        question = " ".join(tokens[2:]).strip()
+        if not question:
+            raise ValueError("ask-image requires a question")
+        paper_id, rel_path = self._literature_shell_paper_path(path)
+        parts = [part for part in rel_path.split("/") if part]
+        if len(parts) < 2 or parts[0] != "figures":
+            raise ValueError("ask-image expects /papers/{paper_id}/figures/{figure_id}/...")
+        figure_id = parts[1]
+        figure = self.get_figure(paper_id, figure_id)
+        paper = self.get_indexed_paper(paper_id)
+        row = {
+            "paper_id": paper_id,
+            "title": paper.title,
+            "figure_id": figure.figure_id,
+            "path": f"/papers/{paper_id}/figures/{figure.figure_id}/",
+            "caption_path": f"/papers/{paper_id}/figures/{figure.figure_id}/caption.md",
+            "image_url": figure.image_url,
+            "content_type": figure.content_type,
+            "question": question,
+            "caption": figure.caption,
+            "answer": "Figure pixels are exposed through image_url; this shell returns caption evidence for text-only callers.",
+        }
+        citation = self._shell_register_paper_citation(
+            citation_registry,
+            paper_id=paper_id,
+            title=paper.title,
+            path=f"figures/{figure.figure_id}/caption.md",
+            content=figure.caption,
+            question=question,
+        )
+        lines = [
+            f"{paper_id} {figure.figure_id}",
+            f"caption_path: {row['caption_path']}",
+            f"image_url: {figure.image_url or '(none)'}",
+            f"content_type: {figure.content_type or '(unknown)'}",
+            "",
+            figure.caption,
+        ]
+        return LiteratureShellResponse(command=command, stdout="\n".join(lines), rows=[row], citations=[citation])
+
     def _shell_command_grep(self, command: str, tokens: list[str], citation_registry: ChatCitationRegistry | None) -> LiteratureShellResponse:
         if len(tokens) < 2:
             raise ValueError("grep requires a pattern")
@@ -7019,6 +7367,7 @@ class PaperbaseService:
                 continue
             raise ValueError(f"unexpected grep argument {token}")
         if result_set_id:
+            result_set_id = self._resolve_shell_result_set_id(result_set_id)
             response = self.grep_results(result_set_id, pattern, limit=limit)
             matches = [match.model_dump(mode="json") for match in response.papers]
             citations: list[dict[str, Any]] = []
@@ -7252,6 +7601,7 @@ class PaperbaseService:
             raise ValueError(f"unexpected map argument {token}")
         if not result_set_id:
             raise ValueError("map requires --from result_set_id")
+        result_set_id = self._resolve_shell_result_set_id(result_set_id)
         if not query:
             raise ValueError("map requires --query")
         schema = self._parse_shell_schema(raw_schema)
@@ -7366,14 +7716,22 @@ class PaperbaseService:
                 return self._shell_command_results(command, tokens)
             if name == "ls":
                 return self._shell_command_ls(command, tokens)
+            if name == "find":
+                return self._shell_command_find(command, tokens)
             if name == "cat":
                 return self._shell_command_cat(command, tokens, citation_registry)
             if name == "head":
                 return self._shell_command_head(command, tokens, citation_registry)
+            if name == "lines":
+                return self._shell_command_lines(command, tokens, citation_registry)
             if name == "grep":
                 return self._shell_command_grep(command, tokens, citation_registry)
             if name == "map":
                 return self._shell_command_map(command, tokens, citation_registry, user)
+            if name == "sql":
+                return self._shell_command_sql(command, tokens)
+            if name in {"ask-image", "ask_image"}:
+                return self._shell_command_ask_image(command, tokens, citation_registry)
             raise ValueError(f"unsupported command {tokens[0]!r}; run help")
         except HTTPException as exc:
             return self._literature_shell_error(command, str(exc.detail))

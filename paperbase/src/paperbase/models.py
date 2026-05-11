@@ -244,6 +244,8 @@ class SearchSectionResponse(BaseModel):
 class ResultSetResponse(BaseModel):
     result_set_id: str
     query: str | None = None
+    parent_result_set_id: str | None = None
+    pattern: str | None = None
     created_at: datetime
     expires_at: datetime
     papers: list[SearchPaperResult]

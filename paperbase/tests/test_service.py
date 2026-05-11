@@ -1466,20 +1466,52 @@ def test_literature_shell_commands_use_virtual_paper_namespace(monkeypatch):
     assert results.error is None
     assert results.papers[0]["path"] == f"/papers/{paper_id}/"
 
+    latest = service.literature_shell(LiteratureShellRequest(command="results latest"))
+    assert latest.error is None
+    assert latest.result_set_id == search.result_set_id
+
     root = service.literature_shell(LiteratureShellRequest(command="ls /"))
     assert root.paths == ["/papers/", "/results/"]
+
+    result_index = service.literature_shell(LiteratureShellRequest(command="ls /results"))
+    assert result_index.error is None
+    assert f"/results/{search.result_set_id}" in result_index.paths
+    assert result_index.rows[0]["result_set_id"] == search.result_set_id
 
     result_paths = service.literature_shell(LiteratureShellRequest(command=f"ls /results/{search.result_set_id}"))
     assert result_paths.paths == [f"/papers/{paper_id}/"]
 
+    latest_paths = service.literature_shell(LiteratureShellRequest(command="ls /results/latest"))
+    assert latest_paths.paths == [f"/papers/{paper_id}/"]
+
     paper_paths = service.literature_shell(LiteratureShellRequest(command=f"ls /papers/{paper_id}/"))
+    assert f"/papers/{paper_id}/abstract.md" in paper_paths.paths
+    assert f"/papers/{paper_id}/files.json" in paper_paths.paths
     assert f"/papers/{paper_id}/sections/" in paper_paths.paths
     assert f"/papers/{paper_id}/figures/" in paper_paths.paths
     assert f"/papers/{paper_id}/tables/" in paper_paths.paths
 
     section_paths = service.literature_shell(LiteratureShellRequest(command=f"ls /papers/{paper_id}/sections"))
+    assert f"/papers/{paper_id}/sections/index.json" in section_paths.paths
     assert f"/papers/{paper_id}/sections/introduction.md" in section_paths.paths
     assert f"/papers/{paper_id}/sections/introduction.lines" in section_paths.paths
+
+    found_sections = service.literature_shell(LiteratureShellRequest(command=f'find /papers/{paper_id}/ "*.md" -n 10'))
+    assert found_sections.error is None
+    assert f"/papers/{paper_id}/abstract.md" in found_sections.paths
+    assert f"/papers/{paper_id}/sections/introduction.md" in found_sections.paths
+
+    files_index = service.literature_shell(LiteratureShellRequest(command=f"cat /papers/{paper_id}/files.json"))
+    assert files_index.error is None
+    assert f"/papers/{paper_id}/sections/introduction.md" in files_index.stdout
+
+    sections_index = service.literature_shell(LiteratureShellRequest(command=f"cat /papers/{paper_id}/sections/index.json"))
+    assert sections_index.error is None
+    assert f"/papers/{paper_id}/sections/introduction.lines" in sections_index.stdout
+
+    abstract = service.literature_shell(LiteratureShellRequest(command=f"cat /papers/{paper_id}/abstract.md"))
+    assert abstract.error is None
+    assert "Attention shell abstract." in abstract.stdout
 
     cat = service.literature_shell(LiteratureShellRequest(command=f"cat /papers/{paper_id}/sections/introduction.md"))
     assert cat.error is None
@@ -1490,18 +1522,44 @@ def test_literature_shell_commands_use_virtual_paper_namespace(monkeypatch):
     assert head.stdout.splitlines() == ["L1: ## Methods", "L2: "]
     assert head.truncated is True
 
+    exact_lines = service.literature_shell(LiteratureShellRequest(command=f"lines /papers/{paper_id}/sections/introduction.md 1 2"))
+    assert exact_lines.error is None
+    assert exact_lines.stdout.splitlines() == ["L1: ## Methods", "L2: "]
+
     grep_result_set = service.literature_shell(
-        LiteratureShellRequest(command=f'grep "attention" --from {search.result_set_id} -n 10')
+        LiteratureShellRequest(command='grep "attention" --from latest -n 10')
     )
     assert grep_result_set.error is None
     assert grep_result_set.result_set_id != search.result_set_id
     assert grep_result_set.parent_result_set_id == search.result_set_id
     assert grep_result_set.matches
 
+    previous = service.literature_shell(LiteratureShellRequest(command="results prev"))
+    assert previous.error is None
+    assert previous.result_set_id == search.result_set_id
+
     grep_paper = service.literature_shell(LiteratureShellRequest(command=f'grep "attention" /papers/{paper_id}/ -n 10'))
     assert grep_paper.error is None
     assert grep_paper.result_set_id is not None
     assert grep_paper.matches
+
+    sql = service.literature_shell(
+        LiteratureShellRequest(command='sql "select paper_id,title,published from papers where primary_category=\'cs.AI\' limit 5"')
+    )
+    assert sql.error is None
+    assert sql.result_set_id is not None
+    assert sql.rows == [{"paper_id": paper_id, "title": "Literature Shell Paper", "published": "2024-01-10"}]
+
+    sql_count = service.literature_shell(LiteratureShellRequest(command='sql "select count(*) from papers"'))
+    assert sql_count.error is None
+    assert sql_count.rows == [{"count": 1}]
+
+    figure = service.literature_shell(
+        LiteratureShellRequest(command=f'ask-image /papers/{paper_id}/figures/figure-1/ "what is shown?"')
+    )
+    assert figure.error is None
+    assert figure.rows[0]["caption"] == "A model architecture."
+    assert figure.rows[0]["image_url"]
 
 
 def test_literature_shell_rejects_unsafe_syntax_and_invalid_paths(monkeypatch):
@@ -3670,7 +3728,7 @@ def test_project_chat_tools_are_advertised_for_coding_turns(browser_service):
         "paperbase_list_uploaded_documents",
         "paperbase_search_uploaded_sections",
     }.isdisjoint(tool_names)
-    assert "search/results/ls/cat/head/grep/map" in tools_by_name["paperbase_shell"]["description"]
+    assert "search/results/ls/find/cat/head/lines/grep/map/sql/ask-image" in tools_by_name["paperbase_shell"]["description"]
     assert "workspace text files" in tools_by_name["project_list_files"]["description"]
     assert "Create or replace one repo-relative workspace text file" in tools_by_name["project_write_file"]["description"]
     assert "exact-match text patch" in tools_by_name["project_apply_patch"]["description"]

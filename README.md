@@ -155,7 +155,7 @@ The browser chat experience is project-based:
 - Python and notebook files open as the single active project resource in a Monaco-backed high-contrast editor view
 - project code files can be renamed or deleted directly from the sidebar Code section, projects themselves can be deleted from the project menu including the default `General` project, and if a user has no projects left the app drops into a create-project-only state until a new project is created
 - project chats can invoke a project-scoped coding tool surface against repo-relative workspace text files, including list/read/grep/write/patch/move/delete/git-diff/exec/test/lint/run operations instead of raw repo-shell access
-- research turns expose a single restricted `paperbase_shell` literature tool for `search`, `results`, `ls`, `cat`, `head`, `grep`, and `map` over virtual paper paths; the MCP bridge exposes the same shell plus operational job/index tools
+- research turns expose a single restricted `paperbase_shell` literature tool for `search`, `results`, `ls`, `find`, `cat`, `head`, `lines`, `grep`, `map`, read-only metadata `sql`, and `ask-image` over virtual paper paths; the MCP bridge exposes the same shell plus operational job/index tools
 - coding turns auto-persist dirty project Python drafts before the agent runs tools, so the backend tool view stays aligned with Monaco edits
 - duplicate Python basenames are disambiguated with repo-path context in the sidebar and active-resource title
 - assistant commentary is now prompted before non-trivial tool batches, then collapsed behind a `Worked for ...` summary once the final answer arrives so session-level actions stay attached to the conclusion

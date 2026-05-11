@@ -1709,6 +1709,10 @@ class PaperRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def list_recent_result_sets(self, *, limit: int = 10) -> list[ResultSetResponse]:
+        raise NotImplementedError
+
+    @abstractmethod
     def grep_result_set(self, result_set_id: str, pattern: str, *, limit: int) -> list[GrepPaperMatch]:
         raise NotImplementedError
 
@@ -5605,6 +5609,8 @@ class SqlAlchemyPaperRepository(PaperRepository):
         return ResultSetResponse(
             result_set_id=result_set_id,
             query=query,
+            parent_result_set_id=parent_result_set_id,
+            pattern=pattern,
             created_at=now,
             expires_at=expires_at,
             papers=papers,
@@ -5635,10 +5641,30 @@ class SqlAlchemyPaperRepository(PaperRepository):
         return ResultSetResponse(
             result_set_id=result_set.result_set_id,
             query=result_set.query,
+            parent_result_set_id=result_set.parent_result_set_id,
+            pattern=result_set.pattern,
             created_at=result_set.created_at,
             expires_at=result_set.expires_at,
             papers=papers,
         )
+
+    def list_recent_result_sets(self, *, limit: int = 10) -> list[ResultSetResponse]:
+        safe_limit = min(max(limit, 1), 50)
+        with self._session() as session:
+            result_set_ids = list(
+                session.scalars(
+                    select(ResultSetORM.result_set_id)
+                    .where(ResultSetORM.expires_at >= utcnow())
+                    .order_by(ResultSetORM.created_at.desc(), ResultSetORM.result_set_id.desc())
+                    .limit(safe_limit)
+                )
+            )
+        result_sets: list[ResultSetResponse] = []
+        for result_set_id in result_set_ids:
+            result_set = self.get_result_set(result_set_id)
+            if result_set is not None:
+                result_sets.append(result_set)
+        return result_sets
 
     def grep_result_set(self, result_set_id: str, pattern: str, *, limit: int) -> list[GrepPaperMatch]:
         literal = literal_hint_from_pattern(pattern)
@@ -7145,6 +7171,8 @@ class MemoryPaperRepository(PaperRepository):
         result_set = ResultSetResponse(
             result_set_id=new_id("rs"),
             query=query,
+            parent_result_set_id=parent_result_set_id,
+            pattern=pattern,
             created_at=utcnow(),
             expires_at=utcnow() + timedelta(days=ttl_days),
             papers=papers,
@@ -7154,6 +7182,13 @@ class MemoryPaperRepository(PaperRepository):
 
     def get_result_set(self, result_set_id: str) -> ResultSetResponse | None:
         return self.result_sets.get(result_set_id)
+
+    def list_recent_result_sets(self, *, limit: int = 10) -> list[ResultSetResponse]:
+        safe_limit = min(max(limit, 1), 50)
+        now = utcnow()
+        result_sets = [result_set for result_set in self.result_sets.values() if result_set.expires_at >= now]
+        result_sets.sort(key=lambda result_set: (result_set.created_at, result_set.result_set_id), reverse=True)
+        return result_sets[:safe_limit]
 
     def grep_result_set(self, result_set_id: str, pattern: str, *, limit: int) -> list[GrepPaperMatch]:
         regex = re.compile(pattern, re.IGNORECASE)
